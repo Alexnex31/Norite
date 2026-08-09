@@ -1,0 +1,12 @@
+Copyright (c) 2026 Alexandre Duffez. All rights reserved.
+
+This repository and its contents are made visible for transparency and self-hosting trust purposes only. No
+license is granted to any person to use, copy, modify, merge, publish, distribute, sublicense, host, or sell
+copies of this software, in whole or in part, except as may be separately and explicitly granted in writing
+by the copyright holder (for example, via a paid self-hosted-instance license agreement).
+
+In the absence of such a written grant, all rights are reserved under applicable copyright law. Viewing this
+source code does not constitute permission to run, deploy, or redistribute it.
+
+See `docs/adr/0007-licensing-and-project-posture.md` for the reasoning behind this posture and how paid
+self-hosted licenses are granted.

@@ -1,0 +1,50 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Go
+backend/bin/
+*.exe
+*.test
+*.out
+backend/**/vendor/
+!backend/vendor/modules.txt
+
+# sqlc / migrate scratch (generated code IS committed; this ignores local tool caches only)
+backend/.sqlc/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/coverage/
+frontend/src/api/generated/
+frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
+pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker / local data volumes
+docker/.data/
+docker/**/pgdata/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Claude config
+.claude/*
