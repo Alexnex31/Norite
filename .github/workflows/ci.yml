@@ -24,6 +24,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          # No go.sum exists yet in any module (zero external deps in the M0 skeleton) — nothing to key a
+          # cache on. Re-enable with cache-dependency-path: ${{ matrix.module }}/go.sum once M1 adds real
+          # dependencies.
+          cache: false
       - name: go vet
         working-directory: ${{ matrix.module }}
         run: go vet ./...
@@ -44,6 +48,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          # No go.sum exists yet in any module (zero external deps in the M0 skeleton) — nothing to key a
+          # cache on. Re-enable with cache-dependency-path: ${{ matrix.module }}/go.sum once M1 adds real
+          # dependencies.
+          cache: false
       - name: go test
         working-directory: ${{ matrix.module }}
         run: go test ./... -race -count=1
@@ -59,6 +67,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+          # No go.sum exists yet in any module (zero external deps in the M0 skeleton) — nothing to key a
+          # cache on. Re-enable once M1 adds real dependencies, with cache-dependency-path listing all four
+          # modules' go.sum files (this job isn't matrixed, unlike lint/test above).
+          cache: false
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
