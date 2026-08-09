@@ -10,6 +10,16 @@ backend/bin/
 *.out
 backend/**/vendor/
 !backend/vendor/modules.txt
+# Unnamed `go build ./...` output at each module root (the binary takes the module dir's name) —
+# always use `go build -o <path>` or goreleaser instead of a bare `go build ./...` for real builds.
+/backend/backend
+/backend/server
+/cli/cli
+/cli/app
+/gui/gui
+/daemon/daemon
+/daemon/daemond
+/voiceworker/voiceworker
 
 # goreleaser build output
 /dist/
