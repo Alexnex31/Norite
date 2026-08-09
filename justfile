@@ -10,36 +10,50 @@ default:
 dev:
     docker compose -f docker/docker-compose.yml up --build
 
-# Run tests across every Go module. Frontend tests join once frontend/ exists (Phase O).
+# Run tests across every Go module, in parallel (they're independent modules with no shared state).
+# Frontend tests join once frontend/ exists (Phase O).
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    pids=()
     for m in {{go_modules}}; do
-        echo "--- go test: $m ---"
-        (cd "$m" && go test ./...)
+        (cd "$m" && go test ./... 2>&1 | sed "s/^/[$m] /") &
+        pids+=($!)
     done
+    fail=0
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit $fail
 
-# Vet + lint every Go module. Frontend linting joins once frontend/ exists (Phase O).
+# Vet + lint every Go module, in parallel. Frontend linting joins once frontend/ exists (Phase O).
 lint:
     #!/usr/bin/env bash
     set -euo pipefail
+    pids=()
     for m in {{go_modules}}; do
-        echo "--- lint: $m ---"
-        (cd "$m" && go vet ./... && golangci-lint run ./...)
+        (cd "$m" && { go vet ./... && golangci-lint run ./...; } 2>&1 | sed "s/^/[$m] /") &
+        pids+=($!)
     done
+    fail=0
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit $fail
 
 # Apply pending golang-migrate migrations. No-op until backend/migrations/ exists (Milestone M1).
 db-migrate:
     @echo "no migrations yet — lands at Milestone M1 (docs/architecture.md §13)"
 
-# govulncheck across every Go module. pnpm audit and Trivy join once frontend/ and a Dockerfile exist.
+# govulncheck across every Go module, in parallel. pnpm audit and Trivy join once frontend/ and a
+# Dockerfile exist.
 security-scan:
     #!/usr/bin/env bash
     set -euo pipefail
+    pids=()
     for m in {{go_modules}}; do
-        echo "--- govulncheck: $m ---"
-        (cd "$m" && govulncheck ./...)
+        (cd "$m" && govulncheck ./... 2>&1 | sed "s/^/[$m] /") &
+        pids+=($!)
     done
+    fail=0
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit $fail
 
 # Build every binary via goreleaser, snapshot mode (no publish, no signing — that lands at Milestone M24).
 build:
