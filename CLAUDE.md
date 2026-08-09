@@ -178,10 +178,22 @@ a half-finished one. Each milestone (`docs/architecture.md` §13) gets its own b
 `m<N>-<kebab-slug>` matching the milestone's title (e.g. `m1-backend-skeleton`). Child branches off a
 milestone branch are fine for exploring an approach within that milestone; merge them back into the
 milestone branch, not `main`, before the milestone branch itself merges into `main` once its "done when"
-criteria are met. This is solo-scoped deliberately — no PR ceremony, no required review, no protected-branch
-rules; the milestone branch is a checkpoint for the developer's own sake (a clean rollback point, a clear
-diff to review before merging), not a collaboration mechanism. Optionally tag `main` at each milestone
-completion (`git tag m12`) — cheap, and makes 118 milestones of history easy to navigate later.
+criteria are met.
+
+**Every milestone branch reaches `main` through a Pull Request — always, even solo. Never a direct/local
+merge into `main`, and never a fast-forward merge**, starting from Milestone M1 onward (M0 predates this rule
+and was fast-forward-merged directly — a one-time exception, not a precedent). Squash-merge is the default so
+`main` collects one clean commit per milestone; a regular merge commit is acceptable instead if that
+milestone's sub-commit history is worth preserving directly on `main` — pick per-milestone, but never
+fast-forward either way. **`main` is tagged at every milestone completion** (`git tag m12`) — no longer
+optional. Together, the PR and the tag are how repo history and milestones stay easy to navigate: `git log
+main --oneline` reads as one entry per milestone, the merged PR holds the full detailed commit-by-commit
+history and diff for anyone who wants to dig in, and `git tag -l` / a diff between two milestone tags
+(`git diff m4..m12`) jumps straight to "what changed between these two milestones."
+
+Practical constraint: opening and merging the actual PR needs either doing it via the GitHub web UI, or the
+`gh` CLI installed and authenticated so it can be driven end-to-end from here — neither was set up as of M0,
+so confirm which one before M1's branch is ready to land.
 
 ## Milestone status
 
