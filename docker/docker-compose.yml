@@ -1,0 +1,46 @@
+# Local dev + self-hosted docker-compose production option (docs/architecture.md §1, §8.16/M88).
+#
+# M0 skeleton: valid config, not yet exercised by any milestone's done-when criteria (the backend has no
+# Postgres/Redis dependency until M1). Redis is present from the start even though it stays reserved-but-
+# unused by self-hosted single-process instances (docs/architecture.md §11) — only the flagship activates it.
+name: norite
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: norite
+      POSTGRES_PASSWORD: norite
+      POSTGRES_DB: norite
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U norite"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  backend:
+    image: golang:1.23-alpine
+    working_dir: /app/backend
+    volumes:
+      - ../backend:/app/backend
+      - ../go.work:/app/go.work
+    command: ["go", "run", "./cmd/server"]
+    environment:
+      NORITE_LISTEN_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

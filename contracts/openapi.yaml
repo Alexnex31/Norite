@@ -1,0 +1,14 @@
+openapi: 3.1.0
+info:
+  title: Norite REST API
+  version: 0.0.0-m0
+  description: >
+    Source-of-truth REST contract for the Norite backend (see docs/architecture.md §2 and §10). This is an
+    M0 skeleton — no real endpoints exist yet. `oapi-codegen` starts generating Go server-side types and
+    routing scaffolding from this file starting at Milestone M12; every REST endpoint added from that point
+    on updates this file in the same commit (CLAUDE.md rule 6).
+servers:
+  - url: /api/v1
+paths: {}
+components:
+  schemas: {}

@@ -1,0 +1,63 @@
+# M0 skeleton: builds/packages the four current binaries. No signing wired in yet — Sigstore/cosign release
+# signing lands at Milestone M24 (docs/architecture.md §13, ADR 0020). voiceworker/ joins once it exists
+# (Phase E); frontend/ is never a goreleaser artifact (it's embedded into the backend binary, or served by
+# the later web SPA's own build, per docs/architecture.md §1).
+version: 2
+
+project_name: norite
+
+before:
+  hooks:
+    - go work sync
+
+builds:
+  - id: backend
+    dir: backend
+    main: ./cmd/server
+    binary: norite-server
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: cli
+    dir: cli
+    main: ./cmd/app
+    binary: norite
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: gui
+    dir: gui
+    main: ./cmd/gui
+    binary: norite-gui
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: daemon
+    dir: daemon
+    main: ./cmd/daemond
+    binary: norite-daemon
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  disable: true

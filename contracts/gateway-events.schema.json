@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.example/contracts/gateway-events.schema.json",
+  "title": "Norite Gateway Events",
+  "description": "Source-of-truth WS dispatch payload contract (see docs/architecture.md §2). M0 skeleton — only the envelope shape is defined; no real op-codes or DISPATCH event types exist yet. This file updates in the same commit as any new gateway dispatch type (CLAUDE.md rule 6), starting at Milestone M18.",
+  "type": "object",
+  "properties": {
+    "op": {
+      "type": "integer",
+      "description": "Op-code. See docs/architecture.md §2 for the full table (0 Dispatch, 7 Reconnect, 9 Invalid Session, 10 Hello, 11 Heartbeat ACK server-side; 1 Heartbeat, 2 Identify, 3 Presence Update, 4 Voice State Update, 6 Resume, 8 Request Guild Members client-side)."
+    },
+    "d": {
+      "description": "Op-code-specific payload. Shape defined per dispatch type starting at Milestone M18.",
+      "type": ["object", "null"]
+    },
+    "s": {
+      "description": "Sequence number, present on Dispatch frames only.",
+      "type": ["integer", "null"]
+    },
+    "t": {
+      "description": "Dispatch event type name, present on Dispatch frames only.",
+      "type": ["string", "null"]
+    }
+  },
+  "required": ["op", "d"],
+  "additionalProperties": false
+}

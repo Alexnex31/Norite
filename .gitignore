@@ -11,6 +11,9 @@ backend/bin/
 backend/**/vendor/
 !backend/vendor/modules.txt
 
+# goreleaser build output
+/dist/
+
 # sqlc / migrate scratch (generated code IS committed; this ignores local tool caches only)
 backend/.sqlc/
 
