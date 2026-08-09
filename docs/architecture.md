@@ -4,8 +4,8 @@
 > plan the project was bootstrapped from — keep it updated as real decisions supersede it (a stale doc that
 > nobody trusts is worse than no doc; if you deviate from something here, update this file in the same PR).
 > See also: `/CLAUDE.md` for the fast-loading summary + non-negotiable rules, and `docs/adr/` for short,
-> focused records of the most contested individual decisions below. This document absorbs and supersedes the
-> repo-root `v2-plan.md`, which remains in the repo as historical planning record but is no longer the live
+> focused records of the most contested individual decisions below. This document absorbs and supersedes
+> `docs/plan.md`, which remains in the repo as historical planning record but is no longer the live
 > reference.
 
 ## Context
