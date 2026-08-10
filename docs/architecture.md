@@ -85,7 +85,7 @@ Locked-in decisions:
 │   ├── sqlc.yaml
 │   └── go.mod
 ├── cli/                          # The `app` CLI — Bubble Tea/Lip Gloss/Bubbles TUI
-│   ├── cmd/                      # cobra-style command tree, --json flag plumbing
+│   ├── cmd/                      # urfave/cli v3 command tree, --json flag plumbing
 │   ├── tui/                      # pane engine, keybindings, markdown renderer, sanitization, image rendering
 │   └── go.mod
 ├── gui/                          # The native GUI — Gio
@@ -805,6 +805,23 @@ carries a semver field; MAJOR must match exactly, a defined MINOR-version-back w
 
 A separate, performance-focused, fully scriptable client (Unix-style: one action, exit, pipeable
 stdin/stdout), attaching to the shared daemon (§3). See [ADR 0009](adr/0009-cli-and-gui-client-architecture.md).
+
+**Command routing**: `urfave/cli` v3 — the argument parser and command tree (`app instance init`,
+`app config get`, …), distinct from the Charm stack, which is only the interactive TUI layer. It carries
+`--json`/`--help` plumbing and shell completions for every command. *Where the choice was contested*: over
+`spf13/cobra`, the heavier ecosystem default, for a lighter dependency and less per-command boilerplate
+across what will become dozens of commands; nested subcommand groups, the one thing this CLI genuinely needs
+from a router, work equally well in both.
+
+**Instance setup wizard** (`app instance init`): the self-hosted operator's first-run flow, living in the
+`app` CLI rather than the server binary so that the step added later — creating the first admin account —
+is a normal authenticated API call from the client that already knows how to make one. Prompts are **plain
+sequential stdin/stdout question-and-answer, not a full-screen TUI**: the wizard is a rare one-time flow
+that has to work over SSH, inside `docker exec`, and in CI, and it must degrade to an error rather than a
+hang when stdin is not a TTY. Two modes — a quick-start path that prompts only for what has no safe default,
+and `--full`, which prompts for everything — plus a fully non-interactive flag form for scripted
+provisioning. It writes the instance config file; that file's format, path, and precedence relative to the
+backend's `NORITE_*` environment variables are settled at Milestone M2 and documented here then.
 
 **Pane engine**: a custom TUI pane/split engine on the Charm stack (Bubble Tea + Lip Gloss + Bubbles), not a
 real installed tmux, for identical cross-platform behavior. Any pane is a fully flexible viewport pointed at

@@ -59,7 +59,9 @@ a signed license file, not a public license text. Not AGPL, not open source. See
 GIN + `pg_trgm` for search), Redis (activated only for the flagship's horizontal-scale event bus/rate
 limiting; self-hosted single-process instances never touch it).
 
-**CLI**: Go, Bubble Tea + Lip Gloss + Bubbles (Charm stack), `teatest` for testing, `pelletier/go-toml` v2.
+**CLI**: Go, `urfave/cli` v3 (command tree, flag parsing, `--json`/`--help`, completions — chosen over
+`spf13/cobra`), Bubble Tea + Lip Gloss + Bubbles (Charm stack, the interactive TUI layer only), `teatest`
+for testing, `pelletier/go-toml` v2.
 
 **Native GUI**: Go, Gio (`gioui.org`) — immediate-mode, hand-built widgets, golden-image testing for the
 highest-value surfaces.
@@ -209,10 +211,16 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
 `docs/roadmap.md`.
 
 - **M0 — monorepo scaffolding**: done (tag `m0`).
-- **M1 — backend skeleton**: done. `internal/config` (typed, env-bound, validated at startup),
+- **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
   `internal/platform/{logging,httpx,database,ratelimit}`, `internal/db` (sqlc-generated, pgx/v5),
   `migrations/` (go:embed'd; `000001_init` is intentionally empty), and the `cmd/server` composition root.
-- **M2 — `app instance init`**: next.
+- **M2 — CLI skeleton and `app instance init`**: next. Scope was reshuffled with M3 (settled 2026-08-10):
+  the `app` command tree now lands in M2, since the wizard needs it, and M3 is the daemon lifecycle stub
+  alone. The router is `urfave/cli` v3, and the wizard prompts are plain sequential stdin/stdout, not a
+  Bubble Tea TUI — see `docs/architecture.md` §4. The *instance* config file's format, path, and precedence
+  relative to the `NORITE_*` environment variables are deliberately still open — they get settled during M2
+  and written into architecture.md §4 then, since nothing designs them today (the
+  `~/.config/norite/config.toml` in architecture.md §3 is the CLI/GUI *client* config, a different file).
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:

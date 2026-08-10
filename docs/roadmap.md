@@ -32,18 +32,22 @@ of this section.
   a `/healthz` endpoint. Done when: the backend binary starts, blocks on a pending migration until it
   completes, connects to Postgres, and `/healthz` returns 200; a burst of requests from one IPv6 `/64` block
   is throttled as a single source.
-- **M2 — `app instance init`, infrastructure config only**: the setup wizard's DB-connection,
-  storage-backend (local disk vs. S3/MinIO), ACME on/off (plus the LAN-only opt-out), and
-  registration-gating prompts — writing a valid config file. Explicitly does not include first-admin-account
-  creation yet (no `users` table exists until M4) — that step is added at M10. Both quick-start and `--full`
-  modes are stubbed now, fleshed out as later milestones add more prompts (the SMTP prompt at M5, the voice
-  opt-out at M37, the public-matchmaking toggle at M58). Done when: running the wizard produces a valid,
-  loadable instance config.
-- **M3 — CLI skeleton and daemon lifecycle stub**: the `app` CLI binary builds and runs, command scaffolding,
-  `--json`/`--help` flag plumbing (no real commands yet), and a daemon stub that installs itself as an
-  OS-level service (systemd/launchd/Windows task) but does nothing beyond starting and stopping cleanly. Done
-  when: `app` installs and starts a daemon that appears as a running OS service, with no functional commands
-  yet.
+- **M2 — CLI skeleton and `app instance init`, infrastructure config only**: the `app` binary builds and
+  runs on a `urfave/cli` v3 command tree, with `--json`/`--help` flag plumbing and shell completions wired
+  once for every command that follows (`architecture.md` §4) — no functional client commands yet. On that
+  foundation, the setup wizard: DB-connection, storage-backend (local disk vs. S3/MinIO), ACME on/off (plus
+  the LAN-only opt-out), and registration-gating prompts — plain sequential stdin/stdout prompts, not a
+  full-screen TUI — writing a valid config file. **This milestone also decides and documents the instance
+  config file's format, path, and precedence relative to the backend's `NORITE_*` environment variables**,
+  writing the outcome into `architecture.md` §4; nothing before M2 fixes that choice. Explicitly does not
+  include first-admin-account creation yet (no `users` table exists until M4) — that step is added at M10.
+  Both quick-start and `--full` modes are stubbed now, fleshed out as later milestones add more prompts (the
+  SMTP prompt at M5, the voice opt-out at M37, the public-matchmaking toggle at M58). Done when: `app --help`
+  lists the command tree, and running the wizard produces an instance config the backend actually loads.
+- **M3 — Daemon lifecycle stub**: a daemon stub that installs itself as an OS-level service (systemd/launchd/
+  Windows task) but does nothing beyond starting and stopping cleanly, plus the `app` subcommands that drive
+  that install/start/stop. Depends on M2 for the CLI command tree those subcommands mount into. Done when:
+  `app` installs and starts a daemon that appears as a running OS service.
 
 #### Phase B — Auth
 
