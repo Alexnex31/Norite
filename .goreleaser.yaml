@@ -28,6 +28,10 @@ builds:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    # Without this, `norite --version` reports "dev" in every shipped release — the variable's default.
+    # The other three binaries get the same treatment as they grow a version to report.
+    ldflags:
+      - -s -w -X github.com/Alexnex31/Norite/cli/internal/cliapp.Version={{ .Version }}
 
   - id: gui
     dir: gui

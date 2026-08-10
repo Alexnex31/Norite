@@ -1,0 +1,130 @@
+# Norite instance configuration — reference document
+#
+# This file is a source-of-truth contract, alongside openapi.yaml and gateway-events.schema.json. It lists
+# EVERY key the backend understands, so two things can be checked automatically and stay in step:
+#
+#   * the backend proves it loads and validates this document (backend/internal/config)
+#   * `norite instance init` proves it writes only keys that appear here (cli/internal/instanceinit)
+#
+# It is a schema reference, NOT a recommended starting configuration. Every key is present so the contract
+# is complete, which means some are set to values a real instance would leave alone — storage.backend is
+# "s3" and acme.enabled is true here purely so their dependent settings are exercised. A real instance
+# writes only what it needs; `norite instance init` generates that file for you.
+#
+# ---------------------------------------------------------------------------------------------------
+# Precedence, highest first: NORITE_* environment variable, then this file, then the built-in default.
+#
+# The direction matters. The flagship deployment injects DATABASE_URL from a Kubernetes Secret, and a
+# config file baked into a container image must never be able to shadow it. It also means every existing
+# environment-variable-only deployment keeps behaving exactly as it did before this file existed — the
+# file is entirely optional, and no file at all is a fully supported setup.
+#
+# Discovery order: the server's -config flag, then NORITE_CONFIG_FILE, then /etc/norite/instance.toml
+# (%ProgramData%\Norite\instance.toml on Windows). A file named explicitly by the flag or the variable
+# must exist; the conventional location is allowed to be absent.
+#
+# Every key is optional — a file setting only [database].url is valid. Unknown keys are REJECTED at
+# startup rather than ignored, so a typo fails loudly instead of silently leaving a setting on its
+# default. The per-setting reference, including every default, is backend/internal/config/config.go.
+#
+# This file contains the database password and, when S3 storage is used, an S3 secret key. `norite instance
+# init` creates it 0600. Keep it that way.
+# ---------------------------------------------------------------------------------------------------
+
+# "development" or "production". Only changes cross-cutting defaults (log format), never behavior.
+# Default: "development".
+env = "production"
+
+[http]
+# Listen address. Default ":8080".
+listen_addr = ":8080"
+
+# How long graceful shutdown drains in-flight requests before dropping them. Default "15s".
+shutdown_timeout = "15s"
+
+# Honor X-Forwarded-For (client address) and X-Forwarded-Proto (the HSTS decision). Default false, and
+# that default is load-bearing: the client IP is the rate limiter's grouping key, so trusting a
+# client-settable header on a directly-exposed process lets any caller forge a fresh identity per request
+# and walk straight through every IP-based limit. Turn it on only behind a proxy that overwrites them.
+trust_proxy_headers = false
+
+# How many trusted proxies sit between the client and this process; only read when the above is true.
+# X-Forwarded-For is append-only, so the client's address is this many entries from the END of the header.
+# 1 for a single reverse proxy or Ingress, 2 for a CDN in front of one. Default 1.
+trusted_proxy_hops = 1
+
+[database]
+# Postgres connection string. No default — there is no safe guess. Carries the password: see the 0600 note
+# above. Use sslmode=require (or verify-full) for anything but a local socket or private container network.
+url = "postgres://norite:norite@localhost:5432/norite?sslmode=disable"
+
+# Pool size per backend replica. Default: the CPU count clamped to [4, 16] — deliberately small. Postgres
+# treats connections as relatively heavy processes with a low default limit (often 100). If one instance
+# outgrows a small direct pool, put PgBouncer in front rather than raising this a lot.
+max_conns = 8
+min_conns = 2
+
+# How long startup waits for the first successful connection. Default "10s".
+connect_timeout = "10s"
+
+# How long startup waits for the migration advisory lock before giving up. Waiting is normal — it means
+# another process is mid-migration — so this only needs to outlast a real migration. Default "2m".
+migrate_lock_timeout = "2m"
+
+[log]
+# trace | debug | info | warn | error | fatal | panic. Default "info".
+level = "info"
+
+# "json" (default in production) or "console" (human-readable, default in development).
+format = "json"
+
+[rate_limit]
+# Base REST limit, "<limit>-<S|M|H|D>". Default "600-M" (600 requests per minute).
+#
+# All IP-based limiting groups IPv6 traffic by /64 subnet rather than exact address — a single actor is
+# routinely handed an entire /64, so per-address counting would let IPv6 traffic route around every limit
+# for free. That grouping is global and not configurable.
+rest = "600-M"
+
+[storage]
+# Where uploaded attachments live: "local" disk or "s3" (AWS S3, MinIO, or anything speaking that API).
+# Default "local". Read by the attachment milestones, not yet by anything at M2 — validated from M2 on so
+# a misconfigured instance fails at startup rather than at someone's first upload months later.
+backend = "s3"
+
+# Directory attachments are written to when backend = "local". Required in that case.
+# Default "/var/lib/norite/attachments" (%ProgramData%\Norite\attachments on Windows).
+local_path = "/var/lib/norite/attachments"
+
+[storage.s3]
+# Base URL of the S3-compatible service. Required for MinIO and other non-AWS services; leave empty for
+# AWS S3 itself, where the region determines the endpoint.
+endpoint = "https://minio.example.com"
+
+# Region, bucket, and credentials. All four are required when backend = "s3".
+# secret_access_key is a credential — it is never logged, and this file must stay 0600.
+region = "us-east-1"
+bucket = "norite-attachments"
+access_key_id = "norite"
+secret_access_key = "change-me"
+
+# Address buckets as endpoint/bucket rather than bucket.endpoint. MinIO and most self-hosted S3
+# implementations need this; AWS S3 does not. Default false.
+force_path_style = true
+
+[acme]
+# Let the backend provision and renew its own TLS certificate (certmagic). Default false, which is what
+# both a LAN-only self-hoster and the flagship need — the flagship terminates TLS at the Ingress with
+# cert-manager instead, since every replica racing for the same Let's Encrypt certificate would hit rate
+# limits. Read from the milestone that wires certmagic in; validated from M2 on.
+enabled = true
+
+# The hostname a certificate is issued for, and the address the CA sends expiry notices to. Both are
+# required once ACME is on — the protocol cannot proceed without them.
+domain = "chat.example.com"
+email = "admin@example.com"
+
+[registration]
+# "open" (anyone may create an account) or "invite" (an instance invite code is required).
+# Default "open". Enforced by the registration endpoint from Milestone M10.
+mode = "invite"

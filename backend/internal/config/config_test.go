@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,10 +12,22 @@ import (
 
 const validDSN = "postgres://norite:norite@localhost:5432/norite?sslmode=disable"
 
+// withoutConfigFile points file discovery at an empty document, so these tests exercise the
+// environment-and-defaults path regardless of whether the machine running them happens to have a real
+// /etc/norite/instance.toml. An empty file leaves every field unset, which is exactly the "no file
+// anywhere" case — see TestLoadFindsNoFile for the genuinely-absent path.
+func withoutConfigFile(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	t.Setenv(ConfigFileEnvVar, path)
+}
+
 func TestLoadDefaults(t *testing.T) {
+	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
 
-	cfg, err := Load()
+	cfg, err := Load("")
 	require.NoError(t, err)
 
 	assert.Equal(t, EnvDevelopment, cfg.Env)
@@ -32,16 +46,18 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadProductionDefaultsToJSONLogs(t *testing.T) {
+	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
 	t.Setenv(envPrefix+"ENV", string(EnvProduction))
 
-	cfg, err := Load()
+	cfg, err := Load("")
 	require.NoError(t, err)
 	assert.Equal(t, "json", cfg.LogFormat)
 	assert.True(t, cfg.IsProduction())
 }
 
 func TestLoadOverrides(t *testing.T) {
+	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
 	t.Setenv(envPrefix+"LISTEN_ADDR", "127.0.0.1:9090")
 	t.Setenv(envPrefix+"DB_MAX_CONNS", "8")
@@ -55,7 +71,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv(envPrefix+"LOG_FORMAT", "json")
 	t.Setenv(envPrefix+"RATELIMIT", "10-S")
 
-	cfg, err := Load()
+	cfg, err := Load("")
 	require.NoError(t, err)
 
 	assert.Equal(t, "127.0.0.1:9090", cfg.ListenAddr)
@@ -134,10 +150,11 @@ func TestLoadRejectsBadInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			withoutConfigFile(t)
 			for k, v := range tt.env {
 				t.Setenv(envPrefix+k, v)
 			}
-			_, err := Load()
+			_, err := Load("")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -147,9 +164,10 @@ func TestLoadRejectsBadInput(t *testing.T) {
 // The database URL carries a password, so it must never end up in an error message an operator might
 // paste into a bug report.
 func TestValidationErrorsDoNotLeakTheDatabaseURL(t *testing.T) {
+	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", "mysql://user:hunter2@localhost/norite")
 
-	_, err := Load()
+	_, err := Load("")
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "hunter2")
 }
@@ -157,11 +175,12 @@ func TestValidationErrorsDoNotLeakTheDatabaseURL(t *testing.T) {
 // The hop count is meaningless when proxy headers aren't trusted, so setting it to 0 to mean "no proxies
 // in front of me" must not be a hard startup failure over a value nothing reads.
 func TestZeroProxyHopsIsAcceptedWhenProxiesAreNotTrusted(t *testing.T) {
+	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
 	t.Setenv(envPrefix+"TRUST_PROXY_HEADERS", "false")
 	t.Setenv(envPrefix+"TRUSTED_PROXY_HOPS", "0")
 
-	cfg, err := Load()
+	cfg, err := Load("")
 	require.NoError(t, err)
 	assert.Equal(t, 0, cfg.TrustedProxyHops)
 }

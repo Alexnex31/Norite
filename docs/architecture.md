@@ -84,8 +84,10 @@ Locked-in decisions:
 │   ├── migrations/               # golang-migrate .sql up/down, go:embed'd into the binary
 │   ├── sqlc.yaml
 │   └── go.mod
-├── cli/                          # The `app` CLI — Bubble Tea/Lip Gloss/Bubbles TUI
-│   ├── cmd/                      # urfave/cli v3 command tree, --json flag plumbing
+├── cli/                          # The `norite` CLI — Bubble Tea/Lip Gloss/Bubbles TUI
+│   ├── cmd/app/                  # main() only: process lifetime and exit codes, nothing else
+│   ├── internal/cliapp/          # urfave/cli v3 command tree, global --json/--help flags, completions
+│   ├── internal/<command>/       # one package per command group, e.g. instanceinit (`norite instance init`)
 │   ├── tui/                      # pane engine, keybindings, markdown renderer, sanitization, image rendering
 │   └── go.mod
 ├── gui/                          # The native GUI — Gio
@@ -770,7 +772,7 @@ debounced, so opening any client on any machine shows accurate unread state.
 **Config file** (`~/.config/norite/config.toml`, TOML, `pelletier/go-toml` v2 document-editing mode —
 preserves hand-written comments/formatting): covers theme, keybindings, notification filters, pane-layout
 preferences — anything a user should freely hand-edit. Keys are namespaced by client (`[cli]`, `[gui]`,
-`[shared]`) so one file serves both UIs without collision, and `app config get`/`app config set` expose the
+`[shared]`) so one file serves both UIs without collision, and `norite config get`/`norite config set` expose the
 same file as a scriptable interface rather than a second source of truth. Every writer (CLI, GUI, daemon)
 uses atomic writes
 (temp file + rename) **plus `gofrs/flock`-based locking** around each read-modify-write cycle. The daemon
@@ -783,7 +785,7 @@ app-settings toggle (living in the daemon state file) lets them diverge into sep
 flipping on copies the current shared file to both as a starting point, flipping off reconciles via
 last-write-wins onto one shared file.
 
-**Config export/import**: `app config export` / `app config import` — a portable file covering the
+**Config export/import**: `norite config export` / `norite config import` — a portable file covering the
 `config.toml` scope only (never the daemon state file, which is machine-local by nature), for carrying
 preferences between separate daemons/machines. Import merges key-by-key, preserving the target's existing
 customization.
@@ -806,22 +808,60 @@ carries a semver field; MAJOR must match exactly, a defined MINOR-version-back w
 A separate, performance-focused, fully scriptable client (Unix-style: one action, exit, pipeable
 stdin/stdout), attaching to the shared daemon (§3). See [ADR 0009](adr/0009-cli-and-gui-client-architecture.md).
 
-**Command routing**: `urfave/cli` v3 — the argument parser and command tree (`app instance init`,
-`app config get`, …), distinct from the Charm stack, which is only the interactive TUI layer. It carries
-`--json`/`--help` plumbing and shell completions for every command. *Where the choice was contested*: over
+**Command routing**: `urfave/cli` v3 — the argument parser and command tree (`norite instance init`,
+`norite config get`, …), distinct from the Charm stack, which is only the interactive TUI layer. It carries
+`--help` and shell completions for every command, and declares the global `--json` flag; the machinery that
+*renders* JSON, and the per-command schemas in `contracts/cli-json/`, arrive with the first data-printing
+command (Milestone M46) — until then the flag is a declared seam, not a working output mode. The tree lives
+in `internal/cliapp`, not under `cmd/`, so it can be constructed and exercised in tests without spawning a
+process; `cmd/app/main.go` owns process lifetime and exit codes and nothing else. A mistyped command exits
+non-zero rather than printing help and succeeding, which `urfave/cli` does by default. *Where the choice was contested*: over
 `spf13/cobra`, the heavier ecosystem default, for a lighter dependency and less per-command boilerplate
 across what will become dozens of commands; nested subcommand groups, the one thing this CLI genuinely needs
 from a router, work equally well in both.
 
-**Instance setup wizard** (`app instance init`): the self-hosted operator's first-run flow, living in the
-`app` CLI rather than the server binary so that the step added later — creating the first admin account —
+**Instance setup wizard** (`norite instance init`): the self-hosted operator's first-run flow, living in the
+`norite` CLI rather than the server binary so that the step added later — creating the first admin account —
 is a normal authenticated API call from the client that already knows how to make one. Prompts are **plain
 sequential stdin/stdout question-and-answer, not a full-screen TUI**: the wizard is a rare one-time flow
 that has to work over SSH, inside `docker exec`, and in CI, and it must degrade to an error rather than a
 hang when stdin is not a TTY. Two modes — a quick-start path that prompts only for what has no safe default,
 and `--full`, which prompts for everything — plus a fully non-interactive flag form for scripted
-provisioning. It writes the instance config file; that file's format, path, and precedence relative to the
-backend's `NORITE_*` environment variables are settled at Milestone M2 and documented here then.
+provisioning. Quick-start asks only what has no safe default — how to reach Postgres, and whether
+registration is open, which is a policy decision that shouldn't be made silently for a private instance —
+then prints what it defaulted for everything else; `--full` asks about all of it. The database connection
+is asked for in parts and assembled with `net/url` rather than typed as a whole DSN, because a password
+containing `@`, `/`, or `:` has to be percent-encoded to survive in a URL and making an operator get that
+right by hand is a trap.
+
+**Instance config file** (settled at Milestone M2): **TOML**, at `/etc/norite/instance.toml`
+(`%ProgramData%\Norite\instance.toml` on Windows). TOML for consistency with the CLI/GUI client config
+above, and because the generated file is meant to be hand-edited afterwards — it ships as a commented
+document explaining every setting it writes, which a struct marshal cannot produce. This is a *different
+file* from `~/.config/norite/config.toml`: that one is per-user client preferences, this one configures a
+server, which is typically run by a system account or inside a container.
+
+Discovery order: the server's `-config` flag, then `NORITE_CONFIG_FILE`, then the conventional location. A
+file named explicitly by the flag or the variable must exist — starting on defaults that look nothing like
+what was asked for is worse than refusing; the conventional location is allowed to be absent.
+
+**Precedence, highest first: environment variable, then this file, then the built-in default.** The
+direction is load-bearing rather than arbitrary: the flagship injects `DATABASE_URL` from a Kubernetes
+Secret (§12), and a config file baked into a container image must never be able to shadow it. It also
+means every environment-variable-only deployment — docker-compose, Kubernetes — behaves exactly as it did
+before the file existed. **The file is entirely optional**; no file at all is a fully supported setup.
+Every key within it is optional too, and unknown keys are *rejected* at startup rather than ignored, so a
+typo fails loudly instead of silently leaving a setting on its default.
+
+The file holds the database password, and an S3 secret key when object storage is used, so the wizard
+creates it `0600` and fails rather than producing one it cannot restrict to the owner. Because a validation
+failure could name either vocabulary, an error on a file-configured instance names both the environment
+variable and the file key (`NORITE_REGISTRATION_MODE ([registration].mode in /etc/norite/instance.toml)`).
+
+`contracts/instance-config.toml` is the source-of-truth reference listing every key, on the same footing as
+`openapi.yaml` and `gateway-events.schema.json`. It exists because the backend and the CLI are separate Go
+modules that cannot import each other's types: the backend proves it loads that document, the CLI proves
+the wizard writes only keys appearing in it, and between them the two sides cannot drift apart.
 
 **Pane engine**: a custom TUI pane/split engine on the Charm stack (Bubble Tea + Lip Gloss + Bubbles), not a
 real installed tmux, for identical cross-platform behavior. Any pane is a fully flexible viewport pointed at
@@ -848,7 +888,7 @@ toggle (which does not suppress custom-emoji rendering).
 `contracts/cli-json/` as a third source-of-truth contract alongside `openapi.yaml`/`gateway-events.schema.json`
 — schema changes ship in the same commit as the code change causing them.
 
-**Logging**: file-based, never stderr (Bubble Tea owns the alternate screen buffer), `app logs tail`,
+**Logging**: file-based, never stderr (Bubble Tea owns the alternate screen buffer), `norite logs tail`,
 `natefinch/lumberjack` rotation — reused by daemon, CLI, and GUI alike.
 
 **Voice controls**: join/leave/mute/deafen via keybinding, a status line (no visual call UI — it's a
@@ -1055,7 +1095,7 @@ gateway-fed real-time stores with one dispatcher routing DISPATCH frames, local/
 
 **Pane splitting**: CSS grid/flex-based resizable panes, `localStorage`-based layout persistence — the web
 client's own independent implementation of the same pane-content model the CLI/GUI use, never synced with
-either by default (the manual `app config export`/`import` path, §3, is how a user manually carries
+either by default (the manual `norite config export`/`import` path, §3, is how a user manually carries
 preferences across clients).
 
 **E2E export**: the browser-side decrypt-and-export equivalent of §7's daemon-performed step.
@@ -1338,7 +1378,7 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/`, and real tests:
   blocked author's events from the DISPATCH stream (inspect the stream, not just client rendering).
 - **Daemon/CLI/GUI**: confirm a CLI-side test client attached to the daemon's socket receives the same
   DISPATCH events the daemon gets from the real gateway; confirm a deliberately frozen attach client gets
-  dropped without stalling a second, healthy attached client; confirm `app config export`/`import` round-trips
+  dropped without stalling a second, healthy attached client; confirm `norite config export`/`import` round-trips
   correctly.
 - **Voice**: confirm the DSP chain order (AEC before RNNoise) via a two-party echo test; confirm the
   voice-worker crash is detected via the closed pipe without affecting messaging.

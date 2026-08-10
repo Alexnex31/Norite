@@ -40,7 +40,7 @@ uses atomic writes plus `gofrs/flock` locking; the daemon hot-reloads on externa
 - Cross-client pane splitting is a requirement for all three clients but is never synced across clients or
   devices by default — each client implements its own split-pane engine, and layout lives in the daemon/
   config-file state (CLI/GUI, same machine) or `localStorage` (web, separate codebase). A same-machine
-  CLI/GUI toggle can opt into separate config files instead of the default shared one; `app config export`/
+  CLI/GUI toggle can opt into separate config files instead of the default shared one; `norite config export`/
   `import` carries preferences across separate daemons/machines manually.
 - The daemon proactively raises `RLIMIT_NOFILE` at startup — it's effectively a local server holding many
   simultaneous handles (gateway WS, N attach sockets, bot-automation TCP, voice-worker pipes, SQLite/log

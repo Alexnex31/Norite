@@ -54,9 +54,13 @@ func run() error {
 	migrateOnly := flag.Bool("migrate-only", false,
 		"apply pending migrations and exit, without starting the HTTP server "+
 			"(used by `just db-migrate` and, for the flagship, by the Helm pre-upgrade Job)")
+	configPath := flag.String("config", "",
+		"path to the instance config file written by `norite instance init`; overrides "+
+			config.ConfigFileEnvVar+" and the default location. Optional — NORITE_* environment "+
+			"variables alone are a fully supported configuration, and they override this file either way")
 	flag.Parse()
 
-	cfg, err := config.Load()
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
 	}
@@ -64,6 +68,15 @@ func run() error {
 	logger, err := logging.New(logging.Options{Level: cfg.LogLevel, Format: cfg.LogFormat})
 	if err != nil {
 		return err
+	}
+
+	// Which file (if any) was read is the first thing anyone debugging a surprising setting needs, and it
+	// is not otherwise discoverable from outside the process. The path only — never the values, several of
+	// which are credentials (CLAUDE.md rule 8).
+	if cfg.SourcePath != "" {
+		logger.Info().Str("path", cfg.SourcePath).Msg("loaded instance config file")
+	} else {
+		logger.Info().Msg("no instance config file found — using environment variables and defaults")
 	}
 
 	// A canceled context is how SIGINT/SIGTERM reaches everything below, so an operator who asks a stuck

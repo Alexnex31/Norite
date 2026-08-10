@@ -35,8 +35,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          # Glob rather than ${{ matrix.module }}/go.sum: cli, gui, and daemon still have zero
-          # dependencies and so no go.sum, and setup-go fails on a path that matches nothing.
+          # Glob rather than ${{ matrix.module }}/go.sum: gui and daemon still have zero dependencies
+          # and so no go.sum, and setup-go fails on a path that matches nothing.
           cache-dependency-path: "**/go.sum"
       - name: go vet
         working-directory: ${{ matrix.module }}
@@ -58,8 +58,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          # Glob rather than ${{ matrix.module }}/go.sum: cli, gui, and daemon still have zero
-          # dependencies and so no go.sum, and setup-go fails on a path that matches nothing.
+          # Glob rather than ${{ matrix.module }}/go.sum: gui and daemon still have zero dependencies
+          # and so no go.sum, and setup-go fails on a path that matches nothing.
           cache-dependency-path: "**/go.sum"
       # The backend's integration tests start a real Postgres via testcontainers. ubuntu-latest runners
       # ship a working Docker daemon, so no extra service container or setup step is needed.

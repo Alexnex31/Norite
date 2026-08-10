@@ -18,7 +18,7 @@ so rotating one device's daemon never invalidates another device's session/refre
 run daemons on more than one machine). Personal API tokens support scopes (e.g. `messages:send`-only), not
 just one full-access token per user, for bots/automation.
 
-`app login` supports direct password login and, for OAuth (Google, GitHub), a system-browser-plus-localhost-
+`norite login` supports direct password login and, for OAuth (Google, GitHub), a system-browser-plus-localhost-
 callback loopback flow — a fixed registered local port with a documented fallback-port list, since GitHub
 OAuth Apps require an exact pre-registered callback URL. A headless/SSH context (no local browser, or
 `--no-browser`) falls back to a device-code flow (`gh`/`gcloud`/`aws`-style): a code and URL completed on any

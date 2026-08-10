@@ -147,7 +147,7 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 ```
 backend/       Go modular monolith — cmd/server, internal/{config,platform,auth,users,guilds,channels,
                roles,messages,gateway,presence,voice,db}, migrations/
-cli/           The `app` CLI — Bubble Tea/Lip Gloss/Bubbles TUI, pane engine, keybindings
+cli/           The `norite` CLI — Bubble Tea/Lip Gloss/Bubbles TUI, pane engine, keybindings
 gui/           The native GUI — Gio app, shares the daemon/config model with cli/
 daemon/        Shared background daemon — gateway client, dual IPC, plugin host, config/state files
 internal/voice/  Pion-based SFU, embedded TURN server (lives under backend/, server-side infra)
@@ -206,7 +206,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M1.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M2.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -214,13 +214,9 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
 - **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
   `internal/platform/{logging,httpx,database,ratelimit}`, `internal/db` (sqlc-generated, pgx/v5),
   `migrations/` (go:embed'd; `000001_init` is intentionally empty), and the `cmd/server` composition root.
-- **M2 — CLI skeleton and `app instance init`**: next. Scope was reshuffled with M3 (settled 2026-08-10):
-  the `app` command tree now lands in M2, since the wizard needs it, and M3 is the daemon lifecycle stub
-  alone. The router is `urfave/cli` v3, and the wizard prompts are plain sequential stdin/stdout, not a
-  Bubble Tea TUI — see `docs/architecture.md` §4. The *instance* config file's format, path, and precedence
-  relative to the `NORITE_*` environment variables are deliberately still open — they get settled during M2
-  and written into architecture.md §4 then, since nothing designs them today (the
-  `~/.config/norite/config.toml` in architecture.md §3 is the CLI/GUI *client* config, a different file).
+- **M2 — CLI skeleton and `norite instance init`**: done. Scope was reshuffled with M3 (settled 2026-08-10):
+  the `norite` command tree landed here, since the wizard needs it, and M3 is the daemon lifecycle stub alone.
+- **M3 — daemon lifecycle stub**: next.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -250,6 +246,29 @@ re-derive:
   justfile's variables. `just lint` warns when your local golangci-lint differs. Also note golangci-lint
   must be built with Go >= the workspace's highest `go` directive (1.25.0), which is why the lint action
   is v9/golangci-lint v2 rather than the v6/v1 pair M0 started with.
+
+And on the CLI side, from M2:
+
+- **Command tree** lives in `cli/internal/cliapp`, never in `cmd/app` — that keeps it constructible in a
+  test without spawning a process, which is how help output and flag plumbing are covered. `cmd/app/main.go`
+  owns process lifetime and nothing else. Mount a new command group by adding it to `New`'s `Commands`.
+- **A mistyped command must exit non-zero.** urfave/cli's default prints help and returns nil, so the root
+  `Action` explicitly errors on an unconsumed argument (with a "did you mean" via `cli.SuggestCommand`).
+  Don't remove it — `norite instnace init && echo ok` printing "ok" is exactly the silent success a scriptable
+  CLI must never produce.
+- **Terminal output goes through `prompter.printf`/`println`**, not bare `fmt.Fprintf` — the ignored write
+  error is justified once, in one place, rather than at every call site (and errcheck enforces this).
+- **Anything interactive must degrade**: check `term.IsTerminal` and fail with an actionable message rather
+  than blocking on input that will never arrive, or reading EOF and silently accepting every default.
+  `instanceinit.ErrNotATerminal` is the shape to follow; `main` maps it to exit code 2.
+- **Never echo a secret.** Passwords are read with `term.ReadPassword` and summaries print
+  `url.URL.Redacted()`, never the raw DSN (rule 8 applies to the CLI too). Prefer an env-var source over a
+  flag for any credential — a flag value is visible in the process list to every user on the machine.
+- **Instance config**: TOML, discovery/precedence per `docs/architecture.md` §4 (**environment overrides
+  file overrides default**). `contracts/instance-config.toml` is the source of truth listing every key: the
+  backend tests that it loads, the CLI tests that the wizard writes nothing outside it. Adding a setting
+  means touching that file, `backend/internal/config` (struct field, `envVarFor`, `fileKeyFor`), the
+  wizard's template, and `.env.example` — the tests fail if you miss one.
 
 ## Project-specific skills
 

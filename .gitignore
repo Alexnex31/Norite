@@ -3,6 +3,12 @@
 .env.*
 !.env.example
 
+# Instance config written by `norite instance init` — it holds the database password and, when object
+# storage is used, an S3 secret key. Running the wizard with -o inside a checkout must never produce
+# something committable. contracts/instance-config.toml is the placeholder-only reference and is tracked.
+instance.toml
+!contracts/instance-config.toml
+
 # Go
 backend/bin/
 *.exe

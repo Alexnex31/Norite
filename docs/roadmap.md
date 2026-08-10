@@ -32,7 +32,7 @@ of this section.
   a `/healthz` endpoint. Done when: the backend binary starts, blocks on a pending migration until it
   completes, connects to Postgres, and `/healthz` returns 200; a burst of requests from one IPv6 `/64` block
   is throttled as a single source.
-- **M2 — CLI skeleton and `app instance init`, infrastructure config only**: the `app` binary builds and
+- **M2 — CLI skeleton and `norite instance init`, infrastructure config only**: the `norite` binary builds and
   runs on a `urfave/cli` v3 command tree, with `--json`/`--help` flag plumbing and shell completions wired
   once for every command that follows (`architecture.md` §4) — no functional client commands yet. On that
   foundation, the setup wizard: DB-connection, storage-backend (local disk vs. S3/MinIO), ACME on/off (plus
@@ -42,12 +42,12 @@ of this section.
   writing the outcome into `architecture.md` §4; nothing before M2 fixes that choice. Explicitly does not
   include first-admin-account creation yet (no `users` table exists until M4) — that step is added at M10.
   Both quick-start and `--full` modes are stubbed now, fleshed out as later milestones add more prompts (the
-  SMTP prompt at M5, the voice opt-out at M37, the public-matchmaking toggle at M58). Done when: `app --help`
+  SMTP prompt at M5, the voice opt-out at M37, the public-matchmaking toggle at M58). Done when: `norite --help`
   lists the command tree, and running the wizard produces an instance config the backend actually loads.
 - **M3 — Daemon lifecycle stub**: a daemon stub that installs itself as an OS-level service (systemd/launchd/
-  Windows task) but does nothing beyond starting and stopping cleanly, plus the `app` subcommands that drive
+  Windows task) but does nothing beyond starting and stopping cleanly, plus the `norite` subcommands that drive
   that install/start/stop. Depends on M2 for the CLI command tree those subcommands mount into. Done when:
-  `app` installs and starts a daemon that appears as a running OS service.
+  `norite` installs and starts a daemon that appears as a running OS service.
 
 #### Phase B — Auth
 
@@ -57,7 +57,7 @@ of this section.
   plus validation middleware. Done when: a REST call with a valid password can obtain an access-plus-refresh
   token pair, a scoped `api_tokens` row can authenticate a request restricted to its granted scope only, and
   rotating one device's refresh token leaves a second device's own token family valid.
-- **M5 — Transactional email (SMTP) and password reset**: `app instance init` gains the SMTP prompt
+- **M5 — Transactional email (SMTP) and password reset**: `norite instance init` gains the SMTP prompt
   (skipped by default in quick-start, prompted explicitly in `--full`), the `password_reset_tokens` table, and
   reset-request/confirm endpoints with anti-enumeration and rate-limiting, using `wneessen/go-mail` for
   sending. Email sending is asynchronous/backgrounded, never synchronous in the request path. Depends on M4
@@ -67,21 +67,21 @@ of this section.
 - **M6 — OAuth backend flow**: `golang.org/x/oauth2` wiring for Google and GitHub, an account-linking table,
   callback handling. Done when: completing a Google or GitHub OAuth flow against the backend issues a valid
   token pair.
-- **M7 — CLI `app login`, password plus keychain**: a direct in-terminal password prompt, storing the
-  resulting tokens via `zalando/go-keyring`. Done when: `app login` with a password succeeds, and the daemon
+- **M7 — CLI `norite login`, password plus keychain**: a direct in-terminal password prompt, storing the
+  resulting tokens via `zalando/go-keyring`. Done when: `norite login` with a password succeeds, and the daemon
   can use the stored token on next launch without re-prompting.
 - **M8 — CLI OAuth loopback flow**: the system-browser-plus-localhost-callback loopback login, using the
   fixed local port (with its documented fallback-port list) registered as the exact callback URL with both
-  providers. Done when: `app login` opens a browser, completes Google or GitHub OAuth via the fixed
+  providers. Done when: `norite login` opens a browser, completes Google or GitHub OAuth via the fixed
   registered port, and stores the resulting token via the same keychain path as M7; and if the primary port is
   occupied, the CLI falls back to the next registered port and only fails with a clear "free this port and
   retry" error once every registered fallback is exhausted.
 - **M9 — CLI headless device-code fallback**: the `device_code` table, the minimal unstyled server-rendered
   auth-completion page, and CLI headless-context detection plus polling logic. Depends on M6 (OAuth) and M8
-  (loopback, to detect when to fall back from it). Done when: `app login --no-browser` (or an auto-detected
+  (loopback, to detect when to fall back from it). Done when: `norite login --no-browser` (or an auto-detected
   headless context) displays a code, and completing it on a separate device with a browser finishes the login
   on the original CLI session.
-- **M10 — `app instance init`, finish**: adds the first-admin-account-creation step (now that M4 exists) and
+- **M10 — `norite instance init`, finish**: adds the first-admin-account-creation step (now that M4 exists) and
   wires up instance-level registration gating (the `instance_invites` table plus enforcement at
   registration). Depends on M2 and M4. Done when: a fresh instance can only be bootstrapped via the wizard,
   ending with one working admin account, and normal registration requires a valid instance invite code if
@@ -150,12 +150,12 @@ of this section.
   the CLI at M42 and the GUI at M73). Also: the config-file split (hand-editable `config.toml` vs. the
   daemon-owned state file for plugin grants/hashes and the voice breadcrumb), the same-machine CLI/GUI
   separate-config toggle (living in daemon state, copying shared state on enable and reconciling via
-  last-write-wins on disable), and `app config export`/`app config import` subcommands (covering
+  last-write-wins on disable), and `norite config export`/`norite config import` subcommands (covering
   `config.toml` scope only, import merging key-by-key). Done when: hand-editing the config file in a text
-  editor while the daemon runs takes effect without a restart; `app config set` never destroys hand-written
+  editor while the daemon runs takes effect without a restart; `norite config set` never destroys hand-written
   comments elsewhere in the file; two near-simultaneous writers no longer race thanks to the file lock;
-  flipping the same-machine toggle on/off preserves existing customization; and `app config export` on one
-  machine followed by `app config import` on another correctly carries over theme/keybindings/pane-layout
+  flipping the same-machine toggle on/off preserves existing customization; and `norite config export` on one
+  machine followed by `norite config import` on another correctly carries over theme/keybindings/pane-layout
   without disturbing the target's own existing settings.
 - **M22 — Local bot-automation port**: the separate localhost-only TCP listener with a per-session secret
   (`0600` file or environment variable), authenticated via scoped `api_tokens` (M4), messages sent through it
@@ -163,7 +163,7 @@ of this section.
   valid scoped token can send a message via the local port, and it renders visually tagged as automated.
 - **M23 — Daemon lifecycle polish**: OS-service auto-install across all three platforms, a startup
   `RLIMIT_NOFILE` raise (`syscall.Setrlimit`, to a safe ceiling such as 4096) before any IPC/network/subprocess
-  handle is opened, log-file-not-stderr logging with `natefinch/lumberjack` rotation, `app logs tail`. Done
+  handle is opened, log-file-not-stderr logging with `natefinch/lumberjack` rotation, `norite logs tail`. Done
   when: the daemon survives a full reboot and comes back up automatically; its log file rotates instead of
   growing unbounded; and a test forcing many simultaneous attach-client/voice-worker/log handles open does not
   hit the OS's default file-descriptor ceiling.
@@ -230,7 +230,7 @@ of this section.
 - **M36 — Voice auto-rejoin**: the "last active voice channel" breadcrumb (the one exception to in-memory
   daemon state), the daemon respawns the worker and rejoins on crash/restart. Done when: killing the daemon
   process mid-call results in automatic rejoin within a few seconds of restart.
-- **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to `app instance init`,
+- **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to `norite instance init`,
   extending M2/M10), the SFU/TURN never start when off, voice+text channels degrade to text-only, voice UI is
   hidden entirely (not grayed out) in CLI/GUI when disabled. Done when: an instance with voice disabled shows
   no voice-related UI anywhere and never starts the SFU/TURN processes.
@@ -268,7 +268,7 @@ of this section.
   in `contracts/` as the third source-of-truth artifact alongside `openapi.yaml`/`gateway-events.schema.json`.
   Done when: a script can reliably parse `--json` output against its documented schema.
 - **M47 — CLI logging**: file-based logging (never stderr, to avoid corrupting Bubble Tea's alternate-screen
-  rendering), `app logs tail`, `lumberjack` rotation reused from M23. Done when: logs never appear on-screen
+  rendering), `norite logs tail`, `lumberjack` rotation reused from M23. Done when: logs never appear on-screen
   during normal TUI use and are viewable via the tail command.
 - **M48 — CLI TUI testing**: `teatest`-based tests for the pane engine and keybindings from M41/M42. Done
   when: key-press simulation tests cover pane split/focus/navigation.
@@ -325,7 +325,7 @@ of this section.
 
 - **M58 — Public matchmaking channel type**: the guild-less top-level channel type, fixed platform ruleset
   (no custom roles/ownership), a voice-and-text pair (the voice half depends on Phase E being done), an
-  instance-level toggle defaulting ON (extends `app instance init` again). Done when: a public channel can be
+  instance-level toggle defaulting ON (extends `norite instance init` again). Done when: a public channel can be
   created, joined without invite, and automatically removed once empty per its lifecycle rules.
 - **M59 — Public matchmaking anti-abuse**: the minimum account-age/verification threshold gate, layered on
   top of existing rate limiting — including that limiting's global `/64` IPv6-subnet grouping (`architecture.md` §11),
@@ -363,7 +363,7 @@ of this section.
   `instance_audit_log` recording every Instance Admin action. Done when: issuing a ban immediately
   disconnects the account everywhere and blocks re-authentication, and the action is logged.
 - **M65 — Instance Admin lockout recovery**: the server-side recovery CLI command
-  (`app instance grant-admin <email>`, filesystem-access-gated). Done when: it successfully regrants the tier
+  (`norite instance grant-admin <email>`, filesystem-access-gated). Done when: it successfully regrants the tier
   on a test instance with zero remaining admins.
 - **M66 — Instance-level reports routing and whisper break-glass**: wires the M16 reports system's
   instance-scoped half — public-matchmaking, whisper, and plain-DM/Group-DM reports (none of which have a
@@ -593,7 +593,7 @@ annotated below with where it actually belongs.
   and M18 (gateway dispatch core). Done when: marking a channel read on one client is reflected as read when a
   second client (or a second daemon on another machine) next syncs, without a separate mark-as-read action.
 - **M117 — Data retention / audit-log pruning**: the configurable pruning seam from `architecture.md` §11, wired into
-  `app instance init`/`app config set`, default-disabled, scoped to `audit_log_entries` and
+  `norite instance init`/`norite config set`, default-disabled, scoped to `audit_log_entries` and
   `instance_audit_log` only — message history and reports are explicitly not covered and stay permanent by
   design. Conceptually belongs in Phase L (self-hosting ops polish) — depends on M14 (audit log) and M64
   (instance audit log) existing, no other hard dependency. Done when: enabling a retention window on a test
