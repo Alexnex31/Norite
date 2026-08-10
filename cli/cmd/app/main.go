@@ -1,7 +1,7 @@
 // Command app is the Norite CLI.
 //
 // M0 scope: proves the module builds. Command scaffolding, --json/--help flag plumbing, and the daemon
-// lifecycle stub are M3 scope (see docs/architecture.md §13). The Bubble Tea TUI pane engine is Phase F.
+// lifecycle stub are M3 scope (see docs/roadmap.md). The Bubble Tea TUI pane engine is Phase F.
 package main
 
 import "fmt"

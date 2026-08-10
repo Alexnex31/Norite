@@ -1,0 +1,54 @@
+# golangci-lint configuration, shared by every Go module in the monorepo.
+#
+# Why this file exists at all: without it, local runs and CI each fall back to whatever the installed
+# binary's defaults happen to be, so `just lint` passing locally says nothing about CI. The linter set is
+# spelled out here, and the *version* is pinned in two places that must stay in sync:
+#
+#   - .github/workflows/ci.yml -> env.GOLANGCI_LINT_VERSION
+#   - the justfile's `lint` recipe, which checks the local binary matches
+#
+# golangci-lint must be built with a Go version at least as new as the highest `go` directive in the
+# workspace (currently 1.25.0, raised by testcontainers-go). An older binary fails with
+# "the Go language version used to build golangci-lint is lower than the targeted Go version" — that is
+# what broke the first M1 CI run.
+version: "2"
+
+run:
+  # Generous and explicit: the backend's dependency graph (pgx, testcontainers, moby, otel) takes a while
+  # to type-check on a cold CI cache, and a default that changes between releases is exactly the kind of
+  # drift this file exists to prevent.
+  timeout: 5m
+  # Lint test files too. They are where the project's security properties are actually asserted, so they
+  # deserve the same scrutiny as the code.
+  tests: true
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    # Correct error comparison and wrapping. Load-bearing here: internal/platform/httpx maps sentinel
+    # errors to HTTP statuses via errors.Is/As, and a stray `==` would silently fall through to a 500.
+    - errorlint
+    # An unclosed HTTP response body leaks a connection. Relevant now in tests, and more so once
+    # link-preview fetching lands (M56).
+    - bodyclose
+    # Cheap, and it keeps operator-facing log and error strings clean.
+    - misspell
+
+  settings:
+    errcheck:
+      # Blank-identifier assignments are how this codebase spells "deliberately ignored", always with a
+      # comment; flagging them would only train people to add noise.
+      check-blank: false
+    misspell:
+      locale: US
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # Keeps this repo's own packages in their own import group, below third-party ones.
+      local-prefixes:
+        - github.com/Alexnex31/Norite

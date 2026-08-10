@@ -4,9 +4,8 @@
 > plan the project was bootstrapped from — keep it updated as real decisions supersede it (a stale doc that
 > nobody trusts is worse than no doc; if you deviate from something here, update this file in the same PR).
 > See also: `/CLAUDE.md` for the fast-loading summary + non-negotiable rules, and `docs/adr/` for short,
-> focused records of the most contested individual decisions below. This document absorbs and supersedes
-> `docs/plan.md`, which remains in the repo as historical planning record but is no longer the live
-> reference.
+> focused records of the most contested individual decisions below, and `docs/roadmap.md` for the
+> dependency-ordered milestone sequence (`M0`–`M117`) that this document deliberately does not restate.
 
 ## Context
 
@@ -135,6 +134,13 @@ parameterized by construction (§14). **WebSocket**: `coder/websocket`. **Other 
 `openapi.yaml`, wired starting at the milestone that first defines guild/channel endpoints), `ulule/limiter/v3`,
 `zerolog`, `testify` + `testcontainers-go`, `google/go-github`, `PuerkitoBio/goquery`, `wneessen/go-mail`,
 `caddyserver/certmagic`, `pion/turn`, `pion/webrtc` + `pion/interceptor`, `minio-go`, `govulncheck` (CI tool).
+
+**Where the choice was contested**, so it isn't relitigated later: `zerolog` over `zap` and stdlib
+`log/slog` for allocation-free structured logging on the gateway hot path; `certmagic` over the lower-level
+`autocert` for its more robust renewal/retry/storage handling; `wneessen/go-mail` over bare `net/smtp`,
+which is too low-level, without pulling in a templating engine for one or two plain emails; `minio-go` over
+the full `aws-sdk-go-v2` — it speaks S3 and is far lighter for a single bucket; and `PuerkitoBio/goquery`
+(a jQuery-like API over `golang.org/x/net/html`) for OpenGraph `<meta property="og:...">` extraction.
 
 Each domain package has the same shape: `service.go` (business logic + permission checks — **every**
 mutating method takes an already-authenticated `actor` and calls `roles.Resolve` before touching data),
@@ -684,8 +690,9 @@ account); reuse-detection revokes only the affected device's chain. Scoped `api_
 
 OAuth (Google/GitHub) via `x/oauth2` with PKCE, same account-linking rules as the original design
 (auto-link only on a provider-verified email). Two CLI login paths: a system-browser-plus-localhost-callback
-loopback flow (fixed registered port + documented fallback list, since GitHub OAuth Apps require an exact
-pre-registered callback URL), and a headless/SSH device-code fallback (`device_code` table, minimal
+loopback flow (a fixed registered port, e.g. `http://127.0.0.1:51763/callback`, the same for both
+providers, plus a documented fallback-port list, since GitHub OAuth Apps require an exact pre-registered
+callback URL), and a headless/SSH device-code fallback (`device_code` table, minimal
 server-rendered completion page, independent of the web SPA).
 
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
@@ -762,7 +769,10 @@ debounced, so opening any client on any machine shows accurate unread state.
 
 **Config file** (`~/.config/norite/config.toml`, TOML, `pelletier/go-toml` v2 document-editing mode —
 preserves hand-written comments/formatting): covers theme, keybindings, notification filters, pane-layout
-preferences — anything a user should freely hand-edit. Every writer (CLI, GUI, daemon) uses atomic writes
+preferences — anything a user should freely hand-edit. Keys are namespaced by client (`[cli]`, `[gui]`,
+`[shared]`) so one file serves both UIs without collision, and `app config get`/`app config set` expose the
+same file as a scriptable interface rather than a second source of truth. Every writer (CLI, GUI, daemon)
+uses atomic writes
 (temp file + rename) **plus `gofrs/flock`-based locking** around each read-modify-write cycle. The daemon
 hot-reloads on external changes via `fsnotify`. A **second, daemon-owned state file** holds anything
 daemon-written-only: plugin capability grants + pinned `.wasm` hashes (§8), the voice-channel breadcrumb, and
@@ -1059,7 +1069,11 @@ Playwright E2E against the real docker-compose stack.
 ## 11. Business posture, platform scope, and operations
 
 **Licensing and commercial model**: no public license — default copyright, all rights reserved. Two
-independent deployments, each granted rights individually via a signed license file: **the free flagship
+independent deployments, each granted rights individually via a signed license file — an offline,
+Ed25519-signed JWT-like structure whose claims are `license_id`, `issued_to`, and an `entitlements` blob,
+with no expiry claim, verified locally with a compiled-in public key so an instance never phones home. For
+v1 the entitlements blob is a simple binary unlock (`{licensed: bool, license_key: string}`-shape); richer
+per-feature entitlements are the reason it is a blob rather than a boolean. **The free flagship
 instance is the primary product**; self-hosted instances (sold via a flat one-time license, most likely to
 appeal to enterprises and other private groups) are a real, fully-built secondary offering. No shared
 multi-tenancy, no public license text to draft or maintain. See
@@ -1112,91 +1126,21 @@ See [ADR 0021](adr/0021-flagship-kubernetes-deployment.md) for full reasoning. S
 
 ---
 
-## 13. Unified Milestone Roadmap
+## 13. Milestone roadmap
 
-Dependency-ordered, phase-grouped, `M0` through `M117`. Read as a long-term critical path, not a near-term
-promise — the accumulated scope (custom SFU, custom crypto, native GUI, plugin sandbox, licensing
-infrastructure) is realistically multi-year work. Phase P (flagship Kubernetes) is explicitly parallel, not
-sequential — it can start once core messaging and voice are usable (after M37) and continues absorbing new
-features as they land. `M116`/`M117` sit numerically at the end but are logically earlier, annotated below.
+**The roadmap lives in [`roadmap.md`](roadmap.md)** — `M0` through `M117`, phase-grouped, each with its
+scope, dependencies, and a checkable "done when" condition.
 
-**Phase A — Foundation**: `M0` monorepo scaffolding → `M1` backend skeleton (chi, sqlc/pgx, blocking
-advisory-lock auto-migration, base `ulule/limiter` w/ `/64` grouping, `/healthz`) → `M2` `app instance init`
-infra config → `M3` CLI skeleton + daemon lifecycle stub.
+It is deliberately not restated here. It used to exist in two places, which meant every milestone change
+needed two edits and the two copies could disagree; `roadmap.md` is now the single source of truth for
+milestone numbering and scope.
 
-**Phase B — Auth**: `M4` backend auth core (`device_id`-scoped refresh families) → `M5` SMTP + password reset
-→ `M6` OAuth backend → `M7` CLI password login → `M8` CLI OAuth loopback → `M9` CLI headless device-code →
-`M10` `app instance init` finish → `M11` session revocation primitive.
+Two properties of it are worth knowing without opening the file: Phase P (the flagship Kubernetes
+deployment, `M104`–`M115`) is an explicitly **parallel** track that can start once core messaging and voice
+are usable, rather than following the feature phases; and `M116`/`M117` sit at the numeric end but belong
+logically much earlier, each annotated with where.
 
-**Phase C — Guild/channel/permission core**: `M12` guilds/channels/roles schema + CRUD (`oapi-codegen`
-wired) → `M13` permission engine → `M14` guild audit log → `M15` core messaging CRUD → `M16` guild-level
-reports → `M17` message tagging.
-
-**Phase D — Real-time gateway and daemon**: `M18` gateway protocol core (server-time-in-HELLO, lazy/streamed
-READY) → `M19` daemon as gateway client (clock offset, stream-decode) → `M20` daemon↔CLI/GUI IPC (bounded
-async writes) → `M21` config file (split, flock, toggle, export/import) → `M22` local bot-automation port →
-`M23` daemon lifecycle polish (`RLIMIT_NOFILE`) → `M24` client auto-update (voice-session-aware once Phase E
-exists).
-
-**Phase E — Voice**: `M25` mic-permission/global-hotkey spike → `M26` Pion SFU core → `M27` embedded
-TURN/STUN → `M28` voice-worker subprocess + IPC → `M29` Opus pipeline → `M30` audio DSP (strict AEC→RNNoise→
-AGC order) → `M31` adaptive bitrate → `M32` mic-permission handoff → `M33` voice signaling (real) → `M34` CLI
-voice controls (active-speaker, mute/report) → `M35` voice input mode/PTT → `M36` voice auto-rejoin → `M37`
-voice deployment opt-out.
-
-**Phase F — Presence, Deep Work, CLI polish**: `M38` presence persistence → `M39` Deep Work (+ offline
-`@urgent` email fallback) → `M40` OS desktop notifications → `M41` CLI pane engine → `M42` CLI keybindings →
-`M43` CLI markdown renderer → `M44` CLI terminal-safe sanitization → `M45` CLI image rendering → `M46` CLI
-`--json` output → `M47` CLI logging → `M48` CLI TUI testing.
-
-**Phase G — DMs, invites, attachments, chat power features**: `M49` DMs/Group DMs/invites → `M50`
-attachments storage → `M51` custom emoji → `M52` incoming webhooks → `M53` whispers → `M54` regex
-notification filters → `M55` bandwidth toggles → `M56` link previews.
-
-**Phase H — Search**: `M57` Postgres full-text search (sync v1, async-decoupling documented as flagship-only
-future upgrade).
-
-**Phase I — Public matchmaking, friends, blocks, Instance Admin**: `M58` public matchmaking channel type →
-`M59` anti-abuse (global `/64` grouping) → `M60` recently-met → `M61` friends → `M62` blocks (server-side
-gateway-dispatch filtering) → `M63` Instance Admin schema → `M64` bans/enforcement/audit → `M65` lockout
-recovery → `M66` instance-level reports routing + whisper break-glass → `M67` proactive intervention → `M68`
-public-channel/whisper retention → `M69` data export asymmetry verification.
-
-**Phase J — Native GUI**: `M70` skeleton → `M71` message rendering → `M72` pane splitting → `M73` theming →
-`M74` settings + voice device tab → `M75` voice UI (active-speaker, mute/report) → `M76` GUI testing → `M77`
-integrated whiteboard.
-
-**Phase K — Dev tools and extensibility**: `M78` code block enhancements → `M79` integrated shell → `M80`
-WASM plugin host → `M81` capability manifest + hash-pinning → `M82` plugin resource limits + metering
-benchmark → `M83` plugin distribution/TinyGo docs.
-
-**Phase L — Self-hosting polish, P2P, ops**: `M84` backup/restore docs → `M85` Prometheus metrics → `M86` P2P
-file transfer (three-way handshake) → `M87` container image scanning → `M88` docker-compose production path.
-
-**Phase M — E2E encryption**: `M89` crypto base integration (license gate) → `M90` E2E keystore (mandatory
-FTS5, single-writer goroutine) → `M91` E2E opt-in UX (DM-only) → `M92` device-linking flow (no history sync)
-→ `M93` device revocation/E2E trust linkage → `M94` fuzz testing → `M95` external cryptographic security
-review (hard gate) → `M96` E2E-aware account export (standalone zip).
-
-**Phase N — Video/screen-share**: `M97` GUI/web video connection → `M98` capture/selection UI → `M99` SFU
-video forwarding activation (including simulcast/SVC as real remaining work).
-
-**Phase O — Web SPA**: `M100` BFF cookie-exchange auth → `M101` web SPA rebuild → `M102` pane-splitting →
-`M103` E2E export.
-
-**Phase P — Flagship Kubernetes (parallel track)**: `M104` Helm skeleton + API pods → `M105` CloudNativePG +
-backups → `M106` Redis + event-bus/rate-limit activation → `M107` MinIO → `M108` TURN/SFU pods → `M109`
-`cert-manager` + Ingress TLS → `M110` graceful rollout (staggered preStop + backoff) → `M111` DB migration Job
-hook → `M112` Secrets → `M113` autoscaling → `M114` NetworkPolicies → `M115` CI-triggered `helm upgrade`.
-
-**Gap-closure milestones** (numerically appended, logically earlier): `M116` read-state sync (conceptually
-Phase D/G, depends on `M12`/`M18`) → `M117` data retention/audit-log pruning (conceptually Phase L, depends on
-`M14`/`M64`).
-
-**Key dependency notes**: `M37` before `M58`; `M53` before `M66` and `M91`; `M60` before `M61`; `M49`/`M60`/
-`M61` before `M62`; `M11` before `M64`/`M93`; `M50` before `M51`; `M89`'s license check before any further
-Phase M work; Phase P depends on `M106` requiring Phase D's Redis-fan-out seam, and `M50`/`M105` requiring
-`M107`.
+Completion status is tracked in `CLAUDE.md` and `README.md`, not in the roadmap.
 
 ---
 
@@ -1261,7 +1205,8 @@ E2E key-boundary violations.
 12. **SSRF protection** (link previews, and any future user-supplied-URL fetch): a custom `DialContext`
     rejects private/loopback/link-local resolved IPs, checked at actual connect time (not string-matching the
     URL, since DNS rebinding can shift the resolved IP between check and connection), with a strict request
-    timeout and a response-size cap.
+    timeout and a response-size cap. The link-local rule is what closes the cloud
+    instance-metadata endpoint (`169.254.169.254`), the highest-value SSRF target on any hosted deployment.
 
 13. **Block-enforcement checkpoints**: server-side at gateway DISPATCH fan-out time (a cached per-connection
     block-set, invalidated immediately on block/unblock) — never a client-side-only filter, both to avoid
@@ -1284,7 +1229,11 @@ E2E key-boundary violations.
 
 18. **Rate limiting & abuse prevention**: `ulule/limiter`, `/64` IPv6-subnet grouping globally (not scoped to
     one feature), stricter limits on `/auth/*`, per-webhook rate limiting independent of the creating user's
-    own limit.
+    own limit. The client address the limiter groups on is decided once, in the router: `X-Forwarded-For`
+    is honored only when explicitly configured, and is read from the right-hand end (the entry a trusted
+    proxy appended) rather than the leftmost, client-supplied one. **Known gap, closed at `M114`**: the
+    backend does not yet verify that the immediate peer *is* a trusted proxy, which matters only on
+    Kubernetes, where a pod can reach the API Service without passing the Ingress.
 
 19. **Dependency & supply-chain hygiene**: `govulncheck`/`pnpm audit`/`Trivy` in CI on every PR.
 
@@ -1343,22 +1292,28 @@ E2E key-boundary violations.
 12. **Asset/attachment performance**: unchanged — server-side thumbnail generation, long-lived cache headers
     from the separate attachment origin.
 
-13. **Measure before optimizing further**: `net/http/pprof` (internal-only), the Prometheus `/metrics`
-    endpoint (auth-gated, aggregate-only labels) from the foundational milestone — real production numbers
-    drive future optimization work, not guesses.
+13. **Measure before optimizing further**: `net/http/pprof` (internal-only) and the Prometheus `/metrics`
+    endpoint (auth-gated, aggregate-only labels) both arrive at `M85`, not earlier — real production
+    numbers drive future optimization work, not guesses. They are deliberately not in the foundational
+    milestone: `/metrics` is auth-gated on an Instance Admin token, which does not exist until `M63`, and
+    there is nothing worth profiling before there are features generating load.
 
 ---
 
 ## 16. Verification
 
-This is largely still a documentation-and-early-implementation-phase plan, so verification means both an
-internal-consistency pass over this document/`CLAUDE.md`/`docs/adr/`, and, once code exists, real tests:
+The project is in early implementation, so verification means both an internal-consistency pass over this
+document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/`, and real tests:
 
+- **One authority per topic**: this document describes what the system *is*; `docs/roadmap.md` owns
+  milestone numbering and scope; `docs/adr/` owns the contested rationale. If the same thing is described
+  in two of them, that is drift — collapse it to one and leave a pointer, rather than keeping both in
+  sync by hand. (This is not hypothetical: a duplicated roadmap lived in two files until M1.)
 - **Consistency**: grep this doc set for "AGPL," "cookie," "CSRF," "frontend" (outside §9's now-scoped
   usage), and "voice"+"deferred" — confirm none read as stale (licensing/auth/voice language should all match
   the current design, not the pre-v2 one). Confirm the daemon-holds-E2E-keys language is consistent
   everywhere (never "the CLI/GUI hold the keys"). Confirm every milestone number referenced in prose matches
-  §13 exactly (`M0`–`M117`).
+  `docs/roadmap.md` exactly (`M0`–`M117`), and that no milestone is described in two places.
 - **Backend**: `go test ./...` clean, `govulncheck ./...` clean; manually exercise the token-based auth
   round-trip (register → login → Bearer-authenticated request) and a raw WS connection through
   Hello→Identify→READY with a real access token; confirm a request scoped to another guild/channel is
@@ -1375,3 +1330,75 @@ internal-consistency pass over this document/`CLAUDE.md`/`docs/adr/`, and, once 
 - **Security spot-checks each milestone**: an XSS/ANSI-escape payload renders as inert text on every client;
   the audit log gets an entry for every guild-scoped mutation exercised in tests; the account-export
   asymmetries (blocks, reports) hold under an automated test.
+
+---
+
+## 17. Known tensions and accepted limitations
+
+These are the places where this design knowingly trades one good property against another, or depends on
+something not yet proven. They are recorded so a future reader can tell a deliberate trade-off from an
+oversight — and so that revisiting one is a decision, not a discovery.
+
+These are permanent, deliberate properties of the design. They must never be treated as gaps or oversights
+during implementation, and must be documented plainly wherever the relevant subsystem is described in
+`docs/architecture.md` and the relevant ADR:
+
+- **Voice-worker isolation.** Voice/audio media (capture, encoding, the SFU connection, DSP) runs in an
+  isolated voice-worker subprocess, spawned on demand by the daemon and torn down when a voice session ends —
+  never inside the daemon process itself. A crash in the voice-worker must never take down messaging,
+  presence, or plugins.
+- **Mic-permission handoff is unverified until Milestone M25 completes.** The design intent is that a
+  foreground CLI/GUI client triggers the OS permission prompt on first voice use, then hands audio capture off
+  to the voice-worker subprocess once granted. OS mic-permission grants (especially macOS TCC) are typically
+  tied to whichever binary actually opens the audio device, which may end up being the voice-worker process
+  rather than whichever attach client displayed the prompt. Milestone M25 is a throwaway prototype/spike that
+  determines the real per-OS answer before the real voice milestones are designed in further detail.
+  Milestone M25 also determines whether a headless daemon process can register an OS-wide global hotkey (for
+  push-to-talk) on each target OS, including the macOS Input Monitoring entitlement — the same category of
+  "which OS-level binary actually holds this capability" question as the mic-permission handoff.
+- **Self-hosting simplicity and voice-in-v1 are in real, unreconciled tension.** Postgres-only self-hosting
+  keeps the database story simple, but the custom SFU and embedded TURN server mean self-hosters must still
+  handle UDP port ranges and NAT/firewall traversal — a materially bigger operational burden than pure
+  text-only self-hosting. Voice is real v1 product functionality, but is a deployment-time opt-out
+  (Milestone M37) specifically because of this burden.
+- **cgo is confined to the voice-worker binary.** The pure-Go, cgo-free constraint used everywhere else in the
+  stack (daemon, CLI, GUI, backend) does not extend to the voice-worker: Opus (`hraban/opus`), RNNoise, and
+  `libspeexdsp` are all cgo bindings, because no mature pure-Go equivalents exist for production-grade audio
+  codec/DSP work. This exception is contained entirely to the isolated, opt-out-gated voice-worker binary; the
+  daemon, CLI, and GUI stay pure Go and cross-compile cleanly regardless.
+- **E2E encryption carries compounding, not merely additive, cryptographic risk.** The feature depends on two
+  independent custom protocol surfaces: the device-linking protocol (fully custom, no off-the-shelf
+  equivalent) and the correct integration of the `go.mau.fi/libsignal` library into this project's own
+  key-management and multi-device model. Either surface can silently break forward secrecy or device-trust
+  guarantees with no visible symptom. Both require the dedicated external cryptographic security review at
+  Milestone M95 before E2E is enabled for any account beyond the developer's own test accounts — enforced by a
+  build/instance-level flag, not a documentation policy. This is a hard release gate, not optional polish.
+  No history-transfer mechanism exists for a newly linked device, either: a device linked via Milestone M92
+  sees only messages sent after linking, matching the no-backup, permanent-loss-on-device-loss philosophy
+  already accepted below. This is a deliberate limitation, not an oversight — it adds zero new custom-crypto
+  surface to a protocol already carrying the two risks above.
+- **The SFU's codec-agnostic track model is necessary but not sufficient for video.** §6 deliberately
+  keeps Pion's internal track/participant model track-kind-agnostic now, specifically so a video track type
+  is additive later rather than a redesign — but that agnosticism only covers whether the SFU *can* forward
+  a track, not whether it forwards it *well* under real-world bandwidth constraints. Simulcast/SVC (dropping
+  spatial/temporal layers for a participant on a poor connection) is real, separate engineering work,
+  deliberately scoped into Phase N (Milestones M97–M99) rather than assumed to fall out for free from the
+  agnostic track model. Stated explicitly so it is never mistaken for scope the current design already
+  covers.
+- **Gio's engineering cost is real, not just a toolkit-choice footnote.** Gio provides no built-in widget
+  library, no OS-level accessibility/screen-reader integration, and no component tree to snapshot-test. Every
+  GUI surface — message virtualization, voice/video call UI, pane splitting, device-linking flows, plugin
+  extension points, settings, theming — is hand-built from primitives. Accessibility support is an explicit,
+  documented non-goal for v1, not a silently dropped feature. GUI testing relies on golden-image/screenshot
+  comparisons for the highest-value, most regression-prone surfaces (message list rendering, pane-split
+  layout, voice UI states), with manual QA covering everything else.
+- **Public-matchmaking voice abuse has no evidence to review, by design.** Call recording is a permanent
+  non-goal across the whole platform, for privacy reasons — this holds even for public matchmaking voice
+  channels, which are the one voice context with no guild owner to trust. A voice-abuse report filed against a
+  public-matchmaking voice channel therefore has nothing for an Instance Admin to review. Moderation of
+  public-matchmaking voice is necessarily corroborating-multi-report-based only, never evidence-based. This is
+  accepted as a permanent limitation.
+- **E2E encryption is text-only, permanently, for this plan's scope.** Voice audio relies solely on standard
+  WebRTC transport encryption (DTLS-SRTP), which protects against network eavesdroppers but not against the
+  server/SFU operator. True end-to-end voice (frame-level encryption the SFU forwards without decrypting) is
+  out of scope entirely.

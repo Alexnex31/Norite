@@ -11,10 +11,25 @@ you're using and does the real work; the clients are thin UIs over it.
 
 ## Status
 
-Pre-implementation. Nothing is built yet — see `docs/architecture.md` for the full architecture and the
-milestone roadmap (`M0` monorepo scaffolding through `M117`, dependency-ordered, phase-grouped). This is
-realistically multi-year, systems-engineering-team-sized work; the roadmap is a long-term critical path, not
-a near-term promise.
+Early implementation — Phase A (foundation). `M0` (monorepo scaffolding) and `M1` (backend skeleton: chi
+router, pgx pool, advisory-lock-guarded auto-migration, structured logging, base rate limiting, `/healthz`)
+are done; no product features exist yet. See `docs/architecture.md` for the full architecture and
+`docs/roadmap.md` for the milestone sequence (`M0` through `M117`, dependency-ordered, phase-grouped). This is realistically
+multi-year, systems-engineering-team-sized work; the roadmap is a long-term critical path, not a near-term
+promise.
+
+### Running the backend locally
+
+```sh
+just dev          # Postgres + Redis + the backend with hot-reload, via docker-compose
+just test         # every Go module's tests (needs a container runtime for the backend's)
+just test-short   # unit tests only, no container runtime required
+just lint
+```
+
+The backend is configured entirely through `NORITE_*` environment variables — see `.env.example` for the
+full list. It applies its embedded migrations on startup, holding a Postgres advisory lock so two processes
+never race, and `GET /api/v1/healthz` returns 200 only once that has completed.
 
 ## Features (planned, v1 scope — none of this is a "later" phase)
 
@@ -88,8 +103,11 @@ stands alone.
 
 - `CLAUDE.md` — fast-loading project summary and non-negotiable engineering rules, for both human
   contributors and AI coding agents working in this repo.
-- `docs/architecture.md` — the full architecture plan: data model, permission system, daemon/CLI/GUI
-  design, voice architecture, gateway protocol, REST API, security and performance deep dives.
+- `docs/architecture.md` — the full architecture: data model, permission system, daemon/CLI/GUI design,
+  voice architecture, gateway protocol, REST API, security and performance deep dives, and the known
+  tensions this design accepts.
+- `docs/roadmap.md` — the dependency-ordered milestone sequence (`M0`–`M117`), each with a checkable
+  "done when" condition.
 - `docs/adr/` — Architecture Decision Records for the most contested individual choices.
 - `.claude/skills/` — repo-specific workflows (`/new-endpoint`, `/new-gateway-event`, `/db-migration`,
   `/security-audit`) encoding the conventions above.

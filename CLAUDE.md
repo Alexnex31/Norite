@@ -154,14 +154,20 @@ docker/        docker-compose.yml (postgres, redis, backend hot-reload) — loca
 frontend/      React SPA — the later, tertiary web client (Phase O)
 ```
 
-## Common commands (once scaffolded)
+## Common commands
 
-- `just dev` — run the full local stack (docker-compose: postgres, redis, backend w/ air, frontend w/ vite)
-- `just test` — backend `go test ./...` + frontend `pnpm test`
-- `just lint` — `golangci-lint` + `staticcheck` + frontend ESLint/`tsc --noEmit`
-- `just db-migrate` — apply pending `golang-migrate` migrations
-- `just security-scan` — `govulncheck ./...` + `pnpm audit` + `Trivy` (container image scan, once
-  Dockerfiles exist)
+- `just dev` — run the full local stack (docker-compose: postgres, redis, backend w/ air; frontend w/ vite
+  joins at Phase O)
+- `just test` — every Go module's tests. **Needs a running container runtime**: the backend's integration
+  tests start a real Postgres via `testcontainers-go`. Frontend tests join at Phase O.
+- `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
+  substitute for `just test` before pushing.
+- `just lint` — `go vet` + `golangci-lint` per module (frontend ESLint/`tsc --noEmit` at Phase O)
+- `just db-migrate` — apply pending migrations (runs the server's own `-migrate-only` mode, so it takes the
+  exact same advisory-lock-guarded code path a real startup does)
+- `just sqlc-generate` / `just sqlc-check` — regenerate the committed sqlc layer / fail if it's stale
+- `just security-scan` — `govulncheck ./...` (+ `pnpm audit` and `Trivy` once frontend/ and Dockerfiles
+  exist)
 
 ## Git workflow
 
@@ -174,8 +180,8 @@ milestone-scoped. Types: `feat` (new capability), `fix` (bug fix), `docs` (docum
 (deps/build system), `ci`.
 
 **Branching**: `main` always reflects the state right after the most recently *completed* milestone — never
-a half-finished one. Each milestone (`docs/architecture.md` §13) gets its own branch, named
-`m<N>-<kebab-slug>` matching the milestone's title (e.g. `m1-backend-skeleton`). Child branches off a
+a half-finished one. Each milestone (see `docs/roadmap.md`) gets its own branch, named `m<N>-<kebab-slug>`
+matching the milestone's title (e.g. `m1-backend-skeleton`). Child branches off a
 milestone branch are fine for exploring an approach within that milestone; merge them back into the
 milestone branch, not `main`, before the milestone branch itself merges into `main` once its "done when"
 criteria are met.
@@ -191,15 +197,51 @@ main --oneline` reads as one entry per milestone, the merged PR holds the full d
 history and diff for anyone who wants to dig in, and `git tag -l` / a diff between two milestone tags
 (`git diff m4..m12`) jumps straight to "what changed between these two milestones."
 
-Practical constraint: opening and merging the actual PR needs either doing it via the GitHub web UI, or the
-`gh` CLI installed and authenticated so it can be driven end-to-end from here — neither was set up as of M0,
-so confirm which one before M1's branch is ready to land.
+Practical constraint, settled at M1: the `gh` CLI is **not** installed on the dev machine, so PRs are
+opened and squash-merged through the GitHub web UI. An agent can prepare the branch, push it, and draft the
+PR title/body, but cannot open or merge the PR itself — hand that off rather than trying to automate it.
+Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-Nothing implemented yet — repo is freshly initialized, Phase A (foundation) not yet started. Full
-dependency-ordered roadmap (`M0` through `M117`, phase-grouped, with Phase P — the flagship Kubernetes
-deployment — running as an explicitly parallel track) is in `docs/architecture.md` §13.
+**Phase A (foundation), through M1.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
+`docs/roadmap.md`.
+
+- **M0 — monorepo scaffolding**: done (tag `m0`).
+- **M1 — backend skeleton**: done. `internal/config` (typed, env-bound, validated at startup),
+  `internal/platform/{logging,httpx,database,ratelimit}`, `internal/db` (sqlc-generated, pgx/v5),
+  `migrations/` (go:embed'd; `000001_init` is intentionally empty), and the `cmd/server` composition root.
+- **M2 — `app instance init`**: next.
+
+What exists on the backend today, and the conventions the next milestone should follow rather than
+re-derive:
+
+- **Startup order** (`cmd/server/main.go`): config → pool (verified with a real round trip) → HTTP listener
+  → blocking advisory-lock-guarded migration → *then* readiness. `/api/v1/healthz` answers 503
+  `{"status":"starting"}` until migrations finish, then 200. `-migrate-only` runs migrations and exits —
+  that's what `just db-migrate` and, later, the flagship's Helm pre-upgrade Job use.
+- **Middleware chain** (`cmd/server/router.go`), fixed by `docs/architecture.md` §2: RequestID →
+  EchoRequestID → RealIP *(only when `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders →
+  StructuredLogger → RateLimit. `AuthenticateBearer` slots in below RateLimit at M4. Domain routers mount
+  in the rate-limited group inside `/api/v1`; `/healthz` sits outside it on purpose.
+- **Errors**: return `httpx.ErrNotFound` / `ErrForbidden` / … (or `httpx.Errorf(sentinel, …)`) from
+  services and let `httpx.WriteError` map them. 5xx detail is logged, never returned. Every response
+  carries `X-Request-Id`; every error body carries `request_id`.
+- **Transactions**: `database.RunInTx`. Mutation + audit-log write go in one `fn` (rule 2); publish gateway
+  events *after* it returns nil (rule 5).
+- **Rate limiting**: always build limiters through `internal/platform/ratelimit` — it is what enforces the
+  global "IPv6 groups by /64" rule (rule-adjacent, `docs/architecture.md` §11). Give a new stricter limit
+  its own `Bucket`.
+- **sqlc**: add `.sql` files under `backend/internal/db/queries/`, run `just sqlc-generate`, commit the
+  output. CI's `codegen` job fails if the committed output is stale.
+- **Logging**: `logging.FromContext(ctx)` inside handlers. The request logger deliberately omits query
+  strings, headers, and bodies (rule 8) — don't add them back.
+- **Toolchain pinning**: `golangci-lint` (config in `.golangci.yml`) and `sqlc` are pinned to exact
+  versions in *two* places that must move together — `.github/workflows/ci.yml`'s `env:` block and the
+  justfile's variables. `just lint` warns when your local golangci-lint differs. Also note golangci-lint
+  must be built with Go >= the workspace's highest `go` directive (1.25.0), which is why the lint action
+  is v9/golangci-lint v2 rather than the v6/v1 pair M0 started with.
 
 ## Project-specific skills
 
@@ -215,9 +257,17 @@ deployment — running as an explicitly parallel track) is in `docs/architecture
 
 ## Where to look for more detail
 
-`docs/architecture.md` has: the full Postgres DDL, the permission-resolution algorithm, the exact gateway
-op-code/frame shapes, the daemon/CLI/GUI design, the voice architecture, the complete REST endpoint list, the
-OAuth linking/PKCE flow, and dedicated deep-dive sections on security and performance/optimization. Read it
-before making an architectural decision this file doesn't already cover. `docs/adr/` has the short-form
-reasoning behind the most contested individual decisions. `SECURITY.md` covers vulnerability-reporting
+The doc set has one authority per topic — if two files seem to cover the same ground, that is drift and
+should be fixed, not tolerated:
+
+- `docs/architecture.md` — **what the system is.** Full Postgres DDL, the permission-resolution algorithm,
+  the exact gateway op-code/frame shapes, the daemon/CLI/GUI design, the voice architecture, the complete
+  REST endpoint list, the OAuth linking/PKCE flow, deep dives on security (§14) and performance (§15), and
+  the known tensions and accepted limitations (§17). Read it before making an architectural decision this
+  file doesn't already cover.
+- `docs/roadmap.md` — **what gets built, in what order.** `M0`–`M117`, each with scope, dependencies, and a
+  checkable "done when". The single source of truth for milestone numbering; `architecture.md` §13 only
+  points here.
+- `docs/adr/` — **why the contested calls went the way they did.** Superseded ADRs stay, marked as such in
+  both directions. `SECURITY.md` covers vulnerability-reporting
 process, not architecture.

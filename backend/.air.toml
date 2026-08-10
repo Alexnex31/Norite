@@ -1,0 +1,27 @@
+# air (https://github.com/air-verse/air) — rebuild-and-restart-on-save for the backend during local dev.
+#
+# Used by docker/docker-compose.yml's backend service. Not used in production: the released artifact is a
+# plain compiled binary (see .goreleaser.yaml).
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/norite-server ./cmd/server"
+  # `entrypoint`, not the older `bin` key, which air deprecated.
+  entrypoint = "./tmp/norite-server"
+  include_ext = ["go", "sql"]
+  # Migrations are go:embed'd, so a .sql change needs a rebuild to take effect — hence "sql" above and
+  # migrations/ deliberately *not* excluded here.
+  exclude_dir = ["tmp", "internal/db/queries"]
+  exclude_regex = ["_test\\.go"]
+  delay = 500
+  stop_on_error = true
+  send_interrupt = true
+  kill_delay = "5s"
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = true

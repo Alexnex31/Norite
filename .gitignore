@@ -21,6 +21,9 @@ backend/**/vendor/
 /daemon/daemond
 /voiceworker/voiceworker
 
+# air (local hot-reload) build output
+backend/tmp/
+
 # goreleaser build output
 /dist/
 

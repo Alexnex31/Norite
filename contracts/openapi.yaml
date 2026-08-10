@@ -1,14 +1,150 @@
 openapi: 3.1.0
 info:
   title: Norite REST API
-  version: 0.0.0-m0
+  version: 0.0.0-m1
   description: >
-    Source-of-truth REST contract for the Norite backend (see docs/architecture.md §2 and §10). This is an
-    M0 skeleton — no real endpoints exist yet. `oapi-codegen` starts generating Go server-side types and
-    routing scaffolding from this file starting at Milestone M12; every REST endpoint added from that point
-    on updates this file in the same commit (CLAUDE.md rule 6).
+    Source-of-truth REST contract for the Norite backend (see docs/architecture.md §2 and §10).
+    `oapi-codegen` starts generating Go server-side types and routing scaffolding from this file at
+    Milestone M12; until then it is hand-maintained, but the same rule already applies — every REST
+    endpoint added or changed updates this file in the same commit (CLAUDE.md rule 6).
 servers:
   - url: /api/v1
-paths: {}
+paths:
+  /healthz:
+    get:
+      summary: Readiness check
+      description: >
+        Reports whether this instance can serve requests right now. This is a readiness check, not a
+        liveness check: it returns 200 only once startup has completed — schema migrations included — and
+        the instance can execute a statement against Postgres.
+
+
+        503 with `status: "starting"` means the process is up but not yet ready; migrations may still be
+        running (docs/architecture.md §8.16). `status: "stopping"` means it is draining during shutdown.
+        `status: "degraded"` means it is past startup but cannot currently reach the database.
+
+
+        The database probe behind this endpoint is cached briefly, so probe frequency does not translate
+        into database load — the endpoint is unauthenticated and exempt from rate limiting, and the
+        connection pool is deliberately small.
+
+
+        `HEAD` is accepted as well as `GET`, since several load balancers and `curl -I` probe with it.
+
+
+        Unauthenticated by design, so orchestrators and load balancers can probe it, and deliberately
+        exempt from rate limiting so frequent single-source probes cannot throttle themselves into
+        reporting a healthy instance as down. Response detail is kept generic for the same reason it is
+        unauthenticated — it must not disclose hostnames or driver internals.
+      operationId: getHealthz
+      tags: [observability]
+      security: []
+      responses:
+        "200":
+          description: The instance is ready to serve.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              examples:
+                ready:
+                  value:
+                    status: ok
+        "503":
+          description: The instance is not ready to serve.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              examples:
+                starting:
+                  value:
+                    status: starting
+                    detail: instance is still starting up (migrations may be in progress)
+                stopping:
+                  value:
+                    status: stopping
+                    detail: instance is shutting down and draining in-flight requests
+                degraded:
+                  value:
+                    status: degraded
+                    detail: database is unreachable
 components:
-  schemas: {}
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [ok, starting, stopping, degraded]
+          description: >
+            Readiness state: `ok` is serving; `starting` is up but not finished booting (migrations may
+            still be running); `stopping` is draining during shutdown; `degraded` is past startup but
+            currently unable to reach the database.
+        detail:
+          type: string
+          description: Operator-facing explanation of a non-ok status. Omitted when status is `ok`.
+
+    Error:
+      description: >
+        The envelope every non-2xx JSON response uses. Clients key off `code`, which is stable, never off
+        `message`, which is human-readable and may change.
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable error identifier.
+              enum:
+                - bad_request
+                - unauthorized
+                - forbidden
+                - not_found
+                - method_not_allowed
+                - conflict
+                - rate_limited
+                - service_unavailable
+                - internal_error
+            message:
+              type: string
+              description: >
+                Human-readable summary, safe to show a user. For 5xx responses this is always a generic
+                string — server-side detail is logged, never returned.
+            request_id:
+              type: string
+              description: >
+                Correlation ID for this request, matching the `X-Request-Id` response header and the
+                server-side log line.
+
+  responses:
+    RateLimited:
+      description: >
+        Too many requests. All IP-based limiting groups IPv6 traffic by /64 subnet rather than exact
+        address (docs/architecture.md §11), so every address within one /64 shares a single budget.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until the limit resets.
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Unix timestamp at which the current window resets.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

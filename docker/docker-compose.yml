@@ -1,8 +1,16 @@
 # Local dev + self-hosted docker-compose production option (docs/architecture.md §1, §8.16/M88).
 #
-# M0 skeleton: valid config, not yet exercised by any milestone's done-when criteria (the backend has no
-# Postgres/Redis dependency until M1). Redis is present from the start even though it stays reserved-but-
-# unused by self-hosted single-process instances (docs/architecture.md §11) — only the flagship activates it.
+# Redis is present from the start even though it stays reserved-but-unused by self-hosted single-process
+# instances (docs/architecture.md §11) — only the flagship activates it. Having it here means the
+# Redis-backed event bus and rate-limiter stores can be exercised later without a compose change.
+#
+# Every published port is bound to 127.0.0.1 rather than the default 0.0.0.0. Docker's published ports are
+# implemented as DNAT rules that bypass most host firewall configuration, so a bare "5432:5432" on a laptop
+# means anyone on the same café or office Wi-Fi can reach this Postgres — which trusts the throwaway
+# norite/norite credentials below. Nothing needs these ports off-box: containers reach each other over the
+# compose network, and a developer reaches them from the same machine. If you deliberately want to hit the
+# backend from another device (a phone, a second laptop), change that one line to "8080:8080" for as long
+# as you need it, rather than dropping the loopback bind from all of them.
 name: norite
 
 services:
@@ -13,7 +21,7 @@ services:
       POSTGRES_PASSWORD: norite
       POSTGRES_DB: norite
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -25,10 +33,10 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   backend:
-    image: golang:1.23-alpine
+    image: golang:1.25-alpine
     working_dir: /app/backend
     volumes:
       # go.work is deliberately NOT mounted here: it lists cli/gui/daemon too, and Go auto-discovers any
@@ -36,14 +44,52 @@ services:
       # `go run` fail immediately (cannot load module ../cli/../daemon/../gui). backend doesn't import any
       # of them, so it doesn't need workspace mode at all inside the container — go.mod alone is enough.
       - ../backend:/app/backend
-    command: ["go", "run", "./cmd/server"]
+      # Named volumes for the module and build caches, so a restart doesn't re-download and re-compile
+      # every dependency. Without these, `air`'s rebuild-on-save loop is unusably slow.
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+      - gobin:/go/bin
+    # air rebuilds and restarts the server on save. Installed at container start rather than baked into an
+    # image because there is no backend Dockerfile yet — that arrives with the production container image
+    # at Milestone M87/M88, and this service switches to it then.
+    #
+    # /go/bin is a named volume, so the install happens on first run and is reused after that; combined
+    # with the module cache volume, later starts need no network.
+    #
+    # air is pinned to the newest release that still declares `go 1.25`; from v1.67.2 on it requires
+    # go 1.26, which this image cannot satisfy and the golang images set GOTOOLCHAIN=local so Go will not
+    # silently fetch another toolchain. When the image moves past 1.25, this pin can move with it — check
+    # the release's go.mod, not whatever `go install` happens to do on the host.
+    command:
+      - sh
+      - -c
+      - |
+        command -v air >/dev/null 2>&1 || go install github.com/air-verse/air@v1.67.1
+        exec air -c .air.toml
     environment:
       NORITE_LISTEN_ADDR: ":8080"
+      # postgres/redis resolve over the compose network; sslmode=disable is correct for that hop and
+      # must not be copied into a real deployment.
+      NORITE_DATABASE_URL: "postgres://norite:norite@postgres:5432/norite?sslmode=disable"
+      NORITE_ENV: "development"
+      NORITE_LOG_LEVEL: "debug"
+      NORITE_LOG_FORMAT: "console"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      # Readiness only turns 200 once migrations have completed (docs/architecture.md §8.16), so this
+      # doubles as the signal that the stack is actually usable.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/api/v1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
 
 volumes:
   pgdata:
+  gomodcache:
+  gobuildcache:
+  gobin:

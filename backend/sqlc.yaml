@@ -1,0 +1,26 @@
+# sqlc configuration — generates the typed, parameterized query layer in internal/db.
+#
+# This is the only sanctioned path from SQL to Go in this codebase. CLAUDE.md rule 3: all SQL goes through
+# sqlc-generated, parameterized queries, never fmt.Sprintf-built strings. Regenerate with
+# `just sqlc-generate` after touching either migrations/ or internal/db/queries/, and commit the output —
+# generated code is checked in so a plain `go build` needs no extra tooling.
+#
+# The schema sqlc type-checks against is the migration set itself, so a query referencing a column that no
+# migration creates fails at generation time rather than at runtime.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations
+    queries: internal/db/queries
+    gen:
+      go:
+        package: db
+        out: internal/db
+        # pgx/v5 rather than database/sql: the pool, the transaction helper, and the generated code all
+        # speak the same driver types, so no conversion layer is needed (docs/architecture.md §2).
+        sql_package: pgx/v5
+        emit_json_tags: false
+        emit_prepared_queries: false
+        emit_interface: true
+        emit_empty_slices: true
+        emit_pointers_for_null_types: true
