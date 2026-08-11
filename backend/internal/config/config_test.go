@@ -13,6 +13,10 @@ import (
 
 const validDSN = "postgres://norite:norite@localhost:5432/norite?sslmode=disable"
 
+// testJWTSecret is a fixture signing key. Required to boot from M4 on, exactly like the database URL, so
+// every fixture that sets one sets both.
+const testJWTSecret = "test-signing-key-at-least-32-bytes-long"
+
 // withoutConfigFile points file discovery at an empty document, so these tests exercise the
 // environment-and-defaults path regardless of whether the machine running them happens to have a real
 // /etc/norite/instance.toml. An empty file leaves every field unset, which is exactly the "no file
@@ -27,6 +31,7 @@ func withoutConfigFile(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 
 	cfg, err := Load("")
 	require.NoError(t, err)
@@ -49,6 +54,7 @@ func TestLoadDefaults(t *testing.T) {
 func TestLoadProductionDefaultsToJSONLogs(t *testing.T) {
 	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 	t.Setenv(envPrefix+"ENV", string(EnvProduction))
 
 	cfg, err := Load("")
@@ -60,6 +66,7 @@ func TestLoadProductionDefaultsToJSONLogs(t *testing.T) {
 func TestLoadOverrides(t *testing.T) {
 	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 	t.Setenv(envPrefix+"LISTEN_ADDR", "127.0.0.1:9090")
 	t.Setenv(envPrefix+"DB_MAX_CONNS", "8")
 	t.Setenv(envPrefix+"DB_MIN_CONNS", "1")
@@ -178,6 +185,7 @@ func TestValidationErrorsDoNotLeakTheDatabaseURL(t *testing.T) {
 func TestZeroProxyHopsIsAcceptedWhenProxiesAreNotTrusted(t *testing.T) {
 	withoutConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 	t.Setenv(envPrefix+"TRUST_PROXY_HEADERS", "false")
 	t.Setenv(envPrefix+"TRUSTED_PROXY_HOPS", "0")
 

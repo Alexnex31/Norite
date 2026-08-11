@@ -1,6 +1,8 @@
 package instanceinit
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -94,6 +96,15 @@ func gather(p *prompter, opts Options) (Document, error) {
 		StorageLocalPath: orDefault(opts.StorageLocalPath, DefaultStoragePath()),
 		RegistrationMode: orDefault(opts.Registration, registrationOpen),
 	}
+
+	// Generated, never prompted for. Asking an operator to invent a signing key produces a memorable one,
+	// and a memorable HS256 key is a forgeable one — the whole security of an access token rests on this
+	// value's entropy. Generating it here means no instance can be set up with a weak key by accident.
+	secret, err := generateSigningKey()
+	if err != nil {
+		return Document{}, err
+	}
+	doc.JWTSecret = secret
 
 	if p.asks() {
 		p.println("Setting up a Norite instance.")
@@ -349,6 +360,9 @@ func printSummary(p *prompter, doc Document, path string, full bool) {
 		p.println("  https:        off (terminate TLS in front of this instance)")
 	}
 	p.println("  registration: " + doc.RegistrationMode)
+	// The value itself is never printed (CLAUDE.md rule 8). Saying it exists matters, though: an operator
+	// who does not know the file now holds a credential may copy it somewhere it should not go.
+	p.println("  signing key:  generated (" + strconv.Itoa(signingKeyBytes*8) + "-bit, stored in this file)")
 
 	if !full {
 		p.println("\nEverything not asked about took its default. Re-run with --full to be asked " +
@@ -379,4 +393,23 @@ func orDefault(value, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// signingKeyBytes is the size of the generated HS256 signing key.
+//
+// 32 bytes matches SHA-256's output size, which is the point past which a longer HMAC key adds nothing and
+// below which it starts to matter. The backend enforces the same floor at startup (config.JWTSecret).
+const signingKeyBytes = 32
+
+// generateSigningKey returns a fresh base64 signing key.
+func generateSigningKey() (string, error) {
+	buf := make([]byte, signingKeyBytes)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand failing means there is no usable entropy source. Writing a predictable signing key
+		// would be far worse than refusing to finish setup, so this is fatal rather than fallback-worthy.
+		return "", fmt.Errorf("generating the token signing key: %w", err)
+	}
+	// Standard base64 rather than raw-URL: this value only ever appears inside a quoted TOML string, and
+	// the padded alphabet is what `openssl rand -base64 32` produces, so a hand-replaced key looks the same.
+	return base64.StdEncoding.EncodeToString(buf), nil
 }

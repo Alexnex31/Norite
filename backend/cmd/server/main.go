@@ -34,10 +34,12 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
+	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/migrations"
 )
 
@@ -122,10 +124,38 @@ func run() error {
 
 	health := newHealth(db.New(pool))
 
+	// Node 0: the ID scheme reserves 10 bits for a node identifier so a future multi-node deployment needs
+	// only a config value rather than an ID migration (ADR 0003). A single-process monolith has exactly one.
+	ids, err := snowflake.NewGenerator(0)
+	if err != nil {
+		logger.Error().Err(err).Msg("could not initialize the ID generator")
+		return err
+	}
+
+	issuer, err := auth.NewTokenIssuer([]byte(cfg.JWTSecret))
+	if err != nil {
+		// The only failure is a key below the length floor, and the message must not echo the key itself.
+		logger.Error().Err(err).Msg("the configured JWT signing key is unusable")
+		return err
+	}
+
+	authService, err := auth.NewService(auth.ServiceOptions{
+		Pool:             pool,
+		IDs:              ids,
+		Issuer:           issuer,
+		RegistrationMode: auth.RegistrationMode(cfg.RegistrationMode),
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("could not initialize the auth service")
+		return err
+	}
+
 	router, err := newRouter(routerOptions{
-		Config: cfg,
-		Logger: logger,
-		Health: health,
+		Config:  cfg,
+		Logger:  logger,
+		Health:  health,
+		Auth:    auth.NewHandler(authService),
+		AuthSvc: authService,
 	})
 	if err != nil {
 		return err

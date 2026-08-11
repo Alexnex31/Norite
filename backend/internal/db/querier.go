@@ -9,6 +9,37 @@ import (
 )
 
 type Querier interface {
+	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
+	// Scoped API token queries.
+	//
+	// These are the long-lived, narrow-privilege credentials bots and local automation use, as opposed to the
+	// 15-minute access tokens a logged-in client holds. They are stored only as a SHA-256 hash, so the raw
+	// value is recoverable exactly once — in the response that created it.
+	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
+	// Refresh-session queries.
+	//
+	// A session is one device's refresh-token family. Rotation replaces a row with a successor and links the
+	// two; reuse detection walks that link. Every one of these queries is scoped by user_id AND device_id
+	// wherever it revokes, because revoking across devices is precisely the bug this schema exists to prevent
+	// (docs/architecture.md §2, ADR 0011).
+	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	// Account queries.
+	//
+	// Every read filters `deleted_at IS NULL`: a soft-deleted account keeps its row so authored content can
+	// still render as "Deleted User", but it must never be findable for login, registration collision, or
+	// profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
+	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// Runs on every request authenticated with an API token, which is why the hash column is indexed. Revoked
+	// rows are returned rather than filtered so the caller can answer "revoked" distinctly from "unknown"
+	// server-side, while still telling the client only that the credential is invalid.
+	GetAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// The hot path: every refresh looks a session up by hash. Deliberately returns revoked and rotated rows
+	// too — the caller must be able to tell "no such token" from "a token that was already used", since only
+	// the second is a replay worth revoking a family over.
+	GetSessionByRefreshTokenHash(ctx context.Context, refreshTokenHash []byte) (Session, error)
+	GetUserByEmail(ctx context.Context, email string) (User, error)
+	GetUserByID(ctx context.Context, id int64) (User, error)
+	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
 	// Health-check queries.
 	//
 	// These exist so the readiness endpoint validates the *whole* data path — pool checkout, the
@@ -16,6 +47,23 @@ type Querier interface {
 	// TCP connection but cannot actually execute a statement (exhausted, wedged on a failover, blocked by a
 	// broken search_path) is not ready, and a bare ping would report it as healthy.
 	Ping(ctx context.Context) (int32, error)
+	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
+	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
+	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
+	RevokeSession(ctx context.Context, id int64) (Session, error)
+	// Reuse detection: revoke every live session in one device's family. Scoped by device_id as well as
+	// user_id so another machine's family is untouched — a user with daemons on two computers must not be
+	// logged out of one because the other replayed a token.
+	RevokeSessionsForDevice(ctx context.Context, arg RevokeSessionsForDeviceParams) (int64, error)
+	// Marks a session as replaced by its successor. Revoking at the same moment is what makes the old token
+	// single-use: a second presentation finds revoked_at set and replaced_by_id populated, which is the replay
+	// signature.
+	RotateSession(ctx context.Context, arg RotateSessionParams) (Session, error)
+	// Records use. Separate from the lookup and deliberately fire-and-forget: a write on every authenticated
+	// request must never be able to fail one.
+	TouchAPIToken(ctx context.Context, id int64) error
+	UserExistsByEmail(ctx context.Context, email string) (bool, error)
+	UserExistsByUsername(ctx context.Context, username string) (bool, error)
 }
 
 var _ Querier = (*Queries)(nil)
