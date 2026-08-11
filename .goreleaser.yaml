@@ -50,6 +50,11 @@ builds:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    # The daemon writes its version into the first line of every log file, which is the first thing anyone
+    # asks for in a support conversation. goreleaser's default would set `main.version`; this binary's
+    # variable is `main.Version`, so it has to be named explicitly or every release reports "dev".
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
 
 archives:
   - id: default

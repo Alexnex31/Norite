@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v3"
 )
 
 // runArgs exercises the command tree exactly as a real invocation would, minus the process.
@@ -119,4 +120,43 @@ func TestVersionIsWiredToTheReleaseLDFlags(t *testing.T) {
 
 	assert.Contains(t, string(config), "github.com/Alexnex31/Norite/cli/internal/cliapp.Version=",
 		"goreleaser must set cliapp.Version, or `norite --version` reports \"dev\" in every release")
+}
+
+func TestDaemonGroupIsMounted(t *testing.T) {
+	out, _, err := runArgs(t, "--help")
+	require.NoError(t, err)
+	assert.Contains(t, out, "daemon", "the daemon command group must be discoverable from the root")
+
+	out, _, err = runArgs(t, "daemon", "--help")
+	require.NoError(t, err)
+	for _, sub := range []string{"install", "uninstall", "start", "stop", "restart", "status"} {
+		assert.Contains(t, out, sub, "`norite daemon --help` must list every subcommand")
+	}
+}
+
+// urfave/cli's default handling of an ExitCoder prints the error and calls os.Exit from *inside* Run. That
+// would make cmd/app/main.go — the one place this CLI decides exit codes — unreachable for any command that
+// reports its result through one, starting with `norite daemon status`. It would also make such a command
+// impossible to test, since the test binary would exit with it.
+//
+// This is exactly the kind of behavior that gets removed as an unexplained line during a refactor, so it is
+// pinned here rather than only in a comment.
+func TestExitCodersReachTheCallerInsteadOfExitingTheProcess(t *testing.T) {
+	root := New(io.Discard, io.Discard)
+	require.NotNil(t, root.ExitErrHandler,
+		"without a no-op ExitErrHandler, urfave/cli calls os.Exit inside Run and main never sees the error")
+
+	sentinel := cli.Exit("deliberate", 7)
+	root.Commands = append(root.Commands, &cli.Command{
+		Name:   "exit-probe",
+		Hidden: true,
+		Action: func(context.Context, *cli.Command) error { return sentinel },
+	})
+
+	// Reaching the assertion at all is half the test: the default handler would have ended the process here.
+	err := root.Run(context.Background(), []string{"norite", "exit-probe"})
+
+	var coder cli.ExitCoder
+	require.ErrorAs(t, err, &coder, "the ExitCoder must travel back to the caller intact")
+	assert.Equal(t, 7, coder.ExitCode(), "main maps this code onto the process exit status")
 }

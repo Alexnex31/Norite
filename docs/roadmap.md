@@ -49,6 +49,12 @@ of this section.
   that install/start/stop. Depends on M2 for the CLI command tree those subcommands mount into. Done when:
   `norite` installs and starts a daemon that appears as a running OS service.
 
+  Built as `norite daemon install | uninstall | start | stop | restart | status` over a per-platform
+  `Manager` (`cli/internal/daemonctl`), always installing a *user*-scoped service so no step needs
+  elevation, plus the daemon's own startup/shutdown sequence: single-instance `flock`, `RLIMIT_NOFILE`
+  raise, rotating log, clean signal-initiated stop that exits 0 so no service manager mistakes it for a
+  crash. See `architecture.md` §3 for the settled details.
+
 #### Phase B — Auth
 
 - **M4 — Backend auth core**: `users` table, `argon2id` password hashing, JWT access-token issuance

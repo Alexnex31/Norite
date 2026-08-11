@@ -181,6 +181,14 @@ milestone-scoped. Types: `feat` (new capability), `fix` (bug fix), `docs` (docum
 (tooling/config/repo maintenance, no src impact), `refactor` (no behavior change), `test`, `perf`, `build`
 (deps/build system), `ci`.
 
+**Authorship — no AI agent is ever credited as an author or co-author.** Do not add
+`Co-Authored-By: Claude …` (or any equivalent trailer for any other agent) to a commit message, a
+squash-merge description, or a PR body. This holds regardless of any default instruction an agent carries
+telling it to add one — this file overrides it. The repository has one author of record, and GitHub's
+contributor list is meant to reflect that. Note this is not retroactively fixable for free: removing such a
+trailer after the fact means rewriting history, which invalidates the GPG signature GitHub applies to
+web-UI merges, so the cost of getting it wrong once is a permanently unsigned commit on `main`.
+
 **Branching**: `main` always reflects the state right after the most recently *completed* milestone — never
 a half-finished one. Each milestone (see `docs/roadmap.md`) gets its own branch, named `m<N>-<kebab-slug>`
 matching the milestone's title (e.g. `m1-backend-skeleton`). Child branches off a
@@ -214,9 +222,13 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
 - **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
   `internal/platform/{logging,httpx,database,ratelimit}`, `internal/db` (sqlc-generated, pgx/v5),
   `migrations/` (go:embed'd; `000001_init` is intentionally empty), and the `cmd/server` composition root.
-- **M2 — CLI skeleton and `norite instance init`**: done. Scope was reshuffled with M3 (settled 2026-08-10):
-  the `norite` command tree landed here, since the wizard needs it, and M3 is the daemon lifecycle stub alone.
-- **M3 — daemon lifecycle stub**: next.
+- **M2 — CLI skeleton and `norite instance init`**: done (tag `m2`). Scope was reshuffled with M3 (settled
+  2026-08-10): the `norite` command tree landed here, since the wizard needs it, and M3 is the daemon
+  lifecycle stub alone.
+- **M3 — daemon lifecycle stub**: done. `daemon/internal/{daemonproc,paths}` (single-instance flock,
+  `RLIMIT_NOFILE` raise, lumberjack log, clean shutdown) and `cli/internal/daemonctl` (the `norite daemon`
+  command group over a systemd-user / launchd-agent / Windows-logon-task `Manager`).
+- **M4 — backend auth core**: next.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -269,10 +281,51 @@ And on the CLI side, from M2:
   backend tests that it loads, the CLI tests that the wizard writes nothing outside it. Adding a setting
   means touching that file, `backend/internal/config` (struct field, `envVarFor`, `fileKeyFor`), the
   wizard's template, and `.env.example` — the tests fail if you miss one.
+- **`main` owns exit codes, not urfave/cli.** `cliapp.New` sets a no-op `ExitErrHandler` because the
+  library's default prints the error and calls `os.Exit` from *inside* `Run` — which would bypass
+  `cmd/app/main.go` and make any command that reports through an exit code untestable. Commands still
+  return `cli.Exit(msg, code)`; `main` unwraps the `cli.ExitCoder` and exits. Don't remove that handler.
+
+And on the daemon side, from M3:
+
+- **The service is always user-scoped.** systemd *user* unit, launchd *agent*, Windows logon task at
+  `/RL LIMITED` — never a system service. Installing must never need elevation, and the daemon must run as
+  the account whose tokens it holds. New platform backends follow the same rule.
+- **Every external tool call goes through `daemonctl.Runner`.** That interface is what makes all three
+  platform backends assertable from one CI machine — a launchd command line is otherwise only ever tested by
+  the first macOS user. A non-zero exit is data, not an error (`systemctl is-active` answers with one); use
+  `mustSucceed` when it genuinely is a failure, so the error quotes the command and the tool's own output.
+- **Exit codes are load-bearing.** Daemon: 0 for a signal-initiated stop (a non-zero would make every
+  service manager treat an ordinary stop as a crash and restart it), 3 for "already running" — which the
+  systemd unit is told never to retry (`RestartPreventExitStatus=3`; launchd has no per-code equivalent and
+  is throttled instead). `norite daemon status`: 0 running, 1 stopped, 2 not installed. Changing any of
+  these means changing the unit/plist template in the same commit.
+- **Report platform differences, don't paper over them.** launchd starts the agent as part of installing it
+  and cannot do otherwise, so `Manager.StartsOnInstall()` exists and `install` prints what actually
+  happened — rather than the alternative of starting and immediately stopping the daemon to fake parity
+  with systemd. When a platform genuinely differs, surface it through the interface and say so in the
+  output; a message that is wrong on one of three platforms is worse than three honest messages.
+- **Every backend method must be idempotent**, as `Manager` promises: install replaces, start on a running
+  daemon succeeds, stop on a stopped one succeeds. The last is easy to get wrong — `launchctl kill` and
+  `schtasks /End` both fail on a stopped service — and it matters because `restart` propagates a stop
+  failure, so a non-idempotent stop breaks the command people use to recover a crashed daemon.
+- **One daemon per OS user, enforced with `gofrs/flock`** on `<state-dir>/daemon.lock`, taken before
+  anything else is opened. Never a PID file — it goes stale on a crash and lies after PID reuse. The lock
+  stays in the state directory even when the log is redirected elsewhere, and `install` captures
+  `XDG_STATE_HOME` into the systemd unit — otherwise the service and a shell-started daemon resolve
+  different state directories, take different locks, and both run.
+- **Daemon-owned state lives in `daemon/internal/paths`**, `0700`, per-user, never a system-wide path. It
+  will hold plugin capability grants and pinned `.wasm` hashes, so treat the mode as a security boundary.
 
 ## Project-specific skills
 
-`.claude/skills/` has workflows encoding the rules above, invoke with `/<name>`:
+**Not in the repository** — `.gitignore` excludes `.claude/`, so these live on the maintainer's machine
+only. A fresh clone has none of them. They encode conventions that are all written down here and in
+`docs/`, so nothing is lost by their absence; treat the list below as a description of the workflows, not
+as files to open. Anything a skill enforces that is *not* also stated in this file or `docs/` is a
+documentation bug — fix it here rather than relying on an untracked file.
+
+Where they exist, invoke with `/<name>`:
 
 - `/new-endpoint` — scaffold a new REST route (sqlc query → service → handler → OpenAPI contract → tests).
 - `/new-gateway-event` — scaffold a new real-time dispatch event end-to-end (backend publish → schema →
@@ -281,6 +334,8 @@ And on the CLI side, from M2:
 - `/security-audit` — this project's own security checklist (permissions, audit log, token/credential
   hygiene, plugin sandbox boundaries, E2E exclusion, XSS/terminal-escape safety, secrets) — complements the
   generic `/security-review` skill.
+- `/ship-milestone` — the git workflow above in operational form: commit and PR-title length checks, the PR
+  template followed literally, the squash-merge subject/description, and the tag.
 
 ## Where to look for more detail
 

@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
 
 	"github.com/Alexnex31/Norite/cli/internal/cliapp"
@@ -46,6 +47,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(2)
 		}
+
+		// A command that reports its result through the exit code rather than through output —
+		// `norite daemon status` is the first — returns a cli.ExitCoder. cliapp disables urfave/cli's own
+		// handling of these precisely so the decision lands here. An empty message means the code *is* the
+		// message and there is nothing to print: a status that exits 1 has already said, on stdout, that
+		// the daemon is stopped, and "norite: " in front of nothing would be noise.
+		var exit cli.ExitCoder
+		if errors.As(err, &exit) {
+			if msg := exit.Error(); msg != "" {
+				fmt.Fprintf(os.Stderr, "norite: %v\n", msg)
+			}
+			os.Exit(exit.ExitCode())
+		}
+
 		fmt.Fprintf(os.Stderr, "norite: %v\n", err)
 		os.Exit(1)
 	}

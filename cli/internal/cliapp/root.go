@@ -12,6 +12,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/Alexnex31/Norite/cli/internal/daemonctl"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 )
 
@@ -47,6 +48,16 @@ func New(out, errOut io.Writer) *cli.Command {
 		// Offer the nearest command on a typo. Cheap, and this tree will grow large enough to need it.
 		Suggest: true,
 
+		// Take over urfave/cli's exit handling. Its default, HandleExitCoder, prints the error and calls
+		// os.Exit from *inside* Run — so a command returning cli.Exit(…) would terminate the process
+		// without Run ever returning, silently bypassing cmd/app/main.go, which is supposed to be the one
+		// place process lifetime and exit codes are decided. It would also make any such command
+		// untestable, since the test binary would exit along with it.
+		//
+		// A no-op handler leaves the ExitCoder to travel back as an ordinary error; main unwraps it and
+		// exits with the code it carries. Commands keep using cli.Exit — only who acts on it changes.
+		ExitErrHandler: func(context.Context, *cli.Command, error) {},
+
 		// A mistyped command must fail, not print help and succeed. The default behavior returns no error,
 		// so `norite instnace init && echo ok` would print "ok" without having configured anything — exactly
 		// the kind of silent success a scriptable CLI must never produce.
@@ -71,6 +82,7 @@ func New(out, errOut io.Writer) *cli.Command {
 		},
 
 		Commands: []*cli.Command{
+			daemonctl.GroupCommand(),
 			instanceinit.GroupCommand(),
 		},
 	}

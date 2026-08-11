@@ -748,6 +748,54 @@ startup task), running from login. On startup, before opening any handle, the da
 bot-automation TCP listener, voice-worker pipes, and SQLite/log files, and default OS limits (256 on macOS)
 are easy to exceed under normal multi-client, active-voice use.
 
+**Service installation** (settled at Milestone M3): `norite daemon install | uninstall | start | stop |
+restart | status`, implemented in `cli/internal/daemonctl` behind one `Manager` interface with a backend per
+platform. Always a **user-scoped** service — a systemd *user* unit (`~/.config/systemd/user/`), a launchd
+*agent* (`~/Library/LaunchAgents/`), or a logon task at the user's own integrity level (`schtasks /SC
+ONLOGON /RL LIMITED`) — never a system-wide one, so installing needs no elevation and the daemon runs as the
+account whose tokens and keystore it holds. Each backend shells out to that platform's own tool
+(`systemctl --user`, `launchctl`, `schtasks`) through an injectable `Runner`, which is what lets all three
+command lines be asserted from one CI machine; the failed command appears verbatim in any error, so an
+operator can reproduce it. **Install and start are separate verbs** — provisioning an image wants one
+without the other. `install` is repeatable and replaces an existing definition; `uninstall` succeeds when
+nothing is installed.
+
+**Single instance, and how a stop is distinguished from a crash**: the daemon holds a `gofrs/flock` advisory
+lock on `<state-dir>/daemon.lock` for its whole life, taken before it opens anything else. flock is owned by
+the open file description, so the kernel releases it however the process dies — nothing goes stale, unlike a
+PID file. A second daemon exits **3**, which the systemd unit is told never to retry
+(`RestartPreventExitStatus=3`), since the condition it reports is by definition already satisfied; launchd
+has no per-exit-code equivalent and is throttled instead (see the platform differences below). A
+signal-initiated stop exits **0**, not 128+signum: every service manager reads a non-zero exit as a crash
+and answers with a restart, which would make an ordinary stop loop. `norite daemon status` reports through
+its exit code — 0 running, 1 installed-but-stopped, 2 not installed — so a script can branch without parsing
+prose, and until the CLI's `--json` machinery lands (M46) that code is the machine-readable surface.
+
+**Daemon-owned state directory**: `$XDG_STATE_HOME/norite` (`~/.local/state/norite`), `~/Library/Application
+Support/Norite`, or `%LOCALAPPDATA%\Norite`, created `0700` — it will later hold plugin capability grants and
+pinned `.wasm` hashes (§8), so the mode is established now rather than migrated. It holds the lock and, by
+default, the daemon's own rotating log (`natefinch/lumberjack`, per §4's file-based logging rule); the
+daemon also copies every line to stderr, which is what journald captures, so `systemctl --user status` and
+the log file both show something useful. **The lock always stays in the state directory** even when the log
+is redirected — it is the per-user rendezvous point, and a lock that moved with the logs would let two
+daemons take different ones.
+
+Because the systemd user manager does not read the shell profile, `install` **captures `XDG_STATE_HOME` into
+the unit's `Environment=`** when it is set. Without that, a user who exports it in their shell gets one state
+directory from a hand-started daemon and another from the service, so the two take *different* locks and both
+start — breaking the single-instance invariant with no error anywhere.
+
+**Where the three platforms genuinely differ**, rather than being papered over:
+- **launchd starts the agent as part of installing it** (`bootstrap` loads it; `RunAtLoad` runs it). There is
+  no register-without-starting, so `Manager.StartsOnInstall()` reports the difference and `norite daemon
+  install` prints what actually happened instead of systemd's "to start it now" advice everywhere.
+- **launchd cannot exempt an exit code** the way `RestartPreventExitStatus=3` does, so an exit-3 daemon is
+  respawned while another instance holds the lock. The loop is self-correcting; `ThrottleInterval` keeps it
+  cheap.
+- **launchd's `StandardErrorPath` is never rotated**, so on macOS the daemon is launched with `-log-file`
+  (rotating log into `~/Library/Logs`) and `-stderr-log=false`; that leaves the launchd-captured file holding
+  only panics and pre-logging failures rather than an unbounded copy of the rotated log.
+
 **Dual IPC, different trust tiers**:
 - **Daemon↔attach-client**: a Unix domain socket / Windows named pipe, OS-file-permission-protected (no
   secret needed — only the owning OS user can open it). Reuses the gateway's exact op-code/DISPATCH protocol
