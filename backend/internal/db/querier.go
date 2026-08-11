@@ -29,10 +29,13 @@ type Querier interface {
 	// still render as "Deleted User", but it must never be findable for login, registration collision, or
 	// profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
-	// Runs on every request authenticated with an API token, which is why the hash column is indexed. Revoked
-	// rows are returned rather than filtered so the caller can answer "revoked" distinctly from "unknown"
-	// server-side, while still telling the client only that the credential is invalid.
-	GetAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// Runs on every request authenticated with an API token, which is why the hash column is indexed.
+	//
+	// One statement, not three: the owning account's liveness is joined in rather than fetched separately, and
+	// the revocation and soft-delete filters are applied here rather than in Go. An unusable token therefore
+	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
+	// distinguishing them.
+	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
 	// The hot path: every refresh looks a session up by hash. Deliberately returns revoked and rotated rows
 	// too — the caller must be able to tell "no such token" from "a token that was already used", since only
 	// the second is a replay worth revoking a family over.
@@ -59,8 +62,14 @@ type Querier interface {
 	// single-use: a second presentation finds revoked_at set and replaced_by_id populated, which is the replay
 	// signature.
 	RotateSession(ctx context.Context, arg RotateSessionParams) (Session, error)
-	// Records use. Separate from the lookup and deliberately fire-and-forget: a write on every authenticated
-	// request must never be able to fail one.
+	// Records use, at most once every few minutes per token.
+	//
+	// Writing on every authenticated request would put a row update — and its WAL traffic, and its dead tuple
+	// for autovacuum — on the hottest read path in the API, to keep a timestamp accurate to the second that
+	// nothing needs to the second. The staleness window is the whole optimization: "last used" is for an
+	// operator auditing an account's tokens, and five minutes is well inside what that reader cares about.
+	//
+	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
 	UserExistsByEmail(ctx context.Context, email string) (bool, error)
 	UserExistsByUsername(ctx context.Context, username string) (bool, error)

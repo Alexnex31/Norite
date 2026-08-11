@@ -316,7 +316,7 @@ func TestAPITokenAuthenticatesWithinItsScopesOnly(t *testing.T) {
 	assert.Equal(t, ActorAPIToken, actor.Kind)
 	assert.Equal(t, snowflake.ID(user.ID), actor.UserID)
 	assert.True(t, actor.HasScope(ScopeIdentify), "the granted scope must be held")
-	assert.False(t, actor.HasScope(ScopeTokensRead), "an ungranted scope must not be held")
+	assert.False(t, actor.HasScope("some:other"), "an ungranted scope must not be held")
 }
 
 func TestMintedTokenIsStoredOnlyAsAHash(t *testing.T) {

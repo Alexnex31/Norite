@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"runtime"
 	"unicode/utf8"
 
 	"github.com/alexedwards/argon2id"
@@ -63,15 +65,55 @@ func mustHash(password string) string {
 	return h
 }
 
+// maxConcurrentHashes bounds how many argon2id operations may run at once.
+//
+// Each one allocates hashParams.Memory — 64 MiB — for its whole duration, which is the entire point of a
+// memory-hard KDF and also a denial-of-service surface: 16 concurrent logins measured at 1 GiB of heap, and
+// the per-IP rate limiter does nothing about a distributed flood, where a few hundred sources each sending
+// one login a second would exhaust any machine.
+//
+// Gating makes the worst case arithmetic instead of unbounded: slots x 64 MiB. Sized from GOMAXPROCS
+// (cgroup-aware since Go 1.25, so a small pod on a big node stays small) and floored at 2 so a
+// single-core instance can still serve logins. Excess requests wait for a slot rather than being refused —
+// a brief queue is a far better failure than an OOM kill, and each waiter is already bounded by its own
+// request context.
+var maxConcurrentHashes = max(2, runtime.GOMAXPROCS(0)/2)
+
+// hashSlots is the gate itself. A buffered channel rather than x/sync/semaphore: the acquire needs to be
+// selectable against a context, which a plain channel does natively and without another dependency.
+var hashSlots = make(chan struct{}, maxConcurrentHashes)
+
+// withHashSlot runs fn while holding one of the gate's slots.
+//
+// A caller whose context is canceled while waiting — a client that hung up, or a request past its deadline
+// — gives up without ever starting the work, which is what keeps a queue from turning into the same memory
+// problem one step later.
+func withHashSlot(ctx context.Context, fn func() error) error {
+	select {
+	case hashSlots <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("%w: server is busy verifying other credentials", ctx.Err())
+	}
+	defer func() { <-hashSlots }()
+
+	return fn()
+}
+
 // HashPassword applies the password policy and returns an argon2id encoded hash.
 //
 // The returned string carries its own algorithm, parameters, and salt, so verification needs nothing else
 // stored alongside it and a future parameter change stays backwards-compatible.
-func HashPassword(password string) (string, error) {
+func HashPassword(ctx context.Context, password string) (string, error) {
 	if err := ValidatePassword(password); err != nil {
 		return "", err
 	}
-	hash, err := argon2id.CreateHash(password, hashParams)
+
+	var hash string
+	err := withHashSlot(ctx, func() error {
+		var err error
+		hash, err = argon2id.CreateHash(password, hashParams)
+		return err
+	})
 	if err != nil {
 		return "", fmt.Errorf("hashing password: %w", err)
 	}
@@ -99,13 +141,21 @@ func ValidatePassword(password string) error {
 // storedHash may be empty, meaning the account has no password (OAuth-only, from M6). That case still runs
 // a full comparison against the dummy hash before returning, for the same timing reason as an unknown
 // account — otherwise "this email exists but has no password" becomes measurably distinct.
-func VerifyPassword(storedHash, password string) error {
+func VerifyPassword(ctx context.Context, storedHash, password string) error {
 	if storedHash == "" {
-		_, _ = argon2id.ComparePasswordAndHash(password, dummyHash)
+		_ = withHashSlot(ctx, func() error {
+			_, _ = argon2id.ComparePasswordAndHash(password, dummyHash)
+			return nil
+		})
 		return ErrPasswordNotSet
 	}
 
-	match, err := argon2id.ComparePasswordAndHash(password, storedHash)
+	var match bool
+	err := withHashSlot(ctx, func() error {
+		var err error
+		match, err = argon2id.ComparePasswordAndHash(password, storedHash)
+		return err
+	})
 	if err != nil {
 		// A malformed stored hash is a data-integrity problem, not a wrong password, and the difference
 		// matters to an operator reading logs. The caller still tells the client only "invalid credentials".
@@ -122,8 +172,11 @@ func VerifyPassword(storedHash, password string) error {
 // Called on the login path when no account matched, so that the handler's total time does not reveal
 // whether the email exists. Returns ErrInvalidCredentials always — the caller must not be able to
 // accidentally treat it as success.
-func VerifyPasswordForMissingUser(password string) error {
-	_, _ = argon2id.ComparePasswordAndHash(password, dummyHash)
+func VerifyPasswordForMissingUser(ctx context.Context, password string) error {
+	_ = withHashSlot(ctx, func() error {
+		_, _ = argon2id.ComparePasswordAndHash(password, dummyHash)
+		return nil
+	})
 	return ErrInvalidCredentials
 }
 

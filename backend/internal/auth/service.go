@@ -143,7 +143,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		displayName = username
 	}
 
-	hash, err := HashPassword(in.Password)
+	hash, err := HashPassword(ctx, in.Password)
 	if err != nil {
 		return db.User{}, err
 	}
@@ -220,7 +220,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 			// Burn the same argon2id work a real verification costs, so response time does not reveal
 			// whether the address is registered. Returning early here is exactly the timing oracle that
 			// lets an attacker enumerate an entire user base without guessing a single password.
-			return TokenPair{}, VerifyPasswordForMissingUser(in.Password)
+			return TokenPair{}, VerifyPasswordForMissingUser(ctx, in.Password)
 		}
 		return TokenPair{}, fmt.Errorf("looking up account: %w", err)
 	}
@@ -229,7 +229,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 	if user.PasswordHash != nil {
 		stored = *user.PasswordHash
 	}
-	if err := VerifyPassword(stored, in.Password); err != nil {
+	if err := VerifyPassword(ctx, stored, in.Password); err != nil {
 		if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrPasswordNotSet) {
 			// Both are reported to the client identically. "This account exists but signs in with Google"
 			// is precisely the kind of detail that turns a login form into an account-discovery tool.

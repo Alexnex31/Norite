@@ -9,19 +9,32 @@ INSERT INTO api_tokens (id, user_id, name, token_hash, scopes)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
--- name: GetAPITokenByHash :one
--- Runs on every request authenticated with an API token, which is why the hash column is indexed. Revoked
--- rows are returned rather than filtered so the caller can answer "revoked" distinctly from "unknown"
--- server-side, while still telling the client only that the credential is invalid.
-SELECT * FROM api_tokens
-WHERE token_hash = $1;
+-- name: GetActiveAPITokenByHash :one
+-- Runs on every request authenticated with an API token, which is why the hash column is indexed.
+--
+-- One statement, not three: the owning account's liveness is joined in rather than fetched separately, and
+-- the revocation and soft-delete filters are applied here rather than in Go. An unusable token therefore
+-- returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
+-- distinguishing them.
+SELECT t.* FROM api_tokens t
+JOIN users u ON u.id = t.user_id
+WHERE t.token_hash = $1
+  AND t.revoked_at IS NULL
+  AND u.deleted_at IS NULL;
 
 -- name: TouchAPIToken :exec
--- Records use. Separate from the lookup and deliberately fire-and-forget: a write on every authenticated
--- request must never be able to fail one.
+-- Records use, at most once every few minutes per token.
+--
+-- Writing on every authenticated request would put a row update — and its WAL traffic, and its dead tuple
+-- for autovacuum — on the hottest read path in the API, to keep a timestamp accurate to the second that
+-- nothing needs to the second. The staleness window is the whole optimization: "last used" is for an
+-- operator auditing an account's tokens, and five minutes is well inside what that reader cares about.
+--
+-- Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 UPDATE api_tokens
 SET last_used_at = now()
-WHERE id = $1;
+WHERE id = $1
+  AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes');
 
 -- name: ListAPITokensForUser :many
 SELECT * FROM api_tokens

@@ -23,23 +23,23 @@ const (
 	// ScopeIdentify reads the actor's own account. The narrowest useful scope, and the one a bot needs to
 	// confirm which account it is running as.
 	ScopeIdentify Scope = "identify"
-
-	// ScopeTokensRead lists the account's API tokens (names, scopes and timestamps — never a token value,
-	// which exists only in the response that created it).
-	ScopeTokensRead Scope = "tokens:read"
 )
 
-// There is deliberately no `tokens:write` scope, and minting an API token requires a *user* actor rather
-// than any scope at all. A delegated credential that can mint credentials can mint one with more scopes
-// than itself, which would make every restriction in this file decorative. Closing that by construction is
-// worth more than the convenience of a bot rotating its own token.
+// Token management — minting, listing and revoking — has no scope at all: every one of those operations
+// requires a *user* actor, so a delegated credential can never touch the account's credential inventory.
+//
+// Minting is the obvious case: a token that can mint tokens can mint one with scopes it does not itself
+// hold, which would make every restriction here decorative. Listing is the same category for a quieter
+// reason — it discloses the names, scopes and last-use times of an account's *other* tokens, which is
+// reconnaissance for a compromised low-privilege bot: it cannot use a more powerful sibling, but it can
+// learn one exists and what it can reach. There is no delegation use case worth that.
 
 // AllScopes is every scope a token may be granted, used to validate a mint request.
 //
 // An unknown scope is rejected rather than ignored: silently dropping a scope the caller asked for would
 // hand them a token they believe is more capable than it is, and silently *keeping* one this build does not
 // understand would mean a future release could widen an existing token's reach.
-var AllScopes = []Scope{ScopeIdentify, ScopeTokensRead}
+var AllScopes = []Scope{ScopeIdentify}
 
 // ValidScope reports whether s is a scope this build understands.
 func ValidScope(s Scope) bool { return slices.Contains(AllScopes, s) }

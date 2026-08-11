@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,28 +21,28 @@ const testSigningKey = "test-signing-key-of-at-least-32-bytes"
 func TestHashAndVerifyPassword(t *testing.T) {
 	const password = "correct horse battery staple"
 
-	hash, err := HashPassword(password)
+	hash, err := HashPassword(t.Context(), password)
 	require.NoError(t, err)
 
 	assert.NotContains(t, hash, password, "the hash must not contain the password")
 	assert.True(t, strings.HasPrefix(hash, "$argon2id$"), "must be an argon2id encoded hash, got %q", hash)
 
-	assert.NoError(t, VerifyPassword(hash, password))
-	assert.ErrorIs(t, VerifyPassword(hash, "wrong password entirely"), ErrInvalidCredentials)
+	assert.NoError(t, VerifyPassword(t.Context(), hash, password))
+	assert.ErrorIs(t, VerifyPassword(t.Context(), hash, "wrong password entirely"), ErrInvalidCredentials)
 }
 
 func TestHashingTheSamePasswordTwiceGivesDifferentHashes(t *testing.T) {
 	const password = "correct horse battery staple"
 
-	first, err := HashPassword(password)
+	first, err := HashPassword(t.Context(), password)
 	require.NoError(t, err)
-	second, err := HashPassword(password)
+	second, err := HashPassword(t.Context(), password)
 	require.NoError(t, err)
 
 	// Distinct salts. Identical hashes would let anyone with the table see which accounts share a password.
 	assert.NotEqual(t, first, second)
-	assert.NoError(t, VerifyPassword(first, password))
-	assert.NoError(t, VerifyPassword(second, password))
+	assert.NoError(t, VerifyPassword(t.Context(), first, password))
+	assert.NoError(t, VerifyPassword(t.Context(), second, password))
 }
 
 func TestPasswordPolicy(t *testing.T) {
@@ -73,11 +75,11 @@ func TestPasswordPolicy(t *testing.T) {
 // An account with no password must not be loginable, and must not be *distinguishable* from a wrong
 // password either — "this address signs in with Google" turns a login form into an account-discovery tool.
 func TestVerifyPasswordOnAnAccountWithNoPassword(t *testing.T) {
-	assert.ErrorIs(t, VerifyPassword("", "anything at all"), ErrPasswordNotSet)
+	assert.ErrorIs(t, VerifyPassword(t.Context(), "", "anything at all"), ErrPasswordNotSet)
 }
 
 func TestVerifyPasswordForMissingUserAlwaysFails(t *testing.T) {
-	assert.ErrorIs(t, VerifyPasswordForMissingUser("anything"), ErrInvalidCredentials)
+	assert.ErrorIs(t, VerifyPasswordForMissingUser(t.Context(), "anything"), ErrInvalidCredentials)
 }
 
 // The timing-equalizer only works if the missing-user path costs about the same as a real verification.
@@ -87,7 +89,7 @@ func TestMissingUserVerificationCostsTheSameAsARealOne(t *testing.T) {
 		t.Skip("timing measurement is too noisy to be worth running in -short mode")
 	}
 
-	hash, err := HashPassword("correct horse battery staple")
+	hash, err := HashPassword(t.Context(), "correct horse battery staple")
 	require.NoError(t, err)
 
 	measure := func(f func()) time.Duration {
@@ -98,8 +100,8 @@ func TestMissingUserVerificationCostsTheSameAsARealOne(t *testing.T) {
 		return time.Since(start) / 3
 	}
 
-	real := measure(func() { _ = VerifyPassword(hash, "wrong password") })
-	missing := measure(func() { _ = VerifyPasswordForMissingUser("wrong password") })
+	real := measure(func() { _ = VerifyPassword(t.Context(), hash, "wrong password") })
+	missing := measure(func() { _ = VerifyPasswordForMissingUser(t.Context(), "wrong password") })
 
 	t.Logf("real verification %s, missing-user path %s", real, missing)
 
@@ -299,8 +301,10 @@ func TestVerifyRejectsJunk(t *testing.T) {
 
 func TestScopeValidation(t *testing.T) {
 	assert.True(t, ValidScope(ScopeIdentify))
-	assert.True(t, ValidScope(ScopeTokensRead))
 	assert.False(t, ValidScope("wildcard"), "an unknown scope must never validate")
+	// Token management is user-only and has no scope at all, so these must never validate either.
+	assert.False(t, ValidScope("tokens:read"))
+	assert.False(t, ValidScope("tokens:write"))
 	assert.False(t, ValidScope(""), "the empty scope is not a scope")
 }
 
@@ -312,7 +316,7 @@ func TestActorScopeSemantics(t *testing.T) {
 
 	token := Actor{Kind: ActorAPIToken, UserID: 1, Scopes: []Scope{ScopeIdentify}}
 	assert.True(t, token.HasScope(ScopeIdentify))
-	assert.False(t, token.HasScope(ScopeTokensRead), "a token must not hold a scope it was not granted")
+	assert.False(t, token.HasScope("some:other"), "a token must not hold a scope it was not granted")
 
 	none := Actor{Kind: ActorAPIToken, UserID: 1}
 	assert.False(t, none.HasScope(ScopeIdentify), "a token with no scopes can do nothing")
@@ -334,4 +338,84 @@ func TestActorRoundTripsThroughContext(t *testing.T) {
 	// The zero actor is not an authenticated one, so a struct that got zeroed cannot pass as a caller.
 	_, ok = ActorFrom(WithActor(ctx, Actor{}))
 	assert.False(t, ok)
+}
+
+// argon2id allocates 64 MiB for the whole duration of every hash, which is the point of a memory-hard KDF
+// and also a denial-of-service surface: 16 concurrent logins measured at 1 GiB of heap, and the per-IP rate
+// limiter does nothing about a distributed flood. The gate turns the worst case into arithmetic.
+func TestConcurrentHashingIsBounded(t *testing.T) {
+	require.GreaterOrEqual(t, maxConcurrentHashes, 2, "a single-core instance must still be able to serve logins")
+
+	var (
+		mu       sync.Mutex
+		inFlight int
+		peak     int
+	)
+
+	var wg sync.WaitGroup
+	for range maxConcurrentHashes * 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = withHashSlot(t.Context(), func() error {
+				mu.Lock()
+				inFlight++
+				if inFlight > peak {
+					peak = inFlight
+				}
+				mu.Unlock()
+
+				time.Sleep(5 * time.Millisecond)
+
+				mu.Lock()
+				inFlight--
+				mu.Unlock()
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+
+	assert.LessOrEqual(t, peak, maxConcurrentHashes,
+		"more hashes ran at once than the gate allows — the memory ceiling is not a ceiling")
+	assert.Positive(t, peak)
+}
+
+// A caller who gives up while queued must not go on to do the work anyway: that would let a flood of
+// abandoned requests hold 64 MiB each long after their clients disconnected.
+func TestHashingGivesUpWhenTheCallerDoes(t *testing.T) {
+	// Fill every slot and hold them.
+	release := make(chan struct{})
+	var held sync.WaitGroup
+	for range maxConcurrentHashes {
+		held.Add(1)
+		go func() {
+			defer held.Done()
+			_ = withHashSlot(t.Context(), func() error { <-release; return nil })
+		}()
+	}
+	// Give the fillers a moment to actually acquire.
+	require.Eventually(t, func() bool { return len(hashSlots) == maxConcurrentHashes }, time.Second, time.Millisecond)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	ran := false
+	err := withHashSlot(ctx, func() error { ran = true; return nil })
+
+	assert.Error(t, err, "a canceled caller must not be granted a slot")
+	assert.False(t, ran, "the work must not run for a caller that already gave up")
+
+	close(release)
+	held.Wait()
+}
+
+func TestPasswordHashingRespectsACanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Not a hard guarantee that it never runs — an idle gate admits immediately — but it must never hang,
+	// and a full gate must reject rather than queue a caller who is already gone.
+	_, err := HashPassword(ctx, "correct horse battery staple")
+	_ = err // an idle gate legitimately succeeds; the bounded-wait behavior is covered above.
 }

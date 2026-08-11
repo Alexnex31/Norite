@@ -44,11 +44,12 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Group(func(r chi.Router) {
 		r.Use(RequireAuth)
 
-		// Minting and revoking require the person, not a delegated credential: a token that can mint
-		// tokens can grant itself scopes it does not hold.
+		// All three require the person, not a delegated credential. Minting because a token that can
+		// mint tokens can grant itself scopes it does not hold; listing because it discloses the
+		// account's other tokens to whatever holds this one; revoking for symmetry with both.
 		r.With(RequireUserActor).Post("/tokens", h.mintToken)
+		r.With(RequireUserActor).Get("/tokens", h.listTokens)
 		r.With(RequireUserActor).Delete("/tokens/{tokenID}", h.revokeToken)
-		r.With(RequireScope(ScopeTokensRead)).Get("/tokens", h.listTokens)
 	})
 }
 

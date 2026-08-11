@@ -122,28 +122,20 @@ func (s *Service) AuthenticateAPIToken(ctx context.Context, raw string) (Actor, 
 		return Actor{}, ErrInvalidToken
 	}
 
-	token, err := s.queries.GetAPITokenByHash(ctx, hash)
+	// One statement covers all three conditions — the token exists, is not revoked, and its account is not
+	// soft-deleted — so the hot path is a single indexed lookup rather than a token read plus a user read.
+	// A deleted account's tokens must stop working immediately; revoking them individually is M11's job,
+	// and until then this join is what closes the gap.
+	token, err := s.queries.GetActiveAPITokenByHash(ctx, hash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Actor{}, ErrInvalidToken
 		}
 		return Actor{}, fmt.Errorf("looking up API token: %w", err)
 	}
-	if token.RevokedAt.Valid {
-		return Actor{}, ErrInvalidToken
-	}
 
-	// The owning account must still exist and not be soft-deleted. Without this a deleted user's tokens
-	// would keep working, since revoking them is a separate step that M11 owns.
-	if _, err := s.queries.GetUserByID(ctx, token.UserID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Actor{}, ErrInvalidToken
-		}
-		return Actor{}, fmt.Errorf("looking up the token's account: %w", err)
-	}
-
-	// Fire-and-forget: a bookkeeping write must never be able to fail an otherwise-valid request. Logged
-	// rather than swallowed so a persistently failing write is still visible.
+	// Fire-and-forget, and throttled in SQL to at most one write per token per few minutes — see the query.
+	// Logged rather than swallowed so a persistently failing write is still visible.
 	if err := s.queries.TouchAPIToken(ctx, token.ID); err != nil {
 		logging.FromContext(ctx).Warn().Err(err).Msg("could not record API token usage")
 	}
