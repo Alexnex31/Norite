@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -189,4 +190,29 @@ func TestDefaultDBMinConnsNeverExceedsMax(t *testing.T) {
 	assert.Equal(t, int32(1), defaultDBMinConns(1))
 	assert.Equal(t, int32(2), defaultDBMinConns(2))
 	assert.Equal(t, int32(2), defaultDBMinConns(16))
+}
+
+// Pool sizing follows GOMAXPROCS, not NumCPU. Since Go 1.25 GOMAXPROCS defaults to the cgroup CPU limit
+// while NumCPU still reports the whole machine, so on Kubernetes a small pod on a large node would
+// otherwise size its pool from the node's core count and claim far more of Postgres's connection budget
+// than its share justifies — multiplied by every replica.
+func TestPoolSizeFollowsTheCPULimitNotTheMachine(t *testing.T) {
+	original := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(original) })
+
+	cases := []struct {
+		procs int
+		want  int32
+	}{
+		{1, 4},   // floor: a connection pool of 1 would serialize the whole instance
+		{2, 4},   // still the floor
+		{8, 8},   // proportional in the ordinary range
+		{64, 16}, // ceiling: never claim an unbounded share per replica
+	}
+	for _, tc := range cases {
+		runtime.GOMAXPROCS(tc.procs)
+		if got := defaultDBMaxConns(); got != tc.want {
+			t.Errorf("GOMAXPROCS=%d: pool size %d, want %d", tc.procs, got, tc.want)
+		}
+	}
 }

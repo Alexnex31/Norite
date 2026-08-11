@@ -427,12 +427,18 @@ func defaultLogFormat(env Environment) string {
 // defaultDBMaxConns sizes the pool relative to available cores but keeps it deliberately small
 // (docs/architecture.md §11, §15.3). pgx's own default is max(4, NumCPU) with no ceiling, which on a
 // large host would quietly claim a big share of Postgres's connection budget per replica.
+//
+// GOMAXPROCS, not NumCPU. As of Go 1.25 GOMAXPROCS defaults to the cgroup CPU limit, while NumCPU still
+// reports the whole machine — so on the flagship's Kubernetes deployment (§12), a pod limited to 2 CPUs on
+// a 64-core node would size itself from 64 and take the ceiling of 16 connections instead of the 4 its
+// actual share justifies. Multiplied across replicas that is a large, invisible claim on Postgres's
+// connection budget. On bare metal and docker-compose the two values agree, so nothing changes there.
 func defaultDBMaxConns() int32 {
 	const (
 		floor   = 4
 		ceiling = 16
 	)
-	n := runtime.NumCPU()
+	n := runtime.GOMAXPROCS(0)
 	if n < floor {
 		n = floor
 	}

@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 )
 
 // DaemonBinaryEnvVar names the daemon executable explicitly.
@@ -85,6 +87,22 @@ func verifyDaemonBinary(candidate, source string) (string, error) {
 		return "", fmt.Errorf("resolving %s: %w", candidate, err)
 	}
 
+	// Reject control characters before anything else looks at this path.
+	//
+	// The resolved path is interpolated into a systemd unit file, which is parsed line by line: a newline
+	// inside it ends the ExecStart= directive and everything after becomes further directives. Quoting does
+	// not help — the quote sits on the first line while the injected text is parsed as configuration — so
+	// `.../norite-daemon\nExecStartPost=/bin/sh -c ...` would run an attacker's command at every login.
+	//
+	// Rejecting rather than escaping is the correct fix: systemd has no representation for a newline inside
+	// ExecStart, so there is nothing to escape it to. Filenames like this are legal on Linux but never
+	// legitimate here, and checking once at the single point every path is resolved covers all three
+	// backends rather than each having to remember.
+	if i := strings.IndexFunc(abs, isControl); i >= 0 {
+		return "", describeBadBinary(strconv.Quote(abs), source,
+			fmt.Sprintf("it contains a control character (%q at byte %d), which cannot appear in a service definition", abs[i], i))
+	}
+
 	info, err := os.Stat(abs)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -109,6 +127,12 @@ func describeBadBinary(path, source, why string) error {
 		return fmt.Errorf("%s: %s", path, why)
 	}
 	return fmt.Errorf("%s names %s, but %s", source, path, why)
+}
+
+// isControl reports whether r is a character that must never appear in a path written into a service
+// definition. Covers C0 (newline, carriage return, NUL, tab), DEL, and C1.
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
 func exeSuffix() string {

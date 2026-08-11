@@ -143,3 +143,53 @@ func TestLockAndLogSitInsideTheStateDir(t *testing.T) {
 		t.Errorf("LogFile = %q, want %q", got, want)
 	}
 }
+
+// MkdirAll applies its mode only when it creates the directory, so a state directory that already exists
+// with loose permissions keeps them. Verified against the pre-fix code: it stayed 0755.
+//
+// It matters because this directory is about to hold plugin capability grants and pinned .wasm hashes
+// (CLAUDE.md rule 12) — group or world write there decides what plugin code is permitted to do.
+func TestStateDirTightensAnExistingLooseDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not meaningful on Windows")
+	}
+
+	cases := []struct {
+		name        string
+		start, want os.FileMode
+	}{
+		{"world-readable", 0o755, 0o700},
+		{"group-writable", 0o770, 0o700},
+		{"world-writable", 0o777, 0o700},
+		{"already correct", 0o700, 0o700},
+		// Only ever tighten: an operator who chose something stricter keeps it.
+		{"stricter than required", 0o500, 0o500},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_STATE_HOME", "")
+
+			dir := filepath.Join(home, ".local", "state", "norite")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatalf("preparing: %v", err)
+			}
+			if err := os.Chmod(dir, tc.start); err != nil {
+				t.Fatalf("chmod %#o: %v", tc.start, err)
+			}
+
+			got, err := StateDir()
+			if err != nil {
+				t.Fatalf("StateDir: %v", err)
+			}
+			info, err := os.Stat(got)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if info.Mode().Perm() != tc.want {
+				t.Errorf("mode = %#o, want %#o (started at %#o)", info.Mode().Perm(), tc.want, tc.start)
+			}
+		})
+	}
+}

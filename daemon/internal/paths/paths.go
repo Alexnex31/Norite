@@ -42,7 +42,42 @@ func StateDir() (string, error) {
 	if err := os.MkdirAll(dir, stateDirPerm); err != nil {
 		return "", fmt.Errorf("creating state directory %s: %w", dir, err)
 	}
+	if err := tighten(dir); err != nil {
+		return "", err
+	}
 	return dir, nil
+}
+
+// tighten removes group and world access from an already-existing state directory.
+//
+// MkdirAll applies its mode only when it actually creates the directory; on one that already exists it does
+// nothing. So a directory left at 0755 by an older build, a restore from backup, or a permissive umask
+// stays that way forever, and "0700" above would be true only of a first run. That is not a guarantee worth
+// stating for a directory about to hold plugin capability grants and pinned .wasm hashes (CLAUDE.md
+// rule 12), where another local user's write access decides what plugin code is allowed to do.
+//
+// Only ever tightens: a directory an operator deliberately made stricter than 0700 is left alone, and the
+// mode is rewritten only when loose bits are actually set, so the ordinary case costs one Stat.
+func tighten(dir string) error {
+	// Windows does not model Unix permission bits — os.Chmod there only toggles the read-only flag, so
+	// applying this would be meaningless. Access control comes from the ACL inherited from %LOCALAPPDATA%,
+	// which is already user-scoped.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("checking state directory %s: %w", dir, err)
+	}
+
+	if loose := info.Mode().Perm() &^ stateDirPerm; loose != 0 {
+		if err := os.Chmod(dir, info.Mode().Perm()&stateDirPerm); err != nil {
+			return fmt.Errorf("securing state directory %s: it is %#o and group/other access could not be "+
+				"removed: %w", dir, info.Mode().Perm(), err)
+		}
+	}
+	return nil
 }
 
 // stateDirFor resolves the state directory for a named GOOS without creating it.

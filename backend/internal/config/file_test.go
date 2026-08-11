@@ -391,3 +391,36 @@ func TestMalformedFileErrorDoesNotEchoTheFile(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "hunter2")
 }
+
+// Every path that can reject a config file must be checked for leaking the database password. These
+// messages go to stderr and into logs, and CLAUDE.md rule 8 makes no exception for startup failures.
+//
+// This is not hypothetical: the TOML library's StrictMissingError.String() renders an excerpt of the
+// surrounding document, and in this file the line above a typo is very often the database URL — which is
+// why loadFile formats unknown keys itself instead of using it. That fix is what this test pins.
+func TestConfigErrorsNeverLeakTheDatabasePassword(t *testing.T) {
+	const secret = "SuP3rS3cr3tPassw0rd"
+	dsn := "postgres://norite:" + secret + "@db.internal:5432/norite"
+
+	cases := map[string]string{
+		// The typo sits directly below the URL, which is where an excerpt-rendering error would catch it.
+		"unrecognized key":  "[database]\nurl = \"" + dsn + "\"\ntypo_key = 1\n",
+		"wrong value type":  "[database]\nurl = \"" + dsn + "\"\nmax_conns = \"not-a-number\"\n",
+		"malformed TOML":    "[database]\nurl = \"" + dsn + "\"\nthis is not toml\n",
+		"failed validation": "[database]\nurl = \"" + dsn + "\"\n\n[registration]\nmode = \"bogus\"\n",
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			withoutConfigFile(t)
+
+			path := filepath.Join(t.TempDir(), "instance.toml")
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+			_, err := Load(path)
+			require.Error(t, err, "this input must be rejected, or the test proves nothing")
+			assert.NotContains(t, err.Error(), secret,
+				"the startup error leaks the database password: %v", err)
+		})
+	}
+}

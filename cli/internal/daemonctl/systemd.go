@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -88,6 +89,14 @@ func (s *systemdUser) LogHint() string {
 }
 
 func (s *systemdUser) Install(ctx context.Context, daemonBinary string) error {
+	// A unit file is parsed line by line, so a newline in the path ends ExecStart= and turns everything
+	// after it into further directives — including ones that run commands. LocateDaemon already rejects
+	// this, but Install is exported on the Manager interface and must not depend on its caller having done
+	// so. Refusing rather than escaping is deliberate: systemd cannot represent a newline inside ExecStart.
+	if strings.ContainsFunc(daemonBinary, isControl) {
+		return fmt.Errorf("refusing to write a unit file: the executable path contains a control character (%s)", strconv.Quote(daemonBinary))
+	}
+
 	path, err := s.DefinitionPath()
 	if err != nil {
 		return err
