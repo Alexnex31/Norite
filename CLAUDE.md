@@ -207,6 +207,12 @@ main --oneline` reads as one entry per milestone, the merged PR holds the full d
 history and diff for anyone who wants to dig in, and `git tag -l` / a diff between two milestone tags
 (`git diff m4..m12`) jumps straight to "what changed between these two milestones."
 
+**Exception, M0–M3: those PRs no longer exist.** The repository was re-created on 2026-08-11 and the commit
+history pushed to a fresh remote, which does not carry pull requests. Commits, tags and content are
+byte-for-byte identical (`main` is still `4a621e0`, tags `m0`–`m3` unchanged), but the review discussion and
+per-commit breakdown for the first four milestones are gone; the tags are the only navigation for that
+range. From M4 on, the PR-plus-tag pairing above applies normally again.
+
 Practical constraint, settled at M1: the `gh` CLI is **not** installed on the dev machine, so PRs are
 opened and squash-merged through the GitHub web UI. An agent can prepare the branch, push it, and draft the
 PR title/body, but cannot open or merge the PR itself — hand that off rather than trying to automate it.
