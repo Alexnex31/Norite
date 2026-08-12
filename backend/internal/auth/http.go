@@ -307,9 +307,13 @@ func (h *Handler) revokeToken(w http.ResponseWriter, r *http.Request) {
 
 	tokenID, err := snowflake.Parse(chi.URLParam(r, "tokenId"))
 	if err != nil {
-		// Same answer as a token that does not exist. A malformed ID and an unowned one must be
-		// indistinguishable, or the endpoint becomes a way to probe which IDs are real.
-		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrNotFound, "no such token"))
+		// Same answer as a token that does not exist. A malformed ID, an unowned one and an absent one must
+		// be indistinguishable, or the endpoint becomes a way to probe which IDs are real.
+		//
+		// Routed through writeErr rather than writing a 404 here, so all three answers are produced by one
+		// line of code instead of two that have to be kept identical by hand — they had already drifted to
+		// different messages once.
+		h.writeErr(w, r, ErrNotFound)
 		return
 	}
 
