@@ -167,6 +167,30 @@ func TestRouterSetsARequestIDHeader(t *testing.T) {
 	assert.NotEmpty(t, rec.Header().Get("X-Request-Id"))
 }
 
+// The sanitizer only works if it is mounted above chi's RequestID, which is an ordering fact no unit test
+// of the middleware itself can show. Asserted here on the assembled chain, where getting it wrong would
+// echo the caller's own string straight back at them.
+func TestRouterDoesNotAdoptAClientSuppliedRequestID(t *testing.T) {
+	for _, trust := range []bool{false, true} {
+		cfg := testConfig()
+		cfg.TrustProxyHeaders = trust
+		cfg.TrustedProxyHops = 1
+		router := readyRouter(t, cfg)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/healthz", nil)
+		// Untrusted this must be discarded outright; trusted it must still fail the charset filter.
+		req.Header.Set("X-Request-Id", "spoofed id\nwith a newline")
+
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		echoed := rec.Header().Get("X-Request-Id")
+		assert.NotEmpty(t, echoed, "trust_proxy_headers=%v", trust)
+		assert.NotContains(t, echoed, "spoofed", "trust_proxy_headers=%v", trust)
+		assert.NotContains(t, echoed, "\n", "a header value must never carry a newline")
+	}
+}
+
 // A misconfigured rate string must fail at construction, before the process starts listening — not on the
 // first request that happens to hit a limited route.
 func TestRouterRejectsAnInvalidRateLimitConfig(t *testing.T) {

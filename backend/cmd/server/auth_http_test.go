@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
@@ -56,6 +60,35 @@ type api struct {
 	t       *testing.T
 	handler http.Handler
 	pool    *pgxpool.Pool
+	// mail captures what the reset flow would have sent. The raw token exists nowhere else — that is the
+	// point of it — so this is the only way a test can follow a reset link.
+	mail *captureMailer
+}
+
+// captureMailer stands in for the real queue: it records messages instead of delivering them, and can
+// report itself disabled to model an instance with no relay configured.
+type captureMailer struct {
+	mu       sync.Mutex
+	sent     []mail.Message
+	disabled bool
+}
+
+func (m *captureMailer) Enabled() bool { return !m.disabled }
+
+func (m *captureMailer) Enqueue(msg mail.Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, msg)
+	return nil
+}
+
+func (m *captureMailer) last() (mail.Message, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sent) == 0 {
+		return mail.Message{}, false
+	}
+	return m.sent[len(m.sent)-1], true
 }
 
 // newAPI builds the real router over a freshly-migrated database.
@@ -63,6 +96,18 @@ type api struct {
 // The wiring mirrors run() in main.go deliberately: if the composition root starts mounting things
 // differently, these tests should stop reflecting production and that should be a visible edit here.
 func newAPI(t *testing.T, mode auth.RegistrationMode) *api {
+	t.Helper()
+	return newAPIWithMail(t, mode, &captureMailer{})
+}
+
+// newAPIWithoutMail is the shape an instance with no SMTP configuration runs: password reset is
+// unavailable, and everything else works normally.
+func newAPIWithoutMail(t *testing.T, mode auth.RegistrationMode) *api {
+	t.Helper()
+	return newAPIWithMail(t, mode, &captureMailer{disabled: true})
+}
+
+func newAPIWithMail(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer) *api {
 	t.Helper()
 	dbtest.RequireContainer(t)
 
@@ -96,6 +141,8 @@ func newAPI(t *testing.T, mode auth.RegistrationMode) *api {
 		IDs:              ids,
 		Issuer:           issuer,
 		RegistrationMode: mode,
+		Mailer:           mailer,
+		PublicBaseURL:    "https://chat.example.com",
 	})
 	require.NoError(t, err)
 
@@ -111,7 +158,24 @@ func newAPI(t *testing.T, mode auth.RegistrationMode) *api {
 	})
 	require.NoError(t, err)
 
-	return &api{t: t, handler: handler, pool: pool}
+	return &api{t: t, handler: handler, pool: pool, mail: mailer}
+}
+
+// issueResetToken runs a real reset request and returns the token out of the email that would have gone.
+func (a *api) issueResetToken(t *testing.T, email string) string {
+	t.Helper()
+
+	resp := a.call(http.MethodPost, "/api/v1/auth/password/reset/request", map[string]string{"email": email})
+	require.Equal(t, http.StatusAccepted, resp.Code, resp)
+
+	msg, ok := a.mail.last()
+	require.True(t, ok, "a reset request for a real account must queue an email")
+
+	_, after, found := strings.Cut(msg.Body, "token=")
+	require.True(t, found, "the email must carry a reset link:\n%s", msg.Body)
+	token, _, _ := strings.Cut(strings.TrimSpace(after), "\n")
+	require.NotEmpty(t, token)
+	return token
 }
 
 // reqOpt adjusts a request before it is served.
@@ -728,4 +792,228 @@ func TestAuthRoutesCarryTheStricterRateLimit(t *testing.T) {
 		require.Equal(t, http.StatusUnauthorized, resp.Code,
 			"request %d fell into the auth bucket; the two must count independently", i+1)
 	}
+}
+
+// A client that gives up mid-request — most often while queued for an argon2id slot, which is the
+// concurrency gate working as designed — must not be reported as a server fault. It used to fall through
+// writeErr's default branch, logging at ERROR and answering 500: an ordinary login burst produced a stream
+// of alarming lines about a server that was fine.
+func TestAbandonedRequestIsNotReportedAsAServerFault(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // the client is already gone before the handler runs
+
+	body, err := json.Marshal(map[string]string{
+		"email": "ada@example.com", "password": testPassword, "device_id": "laptop",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	api.handler.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusInternalServerError, rec.Code,
+		"a client that hung up is not a server error")
+	if rec.Code == http.StatusServiceUnavailable {
+		assert.Equal(t, "service_unavailable", (&response{t: t, Code: rec.Code, Body: rec.Body.Bytes()}).errorBody().Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// password reset (M5)
+// ---------------------------------------------------------------------------
+
+// The reset page is this codebase's first HTML surface, and the API's global CSP —
+// `default-src 'none'; form-action 'none'` — would render it and then silently forbid its own form from
+// submitting anywhere. The override is per-route; this asserts what it grants and what it still denies.
+func TestResetPageCarriesItsOwnContentSecurityPolicy(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	page := api.call(http.MethodGet, "/reset?token=nrp_whatever", nil)
+	require.Equal(t, http.StatusOK, page.Code, page)
+	assert.Contains(t, page.Header.Get("Content-Type"), "text/html")
+
+	csp := page.Header.Get("Content-Security-Policy")
+	assert.Contains(t, csp, "form-action 'self'", "the form must be allowed to submit somewhere")
+	assert.Contains(t, csp, "default-src 'none'", "everything else stays denied")
+	assert.Contains(t, csp, "style-src 'nonce-", "the stylesheet is nonce-scoped, never 'unsafe-inline'")
+	assert.NotContains(t, csp, "unsafe-inline")
+	assert.NotContains(t, csp, "script-src", "the page has no scripts, so none are granted")
+
+	// A page whose URL carries a token must not be cached anywhere.
+	assert.Contains(t, page.Header.Get("Cache-Control"), "no-store")
+	assert.Equal(t, "no-referrer", page.Header.Get("Referrer-Policy"))
+}
+
+// The nonce in the header has to be the one in the document, or the browser blocks the page's own
+// stylesheet — a mismatch would look like a styling bug rather than the policy failure it is.
+func TestTheResetPageNonceMatchesItsHeader(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	page := api.call(http.MethodGet, "/reset", nil)
+	csp := page.Header.Get("Content-Security-Policy")
+
+	_, after, found := strings.Cut(csp, "style-src 'nonce-")
+	require.True(t, found, "no nonce in the policy: %s", csp)
+	nonce, _, _ := strings.Cut(after, "'")
+
+	require.NotEmpty(t, nonce)
+	assert.Contains(t, page.String(), `<style nonce="`+nonce+`">`)
+}
+
+// Every JSON route keeps the strict policy — the override is for two routes, not a loosening.
+func TestTheAPIKeepsTheStrictCSP(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	csp := api.call(http.MethodGet, "/api/v1/healthz", nil).Header.Get("Content-Security-Policy")
+	assert.Contains(t, csp, "form-action 'none'", "the JSON API's policy must not have been relaxed")
+	assert.NotContains(t, csp, "nonce-")
+}
+
+// Two renders must not share a nonce, or it is not a nonce.
+func TestEachResetPageRenderGetsAFreshNonce(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	first := api.call(http.MethodGet, "/reset", nil).Header.Get("Content-Security-Policy")
+	second := api.call(http.MethodGet, "/reset", nil).Header.Get("Content-Security-Policy")
+	assert.NotEqual(t, first, second)
+}
+
+// The token lands in an HTML attribute, which is where an injection would show up if any of this page
+// were built by concatenation rather than by html/template.
+func TestTheResetPageEscapesTheToken(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	page := api.call(http.MethodGet, `/reset?token="><script>alert(1)</script>`, nil)
+
+	require.Equal(t, http.StatusOK, page.Code)
+	assert.NotContains(t, page.String(), "<script>alert(1)</script>",
+		"user-supplied text must never reach the page as markup (CLAUDE.md rule 9)")
+}
+
+// M5's done-when #2, at the HTTP level.
+func TestResetRequestAnswersIdenticallyForAnyAddress(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+
+	known := api.call(http.MethodPost, "/api/v1/auth/password/reset/request",
+		map[string]string{"email": "ada@example.com"})
+	unknown := api.call(http.MethodPost, "/api/v1/auth/password/reset/request",
+		map[string]string{"email": "nobody@example.com"})
+
+	require.Equal(t, http.StatusAccepted, known.Code, known)
+	require.Equal(t, http.StatusAccepted, unknown.Code, unknown)
+	assert.Equal(t, known.Body, unknown.Body, "the two responses must be byte-identical")
+	assert.Empty(t, known.Body, "202 carries no body to differ in")
+}
+
+func TestResetConfirmIsSingleUseOverHTTP(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+	acct := api.newAccount("ada", "ada@example.com", "laptop")
+
+	token := api.issueResetToken(t, "ada@example.com")
+
+	const newPassword = "a completely different passphrase"
+	first := api.call(http.MethodPost, "/api/v1/auth/password/reset",
+		map[string]string{"token": token, "new_password": newPassword})
+	require.Equal(t, http.StatusNoContent, first.Code, first)
+
+	second := api.call(http.MethodPost, "/api/v1/auth/password/reset",
+		map[string]string{"token": token, "new_password": "yet another passphrase"})
+	unknown := api.call(http.MethodPost, "/api/v1/auth/password/reset",
+		map[string]string{"token": "nrp_" + strings.Repeat("A", 43), "new_password": "yet another passphrase"})
+
+	require.Equal(t, http.StatusUnauthorized, second.Code, second)
+	require.Equal(t, http.StatusUnauthorized, unknown.Code, unknown)
+
+	a, b := second.errorBody(), unknown.errorBody()
+	a.RequestID, b.RequestID = "", ""
+	assert.Equal(t, b, a, "a spent token and an invented one must be reported identically")
+
+	// The old session is gone, and the new password works.
+	stale := api.call(http.MethodPost, "/api/v1/auth/refresh",
+		map[string]string{"refresh_token": acct.Tokens.RefreshToken})
+	assert.Equal(t, http.StatusUnauthorized, stale.Code, "a reset must sign every device out")
+
+	login := api.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": "ada@example.com", "password": newPassword, "device_id": "laptop",
+	})
+	assert.Equal(t, http.StatusOK, login.Code, login)
+}
+
+// The whole point of the HTML surface: someone with only a browser can complete a reset.
+func TestResetCompletesThroughTheHTMLForm(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+
+	token := api.issueResetToken(t, "ada@example.com")
+
+	form := url.Values{"token": {token}, "password": {"a passphrase from the form"}}
+	resp := api.call(http.MethodPost, "/reset", form.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	require.Equal(t, http.StatusOK, resp.Code, resp)
+	assert.Contains(t, resp.String(), "password has been changed")
+	assert.Contains(t, resp.String(), "API tokens", "the page must say what the reset cost")
+
+	login := api.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": "ada@example.com", "password": "a passphrase from the form", "device_id": "laptop",
+	})
+	assert.Equal(t, http.StatusOK, login.Code, login)
+}
+
+func TestResetFormRejectsABadTokenWithoutDetail(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	form := url.Values{"token": {"nrp_" + strings.Repeat("A", 43)}, "password": {"a valid passphrase"}}
+	resp := api.call(http.MethodPost, "/reset", form.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	require.Equal(t, http.StatusBadRequest, resp.Code)
+	assert.Contains(t, resp.String(), "no longer valid")
+	assert.NotContains(t, resp.String(), "expired", "expired, spent and unknown must not be distinguishable")
+	assert.NotContains(t, resp.String(), "already used")
+}
+
+// An instance with no relay says so rather than accepting a request it cannot fulfill. The answer does not
+// depend on the address, so it discloses nothing about who has an account.
+func TestResetIsRefusedWhenTheInstanceHasNoRelay(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+
+	for _, email := range []string{"ada@example.com", "nobody@example.com"} {
+		resp := api.call(http.MethodPost, "/api/v1/auth/password/reset/request",
+			map[string]string{"email": email})
+
+		require.Equal(t, http.StatusServiceUnavailable, resp.Code, resp)
+		assert.Equal(t, "reset_unavailable", resp.errorBody().Code)
+	}
+}
+
+// The reset pages are mounted at the instance root, which put them outside the /auth group and so outside
+// its stricter bucket. POST /reset spends a reset token and changes a password; the base limit alone let it
+// run at hundreds of attempts a minute, and the roadmap asks for rate-limiting on the confirm endpoint
+// specifically.
+func TestTheResetPagesCarryTheStricterRateLimit(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	form := url.Values{"token": {"nrp_" + strings.Repeat("A", 43)}, "password": {"a valid passphrase"}}.Encode()
+
+	var throttled *response
+	for i := 0; i < 40; i++ {
+		resp := api.call(http.MethodPost, "/reset", form,
+			withHeader("Content-Type", "application/x-www-form-urlencoded"), fromIP("203.0.113.99"))
+		if resp.Code == http.StatusTooManyRequests {
+			throttled = resp
+			break
+		}
+	}
+
+	require.NotNil(t, throttled,
+		"POST /reset must be throttled by the auth bucket (%s), not only by the base limit", authRateLimit)
+	assert.NotEmpty(t, throttled.Header.Get("Retry-After"))
 }

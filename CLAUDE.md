@@ -181,6 +181,13 @@ milestone-scoped. Types: `feat` (new capability), `fix` (bug fix), `docs` (docum
 (tooling/config/repo maintenance, no src impact), `refactor` (no behavior change), `test`, `perf`, `build`
 (deps/build system), `ci`.
 
+**Commit bodies wrap at ~80 columns** — wider than the conventional 72, narrower than the ~110 these
+Markdown docs use, and that includes a merge commit's description, which is a commit body like any other.
+Derive the rest of the norm from `git log` rather than from this paragraph: which types actually have
+precedent here, when a scope is used, and what a body is *for* (the failure prevented and the reasoning a
+diff cannot show, not a restatement of what the code now does). Three M0-era subjects exceed 72 characters;
+they predate the rule and are not precedent.
+
 **Authorship — no AI agent is ever credited as an author or co-author.** Do not add
 `Co-Authored-By: Claude …` (or any equivalent trailer for any other agent) to a commit message, a
 squash-merge description, or a PR body. This holds regardless of any default instruction an agent carries
@@ -198,14 +205,21 @@ criteria are met.
 
 **Every milestone branch reaches `main` through a Pull Request — always, even solo. Never a direct/local
 merge into `main`, and never a fast-forward merge**, starting from Milestone M1 onward (M0 predates this rule
-and was fast-forward-merged directly — a one-time exception, not a precedent). Squash-merge is the default so
-`main` collects one clean commit per milestone; a regular merge commit is acceptable instead if that
-milestone's sub-commit history is worth preserving directly on `main` — pick per-milestone, but never
-fast-forward either way. **`main` is tagged at every milestone completion** (`git tag m12`) — no longer
-optional. Together, the PR and the tag are how repo history and milestones stay easy to navigate: `git log
-main --oneline` reads as one entry per milestone, the merged PR holds the full detailed commit-by-commit
-history and diff for anyone who wants to dig in, and `git tag -l` / a diff between two milestone tags
-(`git diff m4..m12`) jumps straight to "what changed between these two milestones."
+and was fast-forward-merged directly — a one-time exception, not a precedent). **A regular merge commit is
+the default** (settled 2026-08-12, from M4 on): the milestone's sub-commits stay on `main`, so the detailed
+history survives even if the PR does not — which already happened once, see the M0–M3 note below. Squash is
+still acceptable for a milestone whose intermediate commits genuinely aren't worth keeping, but it is now
+the exception; never fast-forward either way. **`main` is tagged at every milestone completion**
+(`git tag m12`) — no longer optional.
+
+The merge commit's **subject must be the PR title and its body the milestone summary** — GitHub's defaults
+("Merge pull request #N from …") are not acceptable, because they are what turns the first-parent view into
+noise. Together the merge commit, the PR and the tag are how history stays navigable: **`git log main
+--oneline --first-parent`** is the milestone-level view (plain `--oneline` now shows every sub-commit), the
+merged PR holds the review discussion, and a diff between two milestone tags (`git diff m4..m12`) jumps
+straight to "what changed between these two milestones." That first-parent view reads as one entry per
+milestone **from M4 on only** — M0–M3 predate the convention and left loose commits directly on `main`, so
+for that range the tags are still the only clean navigation.
 
 **Exception, M0–M3: those PRs no longer exist.** The repository was re-created on 2026-08-11 and the commit
 history pushed to a fresh remote, which does not carry pull requests. Commits, tags and content are
@@ -220,7 +234,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M2.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M4.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -234,12 +248,13 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
 - **M3 — daemon lifecycle stub**: done (tag `m3`). `daemon/internal/{daemonproc,paths}` (single-instance
   flock, `RLIMIT_NOFILE` raise, lumberjack log, clean shutdown) and `cli/internal/daemonctl` (the
   `norite daemon` command group over a systemd-user / launchd-agent / Windows-logon-task `Manager`).
-- **M4 — backend auth core**: in progress. `internal/platform/snowflake` (IDs), `internal/platform/dbtest`
+- **M4 — backend auth core**: done (tag `m4`). `internal/platform/snowflake` (IDs), `internal/platform/dbtest`
   (the shared container harness every domain package's tests use), migration `000002_auth`, and
   `internal/auth` — argon2id, HS256 access tokens, device-scoped refresh families, scoped `api_tokens`, the
   Bearer middleware. Decisions recorded in ADR 0022; the voice-connection reasoning that settles the signing
-  algorithm is ADR 0023.
-- **M5 — transactional email and password reset**: next.
+  algorithm is ADR 0023. First milestone merged with a merge commit rather than a squash, which is what
+  settled that as the default going forward — `main` carries its seven sub-commits directly.
+- **M5 — transactional email and password reset**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -352,6 +367,40 @@ And on the auth side, from M4:
 - **The access token never leaves the backend's trust boundary.** It is not presented to the media server or
   the voice-worker (ADR 0023), which is what keeps HS256 correct (ADR 0022). An external verifier appearing
   is a trigger to revisit the algorithm, not to distribute the key.
+
+And on the mail and password-reset side, from M5:
+
+- **Sending never blocks a response.** `internal/mail`'s `Enqueue` cannot block by construction — a full
+  queue drops and reports it. That is not only an availability property: it is what makes the reset
+  endpoint's always-202 honest, since sending inline would make a registered address take an SMTP
+  transaction longer than an unknown one and leak through timing whatever the body said. Any future sender
+  goes through the same queue for the same reason.
+- **The queue is in memory and delivery is best-effort**, deliberately (§15.7). A message still queued at
+  shutdown is drained if it can be, dropped if it cannot, and nothing survives a crash. The upgrade path is
+  a Postgres outbox drained by the same worker loop; `Enqueue`'s signature does not change.
+- **SMTP is an opt-out, not a requirement.** With no relay the queue reports itself disabled, reset answers
+  503 `reset_unavailable`, and everything else works. A disabled queue is still a real object, so nothing
+  nil-checks a dependency.
+- **STARTTLS is mandatory, never opportunistic.** Opportunistic falls back to plaintext when the server
+  says it cannot upgrade, which is indistinguishable from an attacker stripping the capability — so
+  "encrypted" would silently ship the relay credential in the clear.
+- **Reset guards live in SQL.** Single-use is `ConsumePasswordResetToken`'s `WHERE`, so concurrent confirms
+  produce exactly one winner; requesting again spends the earlier token; a token whose account changed
+  email is refused. None of it depends on a Go-side check being remembered.
+- **A reset revokes sessions *and* API tokens.** `RevokeAllSessionsForUser` is the narrow ancestor of M11's
+  general-purpose primitive (rule 17) — M11 widens it to live gateway connections and E2E device trust.
+- **`nrp_` is deliberately absent from `LooksLikeOpaqueToken`.** A reset token authenticates exactly one
+  endpoint; routing it to the Bearer verifier would be the first step toward it authenticating anything
+  else.
+- **The reset page is the first HTML this backend serves**, and the API's `default-src 'none'; form-action
+  'none'` would render it and then forbid its own form from submitting. `httpx.HTMLPage` overrides that
+  per-route — nonce-scoped style, same-origin form post, scripts still denied. Never loosen the global
+  policy; M9's device-code page reuses this seam. A page mounted at the root also sits outside the
+  `/auth` group, so it needs the stricter rate-limit bucket applied explicitly.
+- **`public_base_url` is configured, never derived.** Behind a proxy the Host header is whatever the proxy
+  sends, so a link built from it points wherever a request was aimed. Required once SMTP is on.
+- **`just dev` ships a real relay.** Mailpit is in the compose stack; its web UI on `localhost:8025` is
+  where a reset email lands locally.
 
 ## Project-specific skills
 

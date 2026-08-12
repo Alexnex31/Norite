@@ -1,10 +1,13 @@
 package auth
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -540,4 +543,56 @@ func TestReuseDetectionStillFiresForAGenuinelyRotatedToken(t *testing.T) {
 
 	_, err = svc.Refresh(ctx, first.RefreshToken)
 	assert.ErrorIs(t, err, ErrSessionReuse, "narrowing reuse detection must not switch it off")
+}
+
+// A whitespace-only name passes the handler's `required` tag and is only empty after trimming, so the
+// service is what rejects it. It used to do so by wrapping ErrUnknownScope, and writeErr renders these
+// straight to the client — producing "unknown scope: a token name is required" for a request whose scopes
+// were fine.
+func TestMintRejectsABadNameWithoutBlamingScopes(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	for name, input := range map[string]string{
+		"whitespace only": "   ",
+		"empty":           "",
+		"too long":        strings.Repeat("a", MaxAPITokenNameLength+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := svc.MintAPIToken(t.Context(), snowflake.ID(user.ID), MintAPITokenInput{
+				Name:   input,
+				Scopes: []Scope{ScopeIdentify},
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrInvalidTokenName)
+			assert.NotErrorIs(t, err, ErrUnknownScope, "a name problem must not be reported as a scope problem")
+			assert.NotContains(t, err.Error(), "scope")
+		})
+	}
+}
+
+// Mapping every unique violation that was not a username to ErrEmailTaken meant a users_pkey collision —
+// what a snowflake generator re-issuing an ID looks like — was reported as "that email is already
+// registered", sending an operator to inspect a mailbox instead of ID generation.
+//
+// Unit-tested against synthetic pg errors rather than by provoking a real collision: forcing the generator
+// to re-issue an ID would mean predicting its next value, which is timing-dependent and would make this a
+// flaky test of the wrong thing.
+func TestRegisterConflictOnlyNamesConstraintsItUnderstands(t *testing.T) {
+	violation := func(constraint string) error {
+		return &pgconn.PgError{Code: pgerrcode.UniqueViolation, ConstraintName: constraint}
+	}
+
+	assert.ErrorIs(t, registerConflict(violation("users_username_key")), ErrUsernameTaken)
+	assert.ErrorIs(t, registerConflict(violation("users_email_key")), ErrEmailTaken)
+
+	// The ones that must NOT be dressed up as a conflict the user can act on.
+	for _, constraint := range []string{"users_pkey", "sessions_user_id_fkey", "unknown", ""} {
+		assert.Nil(t, registerConflict(violation(constraint)),
+			"%q is not an email or username conflict and must reach the caller as a 500", constraint)
+	}
+
+	// A non-unique-violation error is never a conflict either.
+	assert.Nil(t, registerConflict(errors.New("connection reset")))
+	assert.Nil(t, registerConflict(nil))
 }

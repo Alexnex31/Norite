@@ -273,6 +273,7 @@ func TestSystemdCarriesXDGStateHomeIntoTheUnit(t *testing.T) {
 func TestWindowsStatusDistinguishesAFailedQueryFromAnAbsentTask(t *testing.T) {
 	r := newFakeRunner()
 	r.respond(queryLine, Result{ExitCode: 1, Stderr: "ERROR: Access is denied."})
+	r.respond(listLine, taskListed())
 	w := &windowsTask{run: r}
 
 	_, err := w.Status(t.Context())

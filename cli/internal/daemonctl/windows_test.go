@@ -24,6 +24,18 @@ func taskMissing() Result {
 	return Result{ExitCode: 1, Stderr: "ERROR: The system cannot find the file specified."}
 }
 
+// The locale-independent existence check. schtasks translates its messages and its column headers but
+// never a task name, so listing is what "is it registered" is actually decided by.
+var listLine = "schtasks /Query /FO CSV /NH"
+
+func taskListed() Result {
+	return Result{ExitCode: 0, Stdout: `"\` + windowsTaskName + `","N/A","Ready"` + "\r\n"}
+}
+
+func taskNotListed() Result {
+	return Result{ExitCode: 0, Stdout: `"\Microsoft\Windows\Defrag\ScheduledDefrag","N/A","Ready"` + "\r\n"}
+}
+
 func TestWindowsInstallCreatesALogonTask(t *testing.T) {
 	r := newFakeRunner()
 	w := &windowsTask{run: r}
@@ -73,6 +85,7 @@ func TestWindowsUninstallDeletesTheTask(t *testing.T) {
 func TestWindowsUninstallSucceedsWhenTheTaskIsAbsent(t *testing.T) {
 	r := newFakeRunner()
 	r.respond("schtasks /Delete", taskMissing())
+	r.respond(listLine, taskNotListed())
 	w := &windowsTask{run: r}
 
 	// Uninstall's contract is that the task is gone afterwards, and it already is.
@@ -84,14 +97,16 @@ func TestWindowsUninstallSucceedsWhenTheTaskIsAbsent(t *testing.T) {
 func TestWindowsUninstallSurfacesARealFailure(t *testing.T) {
 	r := newFakeRunner()
 	r.respond("schtasks /Delete", Result{ExitCode: 1, Stderr: "ERROR: Access is denied."})
+	r.respond(listLine, taskListed())
 	w := &windowsTask{run: r}
 
 	err := w.Uninstall(t.Context())
 	if err == nil {
 		t.Fatal("Uninstall succeeded despite schtasks reporting access denied")
 	}
-	// Only "cannot find" is treated as already-done. Anything else is a real failure and must not be
-	// silently swallowed into a success, or an uninstall that did nothing would report that it worked.
+	// Only a task that is genuinely absent counts as already-done, and the listing is what decides that.
+	// Anything else is a real failure and must not be swallowed into a success, or an uninstall that did
+	// nothing would report that it worked.
 	if !strings.Contains(err.Error(), "Access is denied") {
 		t.Errorf("the error drops the reason: %v", err)
 	}
@@ -100,6 +115,7 @@ func TestWindowsUninstallSurfacesARealFailure(t *testing.T) {
 func TestWindowsStartAndStopRefuseWhenNotInstalled(t *testing.T) {
 	r := newFakeRunner()
 	r.respond(queryLine, taskMissing())
+	r.respond(listLine, taskNotListed())
 	w := &windowsTask{run: r}
 
 	if err := w.Start(t.Context()); !errors.Is(err, ErrNotInstalled) {
@@ -127,6 +143,7 @@ func TestWindowsStopToleratesAnAlreadyStoppedTask(t *testing.T) {
 	r := newFakeRunner()
 	r.respond(queryLine, taskExists())
 	r.respond("schtasks /End", Result{ExitCode: 1, Stderr: "ERROR: The system cannot find the file specified."})
+	r.respond(listLine, taskListed())
 	w := &windowsTask{run: r}
 
 	// Stopping something already stopped is a success by Manager's contract — scripts run stop before
@@ -175,7 +192,8 @@ func TestTaskStatusFieldParsing(t *testing.T) {
 		{"LF output", "Status: Running\n", "Running"},
 		{"case-insensitive key", "STATUS: Ready", "Ready"},
 		// A localized Windows names the key in its own language. Degrading to "" — which the caller shows
-		// as "unknown" — is the honest outcome; the Installed flag comes from the exit code and stays right.
+		// as "unknown" — is the honest outcome, and Installed stays correct regardless because it comes
+		// from the task listing rather than from any translated text.
 		{"localized key", "Statut:        Prêt", ""},
 		{"no status line", "TaskName: \\X", ""},
 	}
@@ -185,6 +203,61 @@ func TestTaskStatusFieldParsing(t *testing.T) {
 				t.Errorf("taskStatusField(%q) = %q, want %q", tc.out, got, tc.want)
 			}
 		})
+	}
+}
+
+// The bug this replaced: "task is absent" was decided by matching the English string "CANNOT FIND", so on
+// a localized Windows every absent-task path broke at once — `norite daemon status` exited 1 instead of the
+// documented 2, Start and Stop reported a spurious error instead of ErrNotInstalled, and Uninstall and Stop
+// lost the idempotence Manager promises.
+//
+// Each case below is a real schtasks "not found" message in another language. None of them contains
+// "cannot find", and none of them needs to: absence is decided by the task listing.
+func TestWindowsAbsentTaskIsDetectedInAnyLocale(t *testing.T) {
+	localized := map[string]string{
+		"french":   "ERREUR: Le système ne trouve pas le fichier spécifié.",
+		"german":   "FEHLER: Das System kann die angegebene Datei nicht finden.",
+		"spanish":  "ERROR: El sistema no puede encontrar el archivo especificado.",
+		"japanese": "エラー: 指定されたファイルが見つかりません。",
+		"russian":  "ОШИБКА: Не удается найти указанный файл.",
+	}
+
+	for name, message := range localized {
+		t.Run(name, func(t *testing.T) {
+			r := newFakeRunner()
+			r.respond(queryLine, Result{ExitCode: 1, Stderr: message})
+			r.respond(listLine, taskNotListed())
+			w := &windowsTask{run: r}
+
+			state, err := w.Status(t.Context())
+			if err != nil {
+				t.Fatalf("Status: %v", err)
+			}
+			if state.Installed {
+				t.Error("an absent task was reported as installed")
+			}
+
+			// The exit codes the CLI documents hang off this, and so does Stop's idempotence.
+			if err := w.Start(t.Context()); !errors.Is(err, ErrNotInstalled) {
+				t.Errorf("Start returned %v, want ErrNotInstalled", err)
+			}
+			if err := w.Stop(t.Context()); !errors.Is(err, ErrNotInstalled) {
+				t.Errorf("Stop returned %v, want ErrNotInstalled", err)
+			}
+		})
+	}
+}
+
+// The other half of the same decision: a real failure must stay a failure in every locale too, rather than
+// being downgraded to "not installed" because the message could not be parsed.
+func TestWindowsLocalizedFailureOnAnExistingTaskIsStillAnError(t *testing.T) {
+	r := newFakeRunner()
+	r.respond(queryLine, Result{ExitCode: 1, Stderr: "FEHLER: Zugriff verweigert."})
+	r.respond(listLine, taskListed())
+	w := &windowsTask{run: r}
+
+	if _, err := w.Status(t.Context()); err == nil {
+		t.Fatal("a permissions failure on an existing task was reported as not installed")
 	}
 }
 

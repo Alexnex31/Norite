@@ -37,6 +37,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -139,11 +140,31 @@ func run() error {
 		return err
 	}
 
+	// The mail queue exists whether or not SMTP is configured: with no relay it reports itself disabled
+	// and refuses politely, so nothing downstream has to nil-check it (ADR 0020 — an instance without a
+	// relay is a working instance, with password reset simply unavailable).
+	mailer, err := newMailQueue(cfg, logger)
+	if err != nil {
+		logger.Error().Err(err).Msg("the configured SMTP relay is unusable")
+		return err
+	}
+	defer func() {
+		// Drained after the HTTP server has stopped, so nothing new is queued while this runs. Bounded by
+		// the same shutdown timeout as everything else: a wedged relay must not hold the process open.
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := mailer.Shutdown(ctx); err != nil {
+			logger.Warn().Err(err).Msg("mail queue did not drain before the shutdown deadline")
+		}
+	}()
+
 	authService, err := auth.NewService(auth.ServiceOptions{
 		Pool:             pool,
 		IDs:              ids,
 		Issuer:           issuer,
 		RegistrationMode: auth.RegistrationMode(cfg.RegistrationMode),
+		Mailer:           mailer,
+		PublicBaseURL:    cfg.PublicBaseURL,
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("could not initialize the auth service")
@@ -216,6 +237,41 @@ func run() error {
 	shutdown(srv, cfg.ShutdownTimeout, &logger)
 	logger.Info().Msg("norite backend stopped")
 	return nil
+}
+
+// newMailQueue builds the outbound mail queue from configuration.
+//
+// A disabled queue is returned as a real object rather than nil, so callers ask Enabled() instead of
+// nil-checking a dependency — the difference between "this instance cannot send mail" and "someone forgot
+// to wire the mailer" stays visible.
+func newMailQueue(cfg config.Config, logger zerolog.Logger) (*mail.Queue, error) {
+	if !cfg.SMTPEnabled {
+		logger.Info().Msg("SMTP is not configured — password reset is unavailable on this instance")
+		return mail.NewQueue(mail.Options{Logger: logger}), nil
+	}
+
+	sender, err := mail.NewSMTPSender(mail.SMTPOptions{
+		Host:        cfg.SMTPHost,
+		Port:        cfg.SMTPPort,
+		Username:    cfg.SMTPUsername,
+		Password:    cfg.SMTPPassword,
+		Encryption:  mail.Encryption(cfg.SMTPEncryption),
+		FromAddress: cfg.SMTPFromAddress,
+		FromName:    cfg.SMTPFromName,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Host, port and mode only. The username is an identity and the password is a credential, and neither
+	// belongs in a log line (CLAUDE.md rule 8).
+	logger.Info().
+		Str("host", cfg.SMTPHost).
+		Int("port", cfg.SMTPPort).
+		Str("encryption", cfg.SMTPEncryption).
+		Msg("outbound email enabled")
+
+	return mail.NewQueue(mail.Options{Sender: sender, Logger: logger}), nil
 }
 
 // shutdown drains in-flight requests, giving up after timeout.

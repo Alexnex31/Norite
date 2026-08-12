@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -39,6 +40,8 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/login", h.login)
 	r.Post("/refresh", h.refresh)
 	r.Post("/logout", h.logout)
+	r.Post("/password/reset/request", h.requestPasswordReset)
+	r.Post("/password/reset", h.confirmPasswordReset)
 
 	// Authenticated.
 	r.Group(func(r chi.Router) {
@@ -64,7 +67,10 @@ func (h *Handler) UserRoutes(r chi.Router) {
 // ---------- request payloads ----------
 
 type registerRequest struct {
-	Username    string `json:"username" validate:"required,min=2,max=32,excludesall= "`
+	// Bounds only. What a username may *contain* is decided by auth.ValidUsername, after normalization —
+	// see username.go. The tag's old `excludesall= ` excluded exactly one character and read as though it
+	// were a charset rule.
+	Username    string `json:"username" validate:"required,min=2,max=64"`
 	Email       string `json:"email" validate:"required,email,max=254"`
 	Password    string `json:"password" validate:"required"`
 	DisplayName string `json:"display_name" validate:"omitempty,max=64"`
@@ -85,6 +91,15 @@ type refreshRequest struct {
 
 type logoutRequest struct {
 	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+type passwordResetRequest struct {
+	Email string `json:"email" validate:"required,email,max=254"`
+}
+
+type passwordResetConfirmRequest struct {
+	Token       string `json:"token" validate:"required"`
+	NewPassword string `json:"new_password" validate:"required"`
 }
 
 type mintTokenRequest struct {
@@ -251,6 +266,42 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, r, http.StatusNoContent, nil)
 }
 
+// requestPasswordReset always answers 202, whether or not the address belongs to an account.
+//
+// 202 rather than 200 because it is literally accurate — the mail is queued, not sent — and because a
+// status that says "accepted for processing" is the honest way to describe an endpoint that deliberately
+// declines to tell you what it found.
+func (h *Handler) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req passwordResetRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	if err := h.svc.RequestPasswordReset(r.Context(), req.Email); err != nil {
+		// ErrResetUnavailable is the one failure worth reporting: it does not depend on the address, so it
+		// discloses nothing, and an operator with no relay configured has not chosen for reset to fail
+		// silently. Everything else is a server fault and must not change the answer either way.
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusAccepted, nil)
+}
+
+func (h *Handler) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req passwordResetConfirmRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	if err := h.svc.ConfirmPasswordReset(r.Context(), req.Token, req.NewPassword); err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	// 204: the caller now signs in with the new password, and there is nothing to hand back — every
+	// credential the account had was just revoked.
+	httpx.WriteJSON(w, r, http.StatusNoContent, nil)
+}
+
 func (h *Handler) currentUser(w http.ResponseWriter, r *http.Request) {
 	actor, _ := ActorFrom(r.Context())
 
@@ -375,8 +426,30 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUsernameTaken):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
 
-	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong), errors.Is(err, ErrUnknownScope):
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The client gave up — most often while queued for an argon2id slot, which is the gate working as
+		// designed rather than a fault. Logging these at ERROR and answering 500 turned an ordinary login
+		// burst into a stream of alarming lines about a server that was fine. Nobody is left to read the
+		// response, so its only job is not to lie about whose problem this was.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnavailable, "the server is busy; retry shortly"))
+
+	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong),
+		errors.Is(err, ErrUnknownScope), errors.Is(err, ErrInvalidUsername),
+		errors.Is(err, ErrInvalidTokenName):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
+
+	case errors.Is(err, ErrInvalidResetToken):
+		// One answer for expired, spent, unknown, and issued-to-a-since-changed-address. Distinguishing
+		// them tells whoever holds a stolen link which of those it is.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid or expired password reset token"))
+
+	case errors.Is(err, ErrResetUnavailable):
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusServiceUnavailable,
+			Code:    "reset_unavailable",
+			Message: "password reset is unavailable: this instance has no email relay configured",
+			Err:     err,
+		})
 
 	case errors.Is(err, ErrNotFound):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrNotFound, "not found"))

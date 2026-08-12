@@ -42,6 +42,8 @@ const authRateLimit = "20-M"
 //
 // The chain order is fixed by docs/architecture.md §2 and is load-bearing rather than stylistic:
 //
+//	SanitizeInboundRequestID → decides whether the client's own X-Request-Id may be adopted, before
+//	             anything downstream treats it as trusted.
 //	RequestID  → every later layer, and every log line, can reference the same correlation ID.
 //	EchoRequestID → returns that ID to the client so it can quote it in a report.
 //	RealIP     → conditional; see below.
@@ -70,6 +72,9 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 
 	r := chi.NewRouter()
 
+	// Above RequestID, because that middleware adopts an inbound X-Request-Id verbatim and the value ends
+	// up in the response, the logs, and every error body. See httpx.SanitizeInboundRequestID.
+	r.Use(httpx.SanitizeInboundRequestID(opts.Config.TrustProxyHeaders))
 	r.Use(middleware.RequestID)
 	r.Use(httpx.EchoRequestID)
 
@@ -113,6 +118,25 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 		}
 		httpx.WriteError(w, req, httpx.ErrMethodNotAllowed)
 	})
+
+	// The server-rendered password-reset pages, outside the versioned API prefix: a person opens these
+	// from an email, they are not an API a client codegens against, and putting them under /api/v1 would
+	// imply they move when that version does.
+	//
+	// httpx.HTMLPage overrides the JSON API's CSP for these two routes only. The global policy is
+	// `default-src 'none'; form-action 'none'`, which would render the page and then silently forbid its
+	// form from submitting anywhere — see that middleware for what it grants and what it still denies.
+	if opts.Auth != nil {
+		r.Group(func(r chi.Router) {
+			// The same stricter bucket the /auth/* routes carry, and for the same reason: POST /reset is a
+			// credential-changing endpoint, and it is one of only two ways to spend a reset token. Being
+			// mounted at the root rather than inside /api/v1 put it outside that group by accident — the
+			// base limit alone let it run at hundreds of attempts a minute.
+			r.Use(authLimiter)
+			r.Use(httpx.HTMLPage)
+			opts.Auth.PageRoutes(r)
+		})
+	}
 
 	r.Route(apiBase, func(r chi.Router) {
 		// Authenticate resolves a Bearer credential into an actor for every request below this point. It

@@ -21,6 +21,16 @@ type ApiToken struct {
 	RevokedAt  pgtype.Timestamptz
 }
 
+type PasswordResetToken struct {
+	ID        int64
+	UserID    int64
+	TokenHash []byte
+	SentTo    string
+	CreatedAt pgtype.Timestamptz
+	ExpiresAt pgtype.Timestamptz
+	UsedAt    pgtype.Timestamptz
+}
+
 type Session struct {
 	ID               int64
 	UserID           int64

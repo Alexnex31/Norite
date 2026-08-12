@@ -51,6 +51,17 @@ type Document struct {
 	ACMEDomain  string
 	ACMEEmail   string
 
+	PublicBaseURL string
+
+	SMTPEnabled     bool
+	SMTPHost        string
+	SMTPPort        int
+	SMTPUsername    string
+	SMTPPassword    string
+	SMTPEncryption  string
+	SMTPFromAddress string
+	SMTPFromName    string
+
 	RegistrationMode string
 
 	// JWTSecret signs the instance's access tokens. Generated, never prompted for — see wizard.go.
@@ -103,6 +114,13 @@ env = {{ .Env | toml }}
 [http]
 # Address the backend listens on.
 listen_addr = {{ .ListenAddr | toml }}
+{{- if .PublicBaseURL }}
+
+# The origin users reach this instance on. Used to build links in outbound email, and configured rather
+# than derived: behind a proxy the Host header is whatever the proxy sends, so a link built from it would
+# point wherever a request was aimed.
+public_base_url = {{ .PublicBaseURL | toml }}
+{{- end }}
 
 [database]
 # Postgres connection string. Carries the password — see the 0600 note above.
@@ -144,6 +162,30 @@ enabled = {{ .ACMEEnabled }}
 # The hostname a certificate is issued for, and where the CA sends expiry notices.
 domain = {{ .ACMEDomain | toml }}
 email = {{ .ACMEEmail | toml }}
+{{- end }}
+
+[smtp]
+# Outbound email. Off means password reset is unavailable and the instance still runs normally — this is
+# an opt-out, not a half-configured state.
+enabled = {{ .SMTPEnabled }}
+{{- if .SMTPEnabled }}
+
+# The relay. 587 is submission; 25 is server-to-server relay and blocked outbound by most providers.
+host = {{ .SMTPHost | toml }}
+port = {{ .SMTPPort }}
+
+# Credentials for the relay, both optional — an internal relay that accepts mail from its own network
+# needs neither. Treat the password exactly like the database password above.
+username = {{ .SMTPUsername | toml }}
+password = {{ .SMTPPassword | toml }}
+
+# "starttls" (the usual submission shape), "tls" (implicit TLS, usually port 465), or "none". Never
+# "none" across a real network: it hands this credential to anyone on the path.
+encryption = {{ .SMTPEncryption | toml }}
+
+# The envelope sender, and the display name beside it.
+from_address = {{ .SMTPFromAddress | toml }}
+from_name = {{ .SMTPFromName | toml }}
 {{- end }}
 
 [registration]

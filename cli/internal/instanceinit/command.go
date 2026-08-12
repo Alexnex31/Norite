@@ -15,6 +15,10 @@ import (
 // path worth pointing people at.
 const dbPasswordEnvVar = "NORITE_DB_PASSWORD"
 
+// smtpPasswordEnvVar is the SMTP relay credential's preferred source, for the same reason as the database
+// password above: a flag value is visible in the process list to every user on the machine.
+const smtpPasswordEnvVar = "NORITE_SMTP_PASSWORD"
+
 // Command builds the `norite instance init` command.
 func Command() *cli.Command {
 	return &cli.Command{
@@ -89,6 +93,26 @@ func Command() *cli.Command {
 			&cli.StringFlag{Name: "acme-domain", Usage: "public `HOSTNAME` to obtain a certificate for"},
 			&cli.StringFlag{Name: "acme-email", Usage: "contact `EMAIL` for certificate expiry notices"},
 
+			&cli.StringFlag{
+				Name:  "public-base-url",
+				Usage: "the `URL` users reach this instance on; reset links are built from it",
+			},
+
+			&cli.BoolFlag{Name: "smtp", Usage: "send email through an SMTP relay (password reset needs one)"},
+			&cli.StringFlag{Name: "smtp-host", Usage: "SMTP relay `HOST`"},
+			&cli.StringFlag{Name: "smtp-port", Usage: "SMTP relay `PORT` (default 587, the submission port)"},
+			&cli.StringFlag{Name: "smtp-username", Usage: "SMTP `USERNAME`; empty for a relay needing no auth"},
+			&cli.StringFlag{
+				Name: "smtp-password",
+				// Same reasoning as --db-password: a flag value is visible in the process list to every
+				// other user on the machine, so the environment variable is the one to prefer.
+				Usage:   "SMTP `PASSWORD` — prefer " + smtpPasswordEnvVar,
+				Sources: cli.EnvVars(smtpPasswordEnvVar),
+			},
+			&cli.StringFlag{Name: "smtp-encryption", Usage: "relay connection `MODE`: starttls, tls, or none"},
+			&cli.StringFlag{Name: "smtp-from-address", Usage: "envelope sender `ADDRESS` for outbound email"},
+			&cli.StringFlag{Name: "smtp-from-name", Usage: "display `NAME` shown beside the sender address"},
+
 			&cli.StringFlag{Name: "registration", Usage: "registration `POLICY`: open or invite"},
 		},
 		Action: func(_ context.Context, cmd *cli.Command) error {
@@ -121,6 +145,15 @@ func Command() *cli.Command {
 				ACMEDomain: cmd.String("acme-domain"),
 				ACMEEmail:  cmd.String("acme-email"),
 
+				PublicBaseURL:   cmd.String("public-base-url"),
+				SMTPHost:        cmd.String("smtp-host"),
+				SMTPPort:        cmd.String("smtp-port"),
+				SMTPUsername:    cmd.String("smtp-username"),
+				SMTPPassword:    cmd.String("smtp-password"),
+				SMTPEncryption:  cmd.String("smtp-encryption"),
+				SMTPFromAddress: cmd.String("smtp-from-address"),
+				SMTPFromName:    cmd.String("smtp-from-name"),
+
 				Registration: cmd.String("registration"),
 			}
 
@@ -133,6 +166,10 @@ func Command() *cli.Command {
 			if cmd.IsSet("s3-force-path-style") {
 				v := cmd.Bool("s3-force-path-style")
 				opts.S3ForcePathStyle = &v
+			}
+			if cmd.IsSet("smtp") {
+				v := cmd.Bool("smtp")
+				opts.SMTP = &v
 			}
 
 			return Run(opts, os.Stdin, cmd.Writer)

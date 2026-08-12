@@ -55,6 +55,17 @@ type Options struct {
 	ACMEDomain string
 	ACMEEmail  string
 
+	PublicBaseURL string
+
+	SMTP            *bool
+	SMTPHost        string
+	SMTPPort        string
+	SMTPUsername    string
+	SMTPPassword    string
+	SMTPEncryption  string
+	SMTPFromAddress string
+	SMTPFromName    string
+
 	Registration string
 }
 
@@ -140,6 +151,11 @@ func gather(p *prompter, opts Options) (Document, error) {
 			return Document{}, err
 		}
 	}
+	if opts.Full || (opts.SMTP != nil && *opts.SMTP) {
+		if err := gatherSMTP(p, opts, &doc); err != nil {
+			return Document{}, err
+		}
+	}
 	if opts.Full || (opts.ACME != nil && *opts.ACME) {
 		if err := gatherACME(p, opts, &doc); err != nil {
 			return Document{}, err
@@ -190,9 +206,14 @@ func gatherDatabase(p *prompter, opts Options) (string, error) {
 	}
 
 	password := opts.DBPassword
-	if password == "" && p.asks() {
-		// The one answer with no default and no safe guess. Read without echo — this ends up in a file
-		// and should not also end up in the scrollback of a shared terminal.
+	if password == "" {
+		// Deliberately not guarded by p.asks(). askSecret is what decides what a missing answer means —
+		// a prompt when there is a terminal, ErrNotATerminal when there is not, and a "required" error
+		// when scripted. Gating the call on p.asks() skipped all three, so a piped run wrote a
+		// passwordless DSN and exited 0: exactly the outcome ErrNotATerminal exists to prevent.
+		//
+		// Read without echo — this ends up in a file and should not also end up in the scrollback of a
+		// shared terminal.
 		password, err = p.askSecret("Database password", "", false)
 		if err != nil {
 			return "", err
@@ -247,6 +268,65 @@ func gatherStorage(p *prompter, opts Options, doc *Document) error {
 
 	p.note("Path-style addressing (endpoint/bucket) is what MinIO and most self-hosted services need.")
 	doc.S3ForcePathStyle, err = p.askBool("Use path-style bucket addressing", opts.S3ForcePathStyle, doc.S3Endpoint != "")
+	return err
+}
+
+// gatherSMTP collects the relay settings, and the public origin that reset links are built from.
+//
+// Only asked under --full. Quick-start leaves SMTP off, which is a working instance: password reset is
+// simply unavailable, exactly as ADR 0020 intends. Asking every quick-start operator for a relay they may
+// not have would turn an opt-out into a hurdle.
+func gatherSMTP(p *prompter, opts Options, doc *Document) error {
+	p.section("Outbound email")
+	p.note("Norite sends password-reset emails through an SMTP relay you provide.")
+	p.note("Say no for now if you have none — the instance runs fine, and password reset is simply off.")
+
+	enabled, err := p.askBool("Send email through an SMTP relay", opts.SMTP, false)
+	if err != nil {
+		return err
+	}
+	doc.SMTPEnabled = enabled
+	if !enabled {
+		return nil
+	}
+
+	if doc.SMTPHost, err = p.askRequiredOr("SMTP host", opts.SMTPHost); err != nil {
+		return err
+	}
+	// 587 is submission. 25 is server-to-server relay and blocked outbound by most hosting providers, so
+	// defaulting to it would send people down a long diagnostic path for no reason.
+	if doc.SMTPPort, err = p.askPort("SMTP port", opts.SMTPPort, 587); err != nil {
+		return err
+	}
+
+	p.note("Leave the username empty for a relay that accepts mail from its own network without auth.")
+	if doc.SMTPUsername, err = p.ask("SMTP username", opts.SMTPUsername, ""); err != nil {
+		return err
+	}
+	if doc.SMTPUsername != "" {
+		// Read without echo, and allowed to be empty: some relays authenticate by username alone.
+		if doc.SMTPPassword, err = p.askSecret("SMTP password", opts.SMTPPassword, true); err != nil {
+			return err
+		}
+	}
+
+	p.note("starttls suits almost every submission relay; tls is implicit TLS, usually on port 465.")
+	if doc.SMTPEncryption, err = p.askChoice("Encryption",
+		[]string{"starttls", "tls", "none"}, opts.SMTPEncryption, "starttls"); err != nil {
+		return err
+	}
+
+	if doc.SMTPFromAddress, err = p.askRequiredOr("From address", opts.SMTPFromAddress); err != nil {
+		return err
+	}
+	if doc.SMTPFromName, err = p.ask("From name", opts.SMTPFromName, "Norite"); err != nil {
+		return err
+	}
+
+	// Required alongside SMTP, and the backend refuses to start without it: a reset link is built from
+	// this, and it cannot be derived from a request without trusting whatever Host header arrives.
+	p.note("Reset links are built from this, so it must be the URL your users actually reach.")
+	doc.PublicBaseURL, err = p.askRequiredOr("Public base URL", opts.PublicBaseURL)
 	return err
 }
 

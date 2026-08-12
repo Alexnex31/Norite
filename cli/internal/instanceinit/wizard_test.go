@@ -103,6 +103,7 @@ func TestFullRunAsksAboutEverything(t *testing.T) {
 		"development", "127.0.0.1:9000", // env, listen addr
 		"localhost", "5432", "norite", "norite", "disable", // database
 		"local", "/srv/attachments", // storage
+		"no",     // smtp
 		"no",     // acme
 		"invite", // registration
 	}
@@ -122,6 +123,112 @@ func TestFullRunAsksAboutEverything(t *testing.T) {
 	assert.Equal(t, false, parsed["acme"].(map[string]any)["enabled"])
 }
 
+// The relay settings, and the public origin reset links are built from. Answering yes must collect all of
+// them, because the backend refuses to start with SMTP on and any of them missing.
+func TestFullRunCollectsSMTPSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	answers := []string{
+		"production", ":8080",
+		"localhost", "5432", "norite", "norite", "disable",
+		"local", "/srv/attachments",
+		"yes",                     // send email
+		"smtp.example.com", "587", // host, port
+		"norite@example.com",       // username -> triggers the password prompt
+		"starttls",                 // encryption
+		"no-reply@example.com",     // from address
+		"Norite",                   // from name
+		"https://chat.example.com", // public base url
+		"no",                       // acme
+		"open",
+	}
+	p, out := scripted(answers, "db-pw", "relay-pw")
+
+	require.NoError(t, run(Options{Full: true, Output: path}, p))
+
+	parsed := readBack(t, path)
+	smtp, ok := parsed["smtp"].(map[string]any)
+	require.True(t, ok, "an SMTP instance must get an [smtp] section")
+	assert.Equal(t, true, smtp["enabled"])
+	assert.Equal(t, "smtp.example.com", smtp["host"])
+	assert.Equal(t, int64(587), smtp["port"])
+	assert.Equal(t, "norite@example.com", smtp["username"])
+	assert.Equal(t, "relay-pw", smtp["password"])
+	assert.Equal(t, "starttls", smtp["encryption"])
+	assert.Equal(t, "no-reply@example.com", smtp["from_address"])
+
+	// public_base_url lives under [http] but is only required because SMTP is on — the cross-section
+	// dependency the backend enforces, and the one a wizard is most likely to forget to collect.
+	assert.Equal(t, "https://chat.example.com", parsed["http"].(map[string]any)["public_base_url"])
+
+	assert.NotContains(t, out.String(), "relay-pw", "the summary must never echo the relay password")
+}
+
+// A quick-start run that asks for SMTP must still be asked its companion questions. Gating them on --full
+// alone would write a file with smtp.enabled = true and no host, which the backend refuses to start on —
+// the same trap the storage and ACME branches above already avoid.
+func TestQuickStartWithSMTPStillCollectsItsCompanions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	yes := true
+
+	p, _ := silent()
+	err := run(Options{
+		NonInteractive: true,
+		Output:         path,
+		DBPassword:     "pw",
+		SMTP:           &yes,
+		// Deliberately incomplete: no host, no from address, no public base URL.
+	}, p)
+
+	require.Error(t, err, "--smtp without its companions must fail rather than write an unstartable file")
+	assert.NoFileExists(t, path)
+}
+
+func TestQuickStartWithSMTPFlagsWritesTheSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	yes := true
+
+	p, _ := silent()
+	require.NoError(t, run(Options{
+		NonInteractive:  true,
+		Output:          path,
+		DBPassword:      "pw",
+		SMTP:            &yes,
+		SMTPHost:        "relay.example.com",
+		SMTPFromAddress: "no-reply@example.com",
+		PublicBaseURL:   "https://chat.example.com",
+	}, p))
+
+	parsed := readBack(t, path)
+	smtp := parsed["smtp"].(map[string]any)
+	assert.Equal(t, true, smtp["enabled"], "--smtp must be honored without --full")
+	assert.Equal(t, "relay.example.com", smtp["host"])
+	assert.Equal(t, "https://chat.example.com", parsed["http"].(map[string]any)["public_base_url"])
+}
+
+// Declining leaves the section off entirely rather than half-written. An instance with SMTP off is a
+// working instance, not a misconfigured one.
+func TestDecliningSMTPLeavesItDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	answers := []string{
+		"production", ":8080",
+		"localhost", "5432", "norite", "norite", "disable",
+		"local", "/srv/attachments",
+		"no", // smtp
+		"no", // acme
+		"open",
+	}
+	p, _ := scripted(answers, "db-pw")
+
+	require.NoError(t, run(Options{Full: true, Output: path}, p))
+
+	parsed := readBack(t, path)
+	smtp, ok := parsed["smtp"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, smtp["enabled"])
+	assert.NotContains(t, smtp, "host", "a disabled relay must not leave half a configuration behind")
+	assert.NotContains(t, parsed["http"], "public_base_url")
+}
+
 // Values that only exist under S3 storage must be collected when it is chosen, and the resulting file has
 // to carry all of them or the backend will refuse to start.
 func TestFullRunCollectsS3Settings(t *testing.T) {
@@ -130,7 +237,8 @@ func TestFullRunCollectsS3Settings(t *testing.T) {
 		"production", ":8080",
 		"localhost", "5432", "norite", "norite", "disable",
 		"s3", "https://minio.example.com", "eu-west-1", "attachments", "minio-user", "yes",
-		"no",
+		"no", // smtp
+		"no", // acme
 		"open",
 	}
 	p, _ := scripted(answers, "db-pw", "s3-secret")
@@ -168,10 +276,46 @@ func TestNonInteractiveMissingRequiredValueIsNamed(t *testing.T) {
 		Full:           true,
 		Output:         filepath.Join(t.TempDir(), "instance.toml"),
 		Storage:        storageS3,
+		// Supplied so the run reaches the S3 questions this test is about. Without it the database
+		// password — also required, and asked earlier — is what fails first.
+		DBPassword: "pw",
 	}, p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Bucket name")
 	assert.Contains(t, err.Error(), "non-interactively")
+}
+
+// The S3 secret access key is the one required S3 value read without echo, so it goes through askSecret
+// rather than askRequiredOr. askSecret used to return "" unconditionally when it was not prompting, which
+// ignored its own allowEmpty=false and wrote the secret out empty — the backend then refused to start on
+// `required_if=StorageBackend s3` with nothing pointing back at the wizard.
+func TestNonInteractiveMissingS3SecretIsNamed(t *testing.T) {
+	p, _ := silent()
+
+	err := run(Options{
+		NonInteractive: true,
+		Full:           true,
+		Output:         filepath.Join(t.TempDir(), "instance.toml"),
+		Storage:        storageS3,
+		DBPassword:     "pw",
+		S3Bucket:       "bucket",
+		S3Region:       "us-east-1",
+		S3AccessKeyID:  "AKIAEXAMPLE",
+	}, p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Secret access key")
+	assert.Contains(t, err.Error(), "non-interactively")
+}
+
+// A non-interactive run with no database password must name it rather than write a passwordless DSN.
+func TestNonInteractiveMissingDatabasePasswordIsNamed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	p, _ := silent()
+
+	err := run(Options{NonInteractive: true, Output: path}, p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Database password")
+	assert.NoFileExists(t, path, "nothing may be written when a required credential was never given")
 }
 
 // A password with URL metacharacters is exactly why the DSN is assembled rather than typed: unescaped, it
@@ -322,6 +466,32 @@ func TestPipedStdinWithoutNonInteractiveIsRefused(t *testing.T) {
 	err := run(Options{Output: path}, p)
 	require.ErrorIs(t, err, ErrNotATerminal)
 	assert.NoFileExists(t, path, "nothing may be written when the answers were never actually given")
+}
+
+// The same hole, one level deeper, and the reason the test above did not catch it.
+//
+// That test passes because the *first* question has no preset, so the run fails before ever reaching the
+// password. Supply every other db-* flag and the wizard walks straight past them to the one question with
+// no default — which was guarded by `password == "" && p.asks()`, so on a pipe it was skipped rather than
+// asked, and the run wrote `postgres://norite@host/db` and exited 0.
+func TestPipedStdinIsRefusedEvenWhenEveryOtherDBFlagIsSupplied(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	out := &bytes.Buffer{}
+	p := newPrompter(strings.NewReader(""), out, promptNoTerminal,
+		func() (string, error) { return "", io.EOF })
+
+	err := run(Options{
+		Output:       path,
+		DBHost:       "db.example.com",
+		DBPort:       "5432",
+		DBName:       "norite",
+		DBUser:       "norite",
+		DBSSLMode:    "require",
+		Registration: "open",
+	}, p)
+
+	require.ErrorIs(t, err, ErrNotATerminal)
+	assert.NoFileExists(t, path, "a passwordless DSN must never be written on the way to exiting 0")
 }
 
 // ...but with --non-interactive the same pipe is fine: the operator stated that defaults are intended.

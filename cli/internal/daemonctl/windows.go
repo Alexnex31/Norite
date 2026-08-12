@@ -51,8 +51,15 @@ func (w *windowsTask) Uninstall(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 && !taskNotFound(res) {
-		return errFromResult("schtasks /Delete", res)
+	if res.ExitCode != 0 {
+		absent, err := w.absentNotFailing(ctx)
+		if err != nil {
+			return err
+		}
+		// Deleting a task that is already gone is the outcome Uninstall wanted, so it is a success.
+		if !absent {
+			return errFromResult("schtasks /Delete", res)
+		}
 	}
 	return nil
 }
@@ -80,15 +87,27 @@ func (w *windowsTask) Stop(ctx context.Context) error {
 		return ErrNotInstalled
 	}
 
-	// /End on a task that is not running exits non-zero with "The system cannot find the file specified" or
-	// similar. Stopping something already stopped is a success by this interface's contract, so that case
-	// is accepted rather than surfaced.
+	// /End on a task that is not running exits non-zero. Stopping something already stopped is a success by
+	// this interface's contract, and Manager's idempotence promise is load-bearing: restart propagates a
+	// stop failure, so a Stop that errors on an already-stopped daemon breaks the command people reach for
+	// to recover a crashed one.
+	//
+	// The task's existence was just confirmed above, so any /End failure from here is either "not running"
+	// or a transient fault — and neither is worth failing a stop over. Reading the message to tell them
+	// apart is what broke on localized Windows in the first place.
 	res, err := w.run.Run(ctx, "schtasks", "/End", "/TN", windowsTaskName)
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 && !taskNotRunning(res) {
-		return errFromResult("schtasks /End", res)
+	if res.ExitCode != 0 {
+		absent, err := w.absentNotFailing(ctx)
+		if err != nil {
+			return err
+		}
+		// Raced with an uninstall between the check above and here.
+		if absent {
+			return ErrNotInstalled
+		}
 	}
 	return nil
 }
@@ -99,10 +118,14 @@ func (w *windowsTask) Status(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	if res.ExitCode != 0 {
-		// Only "cannot find" means the task is absent. Group Policy or a permissions problem can make
-		// /Query fail on a machine where it exists, and reporting that as "not installed" would send the
-		// user to `norite daemon install` — which fails the same way, with the real cause still hidden.
-		if !taskNotFound(res) {
+		// Only an absent task means "not installed". Group Policy or a permissions problem can make /Query
+		// fail on a machine where it exists, and reporting that as "not installed" would send the user to
+		// `norite daemon install` — which fails the same way, with the real cause still hidden.
+		absent, err := w.absentNotFailing(ctx)
+		if err != nil {
+			return State{}, err
+		}
+		if !absent {
 			return State{}, errFromResult("schtasks /Query", res)
 		}
 		return State{}, nil
@@ -128,10 +151,10 @@ func (w *windowsTask) installed(ctx context.Context) (bool, error) {
 
 // taskStatusField pulls the Status value out of `schtasks /FO LIST` output.
 //
-// The output is a block of "Key: value" lines, and the key is localized on a non-English Windows. Matching
-// the English key is a deliberate best effort: a mismatch degrades Status to "unknown" rather than
-// misreporting, and the Installed flag — which is what the CLI actually gates on — comes from the exit code
-// and stays correct in every locale.
+// The output is a block of "Key: value" lines, and both the key and the value are localized on a
+// non-English Windows. Matching the English key is a deliberate best effort: a mismatch degrades Status to
+// "unknown" rather than misreporting it. The Installed flag — which is what the CLI actually turns into an
+// exit code — does not depend on this at all; it comes from taskExists, which reads no translated text.
 func taskStatusField(out string) string {
 	for line := range strings.SplitSeq(out, "\n") {
 		key, value, found := strings.Cut(line, ":")
@@ -143,11 +166,40 @@ func taskStatusField(out string) string {
 	return ""
 }
 
-func taskNotFound(res Result) bool {
-	return strings.Contains(strings.ToUpper(res.Stderr+res.Stdout), "CANNOT FIND")
+// taskExists answers "is this task registered at all", without reading a single word of English.
+//
+// The obvious implementation — matching schtasks' "cannot find" error text — is wrong on every non-English
+// Windows, and it gated the Installed flag that `norite daemon status` turns into an exit code and that
+// Start/Stop turn into ErrNotInstalled. A localized machine therefore got an error where it should have got
+// "not installed", and lost the idempotence Manager promises for Stop and Uninstall.
+//
+// Listing tasks instead is locale-independent for the one reason that matters: schtasks translates its
+// messages and its column headers, but never a task name, because the name is ours. /NH drops the header
+// row so nothing localized is parsed at all.
+//
+// A failure of the listing itself is a real error and stays one — that is what keeps a Group Policy or
+// permissions problem from being reported as "not installed", which would send someone to
+// `norite daemon install` with the actual cause still hidden.
+func (w *windowsTask) taskExists(ctx context.Context) (bool, error) {
+	res, err := w.run.Run(ctx, "schtasks", "/Query", "/FO", "CSV", "/NH")
+	if err != nil {
+		return false, err
+	}
+	if res.ExitCode != 0 {
+		return false, errFromResult("schtasks /Query", res)
+	}
+	return strings.Contains(res.Stdout, windowsTaskName), nil
 }
 
-func taskNotRunning(res Result) bool { return taskNotFound(res) }
+// absentNotFailing distinguishes "that command failed because the task is not there" from "that command
+// failed for a reason worth reporting", for a per-task schtasks call that already returned non-zero.
+func (w *windowsTask) absentNotFailing(ctx context.Context) (bool, error) {
+	exists, err := w.taskExists(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !exists, nil
+}
 
 // quoteTaskCommand wraps the binary path for schtasks' /TR argument.
 //
