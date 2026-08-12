@@ -119,6 +119,20 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 		httpx.WriteError(w, req, httpx.ErrMethodNotAllowed)
 	})
 
+	// The server-rendered password-reset pages, outside the versioned API prefix: a person opens these
+	// from an email, they are not an API a client codegens against, and putting them under /api/v1 would
+	// imply they move when that version does.
+	//
+	// httpx.HTMLPage overrides the JSON API's CSP for these two routes only. The global policy is
+	// `default-src 'none'; form-action 'none'`, which would render the page and then silently forbid its
+	// form from submitting anywhere — see that middleware for what it grants and what it still denies.
+	if opts.Auth != nil {
+		r.Group(func(r chi.Router) {
+			r.Use(httpx.HTMLPage)
+			opts.Auth.PageRoutes(r)
+		})
+	}
+
 	r.Route(apiBase, func(r chi.Router) {
 		// Authenticate resolves a Bearer credential into an actor for every request below this point. It
 		// rejects nothing on its own — each route decides whether it needs one — so public and protected

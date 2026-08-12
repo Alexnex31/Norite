@@ -34,12 +34,45 @@ import (
 
 // openAPIDoc is the slice of the contract this test needs.
 type openAPIDoc struct {
-	Servers []struct {
-		URL string `yaml:"url"`
-	} `yaml:"servers"`
-	Paths map[string]map[string]struct {
-		OperationID string `yaml:"operationId"`
-	} `yaml:"paths"`
+	Servers []serverEntry       `yaml:"servers"`
+	Paths   map[string]pathItem `yaml:"paths"`
+}
+
+type serverEntry struct {
+	URL string `yaml:"url"`
+}
+
+// pathItem spells its operations out rather than decoding into a map, because a path item also carries
+// non-operation keys — `servers` and `parameters` — and a map would have to guess which is which.
+type pathItem struct {
+	// Servers overrides the document's base for this path. OpenAPI allows it per path, and the reset
+	// pages need it: they are served at the instance root while every JSON endpoint sits under /api/v1.
+	Servers []serverEntry `yaml:"servers"`
+
+	Get     *operation `yaml:"get"`
+	Head    *operation `yaml:"head"`
+	Post    *operation `yaml:"post"`
+	Put     *operation `yaml:"put"`
+	Patch   *operation `yaml:"patch"`
+	Delete  *operation `yaml:"delete"`
+	Options *operation `yaml:"options"`
+}
+
+type operation struct {
+	OperationID string `yaml:"operationId"`
+}
+
+// byMethod pairs each defined operation with its HTTP method.
+func (p pathItem) byMethod() map[string]*operation {
+	return map[string]*operation{
+		http.MethodGet:     p.Get,
+		http.MethodHead:    p.Head,
+		http.MethodPost:    p.Post,
+		http.MethodPut:     p.Put,
+		http.MethodPatch:   p.Patch,
+		http.MethodDelete:  p.Delete,
+		http.MethodOptions: p.Options,
+	}
 }
 
 func loadContract(t *testing.T) openAPIDoc {
@@ -60,22 +93,26 @@ func loadContract(t *testing.T) openAPIDoc {
 func documentedOperations(t *testing.T, doc openAPIDoc) map[string]string {
 	t.Helper()
 
-	prefix := ""
+	base := ""
 	if len(doc.Servers) > 0 {
-		prefix = strings.TrimSuffix(doc.Servers[0].URL, "/")
+		base = strings.TrimSuffix(doc.Servers[0].URL, "/")
 	}
 
 	out := make(map[string]string)
-	for path, operations := range doc.Paths {
-		for method, op := range operations {
-			// Skip OpenAPI's non-operation keys (parameters, summary, servers, …).
-			switch strings.ToUpper(method) {
-			case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
-				http.MethodPatch, http.MethodDelete, http.MethodOptions:
-			default:
+	for path, item := range doc.Paths {
+		// A path may override the document's base. Without honoring that, the reset pages — served at the
+		// root while everything else sits under /api/v1 — could only be documented by lying about where
+		// they live.
+		prefix := base
+		if len(item.Servers) > 0 {
+			prefix = strings.TrimSuffix(item.Servers[0].URL, "/")
+		}
+
+		for method, op := range item.byMethod() {
+			if op == nil {
 				continue
 			}
-			out[strings.ToUpper(method)+" "+prefix+path] = op.OperationID
+			out[method+" "+prefix+path] = op.OperationID
 		}
 	}
 	return out

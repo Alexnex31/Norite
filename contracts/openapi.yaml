@@ -303,6 +303,170 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /reset:
+    # Served at the instance root, not under /api/v1: this is a page a person opens from an email, not an
+    # API a client codegens against, and putting it under the versioned prefix would imply it moves when
+    # that version does. Documented here anyway because it is a route the backend serves, and
+    # cmd/server/contract_test.go holds the router and this file to the same set.
+    servers:
+      - url: /
+    get:
+      summary: The password-reset form
+      description: >
+        The page the link in a reset email opens. Carries the token in its query string into a hidden form
+        field; it does **not** verify it. Checking on GET would report whether a token is live before
+        anyone submits anything, which makes the page an oracle for exactly that.
+
+
+        Returns HTML, not JSON, and needs no authentication: the token is the entire authority, and the
+        person opening it is by definition locked out of the account.
+      operationId: getResetPage
+      tags: [auth]
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The reset token from the email. Absent or wrong, the form still renders and the
+            submission is what fails — for the reason above.
+      responses:
+        "200":
+          description: The form.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      summary: Submit the password-reset form
+      description: >
+        The form target. Form-encoded rather than JSON so the page needs no JavaScript, which is what lets
+        its Content-Security-Policy forbid scripts outright.
+
+
+        No CSRF token participates and none is needed: the reset token *is* the authority, so an attacker
+        able to forge this request already holds it and could submit the form directly. No ambient
+        credential is involved — the same reason the rest of this API carries no CSRF middleware.
+
+
+        Same effects as `POST /api/v1/auth/password/reset`: single-use token, every session and API token
+        on the account revoked.
+      operationId: submitResetPage
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token:
+                  type: string
+                password:
+                  type: string
+                  minLength: 12
+      responses:
+        "200":
+          description: The password was changed. HTML confirmation.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: >
+            The token or the password was rejected. The form is re-rendered with one generic message —
+            expired, spent, unknown and no-longer-matching are not distinguished.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /auth/password/reset/request:
+    post:
+      summary: Request a password reset email
+      description: >
+        Always answers 202, whether or not the address belongs to an account.
+
+
+        Unlike registration — which necessarily discloses whether a name is taken — this endpoint has no
+        reason to say whether an address is registered, and saying so would turn it into an
+        account-enumeration oracle for any address someone cares to try. Timing does not disclose it
+        either: the message is handed to a background queue, so the request does the same work in both
+        cases.
+
+
+        The one failure it does report is 503 `reset_unavailable`, when the instance has no SMTP relay
+        configured. That answer does not depend on the address, so it discloses nothing — and an operator
+        who never configured a relay has not chosen for reset to fail silently.
+
+
+        Requesting again invalidates any earlier token for the account, so only the most recent email
+        works.
+      operationId: requestPasswordReset
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequest"
+      responses:
+        "202":
+          description: >
+            The request was accepted. This says nothing about whether an account exists, and nothing about
+            whether an email was actually sent.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: This instance has no email relay configured (`reset_unavailable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/password/reset:
+    post:
+      summary: Set a new password using a reset token
+      description: >
+        Spends the token and sets the password. The token is single-use and expires an hour after it is
+        issued.
+
+
+        Every way a token can be bad — unknown, expired, already spent, or issued to an address the
+        account no longer uses — is reported as the same 401. Distinguishing them would tell whoever holds
+        a stolen link which of those it is.
+
+
+        **This revokes every credential on the account**: all sessions, on every device, and all API
+        tokens. A reset is how someone recovers a compromised account, so a credential an intruder minted
+        must not survive it. Bots and scripts need new tokens afterwards.
+      operationId: confirmPasswordReset
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetConfirmRequest"
+      responses:
+        "204":
+          description: >
+            The password is changed and every session and API token on the account is revoked. No body —
+            the caller signs in again with the new password.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: The token is unknown, expired, already used, or no longer matches the account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /auth/tokens:
     post:
       summary: Mint a scoped API token
@@ -621,6 +785,31 @@ components:
                 it is lost, mint a new token and revoke this one. The `nat_` prefix exists so a leaked
                 credential is identifiable on sight, by a human or a secret scanner.
               examples: ["nat_9pQ2xL7vD4mZ0kR8sT1yWbGhJcNfEuAiOoPdXrVtYnM"]
+
+    PasswordResetRequest:
+      type: object
+      required: [email]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+
+    PasswordResetConfirmRequest:
+      type: object
+      required: [token, new_password]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          description: >
+            The token from the reset email. Single-use, and valid for one hour from when it was issued.
+        new_password:
+          type: string
+          minLength: 12
+          maxLength: 256
+          description: Same rules as registration — length only, counted in characters.
 
     RegisterRequest:
       type: object
