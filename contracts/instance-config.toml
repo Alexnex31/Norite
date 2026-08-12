@@ -39,6 +39,13 @@ env = "production"
 # Listen address. Default ":8080".
 listen_addr = ":8080"
 
+# The origin users reach this instance on, used to build links in outbound email (password reset, M5).
+#
+# Configured rather than derived: behind a reverse proxy the Host header is whatever the proxy sends, so a
+# link built from it would point wherever an attacker aimed a request. No default, and REQUIRED once
+# [smtp].enabled is true — a reset link pointing at the wrong origin is worse than no email at all.
+public_base_url = "https://chat.example.com"
+
 # How long graceful shutdown drains in-flight requests before dropping them. Default "15s".
 shutdown_timeout = "15s"
 
@@ -123,6 +130,39 @@ enabled = true
 # required once ACME is on — the protocol cannot proceed without them.
 domain = "chat.example.com"
 email = "admin@example.com"
+
+[smtp]
+# Outbound email. Off by default and a deployment-time opt-out by design: an instance with no relay still
+# runs, and the features that need one — password reset today, matchmaking's email gate later — are simply
+# unavailable rather than broken. Everything below is REQUIRED once this is true, along with
+# [http].public_base_url.
+enabled = true
+
+# The relay. Port defaults to 587 (submission) rather than 25: 25 is server-to-server relay, blocked
+# outbound by most hosting providers, and not the port anyone wants here.
+host = "smtp.example.com"
+port = 587
+
+# Credentials for the relay. Both optional — an internal relay that accepts mail from its own network
+# needs neither, which is a normal self-hosted shape.
+#
+# Treat the password exactly like [database].url and [storage.s3].secret_access_key: it is a credential,
+# and NORITE_SMTP_PASSWORD is the better place for it on any shared machine.
+username = "norite@example.com"
+password = "REPLACE-ME-with-the-relay-password"
+
+# "starttls" (upgrade a plaintext connection — the common submission shape, and the default), "tls"
+# (implicit TLS, usually port 465), or "none".
+#
+# "none" exists because a relay reached over a container network or loopback has no transport to protect,
+# and refusing to support that would push people toward a worse workaround. Never use it across a real
+# network: it hands the relay credential to anyone on the path.
+encryption = "starttls"
+
+# The envelope sender, and the display name beside it. The address is required once SMTP is on — relays
+# reject mail without one, and most score it as spam first. from_name defaults to "Norite".
+from_address = "no-reply@example.com"
+from_name = "Norite"
 
 [registration]
 # "open" (anyone may create an account) or "invite" (an instance invite code is required).

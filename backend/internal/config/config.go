@@ -151,6 +151,45 @@ type Config struct {
 	ACMEDomain string `validate:"required_if=ACMEEnabled true,omitempty,hostname"`
 	ACMEEmail  string `validate:"required_if=ACMEEnabled true,omitempty,email"`
 
+	// PublicBaseURL is the origin users reach this instance on, e.g. "https://chat.example.com".
+	//
+	// The backend cannot derive this: behind a reverse proxy the Host header is whatever the proxy sends,
+	// and a link built from it would point wherever an attacker aimed a request. So it is configured, not
+	// inferred. Required once SMTP is on, because a password-reset email whose link points at the wrong
+	// origin is worse than no email at all (Milestone M5).
+	PublicBaseURL string `validate:"required_if=SMTPEnabled true,omitempty,url"`
+
+	// SMTPEnabled turns on outbound email. Off by default, and a deployment-time opt-out by design
+	// (docs/adr/0020-operations.md): an instance with no relay still runs, and the features that need one
+	// — password reset today, matchmaking's email gate later — are simply unavailable rather than broken.
+	SMTPEnabled bool
+
+	// SMTPHost and SMTPPort address the relay. Required once SMTP is on; there is nothing to fall back to.
+	SMTPHost string `validate:"required_if=SMTPEnabled true,omitempty,hostname"`
+	SMTPPort int    `validate:"required_if=SMTPEnabled true,omitempty,gte=1,lte=65535"`
+
+	// SMTPUsername and SMTPPassword authenticate to the relay. Both optional: an internal relay that
+	// accepts mail from its own network needs neither, which is a normal self-hosted shape.
+	//
+	// Never log SMTPPassword (CLAUDE.md rule 8) — it is a credential exactly like the S3 secret key and
+	// the password embedded in DatabaseURL.
+	SMTPUsername string
+	SMTPPassword string
+
+	// SMTPEncryption is "starttls" (upgrade a plaintext connection, the common submission shape),
+	// "tls" (implicit TLS, usually port 465), or "none".
+	//
+	// "none" exists because a relay reached over a container network or a loopback interface has no
+	// transport to protect, and refusing to support that would push people toward a worse workaround. It
+	// is never the default: an unencrypted submission over a real network hands the relay credential to
+	// anyone on the path.
+	SMTPEncryption string `validate:"required_if=SMTPEnabled true,omitempty,oneof=starttls tls none"`
+
+	// SMTPFromAddress is the envelope sender; SMTPFromName is the display name beside it. The address is
+	// required once SMTP is on — relays reject mail without one, and most score it as spam first.
+	SMTPFromAddress string `validate:"required_if=SMTPEnabled true,omitempty,email"`
+	SMTPFromName    string `validate:"omitempty,max=64"`
+
 	// RegistrationMode is "open" (anyone may create an account) or "invite" (an instance invite code is
 	// required). Enforced by the registration endpoint from Milestone M4 onward; M4 refuses registration
 	// outright when this is "invite", and M10 adds the invite-redemption path that makes it usable.
@@ -215,6 +254,17 @@ func Load(configPath string) (Config, error) {
 		ACMEDomain: getEnvString("ACME_DOMAIN", fileString(file.ACME.Domain, "")),
 		ACMEEmail:  getEnvString("ACME_EMAIL", fileString(file.ACME.Email, "")),
 
+		PublicBaseURL: getEnvString("PUBLIC_BASE_URL", fileString(file.HTTP.PublicBaseURL, "")),
+
+		SMTPHost: getEnvString("SMTP_HOST", fileString(file.SMTP.Host, "")),
+		// starttls rather than none: the default has to be the safe one, and submission relays
+		// overwhelmingly speak it on 587.
+		SMTPEncryption:  getEnvString("SMTP_ENCRYPTION", fileString(file.SMTP.Encryption, "starttls")),
+		SMTPUsername:    getEnvString("SMTP_USERNAME", fileString(file.SMTP.Username, "")),
+		SMTPPassword:    getEnvString("SMTP_PASSWORD", fileString(file.SMTP.Password, "")),
+		SMTPFromAddress: getEnvString("SMTP_FROM_ADDRESS", fileString(file.SMTP.FromAddress, "")),
+		SMTPFromName:    getEnvString("SMTP_FROM_NAME", fileString(file.SMTP.FromName, "Norite")),
+
 		RegistrationMode: getEnvString("REGISTRATION_MODE", fileString(file.Registration.Mode, "open")),
 		// No default: an instance must be given a signing key deliberately. Generating one at startup would
 		// mean every restart invalidated every access token, and every replica of the flagship signing with
@@ -270,6 +320,16 @@ func Load(configPath string) (Config, error) {
 	acmeEnabled, err := getEnvBool("ACME_ENABLED", fileBool(file.ACME.Enabled, false))
 	collect(err)
 	cfg.ACMEEnabled = acmeEnabled
+
+	smtpEnabled, err := getEnvBool("SMTP_ENABLED", fileBool(file.SMTP.Enabled, false))
+	collect(err)
+	cfg.SMTPEnabled = smtpEnabled
+
+	// 587 (submission) rather than 25: 25 is server-to-server relay, blocked outbound by most hosting
+	// providers, and the port nobody actually wants here.
+	smtpPort, err := getEnvInt32("SMTP_PORT", fileInt32(file.SMTP.Port, 587))
+	collect(err)
+	cfg.SMTPPort = int(smtpPort)
 
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
@@ -334,8 +394,12 @@ func fileKeyFor(field string) string {
 		return "env"
 	case "ListenAddr":
 		return "[http].listen_addr"
+	case "PublicBaseURL":
+		return "[http].public_base_url"
 	case "ShutdownTimeout":
 		return "[http].shutdown_timeout"
+	case "TrustProxyHeaders":
+		return "[http].trust_proxy_headers"
 	case "TrustedProxyHops":
 		return "[http].trusted_proxy_hops"
 	case "DatabaseURL":
@@ -358,6 +422,8 @@ func fileKeyFor(field string) string {
 		return "[storage].backend"
 	case "StorageLocalPath":
 		return "[storage].local_path"
+	case "S3ForcePathStyle":
+		return "[storage.s3].force_path_style"
 	case "S3Endpoint":
 		return "[storage.s3].endpoint"
 	case "S3Region":
@@ -368,10 +434,28 @@ func fileKeyFor(field string) string {
 		return "[storage.s3].access_key_id"
 	case "S3SecretAccessKey":
 		return "[storage.s3].secret_access_key"
+	case "ACMEEnabled":
+		return "[acme].enabled"
 	case "ACMEDomain":
 		return "[acme].domain"
 	case "ACMEEmail":
 		return "[acme].email"
+	case "SMTPEnabled":
+		return "[smtp].enabled"
+	case "SMTPHost":
+		return "[smtp].host"
+	case "SMTPPort":
+		return "[smtp].port"
+	case "SMTPUsername":
+		return "[smtp].username"
+	case "SMTPPassword":
+		return "[smtp].password"
+	case "SMTPEncryption":
+		return "[smtp].encryption"
+	case "SMTPFromAddress":
+		return "[smtp].from_address"
+	case "SMTPFromName":
+		return "[smtp].from_name"
 	case "RegistrationMode":
 		return "[registration].mode"
 	case "JWTSecret":
@@ -408,10 +492,14 @@ func envVarFor(field string) string {
 		return envPrefix + "TRUSTED_PROXY_HOPS"
 	case "ShutdownTimeout":
 		return envPrefix + "SHUTDOWN_TIMEOUT"
+	case "TrustProxyHeaders":
+		return envPrefix + "TRUST_PROXY_HEADERS"
 	case "StorageBackend":
 		return envPrefix + "STORAGE_BACKEND"
 	case "StorageLocalPath":
 		return envPrefix + "STORAGE_LOCAL_PATH"
+	case "S3ForcePathStyle":
+		return envPrefix + "S3_FORCE_PATH_STYLE"
 	case "S3Endpoint":
 		return envPrefix + "S3_ENDPOINT"
 	case "S3Region":
@@ -422,10 +510,30 @@ func envVarFor(field string) string {
 		return envPrefix + "S3_ACCESS_KEY_ID"
 	case "S3SecretAccessKey":
 		return envPrefix + "S3_SECRET_ACCESS_KEY"
+	case "ACMEEnabled":
+		return envPrefix + "ACME_ENABLED"
 	case "ACMEDomain":
 		return envPrefix + "ACME_DOMAIN"
 	case "ACMEEmail":
 		return envPrefix + "ACME_EMAIL"
+	case "PublicBaseURL":
+		return envPrefix + "PUBLIC_BASE_URL"
+	case "SMTPEnabled":
+		return envPrefix + "SMTP_ENABLED"
+	case "SMTPHost":
+		return envPrefix + "SMTP_HOST"
+	case "SMTPPort":
+		return envPrefix + "SMTP_PORT"
+	case "SMTPUsername":
+		return envPrefix + "SMTP_USERNAME"
+	case "SMTPPassword":
+		return envPrefix + "SMTP_PASSWORD"
+	case "SMTPEncryption":
+		return envPrefix + "SMTP_ENCRYPTION"
+	case "SMTPFromAddress":
+		return envPrefix + "SMTP_FROM_ADDRESS"
+	case "SMTPFromName":
+		return envPrefix + "SMTP_FROM_NAME"
 	case "RegistrationMode":
 		return envPrefix + "REGISTRATION_MODE"
 	case "JWTSecret":

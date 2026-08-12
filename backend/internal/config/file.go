@@ -44,6 +44,7 @@ type fileConfig struct {
 
 	HTTP struct {
 		ListenAddr        *string `toml:"listen_addr"`
+		PublicBaseURL     *string `toml:"public_base_url"`
 		ShutdownTimeout   *string `toml:"shutdown_timeout"`
 		TrustProxyHeaders *bool   `toml:"trust_proxy_headers"`
 		TrustedProxyHops  *int32  `toml:"trusted_proxy_hops"`
@@ -85,6 +86,17 @@ type fileConfig struct {
 		Domain  *string `toml:"domain"`
 		Email   *string `toml:"email"`
 	} `toml:"acme"`
+
+	SMTP struct {
+		Enabled     *bool   `toml:"enabled"`
+		Host        *string `toml:"host"`
+		Port        *int32  `toml:"port"`
+		Username    *string `toml:"username"`
+		Password    *string `toml:"password"`
+		Encryption  *string `toml:"encryption"`
+		FromAddress *string `toml:"from_address"`
+		FromName    *string `toml:"from_name"`
+	} `toml:"smtp"`
 
 	Registration struct {
 		Mode *string `toml:"mode"`
