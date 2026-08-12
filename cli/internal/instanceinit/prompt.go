@@ -185,6 +185,14 @@ func (p *prompter) askSecret(question, preset string, allowEmpty bool) (string, 
 		if err := p.unattended(); err != nil {
 			return "", err
 		}
+		// allowEmpty has to be honored here too, not only in the loop below. Returning "" unconditionally
+		// meant a scripted run silently accepted a missing required secret — the S3 secret access key was
+		// written as "" and the backend then refused to start on it, with nothing in the wizard's output
+		// pointing at the cause. Mirrors askRequiredOr's message so the two read the same.
+		if !allowEmpty {
+			return "", fmt.Errorf("%s is required; pass it as a flag or environment variable when running "+
+				"non-interactively", question)
+		}
 		return "", nil
 	}
 

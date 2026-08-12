@@ -190,9 +190,14 @@ func gatherDatabase(p *prompter, opts Options) (string, error) {
 	}
 
 	password := opts.DBPassword
-	if password == "" && p.asks() {
-		// The one answer with no default and no safe guess. Read without echo — this ends up in a file
-		// and should not also end up in the scrollback of a shared terminal.
+	if password == "" {
+		// Deliberately not guarded by p.asks(). askSecret is what decides what a missing answer means —
+		// a prompt when there is a terminal, ErrNotATerminal when there is not, and a "required" error
+		// when scripted. Gating the call on p.asks() skipped all three, so a piped run wrote a
+		// passwordless DSN and exited 0: exactly the outcome ErrNotATerminal exists to prevent.
+		//
+		// Read without echo — this ends up in a file and should not also end up in the scrollback of a
+		// shared terminal.
 		password, err = p.askSecret("Database password", "", false)
 		if err != nil {
 			return "", err

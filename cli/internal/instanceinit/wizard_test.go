@@ -168,10 +168,46 @@ func TestNonInteractiveMissingRequiredValueIsNamed(t *testing.T) {
 		Full:           true,
 		Output:         filepath.Join(t.TempDir(), "instance.toml"),
 		Storage:        storageS3,
+		// Supplied so the run reaches the S3 questions this test is about. Without it the database
+		// password — also required, and asked earlier — is what fails first.
+		DBPassword: "pw",
 	}, p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Bucket name")
 	assert.Contains(t, err.Error(), "non-interactively")
+}
+
+// The S3 secret access key is the one required S3 value read without echo, so it goes through askSecret
+// rather than askRequiredOr. askSecret used to return "" unconditionally when it was not prompting, which
+// ignored its own allowEmpty=false and wrote the secret out empty — the backend then refused to start on
+// `required_if=StorageBackend s3` with nothing pointing back at the wizard.
+func TestNonInteractiveMissingS3SecretIsNamed(t *testing.T) {
+	p, _ := silent()
+
+	err := run(Options{
+		NonInteractive: true,
+		Full:           true,
+		Output:         filepath.Join(t.TempDir(), "instance.toml"),
+		Storage:        storageS3,
+		DBPassword:     "pw",
+		S3Bucket:       "bucket",
+		S3Region:       "us-east-1",
+		S3AccessKeyID:  "AKIAEXAMPLE",
+	}, p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Secret access key")
+	assert.Contains(t, err.Error(), "non-interactively")
+}
+
+// A non-interactive run with no database password must name it rather than write a passwordless DSN.
+func TestNonInteractiveMissingDatabasePasswordIsNamed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	p, _ := silent()
+
+	err := run(Options{NonInteractive: true, Output: path}, p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Database password")
+	assert.NoFileExists(t, path, "nothing may be written when a required credential was never given")
 }
 
 // A password with URL metacharacters is exactly why the DSN is assembled rather than typed: unescaped, it
@@ -322,6 +358,32 @@ func TestPipedStdinWithoutNonInteractiveIsRefused(t *testing.T) {
 	err := run(Options{Output: path}, p)
 	require.ErrorIs(t, err, ErrNotATerminal)
 	assert.NoFileExists(t, path, "nothing may be written when the answers were never actually given")
+}
+
+// The same hole, one level deeper, and the reason the test above did not catch it.
+//
+// That test passes because the *first* question has no preset, so the run fails before ever reaching the
+// password. Supply every other db-* flag and the wizard walks straight past them to the one question with
+// no default — which was guarded by `password == "" && p.asks()`, so on a pipe it was skipped rather than
+// asked, and the run wrote `postgres://norite@host/db` and exited 0.
+func TestPipedStdinIsRefusedEvenWhenEveryOtherDBFlagIsSupplied(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	out := &bytes.Buffer{}
+	p := newPrompter(strings.NewReader(""), out, promptNoTerminal,
+		func() (string, error) { return "", io.EOF })
+
+	err := run(Options{
+		Output:       path,
+		DBHost:       "db.example.com",
+		DBPort:       "5432",
+		DBName:       "norite",
+		DBUser:       "norite",
+		DBSSLMode:    "require",
+		Registration: "open",
+	}, p)
+
+	require.ErrorIs(t, err, ErrNotATerminal)
+	assert.NoFileExists(t, path, "a passwordless DSN must never be written on the way to exiting 0")
 }
 
 // ...but with --non-interactive the same pipe is fine: the operator stated that defaults are intended.
