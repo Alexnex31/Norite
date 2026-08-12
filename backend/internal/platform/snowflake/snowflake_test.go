@@ -2,6 +2,7 @@ package snowflake
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -278,6 +279,44 @@ func BenchmarkNext(b *testing.B) {
 	for b.Loop() {
 		if _, err := g.Next(); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// Parse and UnmarshalJSON must agree on what an ID is. They did not: a negative value was refused in a URL
+// parameter and accepted in a request body, so the same string was valid or invalid depending only on
+// where a handler read it from. Nothing binds an ID in a body yet, which is why this is worth pinning now
+// rather than after the first bulk-operation endpoint does.
+func TestUnmarshalJSONAgreesWithParse(t *testing.T) {
+	inputs := []string{
+		`"-1"`, `-1`,
+		`"-9223372036854775808"`,
+		`"not-a-number"`, `"1.5"`, `""`, `"0x10"`, `" 1"`,
+		`"175928847299117063"`, `175928847299117063`, `"0"`,
+	}
+
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			var id ID
+			jsonErr := id.UnmarshalJSON([]byte(in))
+
+			// The same text Parse would have been given: the quoted form without its quotes.
+			text := strings.Trim(in, `"`)
+			_, parseErr := Parse(text)
+
+			if (jsonErr == nil) != (parseErr == nil) {
+				t.Fatalf("UnmarshalJSON(%s) err=%v but Parse(%q) err=%v — the two disagree",
+					in, jsonErr, text, parseErr)
+			}
+		})
+	}
+}
+
+func TestUnmarshalJSONRejectsANegativeID(t *testing.T) {
+	for _, in := range []string{`"-1"`, `-1`} {
+		var id ID
+		if err := id.UnmarshalJSON([]byte(in)); err == nil {
+			t.Errorf("UnmarshalJSON(%s) accepted a negative snowflake; no generator can produce one", in)
 		}
 	}
 }

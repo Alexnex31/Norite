@@ -116,20 +116,29 @@ func (id *ID) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 
-	parsed, err := strconv.ParseInt(s, 10, 64)
+	// Parse rather than a bare ParseInt: the two must agree on what an ID is. They did not — a negative
+	// value was refused in a URL parameter and accepted in a request body, so the same ID could be valid
+	// or invalid depending only on where a handler happened to read it from. Nothing binds an ID in a
+	// body yet, which is exactly why this is worth fixing now rather than after the first one does.
+	parsed, err := Parse(s)
 	if err != nil {
 		return fmt.Errorf("snowflake: %q is not a valid ID", string(data))
 	}
-	*id = ID(parsed)
+	*id = parsed
 	return nil
 }
 
 // Parse reads an ID from its decimal string form.
+//
+// The single definition of "is this a valid ID", used by URL parameters and by UnmarshalJSON alike.
 func Parse(s string) (ID, error) {
 	parsed, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("snowflake: %q is not a valid ID", s)
 	}
+	// Negative values are not merely unusual: the layout packs a timestamp into the low 63 bits, so a
+	// negative value has the sign bit set and cannot have come from Next. Passing one to a bigint column
+	// would store a row no generator can ever produce.
 	if parsed < 0 {
 		return 0, fmt.Errorf("snowflake: %q is negative", s)
 	}

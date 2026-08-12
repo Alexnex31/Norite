@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -378,8 +379,16 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUsernameTaken):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
 
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The client gave up — most often while queued for an argon2id slot, which is the gate working as
+		// designed rather than a fault. Logging these at ERROR and answering 500 turned an ordinary login
+		// burst into a stream of alarming lines about a server that was fine. Nobody is left to read the
+		// response, so its only job is not to lie about whose problem this was.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnavailable, "the server is busy; retry shortly"))
+
 	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong),
-		errors.Is(err, ErrUnknownScope), errors.Is(err, ErrInvalidUsername):
+		errors.Is(err, ErrUnknownScope), errors.Is(err, ErrInvalidUsername),
+		errors.Is(err, ErrInvalidTokenName):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
 
 	case errors.Is(err, ErrNotFound):

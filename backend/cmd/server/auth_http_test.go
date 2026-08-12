@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -727,5 +728,34 @@ func TestAuthRoutesCarryTheStricterRateLimit(t *testing.T) {
 		resp := api.call(http.MethodGet, "/api/v1/users/@me", nil, fromIP(client))
 		require.Equal(t, http.StatusUnauthorized, resp.Code,
 			"request %d fell into the auth bucket; the two must count independently", i+1)
+	}
+}
+
+// A client that gives up mid-request — most often while queued for an argon2id slot, which is the
+// concurrency gate working as designed — must not be reported as a server fault. It used to fall through
+// writeErr's default branch, logging at ERROR and answering 500: an ordinary login burst produced a stream
+// of alarming lines about a server that was fine.
+func TestAbandonedRequestIsNotReportedAsAServerFault(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // the client is already gone before the handler runs
+
+	body, err := json.Marshal(map[string]string{
+		"email": "ada@example.com", "password": testPassword, "device_id": "laptop",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	api.handler.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusInternalServerError, rec.Code,
+		"a client that hung up is not a server error")
+	if rec.Code == http.StatusServiceUnavailable {
+		assert.Equal(t, "service_unavailable", (&response{t: t, Code: rec.Code, Body: rec.Body.Bytes()}).errorBody().Code)
 	}
 }

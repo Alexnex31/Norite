@@ -46,12 +46,16 @@ type MintedAPIToken struct {
 // does not itself hold, which would make the whole scope system decorative (see model.go). The handler
 // enforces the actor kind; this method assumes it and documents the assumption.
 func (s *Service) MintAPIToken(ctx context.Context, userID snowflake.ID, in MintAPITokenInput) (MintedAPIToken, error) {
+	// Its own sentinel, not ErrUnknownScope. writeErr renders these straight to the client, so wrapping a
+	// name problem in the scope error produced "unknown scope: a token name is required" for a name of
+	// spaces — which passes the handler's `required` tag and is only empty after trimming.
 	name := strings.TrimSpace(in.Name)
 	switch {
 	case name == "":
-		return MintedAPIToken{}, fmt.Errorf("%w: a token name is required", ErrUnknownScope)
+		return MintedAPIToken{}, fmt.Errorf("%w: a token name is required", ErrInvalidTokenName)
 	case len(name) > MaxAPITokenNameLength:
-		return MintedAPIToken{}, fmt.Errorf("%w: a token name must be at most %d bytes", ErrUnknownScope, MaxAPITokenNameLength)
+		return MintedAPIToken{}, fmt.Errorf("%w: a token name must be at most %d bytes",
+			ErrInvalidTokenName, MaxAPITokenNameLength)
 	}
 
 	// Every requested scope must be one this build understands. Dropping an unknown scope silently would
@@ -203,6 +207,29 @@ func (s *Service) GetUser(ctx context.Context, id snowflake.ID) (db.User, error)
 		return db.User{}, fmt.Errorf("looking up account: %w", err)
 	}
 	return user, nil
+}
+
+// registerConflict maps a failed user insert to the conflict a caller should be told about, or nil when
+// this error is not a conflict anyone here can explain.
+//
+// Only the two constraints that genuinely mean "taken" are named. Treating every other unique violation as
+// ErrEmailTaken — which is what a `default` branch did — turned a users_pkey collision into "that email is
+// already registered". A primary-key collision is what a snowflake generator re-issuing an ID looks like
+// (a clock stepped backwards across a restart, or a second node misconfigured onto node 0), so that
+// mapping sent an operator to inspect a mailbox while the ID generator was the thing that had broken.
+// Returning nil lets it surface as a 500, which is the honest answer for a constraint this code does not
+// understand.
+func registerConflict(err error) error {
+	switch constraint := uniqueViolation(err); {
+	case constraint == "":
+		return nil
+	case strings.Contains(constraint, "username"):
+		return ErrUsernameTaken
+	case strings.Contains(constraint, "email"):
+		return ErrEmailTaken
+	default:
+		return nil
+	}
 }
 
 // uniqueViolation returns the constraint name when err is a Postgres unique-violation, or "".

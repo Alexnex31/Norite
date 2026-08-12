@@ -56,6 +56,7 @@ var (
 	ErrUnknownScope        = errors.New("unknown scope")
 	ErrNotFound            = errors.New("not found")
 	ErrInvalidUsername     = errors.New("a username may contain only letters, digits, and _ . -")
+	ErrInvalidTokenName    = errors.New("invalid token name")
 )
 
 // RegistrationMode mirrors the instance's configured gating.
@@ -186,12 +187,10 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		DisplayName:  displayName,
 	})
 	if err != nil {
-		if constraint := uniqueViolation(err); constraint != "" {
-			// Lost the race described above. Report it as the same conflict the pre-check would have.
-			if strings.Contains(constraint, "username") {
-				return db.User{}, ErrUsernameTaken
-			}
-			return db.User{}, ErrEmailTaken
+		// Lost the race described above. Report it as the same conflict the pre-check would have — but only
+		// for the constraints that actually mean that; see registerConflict.
+		if conflict := registerConflict(err); conflict != nil {
+			return db.User{}, conflict
 		}
 		return db.User{}, fmt.Errorf("creating user: %w", err)
 	}
