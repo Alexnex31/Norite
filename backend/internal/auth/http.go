@@ -64,7 +64,10 @@ func (h *Handler) UserRoutes(r chi.Router) {
 // ---------- request payloads ----------
 
 type registerRequest struct {
-	Username    string `json:"username" validate:"required,min=2,max=32,excludesall= "`
+	// Bounds only. What a username may *contain* is decided by auth.ValidUsername, after normalization —
+	// see username.go. The tag's old `excludesall= ` excluded exactly one character and read as though it
+	// were a charset rule.
+	Username    string `json:"username" validate:"required,min=2,max=64"`
 	Email       string `json:"email" validate:"required,email,max=254"`
 	Password    string `json:"password" validate:"required"`
 	DisplayName string `json:"display_name" validate:"omitempty,max=64"`
@@ -375,7 +378,8 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUsernameTaken):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
 
-	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong), errors.Is(err, ErrUnknownScope):
+	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong),
+		errors.Is(err, ErrUnknownScope), errors.Is(err, ErrInvalidUsername):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
 
 	case errors.Is(err, ErrNotFound):

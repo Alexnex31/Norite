@@ -68,7 +68,7 @@ func TestATrustedProxysRequestIDIsStillBoundedAndFiltered(t *testing.T) {
 		"carriage ret": "abc\rdef",
 		"space":        "abc def",
 		"quote":        `abc"def`,
-		"non-ascii":    "abc‮def",
+		"non-ascii":    "abc\u202edef",
 		"control":      "abc\x00def",
 		"tab":          "abc\tdef",
 	}

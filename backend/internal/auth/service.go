@@ -55,6 +55,7 @@ var (
 	ErrSessionReuse        = errors.New("refresh token was already used")
 	ErrUnknownScope        = errors.New("unknown scope")
 	ErrNotFound            = errors.New("not found")
+	ErrInvalidUsername     = errors.New("a username may contain only letters, digits, and _ . -")
 )
 
 // RegistrationMode mirrors the instance's configured gating.
@@ -136,7 +137,12 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return db.User{}, ErrRegistrationClosed
 	}
 
-	username := strings.TrimSpace(in.Username)
+	// Normalized and validated here rather than only by the handler's struct tags, so every caller gets
+	// the same rule — the tags bound the input's size, this decides what a username may actually be.
+	username := NormalizeUsername(in.Username)
+	if !ValidUsername(username) {
+		return db.User{}, ErrInvalidUsername
+	}
 	email := strings.TrimSpace(strings.ToLower(in.Email))
 	displayName := strings.TrimSpace(in.DisplayName)
 	if displayName == "" {
