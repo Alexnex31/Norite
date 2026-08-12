@@ -89,3 +89,41 @@ func TestRequestIDIsGeneratedWhenNoHeaderIsSent(t *testing.T) {
 	assert.NotEmpty(t, serveWithSanitizer(t, "", false))
 	assert.NotEmpty(t, serveWithSanitizer(t, "", true))
 }
+
+// The nonce must survive html/template's attribute escaping unchanged, or the header and the document
+// disagree about what it is.
+//
+// Standard base64 does not: it contains "+", which html/template writes as "&#43;" inside an attribute. A
+// browser decodes the entity before matching so the page still works, which is precisely what makes the
+// bug survive review — the two values are simply no longer comparable to anything but a browser. This
+// pins the alphabet rather than the symptom.
+func TestNonceContainsNothingHTMLWouldEscape(t *testing.T) {
+	// Enough draws that a "+" or "/" would appear with near-certainty under standard base64: each of the
+	// 22 characters has a 2/64 chance, so a single nonce avoids both about half the time and 200 do not.
+	for range 200 {
+		nonce, err := newNonce()
+		require.NoError(t, err)
+
+		assert.NotEmpty(t, nonce)
+		for _, r := range nonce {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			default:
+				t.Fatalf("nonce %q contains %q, which is outside the URL-safe base64 alphabet and may be "+
+					"escaped into an attribute differently than it appears in the header", nonce, r)
+			}
+		}
+	}
+}
+
+// Two nonces must never repeat — the whole guarantee rests on unpredictability per response.
+func TestNoncesAreUnique(t *testing.T) {
+	seen := make(map[string]struct{}, 500)
+	for range 500 {
+		nonce, err := newNonce()
+		require.NoError(t, err)
+		_, duplicate := seen[nonce]
+		require.False(t, duplicate, "nonce %q was generated twice", nonce)
+		seen[nonce] = struct{}{}
+	}
+}

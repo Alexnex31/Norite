@@ -58,11 +58,18 @@ func NonceFrom(ctx context.Context) string {
 	return nonce
 }
 
-// newNonce returns 128 bits of randomness, base64 for use in a header and an attribute.
+// newNonce returns 128 bits of randomness, encoded so the header and the HTML attribute are byte-identical.
+//
+// URL-safe base64 rather than standard, and that is not cosmetic. Standard base64 contains "+" and "/", and
+// html/template escapes "+" to "&#43;" inside an attribute — so the response header would read
+// `nonce-Aha+uhd…` while the document read `nonce="Aha&#43;uhd…"`. A browser decodes the entity before
+// matching, so it happens to work, but the two are then no longer comparable to anything else: not to a
+// test, not to a proxy, not to anyone reading a response by eye. The URL-safe alphabet (A-Za-z0-9-_) holds
+// nothing HTML escapes, and CSP's own base64-value grammar admits "-" and "_" explicitly.
 func newNonce() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	return base64.RawStdEncoding.EncodeToString(buf), nil
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
