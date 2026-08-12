@@ -234,7 +234,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M4.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M5.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -254,7 +254,12 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   Bearer middleware. Decisions recorded in ADR 0022; the voice-connection reasoning that settles the signing
   algorithm is ADR 0023. First milestone merged with a merge commit rather than a squash, which is what
   settled that as the default going forward — `main` carries its seven sub-commits directly.
-- **M5 — transactional email and password reset**: in progress.
+- **M5 — transactional email and password reset**: done (tag `m5`). `internal/mail` (a `wneessen/go-mail`
+  sender behind a bounded queue whose `Enqueue` cannot block), migration `000003_password_reset`, the
+  always-202 request and single-use confirm endpoints, and the server-rendered `/reset` page — this
+  codebase's first HTML surface, which is why `httpx.HTMLPage` exists. The same PR carried nine fixes from
+  a repo-wide review of already-merged M1/M2/M4 code.
+- **M6 — OAuth backend flow**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
