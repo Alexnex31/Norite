@@ -368,6 +368,40 @@ And on the auth side, from M4:
   the voice-worker (ADR 0023), which is what keeps HS256 correct (ADR 0022). An external verifier appearing
   is a trigger to revisit the algorithm, not to distribute the key.
 
+And on the mail and password-reset side, from M5:
+
+- **Sending never blocks a response.** `internal/mail`'s `Enqueue` cannot block by construction — a full
+  queue drops and reports it. That is not only an availability property: it is what makes the reset
+  endpoint's always-202 honest, since sending inline would make a registered address take an SMTP
+  transaction longer than an unknown one and leak through timing whatever the body said. Any future sender
+  goes through the same queue for the same reason.
+- **The queue is in memory and delivery is best-effort**, deliberately (§15.7). A message still queued at
+  shutdown is drained if it can be, dropped if it cannot, and nothing survives a crash. The upgrade path is
+  a Postgres outbox drained by the same worker loop; `Enqueue`'s signature does not change.
+- **SMTP is an opt-out, not a requirement.** With no relay the queue reports itself disabled, reset answers
+  503 `reset_unavailable`, and everything else works. A disabled queue is still a real object, so nothing
+  nil-checks a dependency.
+- **STARTTLS is mandatory, never opportunistic.** Opportunistic falls back to plaintext when the server
+  says it cannot upgrade, which is indistinguishable from an attacker stripping the capability — so
+  "encrypted" would silently ship the relay credential in the clear.
+- **Reset guards live in SQL.** Single-use is `ConsumePasswordResetToken`'s `WHERE`, so concurrent confirms
+  produce exactly one winner; requesting again spends the earlier token; a token whose account changed
+  email is refused. None of it depends on a Go-side check being remembered.
+- **A reset revokes sessions *and* API tokens.** `RevokeAllSessionsForUser` is the narrow ancestor of M11's
+  general-purpose primitive (rule 17) — M11 widens it to live gateway connections and E2E device trust.
+- **`nrp_` is deliberately absent from `LooksLikeOpaqueToken`.** A reset token authenticates exactly one
+  endpoint; routing it to the Bearer verifier would be the first step toward it authenticating anything
+  else.
+- **The reset page is the first HTML this backend serves**, and the API's `default-src 'none'; form-action
+  'none'` would render it and then forbid its own form from submitting. `httpx.HTMLPage` overrides that
+  per-route — nonce-scoped style, same-origin form post, scripts still denied. Never loosen the global
+  policy; M9's device-code page reuses this seam. A page mounted at the root also sits outside the
+  `/auth` group, so it needs the stricter rate-limit bucket applied explicitly.
+- **`public_base_url` is configured, never derived.** Behind a proxy the Host header is whatever the proxy
+  sends, so a link built from it points wherever a request was aimed. Required once SMTP is on.
+- **`just dev` ships a real relay.** Mailpit is in the compose stack; its web UI on `localhost:8025` is
+  where a reset email lands locally.
+
 ## Project-specific skills
 
 **Not in the repository** — `.gitignore` excludes `.claude/`, so these live on the maintainer's machine

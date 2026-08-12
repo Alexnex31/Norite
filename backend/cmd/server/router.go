@@ -128,6 +128,11 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 	// form from submitting anywhere — see that middleware for what it grants and what it still denies.
 	if opts.Auth != nil {
 		r.Group(func(r chi.Router) {
+			// The same stricter bucket the /auth/* routes carry, and for the same reason: POST /reset is a
+			// credential-changing endpoint, and it is one of only two ways to spend a reset token. Being
+			// mounted at the root rather than inside /api/v1 put it outside that group by accident — the
+			// base limit alone let it run at hundreds of attempts a minute.
+			r.Use(authLimiter)
 			r.Use(httpx.HTMLPage)
 			opts.Auth.PageRoutes(r)
 		})

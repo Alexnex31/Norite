@@ -733,9 +733,22 @@ server-rendered completion page, independent of the web SPA).
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
 entry, one process; CLI/GUI never independently store a token copy.
 
-Password reset: unchanged behavior from the original design (always-202 anti-enumeration, single-use hashed
-token, revokes all sessions on successful reset), now sent asynchronously via the SMTP relay (§11), never
-blocking the HTTP response.
+**Password reset** (built at M5): always-202 anti-enumeration, single-use SHA-256-hashed token with a
+one-hour TTL, sent asynchronously via the SMTP relay (§11) and never blocking the HTTP response — the
+detachment is what makes the 202 honest, since sending inline would leak through timing whatever the body
+said. Requesting again spends any earlier token, and a token is refused if the account's email changed
+after it was issued.
+
+A successful reset **revokes every session and every API token on the account**. Sessions alone would not be
+enough: a reset is how someone recovers a compromised account, and a token an intruder minted while they had
+access outlives a password change unless it is revoked with it. The cost — a user who merely forgot their
+password re-mints their bots — is stated in the email and on the confirmation page rather than left to be
+discovered.
+
+The emailed link lands on a **server-rendered page** the backend serves at `/reset`, outside the versioned
+API prefix. It exists because its recipient is by definition locked out, may have no CLI installed, and may
+be on an instance that never deploys the web SPA. It posts a plain form, so its Content-Security-Policy —
+overridden per-route from the JSON API's `default-src 'none'` — can forbid scripts outright.
 
 ### Account lifecycle: deletion & data export
 

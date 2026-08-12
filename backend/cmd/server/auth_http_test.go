@@ -993,3 +993,27 @@ func TestResetIsRefusedWhenTheInstanceHasNoRelay(t *testing.T) {
 		assert.Equal(t, "reset_unavailable", resp.errorBody().Code)
 	}
 }
+
+// The reset pages are mounted at the instance root, which put them outside the /auth group and so outside
+// its stricter bucket. POST /reset spends a reset token and changes a password; the base limit alone let it
+// run at hundreds of attempts a minute, and the roadmap asks for rate-limiting on the confirm endpoint
+// specifically.
+func TestTheResetPagesCarryTheStricterRateLimit(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	form := url.Values{"token": {"nrp_" + strings.Repeat("A", 43)}, "password": {"a valid passphrase"}}.Encode()
+
+	var throttled *response
+	for i := 0; i < 40; i++ {
+		resp := api.call(http.MethodPost, "/reset", form,
+			withHeader("Content-Type", "application/x-www-form-urlencoded"), fromIP("203.0.113.99"))
+		if resp.Code == http.StatusTooManyRequests {
+			throttled = resp
+			break
+		}
+	}
+
+	require.NotNil(t, throttled,
+		"POST /reset must be throttled by the auth bucket (%s), not only by the base limit", authRateLimit)
+	assert.NotEmpty(t, throttled.Header.Get("Retry-After"))
+}

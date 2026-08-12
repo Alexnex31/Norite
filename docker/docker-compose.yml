@@ -35,6 +35,19 @@ services:
     ports:
       - "127.0.0.1:6379:6379"
 
+  # A real SMTP server that accepts everything and delivers nothing, with a web UI for reading what it
+  # caught. Without a relay in this stack, password reset (Milestone M5) cannot be exercised locally at
+  # all — the backend refuses the request rather than sending into a void, which is correct behavior and
+  # useless for development.
+  #
+  # Nothing here ever leaves the machine: Mailpit is the destination, not a forwarder.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      # 1025 is SMTP, 8025 is the web UI — open http://localhost:8025 to read a reset email.
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+
   backend:
     image: golang:1.25-alpine
     working_dir: /app/backend
@@ -74,6 +87,23 @@ services:
       NORITE_ENV: "development"
       NORITE_LOG_LEVEL: "debug"
       NORITE_LOG_FORMAT: "console"
+      # Required since Milestone M4 — the backend refuses to start without one, and this stack could not
+      # start at all between M4 and M5 because nothing set it here.
+      #
+      # A fixed, obviously-fake value on purpose: it is checked into a public repository, it must never
+      # resemble a real key, and a value that changed per run would invalidate every access token on every
+      # restart of a hot-reloading dev server.
+      NORITE_JWT_SECRET: "dev-only-insecure-signing-key-do-not-use-anywhere-real"
+      # Reset links are built from this. localhost rather than the container name, because the link is
+      # opened in a browser on the host.
+      NORITE_PUBLIC_BASE_URL: "http://localhost:8080"
+      # Points at the mailpit service above. "none" is right for a hop that never leaves the compose
+      # network; it is the wrong answer for anything else.
+      NORITE_SMTP_ENABLED: "true"
+      NORITE_SMTP_HOST: "mailpit"
+      NORITE_SMTP_PORT: "1025"
+      NORITE_SMTP_ENCRYPTION: "none"
+      NORITE_SMTP_FROM_ADDRESS: "no-reply@norite.localhost"
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck:
@@ -87,6 +117,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      mailpit:
+        condition: service_started
 
 volumes:
   pgdata:
