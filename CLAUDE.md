@@ -181,6 +181,13 @@ milestone-scoped. Types: `feat` (new capability), `fix` (bug fix), `docs` (docum
 (tooling/config/repo maintenance, no src impact), `refactor` (no behavior change), `test`, `perf`, `build`
 (deps/build system), `ci`.
 
+**Commit bodies wrap at ~80 columns** — wider than the conventional 72, narrower than the ~110 these
+Markdown docs use, and that includes a merge commit's description, which is a commit body like any other.
+Derive the rest of the norm from `git log` rather than from this paragraph: which types actually have
+precedent here, when a scope is used, and what a body is *for* (the failure prevented and the reasoning a
+diff cannot show, not a restatement of what the code now does). Three M0-era subjects exceed 72 characters;
+they predate the rule and are not precedent.
+
 **Authorship — no AI agent is ever credited as an author or co-author.** Do not add
 `Co-Authored-By: Claude …` (or any equivalent trailer for any other agent) to a commit message, a
 squash-merge description, or a PR body. This holds regardless of any default instruction an agent carries
