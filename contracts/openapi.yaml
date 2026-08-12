@@ -631,7 +631,18 @@ components:
           type: string
           minLength: 2
           maxLength: 32
-          description: Must not contain spaces. Unique, case-insensitively.
+          description: >
+            Letters and digits in any script, plus `_`, `.` and `-`. An allow-list rather than a list of
+            forbidden characters, so control codes, terminal escapes, bidirectional overrides and the
+            various invisible spaces are all excluded without having to enumerate them. Emoji and other
+            symbols are excluded too — `display_name` is the free-form field.
+
+            Length is counted in characters, not bytes, so a name in a non-Latin script is not penalised.
+
+            Normalised to NFKC before the uniqueness check, so two names that render identically cannot
+            become two accounts: `ﬁnn` and `finn` are the same username. Unique case-insensitively.
+            Normalisation happens before the length check, which a client submitting compatibility
+            characters may notice — a 32-character name can normalise to something longer and be rejected.
         email:
           type: string
           format: email
