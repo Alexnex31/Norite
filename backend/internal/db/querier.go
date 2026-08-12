@@ -9,6 +9,16 @@ import (
 )
 
 type Querier interface {
+	// Single-use and expiry in the WHERE clause, so a code seen in an address bar and replayed matches zero
+	// rows the second time rather than issuing a second token pair.
+	ConsumeOAuthExchangeCode(ctx context.Context, codeHash []byte) (OauthExchangeCode, error)
+	// Spends a state, with single-use and expiry both in the WHERE clause rather than in Go.
+	//
+	// A callback replayed — by a user refreshing the page, or by someone who captured the redirect — matches
+	// zero rows the second time and is failed before any token exchange happens. Reading the row, checking
+	// consumed_at in the service, then updating would let two exchanges run against one verifier, which is the
+	// single-use property PKCE depends on.
+	ConsumeOAuthState(ctx context.Context, stateHash []byte) (OauthState, error)
 	// Spends a token, and does the single-use check in the WHERE clause rather than in Go.
 	//
 	// Two confirms racing on the same token both reach this statement; the second finds used_at already set,
@@ -22,6 +32,19 @@ type Querier interface {
 	// 15-minute access tokens a logged-in client holds. They are stored only as a SHA-256 hash, so the raw
 	// value is recoverable exactly once — in the response that created it.
 	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
+	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
+	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
+	// OAuth sign-in queries.
+	//
+	// Two tables with very different lifetimes: oauth_identities is a permanent link between an account and a
+	// provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
+	CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) (OauthState, error)
+	// An account created by an OAuth sign-in, with no password.
+	//
+	// password_hash is left NULL rather than set to an empty string, so an account that can only sign in
+	// through a provider is distinguishable from one with a password — the distinction VerifyPassword and the
+	// reset path both already depend on.
+	CreateOAuthUser(ctx context.Context, arg CreateOAuthUserParams) (User, error)
 	// Password-reset token queries.
 	//
 	// A token is single-use and short-lived, and every one of these statements is written so that property
@@ -40,6 +63,10 @@ type Querier interface {
 	// still render as "Deleted User", but it must never be findable for login, registration collision, or
 	// profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	DeleteExpiredOAuthExchangeCodes(ctx context.Context) (int64, error)
+	// Abandoned flows are the common case: opening the provider page and closing the tab leaves a row behind.
+	// Called by the cleanup job (M11); until then the table's growth is bounded only by traffic.
+	DeleteExpiredOAuthStates(ctx context.Context) (int64, error)
 	// Runs on every request authenticated with an API token, which is why the hash column is indexed.
 	//
 	// One statement, not three: the owning account's liveness is joined in rather than fetched separately, and
@@ -47,6 +74,9 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// The sign-in lookup: has this provider account been linked before? Served by the UNIQUE constraint on
+	// (provider, provider_user_id), which is why that pair needs no separate index.
+	GetOAuthIdentity(ctx context.Context, arg GetOAuthIdentityParams) (OauthIdentity, error)
 	// The confirm path's only lookup. Deliberately returns spent and expired rows too: the caller needs to
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
