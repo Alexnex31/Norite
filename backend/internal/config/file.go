@@ -89,6 +89,10 @@ type fileConfig struct {
 	Registration struct {
 		Mode *string `toml:"mode"`
 	} `toml:"registration"`
+
+	Auth struct {
+		JWTSecret *string `toml:"jwt_secret"`
+	} `toml:"auth"`
 }
 
 // resolveFilePath decides which instance config file to read, if any.

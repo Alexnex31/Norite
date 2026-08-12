@@ -205,7 +205,8 @@ of this section.
 - **M29 — Opus audio pipeline**: `hraban/opus` (cgo) capture/encode/decode/playback in the voice-worker.
   Depends on M25's finding for how mic access is actually obtained. Done when: two voice-worker instances can
   exchange intelligible audio through the SFU from M26.
-- **M30 — Audio DSP**: RNNoise (noise suppression) plus `libspeexdsp` (echo cancellation plus AGC), both cgo,
+- **M30 — Audio DSP**: RNNoise (noise suppression) plus WebRTC's Audio Processing Module (AEC3 echo
+  cancellation plus AGC2 — replacing `libspeexdsp`, ADR 0023), both cgo,
   contained entirely to the voice-worker binary, wired in this exact order: Mic Capture → AEC → RNNoise → AGC
   → Opus Encode. Done when: a recorded test with background noise/echo shows measurable suppression versus the
   unprocessed pipeline from M29, and a two-party echo test confirms AEC correctly cancels far-end audio (i.e.

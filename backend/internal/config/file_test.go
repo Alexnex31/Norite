@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,8 +12,15 @@ import (
 )
 
 // writeConfigFile writes an instance config file and points discovery at it via NORITE_CONFIG_FILE.
+//
+// A signing key is appended when the body does not already set one. It is required to boot from M4 on, so
+// without it every fixture here would fail validation for a reason unrelated to what it is testing — the
+// same role the DSN plays. A body that declares its own [auth] section is left untouched.
 func writeConfigFile(t *testing.T, body string) string {
 	t.Helper()
+	if !strings.Contains(body, "[auth]") {
+		body += "\n[auth]\njwt_secret = \"" + testJWTSecret + "\"\n"
+	}
 	path := filepath.Join(t.TempDir(), "instance.toml")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 	t.Setenv(ConfigFileEnvVar, path)
@@ -113,6 +121,7 @@ mode = "invite"
 	t.Setenv(envPrefix+"ENV", string(EnvProduction))
 	t.Setenv(envPrefix+"LISTEN_ADDR", "0.0.0.0:2222")
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 	t.Setenv(envPrefix+"DB_MAX_CONNS", "9")
 	t.Setenv(envPrefix+"SHUTDOWN_TIMEOUT", "30s")
 	t.Setenv(envPrefix+"TRUST_PROXY_HEADERS", "true")
@@ -211,6 +220,7 @@ shutdown_timeout = "soon"
 func TestNoConfigFileIsNotAnError(t *testing.T) {
 	noSystemConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 
 	cfg, err := Load("")
 	require.NoError(t, err)
@@ -222,6 +232,7 @@ func TestNoConfigFileIsNotAnError(t *testing.T) {
 func TestExplicitlyRequestedFileMustExist(t *testing.T) {
 	noSystemConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 	missing := filepath.Join(t.TempDir(), "nope.toml")
 
 	_, err := Load(missing)
@@ -235,6 +246,7 @@ func TestConfigFileEnvVarMustExist(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nope.toml")
 	t.Setenv(ConfigFileEnvVar, missing)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 
 	_, err := Load("")
 	require.Error(t, err)
@@ -250,6 +262,8 @@ listen_addr = "127.0.0.1:1111"
 [database]
 url = "`+validDSN+`"
 `)
+	// Written directly rather than through writeConfigFile, which would point discovery at this one too and
+	// defeat the point of the test — so the signing key it would have appended is supplied here instead.
 	fromFlag := filepath.Join(t.TempDir(), "flag.toml")
 	require.NoError(t, os.WriteFile(fromFlag, []byte(`
 [http]
@@ -257,6 +271,9 @@ listen_addr = "127.0.0.1:3333"
 
 [database]
 url = "`+validDSN+`"
+
+[auth]
+jwt_secret = "`+testJWTSecret+`"
 `), 0o600))
 
 	cfg, err := Load(fromFlag)
@@ -341,6 +358,7 @@ mode = "everyone"
 func TestValidationErrorsNameOnlyTheVariableWithoutAFile(t *testing.T) {
 	noSystemConfigFile(t)
 	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
 	t.Setenv(envPrefix+"LOG_LEVEL", "verbose")
 
 	_, err := Load("")

@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
@@ -22,10 +23,20 @@ const apiBase = "/api/v1"
 const healthzPath = apiBase + "/healthz"
 
 type routerOptions struct {
-	Config config.Config
-	Logger zerolog.Logger
-	Health *health
+	Config  config.Config
+	Logger  zerolog.Logger
+	Health  *health
+	Auth    *auth.Handler
+	AuthSvc *auth.Service
 }
+
+// authRateLimit is the stricter bucket the unauthenticated auth routes sit behind.
+//
+// The base limit is sized for ordinary API traffic; login, registration and refresh are password- and
+// token-guessing surfaces where that is far too generous. A separate Bucket rather than a lower global
+// limit, so throttling a credential-stuffing run cannot also throttle a legitimate client's normal
+// requests — the two are counted independently (see internal/platform/ratelimit).
+const authRateLimit = "20-M"
 
 // newRouter assembles the HTTP router and its middleware chain.
 //
@@ -44,6 +55,14 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 	rateLimiter, err := ratelimit.Middleware(ratelimit.Options{
 		Rate:   opts.Config.RateLimit,
 		Bucket: "rest",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	authLimiter, err := ratelimit.Middleware(ratelimit.Options{
+		Rate:   authRateLimit,
+		Bucket: "auth",
 	})
 	if err != nil {
 		return nil, err
@@ -96,6 +115,24 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 	})
 
 	r.Route(apiBase, func(r chi.Router) {
+		// Authenticate resolves a Bearer credential into an actor for every request below this point. It
+		// rejects nothing on its own — each route decides whether it needs one — so public and protected
+		// routes can coexist without an exemption list (see auth.Authenticate).
+		if opts.AuthSvc != nil {
+			r.Use(auth.Authenticate(opts.AuthSvc))
+		}
+
+		if opts.Auth != nil {
+			// The auth routes carry the stricter bucket *in addition to* the base limiter already applied
+			// on the root chain, so a credential-guessing run is counted twice and stopped by whichever
+			// ceiling it reaches first.
+			r.Route("/auth", func(r chi.Router) {
+				r.Use(authLimiter)
+				opts.Auth.Routes(r)
+			})
+			r.Route("/users", opts.Auth.UserRoutes)
+		}
+
 		r.Get("/healthz", opts.Health.Handler)
 		// chi registers GET and HEAD separately — a GET-only route answers HEAD with 405. Health probes
 		// (curl -I, several load balancers and CDNs) do use HEAD, so it gets the same handler; net/http

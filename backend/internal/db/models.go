@@ -3,3 +3,47 @@
 //   sqlc v1.30.0
 
 package db
+
+import (
+	"net/netip"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+type ApiToken struct {
+	ID         int64
+	UserID     int64
+	Name       string
+	TokenHash  []byte
+	Scopes     []string
+	CreatedAt  pgtype.Timestamptz
+	LastUsedAt pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+}
+
+type Session struct {
+	ID               int64
+	UserID           int64
+	DeviceID         string
+	RefreshTokenHash []byte
+	DeviceName       *string
+	IpAddress        *netip.Addr
+	CreatedAt        pgtype.Timestamptz
+	LastUsedAt       pgtype.Timestamptz
+	ExpiresAt        pgtype.Timestamptz
+	RevokedAt        pgtype.Timestamptz
+	ReplacedByID     *int64
+}
+
+type User struct {
+	ID              int64
+	Username        string
+	Email           string
+	PasswordHash    *string
+	DisplayName     string
+	AvatarHash      *string
+	EmailVerifiedAt pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+	DeletedAt       pgtype.Timestamptz
+}

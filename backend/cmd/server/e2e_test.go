@@ -138,6 +138,8 @@ func TestMigrateOnlyAppliesMigrationsAndExits(t *testing.T) {
 	cmd := exec.Command(binary, "-migrate-only")
 	cmd.Env = append(os.Environ(),
 		"NORITE_DATABASE_URL="+dsn,
+		// Required to boot from M4 on, exactly like the DSN.
+		"NORITE_JWT_SECRET=test-signing-key-of-at-least-32-bytes",
 		"NORITE_LOG_FORMAT=json",
 	)
 	out, err := cmd.CombinedOutput()
@@ -168,6 +170,8 @@ func startServer(t *testing.T, binary, addr, dsn string) *runningServer {
 	cmd.Env = append(os.Environ(),
 		"NORITE_LISTEN_ADDR="+addr,
 		"NORITE_DATABASE_URL="+dsn,
+		// Required to boot from M4 on, exactly like the DSN.
+		"NORITE_JWT_SECRET=test-signing-key-of-at-least-32-bytes",
 		"NORITE_LOG_FORMAT=json",
 		"NORITE_LOG_LEVEL=debug",
 		// Short enough that a hung test fails in reasonable time, long enough not to trip over a slow

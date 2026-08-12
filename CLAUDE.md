@@ -69,8 +69,8 @@ highest-value surfaces.
 **Daemon**: Go, `wazero` (WASM plugin sandbox, pure Go/no cgo), `zalando/go-keyring`, `fsnotify`,
 `gofrs/flock`, `modernc.org/sqlite` (E2E keystore, pure Go/no cgo).
 
-**Voice-worker**: Go, `pion/webrtc` + `pion/interceptor`, `hraban/opus`/RNNoise/`libspeexdsp` (cgo —
-the *only* binary in the stack where cgo is allowed).
+**Voice-worker**: Go, `pion/webrtc` + `pion/interceptor`, `hraban/opus`/RNNoise/WebRTC APM (AEC3, cgo —
+the *only* binary in the stack where cgo is allowed; AEC3 replaces `libspeexdsp` per ADR 0023).
 
 **Web SPA** (later, tertiary client): React, TypeScript, Vite, TanStack Query, Zustand, Zod, Tailwind +
 shadcn/ui, `react-hook-form`, Vitest + Playwright.
@@ -231,10 +231,15 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
 - **M2 — CLI skeleton and `norite instance init`**: done (tag `m2`). Scope was reshuffled with M3 (settled
   2026-08-10): the `norite` command tree landed here, since the wizard needs it, and M3 is the daemon
   lifecycle stub alone.
-- **M3 — daemon lifecycle stub**: done. `daemon/internal/{daemonproc,paths}` (single-instance flock,
-  `RLIMIT_NOFILE` raise, lumberjack log, clean shutdown) and `cli/internal/daemonctl` (the `norite daemon`
-  command group over a systemd-user / launchd-agent / Windows-logon-task `Manager`).
-- **M4 — backend auth core**: next.
+- **M3 — daemon lifecycle stub**: done (tag `m3`). `daemon/internal/{daemonproc,paths}` (single-instance
+  flock, `RLIMIT_NOFILE` raise, lumberjack log, clean shutdown) and `cli/internal/daemonctl` (the
+  `norite daemon` command group over a systemd-user / launchd-agent / Windows-logon-task `Manager`).
+- **M4 — backend auth core**: in progress. `internal/platform/snowflake` (IDs), `internal/platform/dbtest`
+  (the shared container harness every domain package's tests use), migration `000002_auth`, and
+  `internal/auth` — argon2id, HS256 access tokens, device-scoped refresh families, scoped `api_tokens`, the
+  Bearer middleware. Decisions recorded in ADR 0022; the voice-connection reasoning that settles the signing
+  algorithm is ADR 0023.
+- **M5 — transactional email and password reset**: next.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -323,6 +328,31 @@ And on the daemon side, from M3:
 - **Daemon-owned state lives in `daemon/internal/paths`**, `0700`, per-user, never a system-wide path. It
   will hold plugin capability grants and pinned `.wasm` hashes, so treat the mode as a security boundary.
 
+And on the auth side, from M4:
+
+- **Scopes only ever restrict, never grant.** A scope bounds a *delegated* credential below its owner's
+  reach; permission resolution still runs on top (rule 1). A user actor passes every scope check by design.
+  New scopes are added to `auth.AllScopes` — never invented at a call site, where a typo widens access.
+- **Token management is not delegable.** Minting, listing and revoking `api_tokens` require a user actor and
+  carry no scope. A credential that can create credentials can escalate itself.
+- **Every credential is stored only as a hash.** Passwords argon2id, opaque tokens SHA-256. The raw value of
+  a refresh or API token exists exactly once, in the response that issued it. Token hashes are unsalted
+  deliberately — they are 256-bit random values with nothing to brute-force, and a salt would make the
+  indexed lookup that authenticates every request impossible.
+- **Credential failures are indistinguishable to the client.** Unknown account, wrong password, and
+  OAuth-only account all return the same 401; refresh replay returns the same answer as an unknown token. The
+  login path runs argon2id against a dummy hash when no account matched, so timing does not enumerate
+  accounts either — don't add an early return that skips it.
+- **Refresh rotation is scoped to one `device_id`.** Reuse detection revokes that device's family and never
+  another's. `replaced_by_id` is what distinguishes replay (rotation set it) from deliberate revocation
+  (logout or a superseding login did not) — conflating the two logs users out of sessions they just created.
+- **argon2id runs behind a concurrency gate.** Each hash holds 64 MiB; a distributed login flood would
+  otherwise exhaust memory long before any per-IP limit noticed. Any new call site goes through
+  `HashPassword`/`VerifyPassword`, which take a context for exactly this reason.
+- **The access token never leaves the backend's trust boundary.** It is not presented to the media server or
+  the voice-worker (ADR 0023), which is what keeps HS256 correct (ADR 0022). An external verifier appearing
+  is a trigger to revisit the algorithm, not to distribute the key.
+
 ## Project-specific skills
 
 **Not in the repository** — `.gitignore` excludes `.claude/`, so these live on the maintainer's machine
@@ -340,6 +370,12 @@ Where they exist, invoke with `/<name>`:
 - `/security-audit` — this project's own security checklist (permissions, audit log, token/credential
   hygiene, plugin sandbox boundaries, E2E exclusion, XSS/terminal-escape safety, secrets) — complements the
   generic `/security-review` skill.
+- `/optimization-review` — the performance counterpart to `/security-audit`, against `docs/architecture.md`
+  §15 and rule 7: hot-path identification first, then missing indexes, N+1s, avoidable round trips,
+  per-request work that belongs at construction, allocation, backpressure and payload shape. Findings carry
+  an evidence tier (Measured / Structural; speculative ones are not reported), and it refuses the
+  optimizations that would trade a non-negotiable rule — cached permissions, an async audit write, a
+  dispatch moved inside its transaction, a fan-out that skips the `blocks` check.
 - `/ship-milestone` — the git workflow above in operational form: commit and PR-title length checks, the PR
   template followed literally, the squash-merge subject/description, and the tag.
 

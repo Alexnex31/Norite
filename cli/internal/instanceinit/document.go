@@ -52,6 +52,9 @@ type Document struct {
 	ACMEEmail   string
 
 	RegistrationMode string
+
+	// JWTSecret signs the instance's access tokens. Generated, never prompted for — see wizard.go.
+	JWTSecret string
 }
 
 // UsesS3 reports whether the S3 section is meaningful for this document.
@@ -146,6 +149,14 @@ email = {{ .ACMEEmail | toml }}
 [registration]
 # "open" (anyone may create an account) or "invite" (an instance invite code is required).
 mode = {{ .RegistrationMode | toml }}
+
+[auth]
+# Signs this instance's access tokens (HS256). Generated here with crypto/rand — you are not expected to
+# choose it, and there is no default: a backend without one refuses to start.
+#
+# Treat it exactly like the database password above. Changing it invalidates outstanding access tokens,
+# which expire within 15 minutes anyway; refresh tokens are unaffected, so clients recover by themselves.
+jwt_secret = {{ .JWTSecret | toml }}
 `))
 
 // Render produces the file's contents.

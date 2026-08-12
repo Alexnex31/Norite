@@ -2,6 +2,10 @@ package database
 
 import (
 	"context"
+	"io/fs"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -13,13 +17,36 @@ import (
 	"github.com/Alexnex31/Norite/backend/migrations"
 )
 
+// latestMigrationVersion is the highest version number in the embedded migration set.
+//
+// Derived rather than hardcoded: these tests assert that migrating reaches the *end*, and pinning a literal
+// meant every milestone that added a migration broke three unrelated tests for no reason. Reading the
+// embedded FS also proves the assertion is about the migrations that actually ship.
+func latestMigrationVersion(t *testing.T) int64 {
+	t.Helper()
+
+	entries, err := fs.Glob(migrations.FS, "*.up.sql")
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "the embedded migration set must not be empty")
+
+	var highest int64
+	for _, name := range entries {
+		prefix, _, found := strings.Cut(filepath.Base(name), "_")
+		require.True(t, found, "migration %q does not follow <version>_<name>.up.sql", name)
+		version, err := strconv.ParseInt(prefix, 10, 64)
+		require.NoError(t, err, "migration %q has a non-numeric version prefix", name)
+		highest = max(highest, version)
+	}
+	return highest
+}
+
 func TestMigrateAppliesTheEmbeddedMigrations(t *testing.T) {
 	dsn := freshDatabase(t)
 
 	require.NoError(t, Migrate(context.Background(), migrateOptions(dsn)))
 
 	version, dirty := schemaVersion(t, dsn)
-	assert.Equal(t, int64(1), version)
+	assert.Equal(t, latestMigrationVersion(t), version)
 	assert.False(t, dirty)
 }
 
@@ -32,7 +59,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	require.NoError(t, Migrate(ctx, migrateOptions(dsn)))
 
 	version, dirty := schemaVersion(t, dsn)
-	assert.Equal(t, int64(1), version)
+	assert.Equal(t, latestMigrationVersion(t), version)
 	assert.False(t, dirty)
 }
 
@@ -76,7 +103,7 @@ func TestMigrateBlocksWhileAnotherProcessHoldsTheLock(t *testing.T) {
 	}
 
 	version, dirty := schemaVersion(t, dsn)
-	assert.Equal(t, int64(1), version)
+	assert.Equal(t, latestMigrationVersion(t), version)
 	assert.False(t, dirty)
 }
 
