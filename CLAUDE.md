@@ -370,6 +370,12 @@ Where they exist, invoke with `/<name>`:
 - `/security-audit` — this project's own security checklist (permissions, audit log, token/credential
   hygiene, plugin sandbox boundaries, E2E exclusion, XSS/terminal-escape safety, secrets) — complements the
   generic `/security-review` skill.
+- `/optimization-review` — the performance counterpart to `/security-audit`, against `docs/architecture.md`
+  §15 and rule 7: hot-path identification first, then missing indexes, N+1s, avoidable round trips,
+  per-request work that belongs at construction, allocation, backpressure and payload shape. Findings carry
+  an evidence tier (Measured / Structural; speculative ones are not reported), and it refuses the
+  optimizations that would trade a non-negotiable rule — cached permissions, an async audit write, a
+  dispatch moved inside its transaction, a fan-out that skips the `blocks` check.
 - `/ship-milestone` — the git workflow above in operational form: commit and PR-title length checks, the PR
   template followed literally, the squash-merge subject/description, and the tag.
 
