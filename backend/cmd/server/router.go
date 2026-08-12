@@ -42,6 +42,8 @@ const authRateLimit = "20-M"
 //
 // The chain order is fixed by docs/architecture.md §2 and is load-bearing rather than stylistic:
 //
+//	SanitizeInboundRequestID → decides whether the client's own X-Request-Id may be adopted, before
+//	             anything downstream treats it as trusted.
 //	RequestID  → every later layer, and every log line, can reference the same correlation ID.
 //	EchoRequestID → returns that ID to the client so it can quote it in a report.
 //	RealIP     → conditional; see below.
@@ -70,6 +72,9 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 
 	r := chi.NewRouter()
 
+	// Above RequestID, because that middleware adopts an inbound X-Request-Id verbatim and the value ends
+	// up in the response, the logs, and every error body. See httpx.SanitizeInboundRequestID.
+	r.Use(httpx.SanitizeInboundRequestID(opts.Config.TrustProxyHeaders))
 	r.Use(middleware.RequestID)
 	r.Use(httpx.EchoRequestID)
 

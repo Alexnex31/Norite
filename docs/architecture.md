@@ -149,10 +149,18 @@ mutating method takes an already-authenticated `actor` and calls `roles.Resolve`
 `http.go` (chi sub-router), `model.go`, `events.go` (dispatches after a DB transaction commits, never
 before). Services depend on narrow repository interfaces over the single `internal/db` sqlc package.
 
-**Middleware chain order** (outermost first): `RequestID` → `RealIP` → `Recoverer` → `SecureHeaders` →
-`StructuredLogger` → `RateLimit` (route-bucketed, `/64` IPv6 grouping, §14) → `AuthenticateBearer`
-(populates `actor` from the JWT access token; 401 if absent on protected routes) → domain handler. No CSRF
-middleware exists on this surface at all — see "Auth design" below.
+**Middleware chain order** (outermost first): `SanitizeInboundRequestID` → `RequestID` → `EchoRequestID` →
+`RealIP` → `Recoverer` → `SecureHeaders` → `StructuredLogger` → `RateLimit` (route-bucketed, `/64` IPv6
+grouping, §14) → `AuthenticateBearer` (populates `actor` from the JWT access token; 401 if absent on
+protected routes) → domain handler. No CSRF middleware exists on this surface at all — see "Auth design"
+below.
+
+Two of those exist for the same reason and make the same call. `SanitizeInboundRequestID` and `RealIP` both
+decide whether a client-supplied forwarded header may be believed, and both answer "only when
+`trust_proxy_headers` is on". A request ID is not merely cosmetic: it is echoed to the client, written into
+every log line, and returned in every error body, so adopting the caller's own value on a directly-exposed
+process lets unrelated requests be collapsed under one ID and lets arbitrary text ride into the logs.
+Neither decision is re-made further down the chain.
 
 ### Data model (Postgres) — full DDL sketch
 
