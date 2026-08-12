@@ -21,6 +21,10 @@ const (
 	// what they are looking at and what to revoke.
 	refreshTokenPrefix = "nrt_"
 	apiTokenPrefix     = "nat_"
+	// passwordResetPrefix marks a reset token. Deliberately absent from LooksLikeOpaqueToken: a reset
+	// token authenticates exactly one endpoint, and routing it to the Bearer verifier would be the first
+	// step toward it ever authenticating anything else.
+	passwordResetPrefix = "nrp_"
 )
 
 // ErrMalformedToken reports a token that cannot be a Norite token at all — wrong prefix, wrong length, not
@@ -57,6 +61,16 @@ func GenerateRefreshToken() (raw string, hash TokenHash, err error) {
 // GenerateAPIToken returns a new scoped API token and its stored hash.
 func GenerateAPIToken() (raw string, hash TokenHash, err error) {
 	return generateOpaqueToken(apiTokenPrefix)
+}
+
+// GeneratePasswordResetToken mints a single-use reset token.
+func GeneratePasswordResetToken() (raw string, hash TokenHash, err error) {
+	return generateOpaqueToken(passwordResetPrefix)
+}
+
+// ParsePasswordResetToken hashes a raw reset token for lookup, rejecting anything of the wrong shape.
+func ParsePasswordResetToken(raw string) (TokenHash, error) {
+	return parseOpaqueToken(raw, passwordResetPrefix)
 }
 
 func generateOpaqueToken(prefix string) (string, TokenHash, error) {

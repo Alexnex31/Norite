@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -77,6 +78,13 @@ type Service struct {
 	// registrationMode gates POST /auth/register.
 	registrationMode RegistrationMode
 
+	// mailer sends password-reset email. Nil, or present but disabled, means this instance has no relay
+	// and reset reports ErrResetUnavailable rather than accepting a request it cannot fulfill.
+	mailer Mailer
+	// publicBaseURL is the origin reset links are built from. Configured rather than derived — see
+	// config.PublicBaseURL.
+	publicBaseURL string
+
 	now func() time.Time
 }
 
@@ -86,6 +94,20 @@ type ServiceOptions struct {
 	IDs              *snowflake.Generator
 	Issuer           *TokenIssuer
 	RegistrationMode RegistrationMode
+
+	// Mailer and PublicBaseURL are optional together: an instance with no relay is a working instance,
+	// and password reset is simply unavailable on it (ADR 0020).
+	Mailer        Mailer
+	PublicBaseURL string
+}
+
+// Mailer is the slice of internal/mail this package needs.
+//
+// Narrow, and an interface rather than the concrete queue, for the reason every seam here is: it lets the
+// reset tests drive a relay that is disabled, full, or broken without standing one up.
+type Mailer interface {
+	Enabled() bool
+	Enqueue(msg mail.Message) error
 }
 
 // NewService builds the auth service.
@@ -110,6 +132,8 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{
 		pool:             opts.Pool,
 		queries:          db.New(opts.Pool),
+		mailer:           opts.Mailer,
+		publicBaseURL:    opts.PublicBaseURL,
 		ids:              opts.IDs,
 		issuer:           opts.Issuer,
 		registrationMode: mode,
