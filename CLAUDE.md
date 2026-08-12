@@ -220,7 +220,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M2.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M4.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -234,12 +234,13 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
 - **M3 — daemon lifecycle stub**: done (tag `m3`). `daemon/internal/{daemonproc,paths}` (single-instance
   flock, `RLIMIT_NOFILE` raise, lumberjack log, clean shutdown) and `cli/internal/daemonctl` (the
   `norite daemon` command group over a systemd-user / launchd-agent / Windows-logon-task `Manager`).
-- **M4 — backend auth core**: in progress. `internal/platform/snowflake` (IDs), `internal/platform/dbtest`
+- **M4 — backend auth core**: done (tag `m4`). `internal/platform/snowflake` (IDs), `internal/platform/dbtest`
   (the shared container harness every domain package's tests use), migration `000002_auth`, and
   `internal/auth` — argon2id, HS256 access tokens, device-scoped refresh families, scoped `api_tokens`, the
   Bearer middleware. Decisions recorded in ADR 0022; the voice-connection reasoning that settles the signing
-  algorithm is ADR 0023.
-- **M5 — transactional email and password reset**: next.
+  algorithm is ADR 0023. Merged as a merge commit rather than a squash, so `main` carries its seven
+  sub-commits directly — permitted, and the first milestone to use that option.
+- **M5 — transactional email and password reset**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
