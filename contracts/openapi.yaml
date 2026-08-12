@@ -1,14 +1,38 @@
 openapi: 3.1.0
 info:
   title: Norite REST API
-  version: 0.0.0-m1
+  version: 0.0.0-m4
   description: >
     Source-of-truth REST contract for the Norite backend (see docs/architecture.md §2 and §10).
     `oapi-codegen` starts generating Go server-side types and routing scaffolding from this file at
     Milestone M12; until then it is hand-maintained, but the same rule already applies — every REST
     endpoint added or changed updates this file in the same commit (CLAUDE.md rule 6).
+
+
+    IDs are Snowflakes (docs/adr/0003-snowflake-ids.md) and are always sent as **quoted strings**, never
+    JSON numbers: they exceed 2^53, so a client parsing them as numbers silently loses precision and
+    starts confusing adjacent IDs.
 servers:
   - url: /api/v1
+
+# Every operation requires a Bearer credential unless it declares `security: []`. Stating it this way round
+# means a new endpoint is protected by default, and making one public is a visible, deliberate line in the
+# diff rather than an omission nobody notices.
+security:
+  - bearerAuth: []
+
+tags:
+  - name: observability
+    description: Liveness and readiness surfaces for operators and orchestrators.
+  - name: auth
+    description: >
+      Account creation, password login, refresh-token rotation, and scoped API tokens. Tokens are issued
+      directly in the JSON body, never as cookies — the CLI, GUI and daemon have no cookie jar
+      (docs/adr/0011-token-based-client-auth.md). A future web SPA gets cookies from a BFF layer in front of
+      this same API, not from these endpoints.
+  - name: users
+    description: Account profile surfaces.
+
 paths:
   /healthz:
     get:
@@ -69,8 +93,420 @@ paths:
                   value:
                     status: degraded
                     detail: database is unreachable
+
+    head:
+      summary: Readiness check (headers only)
+      description: >
+        Identical to `GET /healthz` in status code and headers, with no response body. Registered
+        explicitly because chi routes methods separately — a GET-only route answers HEAD with 405 — and
+        several load balancers, as well as `curl -I`, probe with HEAD.
+      operationId: headHealthz
+      tags: [observability]
+      security: []
+      responses:
+        "200":
+          description: The instance is ready to serve.
+        "503":
+          description: The instance is not ready to serve.
+
+  /auth/register:
+    post:
+      summary: Create an account
+      description: >
+        Creates an account and returns it. It does **not** log the new account in: registration and login
+        are separate operations with separate inputs — login needs a `device_id`, which registration has no
+        business requiring — and fusing them would force a client that only wanted an account to invent a
+        device identity.
+
+
+        Returns 403 `registration_closed` while the instance is configured for invite-only registration.
+        Invite redemption arrives at Milestone M10; until then a gated instance refuses registration
+        outright rather than silently behaving as if it were open, so the setting is never a lie.
+
+
+        Unlike login, this endpoint necessarily discloses whether an email or username is already taken —
+        that is inherent to letting someone create an account at all. Password reset (M5) is the surface
+        where anti-enumeration matters, and it always answers 202.
+      operationId: register
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+            examples:
+              minimal:
+                value:
+                  username: ada
+                  email: ada@example.com
+                  password: correct horse battery staple
+      responses:
+        "201":
+          description: The account was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: >
+            Registration is closed on this instance (`registration_closed`). The instance requires an invite
+            code, which cannot yet be redeemed — see M10.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The email address or username is already in use.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/login:
+    post:
+      summary: Exchange a password for an access and refresh token pair
+      description: >
+        Verifies a password and starts a refresh session for the given device.
+
+
+        `device_id` is required and is the key to the whole refresh model: a refresh token belongs to a
+        *device*, not to an account. Rotation and reuse-detection act strictly within one `device_id`, so a
+        user running daemons on a laptop and a desktop cannot have one machine's activity log the other out
+        (docs/adr/0011-token-based-client-auth.md). A login with no device identity would have to share a
+        family with every other such login, and rotation would then log them all out.
+
+
+        A successful login **supersedes that device's previous session**: any live session for the same
+        (user, device) is revoked before the new one is created. Without that, every login would leave
+        another redeemable refresh token behind, so a token stolen months ago would stay valid indefinitely.
+        Other devices are untouched.
+
+
+        Every credential failure returns the same 401 with the same message — unknown account, wrong
+        password, and an OAuth-only account with no password set are deliberately indistinguishable. The
+        server also performs a full password hash against a dummy value when no account matched, so response
+        *timing* does not reveal whether an address is registered either.
+      operationId: login
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            examples:
+              daemon:
+                value:
+                  email: ada@example.com
+                  password: correct horse battery staple
+                  device_id: 3f1c8a52-daemon-install-id
+                  device_name: ada's laptop
+      responses:
+        "200":
+          description: The password was correct; a token pair was issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: >
+            Invalid email or password. Deliberately identical for every credential failure — see the
+            description above.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/refresh:
+    post:
+      summary: Rotate a refresh token
+      description: >
+        Exchanges a refresh token for a fresh pair, within the same device's family.
+
+
+        Rotation is **single-use**: the presented token is revoked in the same transaction that creates its
+        successor. Presenting it again is therefore unambiguous evidence of replay — either a client retried
+        after a lost response, or the token was stolen. The two are indistinguishable from the server, so the
+        pessimistic reading wins and **that device's entire session family is revoked**. Other devices are
+        never affected.
+
+
+        A token that was revoked *without* being rotated — by logout, or by a later login superseding it —
+        is simply invalid and triggers none of that. Conflating the two would mean logging out, logging back
+        in, and retrying the stale token once would revoke the session just created.
+
+
+        Replay and an unknown token return the identical 401. Telling a caller "that token was already used"
+        would confirm to a thief that they hold something real, and that the legitimate client got there
+        first.
+      operationId: refresh
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: A new token pair was issued; the presented refresh token is now spent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: >
+            The refresh token is invalid, expired, revoked, or was already used. Replay additionally revokes
+            that device's remaining sessions, but the response is the same either way.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/logout:
+    post:
+      summary: Revoke the session a refresh token belongs to
+      description: >
+        Takes the *refresh* token rather than the access token: the access token is what the caller
+        authenticates with, but the refresh session is the thing that needs ending — an access token expires
+        on its own within its 15-minute TTL regardless.
+
+
+        Idempotent by nature. An unknown, malformed, or already-revoked token is not an error: a client
+        retrying after a dropped response must not be told its logout failed.
+
+
+        This revokes one session. Revoking every session for an account — the primitive a ban and a
+        self-service account deletion both invoke — is Milestone M11.
+      operationId: logout
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "204":
+          description: The session is revoked, or was already not valid. No body.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/tokens:
+    post:
+      summary: Mint a scoped API token
+      description: >
+        Creates a long-lived, narrow-privilege credential for a bot or local automation script, and returns
+        its value **exactly once**. Only a SHA-256 hash is stored, so the value cannot be recovered — a
+        caller that loses it must mint a new one.
+
+
+        Requires a logged-in user's access token; an API token may not call this. A credential that can mint
+        credentials could grant itself scopes it does not hold, which would make every restriction in the
+        scope system decorative (docs/adr/0022-access-token-signing-and-scope-model.md).
+
+
+        Scopes only ever *restrict*. They bound this token below what its owner can already do, and never
+        grant anything — permission resolution still runs on top of every scope check. An unrecognised scope
+        is rejected rather than dropped: silently dropping one would hand back a token weaker than the caller
+        believes.
+      operationId: mintApiToken
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MintApiTokenRequest"
+            examples:
+              readOnlyBot:
+                value:
+                  name: status bot
+                  scopes: [identify]
+      responses:
+        "201":
+          description: >
+            The token was created. `value` appears in this response and nowhere else, ever.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MintedApiToken"
+        "400":
+          description: Malformed body, missing name, or an unrecognised scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The request authenticated with an API token. Minting requires a logged-in session — see the
+            description above.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    get:
+      summary: List your API tokens
+      description: >
+        Returns the calling account's own, non-revoked API tokens. No credential material is included —
+        neither the token value nor its hash.
+
+
+        Requires a logged-in user's access token, like minting and revoking. Listing is not delegable
+        because it discloses the names, scopes and last-use times of the account's *other* tokens: a
+        compromised low-privilege bot could not use a more powerful sibling, but it could learn one exists
+        and what it reaches, which is reconnaissance with no delegation use case behind it.
+
+
+        `last_used_at` is recorded at most once every few minutes per token rather than on every request —
+        a write on the hottest read path in the API, to keep a timestamp accurate to the second that only an
+        auditing operator reads, is not a trade worth making.
+      operationId: listApiTokens
+      tags: [auth]
+      responses:
+        "200":
+          description: The account's active API tokens, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApiToken"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The request authenticated with an API token; a logged-in session is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/tokens/{tokenId}:
+    delete:
+      summary: Revoke an API token
+      description: >
+        Revokes one of the calling account's own API tokens. Takes effect immediately — the next request
+        presenting it fails.
+
+
+        Ownership is enforced in the SQL statement itself rather than by a separate check, so there is no
+        code path that forgets it (CLAUDE.md rule 1). A token belonging to another account returns 404,
+        identical to one that does not exist, so this endpoint cannot be used to probe which IDs are real.
+        A malformed ID returns 404 for the same reason.
+      operationId: revokeApiToken
+      tags: [auth]
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          description: Snowflake ID of the token to revoke, as a decimal string.
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+      responses:
+        "204":
+          description: The token is revoked. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The request authenticated with an API token; a logged-in session is required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            No such token for this account. Returned identically for a token that does not exist, one owned
+            by someone else, and a malformed ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /users/@me:
+    get:
+      summary: Get the authenticated account
+      description: >
+        Returns the account behind the presented credential. Accepts either a user's access token or an API
+        token holding the `identify` scope.
+      operationId: getCurrentUser
+      tags: [users]
+      security:
+        - bearerAuth: [identify]
+      responses:
+        "200":
+          description: The authenticated account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The presented API token does not hold the `identify` scope. 403 rather than 401 because the
+            credential is genuine — re-authenticating would not help, and a 401 would send a client into a
+            pointless refresh loop.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        `Authorization: Bearer <credential>`, where the credential is one of two kinds and the server tells
+        them apart by prefix:
+
+
+        A **JWT access token** from `/auth/login` or `/auth/refresh` — HS256, 15-minute TTL, verified
+        without a database round trip. It represents the person, so it passes every scope check
+        (docs/adr/0022-access-token-signing-and-scope-model.md).
+
+
+        An **API token** (`nat_…`) from `/auth/tokens` — long-lived, restricted to the scopes it was granted,
+        and revocable instantly.
+
+
+        Refresh tokens (`nrt_…`) are **not** Bearer credentials. They go in the body of `/auth/refresh` and
+        `/auth/logout` and authenticate nothing else.
+
   schemas:
+    Snowflake:
+      type: string
+      pattern: "^[0-9]+$"
+      description: >
+        A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53,
+        so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+      examples: ["7238829238972837423"]
+
+    Scope:
+      type: string
+      description: >
+        A capability an API token may be granted. Scopes only restrict a delegated credential below its
+        owner's reach; they never grant. The vocabulary grows with the surface it guards.
+
+
+        There is deliberately no scope for managing API tokens: minting, listing and revoking all require a
+        logged-in user, because a credential that can create credentials can escalate itself.
+      enum: [identify]
+
     HealthResponse:
       type: object
       required: [status]
@@ -86,6 +522,187 @@ components:
         detail:
           type: string
           description: Operator-facing explanation of a non-ok status. Omitted when status is `ok`.
+
+    User:
+      description: >
+        An account. Never carries `password_hash` or any other credential material — this shape is built
+        field-by-field from the database row rather than serialised from it, so a column added later cannot
+        leak onto the wire by default.
+      type: object
+      required: [id, username, email, display_name, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        username:
+          type: string
+          description: Unique, case-insensitively.
+        email:
+          type: string
+          format: email
+          description: Unique, case-insensitively.
+        display_name:
+          type: string
+        avatar_hash:
+          type: [string, "null"]
+        email_verified_at:
+          type: [string, "null"]
+          format: date-time
+          description: Null until email verification lands at Milestone M5.
+        created_at:
+          type: string
+          format: date-time
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_at]
+      additionalProperties: false
+      properties:
+        access_token:
+          type: string
+          description: >
+            A JWT, presented as `Authorization: Bearer …`. Short-lived by design: revocation acts on the
+            refresh session, so a stolen access token stays usable until it expires and the TTL is what
+            bounds that window.
+        refresh_token:
+          type: string
+          description: >
+            An opaque `nrt_…` value, stored server-side only as a SHA-256 hash. Send it to `/auth/refresh`
+            or `/auth/logout`; it is never a Bearer credential. Single-use — each refresh returns a new one,
+            and presenting a spent one revokes the device's whole family.
+          examples: ["nrt_kZ8m1H0dQ2s7pXv4b9RtLcYwJfN6aE3gUiOoPqSdTbA"]
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_at:
+          type: string
+          format: date-time
+          description: >
+            When the **access** token expires, not the refresh token. Clients refresh on this.
+
+    ApiToken:
+      description: A scoped API token's metadata. Never includes the token value or its hash.
+      type: object
+      required: [id, name, scopes, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        name:
+          type: string
+          description: Human label chosen at mint time, so a token can be recognised later in order to revoke it.
+          maxLength: 100
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scope"
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            Null until first use. Updated at most once every few minutes per token, not per request — see
+            the listing endpoint's description.
+
+    MintedApiToken:
+      description: >
+        A newly-created API token, including its value. This is the only response that ever contains it.
+      allOf:
+        - $ref: "#/components/schemas/ApiToken"
+        - type: object
+          required: [value]
+          properties:
+            value:
+              type: string
+              description: >
+                The credential itself, `nat_…`. Stored only as a SHA-256 hash and **not recoverable** — if
+                it is lost, mint a new token and revoke this one. The `nat_` prefix exists so a leaked
+                credential is identifiable on sight, by a human or a secret scanner.
+              examples: ["nat_9pQ2xL7vD4mZ0kR8sT1yWbGhJcNfEuAiOoPdXrVtYnM"]
+
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          minLength: 2
+          maxLength: 32
+          description: Must not contain spaces. Unique, case-insensitively.
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 12
+          maxLength: 256
+          description: >
+            Length is the only rule, counted in characters rather than bytes so a passphrase in a non-Latin
+            script is not penalised. No composition requirements: they push people toward predictable
+            substitutions while ruling out strong passphrases. The ceiling exists to bound hashing work.
+        display_name:
+          type: string
+          maxLength: 64
+          description: Defaults to the username when omitted.
+
+    LoginRequest:
+      type: object
+      required: [email, password, device_id]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+        device_id:
+          type: string
+          maxLength: 128
+          description: >
+            Stable identifier for this installation — the daemon generates one per install and reuses it.
+            Scopes the refresh-token family; see the endpoint description for why it is required.
+        device_name:
+          type: string
+          maxLength: 64
+          description: Human label shown in a future session listing (M11). Optional.
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      additionalProperties: false
+      properties:
+        refresh_token:
+          type: string
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      additionalProperties: false
+      properties:
+        refresh_token:
+          type: string
+
+    MintApiTokenRequest:
+      type: object
+      required: [name, scopes]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Scope"
+          description: >
+            Must be non-empty and every entry must be recognised. A token with no scopes could do nothing,
+            and an unrecognised scope is rejected rather than dropped.
 
     Error:
       description: >
@@ -113,6 +730,7 @@ components:
                 - rate_limited
                 - service_unavailable
                 - internal_error
+                - registration_closed
             message:
               type: string
               description: >
@@ -125,15 +743,46 @@ components:
                 server-side log line.
 
   responses:
+    BadRequest:
+      description: >
+        The request body was malformed, exceeded 1 MiB, contained an unknown field, or failed validation.
+        Unknown fields are rejected rather than ignored so a typo fails loudly instead of silently leaving
+        a setting on its default (docs/architecture.md §14.1). Validation messages name the offending field
+        and the rule it broke, never the submitted value — that value is a password on two of these routes.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Unauthorized:
+      description: >
+        No credential was presented, or the one presented was invalid, expired or revoked. An invalid
+        credential is treated identically to an absent one, so a caller cannot distinguish "wrong token"
+        from "no token".
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: Always `Bearer realm="norite"`, per RFC 9110.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
     RateLimited:
       description: >
         Too many requests. All IP-based limiting groups IPv6 traffic by /64 subnet rather than exact
         address (docs/architecture.md §11), so every address within one /64 shares a single budget.
+
+
+        The unauthenticated `/auth/*` routes additionally sit behind a stricter bucket than the rest of the
+        API, counted independently: they are credential-guessing surfaces, and throttling a stuffing run
+        must not also throttle a legitimate client's ordinary requests.
       headers:
         Retry-After:
           schema:
             type: integer
-          description: Seconds until the limit resets.
+          description: Seconds until the limit resets. Always present on a 429, and never `0`.
         X-RateLimit-Limit:
           schema:
             type: integer

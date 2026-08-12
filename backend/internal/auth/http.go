@@ -49,7 +49,7 @@ func (h *Handler) Routes(r chi.Router) {
 		// account's other tokens to whatever holds this one; revoking for symmetry with both.
 		r.With(RequireUserActor).Post("/tokens", h.mintToken)
 		r.With(RequireUserActor).Get("/tokens", h.listTokens)
-		r.With(RequireUserActor).Delete("/tokens/{tokenID}", h.revokeToken)
+		r.With(RequireUserActor).Delete("/tokens/{tokenId}", h.revokeToken)
 	})
 }
 
@@ -305,7 +305,7 @@ func (h *Handler) listTokens(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) revokeToken(w http.ResponseWriter, r *http.Request) {
 	actor, _ := ActorFrom(r.Context())
 
-	tokenID, err := snowflake.Parse(chi.URLParam(r, "tokenID"))
+	tokenID, err := snowflake.Parse(chi.URLParam(r, "tokenId"))
 	if err != nil {
 		// Same answer as a token that does not exist. A malformed ID and an unowned one must be
 		// indistinguishable, or the endpoint becomes a way to probe which IDs are real.
