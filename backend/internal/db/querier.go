@@ -9,6 +9,12 @@ import (
 )
 
 type Querier interface {
+	// Spends a token, and does the single-use check in the WHERE clause rather than in Go.
+	//
+	// Two confirms racing on the same token both reach this statement; the second finds used_at already set,
+	// matches zero rows, and is failed. Checking `used_at IS NULL` in the service and updating afterwards
+	// would let both win and would make the "single-use" promise a comment rather than a guarantee.
+	ConsumePasswordResetToken(ctx context.Context, id int64) (PasswordResetToken, error)
 	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
 	// Scoped API token queries.
 	//
@@ -16,6 +22,11 @@ type Querier interface {
 	// 15-minute access tokens a logged-in client holds. They are stored only as a SHA-256 hash, so the raw
 	// value is recoverable exactly once — in the response that created it.
 	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
+	// Password-reset token queries.
+	//
+	// A token is single-use and short-lived, and every one of these statements is written so that property
+	// holds in SQL rather than in whichever Go path remembered to check it.
+	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) (PasswordResetToken, error)
 	// Refresh-session queries.
 	//
 	// A session is one device's refresh-token family. Rotation replaces a row with a successor and links the
@@ -36,12 +47,20 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// The confirm path's only lookup. Deliberately returns spent and expired rows too: the caller needs to
+	// tell "no such token" from "already used" for its own logging, even though both are reported to the
+	// client identically.
+	GetPasswordResetTokenByHash(ctx context.Context, tokenHash []byte) (PasswordResetToken, error)
 	// The hot path: every refresh looks a session up by hash. Deliberately returns revoked and rotated rows
 	// too — the caller must be able to tell "no such token" from "a token that was already used", since only
 	// the second is a replay worth revoking a family over.
 	GetSessionByRefreshTokenHash(ctx context.Context, refreshTokenHash []byte) (Session, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	// Requesting a new reset spends every older one for that account, so the most recent link is the only one
+	// that works. Without this, every request an anxious user makes leaves another live token behind, and the
+	// window a leaked one is redeemable in becomes the union of all of them.
+	InvalidateOutstandingResetTokens(ctx context.Context, userID int64) (int64, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
 	// Health-check queries.
 	//
@@ -53,6 +72,20 @@ type Querier interface {
 	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
 	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
+	// Every API token the account holds.
+	//
+	// A password reset revokes these as well as sessions. The case that decides it is the one where the reset
+	// is happening *because* the account was compromised: an attacker who minted a token while they had
+	// access would otherwise keep it, and the reset would restore the owner's password while leaving the
+	// intruder's credential working. The cost is real and accepted — a user who simply forgot their password
+	// has to re-mint their bots — so the confirmation page says so plainly.
+	RevokeAllAPITokensForUser(ctx context.Context, userID int64) (int64, error)
+	// Every live session for an account, across every device.
+	//
+	// The narrow ancestor of M11's general-purpose revoke-all-sessions primitive (CLAUDE.md rule 17). M11
+	// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
+	// this is the whole of what "log everyone out" can currently mean.
+	RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error)
 	RevokeSession(ctx context.Context, id int64) (Session, error)
 	// Reuse detection: revoke every live session in one device's family. Scoped by device_id as well as
 	// user_id so another machine's family is untouched — a user with daemons on two computers must not be
@@ -62,6 +95,7 @@ type Querier interface {
 	// single-use: a second presentation finds revoked_at set and replaced_by_id populated, which is the replay
 	// signature.
 	RotateSession(ctx context.Context, arg RotateSessionParams) (Session, error)
+	SetUserPassword(ctx context.Context, arg SetUserPasswordParams) (User, error)
 	// Records use, at most once every few minutes per token.
 	//
 	// Writing on every authenticated request would put a row update — and its WAL traffic, and its dead tuple
