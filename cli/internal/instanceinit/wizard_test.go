@@ -103,6 +103,7 @@ func TestFullRunAsksAboutEverything(t *testing.T) {
 		"development", "127.0.0.1:9000", // env, listen addr
 		"localhost", "5432", "norite", "norite", "disable", // database
 		"local", "/srv/attachments", // storage
+		"no",     // smtp
 		"no",     // acme
 		"invite", // registration
 	}
@@ -122,6 +123,112 @@ func TestFullRunAsksAboutEverything(t *testing.T) {
 	assert.Equal(t, false, parsed["acme"].(map[string]any)["enabled"])
 }
 
+// The relay settings, and the public origin reset links are built from. Answering yes must collect all of
+// them, because the backend refuses to start with SMTP on and any of them missing.
+func TestFullRunCollectsSMTPSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	answers := []string{
+		"production", ":8080",
+		"localhost", "5432", "norite", "norite", "disable",
+		"local", "/srv/attachments",
+		"yes",                     // send email
+		"smtp.example.com", "587", // host, port
+		"norite@example.com",       // username -> triggers the password prompt
+		"starttls",                 // encryption
+		"no-reply@example.com",     // from address
+		"Norite",                   // from name
+		"https://chat.example.com", // public base url
+		"no",                       // acme
+		"open",
+	}
+	p, out := scripted(answers, "db-pw", "relay-pw")
+
+	require.NoError(t, run(Options{Full: true, Output: path}, p))
+
+	parsed := readBack(t, path)
+	smtp, ok := parsed["smtp"].(map[string]any)
+	require.True(t, ok, "an SMTP instance must get an [smtp] section")
+	assert.Equal(t, true, smtp["enabled"])
+	assert.Equal(t, "smtp.example.com", smtp["host"])
+	assert.Equal(t, int64(587), smtp["port"])
+	assert.Equal(t, "norite@example.com", smtp["username"])
+	assert.Equal(t, "relay-pw", smtp["password"])
+	assert.Equal(t, "starttls", smtp["encryption"])
+	assert.Equal(t, "no-reply@example.com", smtp["from_address"])
+
+	// public_base_url lives under [http] but is only required because SMTP is on — the cross-section
+	// dependency the backend enforces, and the one a wizard is most likely to forget to collect.
+	assert.Equal(t, "https://chat.example.com", parsed["http"].(map[string]any)["public_base_url"])
+
+	assert.NotContains(t, out.String(), "relay-pw", "the summary must never echo the relay password")
+}
+
+// A quick-start run that asks for SMTP must still be asked its companion questions. Gating them on --full
+// alone would write a file with smtp.enabled = true and no host, which the backend refuses to start on —
+// the same trap the storage and ACME branches above already avoid.
+func TestQuickStartWithSMTPStillCollectsItsCompanions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	yes := true
+
+	p, _ := silent()
+	err := run(Options{
+		NonInteractive: true,
+		Output:         path,
+		DBPassword:     "pw",
+		SMTP:           &yes,
+		// Deliberately incomplete: no host, no from address, no public base URL.
+	}, p)
+
+	require.Error(t, err, "--smtp without its companions must fail rather than write an unstartable file")
+	assert.NoFileExists(t, path)
+}
+
+func TestQuickStartWithSMTPFlagsWritesTheSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	yes := true
+
+	p, _ := silent()
+	require.NoError(t, run(Options{
+		NonInteractive:  true,
+		Output:          path,
+		DBPassword:      "pw",
+		SMTP:            &yes,
+		SMTPHost:        "relay.example.com",
+		SMTPFromAddress: "no-reply@example.com",
+		PublicBaseURL:   "https://chat.example.com",
+	}, p))
+
+	parsed := readBack(t, path)
+	smtp := parsed["smtp"].(map[string]any)
+	assert.Equal(t, true, smtp["enabled"], "--smtp must be honored without --full")
+	assert.Equal(t, "relay.example.com", smtp["host"])
+	assert.Equal(t, "https://chat.example.com", parsed["http"].(map[string]any)["public_base_url"])
+}
+
+// Declining leaves the section off entirely rather than half-written. An instance with SMTP off is a
+// working instance, not a misconfigured one.
+func TestDecliningSMTPLeavesItDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	answers := []string{
+		"production", ":8080",
+		"localhost", "5432", "norite", "norite", "disable",
+		"local", "/srv/attachments",
+		"no", // smtp
+		"no", // acme
+		"open",
+	}
+	p, _ := scripted(answers, "db-pw")
+
+	require.NoError(t, run(Options{Full: true, Output: path}, p))
+
+	parsed := readBack(t, path)
+	smtp, ok := parsed["smtp"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, smtp["enabled"])
+	assert.NotContains(t, smtp, "host", "a disabled relay must not leave half a configuration behind")
+	assert.NotContains(t, parsed["http"], "public_base_url")
+}
+
 // Values that only exist under S3 storage must be collected when it is chosen, and the resulting file has
 // to carry all of them or the backend will refuse to start.
 func TestFullRunCollectsS3Settings(t *testing.T) {
@@ -130,7 +237,8 @@ func TestFullRunCollectsS3Settings(t *testing.T) {
 		"production", ":8080",
 		"localhost", "5432", "norite", "norite", "disable",
 		"s3", "https://minio.example.com", "eu-west-1", "attachments", "minio-user", "yes",
-		"no",
+		"no", // smtp
+		"no", // acme
 		"open",
 	}
 	p, _ := scripted(answers, "db-pw", "s3-secret")
