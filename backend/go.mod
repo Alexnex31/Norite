@@ -16,6 +16,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
 	github.com/ulule/limiter/v3 v3.11.2
+	github.com/wneessen/go-mail v0.8.1
 	golang.org/x/text v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
