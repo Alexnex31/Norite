@@ -2,7 +2,9 @@
 
 ## Status
 Accepted. Supersedes [ADR 0006](0006-voice-deferred-with-seams.md) entirely — the decision to defer real
-media is reversed.
+media is reversed. **Amended by [ADR 0023](0023-voice-connection-authentication.md)** in two places: the
+echo canceller and AGC move from `libspeexdsp` to WebRTC's Audio Processing Module (AEC3), and how a client
+authenticates to the SFU is settled there. Everything else below stands, including the DSP chain order.
 
 ## Context
 ADR 0006 deferred all real voice/video media to an undetermined later phase. The revised project scope makes
@@ -15,8 +17,9 @@ ecosystem and is scoped exactly to audio-now/video-later. Audio is universal (CL
 screen-share is GUI+web only, never CLI (a terminal can't render video).
 
 A separate **voice-worker subprocess**, spawned on-demand by the daemon (never a persistent idle process),
-owns the entire audio session: capture/encode/send, receive/decode/play, noise suppression (RNNoise), echo
-cancellation + AGC (`libspeexdsp`), all cgo — the *only* binary in the stack where cgo is allowed. DSP runs
+owns the entire audio session: capture/encode/send, receive/decode/play, noise suppression, echo
+cancellation and AGC (WebRTC's Audio Processing Module — AEC3, replacing `libspeexdsp` per ADR 0023), all
+cgo — the *only* binary in the stack where cgo is allowed. DSP runs
 in a strict, non-negotiable order: **Mic Capture → AEC → RNNoise → AGC → Opus Encode** (RNNoise before AEC
 would non-linearly distort the signal and break AEC's echo-correlation assumption). The worker holds its own
 direct WebRTC connection to the SFU — actual RTP audio never flows through the daemon, only control

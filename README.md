@@ -79,8 +79,8 @@ library), for tight memory control.
 **Daemon**: Go, `wazero` for the WASM plugin sandbox, `zalando/go-keyring` for credential storage,
 `pelletier/go-toml` v2 for the shared config file.
 
-**Voice-worker**: Go with cgo bindings confined to this one binary — `hraban/opus`, RNNoise, `libspeexdsp` —
-the only place cgo is allowed anywhere in the stack.
+**Voice-worker**: Go with cgo bindings confined to this one binary — `hraban/opus`, RNNoise, and WebRTC's
+Audio Processing Module (AEC3) — the only place cgo is allowed anywhere in the stack.
 
 **Web SPA** (later, third-priority client): React, TypeScript, Vite, TanStack Query, Zustand, Tailwind +
 shadcn/ui, with its own BFF-style httpOnly-cookie auth exchange layer.
