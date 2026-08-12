@@ -27,11 +27,22 @@ CREATE TABLE users (
   deleted_at        timestamptz NULL
 );
 
--- Login and registration both look accounts up by email, and every such lookup excludes soft-deleted rows.
--- The UNIQUE constraints above cover the full column, but not the "and not deleted" shape these queries
--- actually use, so the partial indexes are what those hit (CLAUDE.md rule 7).
-CREATE INDEX users_active_email_idx ON users (email) WHERE deleted_at IS NULL;
-CREATE INDEX users_active_username_idx ON users (username) WHERE deleted_at IS NULL;
+-- No extra index for the "look up an active account by email/username" shape, deliberately.
+--
+-- Login and registration look accounts up with `WHERE email = $1 AND deleted_at IS NULL`, which looks like
+-- it wants a partial index on `(email) WHERE deleted_at IS NULL`. It does not: the UNIQUE constraints above
+-- already resolve either column to *at most one row*, and filtering `deleted_at` on a single already-fetched
+-- row is free. Measured on 200k accounts, the partial index and the unique constraint cost an identical 4
+-- shared buffers per lookup — and still 4 with 30% of accounts soft-deleted, which is far past anything
+-- realistic. The partial index is smaller on disk under heavy deletion and never once faster.
+--
+-- Rule 7 requires a query to ship with the index it relies on. Read the other way, an index whose query is
+-- already served is write amplification with no reader: two extra index entries per registration, and a
+-- duplicated ~25 MB at 200k accounts. The pattern is worth not copying forward to guilds, channels and
+-- messages, which is the real cost of getting this one wrong.
+--
+-- A *non*-unique column later filtered by `deleted_at` is a different case and may well want the partial
+-- index. The test is whether an existing unique constraint already narrows the scan to one row.
 
 CREATE TABLE sessions (
   id                 bigint PRIMARY KEY,

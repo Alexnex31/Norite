@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,13 @@ import (
 
 // MaxAPITokenNameLength bounds the human label on a token.
 const MaxAPITokenNameLength = 100
+
+// apiTokenTouchInterval is how stale last_used_at is allowed to get.
+//
+// It must match the interval in the TouchAPIToken query, which enforces the same window in SQL. The two
+// are deliberately redundant: the SQL predicate is what makes the throttle correct under concurrency, and
+// this constant is what keeps the statement off the wire in the first place (see AuthenticateAPIToken).
+const apiTokenTouchInterval = 5 * time.Minute
 
 // MintAPITokenInput describes a token to create.
 type MintAPITokenInput struct {
@@ -134,10 +142,20 @@ func (s *Service) AuthenticateAPIToken(ctx context.Context, raw string) (Actor, 
 		return Actor{}, fmt.Errorf("looking up API token: %w", err)
 	}
 
-	// Fire-and-forget, and throttled in SQL to at most one write per token per few minutes — see the query.
-	// Logged rather than swallowed so a persistently failing write is still visible.
-	if err := s.queries.TouchAPIToken(ctx, token.ID); err != nil {
-		logging.FromContext(ctx).Warn().Err(err).Msg("could not record API token usage")
+	// Record use — but only when the row just read says the throttle window has actually elapsed.
+	//
+	// TouchAPIToken re-tests this same condition in SQL, so sending it unconditionally was correct but
+	// wasteful: for a bot polling faster than once per interval, all but one statement per window matched
+	// zero rows. The write was already cheap; the round trip was not, and it is one of only three that a
+	// token-authenticated request makes. The SQL predicate stays as the concurrency backstop — two requests
+	// that both read a stale row still produce one write, not two.
+	//
+	// Fire-and-forget: bookkeeping must never fail an otherwise-valid request. Logged rather than swallowed
+	// so a persistently failing write is still visible.
+	if !token.LastUsedAt.Valid || s.now().Sub(token.LastUsedAt.Time) >= apiTokenTouchInterval {
+		if err := s.queries.TouchAPIToken(ctx, token.ID); err != nil {
+			logging.FromContext(ctx).Warn().Err(err).Msg("could not record API token usage")
+		}
 	}
 
 	scopes := make([]Scope, 0, len(token.Scopes))

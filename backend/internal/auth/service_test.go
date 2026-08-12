@@ -319,6 +319,63 @@ func TestAPITokenAuthenticatesWithinItsScopesOnly(t *testing.T) {
 	assert.False(t, actor.HasScope("some:other"), "an ungranted scope must not be held")
 }
 
+// last_used_at is throttled in two places that have to agree: a Go-side guard that keeps the statement off
+// the wire, and the query's own predicate that makes the throttle correct when two requests race. This
+// pins the observable result of both — a first use records the time, an immediate second use does not
+// move it, and a use after the window does.
+func TestAPITokenUsageIsRecordedButThrottled(t *testing.T) {
+	svc, pool := newService(t, RegistrationOpen)
+	ctx := t.Context()
+
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	minted, err := svc.MintAPIToken(ctx, snowflake.ID(user.ID), MintAPITokenInput{
+		Name: "bot", Scopes: []Scope{ScopeIdentify},
+	})
+	require.NoError(t, err)
+
+	lastUsed := func() *time.Time {
+		var at *time.Time
+		require.NoError(t, pool.QueryRow(ctx,
+			"SELECT last_used_at FROM api_tokens WHERE id = $1", int64(minted.Token.ID)).Scan(&at))
+		return at
+	}
+
+	require.Nil(t, lastUsed(), "a token that has never authenticated has no last-used time")
+
+	_, err = svc.AuthenticateAPIToken(ctx, minted.Raw)
+	require.NoError(t, err)
+	first := lastUsed()
+	require.NotNil(t, first, "the first use must be recorded")
+
+	// Well inside the window: the timestamp must not move, and the guard must not have sent the statement.
+	for range 3 {
+		_, err = svc.AuthenticateAPIToken(ctx, minted.Raw)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, *first, *lastUsed(), "uses within the throttle window must not rewrite the timestamp")
+
+	// Past the window. Backdating the row rather than moving the service's clock is what makes this test
+	// honest: the Go guard reads last_used_at from the row, but the SQL predicate compares against the
+	// *database's* now(), so a clock override here would satisfy the guard and still update zero rows.
+	_, err = pool.Exec(ctx,
+		"UPDATE api_tokens SET last_used_at = now() - $1::interval WHERE id = $2",
+		(2 * apiTokenTouchInterval).String(), int64(minted.Token.ID))
+	require.NoError(t, err)
+	backdated := *lastUsed()
+
+	_, err = svc.AuthenticateAPIToken(ctx, minted.Raw)
+	require.NoError(t, err)
+
+	assert.True(t, lastUsed().After(backdated), "a use after the throttle window must be recorded")
+
+	// The query's own predicate, exercised directly. The Go guard above means AuthenticateAPIToken no longer
+	// reaches it in a single-threaded test, but it is what keeps the throttle correct when two requests read
+	// the same stale row and both decide to write — so it needs a test that does not depend on the guard.
+	fresh := *lastUsed()
+	require.NoError(t, svc.queries.TouchAPIToken(ctx, int64(minted.Token.ID)))
+	assert.Equal(t, fresh, *lastUsed(), "the SQL throttle must refuse a write inside the window on its own")
+}
+
 func TestMintedTokenIsStoredOnlyAsAHash(t *testing.T) {
 	svc, pool := newService(t, RegistrationOpen)
 	ctx := t.Context()
