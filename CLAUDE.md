@@ -198,14 +198,21 @@ criteria are met.
 
 **Every milestone branch reaches `main` through a Pull Request — always, even solo. Never a direct/local
 merge into `main`, and never a fast-forward merge**, starting from Milestone M1 onward (M0 predates this rule
-and was fast-forward-merged directly — a one-time exception, not a precedent). Squash-merge is the default so
-`main` collects one clean commit per milestone; a regular merge commit is acceptable instead if that
-milestone's sub-commit history is worth preserving directly on `main` — pick per-milestone, but never
-fast-forward either way. **`main` is tagged at every milestone completion** (`git tag m12`) — no longer
-optional. Together, the PR and the tag are how repo history and milestones stay easy to navigate: `git log
-main --oneline` reads as one entry per milestone, the merged PR holds the full detailed commit-by-commit
-history and diff for anyone who wants to dig in, and `git tag -l` / a diff between two milestone tags
-(`git diff m4..m12`) jumps straight to "what changed between these two milestones."
+and was fast-forward-merged directly — a one-time exception, not a precedent). **A regular merge commit is
+the default** (settled 2026-08-12, from M4 on): the milestone's sub-commits stay on `main`, so the detailed
+history survives even if the PR does not — which already happened once, see the M0–M3 note below. Squash is
+still acceptable for a milestone whose intermediate commits genuinely aren't worth keeping, but it is now
+the exception; never fast-forward either way. **`main` is tagged at every milestone completion**
+(`git tag m12`) — no longer optional.
+
+The merge commit's **subject must be the PR title and its body the milestone summary** — GitHub's defaults
+("Merge pull request #N from …") are not acceptable, because they are what turns the first-parent view into
+noise. Together the merge commit, the PR and the tag are how history stays navigable: **`git log main
+--oneline --first-parent`** is the milestone-level view (plain `--oneline` now shows every sub-commit), the
+merged PR holds the review discussion, and a diff between two milestone tags (`git diff m4..m12`) jumps
+straight to "what changed between these two milestones." That first-parent view reads as one entry per
+milestone **from M4 on only** — M0–M3 predate the convention and left loose commits directly on `main`, so
+for that range the tags are still the only clean navigation.
 
 **Exception, M0–M3: those PRs no longer exist.** The repository was re-created on 2026-08-11 and the commit
 history pushed to a fresh remote, which does not carry pull requests. Commits, tags and content are
@@ -238,8 +245,8 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   (the shared container harness every domain package's tests use), migration `000002_auth`, and
   `internal/auth` — argon2id, HS256 access tokens, device-scoped refresh families, scoped `api_tokens`, the
   Bearer middleware. Decisions recorded in ADR 0022; the voice-connection reasoning that settles the signing
-  algorithm is ADR 0023. Merged as a merge commit rather than a squash, so `main` carries its seven
-  sub-commits directly — permitted, and the first milestone to use that option.
+  algorithm is ADR 0023. First milestone merged with a merge commit rather than a squash, which is what
+  settled that as the default going forward — `main` carries its seven sub-commits directly.
 - **M5 — transactional email and password reset**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
