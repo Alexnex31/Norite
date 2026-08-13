@@ -594,11 +594,15 @@ paths:
 
 
         The refusal worth naming: **an address the provider has not verified never reaches an account**,
-        whether or not one already exists. Where it matches an existing account the answer explains how to
-        link by password instead; where it matches nothing the sign-up is refused rather than started,
-        because creating the account would register someone else's address to whoever typed it and record
-        it as verified. Auto-linking on an unverified address would let anyone who can put another
-        person's address on a provider account take over the matching Norite account.
+        whether or not one already exists. Auto-linking on an unverified address would let anyone who can
+        put another person's address on a provider account take over the matching Norite account; creating
+        a *new* account from one would register someone else's address to whoever typed it and record it as
+        verified. Both are refused.
+
+
+        The answer is identical in the two cases — one message, carrying both ways forward — because
+        differing messages would report whether an address is registered to anyone able to present it
+        unverified at a provider, and GitHub permits that for any address at all.
 
 
         A conflict is also possible, and rendered as its own message: the provider account is already

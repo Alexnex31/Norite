@@ -32,6 +32,8 @@ CREATE UNIQUE INDEX password_reset_tokens_token_hash_idx ON password_reset_token
 -- index genuinely narrows a scan rather than duplicating a constraint that already resolves to one row.
 CREATE INDEX password_reset_tokens_user_idx ON password_reset_tokens (user_id) WHERE used_at IS NULL;
 
--- Expired rows are pruned on a schedule (M11's cleanup job); until then this index is what keeps that
--- sweep from scanning the whole table.
+-- Expired rows are pruned on a schedule by auth.RunSweeper, which this index exists to keep off a
+-- sequential scan. NOTE: as written here the index is partial and the sweep's predicate does not imply it,
+-- so the planner ignored it entirely — corrected in 000005, which this comment is left beside deliberately
+-- rather than rewritten, since editing a released migration would not change any database that ran it.
 CREATE INDEX password_reset_tokens_expires_at_idx ON password_reset_tokens (expires_at) WHERE used_at IS NULL;

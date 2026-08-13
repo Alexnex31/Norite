@@ -34,6 +34,15 @@ UPDATE password_reset_tokens
 SET used_at = now()
 WHERE user_id = $1 AND used_at IS NULL;
 
+-- name: DeleteExpiredPasswordResetTokens :execrows
+-- Removes spent and expired reset tokens. Run on a schedule by auth.RunSweeper.
+--
+-- Both are dead: ConsumePasswordResetToken already refuses anything expired or used, so nothing here is
+-- reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
+-- non-partial in 000005 for exactly this query.
+DELETE FROM password_reset_tokens
+WHERE expires_at < now();
+
 -- name: SetUserPassword :one
 UPDATE users
 SET password_hash = $2, updated_at = now()

@@ -226,13 +226,10 @@ func (h *Handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 // renderOAuthFailure maps a service error onto a page.
 func (h *Handler) renderOAuthFailure(w http.ResponseWriter, r *http.Request, nonce string, err error) {
 	switch {
-	case errors.Is(err, ErrOAuthLinkRequired):
-		// The one failure worth explaining at length: the person owns both accounts and needs to be told
-		// what to do, or they will keep pressing a button that never works.
-		h.renderOAuthError(w, r, nonce, ErrOAuthLinkRequired.Error())
 	case errors.Is(err, ErrOAuthEmailUnverified):
-		// Worth explaining for the same reason as ErrOAuthLinkRequired: the person can fix this, and a
-		// generic failure would leave them pressing a button that never works.
+		// The one failure worth explaining at length: the person can act on it, and a generic message would
+		// leave them pressing a button that never works. Identical whether or not an account owns the
+		// address — see the sentinel's own comment.
 		h.renderOAuthError(w, r, nonce, ErrOAuthEmailUnverified.Error())
 	case errors.Is(err, ErrOAuthIdentityLinkedElsewhere), errors.Is(err, ErrOAuthAccountAlreadyLinked):
 		h.renderOAuthError(w, r, nonce, err.Error())

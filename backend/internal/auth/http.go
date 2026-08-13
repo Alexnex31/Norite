@@ -449,15 +449,9 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		// them tells whoever holds a captured code which of those it is.
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "%s", err.Error()))
 
-	case errors.Is(err, ErrOAuthLinkRequired):
-		httpx.WriteError(w, r, &httpx.StatusError{
-			Status:  http.StatusForbidden,
-			Code:    "oauth_link_required",
-			Message: ErrOAuthLinkRequired.Error(),
-			Err:     err,
-		})
-
 	case errors.Is(err, ErrOAuthEmailUnverified):
+		// One code and one message whether or not an account owns the address: the pair of codes this
+		// replaced was an account-existence oracle for anyone able to present an address unverified.
 		httpx.WriteError(w, r, &httpx.StatusError{
 			Status:  http.StatusForbidden,
 			Code:    "oauth_email_unverified",

@@ -413,9 +413,10 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
   named by `ProviderUserID`. Everything else it reports is a claim. `EmailVerified` is carried as its own
   field and never inferred — a provider that does not say an address is verified is treated as not having
   said so.
-- **Linking to an existing account requires a provider-verified address.** Unverified is refused with
-  `ErrOAuthLinkRequired`, which has its own message because it is the one failure where the person really
-  does own both accounts and needs to be told what to do.
+- **An unverified address reaches no account, existing or new.** Both refusals are one sentinel,
+  `ErrOAuthEmailUnverified`, with one message carrying both routes forward. Two messages is the obvious
+  design and reports whether an address is registered to anyone who can present it unverified at a
+  provider — which GitHub permits for any address. Only the log distinguishes the cases.
 - **An identity is keyed by the provider's user ID, never the email.** An address can be reassigned; the ID
   cannot. After linking, the address is never consulted again.
 - **Nothing is written to `users` until a username is chosen.** The continuation token is signed rather
@@ -441,6 +442,13 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
   (rule 8). Only the provider's own error code survives.
 - **Both OAuth pages reuse `httpx.HTMLPage`** and the shared `pageStyle`. The callback renders HTML from
   inside `/api/v1`, so it takes the CSP override per-route via `.With()`.
+- **Short-lived rows are swept by `auth.RunSweeper`**, started from `cmd/server/main.go` after readiness
+  and stopped with the process. Nothing in the roadmap ever swept anything — four comments pointed at
+  "M11's cleanup job", and M11 is the session-revocation primitive — so reset tokens, OAuth states and
+  exchange codes grew for the life of the instance, two of the three written by unauthenticated endpoints.
+  A new table with a TTL adds its delete to `SweepExpired`, and **ships a non-partial index on the column
+  the sweep filters by**: a partial index predicated on "not yet consumed" cannot serve a sweep that
+  deletes regardless, which is the mistake made on all three of these tables and corrected in `000005`.
 
 ## Project-specific skills
 

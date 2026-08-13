@@ -65,8 +65,15 @@ type Querier interface {
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteExpiredOAuthExchangeCodes(ctx context.Context) (int64, error)
 	// Abandoned flows are the common case: opening the provider page and closing the tab leaves a row behind.
-	// Called by the cleanup job (M11); until then the table's growth is bounded only by traffic.
+	// Called by auth.RunSweeper. Without it the table grows for the life of the instance, and it is written
+	// by an unauthenticated endpoint, so nothing but the rate limiter bounds that.
 	DeleteExpiredOAuthStates(ctx context.Context) (int64, error)
+	// Removes spent and expired reset tokens. Run on a schedule by auth.RunSweeper.
+	//
+	// Both are dead: ConsumePasswordResetToken already refuses anything expired or used, so nothing here is
+	// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
+	// non-partial in 000005 for exactly this query.
+	DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error)
 	// Runs on every request authenticated with an API token, which is why the hash column is indexed.
 	//
 	// One statement, not three: the owning account's liveness is joined in rather than fetched separately, and

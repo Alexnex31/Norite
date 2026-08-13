@@ -238,7 +238,8 @@ WHERE expires_at < now()
 `
 
 // Abandoned flows are the common case: opening the provider page and closing the tab leaves a row behind.
-// Called by the cleanup job (M11); until then the table's growth is bounded only by traffic.
+// Called by auth.RunSweeper. Without it the table grows for the life of the instance, and it is written
+// by an unauthenticated endpoint, so nothing but the rate limiter bounds that.
 func (q *Queries) DeleteExpiredOAuthStates(ctx context.Context) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteExpiredOAuthStates)
 	if err != nil {

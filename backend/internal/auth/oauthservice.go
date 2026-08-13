@@ -34,25 +34,22 @@ const OAuthSignupTTL = 30 * time.Minute
 
 // OAuth service errors.
 var (
-	// ErrOAuthLinkRequired is the refusal that carries the whole linking rule: this provider account's
-	// email belongs to an existing Norite account, but the provider will not vouch for it.
+	// ErrOAuthEmailUnverified is the whole linking rule in one refusal: the provider will not vouch for this
+	// address, so it reaches no account — neither an existing one nor a new one.
 	//
-	// Distinct from every other failure on purpose. It is the one case where the person genuinely does
-	// own both accounts and needs to be told what to do about it, and collapsing it into a generic error
-	// would leave them with a sign-in that simply never works and no way to find out why.
-	ErrOAuthLinkRequired = errors.New(
-		"an account already uses this email address, and the provider has not verified it: " +
-			"sign in with your password and link this provider from settings")
-
-	// ErrOAuthEmailUnverified is the same refusal one step earlier: the provider will not vouch for the
-	// address, and no account owns it yet.
+	// One error and one message for both cases, and that is the security-relevant part. Two messages is the
+	// obvious design and it reports whether an address is registered to anyone who can present it
+	// unverified at a provider, which GitHub permits for any address you care to type. So the message
+	// carries both routes forward instead, and which one applies is the person's to know: they are the only
+	// party to this exchange who already knows whether they have an account here.
 	//
-	// Separate from ErrOAuthLinkRequired because the advice differs — there is no existing account to sign
-	// into with a password, so the way forward is to verify the address at the provider or register here
-	// directly.
+	// It stays long and specific rather than collapsing to something generic, because this is the one
+	// refusal where the person genuinely owns both accounts and can act — told nothing useful, they press a
+	// button that never works.
 	ErrOAuthEmailUnverified = errors.New(
-		"the provider has not verified this email address: verify it with the provider and try again, " +
-			"or create an account with a password instead")
+		"the provider has not verified this email address. Verify it with the provider and try again — " +
+			"or, if you already have a Norite account using this address, sign in with your password and " +
+			"link this provider from settings")
 
 	// ErrOAuthIdentityLinkedElsewhere is this provider account already belonging to a different Norite
 	// account — most often one that has since been deleted.
@@ -213,11 +210,14 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		// asserting nothing: anyone can type someone else's address into an account at a provider that
 		// never checks, and auto-linking on that would hand them the matching Norite account.
 		if !identity.EmailVerified {
+			// The log is the one place these two cases are distinguishable, and deliberately so: an
+			// operator investigating needs to know which happened, and a log line is not an answer to the
+			// caller.
 			log.Warn().
 				Str("provider", string(identity.Provider)).
 				Str("user_id", snowflake.ID(user.ID).String()).
 				Msg("oauth sign-in refused: provider has not verified an address that matches an account")
-			return OAuthOutcome{}, ErrOAuthLinkRequired
+			return OAuthOutcome{}, ErrOAuthEmailUnverified
 		}
 
 		if err := s.linkOAuthIdentity(ctx, user.ID, identity); err != nil {

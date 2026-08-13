@@ -82,21 +82,20 @@ mandatory.
   `flow_verifier`, and the challenge rides the state row and then the exchange-code row (and the signup
   token, for the username step). The cost is that opening `/authorize` in a browser produces a code nothing
   can spend — accepted, because that path is exactly what the attack is built from.
-- **The two unverified-address refusals differ, and that difference reports whether an address is
-  registered.** `ErrOAuthLinkRequired` says an account exists; `ErrOAuthEmailUnverified` says none does.
-  They are deliberately distinct because the advice differs and a person given the wrong one is stuck, and
-  the disclosure is accepted because it is strictly less than registration already gives: `POST
-  /auth/register` answers 409 "that email is already registered" on any address, with no provider flow
-  required. The line this codebase draws is between *registration*, which necessarily discloses, and
-  *login and reset*, which must not — and these refusals sit on the registration side of it. Collapsing
-  them to close a gap that is not closed elsewhere would trade a real usability failure for nothing.
+- **One refusal, one message, whether or not an account owns the address.** Two messages is the obvious
+  design — the advice really does differ — and it reports whether an address is registered to anyone able
+  to present it unverified at a provider, which GitHub permits for any address at all. So the single
+  message carries both routes forward ("verify it with the provider — or, if you already have an account
+  using this address, sign in with your password and link from settings") and which one applies is the
+  person's to know. They are the only party to the exchange who already knows. The log distinguishes the
+  two cases, because an operator investigating needs to and a log line is not an answer to the caller.
 - **Two GET endpoints mutate, against the letter of CLAUDE.md rule 4.** `/authorize` inserts an
   `oauth_states` row and `/callback` consumes it. Both are browser navigations that OAuth requires to be
   GETs, so the shape is not negotiable. The rule's purpose is not violated: it exists for REST hygiene on
   the token-authenticated surface (there is no CSRF exposure without ambient credentials, and these two
-  endpoints are unauthenticated), and neither writes anything reachable by an authenticated caller. The
-  cost is that a prefetching browser or a retried GET leaves abandoned `oauth_states` rows, which is what
-  `DeleteExpiredOAuthStates` and M11's cleanup job exist for.
+  endpoints are unauthenticated), and neither writes anything reachable by an authenticated caller.
+  The consequence that *was* real — a prefetching browser or a retried GET leaving abandoned rows behind,
+  on a table an unauthenticated caller writes — is closed by `auth.RunSweeper` rather than accepted.
 - **An invite-only instance refuses new accounts through a provider but still permits linking**, because
   the gate is on account creation, not on providers.
 - **GitHub costs two requests per sign-in.** Unavoidable given where the verification flag lives.

@@ -107,7 +107,7 @@ func TestOAuthLinksToAnExistingAccountOnlyWhenVerified(t *testing.T) {
 		stub.asGoogle("google-1", "ada@example.com", false)
 
 		_, err := signIn(t, svc, stub, "google")
-		require.ErrorIs(t, err, ErrOAuthLinkRequired,
+		require.ErrorIs(t, err, ErrOAuthEmailUnverified,
 			"an unverified address matching an account is an account-takeover attempt until proven otherwise")
 
 		// Nothing was linked, so a later verified attempt still has to do the linking itself.
@@ -174,16 +174,22 @@ func TestAnUnverifiedAddressCannotStartASignup(t *testing.T) {
 		assert.ErrorIs(t, err, ErrOAuthEmailUnverified)
 	})
 
-	// The two unverified refusals carry different advice — one has an account to sign into by password,
-	// the other does not — so collapsing them would send half the people the wrong instruction.
-	t.Run("distinct from the refusal that has an account to point at", func(t *testing.T) {
+	// ...and it is byte-for-byte the answer an address that *does* belong to an account gets. Two messages
+	// is the obvious design and it reports whether an address is registered to anyone who can present it
+	// unverified at a provider — which GitHub permits for any address at all.
+	t.Run("indistinguishable from the refusal for a registered address", func(t *testing.T) {
 		svc, stub := oauthService(t, RegistrationOpen)
-		registerAndLogin(t, svc, "ada@example.com", "laptop")
-		stub.asGoogle("google-1", "ada@example.com", false)
+		stub.asGoogle("google-1", "stranger@example.com", false)
+		_, unknown := signIn(t, svc, stub, "google")
 
-		_, err := signIn(t, svc, stub, "google")
-		require.ErrorIs(t, err, ErrOAuthLinkRequired)
-		assert.NotErrorIs(t, err, ErrOAuthEmailUnverified)
+		registerAndLogin(t, svc, "ada@example.com", "laptop")
+		stub.asGoogle("google-2", "ada@example.com", false)
+		_, registered := signIn(t, svc, stub, "google")
+
+		require.ErrorIs(t, unknown, ErrOAuthEmailUnverified)
+		require.ErrorIs(t, registered, ErrOAuthEmailUnverified)
+		assert.Equal(t, unknown.Error(), registered.Error(),
+			"the answer must not report whether an address belongs to an account")
 	})
 }
 
@@ -949,8 +955,8 @@ func TestAPasswordResetRevokesOutstandingExchangeCodes(t *testing.T) {
 
 // ---------- cleanup ----------
 
-// The sweeps M11 will schedule. Untested code that deletes rows is worth exercising before something
-// schedules it: a WHERE clause that is one character wrong here empties a table.
+// The sweeps auth.RunSweeper schedules, checked here at the query level. Code that deletes rows is worth
+// exercising directly: a WHERE clause one character wrong here empties a table.
 func TestExpiredRowsAreSweptAndLiveOnesAreNot(t *testing.T) {
 	svc, stub := oauthService(t, RegistrationOpen)
 	registerAndLogin(t, svc, "ada@example.com", "laptop")

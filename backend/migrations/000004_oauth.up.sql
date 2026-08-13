@@ -60,7 +60,7 @@ CREATE TABLE oauth_states (
 CREATE UNIQUE INDEX oauth_states_state_hash_idx ON oauth_states (state_hash);
 
 -- Abandoned flows — a user who opens the provider page and closes the tab — are the common case, so the
--- sweep that clears them (M11's cleanup job) needs to find them without scanning the table.
+-- sweep that clears them (auth.RunSweeper) needs to find them without scanning the table.
 --
 -- Deliberately not partial on `consumed_at IS NULL`, which is what it was first written as. The sweep
 -- deletes every expired row regardless of whether it was spent, so its predicate does not imply a partial
