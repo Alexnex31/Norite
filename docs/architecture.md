@@ -187,6 +187,27 @@ CREATE TABLE oauth_identities (
   UNIQUE (provider, provider_user_id), UNIQUE (user_id, provider)
 );
 
+-- Added at M6. In-flight authorization requests: the bridge between /authorize and /callback.
+-- PKCE requires the code verifier to be known to this server and nobody else, so it cannot travel in the
+-- `state` parameter (which passes through the browser and the provider) — hence a row. Single-use.
+CREATE TABLE oauth_states (
+  id bigint PRIMARY KEY, state_hash bytea NOT NULL,      -- sha256; raw value only in the redirect URL
+  provider varchar(32) NOT NULL,
+  code_verifier text NOT NULL,                            -- necessarily plaintext: sent to the provider
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL, consumed_at timestamptz NULL
+);
+
+-- Added at M6. The bridge between a completed callback and a client that wants tokens: the callback
+-- cannot redirect with a token pair without putting credentials in a URL, so it hands over a one-time
+-- code instead, traded at POST /auth/oauth/exchange. Also serves the CLI loopback flow (M8).
+CREATE TABLE oauth_exchange_codes (
+  id bigint PRIMARY KEY, code_hash bytea NOT NULL,
+  user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL, consumed_at timestamptz NULL
+);
+
 -- Sessions/tokens: token-based auth for CLI/GUI, device_id-scoped refresh families (ADR 0011)
 CREATE TABLE sessions (
   id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -598,7 +619,9 @@ POST   /auth/password/reset
 POST   /auth/email/verify
 GET    /auth/oauth/{provider}/authorize
 GET    /auth/oauth/{provider}/callback
-POST   /auth/oauth/exchange
+POST   /auth/oauth/exchange              -- trade the callback's one-time code for a token pair
+POST   /auth/oauth/complete              -- finish a sign-up by choosing a username (M6)
+POST   /oauth/signup                     -- the same, as the form the rendered page submits (root, HTML)
 POST   /auth/device/code                  -- CLI headless device-code flow: issue a code
 GET    /auth/device/code/{code}           -- poll for completion
 GET    /auth/device                       -- minimal server-rendered completion page (enter code, log in)
@@ -723,8 +746,22 @@ for bots/automation, minted from either CLI or GUI once logged in.
   duration, and a distributed login flood would otherwise exhaust memory well before any per-IP limit
   noticed.
 
-OAuth (Google/GitHub) via `x/oauth2` with PKCE, same account-linking rules as the original design
-(auto-link only on a provider-verified email). Two CLI login paths: a system-browser-plus-localhost-callback
+**OAuth (Google/GitHub)** via `x/oauth2` with PKCE, built at M6 — decisions recorded in
+[ADR 0024](adr/0024-oauth-account-linking-and-signup.md).
+
+An identity links to an existing account **only when the provider reports the address verified**, and is
+otherwise refused with instructions to sign in by password and link from settings. Matching on the address
+alone would let anyone who can put someone else's address on a provider account take over the matching
+Norite account. For GitHub that means a second call to `/user/emails`, which is the only place the
+verification flag exists — `/user` omits the address entirely when it is private. Once linked, sign-in
+consults the provider's immutable user ID and never the address again.
+
+**No account exists until a username is chosen**, and nothing is written to `users` before that: the
+callback returns a short-lived signed continuation token, and the account, its `oauth_identities` row and
+its first session are created together in one transaction. There is deliberately no pending-account state
+for later milestones to have to respect. **The callback never returns tokens** — it renders a page carrying
+a single-use exchange code, because a redirect carrying a token pair would put credentials in a URL, in
+browser history, and in every proxy log on the way. Two CLI login paths: a system-browser-plus-localhost-callback
 loopback flow (a fixed registered port, e.g. `http://127.0.0.1:51763/callback`, the same for both
 providers, plus a documented fallback-port list, since GitHub OAuth Apps require an exact pre-registered
 callback URL), and a headless/SSH device-code fallback (`device_code` table, minimal
