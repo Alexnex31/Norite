@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -408,4 +411,275 @@ func TestUsernameSuggestions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------- account lifecycle ----------
+
+// A soft-deleted account keeps its rows so authored content still renders as "Deleted User" — and that
+// includes its oauth_identities row. Without the join in GetOAuthIdentity, a deleted account signed
+// straight back in and collected a token pair, while password login and API tokens both refused it.
+func TestASoftDeletedAccountCannotSignInThroughAProvider(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	stub.asGoogle("google-1", "ada@example.com", true)
+
+	linked, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+	require.True(t, linked.SignedIn())
+
+	_, err = svc.pool.Exec(t.Context(), "UPDATE users SET deleted_at = now() WHERE id = $1", user.ID)
+	require.NoError(t, err)
+
+	// The identity row still exists, so this is entirely a question of whether the lookup checks.
+	outcome, err := signIn(t, svc, stub, "google")
+	if err == nil {
+		require.False(t, outcome.SignedIn(),
+			"a deleted account must not be signed back in by its surviving provider link")
+	}
+
+	// It falls through to the signup path and fails there on the address, which the deleted row still
+	// holds — the same answer password registration gives for a deleted account's email.
+	if outcome.SignupToken != "" {
+		_, err = svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "reborn")
+		assert.ErrorIs(t, err, ErrEmailTaken)
+	}
+}
+
+// ---------- expiry ----------
+
+// Every consumable value in this flow has a TTL enforced in SQL, and nothing tested any of them: the
+// single-use tests all spend a fresh value.
+func TestOAuthValuesExpire(t *testing.T) {
+	t.Run("state", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		registerAndLogin(t, svc, "ada@example.com", "laptop")
+		stub.asGoogle("google-1", "ada@example.com", true)
+
+		authURL, err := svc.StartOAuth(t.Context(), "google")
+		require.NoError(t, err)
+
+		// Age the row rather than moving a clock: the WHERE clause compares against the database's now(),
+		// so a service-clock override would satisfy nothing.
+		_, err = svc.pool.Exec(t.Context(),
+			"UPDATE oauth_states SET expires_at = now() - interval '1 minute'")
+		require.NoError(t, err)
+
+		_, err = svc.CompleteOAuth(t.Context(), "google", stateFromURL(t, authURL), "code")
+		assert.ErrorIs(t, err, ErrOAuthState)
+	})
+
+	t.Run("exchange code", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		registerAndLogin(t, svc, "ada@example.com", "laptop")
+		stub.asGoogle("google-1", "ada@example.com", true)
+
+		outcome, err := signIn(t, svc, stub, "google")
+		require.NoError(t, err)
+
+		_, err = svc.pool.Exec(t.Context(),
+			"UPDATE oauth_exchange_codes SET expires_at = now() - interval '1 minute'")
+		require.NoError(t, err)
+
+		_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{DeviceID: "laptop"})
+		assert.ErrorIs(t, err, ErrOAuthExchangeCode)
+	})
+
+	t.Run("signup token", func(t *testing.T) {
+		svc, _ := oauthService(t, RegistrationOpen)
+
+		// Minted directly rather than by driving a sign-in. The token is signed rather than stored, so its
+		// expiry is a claim and the service clock is what ages it — but that same clock sets the state
+		// row's expires_at, which the database compares against its own now(). Aging the clock around a
+		// whole sign-in would therefore expire the state first and never reach the token at all.
+		svc.now = func() time.Time { return time.Now().Add(-2 * OAuthSignupTTL) }
+		expired, err := svc.issueOAuthSignupToken(OAuthIdentity{
+			Provider: ProviderGoogle, UserID: "google-99",
+			Email: "newcomer@example.com", EmailVerified: true,
+		})
+		require.NoError(t, err)
+		svc.now = time.Now
+
+		_, err = svc.CompleteOAuthSignup(t.Context(), expired, "newcomer")
+		assert.ErrorIs(t, err, ErrOAuthSignupToken)
+	})
+}
+
+// ---------- concurrency ----------
+
+// Two callbacks racing one state — a double-clicked link, or a browser that prefetches — must produce
+// exactly one exchange. The guard is ConsumeOAuthState's WHERE clause, so this holds without the service
+// coordinating anything.
+func TestConcurrentCallbacksConsumeTheStateOnce(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	registerAndLogin(t, svc, "ada@example.com", "laptop")
+	stub.asGoogle("google-1", "ada@example.com", true)
+
+	authURL, err := svc.StartOAuth(t.Context(), "google")
+	require.NoError(t, err)
+	state := stateFromURL(t, authURL)
+
+	const racers = 4
+	var wg sync.WaitGroup
+	results := make([]error, racers)
+	start := make(chan struct{})
+
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, results[i] = svc.CompleteOAuth(context.Background(), "google", state, "code")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	var succeeded int
+	for _, err := range results {
+		if err == nil {
+			succeeded++
+		} else {
+			assert.ErrorIs(t, err, ErrOAuthState)
+		}
+	}
+	assert.Equal(t, 1, succeeded, "exactly one callback may spend the state")
+}
+
+// Two signups racing one continuation token must create exactly one account. Nothing coordinates this
+// either: oauth_identities' unique constraint is what refuses the second, which is the whole reason the
+// token can be signed rather than stored.
+func TestConcurrentSignupsCreateOneAccount(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	stub.asGoogle("google-99", "newcomer@example.com", true)
+
+	outcome, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+
+	const racers = 4
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	start := make(chan struct{})
+
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, errs[i] = svc.CompleteOAuthSignup(context.Background(), outcome.SignupToken, "newcomer")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	var succeeded int
+	for _, err := range errs {
+		if err == nil {
+			succeeded++
+		}
+	}
+	assert.Equal(t, 1, succeeded, "exactly one signup may create the account")
+
+	var users int
+	require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
+	assert.Equal(t, 1, users, "and the database must agree")
+}
+
+// ---------- more than one provider ----------
+
+// An account may link both providers. The UNIQUE (user_id, provider) constraint allows one row each, and
+// signing in with either must reach the same account.
+func TestAnAccountCanLinkBothProviders(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	stub.asGoogle("google-1", "ada@example.com", true)
+	viaGoogle, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+	require.True(t, viaGoogle.SignedIn())
+
+	stub.githubUser = map[string]any{"id": 4242, "login": "ada"}
+	stub.githubEmails = []map[string]any{{"email": "ada@example.com", "primary": true, "verified": true}}
+	viaGitHub, err := signIn(t, svc, stub, "github")
+	require.NoError(t, err)
+	require.True(t, viaGitHub.SignedIn())
+
+	// Both codes resolve to the same account.
+	for _, code := range []string{viaGoogle.ExchangeCode, viaGitHub.ExchangeCode} {
+		pair, err := svc.ExchangeOAuthCode(t.Context(), code, LoginInput{DeviceID: "laptop"})
+		require.NoError(t, err)
+		actor, err := svc.AuthenticateAccessToken(t.Context(), pair.AccessToken)
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, int64(actor.UserID))
+	}
+
+	var links int
+	require.NoError(t, svc.pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM oauth_identities WHERE user_id = $1", user.ID).Scan(&links))
+	assert.Equal(t, 2, links)
+}
+
+// A GitHub sign-in end to end through the service, not just the provider layer — the two providers differ
+// enough in how they report an address that only exercising one of them proves less than it looks.
+func TestGitHubSignsInThroughTheService(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	stub.githubUser = map[string]any{"id": 4242, "login": "ada", "name": "Ada Lovelace"}
+	stub.githubEmails = []map[string]any{
+		{"email": "private@example.com", "primary": true, "verified": false},
+		{"email": "ada@example.com", "primary": false, "verified": true},
+	}
+
+	outcome, err := signIn(t, svc, stub, "github")
+	require.NoError(t, err)
+	require.NotEmpty(t, outcome.SignupToken, "a new GitHub identity starts a signup")
+	assert.Equal(t, "ada@example.com", outcome.Email,
+		"the verified address is what the account is created from, not the unverified primary")
+
+	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ada")
+	require.NoError(t, err)
+
+	pair, err := svc.ExchangeOAuthCode(t.Context(), code, LoginInput{DeviceID: "laptop"})
+	require.NoError(t, err)
+	actor, err := svc.AuthenticateAccessToken(t.Context(), pair.AccessToken)
+	require.NoError(t, err)
+
+	created, err := svc.GetUser(t.Context(), actor.UserID)
+	require.NoError(t, err)
+	assert.Equal(t, "ada@example.com", created.Email)
+}
+
+// ---------- cleanup ----------
+
+// The sweeps M11 will schedule. Untested code that deletes rows is worth exercising before something
+// schedules it: a WHERE clause that is one character wrong here empties a table.
+func TestExpiredRowsAreSweptAndLiveOnesAreNot(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	registerAndLogin(t, svc, "ada@example.com", "laptop")
+	stub.asGoogle("google-1", "ada@example.com", true)
+
+	// One live flow, and one of each kind aged past its expiry.
+	outcome, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+	require.NotEmpty(t, outcome.ExchangeCode)
+
+	_, err = svc.StartOAuth(t.Context(), "google") // a second, still-live state
+	require.NoError(t, err)
+	_, err = svc.pool.Exec(t.Context(),
+		"UPDATE oauth_states SET expires_at = now() - interval '1 hour' WHERE consumed_at IS NOT NULL")
+	require.NoError(t, err)
+
+	swept, err := svc.queries.DeleteExpiredOAuthStates(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), swept, "only the expired state may be removed")
+
+	var remaining int
+	require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM oauth_states").Scan(&remaining))
+	assert.Equal(t, 1, remaining, "the live flow must survive the sweep")
+
+	// Exchange codes, same shape.
+	_, err = svc.pool.Exec(t.Context(),
+		"UPDATE oauth_exchange_codes SET expires_at = now() - interval '1 hour'")
+	require.NoError(t, err)
+	sweptCodes, err := svc.queries.DeleteExpiredOAuthExchangeCodes(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), sweptCodes)
 }

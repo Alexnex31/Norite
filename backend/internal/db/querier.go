@@ -74,8 +74,16 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
-	// The sign-in lookup: has this provider account been linked before? Served by the UNIQUE constraint on
-	// (provider, provider_user_id), which is why that pair needs no separate index.
+	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
+	//
+	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
+	// rows so authored content still renders as "Deleted User" — including its oauth_identities row — so a
+	// lookup on the identity alone let a deleted account sign straight back in and collect a token pair, while
+	// password login and API tokens both refused it. Same reasoning and same shape as
+	// GetActiveAPITokenByHash's join.
+	//
+	// Served by the UNIQUE constraint on (provider, provider_user_id) plus the users primary key, so neither
+	// needs a separate index.
 	GetOAuthIdentity(ctx context.Context, arg GetOAuthIdentityParams) (OauthIdentity, error)
 	// The confirm path's only lookup. Deliberately returns spent and expired rows too: the caller needs to
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the

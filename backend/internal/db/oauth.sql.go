@@ -240,8 +240,10 @@ func (q *Queries) DeleteExpiredOAuthStates(ctx context.Context) (int64, error) {
 }
 
 const getOAuthIdentity = `-- name: GetOAuthIdentity :one
-SELECT id, user_id, provider, provider_user_id, email, created_at FROM oauth_identities
-WHERE provider = $1 AND provider_user_id = $2
+SELECT i.id, i.user_id, i.provider, i.provider_user_id, i.email, i.created_at FROM oauth_identities i
+JOIN users u ON u.id = i.user_id
+WHERE i.provider = $1 AND i.provider_user_id = $2
+  AND u.deleted_at IS NULL
 `
 
 type GetOAuthIdentityParams struct {
@@ -249,8 +251,16 @@ type GetOAuthIdentityParams struct {
 	ProviderUserID string
 }
 
-// The sign-in lookup: has this provider account been linked before? Served by the UNIQUE constraint on
-// (provider, provider_user_id), which is why that pair needs no separate index.
+// The sign-in lookup: has this provider account been linked before, to an account that still exists?
+//
+// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
+// rows so authored content still renders as "Deleted User" — including its oauth_identities row — so a
+// lookup on the identity alone let a deleted account sign straight back in and collect a token pair, while
+// password login and API tokens both refused it. Same reasoning and same shape as
+// GetActiveAPITokenByHash's join.
+//
+// Served by the UNIQUE constraint on (provider, provider_user_id) plus the users primary key, so neither
+// needs a separate index.
 func (q *Queries) GetOAuthIdentity(ctx context.Context, arg GetOAuthIdentityParams) (OauthIdentity, error) {
 	row := q.db.QueryRow(ctx, getOAuthIdentity, arg.Provider, arg.ProviderUserID)
 	var i OauthIdentity
