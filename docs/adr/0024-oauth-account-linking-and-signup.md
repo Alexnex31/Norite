@@ -82,6 +82,21 @@ mandatory.
   `flow_verifier`, and the challenge rides the state row and then the exchange-code row (and the signup
   token, for the username step). The cost is that opening `/authorize` in a browser produces a code nothing
   can spend — accepted, because that path is exactly what the attack is built from.
+- **The two unverified-address refusals differ, and that difference reports whether an address is
+  registered.** `ErrOAuthLinkRequired` says an account exists; `ErrOAuthEmailUnverified` says none does.
+  They are deliberately distinct because the advice differs and a person given the wrong one is stuck, and
+  the disclosure is accepted because it is strictly less than registration already gives: `POST
+  /auth/register` answers 409 "that email is already registered" on any address, with no provider flow
+  required. The line this codebase draws is between *registration*, which necessarily discloses, and
+  *login and reset*, which must not — and these refusals sit on the registration side of it. Collapsing
+  them to close a gap that is not closed elsewhere would trade a real usability failure for nothing.
+- **Two GET endpoints mutate, against the letter of CLAUDE.md rule 4.** `/authorize` inserts an
+  `oauth_states` row and `/callback` consumes it. Both are browser navigations that OAuth requires to be
+  GETs, so the shape is not negotiable. The rule's purpose is not violated: it exists for REST hygiene on
+  the token-authenticated surface (there is no CSRF exposure without ambient credentials, and these two
+  endpoints are unauthenticated), and neither writes anything reachable by an authenticated caller. The
+  cost is that a prefetching browser or a retried GET leaves abandoned `oauth_states` rows, which is what
+  `DeleteExpiredOAuthStates` and M11's cleanup job exist for.
 - **An invite-only instance refuses new accounts through a provider but still permits linking**, because
   the gate is on account creation, not on providers.
 - **GitHub costs two requests per sign-in.** Unavoidable given where the verification flag lives.

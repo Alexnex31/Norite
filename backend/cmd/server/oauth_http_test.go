@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -245,6 +248,81 @@ func TestOAuthExchangeRefusesACodeFromSomebodyElsesFlow(t *testing.T) {
 	// Answered exactly as an unknown or expired code is. A distinct status would tell whoever crafted the
 	// link that the code was genuine and only the binding refused it.
 	assert.Contains(t, exchanged.String(), "invalid or expired sign-in code")
+}
+
+// The construction contracts/openapi.yaml documents, followed by hand.
+//
+// Every other test builds the pair with auth.GenerateOAuthFlowVerifier, and that is exactly how a wrong
+// recipe in the contract survives a green suite: the clients that will actually implement this — the CLI
+// at M8, the SPA at Phase O — read the document, not the Go helper. So this one mints the pair the way the
+// document says to, byte for byte, and never calls the helper at all.
+func TestTheDocumentedFlowVerifierConstructionWorks(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	acct := api.newAccount("ada", "ada@example.com", "laptop")
+	stub.as("google-1", "ada@example.com", true)
+
+	// Step 1: "nof_" followed by 32 random bytes, base64url without padding — 47 characters.
+	buf := make([]byte, 32)
+	_, err := rand.Read(buf)
+	require.NoError(t, err)
+	verifier := "nof_" + base64.RawURLEncoding.EncodeToString(buf)
+	require.Len(t, verifier, 47, "the contract promises 47 characters")
+
+	// Step 2: SHA-256 of that whole string, prefix included, base64url without padding — 43 characters.
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	require.Len(t, challenge, 43, "the contract promises 43 characters")
+
+	start := api.call(http.MethodGet,
+		"/api/v1/auth/oauth/google/authorize?flow_challenge="+url.QueryEscape(challenge), nil)
+	require.Equal(t, http.StatusFound, start.Code, start)
+
+	location, err := url.Parse(start.Header.Get("Location"))
+	require.NoError(t, err)
+	page := api.call(http.MethodGet, "/api/v1/auth/oauth/google/callback?state="+
+		url.QueryEscape(location.Query().Get("state"))+"&code=stub-code", nil)
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	// Step 3: present the verifier itself.
+	exchanged := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
+		"code": exchangeCodeFromPage(t, page), "flow_verifier": verifier, "device_id": "laptop",
+	})
+	require.Equal(t, http.StatusOK, exchanged.Code, exchanged)
+
+	var pair tokenPair
+	exchanged.decode(&pair)
+	me := api.call(http.MethodGet, "/api/v1/users/@me", nil, withToken(pair.AccessToken))
+	require.Equal(t, http.StatusOK, me.Code)
+	var self struct {
+		ID string `json:"id"`
+	}
+	me.decode(&self)
+	assert.Equal(t, acct.ID, self.ID)
+}
+
+// A deleted account keeps its address, and every lookup that would have refused the flow earlier skips its
+// row — so the person reaches the username form legitimately and cannot get past it. They are told what
+// happened rather than "something went wrong on our end", which was untrue and left them nothing to do.
+func TestOAuthSignupSaysSoWhenTheAddressIsAlreadyClaimed(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+	_, err := api.pool.Exec(t.Context(),
+		"UPDATE users SET deleted_at = now() WHERE email = $1", "ada@example.com")
+	require.NoError(t, err)
+
+	stub.as("google-1", "ada@example.com", true)
+	page := api.authorizeAndCallback(t)
+	require.Equal(t, http.StatusOK, page.Code, page)
+	require.Contains(t, page.String(), "Choose your username", "the dead row is invisible until the insert")
+
+	form := url.Values{"signup_token": {hiddenField(t, page, "signup_token")}, "username": {"reborn"}}
+	done := api.call(http.MethodPost, "/oauth/signup", form.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	require.Equal(t, http.StatusBadRequest, done.Code, done)
+	assert.Contains(t, done.String(), "already uses that email address")
+	assert.NotContains(t, done.String(), "went wrong on our end",
+		"a claimed address is not a server fault, and reporting it as one leaves the person stuck")
 }
 
 // A flow cannot even be started without a binding, so there is no unbound path left to aim at.

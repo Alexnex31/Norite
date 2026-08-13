@@ -194,6 +194,7 @@ CREATE TABLE oauth_states (
   id bigint PRIMARY KEY, state_hash bytea NOT NULL,      -- sha256; raw value only in the redirect URL
   provider varchar(32) NOT NULL,
   code_verifier text NOT NULL,                            -- necessarily plaintext: sent to the provider
+  flow_challenge bytea NOT NULL,                          -- sha256 of the *client's* verifier (ADR 0024)
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL, consumed_at timestamptz NULL
 );
@@ -204,6 +205,7 @@ CREATE TABLE oauth_states (
 CREATE TABLE oauth_exchange_codes (
   id bigint PRIMARY KEY, code_hash bytea NOT NULL,
   user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  flow_challenge bytea NOT NULL,                          -- carried from oauth_states; checked at exchange
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL, consumed_at timestamptz NULL
 );

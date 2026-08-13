@@ -531,9 +531,24 @@ paths:
         but an unconfigured one is indistinguishable from one that does not exist at all.
 
 
-        **`flow_challenge` is required.** Generate 32 random bytes, keep them, and send their SHA-256 here
-        base64url-encoded; present the bytes themselves as `flow_verifier` at `/auth/oauth/exchange`. This
-        binds the sign-in to your client: without it any browser could complete any outstanding
+        **`flow_challenge` is required**, and is derived from a secret your client keeps:
+
+
+        1. `flow_verifier` = the ASCII string `nof_` followed by 32 cryptographically random bytes,
+           base64url-encoded without padding (so 47 characters in total). Keep it in memory.
+
+        2. `flow_challenge` = the SHA-256 of that **whole ASCII string, `nof_` prefix included**,
+           base64url-encoded without padding (43 characters). Send it here.
+
+        3. Present the verifier itself as `flow_verifier` at `POST /auth/oauth/exchange`.
+
+
+        Note that the challenge hashes the prefixed string, not the 32 raw bytes — the prefix is part of
+        the credential, as it is for every other opaque token this API issues, so that one turning up in a
+        log is identifiable on sight.
+
+
+        This binds the sign-in to your client: without it any browser could complete any outstanding
         authorization request, and the code that came back would sign whoever opened the link into
         whichever account consented. It is PKCE's guarantee applied to the client-to-Norite hop, and it is
         mandatory because an optional binding is none — the attack is built by whoever starts the flow.
@@ -1061,10 +1076,15 @@ components:
           description: The one-time code from the callback. Single-use, and valid for minutes.
         flow_verifier:
           type: string
+          pattern: "^nof_[A-Za-z0-9_-]{43}$"
           description: >
-            The secret whose SHA-256 was sent as `flow_challenge` when this flow was started. Required: it
-            is what makes the code redeemable by the client that began the sign-in and by nobody else, so a
-            code obtained from a link somebody else crafted is worthless.
+            The secret whose SHA-256 was sent as `flow_challenge` when this flow was started — the full
+            `nof_`-prefixed string, not the bytes inside it. See `/auth/oauth/{provider}/authorize` for how
+            the pair is constructed.
+
+
+            Required: it is what makes the code redeemable by the client that began the sign-in and by
+            nobody else, so a code obtained from a link somebody else crafted is worthless.
 
 
             A mismatch is answered exactly as an unknown or expired code, and spends the code either way.

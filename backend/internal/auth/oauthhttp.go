@@ -152,6 +152,17 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrOAuthRegistrationClosed):
 		h.renderOAuthError(w, r, nonce, "This instance requires an invite code to create an account.")
 		return
+	case errors.Is(err, ErrEmailTaken):
+		// Reachable, and it was landing in the default branch: an account deleted since the callback — or
+		// deleted long ago, since a soft-deleted row keeps its address — leaves the address claimed while
+		// being invisible to every lookup that would have refused the flow earlier. The person reached
+		// "choose your username" legitimately and cannot get past it, so they are told what actually
+		// happened rather than "something went wrong on our end", which was both untrue and unactionable.
+		//
+		// Discloses no more than registration, which answers 409 on a taken address by design.
+		h.renderOAuthError(w, r, nonce,
+			"An account already uses that email address. Sign in with your password instead.")
+		return
 	default:
 		logging.FromContext(r.Context()).Error().Err(err).Msg("oauth signup page failed")
 		h.renderOAuthError(w, r, nonce, "Something went wrong on our end. Please try again.")
