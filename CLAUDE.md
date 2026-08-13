@@ -416,7 +416,9 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
 - **An unverified address reaches no account, existing or new.** Both refusals are one sentinel,
   `ErrOAuthEmailUnverified`, with one message carrying both routes forward. Two messages is the obvious
   design and reports whether an address is registered to anyone who can present it unverified at a
-  provider — which GitHub permits for any address. Only the log distinguishes the cases.
+  provider — which GitHub permits for any address. Only the log distinguishes the cases. Necessary but not
+  sufficient: `POST /auth/register` still answers 409 on a taken address, so the instance stays enumerable
+  by a cheaper route until M10 gives it a way to verify addresses itself.
 - **An identity is keyed by the provider's user ID, never the email.** An address can be reassigned; the ID
   cannot. After linking, the address is never consulted again.
 - **Nothing is written to `users` until a username is chosen.** The continuation token is signed rather

@@ -90,11 +90,34 @@ of this section.
   (loopback, to detect when to fall back from it). Done when: `norite login --no-browser` (or an auto-detected
   headless context) displays a code, and completing it on a separate device with a browser finishes the login
   on the original CLI session.
-- **M10 — `norite instance init`, finish**: adds the first-admin-account-creation step (now that M4 exists) and
-  wires up instance-level registration gating (the `instance_invites` table plus enforcement at
-  registration). Depends on M2 and M4. Done when: a fresh instance can only be bootstrapped via the wizard,
-  ending with one working admin account, and normal registration requires a valid instance invite code if
-  gating is on.
+- **M10 — `norite instance init` finish, and registration hardening**: adds the first-admin-account-creation
+  step (now that M4 exists) and wires up instance-level registration gating (the `instance_invites` table
+  plus enforcement at registration). Depends on M2 and M4.
+
+  **Also closes the two registration gaps M6 surfaced and could not fix from where it sat**, both of which
+  come down to this instance having no way to verify an address itself — `users.email_verified_at` has
+  existed since M4 and only the OAuth path ever sets it:
+
+  - *Registration is an account-existence oracle.* `POST /auth/register` answers 409 "that email is already
+    registered", so anyone can probe any address. That is the whole reason M6 had to merge its two
+    unverified-address refusals into one message (ADR 0024) — an OAuth-side fix would have closed the
+    smaller hole while this one stayed open. The answer is the same shape M5 already uses for reset: accept
+    the registration identically either way, send mail that differs (a verification link, or a "someone
+    tried to register with your address; you already have an account" notice), and let the account become
+    usable only once the link is followed. Anti-enumeration then holds across register, reset *and* OAuth
+    rather than two of the three.
+  - *An address a provider will not vouch for is refused outright.* M6 has no alternative, since it cannot
+    verify anything itself. GitHub in particular lets an account hold entirely unverified addresses, so
+    those users cannot sign in at all today. With verification here, the refusal becomes a detour: create
+    the account against our own verification instead of the provider's, and the linking rule (ADR 0024) is
+    satisfied by evidence we gathered rather than evidence we were denied.
+
+  Depends on M5 for the mail queue. Done when: a fresh instance can only be bootstrapped via the wizard,
+  ending with one working admin account; normal registration requires a valid instance invite code if
+  gating is on; **registering an address that already has an account is indistinguishable, in status, body
+  and timing, from registering a new one**; an account created by password cannot sign in until its address
+  is verified; and a provider identity whose address is unverified completes through this instance's own
+  verification rather than being refused.
 - **M11 — Session revocation primitive**: the general-purpose "revoke all sessions/tokens for account X"
   mechanism (force-close live gateway connections, revoke refresh plus scoped tokens), exposed now as a
   self-service "log out all other devices" account-security feature. Ban-triggered use of this same primitive

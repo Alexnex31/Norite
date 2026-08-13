@@ -89,6 +89,15 @@ mandatory.
   using this address, sign in with your password and link from settings") and which one applies is the
   person's to know. They are the only party to the exchange who already knows. The log distinguishes the
   two cases, because an operator investigating needs to and a log line is not an answer to the caller.
+
+
+  Note what this does *not* close: `POST /auth/register` still answers 409 on a taken address, so the
+  instance remains enumerable by a cheaper route. That is why the merge was necessary rather than
+  sufficient — an OAuth-only fix would have shut the smaller hole and left the larger one open. Registration
+  is closed at M10, which is also where this refusal stops being final: with an address this instance can
+  verify itself, an identity the provider will not vouch for takes a detour through our own verification
+  instead of being turned away. Until then it is turned away, and a GitHub account holding only unverified
+  addresses cannot sign in at all.
 - **Two GET endpoints mutate, against the letter of CLAUDE.md rule 4.** `/authorize` inserts an
   `oauth_states` row and `/callback` consumes it. Both are browser navigations that OAuth requires to be
   GETs, so the shape is not negotiable. The rule's purpose is not violated: it exists for REST hygiene on

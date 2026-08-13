@@ -772,6 +772,12 @@ server-rendered completion page, independent of the web SPA).
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
 entry, one process; CLI/GUI never independently store a token copy.
 
+**Registration** (M4, hardened at M10): today `POST /auth/register` answers 409 on an address that already
+has an account, which makes the instance enumerable. It is the one auth endpoint that discloses account
+existence — login, reset and the OAuth refusals are all deliberately uniform — and it does so because
+nothing here can verify an address, so there is no way to accept the registration and sort it out by mail.
+M10 adds that verification and closes it; see the milestone for the shape.
+
 **Password reset** (built at M5): always-202 anti-enumeration, single-use SHA-256-hashed token with a
 one-hour TTL, sent asynchronously via the SMTP relay (§11) and never blocking the HTTP response — the
 detachment is what makes the 202 honest, since sending inline would leak through timing whatever the body
