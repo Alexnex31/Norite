@@ -66,6 +66,16 @@ client trades at `POST /auth/oauth/exchange` along with its `device_id`.
   decoration.
 - **Credentials never travel in a URL.** The exchange code is the only thing that crosses the browser, and
   it is worthless without a second request.
+- **The state proves the *server* started this flow, not that *this browser* did.** Nothing ties an
+  `oauth_states` row to a browser, so any browser can complete any outstanding state. That leaves login
+  CSRF: an attacker who consents with their own provider account and hands the resulting callback URL to
+  someone else gets a page rendering the attacker's exchange code in the victim's browser, and a victim who
+  pastes it is signed in as the attacker. Accepted at M6 because the copy-paste step is real friction and
+  because the fix — a per-flow cookie whose hash lives on the state row — would be the first cookie in a
+  codebase that retired them ([ADR 0011](0011-token-based-client-auth.md)). **It stops being acceptable at
+  M8**, whose loopback listener removes the friction entirely, and whose design also decides whether the
+  browser leg still ends on a server-rendered page. M8 settles it; this ADR is amended, not silently
+  outgrown, when it does.
 - **An invite-only instance refuses new accounts through a provider but still permits linking**, because
   the gate is on account creation, not on providers.
 - **GitHub costs two requests per sign-in.** Unavoidable given where the verification flag lives.
