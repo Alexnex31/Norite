@@ -14,6 +14,7 @@ import (
 
 	"github.com/Alexnex31/Norite/cli/internal/daemonctl"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
+	"github.com/Alexnex31/Norite/cli/internal/login"
 )
 
 // Version is the build's version string, overridden at link time by goreleaser.
@@ -82,6 +83,8 @@ func New(out, errOut io.Writer) *cli.Command {
 		},
 
 		Commands: []*cli.Command{
+			login.Command(),
+			login.LogoutCommand(),
 			daemonctl.GroupCommand(),
 			instanceinit.GroupCommand(),
 		},

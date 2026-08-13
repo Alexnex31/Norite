@@ -64,7 +64,7 @@ type Record struct {
 	// life of it: a new one on every login would strand the previous family until it expired, and rotating
 	// it is what reuse detection reads as a stolen token.
 	DeviceID string `json:"device_id"`
-	// DeviceName is what the account's session list shows a person. Free text, theirs to recognise.
+	// DeviceName is what the account's session list shows a person. Free text, theirs to recognize.
 	DeviceName string `json:"device_name"`
 }
 
@@ -150,6 +150,18 @@ func Open() (*Store, error) {
 	dir, err := paths.StateDir()
 	if err != nil {
 		return nil, err
+	}
+	return openIn(dir, newSecretStore(dir))
+}
+
+// OpenIn resolves the store in an explicit directory instead of the daemon's own state directory.
+//
+// For tests, and for anything that has to be told where to look rather than deriving it — the CLI's tests
+// drive a whole login against a temporary directory, which is the only way to exercise the flow without
+// writing to the machine running them.
+func OpenIn(dir string) (*Store, error) {
+	if dir == "" {
+		return nil, errors.New("a credential store needs a directory")
 	}
 	return openIn(dir, newSecretStore(dir))
 }

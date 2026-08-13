@@ -15,10 +15,12 @@ package daemonproc
 import (
 	"context"
 	"io"
+	"net/http"
 	"os"
 
 	"github.com/rs/zerolog"
 
+	"github.com/Alexnex31/Norite/daemon/credentials"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
 )
 
@@ -55,6 +57,13 @@ type Options struct {
 	// A test hook. Without it a test would have to poll for a log line or sleep, and a sleep long enough to
 	// be reliable on a loaded CI machine is long enough to make the suite unpleasant.
 	Ready func()
+
+	// SkipSession stops the daemon reaching for a stored credential at startup.
+	//
+	// For the tests that are about lifecycle rather than authentication: without it, every one of them
+	// would touch the real machine's keyring on a developer's laptop and hit a D-Bus timeout on a CI box.
+	// Nothing in production sets it — a daemon that never establishes a session has no reason to exist.
+	SkipSession bool
 }
 
 // Run starts the daemon and blocks until ctx is canceled.
@@ -108,6 +117,19 @@ func Run(ctx context.Context, opts Options) error {
 		log.Warn().Err(err).Msg("could not raise the open-file limit; continuing at the inherited limit")
 	} else if limit > 0 {
 		log.Debug().Uint64("open_file_limit", limit).Msg("open-file limit set")
+	}
+
+	// The stored credential, before the daemon reports ready: a client attaching at M20 should find the
+	// session already established rather than racing it. Never fatal — see establishSession.
+	if opts.SkipSession {
+		log.Debug().Msg("session establishment skipped")
+	} else {
+		store, err := credentials.OpenIn(stateDir)
+		if err != nil {
+			log.Error().Err(err).Msg("the credential store could not be opened")
+		} else {
+			establishSession(ctx, log, store, &http.Client{Timeout: refreshTimeout})
+		}
 	}
 
 	log.Info().Msg("daemon ready")

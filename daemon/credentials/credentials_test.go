@@ -22,7 +22,7 @@ func storeIn(t *testing.T, secrets secretStore) *Store {
 }
 
 // memoryStore is a secret backend with no machine behind it, for the cases that are about Store's own
-// behaviour rather than about where a token ends up.
+// behavior rather than about where a token ends up.
 type memoryStore struct {
 	entries  map[string]string
 	setErr   error
