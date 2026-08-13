@@ -109,6 +109,15 @@ func newAPIWithoutMail(t *testing.T, mode auth.RegistrationMode) *api {
 
 func newAPIWithMail(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer) *api {
 	t.Helper()
+	return newAPIWith(t, mode, mailer, nil)
+}
+
+// newAPIWith is the full constructor. OAuth providers are a parameter rather than a second copy of this
+// function, so every HTTP test drives the same router assembly the composition root builds.
+func newAPIWith(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer,
+	providers auth.OAuthProviders,
+) *api {
+	t.Helper()
 	dbtest.RequireContainer(t)
 
 	ctx := t.Context()
@@ -143,6 +152,7 @@ func newAPIWithMail(t *testing.T, mode auth.RegistrationMode, mailer *captureMai
 		RegistrationMode: mode,
 		Mailer:           mailer,
 		PublicBaseURL:    "https://chat.example.com",
+		OAuth:            providers,
 	})
 	require.NoError(t, err)
 
