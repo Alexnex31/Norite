@@ -234,7 +234,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M4.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M5.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -254,7 +254,12 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   Bearer middleware. Decisions recorded in ADR 0022; the voice-connection reasoning that settles the signing
   algorithm is ADR 0023. First milestone merged with a merge commit rather than a squash, which is what
   settled that as the default going forward — `main` carries its seven sub-commits directly.
-- **M5 — transactional email and password reset**: in progress.
+- **M5 — transactional email and password reset**: done (tag `m5`). `internal/mail` (a `wneessen/go-mail`
+  sender behind a bounded queue whose `Enqueue` cannot block), migration `000003_password_reset`, the
+  always-202 request and single-use confirm endpoints, and the server-rendered `/reset` page — this
+  codebase's first HTML surface, which is why `httpx.HTMLPage` exists. The same PR carried nine fixes from
+  a repo-wide review of already-merged M1/M2/M4 code.
+- **M6 — OAuth backend flow**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -401,6 +406,51 @@ And on the mail and password-reset side, from M5:
   sends, so a link built from it points wherever a request was aimed. Required once SMTP is on.
 - **`just dev` ships a real relay.** Mailpit is in the compose stack; its web UI on `localhost:8025` is
   where a reset email lands locally.
+
+And on the OAuth side, from M6 (decisions in ADR 0024):
+
+- **A provider is trusted for exactly one thing**: that whoever completed the flow controls the account
+  named by `ProviderUserID`. Everything else it reports is a claim. `EmailVerified` is carried as its own
+  field and never inferred — a provider that does not say an address is verified is treated as not having
+  said so.
+- **An unverified address reaches no account, existing or new.** Both refusals are one sentinel,
+  `ErrOAuthEmailUnverified`, with one message carrying both routes forward. Two messages is the obvious
+  design and reports whether an address is registered to anyone who can present it unverified at a
+  provider — which GitHub permits for any address. Only the log distinguishes the cases. Necessary but not
+  sufficient: `POST /auth/register` still answers 409 on a taken address, so the instance stays enumerable
+  by a cheaper route until M10 gives it a way to verify addresses itself.
+- **An identity is keyed by the provider's user ID, never the email.** An address can be reassigned; the ID
+  cannot. After linking, the address is never consulted again.
+- **Nothing is written to `users` until a username is chosen.** The continuation token is signed rather
+  than stored — the one short-lived value in `internal/auth` that is not a row — because replaying it
+  cannot create a second account: `oauth_identities`' unique constraint refuses it, so single-use falls out
+  of the schema. Do not add a pending-account row; that cost lands on every future query.
+- **The `typ` claim is what separates token purposes.** An access token must never be spendable as a
+  signup and vice versa; both directions have a test. `TokenIssuer.sign` and `keyFunc` are shared so the
+  `alg` pin exists once, not once per token type.
+- **The callback never returns tokens.** It renders a page carrying a single-use exchange code; a redirect
+  with a token pair would put credentials in a URL, history, `Referer`, and every proxy log. `device_id`
+  arrives at `/auth/oauth/exchange`, from the client that will actually hold the session.
+- **PKCE's verifier lives server-side** (`oauth_states`). Putting it in the `state` parameter — the obvious
+  stateless design — sends it through the browser and the provider, which is exactly what PKCE prevents.
+- **A second verifier binds the client, and it is mandatory.** `/authorize` takes a `flow_challenge` and the
+  exchange takes the matching `flow_verifier` — PKCE's construction applied to the client↔Norite hop, which
+  `state` does not cover: `state` proves this server issued the request, not that this client made it.
+  Without it any browser could complete any outstanding flow, and the code that came back would sign
+  whoever opened the link into whichever account consented. Every new consumer of the OAuth endpoints mints
+  a verifier first; opening `/authorize` in a browser is not a sign-in path and is not meant to be.
+- **Provider errors are redacted before they reach a string.** `x/oauth2`'s `RetrieveError` renders the
+  response body, and a misconfigured endpoint that echoes the request would put the client secret in a log
+  (rule 8). Only the provider's own error code survives.
+- **Both OAuth pages reuse `httpx.HTMLPage`** and the shared `pageStyle`. The callback renders HTML from
+  inside `/api/v1`, so it takes the CSP override per-route via `.With()`.
+- **Short-lived rows are swept by `auth.RunSweeper`**, started from `cmd/server/main.go` after readiness
+  and stopped with the process. Nothing in the roadmap ever swept anything — four comments pointed at
+  "M11's cleanup job", and M11 is the session-revocation primitive — so reset tokens, OAuth states and
+  exchange codes grew for the life of the instance, two of the three written by unauthenticated endpoints.
+  A new table with a TTL adds its delete to `SweepExpired`, and **ships a non-partial index on the column
+  the sweep filters by**: a partial index predicated on "not yet consumed" cannot serve a sweep that
+  deletes regardless, which is the mistake made on all three of these tables and corrected in `000005`.
 
 ## Project-specific skills
 

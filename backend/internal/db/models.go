@@ -21,6 +21,36 @@ type ApiToken struct {
 	RevokedAt  pgtype.Timestamptz
 }
 
+type OauthExchangeCode struct {
+	ID            int64
+	CodeHash      []byte
+	UserID        int64
+	FlowChallenge []byte
+	CreatedAt     pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	ConsumedAt    pgtype.Timestamptz
+}
+
+type OauthIdentity struct {
+	ID             int64
+	UserID         int64
+	Provider       string
+	ProviderUserID string
+	Email          string
+	CreatedAt      pgtype.Timestamptz
+}
+
+type OauthState struct {
+	ID            int64
+	StateHash     []byte
+	Provider      string
+	CodeVerifier  string
+	FlowChallenge []byte
+	CreatedAt     pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	ConsumedAt    pgtype.Timestamptz
+}
+
 type PasswordResetToken struct {
 	ID        int64
 	UserID    int64

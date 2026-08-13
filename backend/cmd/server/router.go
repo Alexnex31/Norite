@@ -153,6 +153,10 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			r.Route("/auth", func(r chi.Router) {
 				r.Use(authLimiter)
 				opts.Auth.Routes(r)
+				// OAuth sits in the same stricter bucket: /authorize mints a database row per call and
+				// /exchange spends a credential, so both are worth counting separately from ordinary API
+				// traffic.
+				opts.Auth.OAuthRoutes(r)
 			})
 			r.Route("/users", opts.Auth.UserRoutes)
 		}

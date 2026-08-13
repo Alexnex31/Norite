@@ -122,7 +122,8 @@ func TestContractFileCoversEveryConfigSection(t *testing.T) {
 
 	for _, section := range []string{
 		"[http]", "[database]", "[log]", "[rate_limit]",
-		"[storage]", "[storage.s3]", "[acme]", "[smtp]", "[registration]", "[auth]",
+		"[storage]", "[storage.s3]", "[acme]", "[smtp]",
+		"[oauth.google]", "[oauth.github]", "[registration]", "[auth]",
 	} {
 		assert.Contains(t, doc, section, "the contract must document every configuration section")
 	}
@@ -165,4 +166,72 @@ func TestEveryConfigFieldHasAContractKey(t *testing.T) {
 		assert.Contains(t, doc, bare+" =",
 			"Config.%s maps to %s, which contracts/instance-config.toml never sets", name, key)
 	}
+}
+
+// A provider is configured when both halves are present, and half a provider is always a mistake rather
+// than a configuration — a client ID with no secret fails at the token exchange, with a message from
+// Google or GitHub rather than from here.
+func TestAnOAuthProviderNeedsBothHalves(t *testing.T) {
+	base := map[string]string{
+		envPrefix + "DATABASE_URL":    validDSN,
+		envPrefix + "JWT_SECRET":      testJWTSecret,
+		envPrefix + "PUBLIC_BASE_URL": "https://chat.example.com",
+	}
+
+	load := func(t *testing.T, extra map[string]string) (Config, error) {
+		t.Helper()
+		withoutConfigFile(t)
+		for k, v := range base {
+			t.Setenv(k, v)
+		}
+		for k, v := range extra {
+			t.Setenv(k, v)
+		}
+		return Load("")
+	}
+
+	t.Run("neither half is fine", func(t *testing.T) {
+		cfg, err := load(t, nil)
+		require.NoError(t, err, "an instance with no OAuth provider must start normally")
+		assert.False(t, cfg.OAuthConfigured())
+	})
+
+	t.Run("both halves configure the provider", func(t *testing.T) {
+		cfg, err := load(t, map[string]string{
+			envPrefix + "GOOGLE_CLIENT_ID":     "id.apps.googleusercontent.com",
+			envPrefix + "GOOGLE_CLIENT_SECRET": "secret",
+		})
+		require.NoError(t, err)
+		assert.True(t, cfg.GoogleOAuthConfigured())
+		assert.False(t, cfg.GitHubOAuthConfigured(), "one provider must not imply the other")
+		assert.True(t, cfg.OAuthConfigured())
+	})
+
+	for name, half := range map[string]string{
+		"id without secret": envPrefix + "GOOGLE_CLIENT_ID",
+		"secret without id": envPrefix + "GOOGLE_CLIENT_SECRET",
+		"github id alone":   envPrefix + "GITHUB_CLIENT_ID",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := load(t, map[string]string{half: "value"})
+			require.Error(t, err, "half a provider must fail at startup")
+			assert.Contains(t, err.Error(), envPrefix, "the error must name the variable to set")
+		})
+	}
+}
+
+// public_base_url is required by two independent features, which no single struct tag can express: the
+// provider redirects back to it, exactly as password reset builds a link from it.
+func TestOAuthRequiresThePublicBaseURL(t *testing.T) {
+	withoutConfigFile(t)
+	t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+	t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+	t.Setenv(envPrefix+"GITHUB_CLIENT_ID", "Iv1.example")
+	t.Setenv(envPrefix+"GITHUB_CLIENT_SECRET", "secret")
+
+	_, err := Load("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), envPrefix+"PUBLIC_BASE_URL")
+	assert.Contains(t, err.Error(), "redirects back to it",
+		"the message must say why, not just that it is required")
 }

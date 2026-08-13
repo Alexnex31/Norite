@@ -190,6 +190,21 @@ type Config struct {
 	SMTPFromAddress string `validate:"required_if=SMTPEnabled true,omitempty,email"`
 	SMTPFromName    string `validate:"omitempty,max=64"`
 
+	// OAuth sign-in with Google and GitHub (Milestone M6).
+	//
+	// There is no separate enable flag, unlike SMTP and ACME: registering an OAuth application *is* the
+	// enabling act, so a provider is offered exactly when both its client ID and secret are present.
+	// Setting one without the other is always a mistake rather than a configuration, which is what the
+	// paired `required_with` expresses — it is not "both required", it is "neither, or both".
+	//
+	// Never log either secret (CLAUDE.md rule 8). A client secret is a credential exactly like the SMTP
+	// password and the one embedded in DatabaseURL, and it is the whole of what stops someone else's
+	// application from impersonating this instance to the provider.
+	GoogleClientID     string `validate:"required_with=GoogleClientSecret"`
+	GoogleClientSecret string `validate:"required_with=GoogleClientID"`
+	GitHubClientID     string `validate:"required_with=GitHubClientSecret"`
+	GitHubClientSecret string `validate:"required_with=GitHubClientID"`
+
 	// RegistrationMode is "open" (anyone may create an account) or "invite" (an instance invite code is
 	// required). Enforced by the registration endpoint from Milestone M4 onward; M4 refuses registration
 	// outright when this is "invite", and M10 adds the invite-redemption path that makes it usable.
@@ -264,6 +279,11 @@ func Load(configPath string) (Config, error) {
 		SMTPPassword:    getEnvString("SMTP_PASSWORD", fileString(file.SMTP.Password, "")),
 		SMTPFromAddress: getEnvString("SMTP_FROM_ADDRESS", fileString(file.SMTP.FromAddress, "")),
 		SMTPFromName:    getEnvString("SMTP_FROM_NAME", fileString(file.SMTP.FromName, "Norite")),
+
+		GoogleClientID:     getEnvString("GOOGLE_CLIENT_ID", fileString(file.OAuth.Google.ClientID, "")),
+		GoogleClientSecret: getEnvString("GOOGLE_CLIENT_SECRET", fileString(file.OAuth.Google.ClientSecret, "")),
+		GitHubClientID:     getEnvString("GITHUB_CLIENT_ID", fileString(file.OAuth.GitHub.ClientID, "")),
+		GitHubClientSecret: getEnvString("GITHUB_CLIENT_SECRET", fileString(file.OAuth.GitHub.ClientSecret, "")),
 
 		RegistrationMode: getEnvString("REGISTRATION_MODE", fileString(file.Registration.Mode, "open")),
 		// No default: an instance must be given a signing key deliberately. Generating one at startup would
@@ -359,11 +379,43 @@ func (c Config) Validate() error {
 		}
 		return fmt.Errorf("config: invalid configuration: %w", err)
 	}
+
+	// PublicBaseURL is required by two independent features, and a struct tag cannot say "or": its
+	// `required_if=SMTPEnabled true` covers the mail case, and this covers OAuth. Both need it for the same
+	// reason — a URL handed to something outside this process, where a value derived from a request's Host
+	// header would point wherever that request was aimed.
+	if c.PublicBaseURL == "" && c.OAuthConfigured() {
+		name := envVarFor("PublicBaseURL")
+		if c.SourcePath != "" {
+			name = fmt.Sprintf("%s (%s in %s)", name, fileKeyFor("PublicBaseURL"), c.SourcePath)
+		}
+		return fmt.Errorf("config: invalid configuration: %s: required when an OAuth provider is "+
+			"configured, because the provider redirects back to it", name)
+	}
 	return nil
 }
 
 // IsProduction reports whether production-flavored defaults apply.
 func (c Config) IsProduction() bool { return c.Env == EnvProduction }
+
+// GoogleOAuthConfigured and GitHubOAuthConfigured report whether each provider can be offered.
+//
+// Both halves are checked rather than just the ID: validation already rejects a half-configured provider
+// at startup, so this can only differ during a test that builds a Config by hand — and silently offering a
+// provider whose secret is empty would fail at the token exchange with a message from the provider rather
+// than from here.
+func (c Config) GoogleOAuthConfigured() bool {
+	return c.GoogleClientID != "" && c.GoogleClientSecret != ""
+}
+
+func (c Config) GitHubOAuthConfigured() bool {
+	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
+}
+
+// OAuthConfigured reports whether any provider is available on this instance.
+func (c Config) OAuthConfigured() bool {
+	return c.GoogleOAuthConfigured() || c.GitHubOAuthConfigured()
+}
 
 // describeFieldError turns a validator failure into a message naming what an operator would actually go
 // and edit, rather than the Go field name.
@@ -456,6 +508,14 @@ func fileKeyFor(field string) string {
 		return "[smtp].from_address"
 	case "SMTPFromName":
 		return "[smtp].from_name"
+	case "GoogleClientID":
+		return "[oauth.google].client_id"
+	case "GoogleClientSecret":
+		return "[oauth.google].client_secret"
+	case "GitHubClientID":
+		return "[oauth.github].client_id"
+	case "GitHubClientSecret":
+		return "[oauth.github].client_secret"
 	case "RegistrationMode":
 		return "[registration].mode"
 	case "JWTSecret":
@@ -534,6 +594,14 @@ func envVarFor(field string) string {
 		return envPrefix + "SMTP_FROM_ADDRESS"
 	case "SMTPFromName":
 		return envPrefix + "SMTP_FROM_NAME"
+	case "GoogleClientID":
+		return envPrefix + "GOOGLE_CLIENT_ID"
+	case "GoogleClientSecret":
+		return envPrefix + "GOOGLE_CLIENT_SECRET"
+	case "GitHubClientID":
+		return envPrefix + "GITHUB_CLIENT_ID"
+	case "GitHubClientSecret":
+		return envPrefix + "GITHUB_CLIENT_SECRET"
 	case "RegistrationMode":
 		return envPrefix + "REGISTRATION_MODE"
 	case "JWTSecret":

@@ -435,8 +435,52 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 
 	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong),
 		errors.Is(err, ErrUnknownScope), errors.Is(err, ErrInvalidUsername),
-		errors.Is(err, ErrInvalidTokenName):
+		errors.Is(err, ErrInvalidTokenName), errors.Is(err, ErrOAuthFlowChallenge):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
+
+	case errors.Is(err, ErrUnknownProvider):
+		// 404, not 400: a provider this instance has not configured is indistinguishable from one that
+		// does not exist, and neither is a malformed request.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrNotFound, "no such sign-in provider"))
+
+	case errors.Is(err, ErrOAuthExchangeCode), errors.Is(err, ErrOAuthSignupToken),
+		errors.Is(err, ErrOAuthState):
+		// One answer for unknown, expired and already-spent, exactly as for a reset token: distinguishing
+		// them tells whoever holds a captured code which of those it is.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "%s", err.Error()))
+
+	case errors.Is(err, ErrOAuthEmailUnverified):
+		// One code and one message whether or not an account owns the address: the pair of codes this
+		// replaced was an account-existence oracle for anyone able to present an address unverified.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "oauth_email_unverified",
+			Message: ErrOAuthEmailUnverified.Error(),
+			Err:     err,
+		})
+
+	case errors.Is(err, ErrOAuthIdentityLinkedElsewhere), errors.Is(err, ErrOAuthAccountAlreadyLinked):
+		// 409 rather than 403: nothing about this caller is unauthorized, and the request would be fine
+		// against a different account on either side. It is a collision, which is what 409 is for.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
+
+	case errors.Is(err, ErrOAuthRegistrationClosed):
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "registration_closed",
+			Message: "registration on this instance requires an invite code",
+			Err:     err,
+		})
+
+	case errors.Is(err, ErrOAuthExchange), errors.Is(err, ErrOAuthNoEmail):
+		// The provider failed us, not the other way round. 502 rather than 500 because the fault is
+		// upstream, and saying so is what stops someone debugging this instance for an hour.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusBadGateway,
+			Code:    "oauth_provider_error",
+			Message: err.Error(),
+			Err:     err,
+		})
 
 	case errors.Is(err, ErrInvalidResetToken):
 		// One answer for expired, spent, unknown, and issued-to-a-since-changed-address. Distinguishing

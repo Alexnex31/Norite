@@ -81,17 +81,43 @@ of this section.
   providers. Done when: `norite login` opens a browser, completes Google or GitHub OAuth via the fixed
   registered port, and stores the resulting token via the same keychain path as M7; and if the primary port is
   occupied, the CLI falls back to the next registered port and only fails with a clear "free this port and
-  retry" error once every registered fallback is exhausted.
+  retry" error once every registered fallback is exhausted. The loopback listener mints a
+  `flow_verifier` and passes its challenge to `/authorize`, exactly as any other client must (M6, ADR 0024)
+  — that binding is what stops a crafted callback URL delivering somebody else's exchange code into a
+  listener that would otherwise redeem it without the user doing anything at all.
 - **M9 — CLI headless device-code fallback**: the `device_code` table, the minimal unstyled server-rendered
   auth-completion page, and CLI headless-context detection plus polling logic. Depends on M6 (OAuth) and M8
   (loopback, to detect when to fall back from it). Done when: `norite login --no-browser` (or an auto-detected
   headless context) displays a code, and completing it on a separate device with a browser finishes the login
   on the original CLI session.
-- **M10 — `norite instance init`, finish**: adds the first-admin-account-creation step (now that M4 exists) and
-  wires up instance-level registration gating (the `instance_invites` table plus enforcement at
-  registration). Depends on M2 and M4. Done when: a fresh instance can only be bootstrapped via the wizard,
-  ending with one working admin account, and normal registration requires a valid instance invite code if
-  gating is on.
+- **M10 — `norite instance init` finish, and registration hardening**: adds the first-admin-account-creation
+  step (now that M4 exists) and wires up instance-level registration gating (the `instance_invites` table
+  plus enforcement at registration). Depends on M2 and M4.
+
+  **Also closes the two registration gaps M6 surfaced and could not fix from where it sat**, both of which
+  come down to this instance having no way to verify an address itself — `users.email_verified_at` has
+  existed since M4 and only the OAuth path ever sets it:
+
+  - *Registration is an account-existence oracle.* `POST /auth/register` answers 409 "that email is already
+    registered", so anyone can probe any address. That is the whole reason M6 had to merge its two
+    unverified-address refusals into one message (ADR 0024) — an OAuth-side fix would have closed the
+    smaller hole while this one stayed open. The answer is the same shape M5 already uses for reset: accept
+    the registration identically either way, send mail that differs (a verification link, or a "someone
+    tried to register with your address; you already have an account" notice), and let the account become
+    usable only once the link is followed. Anti-enumeration then holds across register, reset *and* OAuth
+    rather than two of the three.
+  - *An address a provider will not vouch for is refused outright.* M6 has no alternative, since it cannot
+    verify anything itself. GitHub in particular lets an account hold entirely unverified addresses, so
+    those users cannot sign in at all today. With verification here, the refusal becomes a detour: create
+    the account against our own verification instead of the provider's, and the linking rule (ADR 0024) is
+    satisfied by evidence we gathered rather than evidence we were denied.
+
+  Depends on M5 for the mail queue. Done when: a fresh instance can only be bootstrapped via the wizard,
+  ending with one working admin account; normal registration requires a valid instance invite code if
+  gating is on; **registering an address that already has an account is indistinguishable, in status, body
+  and timing, from registering a new one**; an account created by password cannot sign in until its address
+  is verified; and a provider identity whose address is unverified completes through this instance's own
+  verification rather than being refused.
 - **M11 — Session revocation primitive**: the general-purpose "revoke all sessions/tokens for account X"
   mechanism (force-close live gateway connections, revoke refresh plus scoped tokens), exposed now as a
   self-service "log out all other devices" account-security feature. Ban-triggered use of this same primitive
@@ -103,7 +129,13 @@ of this section.
 
 - **M12 — Guilds/channels/roles schema plus CRUD**: the core guild/channel/role tables and REST endpoints.
   `oapi-codegen` against `openapi.yaml` is wired up starting here — every REST endpoint from this point on is
-  generated, not just documented. Done when: a guild, its channels, and its roles can be created, read,
+  generated, not just documented. **First job here is that the contract does not currently generate**, which
+  is latent rather than new: `openapi.yaml` declares `openapi: 3.1.0` and expresses its three nullable
+  fields as 3.1 type unions (`type: [string, "null"]`), which `oapi-codegen` v2 does not support — it warns
+  that 3.1 is unimplemented and fails on the first such field. Nothing has noticed because no milestone
+  generates from the document yet; `cmd/server/contract_test.go` checks routes against the router, not
+  schemas. So M12 decides the version this project targets — downgrade to 3.0.x and use `nullable: true`,
+  which is what the tool recommends, or stay on 3.1 and wait — before it can generate anything. Done when: a guild, its channels, and its roles can be created, read,
   updated, and deleted via the REST API, matching the generated types.
 - **M13 — Permission engine**: `roles.Resolve`, the permission bitfield, overwrite resolution
   (`@everyone` → role → member), role `position` hierarchy enforcement. Done when: the permission-resolution

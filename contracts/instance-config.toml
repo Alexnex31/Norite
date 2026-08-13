@@ -43,7 +43,8 @@ listen_addr = ":8080"
 #
 # Configured rather than derived: behind a reverse proxy the Host header is whatever the proxy sends, so a
 # link built from it would point wherever an attacker aimed a request. No default, and REQUIRED once
-# [smtp].enabled is true — a reset link pointing at the wrong origin is worse than no email at all.
+# [smtp].enabled is true or any [oauth.*] provider is configured — a reset link or an OAuth redirect
+# pointing at the wrong origin is worse than the feature simply being off.
 public_base_url = "https://chat.example.com"
 
 # How long graceful shutdown drains in-flight requests before dropping them. Default "15s".
@@ -163,6 +164,29 @@ encryption = "starttls"
 # reject mail without one, and most score it as spam first. from_name defaults to "Norite".
 from_address = "no-reply@example.com"
 from_name = "Norite"
+
+[oauth.google]
+# Sign in with Google. There is no enable flag: registering an OAuth application *is* the enabling act, so
+# a provider is offered exactly when both values below are present. Setting one without the other is
+# always a mistake, so each requires the other.
+#
+# Configuring any provider also requires [http].public_base_url — the provider redirects back to it, and
+# the exact callback URL must be registered with the provider as
+# <public_base_url>/api/v1/auth/oauth/google/callback.
+#
+# client_secret is a credential: it is never logged, and it is the whole of what stops another application
+# from impersonating this instance to the provider. Prefer NORITE_GOOGLE_CLIENT_SECRET on a shared machine.
+client_id = "000000000000-example.apps.googleusercontent.com"
+client_secret = "REPLACE-ME-with-the-google-client-secret"
+
+[oauth.github]
+# Sign in with GitHub. Same rules as [oauth.google] above; the callback registered with GitHub is
+# <public_base_url>/api/v1/auth/oauth/github/callback.
+#
+# GitHub OAuth Apps require an exact pre-registered callback URL, which is why the CLI's loopback flow
+# (Milestone M8) uses a fixed local port rather than an ephemeral one.
+client_id = "Iv1.0123456789abcdef"
+client_secret = "REPLACE-ME-with-the-github-client-secret"
 
 [registration]
 # "open" (anyone may create an account) or "invite" (an instance invite code is required).

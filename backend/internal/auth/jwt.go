@@ -101,7 +101,7 @@ func (t *TokenIssuer) Issue(userID, sessionID snowflake.ID) (string, time.Time, 
 		SessionID: sessionID.String(),
 	}
 
-	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(t.key)
+	signed, err := t.sign(claims)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("signing access token: %w", err)
 	}
@@ -117,15 +117,10 @@ func (t *TokenIssuer) Issue(userID, sessionID snowflake.ID) (string, time.Time, 
 func (t *TokenIssuer) Verify(raw string) (Claims, error) {
 	var claims Claims
 
-	_, err := jwt.ParseWithClaims(raw, &claims, func(token *jwt.Token) (any, error) {
-		// Pin the algorithm. Without this check a token whose header says `"alg":"none"` — or one signed
-		// with a different family entirely — would be accepted, which is the single most-exploited JWT
-		// misconfiguration there is.
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method %q", token.Header["alg"])
-		}
-		return t.key, nil
-	},
+	// keyFunc pins the algorithm family — without it a token whose header says `"alg":"none"` would be
+	// accepted, the single most-exploited JWT misconfiguration there is. Shared with the OAuth signup
+	// token's parse so that pin exists in one place rather than once per token type.
+	_, err := jwt.ParseWithClaims(raw, &claims, t.keyFunc,
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
 		jwt.WithIssuer(tokenIssuer),
 		jwt.WithExpirationRequired(),

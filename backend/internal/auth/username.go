@@ -51,12 +51,25 @@ func ValidUsername(s string) bool {
 	}
 	// Rejects invalid UTF-8 too: a bad byte decodes to RuneError, which is not a letter or a digit.
 	for _, r := range s {
-		switch {
-		case unicode.IsLetter(r), unicode.IsDigit(r):
-		case r == '_', r == '.', r == '-':
-		default:
+		if !isUsernameRune(r) {
 			return false
 		}
 	}
 	return true
+}
+
+// isUsernameRune reports whether one rune may appear in a username.
+//
+// Split out of ValidUsername so that anything *building* a candidate — the OAuth signup suggestion, which
+// filters a display name down to something usable — filters by the same definition the validator enforces.
+// Two copies of this rule would drift, and the drift would show up as a suggestion the form then rejects.
+func isUsernameRune(r rune) bool {
+	switch {
+	case unicode.IsLetter(r), unicode.IsDigit(r):
+		return true
+	case r == '_', r == '.', r == '-':
+		return true
+	default:
+		return false
+	}
 }

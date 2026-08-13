@@ -158,6 +158,21 @@ func run() error {
 		}
 	}()
 
+	// A provider with no credentials is simply absent from this set, so an instance that configured none
+	// offers no OAuth sign-in and every entry point reports an unknown provider.
+	oauthProviders := auth.NewOAuthProviders(auth.OAuthOptions{
+		PublicBaseURL:      cfg.PublicBaseURL,
+		GoogleClientID:     cfg.GoogleClientID,
+		GoogleClientSecret: cfg.GoogleClientSecret,
+		GitHubClientID:     cfg.GitHubClientID,
+		GitHubClientSecret: cfg.GitHubClientSecret,
+	})
+	if names := oauthProviders.Names(); len(names) > 0 {
+		// Names only. A client ID is not secret but is not useful in a log either, and the secret beside
+		// it must never appear in one (CLAUDE.md rule 8).
+		logger.Info().Strs("providers", names).Msg("oauth sign-in enabled")
+	}
+
 	authService, err := auth.NewService(auth.ServiceOptions{
 		Pool:             pool,
 		IDs:              ids,
@@ -165,6 +180,7 @@ func run() error {
 		RegistrationMode: auth.RegistrationMode(cfg.RegistrationMode),
 		Mailer:           mailer,
 		PublicBaseURL:    cfg.PublicBaseURL,
+		OAuth:            oauthProviders,
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("could not initialize the auth service")
@@ -221,6 +237,16 @@ func run() error {
 	health.MarkReady()
 	logger.Info().Msg("migrations complete — instance is ready")
 
+	// Started after migrations, because it deletes from tables migrations may have just created, and after
+	// readiness, because nothing waits on it. It stops when ctx is canceled by the signal handler, so a
+	// shutdown never waits on a sweep interval; a sweep already in flight is canceled with its query and
+	// the next process picks the rows up.
+	sweeperDone := make(chan struct{})
+	go func() {
+		defer close(sweeperDone)
+		authService.RunSweeper(logging.WithContext(ctx, logger))
+	}()
+
 	select {
 	case err := <-serverErr:
 		if err != nil {
@@ -235,6 +261,11 @@ func run() error {
 	// requests finish.
 	health.MarkStopping()
 	shutdown(srv, cfg.ShutdownTimeout, &logger)
+
+	// The sweeper observes the same canceled context, so this is a join rather than a wait. Joined at all
+	// so the process does not exit with a DELETE still in flight against a pool that is about to close.
+	<-sweeperDone
+
 	logger.Info().Msg("norite backend stopped")
 	return nil
 }

@@ -25,6 +25,16 @@ const (
 	// token authenticates exactly one endpoint, and routing it to the Bearer verifier would be the first
 	// step toward it ever authenticating anything else.
 	passwordResetPrefix = "nrp_"
+	// oauthStatePrefix and oauthExchangePrefix mark the two short-lived values the OAuth flow hands out.
+	// Both are deliberately absent from LooksLikeOpaqueToken for the same reason nrp_ is: each
+	// authenticates exactly one endpoint, and routing either to the Bearer verifier would be the first
+	// step toward it authenticating something else.
+	oauthStatePrefix    = "nos_"
+	oauthExchangePrefix = "noc_"
+	// oauthFlowPrefix marks the flow verifier — the secret a client keeps to prove that the sign-in it is
+	// redeeming is the one it started. Never stored, never sent to a provider, and it crosses the browser
+	// exactly never; only its hash does.
+	oauthFlowPrefix = "nof_"
 )
 
 // ErrMalformedToken reports a token that cannot be a Norite token at all — wrong prefix, wrong length, not
@@ -71,6 +81,74 @@ func GeneratePasswordResetToken() (raw string, hash TokenHash, err error) {
 // ParsePasswordResetToken hashes a raw reset token for lookup, rejecting anything of the wrong shape.
 func ParsePasswordResetToken(raw string) (TokenHash, error) {
 	return parseOpaqueToken(raw, passwordResetPrefix)
+}
+
+// GenerateOAuthState mints the state parameter for an authorization request.
+//
+// A CSRF token in the OAuth sense: the provider echoes it back, so a callback carrying a state this server
+// never issued is a request nobody here started.
+func GenerateOAuthState() (raw string, hash TokenHash, err error) {
+	return generateOpaqueToken(oauthStatePrefix)
+}
+
+// ParseOAuthState hashes a state value for lookup, rejecting anything of the wrong shape.
+func ParseOAuthState(raw string) (TokenHash, error) { return parseOpaqueToken(raw, oauthStatePrefix) }
+
+// GenerateOAuthExchangeCode mints the one-time code a client trades for a token pair.
+func GenerateOAuthExchangeCode() (raw string, hash TokenHash, err error) {
+	return generateOpaqueToken(oauthExchangePrefix)
+}
+
+// ParseOAuthExchangeCode hashes an exchange code for lookup.
+func ParseOAuthExchangeCode(raw string) (TokenHash, error) {
+	return parseOpaqueToken(raw, oauthExchangePrefix)
+}
+
+// GenerateOAuthFlowVerifier mints the secret that binds a sign-in to the client that started it.
+//
+// # Why this exists, given that `state` already exists
+//
+// A state proves the callback belongs to an authorization request *this server issued*. It does not prove
+// it belongs to the request *this client started*, and nothing else in the flow does either — so any
+// browser can complete any outstanding state. That gap is login CSRF: an attacker consents with their own
+// provider account, hands the resulting callback to someone else, and the exchange code that comes back
+// signs the victim into the attacker's account, where everything they write afterwards lands.
+//
+// This closes it the same way PKCE closes the equivalent gap one leg further out. The client keeps the
+// verifier and publishes only its hash, so the code a callback produces is redeemable by the client that
+// began the flow and by nobody else — including whoever crafted the link. It is PKCE for the client↔Norite
+// hop, which is the one hop the flow had no binding on at all.
+//
+// Enforced server-side rather than by asking each client to compare the state it sent with the one it got
+// back. That check works, and it protects only the clients that remember to implement it; this package's
+// standing preference is for the guarantee to live where it cannot be forgotten (see
+// ConsumePasswordResetToken's WHERE clause, and the verifier this one is named after).
+func GenerateOAuthFlowVerifier() (raw string, challenge TokenHash, err error) {
+	return generateOpaqueToken(oauthFlowPrefix)
+}
+
+// ParseOAuthFlowVerifier hashes a verifier into the challenge it must match.
+func ParseOAuthFlowVerifier(raw string) (TokenHash, error) {
+	return parseOpaqueToken(raw, oauthFlowPrefix)
+}
+
+// ParseOAuthFlowChallenge decodes the challenge a client presents at /authorize.
+//
+// Unlike every other value in this file the challenge is not a token — it is already a hash, arriving from
+// the client rather than issued to it, so there is no prefix to check and nothing to hash again. Only its
+// shape can be validated, which is exactly enough: a challenge that is not 32 bytes cannot be the SHA-256
+// of anything, so accepting one would mean recording a binding no verifier could ever satisfy.
+func ParseOAuthFlowChallenge(raw string) (TokenHash, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil || len(decoded) != sha256.Size {
+		return nil, ErrMalformedToken
+	}
+	return decoded, nil
+}
+
+// OAuthFlowChallengeFor renders a challenge for transport in a URL.
+func OAuthFlowChallengeFor(challenge TokenHash) string {
+	return base64.RawURLEncoding.EncodeToString(challenge)
 }
 
 func generateOpaqueToken(prefix string) (string, TokenHash, error) {

@@ -9,6 +9,16 @@ import (
 )
 
 type Querier interface {
+	// Single-use and expiry in the WHERE clause, so a code seen in an address bar and replayed matches zero
+	// rows the second time rather than issuing a second token pair.
+	ConsumeOAuthExchangeCode(ctx context.Context, codeHash []byte) (OauthExchangeCode, error)
+	// Spends a state, with single-use and expiry both in the WHERE clause rather than in Go.
+	//
+	// A callback replayed — by a user refreshing the page, or by someone who captured the redirect — matches
+	// zero rows the second time and is failed before any token exchange happens. Reading the row, checking
+	// consumed_at in the service, then updating would let two exchanges run against one verifier, which is the
+	// single-use property PKCE depends on.
+	ConsumeOAuthState(ctx context.Context, stateHash []byte) (OauthState, error)
 	// Spends a token, and does the single-use check in the WHERE clause rather than in Go.
 	//
 	// Two confirms racing on the same token both reach this statement; the second finds used_at already set,
@@ -22,6 +32,19 @@ type Querier interface {
 	// 15-minute access tokens a logged-in client holds. They are stored only as a SHA-256 hash, so the raw
 	// value is recoverable exactly once — in the response that created it.
 	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
+	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
+	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
+	// OAuth sign-in queries.
+	//
+	// Two tables with very different lifetimes: oauth_identities is a permanent link between an account and a
+	// provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
+	CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) (OauthState, error)
+	// An account created by an OAuth sign-in, with no password.
+	//
+	// password_hash is left NULL rather than set to an empty string, so an account that can only sign in
+	// through a provider is distinguishable from one with a password — the distinction VerifyPassword and the
+	// reset path both already depend on.
+	CreateOAuthUser(ctx context.Context, arg CreateOAuthUserParams) (User, error)
 	// Password-reset token queries.
 	//
 	// A token is single-use and short-lived, and every one of these statements is written so that property
@@ -40,6 +63,17 @@ type Querier interface {
 	// still render as "Deleted User", but it must never be findable for login, registration collision, or
 	// profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	DeleteExpiredOAuthExchangeCodes(ctx context.Context) (int64, error)
+	// Abandoned flows are the common case: opening the provider page and closing the tab leaves a row behind.
+	// Called by auth.RunSweeper. Without it the table grows for the life of the instance, and it is written
+	// by an unauthenticated endpoint, so nothing but the rate limiter bounds that.
+	DeleteExpiredOAuthStates(ctx context.Context) (int64, error)
+	// Removes spent and expired reset tokens. Run on a schedule by auth.RunSweeper.
+	//
+	// Both are dead: ConsumePasswordResetToken already refuses anything expired or used, so nothing here is
+	// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
+	// non-partial in 000005 for exactly this query.
+	DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error)
 	// Runs on every request authenticated with an API token, which is why the hash column is indexed.
 	//
 	// One statement, not three: the owning account's liveness is joined in rather than fetched separately, and
@@ -47,6 +81,23 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
+	//
+	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
+	// rows so authored content still renders as "Deleted User" — including its oauth_identities row — so a
+	// lookup on the identity alone let a deleted account sign straight back in and collect a token pair, while
+	// password login and API tokens both refused it. Same reasoning and same shape as
+	// GetActiveAPITokenByHash's join.
+	//
+	// Served by the UNIQUE constraint on (provider, provider_user_id) plus the users primary key, so neither
+	// needs a separate index.
+	GetOAuthIdentity(ctx context.Context, arg GetOAuthIdentityParams) (OauthIdentity, error)
+	// The same lookup as GetOAuthIdentity, deliberately without the liveness join.
+	//
+	// Used only after a unique violation, to find out which of oauth_identities' two constraints was hit and
+	// what it means. GetOAuthIdentity hides rows belonging to soft-deleted accounts, which is correct for
+	// signing in and exactly wrong here: a hidden row is still a row, and it is the reason the INSERT failed.
+	GetOAuthIdentityIncludingDeleted(ctx context.Context, arg GetOAuthIdentityIncludingDeletedParams) (OauthIdentity, error)
 	// The confirm path's only lookup. Deliberately returns spent and expired rows too: the caller needs to
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
@@ -86,6 +137,15 @@ type Querier interface {
 	// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
 	// this is the whole of what "log everyone out" can currently mean.
 	RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error)
+	// Part of revoking everything a compromised credential could reach (CLAUDE.md rule 17).
+	//
+	// An outstanding exchange code is not a session, so revoking sessions and API tokens leaves it redeemable
+	// — and it is the one credential in this flow that gets rendered on screen. Without this, resetting a
+	// password to lock an intruder out still leaves them a code they can trade for a fresh token pair.
+	//
+	// No index on user_id, on purpose: the table only ever holds sign-ins from the last couple of minutes that
+	// nobody has redeemed yet, so a scan here is cheaper than the write this would add to every sign-in.
+	RevokeOAuthExchangeCodesForUser(ctx context.Context, userID int64) (int64, error)
 	RevokeSession(ctx context.Context, id int64) (Session, error)
 	// Reuse detection: revoke every live session in one device's family. Scoped by device_id as well as
 	// user_id so another machine's family is untouched — a user with daemons on two computers must not be

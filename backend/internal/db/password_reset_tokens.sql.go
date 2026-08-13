@@ -78,6 +78,24 @@ func (q *Queries) CreatePasswordResetToken(ctx context.Context, arg CreatePasswo
 	return i, err
 }
 
+const deleteExpiredPasswordResetTokens = `-- name: DeleteExpiredPasswordResetTokens :execrows
+DELETE FROM password_reset_tokens
+WHERE expires_at < now()
+`
+
+// Removes spent and expired reset tokens. Run on a schedule by auth.RunSweeper.
+//
+// Both are dead: ConsumePasswordResetToken already refuses anything expired or used, so nothing here is
+// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
+// non-partial in 000005 for exactly this query.
+func (q *Queries) DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredPasswordResetTokens)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getPasswordResetTokenByHash = `-- name: GetPasswordResetTokenByHash :one
 SELECT id, user_id, token_hash, sent_to, created_at, expires_at, used_at FROM password_reset_tokens
 WHERE token_hash = $1

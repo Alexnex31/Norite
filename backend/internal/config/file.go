@@ -98,6 +98,17 @@ type fileConfig struct {
 		FromName    *string `toml:"from_name"`
 	} `toml:"smtp"`
 
+	OAuth struct {
+		Google struct {
+			ClientID     *string `toml:"client_id"`
+			ClientSecret *string `toml:"client_secret"`
+		} `toml:"google"`
+		GitHub struct {
+			ClientID     *string `toml:"client_id"`
+			ClientSecret *string `toml:"client_secret"`
+		} `toml:"github"`
+	} `toml:"oauth"`
+
 	Registration struct {
 		Mode *string `toml:"mode"`
 	} `toml:"registration"`
