@@ -15,7 +15,7 @@ const consumeOAuthExchangeCode = `-- name: ConsumeOAuthExchangeCode :one
 UPDATE oauth_exchange_codes
 SET consumed_at = now()
 WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-RETURNING id, code_hash, user_id, created_at, expires_at, consumed_at
+RETURNING id, code_hash, user_id, flow_challenge, created_at, expires_at, consumed_at
 `
 
 // Single-use and expiry in the WHERE clause, so a code seen in an address bar and replayed matches zero
@@ -27,6 +27,7 @@ func (q *Queries) ConsumeOAuthExchangeCode(ctx context.Context, codeHash []byte)
 		&i.ID,
 		&i.CodeHash,
 		&i.UserID,
+		&i.FlowChallenge,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
@@ -38,7 +39,7 @@ const consumeOAuthState = `-- name: ConsumeOAuthState :one
 UPDATE oauth_states
 SET consumed_at = now()
 WHERE state_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-RETURNING id, state_hash, provider, code_verifier, created_at, expires_at, consumed_at
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at
 `
 
 // Spends a state, with single-use and expiry both in the WHERE clause rather than in Go.
@@ -55,6 +56,7 @@ func (q *Queries) ConsumeOAuthState(ctx context.Context, stateHash []byte) (Oaut
 		&i.StateHash,
 		&i.Provider,
 		&i.CodeVerifier,
+		&i.FlowChallenge,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
@@ -63,16 +65,17 @@ func (q *Queries) ConsumeOAuthState(ctx context.Context, stateHash []byte) (Oaut
 }
 
 const createOAuthExchangeCode = `-- name: CreateOAuthExchangeCode :one
-INSERT INTO oauth_exchange_codes (id, code_hash, user_id, expires_at)
-VALUES ($1, $2, $3, $4)
-RETURNING id, code_hash, user_id, created_at, expires_at, consumed_at
+INSERT INTO oauth_exchange_codes (id, code_hash, user_id, flow_challenge, expires_at)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, code_hash, user_id, flow_challenge, created_at, expires_at, consumed_at
 `
 
 type CreateOAuthExchangeCodeParams struct {
-	ID        int64
-	CodeHash  []byte
-	UserID    int64
-	ExpiresAt pgtype.Timestamptz
+	ID            int64
+	CodeHash      []byte
+	UserID        int64
+	FlowChallenge []byte
+	ExpiresAt     pgtype.Timestamptz
 }
 
 func (q *Queries) CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error) {
@@ -80,6 +83,7 @@ func (q *Queries) CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthEx
 		arg.ID,
 		arg.CodeHash,
 		arg.UserID,
+		arg.FlowChallenge,
 		arg.ExpiresAt,
 	)
 	var i OauthExchangeCode
@@ -87,6 +91,7 @@ func (q *Queries) CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthEx
 		&i.ID,
 		&i.CodeHash,
 		&i.UserID,
+		&i.FlowChallenge,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
@@ -130,17 +135,18 @@ func (q *Queries) CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdenti
 
 const createOAuthState = `-- name: CreateOAuthState :one
 
-INSERT INTO oauth_states (id, state_hash, provider, code_verifier, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, state_hash, provider, code_verifier, created_at, expires_at, consumed_at
+INSERT INTO oauth_states (id, state_hash, provider, code_verifier, flow_challenge, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at
 `
 
 type CreateOAuthStateParams struct {
-	ID           int64
-	StateHash    []byte
-	Provider     string
-	CodeVerifier string
-	ExpiresAt    pgtype.Timestamptz
+	ID            int64
+	StateHash     []byte
+	Provider      string
+	CodeVerifier  string
+	FlowChallenge []byte
+	ExpiresAt     pgtype.Timestamptz
 }
 
 // OAuth sign-in queries.
@@ -153,6 +159,7 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		arg.StateHash,
 		arg.Provider,
 		arg.CodeVerifier,
+		arg.FlowChallenge,
 		arg.ExpiresAt,
 	)
 	var i OauthState
@@ -161,6 +168,7 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		&i.StateHash,
 		&i.Provider,
 		&i.CodeVerifier,
+		&i.FlowChallenge,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,

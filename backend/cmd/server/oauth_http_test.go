@@ -74,10 +74,24 @@ func newOAuthAPI(t *testing.T, mode auth.RegistrationMode) (*api, *oauthStub) {
 }
 
 // authorizeAndCallback drives the two browser legs and returns the callback's rendered page.
+//
+// The flow verifier it mints is discarded; tests that go on to redeem the code use authorizeAndCallbackBound.
 func (a *api) authorizeAndCallback(t *testing.T) *response {
 	t.Helper()
+	page, _ := a.authorizeAndCallbackBound(t)
+	return page
+}
 
-	start := a.call(http.MethodGet, "/api/v1/auth/oauth/google/authorize", nil)
+// authorizeAndCallbackBound is authorizeAndCallback, keeping the verifier the flow was bound to.
+func (a *api) authorizeAndCallbackBound(t *testing.T) (*response, string) {
+	t.Helper()
+
+	verifier, challenge, err := auth.GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+
+	start := a.call(http.MethodGet,
+		"/api/v1/auth/oauth/google/authorize?flow_challenge="+
+			url.QueryEscape(auth.OAuthFlowChallengeFor(challenge)), nil)
 	require.Equal(t, http.StatusFound, start.Code, "authorize must redirect to the provider: %s", start)
 
 	location, err := url.Parse(start.Header.Get("Location"))
@@ -88,7 +102,7 @@ func (a *api) authorizeAndCallback(t *testing.T) *response {
 	require.NotEmpty(t, location.Query().Get("code_challenge"), "and a PKCE challenge")
 
 	return a.call(http.MethodGet,
-		"/api/v1/auth/oauth/google/callback?state="+url.QueryEscape(state)+"&code=stub-code", nil)
+		"/api/v1/auth/oauth/google/callback?state="+url.QueryEscape(state)+"&code=stub-code", nil), verifier
 }
 
 // exchangeCodeFromPage pulls the one-time code out of the rendered page, which is the only place it
@@ -111,7 +125,7 @@ func TestOAuthSignInIssuesATokenPair(t *testing.T) {
 	// A provider-verified address matching an existing account links and signs in.
 	stub.as("google-1", "ada@example.com", true)
 
-	page := api.authorizeAndCallback(t)
+	page, verifier := api.authorizeAndCallbackBound(t)
 	require.Equal(t, http.StatusOK, page.Code, page)
 	assert.Contains(t, page.String(), "You're signed in")
 
@@ -119,7 +133,7 @@ func TestOAuthSignInIssuesATokenPair(t *testing.T) {
 	assert.NotContains(t, page.Header.Get("Location"), code, "the code must never travel in a URL")
 
 	exchanged := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
-		"code": code, "device_id": "laptop",
+		"code": code, "flow_verifier": verifier, "device_id": "laptop",
 	})
 	require.Equal(t, http.StatusOK, exchanged.Code, exchanged)
 
@@ -145,7 +159,7 @@ func TestOAuthSignupCompletesThroughTheForm(t *testing.T) {
 	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
 	stub.as("google-99", "newcomer@example.com", true)
 
-	page := api.authorizeAndCallback(t)
+	page, verifier := api.authorizeAndCallbackBound(t)
 	require.Equal(t, http.StatusOK, page.Code, page)
 	assert.Contains(t, page.String(), "Choose your username")
 	assert.Contains(t, page.String(), "newcomer@example.com", "the page must show which account is being made")
@@ -163,7 +177,7 @@ func TestOAuthSignupCompletesThroughTheForm(t *testing.T) {
 	require.Equal(t, http.StatusOK, done.Code, done)
 
 	exchanged := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
-		"code": exchangeCodeFromPage(t, done), "device_id": "laptop",
+		"code": exchangeCodeFromPage(t, done), "flow_verifier": verifier, "device_id": "laptop",
 	})
 	require.Equal(t, http.StatusOK, exchanged.Code, exchanged)
 
@@ -212,6 +226,43 @@ func TestOAuthRefusesAnUnverifiedAddressThatMatchesAnAccount(t *testing.T) {
 	assert.Zero(t, links)
 }
 
+// The login-CSRF defense, through the assembled router: the attacker's page renders and the code on it is
+// real, and the victim's client still cannot spend it.
+func TestOAuthExchangeRefusesACodeFromSomebodyElsesFlow(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	api.newAccount("attacker", "attacker@example.com", "laptop")
+	stub.as("google-attacker", "attacker@example.com", true)
+
+	page, _ := api.authorizeAndCallbackBound(t)
+	require.Equal(t, http.StatusOK, page.Code, page)
+	code := exchangeCodeFromPage(t, page)
+
+	exchanged := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
+		"code": code, "flow_verifier": mustFlowVerifier(t), "device_id": "victim-laptop",
+	})
+	require.Equal(t, http.StatusUnauthorized, exchanged.Code, exchanged)
+
+	// Answered exactly as an unknown or expired code is. A distinct status would tell whoever crafted the
+	// link that the code was genuine and only the binding refused it.
+	assert.Contains(t, exchanged.String(), "invalid or expired sign-in code")
+}
+
+// A flow cannot even be started without a binding, so there is no unbound path left to aim at.
+func TestOAuthAuthorizeRequiresAFlowChallenge(t *testing.T) {
+	api, _ := newOAuthAPI(t, auth.RegistrationOpen)
+
+	for name, query := range map[string]string{
+		"absent":  "",
+		"garbage": "?flow_challenge=!!!!",
+		"short":   "?flow_challenge=c2hvcnQ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := api.call(http.MethodGet, "/api/v1/auth/oauth/google/authorize"+query, nil)
+			assert.Equal(t, http.StatusBadRequest, resp.Code, resp)
+		})
+	}
+}
+
 // ---------- state and replay, through the router ----------
 
 func TestOAuthCallbackStateIsSingleUseThroughTheRouter(t *testing.T) {
@@ -219,7 +270,10 @@ func TestOAuthCallbackStateIsSingleUseThroughTheRouter(t *testing.T) {
 	api.newAccount("ada", "ada@example.com", "laptop")
 	stub.as("google-1", "ada@example.com", true)
 
-	start := api.call(http.MethodGet, "/api/v1/auth/oauth/google/authorize", nil)
+	_, challenge, err := auth.GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+	start := api.call(http.MethodGet, "/api/v1/auth/oauth/google/authorize?flow_challenge="+
+		url.QueryEscape(auth.OAuthFlowChallengeFor(challenge)), nil)
 	location, err := url.Parse(start.Header.Get("Location"))
 	require.NoError(t, err)
 	state := location.Query().Get("state")

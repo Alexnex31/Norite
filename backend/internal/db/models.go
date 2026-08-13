@@ -22,12 +22,13 @@ type ApiToken struct {
 }
 
 type OauthExchangeCode struct {
-	ID         int64
-	CodeHash   []byte
-	UserID     int64
-	CreatedAt  pgtype.Timestamptz
-	ExpiresAt  pgtype.Timestamptz
-	ConsumedAt pgtype.Timestamptz
+	ID            int64
+	CodeHash      []byte
+	UserID        int64
+	FlowChallenge []byte
+	CreatedAt     pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	ConsumedAt    pgtype.Timestamptz
 }
 
 type OauthIdentity struct {
@@ -40,13 +41,14 @@ type OauthIdentity struct {
 }
 
 type OauthState struct {
-	ID           int64
-	StateHash    []byte
-	Provider     string
-	CodeVerifier string
-	CreatedAt    pgtype.Timestamptz
-	ExpiresAt    pgtype.Timestamptz
-	ConsumedAt   pgtype.Timestamptz
+	ID            int64
+	StateHash     []byte
+	Provider      string
+	CodeVerifier  string
+	FlowChallenge []byte
+	CreatedAt     pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	ConsumedAt    pgtype.Timestamptz
 }
 
 type PasswordResetToken struct {

@@ -529,11 +529,26 @@ paths:
 
         Returns 404 for a provider this instance has not configured. Which providers exist is not secret,
         but an unconfigured one is indistinguishable from one that does not exist at all.
+
+
+        **`flow_challenge` is required.** Generate 32 random bytes, keep them, and send their SHA-256 here
+        base64url-encoded; present the bytes themselves as `flow_verifier` at `/auth/oauth/exchange`. This
+        binds the sign-in to your client: without it any browser could complete any outstanding
+        authorization request, and the code that came back would sign whoever opened the link into
+        whichever account consented. It is PKCE's guarantee applied to the client-to-Norite hop, and it is
+        mandatory because an optional binding is none — the attack is built by whoever starts the flow.
       operationId: beginOAuth
       tags: [auth]
       security: []
       parameters:
         - $ref: "#/components/parameters/OAuthProvider"
+        - name: flow_challenge
+          in: query
+          required: true
+          description: Base64url (unpadded) SHA-256 of the flow verifier. 43 characters.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]{43}$"
       responses:
         "302":
           description: Redirect to the provider.
@@ -541,6 +556,7 @@ paths:
             Location:
               schema:
                 type: string
+        "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
@@ -641,7 +657,7 @@ paths:
                 $ref: "#/components/schemas/TokenPair"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401":
-          description: The code is unknown, expired, or already spent.
+          description: The code is unknown, expired, already spent, or bound to another client's flow.
           content:
             application/json:
               schema:
@@ -1037,12 +1053,21 @@ components:
 
     OAuthExchangeRequest:
       type: object
-      required: [code, device_id]
+      required: [code, flow_verifier, device_id]
       additionalProperties: false
       properties:
         code:
           type: string
           description: The one-time code from the callback. Single-use, and valid for minutes.
+        flow_verifier:
+          type: string
+          description: >
+            The secret whose SHA-256 was sent as `flow_challenge` when this flow was started. Required: it
+            is what makes the code redeemable by the client that began the sign-in and by nobody else, so a
+            code obtained from a link somebody else crafted is worthless.
+
+
+            A mismatch is answered exactly as an unknown or expired code, and spends the code either way.
         device_id:
           type: string
           maxLength: 128

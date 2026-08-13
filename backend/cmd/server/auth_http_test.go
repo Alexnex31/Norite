@@ -1106,14 +1106,18 @@ func TestOAuthJSONEndpointsValidateTheirBodies(t *testing.T) {
 		{"exchange with no code", "/api/v1/auth/oauth/exchange",
 			map[string]string{"device_id": "laptop"}, http.StatusBadRequest},
 		{"exchange with an unknown code", "/api/v1/auth/oauth/exchange",
-			map[string]string{"code": "noc_" + strings.Repeat("A", 43), "device_id": "laptop"},
+			map[string]string{"code": "noc_" + strings.Repeat("A", 43),
+				"flow_verifier": "nof_" + strings.Repeat("B", 43), "device_id": "laptop"},
 			http.StatusUnauthorized},
 		{"complete with no username", "/api/v1/auth/oauth/complete",
 			map[string]string{"signup_token": "x"}, http.StatusBadRequest},
 		{"complete with an unknown token", "/api/v1/auth/oauth/complete",
 			map[string]string{"signup_token": "not-a-token", "username": "ada"}, http.StatusUnauthorized},
 		{"unknown field", "/api/v1/auth/oauth/exchange",
-			`{"code":"noc_x","device_id":"laptop","admin":true}`, http.StatusBadRequest},
+			`{"code":"noc_x","flow_verifier":"nof_x","device_id":"laptop","admin":true}`,
+			http.StatusBadRequest},
+		{"exchange with no flow verifier", "/api/v1/auth/oauth/exchange",
+			map[string]string{"code": "noc_x", "device_id": "laptop"}, http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
@@ -1124,6 +1128,15 @@ func TestOAuthJSONEndpointsValidateTheirBodies(t *testing.T) {
 	}
 }
 
+// mustFlowVerifier mints a well-formed flow verifier, for tests whose subject is something other than the
+// binding itself.
+func mustFlowVerifier(t *testing.T) string {
+	t.Helper()
+	raw, _, err := auth.GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+	return raw
+}
+
 // A refresh token must not be spendable as an OAuth exchange code, and vice versa: each authenticates one
 // endpoint, which is why the prefixes are distinct and why neither is in LooksLikeOpaqueToken.
 func TestOAuthCodesAreNotInterchangeableWithOtherCredentials(t *testing.T) {
@@ -1131,7 +1144,7 @@ func TestOAuthCodesAreNotInterchangeableWithOtherCredentials(t *testing.T) {
 	acct := api.newAccount("ada", "ada@example.com", "laptop")
 
 	resp := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
-		"code": acct.Tokens.RefreshToken, "device_id": "laptop",
+		"code": acct.Tokens.RefreshToken, "flow_verifier": mustFlowVerifier(t), "device_id": "laptop",
 	})
 	assert.Equal(t, http.StatusUnauthorized, resp.Code,
 		"a refresh token must not be spendable as an OAuth exchange code")

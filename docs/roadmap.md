@@ -81,10 +81,10 @@ of this section.
   providers. Done when: `norite login` opens a browser, completes Google or GitHub OAuth via the fixed
   registered port, and stores the resulting token via the same keychain path as M7; and if the primary port is
   occupied, the CLI falls back to the next registered port and only fails with a clear "free this port and
-  retry" error once every registered fallback is exhausted. **Also settles how an authorization request is
-  bound to the browser that started it** — M6 left `oauth_states` unbound, which is tolerable only while the
-  copy-paste step this milestone removes is still there (ADR 0024, architecture.md §17). Not optional here:
-  a loopback listener delivers a crafted exchange code with no user action at all.
+  retry" error once every registered fallback is exhausted. The loopback listener mints a
+  `flow_verifier` and passes its challenge to `/authorize`, exactly as any other client must (M6, ADR 0024)
+  — that binding is what stops a crafted callback URL delivering somebody else's exchange code into a
+  listener that would otherwise redeem it without the user doing anything at all.
 - **M9 — CLI headless device-code fallback**: the `device_code` table, the minimal unstyled server-rendered
   auth-completion page, and CLI headless-context detection plus polling logic. Depends on M6 (OAuth) and M8
   (loopback, to detect when to fall back from it). Done when: `norite login --no-browser` (or an auto-detected

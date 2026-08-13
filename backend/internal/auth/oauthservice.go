@@ -64,7 +64,15 @@ var (
 	ErrOAuthAccountAlreadyLinked = errors.New(
 		"that account is already linked to a different account at this provider")
 
-	// ErrOAuthExchangeCode covers an unknown, expired, or already-spent exchange code.
+	// ErrOAuthFlowChallenge is a client starting a flow without a usable binding.
+	//
+	// Unlike most refusals in this package this one is meant to be legible to whoever is building the
+	// client: it can only be reached by a caller that has not been written yet or has been written wrong,
+	// never by an attacker doing something clever, so there is nothing to withhold.
+	ErrOAuthFlowChallenge = errors.New(
+		"flow_challenge must be the base64url-encoded SHA-256 of a flow verifier")
+
+	// ErrOAuthExchangeCode covers an unknown, expired, already-spent, or wrongly-bound exchange code.
 	ErrOAuthExchangeCode = errors.New("invalid or expired sign-in code")
 
 	// ErrOAuthSignupToken covers a bad continuation token from the username step.
@@ -94,10 +102,19 @@ type OAuthOutcome struct {
 func (o OAuthOutcome) SignedIn() bool { return o.ExchangeCode != "" }
 
 // StartOAuth begins an authorization request and returns the URL to send the user to.
-func (s *Service) StartOAuth(ctx context.Context, providerName string) (string, error) {
+//
+// The flow challenge is required, not optional. An optional binding is not a binding: the attack it
+// prevents is constructed by whoever starts the flow, so anyone who wanted to skip the check could simply
+// start a flow without one.
+func (s *Service) StartOAuth(ctx context.Context, providerName, rawChallenge string) (string, error) {
 	provider, err := s.oauth.Get(providerName)
 	if err != nil {
 		return "", err
+	}
+
+	challenge, err := ParseOAuthFlowChallenge(rawChallenge)
+	if err != nil {
+		return "", ErrOAuthFlowChallenge
 	}
 
 	rawState, stateHash, err := GenerateOAuthState()
@@ -112,11 +129,12 @@ func (s *Service) StartOAuth(ctx context.Context, providerName string) (string, 
 	}
 
 	if _, err := s.queries.CreateOAuthState(ctx, db.CreateOAuthStateParams{
-		ID:           int64(id),
-		StateHash:    stateHash,
-		Provider:     string(provider.Name()),
-		CodeVerifier: verifier,
-		ExpiresAt:    timestamptz(s.now().Add(OAuthStateTTL)),
+		ID:            int64(id),
+		StateHash:     stateHash,
+		Provider:      string(provider.Name()),
+		CodeVerifier:  verifier,
+		FlowChallenge: challenge,
+		ExpiresAt:     timestamptz(s.now().Add(OAuthStateTTL)),
 	}); err != nil {
 		return "", fmt.Errorf("recording oauth state: %w", err)
 	}
@@ -158,11 +176,13 @@ func (s *Service) CompleteOAuth(ctx context.Context, providerName, rawState, cod
 		return OAuthOutcome{}, err
 	}
 
-	return s.resolveOAuthIdentity(ctx, identity)
+	return s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge)
 }
 
 // resolveOAuthIdentity decides what an authenticated provider identity means for this instance.
-func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdentity) (OAuthOutcome, error) {
+func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdentity,
+	challenge TokenHash,
+) (OAuthOutcome, error) {
 	log := logging.FromContext(ctx)
 
 	// Already linked: the ordinary sign-in, and the only path that consults nothing but the provider's ID.
@@ -171,7 +191,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		ProviderUserID: identity.UserID,
 	})
 	if err == nil {
-		code, err := s.issueOAuthExchangeCode(ctx, existing.UserID)
+		code, err := s.issueOAuthExchangeCode(ctx, existing.UserID, challenge)
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
@@ -203,7 +223,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if err := s.linkOAuthIdentity(ctx, user.ID, identity); err != nil {
 			return OAuthOutcome{}, err
 		}
-		code, err := s.issueOAuthExchangeCode(ctx, user.ID)
+		code, err := s.issueOAuthExchangeCode(ctx, user.ID, challenge)
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
@@ -230,7 +250,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
 		}
-		token, err := s.issueOAuthSignupToken(identity)
+		token, err := s.issueOAuthSignupToken(identity, challenge)
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
@@ -312,7 +332,7 @@ func (s *Service) classifyLinkConflict(ctx context.Context, userID int64, identi
 
 // CompleteOAuthSignup creates the account a signup token stands for, once a username has been chosen.
 func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsername string) (string, error) {
-	identity, err := s.parseOAuthSignupToken(signupToken)
+	identity, challenge, err := s.parseOAuthSignupToken(signupToken)
 	if err != nil {
 		return "", err
 	}
@@ -389,20 +409,30 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		return "", err
 	}
 
-	return s.issueOAuthExchangeCode(ctx, user.ID)
+	return s.issueOAuthExchangeCode(ctx, user.ID, challenge)
 }
 
 // ExchangeOAuthCode trades a one-time code for a token pair.
 //
 // This is where the device_id finally arrives: a browser does not have one, and the client that ends up
 // holding the tokens is the thing that knows its own device identity (ADR 0011).
-func (s *Service) ExchangeOAuthCode(ctx context.Context, rawCode string, in LoginInput) (TokenPair, error) {
+func (s *Service) ExchangeOAuthCode(ctx context.Context, rawCode, rawVerifier string,
+	in LoginInput,
+) (TokenPair, error) {
 	deviceID, err := normalizeDeviceID(in.DeviceID)
 	if err != nil {
 		return TokenPair{}, err
 	}
 
 	hash, err := ParseOAuthExchangeCode(rawCode)
+	if err != nil {
+		return TokenPair{}, ErrOAuthExchangeCode
+	}
+
+	// Shape-checked before the code is spent, so a client with a bug does not burn its own sign-in on a
+	// malformed verifier. An attacker gains nothing from the ordering: they do not hold a verifier of any
+	// shape, and reaching the comparison below is what they cannot do.
+	presented, err := ParseOAuthFlowVerifier(rawVerifier)
 	if err != nil {
 		return TokenPair{}, ErrOAuthExchangeCode
 	}
@@ -415,6 +445,23 @@ func (s *Service) ExchangeOAuthCode(ctx context.Context, rawCode string, in Logi
 		return TokenPair{}, fmt.Errorf("consuming oauth exchange code: %w", err)
 	}
 
+	// The binding check, and the reason this whole parameter exists: this code is redeemable only by the
+	// client that started the flow it came from.
+	//
+	// Checked after the code is spent, deliberately. A mismatch is the login-CSRF attempt itself — someone
+	// redeeming a code produced by a flow they did not begin — and burning the code as it fails is the
+	// outcome to want: the attacker's code dies in the victim's hands rather than staying live for a
+	// second attempt.
+	//
+	// Reported as an ordinary bad code. The client is told the same thing for unknown, expired, spent and
+	// unbound, exactly as everywhere else in this package; the distinction is worth a log line here because
+	// it is the one that means somebody is being attacked.
+	if !presented.Equal(code.FlowChallenge) {
+		logging.FromContext(ctx).Warn().
+			Msg("oauth exchange refused: the code was not issued to the client redeeming it")
+		return TokenPair{}, ErrOAuthExchangeCode
+	}
+
 	// The same session machinery a password login uses, including superseding this device's previous
 	// family — an OAuth sign-in is a login, and nothing about it should produce a different kind of
 	// session.
@@ -422,7 +469,9 @@ func (s *Service) ExchangeOAuthCode(ctx context.Context, rawCode string, in Logi
 }
 
 // issueOAuthExchangeCode mints the one-time code a client trades for tokens.
-func (s *Service) issueOAuthExchangeCode(ctx context.Context, userID int64) (string, error) {
+func (s *Service) issueOAuthExchangeCode(ctx context.Context, userID int64,
+	challenge TokenHash,
+) (string, error) {
 	raw, hash, err := GenerateOAuthExchangeCode()
 	if err != nil {
 		return "", err
@@ -433,10 +482,11 @@ func (s *Service) issueOAuthExchangeCode(ctx context.Context, userID int64) (str
 	}
 
 	if _, err := s.queries.CreateOAuthExchangeCode(ctx, db.CreateOAuthExchangeCodeParams{
-		ID:        int64(id),
-		CodeHash:  hash,
-		UserID:    userID,
-		ExpiresAt: timestamptz(s.now().Add(OAuthExchangeCodeTTL)),
+		ID:            int64(id),
+		CodeHash:      hash,
+		UserID:        userID,
+		FlowChallenge: challenge,
+		ExpiresAt:     timestamptz(s.now().Add(OAuthExchangeCodeTTL)),
 	}); err != nil {
 		return "", fmt.Errorf("recording exchange code: %w", err)
 	}

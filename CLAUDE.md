@@ -430,6 +430,12 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
   arrives at `/auth/oauth/exchange`, from the client that will actually hold the session.
 - **PKCE's verifier lives server-side** (`oauth_states`). Putting it in the `state` parameter — the obvious
   stateless design — sends it through the browser and the provider, which is exactly what PKCE prevents.
+- **A second verifier binds the client, and it is mandatory.** `/authorize` takes a `flow_challenge` and the
+  exchange takes the matching `flow_verifier` — PKCE's construction applied to the client↔Norite hop, which
+  `state` does not cover: `state` proves this server issued the request, not that this client made it.
+  Without it any browser could complete any outstanding flow, and the code that came back would sign
+  whoever opened the link into whichever account consented. Every new consumer of the OAuth endpoints mints
+  a verifier first; opening `/authorize` in a browser is not a sign-in path and is not meant to be.
 - **Provider errors are redacted before they reach a string.** `x/oauth2`'s `RetrieveError` renders the
   response body, and a misconfigured endpoint that echoes the request would put the client secret in a log
   (rule 8). Only the provider's own error code survives.

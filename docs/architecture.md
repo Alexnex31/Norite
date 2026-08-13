@@ -1619,18 +1619,12 @@ during implementation, and must be documented plainly wherever the relevant subs
   WebRTC transport encryption (DTLS-SRTP), which protects against network eavesdroppers but not against the
   server/SFU operator. True end-to-end voice (frame-level encryption the SFU forwards without decrypting) is
   out of scope entirely.
-- **An OAuth `state` is not bound to the browser that started the flow, and this must be settled at
-  Milestone M8.** `oauth_states` proves a callback belongs to an authorization request *this server issued*,
-  which is what stops a fabricated callback — but it does not prove it belongs to the request *this browser*
-  started, because nothing ties the row to a browser. Any browser can therefore complete any outstanding
-  state. The attack that follows is login CSRF: an attacker starts a flow, consents with their own provider
-  account, captures the callback URL before their own browser follows it, and gets someone else to open it.
-  The victim's browser renders a page carrying the *attacker's* exchange code, and a victim who pastes it
-  into their client is then signed in as the attacker — everything they go on to write lands in an account
-  someone else controls. Today the manual copy-paste step is most of the defense, which is exactly why this
-  cannot be left alone: **M8's loopback listener removes that step**, delivering a crafted code straight into
-  the victim's CLI. The fix is a per-flow value held by the initiating browser (a short-lived, path-scoped,
-  `SameSite=Lax` cookie whose hash is stored on the `oauth_states` row) and it is deliberately *not* built at
-  M6 — it would be the first cookie in a codebase that retired them (ADR 0011), and M8's design decides
-  whether the browser leg still ends on a server-rendered page at all. M8 must not ship its loopback flow
-  without deciding this; see ADR 0024.
+- **A browser alone cannot complete an OAuth sign-in, by design.** The flow is bound to the *client* that
+  started it rather than to the browser that walks through it: `/authorize` requires a `flow_challenge` and
+  `/auth/oauth/exchange` requires the matching `flow_verifier` (§2). Someone who opens an authorize URL by
+  hand therefore reaches a page carrying a code that nothing they hold can spend. That is the intended
+  behaviour and it is what closes login CSRF — an attacker who consents with their own provider account and
+  hands the resulting callback to somebody else produces a code the victim's client cannot redeem, because
+  the verifier never left the attacker's machine. The accepted cost is that "just visit `/authorize`" is not
+  a usable sign-in path and never will be: every client mints a verifier first, including the CLI at M8 and
+  the web SPA at Phase O. See ADR 0024.

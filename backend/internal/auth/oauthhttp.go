@@ -24,6 +24,9 @@ import (
 
 type oauthExchangeRequest struct {
 	Code string `json:"code" validate:"required"`
+	// FlowVerifier is the secret whose hash this flow was started with. Required: it is what makes the code
+	// redeemable only by the client that began the sign-in (see GenerateOAuthFlowVerifier).
+	FlowVerifier string `json:"flow_verifier" validate:"required"`
 	// DeviceID scopes the refresh-token family, exactly as it does for a password login: this is the point
 	// where a client that has one finally says what it is (ADR 0011).
 	DeviceID   string `json:"device_id" validate:"required,max=128"`
@@ -64,7 +67,9 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url, err := h.svc.StartOAuth(r.Context(), provider)
+	// The binding the client keeps: it publishes the hash here and presents the secret at /exchange, so
+	// the code this flow produces is redeemable by this client and by nobody who merely opens the link.
+	url, err := h.svc.StartOAuth(r.Context(), provider, r.URL.Query().Get("flow_challenge"))
 	if err != nil {
 		h.writeErr(w, r, err)
 		return
@@ -158,7 +163,7 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 	// with "Creating an account for…" is a phishing surface handed over for free. The token parses here by
 	// construction — the switch above sent every other outcome to an error page.
 	var email string
-	if identity, err := h.svc.parseOAuthSignupToken(token); err == nil {
+	if identity, _, err := h.svc.parseOAuthSignupToken(token); err == nil {
 		email = identity.Email
 	}
 
@@ -178,7 +183,7 @@ func (h *Handler) oauthExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pair, err := h.svc.ExchangeOAuthCode(r.Context(), req.Code, LoginInput{
+	pair, err := h.svc.ExchangeOAuthCode(r.Context(), req.Code, req.FlowVerifier, LoginInput{
 		DeviceID:   req.DeviceID,
 		DeviceName: req.DeviceName,
 		IP:         clientAddr(r),

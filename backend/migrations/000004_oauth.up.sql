@@ -41,6 +41,13 @@ CREATE TABLE oauth_states (
   -- hash would be useless. It is the one value here that is genuinely secret, and the reason this table's
   -- rows are deleted rather than kept for history.
   code_verifier text NOT NULL,
+  -- SHA-256 of the *client's* flow verifier, which is a different secret from the PKCE one above and binds
+  -- a different hop. code_verifier binds Norite to the provider; this binds the client to Norite.
+  --
+  -- Without it a state proves only that this server issued the authorization request, not that this client
+  -- started it — so any browser could complete any outstanding state, and the exchange code that came back
+  -- would sign whoever opened the link into whichever account consented. See GenerateOAuthFlowVerifier.
+  flow_challenge bytea NOT NULL,
   created_at    timestamptz NOT NULL DEFAULT now(),
   expires_at    timestamptz NOT NULL,
   -- Set when the state is spent, which is what makes a callback replay fail rather than start a second
@@ -75,6 +82,10 @@ CREATE TABLE oauth_exchange_codes (
   -- SHA-256, like every other value handed out and taken back.
   code_hash   bytea NOT NULL,
   user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  -- Carried forward from the oauth_states row this code descends from, so the binding survives the step
+  -- that turns "the flow completed" into "here is something redeemable". A code is only ever redeemed by
+  -- the client that started the flow, and this column is what the exchange checks it against.
+  flow_challenge bytea NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now(),
   -- Minutes, not hours. The client redeems this immediately; anything longer is a window for whoever saw
   -- the address bar over someone's shoulder.

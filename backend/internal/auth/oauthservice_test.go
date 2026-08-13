@@ -25,14 +25,36 @@ func oauthService(t *testing.T, mode RegistrationMode) (*Service, *stubProvider)
 }
 
 // signIn drives /authorize and /callback against the stub and returns the outcome.
+//
+// The flow verifier it mints is discarded, because most tests here care about what the callback decides
+// rather than who may redeem the result. The tests that do care use signInBound.
 func signIn(t *testing.T, svc *Service, stub *stubProvider, provider string) (OAuthOutcome, error) {
 	t.Helper()
+	outcome, _, err := signInBound(t, svc, stub, provider)
+	return outcome, err
+}
 
-	authURL, err := svc.StartOAuth(t.Context(), provider)
+// signInBound is signIn, keeping the flow verifier the sign-in was bound to.
+func signInBound(t *testing.T, svc *Service, stub *stubProvider, provider string) (OAuthOutcome, string, error) {
+	t.Helper()
+
+	verifier, challenge, err := GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+
+	authURL, err := svc.StartOAuth(t.Context(), provider, OAuthFlowChallengeFor(challenge))
 	require.NoError(t, err)
 
 	state := stateFromURL(t, authURL)
-	return svc.CompleteOAuth(t.Context(), provider, state, "authorization-code")
+	outcome, err := svc.CompleteOAuth(t.Context(), provider, state, "authorization-code")
+	return outcome, verifier, err
+}
+
+// mustFlowChallenge mints a binding for a test driving StartOAuth directly.
+func mustFlowChallenge(t *testing.T) (verifier, challenge string) {
+	t.Helper()
+	raw, hash, err := GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+	return raw, OAuthFlowChallengeFor(hash)
 }
 
 // stateFromURL pulls the state parameter back out of the authorize URL, which is the only place it exists
@@ -64,11 +86,12 @@ func TestOAuthLinksToAnExistingAccountOnlyWhenVerified(t *testing.T) {
 		user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
 		stub.asGoogle("google-1", "ada@example.com", true)
 
-		outcome, err := signIn(t, svc, stub, "google")
+		outcome, verifier, err := signInBound(t, svc, stub, "google")
 		require.NoError(t, err)
 		require.True(t, outcome.SignedIn(), "a verified match must sign in, not start a signup")
 
-		pair, err := svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{DeviceID: "laptop"})
+		pair, err := svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,
+			LoginInput{DeviceID: "laptop"})
 		require.NoError(t, err)
 		assert.NotEmpty(t, pair.AccessToken)
 
@@ -108,11 +131,12 @@ func TestASecondSignInUsesTheLinkNotTheEmail(t *testing.T) {
 
 	// The same provider account, now reporting a different and unverified address.
 	stub.asGoogle("google-1", "moved@example.com", false)
-	second, err := signIn(t, svc, stub, "google")
+	second, verifier, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err, "an established link must keep working regardless of the address")
 	require.True(t, second.SignedIn())
 
-	pair, err := svc.ExchangeOAuthCode(t.Context(), second.ExchangeCode, LoginInput{DeviceID: "laptop"})
+	pair, err := svc.ExchangeOAuthCode(t.Context(), second.ExchangeCode, verifier,
+		LoginInput{DeviceID: "laptop"})
 	require.NoError(t, err)
 	actor, err := svc.AuthenticateAccessToken(t.Context(), pair.AccessToken)
 	require.NoError(t, err)
@@ -161,6 +185,116 @@ func TestAnUnverifiedAddressCannotStartASignup(t *testing.T) {
 		require.ErrorIs(t, err, ErrOAuthLinkRequired)
 		assert.NotErrorIs(t, err, ErrOAuthEmailUnverified)
 	})
+}
+
+// ---------- the flow binding ----------
+
+// The attack the binding exists for, written out end to end.
+//
+// An attacker starts a flow, consents as themselves, and hands the resulting callback to someone else. The
+// state is genuine — this server issued it — so the callback completes and produces a real exchange code
+// for the attacker's account. Everything up to that point still works, and must: the binding is not what
+// stops the page rendering, it is what stops the code being worth anything to the person holding it.
+//
+// Without it, the victim's client redeems that code and is signed in as the attacker, with everything they
+// write from then on landing in an account someone else controls.
+func TestACodeCannotBeRedeemedByAClientThatDidNotStartTheFlow(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	registerAndLogin(t, svc, "attacker@example.com", "laptop")
+	stub.asGoogle("google-attacker", "attacker@example.com", true)
+
+	// The attacker's own flow, completed with their own provider account.
+	stolen, _, err := signInBound(t, svc, stub, "google")
+	require.NoError(t, err)
+	require.True(t, stolen.SignedIn(), "the flow itself completes; that is the premise, not the bug")
+
+	// The victim's client holds a verifier from a flow of its own, and never sees the attacker's.
+	victimVerifier, _ := mustFlowChallenge(t)
+
+	_, err = svc.ExchangeOAuthCode(t.Context(), stolen.ExchangeCode, victimVerifier,
+		LoginInput{DeviceID: "victim-laptop"})
+	require.ErrorIs(t, err, ErrOAuthExchangeCode,
+		"a code is redeemable only by the client whose flow produced it")
+
+	// No session was created for anybody — least of all one on the victim's device pointing at the
+	// attacker's account.
+	var sessions int
+	require.NoError(t, svc.pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM sessions WHERE device_id = $1", "victim-laptop").Scan(&sessions))
+	assert.Zero(t, sessions)
+}
+
+// A wrong verifier burns the code rather than leaving it live for another attempt.
+func TestAMisredeemedCodeIsSpent(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	registerAndLogin(t, svc, "ada@example.com", "laptop")
+	stub.asGoogle("google-1", "ada@example.com", true)
+
+	outcome, verifier, err := signInBound(t, svc, stub, "google")
+	require.NoError(t, err)
+
+	wrong, _ := mustFlowChallenge(t)
+	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, wrong,
+		LoginInput{DeviceID: "laptop"})
+	require.ErrorIs(t, err, ErrOAuthExchangeCode)
+
+	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,
+		LoginInput{DeviceID: "laptop"})
+	assert.ErrorIs(t, err, ErrOAuthExchangeCode,
+		"the right verifier must not rescue a code a wrong one already spent")
+}
+
+// The binding is required, because an optional one is not a binding: the attack is constructed by whoever
+// starts the flow, so anyone wanting to skip the check would simply start a flow without a challenge.
+func TestAFlowCannotStartWithoutAUsableBinding(t *testing.T) {
+	svc, _ := oauthService(t, RegistrationOpen)
+
+	for name, challenge := range map[string]string{
+		"absent":       "",
+		"not base64":   "!!!!",
+		"wrong length": "c2hvcnQ", // valid base64url, but not 32 bytes
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := svc.StartOAuth(t.Context(), "google", challenge)
+			assert.ErrorIs(t, err, ErrOAuthFlowChallenge)
+		})
+	}
+
+	var states int
+	require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM oauth_states").Scan(&states))
+	assert.Zero(t, states, "a refused start must not leave a row behind")
+}
+
+// The signup path is where the binding could most easily be lost: the callback ends on a form, and the
+// exchange code is only minted when that form comes back. It rides inside the signed token to get there.
+func TestTheBindingSurvivesTheUsernameStep(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	stub.asGoogle("google-99", "newcomer@example.com", true)
+
+	outcome, verifier, err := signInBound(t, svc, stub, "google")
+	require.NoError(t, err)
+	require.NotEmpty(t, outcome.SignupToken)
+
+	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	require.NoError(t, err)
+
+	// The binding that came out the far side is the right one and not merely some value: a challenge
+	// dropped, zeroed, or re-derived from the submission would all fail here.
+	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
+	require.NoError(t, err, "the verifier from the flow that began the signup must redeem its code")
+	assert.NotEmpty(t, pair.AccessToken)
+
+	// ...and it is genuinely checked on this path, not merely carried: a second signup, redeemed by a
+	// client that did not start it, is refused.
+	stub.asGoogle("google-100", "another@example.com", true)
+	next, _, err := signInBound(t, svc, stub, "google")
+	require.NoError(t, err)
+	nextCode, err := svc.CompleteOAuthSignup(t.Context(), next.SignupToken, "another")
+	require.NoError(t, err)
+
+	wrong, _ := mustFlowChallenge(t)
+	_, err = svc.ExchangeOAuthCode(t.Context(), nextCode, wrong, LoginInput{DeviceID: "laptop"})
+	assert.ErrorIs(t, err, ErrOAuthExchangeCode)
 }
 
 // ---------- link conflicts ----------
@@ -249,7 +383,7 @@ func TestSignupCreatesNothingUntilAUsernameIsChosen(t *testing.T) {
 	svc, stub := oauthService(t, RegistrationOpen)
 	stub.asGoogle("google-99", "newcomer@example.com", true)
 
-	outcome, err := signIn(t, svc, stub, "google")
+	outcome, verifier, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
 
 	require.False(t, outcome.SignedIn(), "there is no account yet, so there is nothing to sign in to")
@@ -267,7 +401,7 @@ func TestSignupCreatesNothingUntilAUsernameIsChosen(t *testing.T) {
 	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
 	require.NoError(t, err)
 
-	pair, err := svc.ExchangeOAuthCode(t.Context(), code, LoginInput{DeviceID: "laptop"})
+	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
 	require.NoError(t, err)
 
 	actor, err := svc.AuthenticateAccessToken(t.Context(), pair.AccessToken)
@@ -287,7 +421,7 @@ func TestSignupAppliesTheUsernameRule(t *testing.T) {
 	svc, stub := oauthService(t, RegistrationOpen)
 	stub.asGoogle("google-99", "newcomer@example.com", true)
 
-	outcome, err := signIn(t, svc, stub, "google")
+	outcome, verifier, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
 
 	for name, username := range map[string]string{
@@ -308,7 +442,7 @@ func TestSignupAppliesTheUsernameRule(t *testing.T) {
 	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ﬁnn")
 	require.NoError(t, err)
 
-	pair, err := svc.ExchangeOAuthCode(t.Context(), code, LoginInput{DeviceID: "laptop"})
+	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
 	require.NoError(t, err)
 	actor, _ := svc.AuthenticateAccessToken(t.Context(), pair.AccessToken)
 	created, err := svc.GetUser(t.Context(), actor.UserID)
@@ -364,7 +498,8 @@ func TestAStateIsSingleUse(t *testing.T) {
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 	stub.asGoogle("google-1", "ada@example.com", true)
 
-	authURL, err := svc.StartOAuth(t.Context(), "google")
+	_, challenge := mustFlowChallenge(t)
+	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
 	require.NoError(t, err)
 	state := stateFromURL(t, authURL)
 
@@ -382,7 +517,8 @@ func TestAStateIsBoundToItsProvider(t *testing.T) {
 	stub.githubUser = map[string]any{"id": 7, "login": "ada"}
 	stub.githubEmails = []map[string]any{{"email": "ada@example.com", "primary": true, "verified": true}}
 
-	authURL, err := svc.StartOAuth(t.Context(), "google")
+	_, challenge := mustFlowChallenge(t)
+	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
 	require.NoError(t, err)
 
 	_, err = svc.CompleteOAuth(t.Context(), "github", stateFromURL(t, authURL), "code")
@@ -411,13 +547,15 @@ func TestAnExchangeCodeIsSingleUse(t *testing.T) {
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 	stub.asGoogle("google-1", "ada@example.com", true)
 
-	outcome, err := signIn(t, svc, stub, "google")
+	outcome, verifier, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
 
-	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{DeviceID: "laptop"})
+	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,
+		LoginInput{DeviceID: "laptop"})
 	require.NoError(t, err)
 
-	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{DeviceID: "laptop"})
+	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,
+		LoginInput{DeviceID: "laptop"})
 	assert.ErrorIs(t, err, ErrOAuthExchangeCode)
 }
 
@@ -426,12 +564,12 @@ func TestExchangeRequiresADeviceID(t *testing.T) {
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 	stub.asGoogle("google-1", "ada@example.com", true)
 
-	outcome, err := signIn(t, svc, stub, "google")
+	outcome, verifier, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
 
 	// Same requirement as a password login: a session with no device identity would share a refresh family
 	// with every other such session, and rotation would log them all out (ADR 0011).
-	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{})
+	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier, LoginInput{})
 	assert.Error(t, err)
 }
 
@@ -461,9 +599,11 @@ func TestSignupTokensAreRejectedWhenTampered(t *testing.T) {
 	require.NoError(t, err)
 	other := *svc
 	other.issuer = forger
+	_, challenge, err := GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
 	forged, err := other.issueOAuthSignupToken(OAuthIdentity{
 		Provider: ProviderGoogle, UserID: "google-1", Email: "victim@example.com", EmailVerified: true,
-	})
+	}, challenge)
 	require.NoError(t, err)
 
 	for name, token := range map[string]string{
@@ -577,7 +717,8 @@ func TestOAuthValuesExpire(t *testing.T) {
 		registerAndLogin(t, svc, "ada@example.com", "laptop")
 		stub.asGoogle("google-1", "ada@example.com", true)
 
-		authURL, err := svc.StartOAuth(t.Context(), "google")
+		_, challenge := mustFlowChallenge(t)
+		authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
 		require.NoError(t, err)
 
 		// Age the row rather than moving a clock: the WHERE clause compares against the database's now(),
@@ -595,14 +736,15 @@ func TestOAuthValuesExpire(t *testing.T) {
 		registerAndLogin(t, svc, "ada@example.com", "laptop")
 		stub.asGoogle("google-1", "ada@example.com", true)
 
-		outcome, err := signIn(t, svc, stub, "google")
+		outcome, verifier, err := signInBound(t, svc, stub, "google")
 		require.NoError(t, err)
 
 		_, err = svc.pool.Exec(t.Context(),
 			"UPDATE oauth_exchange_codes SET expires_at = now() - interval '1 minute'")
 		require.NoError(t, err)
 
-		_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{DeviceID: "laptop"})
+		_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,
+			LoginInput{DeviceID: "laptop"})
 		assert.ErrorIs(t, err, ErrOAuthExchangeCode)
 	})
 
@@ -614,10 +756,12 @@ func TestOAuthValuesExpire(t *testing.T) {
 		// row's expires_at, which the database compares against its own now(). Aging the clock around a
 		// whole sign-in would therefore expire the state first and never reach the token at all.
 		svc.now = func() time.Time { return time.Now().Add(-2 * OAuthSignupTTL) }
+		_, challenge, err := GenerateOAuthFlowVerifier()
+		require.NoError(t, err)
 		expired, err := svc.issueOAuthSignupToken(OAuthIdentity{
 			Provider: ProviderGoogle, UserID: "google-99",
 			Email: "newcomer@example.com", EmailVerified: true,
-		})
+		}, challenge)
 		require.NoError(t, err)
 		svc.now = time.Now
 
@@ -636,7 +780,8 @@ func TestConcurrentCallbacksConsumeTheStateOnce(t *testing.T) {
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 	stub.asGoogle("google-1", "ada@example.com", true)
 
-	authURL, err := svc.StartOAuth(t.Context(), "google")
+	_, challenge := mustFlowChallenge(t)
+	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
 	require.NoError(t, err)
 	state := stateFromURL(t, authURL)
 
@@ -715,19 +860,23 @@ func TestAnAccountCanLinkBothProviders(t *testing.T) {
 	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
 
 	stub.asGoogle("google-1", "ada@example.com", true)
-	viaGoogle, err := signIn(t, svc, stub, "google")
+	viaGoogle, googleVerifier, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
 	require.True(t, viaGoogle.SignedIn())
 
 	stub.githubUser = map[string]any{"id": 4242, "login": "ada"}
 	stub.githubEmails = []map[string]any{{"email": "ada@example.com", "primary": true, "verified": true}}
-	viaGitHub, err := signIn(t, svc, stub, "github")
+	viaGitHub, githubVerifier, err := signInBound(t, svc, stub, "github")
 	require.NoError(t, err)
 	require.True(t, viaGitHub.SignedIn())
 
-	// Both codes resolve to the same account.
-	for _, code := range []string{viaGoogle.ExchangeCode, viaGitHub.ExchangeCode} {
-		pair, err := svc.ExchangeOAuthCode(t.Context(), code, LoginInput{DeviceID: "laptop"})
+	// Both codes resolve to the same account, each redeemed with the verifier its own flow was bound to.
+	for _, redemption := range []struct{ code, verifier string }{
+		{viaGoogle.ExchangeCode, googleVerifier},
+		{viaGitHub.ExchangeCode, githubVerifier},
+	} {
+		pair, err := svc.ExchangeOAuthCode(t.Context(), redemption.code, redemption.verifier,
+			LoginInput{DeviceID: "laptop"})
 		require.NoError(t, err)
 		actor, err := svc.AuthenticateAccessToken(t.Context(), pair.AccessToken)
 		require.NoError(t, err)
@@ -750,7 +899,7 @@ func TestGitHubSignsInThroughTheService(t *testing.T) {
 		{"email": "ada@example.com", "primary": false, "verified": true},
 	}
 
-	outcome, err := signIn(t, svc, stub, "github")
+	outcome, verifier, err := signInBound(t, svc, stub, "github")
 	require.NoError(t, err)
 	require.NotEmpty(t, outcome.SignupToken, "a new GitHub identity starts a signup")
 	assert.Equal(t, "ada@example.com", outcome.Email,
@@ -759,7 +908,7 @@ func TestGitHubSignsInThroughTheService(t *testing.T) {
 	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ada")
 	require.NoError(t, err)
 
-	pair, err := svc.ExchangeOAuthCode(t.Context(), code, LoginInput{DeviceID: "laptop"})
+	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
 	require.NoError(t, err)
 	actor, err := svc.AuthenticateAccessToken(t.Context(), pair.AccessToken)
 	require.NoError(t, err)
@@ -783,7 +932,7 @@ func TestAPasswordResetRevokesOutstandingExchangeCodes(t *testing.T) {
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 	stub.asGoogle("google-1", "ada@example.com", true)
 
-	outcome, err := signIn(t, svc, stub, "google")
+	outcome, verifier, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
 	require.NotEmpty(t, outcome.ExchangeCode)
 
@@ -791,7 +940,9 @@ func TestAPasswordResetRevokesOutstandingExchangeCodes(t *testing.T) {
 	require.NoError(t, svc.ConfirmPasswordReset(t.Context(),
 		tokenFromLink(t, mailer.only(t)), "a new passphrase entirely"))
 
-	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{DeviceID: "laptop"})
+	// Redeemed with the correct verifier, so what refuses it is the revocation and nothing else.
+	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,
+		LoginInput{DeviceID: "laptop"})
 	assert.ErrorIs(t, err, ErrOAuthExchangeCode,
 		"a code still redeemable after a reset hands the intruder a fresh token pair minutes later")
 }
@@ -810,7 +961,8 @@ func TestExpiredRowsAreSweptAndLiveOnesAreNot(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, outcome.ExchangeCode)
 
-	_, err = svc.StartOAuth(t.Context(), "google") // a second, still-live state
+	_, challenge := mustFlowChallenge(t)
+	_, err = svc.StartOAuth(t.Context(), "google", challenge) // a second, still-live state
 	require.NoError(t, err)
 	_, err = svc.pool.Exec(t.Context(),
 		"UPDATE oauth_states SET expires_at = now() - interval '1 hour' WHERE consumed_at IS NOT NULL")

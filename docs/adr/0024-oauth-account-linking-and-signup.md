@@ -48,6 +48,14 @@ cannot be spent as a signup and a signup token cannot authenticate a request.
 **The callback never returns tokens.** It renders a page carrying a single-use exchange code, which a
 client trades at `POST /auth/oauth/exchange` along with its `device_id`.
 
+**A sign-in is bound to the client that started it.** `/authorize` requires a `flow_challenge` — the
+base64url SHA-256 of a secret the client keeps — and the exchange requires that secret as `flow_verifier`.
+It is PKCE's construction applied to the client-to-Norite hop, which is the one hop the flow otherwise had
+no binding on: `state` proves only that this server issued the request, not that this client made it. The
+challenge is carried from the `oauth_states` row onto the `oauth_exchange_codes` row, and through the
+signup token for the username step, so every code is bound however it was produced. The binding is
+mandatory.
+
 ## Consequences
 
 - **The takeover path is closed at the point it would be exploited.** The refusal is a real cost: someone
@@ -66,16 +74,14 @@ client trades at `POST /auth/oauth/exchange` along with its `device_id`.
   decoration.
 - **Credentials never travel in a URL.** The exchange code is the only thing that crosses the browser, and
   it is worthless without a second request.
-- **The state proves the *server* started this flow, not that *this browser* did.** Nothing ties an
-  `oauth_states` row to a browser, so any browser can complete any outstanding state. That leaves login
-  CSRF: an attacker who consents with their own provider account and hands the resulting callback URL to
-  someone else gets a page rendering the attacker's exchange code in the victim's browser, and a victim who
-  pastes it is signed in as the attacker. Accepted at M6 because the copy-paste step is real friction and
-  because the fix — a per-flow cookie whose hash lives on the state row — would be the first cookie in a
-  codebase that retired them ([ADR 0011](0011-token-based-client-auth.md)). **It stops being acceptable at
-  M8**, whose loopback listener removes the friction entirely, and whose design also decides whether the
-  browser leg still ends on a server-rendered page. M8 settles it; this ADR is amended, not silently
-  outgrown, when it does.
+- **A sign-in is bound to the client that started it, and a browser alone cannot finish one.** The `state`
+  proves only that *this server* issued the authorization request; it says nothing about who started it, so
+  on its own it leaves login CSRF — an attacker consents with their own provider account, hands the callback
+  to someone else, and the victim's client redeems a code that signs them into the attacker's account. The
+  binding closes it: `/authorize` requires a `flow_challenge`, the exchange requires the matching
+  `flow_verifier`, and the challenge rides the state row and then the exchange-code row (and the signup
+  token, for the username step). The cost is that opening `/authorize` in a browser produces a code nothing
+  can spend — accepted, because that path is exactly what the attack is built from.
 - **An invite-only instance refuses new accounts through a provider but still permits linking**, because
   the gate is on account creation, not on providers.
 - **GitHub costs two requests per sign-in.** Unavoidable given where the verification flag lives.
@@ -97,6 +103,20 @@ client trades at `POST /auth/oauth/exchange` along with its `device_id`.
   public identifier they never chose.
 - **Returning the token pair from the callback**: rejected. It works, and it puts credentials in a URL, in
   browser history, in the `Referer` header, and in every proxy log along the way.
+- **A per-flow cookie set at `/authorize`, instead of a client-held verifier**: the textbook answer for a
+  browser-driven flow, and rejected because it protects the wrong leg. It would bind the *browser*, which
+  is not who redeems the code — and it would be the first cookie in a codebase that retired them
+  ([ADR 0011](0011-token-based-client-auth.md)) to protect a flow whose real clients are a CLI and a
+  daemon. The verifier binds the party that actually presents the credential, and works unchanged for M8's
+  loopback listener.
+- **Letting each client compare the `state` it sent with the one it got back**: the standard native-app
+  mitigation, sufficient for M8's own flow, and rejected because it protects only the clients that remember
+  to do it and leaves `/exchange` open to every client that does not. This package's preference is
+  consistently for the guarantee to live where it cannot be forgotten — single-use in
+  `ConsumePasswordResetToken`'s `WHERE`, the PKCE verifier server-side, and now this.
+- **Making the binding optional so a bare browser flow still works**: rejected, and the reason is the whole
+  point. The attack is constructed by whoever starts the flow, so an attacker wanting to skip the check
+  would simply start one without a challenge. An optional binding is not a binding.
 - **Skipping PKCE because this is a confidential client**: defensible — the client secret already prevents
   code redemption — and rejected because the redirect leg travels through a browser this server does not
   control, and from M8 through a loopback listener other local processes can see.

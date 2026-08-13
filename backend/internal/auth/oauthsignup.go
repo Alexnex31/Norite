@@ -55,10 +55,17 @@ type oauthSignupClaims struct {
 	// future path which mints one differently cannot silently skip the check.
 	EmailVerified bool   `json:"evf"`
 	DisplayName   string `json:"nam"`
+	// FlowChallenge carries the client binding across the username step.
+	//
+	// The signup path is the one place a flow's binding could be lost: the callback ends on a form, and the
+	// exchange code is only minted once that form comes back. Rebuilding the binding from the submission
+	// would mean trusting the submitter, which is the thing being guarded against — so it rides inside the
+	// signed token, where the signature makes it as tamper-proof as the identity beside it.
+	FlowChallenge string `json:"flw"`
 }
 
 // issueOAuthSignupToken mints the token that stands in for an account that does not exist yet.
-func (s *Service) issueOAuthSignupToken(identity OAuthIdentity) (string, error) {
+func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, challenge TokenHash) (string, error) {
 	now := s.now()
 
 	claims := oauthSignupClaims{
@@ -75,6 +82,7 @@ func (s *Service) issueOAuthSignupToken(identity OAuthIdentity) (string, error) 
 		Email:         identity.Email,
 		EmailVerified: identity.EmailVerified,
 		DisplayName:   identity.DisplayName,
+		FlowChallenge: OAuthFlowChallengeFor(challenge),
 	}
 
 	signed, err := s.issuer.sign(claims)
@@ -85,7 +93,7 @@ func (s *Service) issueOAuthSignupToken(identity OAuthIdentity) (string, error) 
 }
 
 // parseOAuthSignupToken validates a continuation token and returns the identity it carries.
-func (s *Service) parseOAuthSignupToken(raw string) (OAuthIdentity, error) {
+func (s *Service) parseOAuthSignupToken(raw string) (OAuthIdentity, TokenHash, error) {
 	var claims oauthSignupClaims
 
 	_, err := jwt.ParseWithClaims(raw, &claims, s.issuer.keyFunc,
@@ -95,23 +103,30 @@ func (s *Service) parseOAuthSignupToken(raw string) (OAuthIdentity, error) {
 		jwt.WithTimeFunc(s.issuer.now),
 	)
 	if err != nil {
-		return OAuthIdentity{}, ErrOAuthSignupToken
+		return OAuthIdentity{}, nil, ErrOAuthSignupToken
 	}
 
 	// The check that makes `typ` worth carrying: an access token is signed with the same key, and without
 	// this an ordinary user's access token would be accepted here as a signup for an account of their
 	// choosing.
 	if claims.TokenType != oauthSignupTokenType {
-		return OAuthIdentity{}, ErrOAuthSignupToken
+		return OAuthIdentity{}, nil, ErrOAuthSignupToken
 	}
 	if !ValidOAuthProvider(claims.Provider) || claims.Subject == "" || claims.Email == "" {
-		return OAuthIdentity{}, ErrOAuthSignupToken
+		return OAuthIdentity{}, nil, ErrOAuthSignupToken
 	}
 	// A token minted without a verified address should not exist, since resolveOAuthIdentity refuses that
 	// case before ever getting here. Checked anyway: this is the one place the linking rule could be
 	// bypassed by a future caller, and the cost of the check is a comparison.
 	if !claims.EmailVerified {
-		return OAuthIdentity{}, ErrOAuthSignupToken
+		return OAuthIdentity{}, nil, ErrOAuthSignupToken
+	}
+
+	// A token with no usable binding cannot produce a redeemable code, so it is refused here rather than
+	// allowed to create an account whose sign-in then fails.
+	challenge, err := ParseOAuthFlowChallenge(claims.FlowChallenge)
+	if err != nil {
+		return OAuthIdentity{}, nil, ErrOAuthSignupToken
 	}
 
 	return OAuthIdentity{
@@ -120,7 +135,7 @@ func (s *Service) parseOAuthSignupToken(raw string) (OAuthIdentity, error) {
 		Email:         claims.Email,
 		EmailVerified: claims.EmailVerified,
 		DisplayName:   claims.DisplayName,
-	}, nil
+	}, challenge, nil
 }
 
 // sign produces a token from any claims this package defines.

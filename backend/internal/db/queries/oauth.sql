@@ -4,8 +4,8 @@
 -- provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
 
 -- name: CreateOAuthState :one
-INSERT INTO oauth_states (id, state_hash, provider, code_verifier, expires_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO oauth_states (id, state_hash, provider, code_verifier, flow_challenge, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: ConsumeOAuthState :one
@@ -67,8 +67,8 @@ VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: CreateOAuthExchangeCode :one
-INSERT INTO oauth_exchange_codes (id, code_hash, user_id, expires_at)
-VALUES ($1, $2, $3, $4)
+INSERT INTO oauth_exchange_codes (id, code_hash, user_id, flow_challenge, expires_at)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: ConsumeOAuthExchangeCode :one
