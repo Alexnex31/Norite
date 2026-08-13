@@ -770,7 +770,19 @@ callback URL), and a headless/SSH device-code fallback (`device_code` table, min
 server-rendered completion page, independent of the web SPA).
 
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
-entry, one process; CLI/GUI never independently store a token copy.
+entry, one process; CLI/GUI never independently store a token copy. `norite login` (M7) is the single
+exception and a temporary one: it writes that entry because it is the only process that ever sees the
+password, and stops doing so at M20, when the local IPC socket exists and credentials cross it instead.
+
+**Where the credential actually lives** (M7, [ADR 0025](adr/0025-credential-storage-without-a-keyring.md)):
+the OS keyring where the machine has one, and a `0600` file in the daemon's `0700` per-user state directory
+where it does not — a headless Linux server has no Secret Service, and keyring-only would make the CLI
+unusable on exactly the machines it exists for. The fallback is plaintext, deliberately: a decryption key
+stored beside its ciphertext is obfuscation, not protection. `norite login` says which of the two it used,
+so the degradation is never discovered later. Only the refresh token is stored; an access token expires
+long before any restart it would be persisted to survive. Beside it sits a non-secret record — instance,
+account, and the per-installation `device_id` that scopes the refresh family — kept in a plain file so
+that showing which account is signed in never has to open the keyring.
 
 **Registration** (M4, hardened at M10): today `POST /auth/register` answers 409 on an address that already
 has an account, which makes the instance enumerable. It is the one auth endpoint that discloses account

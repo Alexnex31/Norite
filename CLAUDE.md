@@ -459,6 +459,32 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
   the sweep filters by**: a partial index predicated on "not yet consumed" cannot serve a sweep that
   deletes regardless, which is the mistake made on all three of these tables and corrected in `000005`.
 
+And on the client-auth side, from M7:
+
+- **The credential format lives in `daemon/credentials`, and the CLI imports it** — the repository's first
+  cross-module dependency (`cli` → `daemon`, relative `replace`). It follows from ADR 0011: the daemon is
+  the sole holder of its account's tokens, so the daemon module owns what a stored credential is. Two
+  implementations of one on-disk shape drift, and the failure mode is a login that appears to work and a
+  daemon that cannot find it.
+- **The keyring is not assumed to exist.** A headless Linux box has no Secret Service, which is exactly
+  where this CLI is meant to run, so storage falls back to a `0600` file in the `0700` state directory
+  (ADR 0025). The backend is chosen by *writing* a probe entry, never by reading one — a read of a missing
+  entry looks identical on a working keyring and a broken one. Never make the fallback silent.
+- **Only the refresh token is persisted.** An access token lives 15 minutes, shorter than the gap between
+  the restarts persistence would let it survive. The non-secret record beside it is a separate file so
+  `LoadRecord` can answer "who is logged in" without opening a keyring, which on a locked one pops a
+  system dialog.
+- **A `device_id` is per installation, not per login.** Regenerating it strands the previous refresh
+  family until it expires and adds a session-list entry each time; rotating it is what reuse detection
+  reads as theft.
+- **Never take a password from a flag.** A flag value is in the process list and the shell history —
+  `NORITE_PASSWORD` is the scripted path, matching the wizard's rule for the database password. Read
+  interactively with `term.ReadPassword`, and refuse an empty answer locally rather than letting the
+  instance's deliberately vague 401 read as "wrong password".
+- **A daemon with no session is still a daemon.** No credential, an unreachable instance, and a refused
+  token are all logged and survived — refusing to start would mean the daemon cannot be installed before
+  its first login, and `norite daemon install` deliberately runs first.
+
 ## Project-specific skills
 
 **Not in the repository** — `.gitignore` excludes `.claude/`, so these live on the maintainer's machine
