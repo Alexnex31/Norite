@@ -32,6 +32,28 @@ import (
 // already has the token, and with it could simply submit the form themselves. No ambient credential
 // participates, which is the same reason the rest of this API needs no CSRF middleware (rule 4).
 
+// pageStyle is the stylesheet every server-rendered page shares.
+//
+// One definition rather than one per page: these are the only HTML this backend serves, they are seen by
+// someone who is locked out or half-signed-up, and two copies drifting would mean the reset page and the
+// OAuth pages slowly stop looking like the same product. It is inlined under a per-request nonce rather
+// than served as a file, because a stylesheet at its own URL would need a route, a cache policy, and a
+// CSP source — three things to get right for one screenful of CSS.
+const pageStyle = `
+  body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem;
+         line-height: 1.5; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; }
+  label { display: block; margin-top: 1.5rem; font-weight: 600; }
+  input { width: 100%; padding: 0.6rem; margin-top: 0.4rem; font-size: 1rem;
+          border: 1px solid #bbb; border-radius: 4px; box-sizing: border-box; }
+  button { margin-top: 1.5rem; padding: 0.6rem 1.2rem; font-size: 1rem; border: 0; border-radius: 4px;
+           background: #2b5eaa; color: #fff; cursor: pointer; }
+  code.code { display: inline-block; padding: 0.4rem 0.6rem; background: #eee; border-radius: 4px;
+              font-size: 1.1rem; word-break: break-all; }
+  .note { color: #555; font-size: 0.9rem; }
+  .error { color: #a12; font-weight: 600; }
+`
+
 // resetPageData is everything the templates render. Deliberately tiny, and deliberately containing no
 // user-controlled text: nothing about the account is echoed, so there is nothing on this page to escape.
 type resetPageData struct {
@@ -51,17 +73,7 @@ var resetPageTemplate = template.Must(template.New("reset").Parse(`<!doctype htm
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reset your Norite password</title>
 <style nonce="{{ .Nonce }}">
-  body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem;
-         line-height: 1.5; color: #1a1a1a; background: #fafafa; }
-  h1 { font-size: 1.5rem; }
-  label { display: block; margin-top: 1.5rem; font-weight: 600; }
-  input { width: 100%; padding: 0.6rem; margin-top: 0.4rem; font-size: 1rem;
-          border: 1px solid #bbb; border-radius: 4px; box-sizing: border-box; }
-  button { margin-top: 1.5rem; padding: 0.6rem 1.2rem; font-size: 1rem; border: 0; border-radius: 4px;
-           background: #2b5eaa; color: #fff; cursor: pointer; }
-  .note { color: #555; font-size: 0.9rem; }
-  .error { color: #a12; font-weight: 600; }
-</style>
+` + pageStyle + `</style>
 </head>
 <body>
 <h1>Choose a new password</h1>
@@ -87,11 +99,7 @@ var resetDoneTemplate = template.Must(template.New("reset-done").Parse(`<!doctyp
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Password changed</title>
 <style nonce="{{ .Nonce }}">
-  body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem;
-         line-height: 1.5; color: #1a1a1a; background: #fafafa; }
-  h1 { font-size: 1.5rem; }
-  .note { color: #555; font-size: 0.9rem; }
-</style>
+` + pageStyle + `</style>
 </head>
 <body>
 <h1>Your password has been changed</h1>
@@ -109,6 +117,9 @@ and scripts will need new ones.</p>
 func (h *Handler) PageRoutes(r chi.Router) {
 	r.Get("/reset", h.resetPage)
 	r.Post("/reset", h.resetPageSubmit)
+	// The OAuth signup form's target. At the root beside /reset rather than under /api/v1, for the same
+	// reason: it is a form a person submits, not an API a client codegens against.
+	r.Post("/oauth/signup", h.oauthSignupSubmit)
 }
 
 // resetPage renders the form the emailed link opens.

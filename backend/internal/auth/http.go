@@ -438,6 +438,43 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		errors.Is(err, ErrInvalidTokenName):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
 
+	case errors.Is(err, ErrUnknownProvider):
+		// 404, not 400: a provider this instance has not configured is indistinguishable from one that
+		// does not exist, and neither is a malformed request.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrNotFound, "no such sign-in provider"))
+
+	case errors.Is(err, ErrOAuthExchangeCode), errors.Is(err, ErrOAuthSignupToken),
+		errors.Is(err, ErrOAuthState):
+		// One answer for unknown, expired and already-spent, exactly as for a reset token: distinguishing
+		// them tells whoever holds a captured code which of those it is.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "%s", err.Error()))
+
+	case errors.Is(err, ErrOAuthLinkRequired):
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "oauth_link_required",
+			Message: ErrOAuthLinkRequired.Error(),
+			Err:     err,
+		})
+
+	case errors.Is(err, ErrOAuthRegistrationClosed):
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "registration_closed",
+			Message: "registration on this instance requires an invite code",
+			Err:     err,
+		})
+
+	case errors.Is(err, ErrOAuthExchange), errors.Is(err, ErrOAuthNoEmail):
+		// The provider failed us, not the other way round. 502 rather than 500 because the fault is
+		// upstream, and saying so is what stops someone debugging this instance for an hour.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusBadGateway,
+			Code:    "oauth_provider_error",
+			Message: err.Error(),
+			Err:     err,
+		})
+
 	case errors.Is(err, ErrInvalidResetToken):
 		// One answer for expired, spent, unknown, and issued-to-a-since-changed-address. Distinguishing
 		// them tells whoever holds a stolen link which of those it is.

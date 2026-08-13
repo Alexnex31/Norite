@@ -384,6 +384,57 @@ paths:
               schema:
                 type: string
 
+  /oauth/signup:
+    # Served at the instance root, beside /reset: a form a person submits, not an API a client codegens
+    # against. Documented here because cmd/server/contract_test.go holds the router and this file to the
+    # same set.
+    servers:
+      - url: /
+    post:
+      summary: Submit the OAuth username form
+      description: >
+        The form target for the page the callback renders. Form-encoded rather than JSON so the page needs
+        no JavaScript, which is what lets its Content-Security-Policy forbid scripts outright.
+
+
+        No CSRF token participates and none is needed: the signup token is the entire authority, and
+        anyone able to forge this request already holds it.
+
+
+        Same effects as `POST /api/v1/auth/oauth/complete`. A rejected username re-renders the form so it
+        can be fixed without restarting the flow; an expired token cannot be re-rendered and ends on an
+        error page.
+      operationId: submitOAuthSignup
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [signup_token, username]
+              properties:
+                signup_token:
+                  type: string
+                username:
+                  type: string
+                  minLength: 2
+                  maxLength: 32
+      responses:
+        "200":
+          description: The account was created. HTML, carrying the one-time exchange code.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: The username was rejected, or the sign-up expired. HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+
   /auth/password/reset/request:
     post:
       summary: Request a password reset email
@@ -461,6 +512,184 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401":
           description: The token is unknown, expired, already used, or no longer matches the account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/oauth/{provider}/authorize:
+    get:
+      summary: Begin an OAuth sign-in
+      description: >
+        Redirects (302) to the provider's consent screen. Mints a single-use state and a PKCE code
+        verifier, both held server-side — the verifier never travels through the browser or the provider,
+        which is the entire point of PKCE.
+
+
+        Returns 404 for a provider this instance has not configured. Which providers exist is not secret,
+        but an unconfigured one is indistinguishable from one that does not exist at all.
+      operationId: beginOAuth
+      tags: [auth]
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/OAuthProvider"
+      responses:
+        "302":
+          description: Redirect to the provider.
+          headers:
+            Location:
+              schema:
+                type: string
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/oauth/{provider}/callback:
+    get:
+      summary: The provider's redirect target
+      description: >
+        Where the provider sends the user back. Consumes the state, exchanges the authorization code, and
+        renders HTML — not JSON, because a browser lands here.
+
+
+        **It never returns tokens.** A redirect carrying a token pair would put credentials in a URL, and
+        so in history, in a Referer, and in every proxy log on the way. It renders a one-time code
+        instead, which a client trades at `POST /auth/oauth/exchange`.
+
+
+        Three outcomes: an already-linked identity, or one whose provider-verified email matches an
+        account, ends on a page carrying that code; an unrecognised identity ends on a form asking for a
+        username, because no account is created until one is chosen; anything else ends on an error page.
+
+
+        The one refusal worth naming: a provider email that matches an existing account but which the
+        provider has **not** verified is rejected outright, with instructions to sign in by password and
+        link from settings. Auto-linking on an unverified address would let anyone who can put someone
+        else's address on a provider account take over the matching Norite account.
+      operationId: oauthCallback
+      tags: [auth]
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/OAuthProvider"
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Set by the provider when the user declined or it refused. Rendered as an ordinary
+            abandonment, not a fault.
+      responses:
+        "200":
+          description: Signed in, or asking for a username. HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: >
+            The state was unknown, expired or already spent; the provider refused; or the identity was
+            refused by the linking rule. HTML, with one message per case.
+          content:
+            text/html:
+              schema:
+                type: string
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/oauth/exchange:
+    post:
+      summary: Trade a one-time code for a token pair
+      description: >
+        The second half of every OAuth sign-in. The code is single-use and expires in minutes; presenting
+        it twice fails.
+
+
+        This is where `device_id` finally arrives. A browser does not have one — the client that ends up
+        holding the tokens is what knows its own device identity, and the refresh family is scoped to it
+        exactly as it is for a password login (ADR 0011).
+      operationId: exchangeOAuthCode
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthExchangeRequest"
+      responses:
+        "200":
+          description: A token pair, identical to what a password login returns.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: The code is unknown, expired, or already spent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/oauth/complete:
+    post:
+      summary: Finish an OAuth sign-up by choosing a username
+      description: >
+        The JSON equivalent of the username form the callback renders, for a client driving the flow
+        itself.
+
+
+        Nothing exists until this succeeds: the account, its provider link and its first session are
+        created together in one transaction. The signup token carries the provider-verified identity in
+        the meantime, so there is no half-created account for anything else to trip over.
+
+
+        The username is subject to exactly the rule registration applies — letters and digits in any
+        script plus `_`, `.` and `-`, NFKC-normalised before the uniqueness check.
+
+
+        Returns an exchange code rather than a token pair, so both completion paths end the same way.
+      operationId: completeOAuthSignup
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthCompleteRequest"
+      responses:
+        "200":
+          description: The account was created. Trade the code at `/auth/oauth/exchange`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthExchangeCode"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: The signup token is unknown, expired, or not a signup token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Registration on this instance requires an invite code (`registration_closed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: That username is already taken.
           content:
             application/json:
               schema:
@@ -651,6 +880,19 @@ components:
         Refresh tokens (`nrt_…`) are **not** Bearer credentials. They go in the body of `/auth/refresh` and
         `/auth/logout` and authenticate nothing else.
 
+  parameters:
+    OAuthProvider:
+      name: provider
+      in: path
+      required: true
+      description: >
+        Which identity provider. Only names this build implements *and* this instance has configured are
+        accepted; anything else is a 404, so an unconfigured provider is indistinguishable from one that
+        does not exist.
+      schema:
+        type: string
+        enum: [google, github]
+
   schemas:
     Snowflake:
       type: string
@@ -785,6 +1027,49 @@ components:
                 it is lost, mint a new token and revoke this one. The `nat_` prefix exists so a leaked
                 credential is identifiable on sight, by a human or a secret scanner.
               examples: ["nat_9pQ2xL7vD4mZ0kR8sT1yWbGhJcNfEuAiOoPdXrVtYnM"]
+
+    OAuthExchangeRequest:
+      type: object
+      required: [code, device_id]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: The one-time code from the callback. Single-use, and valid for minutes.
+        device_id:
+          type: string
+          maxLength: 128
+          description: >
+            Stable per client install. Scopes the refresh-token family, exactly as at login: rotation and
+            reuse detection act within one device_id and never across them.
+        device_name:
+          type: string
+          maxLength: 64
+
+    OAuthCompleteRequest:
+      type: object
+      required: [signup_token, username]
+      additionalProperties: false
+      properties:
+        signup_token:
+          type: string
+          description: >
+            From the callback. Carries the provider-verified identity until a username is chosen; it is
+            not a Bearer credential and authenticates nothing else.
+        username:
+          type: string
+          minLength: 2
+          maxLength: 32
+          description: Same rule as registration — see RegisterRequest.
+
+    OAuthExchangeCode:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: Trade at `/auth/oauth/exchange` for a token pair.
 
     PasswordResetRequest:
       type: object
@@ -949,6 +1234,16 @@ components:
         Unknown fields are rejected rather than ignored so a typo fails loudly instead of silently leaving
         a setting on its default (docs/architecture.md §14.1). Validation messages name the offending field
         and the rule it broke, never the submitted value — that value is a password on two of these routes.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    NotFound:
+      description: >
+        No such resource. Also the answer for a provider this instance has not configured, and for an
+        object that exists but belongs to someone else — the two are deliberately indistinguishable, so
+        the endpoint cannot be used to probe for what exists.
       content:
         application/json:
           schema:

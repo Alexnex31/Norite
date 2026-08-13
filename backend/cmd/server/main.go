@@ -158,6 +158,21 @@ func run() error {
 		}
 	}()
 
+	// A provider with no credentials is simply absent from this set, so an instance that configured none
+	// offers no OAuth sign-in and every entry point reports an unknown provider.
+	oauthProviders := auth.NewOAuthProviders(auth.OAuthOptions{
+		PublicBaseURL:      cfg.PublicBaseURL,
+		GoogleClientID:     cfg.GoogleClientID,
+		GoogleClientSecret: cfg.GoogleClientSecret,
+		GitHubClientID:     cfg.GitHubClientID,
+		GitHubClientSecret: cfg.GitHubClientSecret,
+	})
+	if names := oauthProviders.Names(); len(names) > 0 {
+		// Names only. A client ID is not secret but is not useful in a log either, and the secret beside
+		// it must never appear in one (CLAUDE.md rule 8).
+		logger.Info().Strs("providers", names).Msg("oauth sign-in enabled")
+	}
+
 	authService, err := auth.NewService(auth.ServiceOptions{
 		Pool:             pool,
 		IDs:              ids,
@@ -165,6 +180,7 @@ func run() error {
 		RegistrationMode: auth.RegistrationMode(cfg.RegistrationMode),
 		Mailer:           mailer,
 		PublicBaseURL:    cfg.PublicBaseURL,
+		OAuth:            oauthProviders,
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("could not initialize the auth service")

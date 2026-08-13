@@ -1017,3 +1017,135 @@ func TestTheResetPagesCarryTheStricterRateLimit(t *testing.T) {
 		"POST /reset must be throttled by the auth bucket (%s), not only by the base limit", authRateLimit)
 	assert.NotEmpty(t, throttled.Header.Get("Retry-After"))
 }
+
+// ---------------------------------------------------------------------------
+// OAuth (M6)
+// ---------------------------------------------------------------------------
+
+// An instance with no provider credentials — the default, and the shape newAPI builds — must answer every
+// OAuth entry point as though the provider does not exist. It is not an error state.
+func TestOAuthIsAbsentWhenNoProviderIsConfigured(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	for _, path := range []string{
+		"/api/v1/auth/oauth/google/authorize",
+		"/api/v1/auth/oauth/github/authorize",
+	} {
+		resp := api.call(http.MethodGet, path, nil)
+		require.Equal(t, http.StatusNotFound, resp.Code, "%s: %s", path, resp)
+		assert.Equal(t, "not_found", resp.errorBody().Code)
+	}
+}
+
+// A provider name is a path parameter that reaches a database column and an error message, so anything
+// that is not one of the two this build implements is refused before the service sees it.
+func TestOAuthRejectsAnUnknownProviderName(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	for _, name := range []string{"myspace", "Google", "..", "google;drop"} {
+		resp := api.call(http.MethodGet, "/api/v1/auth/oauth/"+url.PathEscape(name)+"/authorize", nil)
+		assert.Equal(t, http.StatusNotFound, resp.Code, "provider %q must not be accepted", name)
+	}
+}
+
+// The callback renders HTML, so it needs the same per-route CSP override the reset page has — the JSON
+// API's `form-action 'none'` would render the username form and then forbid it from submitting.
+func TestOAuthCallbackCarriesTheHTMLContentSecurityPolicy(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	// No provider is configured, so this ends on the error page — which is enough to assert the headers,
+	// and is the path a real misconfiguration would take too.
+	resp := api.call(http.MethodGet, "/api/v1/auth/oauth/google/callback?state=x&code=y", nil)
+
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+	csp := resp.Header.Get("Content-Security-Policy")
+	assert.Contains(t, csp, "form-action 'self'", "the username form must be able to submit")
+	assert.Contains(t, csp, "style-src 'nonce-")
+	assert.NotContains(t, csp, "unsafe-inline")
+	assert.Contains(t, resp.Header.Get("Cache-Control"), "no-store",
+		"the page carries a one-time code and must not be cached")
+}
+
+// The signup form is mounted at the root beside /reset, and carries the same CSP.
+func TestOAuthSignupFormIsServedWithTheHTMLPolicy(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	form := url.Values{"signup_token": {"nonsense"}, "username": {"ada"}}
+	resp := api.call(http.MethodPost, "/oauth/signup", form.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+	assert.Contains(t, resp.Header.Get("Content-Security-Policy"), "form-action 'self'")
+	// An unusable token cannot re-render the form, so it ends on the error page rather than a blank one.
+	assert.Contains(t, resp.String(), "start again")
+}
+
+// The JSON endpoints refuse bad input the same way every other endpoint does, and never leak which part
+// of a credential was wrong.
+func TestOAuthJSONEndpointsValidateTheirBodies(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	cases := []struct {
+		name string
+		path string
+		body any
+		want int
+	}{
+		{"exchange without a device id", "/api/v1/auth/oauth/exchange",
+			map[string]string{"code": "noc_x"}, http.StatusBadRequest},
+		{"exchange with no code", "/api/v1/auth/oauth/exchange",
+			map[string]string{"device_id": "laptop"}, http.StatusBadRequest},
+		{"exchange with an unknown code", "/api/v1/auth/oauth/exchange",
+			map[string]string{"code": "noc_" + strings.Repeat("A", 43), "device_id": "laptop"},
+			http.StatusUnauthorized},
+		{"complete with no username", "/api/v1/auth/oauth/complete",
+			map[string]string{"signup_token": "x"}, http.StatusBadRequest},
+		{"complete with an unknown token", "/api/v1/auth/oauth/complete",
+			map[string]string{"signup_token": "not-a-token", "username": "ada"}, http.StatusUnauthorized},
+		{"unknown field", "/api/v1/auth/oauth/exchange",
+			`{"code":"noc_x","device_id":"laptop","admin":true}`, http.StatusBadRequest},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := api.call(http.MethodPost, tc.path, tc.body)
+			assert.Equal(t, tc.want, resp.Code, resp)
+		})
+	}
+}
+
+// A refresh token must not be spendable as an OAuth exchange code, and vice versa: each authenticates one
+// endpoint, which is why the prefixes are distinct and why neither is in LooksLikeOpaqueToken.
+func TestOAuthCodesAreNotInterchangeableWithOtherCredentials(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+	acct := api.newAccount("ada", "ada@example.com", "laptop")
+
+	resp := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
+		"code": acct.Tokens.RefreshToken, "device_id": "laptop",
+	})
+	assert.Equal(t, http.StatusUnauthorized, resp.Code,
+		"a refresh token must not be spendable as an OAuth exchange code")
+
+	// ...and an exchange code is not a Bearer credential.
+	me := api.call(http.MethodGet, "/api/v1/users/@me", nil,
+		withToken("noc_"+strings.Repeat("A", 43)))
+	assert.Equal(t, http.StatusUnauthorized, me.Code)
+}
+
+// The OAuth routes sit in the stricter bucket: /authorize writes a row per call, and /exchange spends a
+// credential. Neither belongs on the base limit alone.
+func TestOAuthRoutesCarryTheStricterRateLimit(t *testing.T) {
+	api := newAPI(t, auth.RegistrationOpen)
+
+	var throttled *response
+	for i := 0; i < 40; i++ {
+		resp := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange",
+			map[string]string{"code": "noc_x"}, fromIP("203.0.113.77"))
+		if resp.Code == http.StatusTooManyRequests {
+			throttled = resp
+			break
+		}
+	}
+	require.NotNil(t, throttled, "OAuth must be throttled by the auth bucket (%s)", authRateLimit)
+	assert.NotEmpty(t, throttled.Header.Get("Retry-After"))
+}
