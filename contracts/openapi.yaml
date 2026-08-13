@@ -562,10 +562,17 @@ paths:
         username, because no account is created until one is chosen; anything else ends on an error page.
 
 
-        The one refusal worth naming: a provider email that matches an existing account but which the
-        provider has **not** verified is rejected outright, with instructions to sign in by password and
-        link from settings. Auto-linking on an unverified address would let anyone who can put someone
-        else's address on a provider account take over the matching Norite account.
+        The refusal worth naming: **an address the provider has not verified never reaches an account**,
+        whether or not one already exists. Where it matches an existing account the answer explains how to
+        link by password instead; where it matches nothing the sign-up is refused rather than started,
+        because creating the account would register someone else's address to whoever typed it and record
+        it as verified. Auto-linking on an unverified address would let anyone who can put another
+        person's address on a provider account take over the matching Norite account.
+
+
+        A conflict is also possible, and rendered as its own message: the provider account is already
+        linked to a different Norite account (most often one since deleted), or the matched account
+        already has a different account at that provider.
       operationId: oauthCallback
       tags: [auth]
       security: []

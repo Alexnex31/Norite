@@ -288,6 +288,11 @@ func TestOAuthSignupFormRerendersOnABadUsername(t *testing.T) {
 	assert.Contains(t, rejected.String(), "Choose your username", "the form must come back, not vanish")
 	assert.Contains(t, rejected.String(), "letters, digits")
 
+	// The address has to survive the re-render. It is the only thing on the page saying *which* account is
+	// being created, and losing it at the moment someone is correcting a mistake is when it matters most.
+	assert.Contains(t, rejected.String(), "newcomer@example.com",
+		"the account being created must stay named on the second attempt")
+
 	// ...and the token it carries still works, so a second attempt succeeds.
 	retry := url.Values{"signup_token": {hiddenField(t, rejected, "signup_token")}, "username": {"newcomer"}}
 	done := api.call(http.MethodPost, "/oauth/signup", retry.Encode(),

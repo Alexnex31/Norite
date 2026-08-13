@@ -119,6 +119,128 @@ func TestASecondSignInUsesTheLinkNotTheEmail(t *testing.T) {
 	assert.Equal(t, user.ID, int64(actor.UserID))
 }
 
+// The linking rule's other half, and the half that was missing.
+//
+// An unverified address matching *nothing* used to mint a signup token, render "choose your username", and
+// then refuse every submission — parseOAuthSignupToken rejects an unverified claim, so the form was a dead
+// end that no amount of retrying escaped. Refusing at the callback is both the honest answer and the
+// correct one: the account would have recorded the address as verified.
+func TestAnUnverifiedAddressCannotStartASignup(t *testing.T) {
+	t.Run("google", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		stub.asGoogle("google-99", "newcomer@example.com", false)
+
+		outcome, err := signIn(t, svc, stub, "google")
+		require.ErrorIs(t, err, ErrOAuthEmailUnverified)
+		assert.Empty(t, outcome.SignupToken, "a sign-up that cannot be completed must never be offered")
+
+		var users int
+		require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
+		assert.Zero(t, users, "a refused sign-up must not create an account")
+	})
+
+	// The path that makes this reachable in production: GitHub reports every address unverified, which
+	// pickGitHubEmail deliberately passes through rather than discarding.
+	t.Run("github with nothing verified", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		stub.githubUser = map[string]any{"id": 4242, "login": "ada"}
+		stub.githubEmails = []map[string]any{{"email": "ada@example.com", "primary": true, "verified": false}}
+
+		_, err := signIn(t, svc, stub, "github")
+		assert.ErrorIs(t, err, ErrOAuthEmailUnverified)
+	})
+
+	// The two unverified refusals carry different advice — one has an account to sign into by password,
+	// the other does not — so collapsing them would send half the people the wrong instruction.
+	t.Run("distinct from the refusal that has an account to point at", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		registerAndLogin(t, svc, "ada@example.com", "laptop")
+		stub.asGoogle("google-1", "ada@example.com", false)
+
+		_, err := signIn(t, svc, stub, "google")
+		require.ErrorIs(t, err, ErrOAuthLinkRequired)
+		assert.NotErrorIs(t, err, ErrOAuthEmailUnverified)
+	})
+}
+
+// ---------- link conflicts ----------
+
+// oauth_identities has two unique constraints that mean opposite things, and linkOAuthIdentity treated
+// every violation as success. The sign-in then went ahead with no link recorded, so it silently fell back
+// to the email-match path forever after — ADR 0024's "once linked, sign-in consults the provider's
+// immutable user ID and nothing else" quietly never took effect.
+func TestALinkConflictIsReportedRatherThanSignedIn(t *testing.T) {
+	// UNIQUE (provider, provider_user_id). Reachable because GetOAuthIdentity hides identities owned by
+	// soft-deleted accounts: the row is invisible to the sign-in lookup and still very much present to the
+	// INSERT.
+	t.Run("the provider account belongs to a deleted account", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		deleted, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+		stub.asGoogle("google-1", "ada@example.com", true)
+
+		linked, err := signIn(t, svc, stub, "google")
+		require.NoError(t, err)
+		require.True(t, linked.SignedIn())
+
+		_, err = svc.pool.Exec(t.Context(), "UPDATE users SET deleted_at = now() WHERE id = $1", deleted.ID)
+		require.NoError(t, err)
+
+		// A live account, and the same Google account now reporting that account's address.
+		live, _ := registerAndLogin(t, svc, "bea@example.com", "laptop")
+		stub.asGoogle("google-1", "bea@example.com", true)
+
+		outcome, err := signIn(t, svc, stub, "google")
+		require.ErrorIs(t, err, ErrOAuthIdentityLinkedElsewhere)
+		assert.False(t, outcome.SignedIn(), "a conflict must not sign anybody in")
+
+		var links int
+		require.NoError(t, svc.pool.QueryRow(t.Context(),
+			"SELECT count(*) FROM oauth_identities WHERE user_id = $1", live.ID).Scan(&links))
+		assert.Zero(t, links)
+	})
+
+	// UNIQUE (user_id, provider): a second Google account whose address matches an account that already has
+	// a Google link.
+	t.Run("the account already has an account at this provider", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+		stub.asGoogle("google-1", "ada@example.com", true)
+		first, err := signIn(t, svc, stub, "google")
+		require.NoError(t, err)
+		require.True(t, first.SignedIn())
+
+		stub.asGoogle("google-2", "ada@example.com", true)
+		outcome, err := signIn(t, svc, stub, "google")
+		require.ErrorIs(t, err, ErrOAuthAccountAlreadyLinked)
+		assert.False(t, outcome.SignedIn())
+
+		var links int
+		require.NoError(t, svc.pool.QueryRow(t.Context(),
+			"SELECT count(*) FROM oauth_identities WHERE user_id = $1", user.ID).Scan(&links))
+		assert.Equal(t, 1, links, "the established link is the only one, and it is untouched")
+	})
+}
+
+// The case the swallow was written for, and the only one it was right about: two callbacks racing to make
+// the same first link. The loser has nothing left to do, so it must not fail.
+func TestLinkingTheSameIdentityTwiceSucceeds(t *testing.T) {
+	svc, _ := oauthService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	identity := OAuthIdentity{
+		Provider: ProviderGoogle, UserID: "google-1", Email: "ada@example.com", EmailVerified: true,
+	}
+
+	require.NoError(t, svc.linkOAuthIdentity(t.Context(), user.ID, identity))
+	require.NoError(t, svc.linkOAuthIdentity(t.Context(), user.ID, identity),
+		"the loser of a race for the same link has nothing left to do")
+
+	var links int
+	require.NoError(t, svc.pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM oauth_identities WHERE user_id = $1", user.ID).Scan(&links))
+	assert.Equal(t, 1, links)
+}
+
 // ---------- signup ----------
 
 // Nothing is written to users until a username is chosen. That is the whole reason the continuation token
@@ -645,6 +767,33 @@ func TestGitHubSignsInThroughTheService(t *testing.T) {
 	created, err := svc.GetUser(t.Context(), actor.UserID)
 	require.NoError(t, err)
 	assert.Equal(t, "ada@example.com", created.Email)
+}
+
+// ---------- revocation ----------
+
+// Rule 17 wants one primitive that revokes everything a compromised credential could reach, and an
+// outstanding exchange code is not a session — so revoking sessions and API tokens used to walk straight
+// past it. It is also the only credential in this flow rendered onto a screen, which is exactly the way it
+// leaks.
+func TestAPasswordResetRevokesOutstandingExchangeCodes(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	mailer := &fakeMailer{}
+	svc.mailer = mailer
+
+	registerAndLogin(t, svc, "ada@example.com", "laptop")
+	stub.asGoogle("google-1", "ada@example.com", true)
+
+	outcome, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+	require.NotEmpty(t, outcome.ExchangeCode)
+
+	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
+	require.NoError(t, svc.ConfirmPasswordReset(t.Context(),
+		tokenFromLink(t, mailer.only(t)), "a new passphrase entirely"))
+
+	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, LoginInput{DeviceID: "laptop"})
+	assert.ErrorIs(t, err, ErrOAuthExchangeCode,
+		"a code still redeemable after a reset hands the intruder a fresh token pair minutes later")
 }
 
 // ---------- cleanup ----------

@@ -274,3 +274,54 @@ func (q *Queries) GetOAuthIdentity(ctx context.Context, arg GetOAuthIdentityPara
 	)
 	return i, err
 }
+
+const getOAuthIdentityIncludingDeleted = `-- name: GetOAuthIdentityIncludingDeleted :one
+SELECT id, user_id, provider, provider_user_id, email, created_at FROM oauth_identities
+WHERE provider = $1 AND provider_user_id = $2
+`
+
+type GetOAuthIdentityIncludingDeletedParams struct {
+	Provider       string
+	ProviderUserID string
+}
+
+// The same lookup as GetOAuthIdentity, deliberately without the liveness join.
+//
+// Used only after a unique violation, to find out which of oauth_identities' two constraints was hit and
+// what it means. GetOAuthIdentity hides rows belonging to soft-deleted accounts, which is correct for
+// signing in and exactly wrong here: a hidden row is still a row, and it is the reason the INSERT failed.
+func (q *Queries) GetOAuthIdentityIncludingDeleted(ctx context.Context, arg GetOAuthIdentityIncludingDeletedParams) (OauthIdentity, error) {
+	row := q.db.QueryRow(ctx, getOAuthIdentityIncludingDeleted, arg.Provider, arg.ProviderUserID)
+	var i OauthIdentity
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Provider,
+		&i.ProviderUserID,
+		&i.Email,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const revokeOAuthExchangeCodesForUser = `-- name: RevokeOAuthExchangeCodesForUser :execrows
+UPDATE oauth_exchange_codes
+SET consumed_at = now()
+WHERE user_id = $1 AND consumed_at IS NULL
+`
+
+// Part of revoking everything a compromised credential could reach (CLAUDE.md rule 17).
+//
+// An outstanding exchange code is not a session, so revoking sessions and API tokens leaves it redeemable
+// — and it is the one credential in this flow that gets rendered on screen. Without this, resetting a
+// password to lock an intruder out still leaves them a code they can trade for a fresh token pair.
+//
+// No index on user_id, on purpose: the table only ever holds sign-ins from the last couple of minutes that
+// nobody has redeemed yet, so a scan here is cheaper than the write this would add to every sign-in.
+func (q *Queries) RevokeOAuthExchangeCodesForUser(ctx context.Context, userID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeOAuthExchangeCodesForUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

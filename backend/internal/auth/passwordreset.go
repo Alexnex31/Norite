@@ -197,6 +197,13 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 		if _, err := q.RevokeAllAPITokensForUser(ctx, token.UserID); err != nil {
 			return fmt.Errorf("revoking API tokens: %w", err)
 		}
+		// And any OAuth exchange code still outstanding. It is not a session, so the two calls above miss
+		// it, and it is the one credential in this codebase that gets rendered onto a screen — leaving it
+		// redeemable would mean an intruder who had a callback page open still collects a fresh token pair
+		// minutes after the reset that was meant to lock them out (rule 17).
+		if _, err := q.RevokeOAuthExchangeCodesForUser(ctx, token.UserID); err != nil {
+			return fmt.Errorf("revoking oauth exchange codes: %w", err)
+		}
 		return nil
 	})
 }

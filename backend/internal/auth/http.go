@@ -457,6 +457,19 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 			Err:     err,
 		})
 
+	case errors.Is(err, ErrOAuthEmailUnverified):
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "oauth_email_unverified",
+			Message: ErrOAuthEmailUnverified.Error(),
+			Err:     err,
+		})
+
+	case errors.Is(err, ErrOAuthIdentityLinkedElsewhere), errors.Is(err, ErrOAuthAccountAlreadyLinked):
+		// 409 rather than 403: nothing about this caller is unauthorized, and the request would be fine
+		// against a different account on either side. It is a collision, which is what 409 is for.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
+
 	case errors.Is(err, ErrOAuthRegistrationClosed):
 		httpx.WriteError(w, r, &httpx.StatusError{
 			Status:  http.StatusForbidden,

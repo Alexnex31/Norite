@@ -153,10 +153,20 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The address is re-derived from the token rather than carried in a hidden field. It is only displayed,
+	// but a form value is whatever the client posted, and a page of ours captioning attacker-chosen text
+	// with "Creating an account for…" is a phishing surface handed over for free. The token parses here by
+	// construction — the switch above sent every other outcome to an error page.
+	var email string
+	if identity, err := h.svc.parseOAuthSignupToken(token); err == nil {
+		email = identity.Email
+	}
+
 	h.renderPage(w, r, oauthSignupTemplate, http.StatusBadRequest, oauthPageData{
 		Nonce:       nonce,
 		SignupToken: token,
 		Username:    username,
+		Email:       email,
 		Error:       message,
 	})
 }
@@ -204,6 +214,12 @@ func (h *Handler) renderOAuthFailure(w http.ResponseWriter, r *http.Request, non
 		// The one failure worth explaining at length: the person owns both accounts and needs to be told
 		// what to do, or they will keep pressing a button that never works.
 		h.renderOAuthError(w, r, nonce, ErrOAuthLinkRequired.Error())
+	case errors.Is(err, ErrOAuthEmailUnverified):
+		// Worth explaining for the same reason as ErrOAuthLinkRequired: the person can fix this, and a
+		// generic failure would leave them pressing a button that never works.
+		h.renderOAuthError(w, r, nonce, ErrOAuthEmailUnverified.Error())
+	case errors.Is(err, ErrOAuthIdentityLinkedElsewhere), errors.Is(err, ErrOAuthAccountAlreadyLinked):
+		h.renderOAuthError(w, r, nonce, err.Error())
 	case errors.Is(err, ErrOAuthRegistrationClosed):
 		h.renderOAuthError(w, r, nonce, "This instance requires an invite code to create an account.")
 	case errors.Is(err, ErrOAuthState):

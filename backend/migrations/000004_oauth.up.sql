@@ -54,7 +54,12 @@ CREATE UNIQUE INDEX oauth_states_state_hash_idx ON oauth_states (state_hash);
 
 -- Abandoned flows — a user who opens the provider page and closes the tab — are the common case, so the
 -- sweep that clears them (M11's cleanup job) needs to find them without scanning the table.
-CREATE INDEX oauth_states_expires_at_idx ON oauth_states (expires_at) WHERE consumed_at IS NULL;
+--
+-- Deliberately not partial on `consumed_at IS NULL`, which is what it was first written as. The sweep
+-- deletes every expired row regardless of whether it was spent, so its predicate does not imply a partial
+-- index's, and the planner would have ignored the index entirely — leaving a sequential scan behind an
+-- index whose stated purpose was to prevent one.
+CREATE INDEX oauth_states_expires_at_idx ON oauth_states (expires_at);
 
 -- The bridge between a completed callback and a client that wants tokens.
 --
@@ -78,4 +83,5 @@ CREATE TABLE oauth_exchange_codes (
 );
 
 CREATE UNIQUE INDEX oauth_exchange_codes_code_hash_idx ON oauth_exchange_codes (code_hash);
-CREATE INDEX oauth_exchange_codes_expires_at_idx ON oauth_exchange_codes (expires_at) WHERE consumed_at IS NULL;
+-- Full, not partial, for the same reason as oauth_states_expires_at_idx above.
+CREATE INDEX oauth_exchange_codes_expires_at_idx ON oauth_exchange_codes (expires_at);

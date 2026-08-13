@@ -85,6 +85,12 @@ type Querier interface {
 	// Served by the UNIQUE constraint on (provider, provider_user_id) plus the users primary key, so neither
 	// needs a separate index.
 	GetOAuthIdentity(ctx context.Context, arg GetOAuthIdentityParams) (OauthIdentity, error)
+	// The same lookup as GetOAuthIdentity, deliberately without the liveness join.
+	//
+	// Used only after a unique violation, to find out which of oauth_identities' two constraints was hit and
+	// what it means. GetOAuthIdentity hides rows belonging to soft-deleted accounts, which is correct for
+	// signing in and exactly wrong here: a hidden row is still a row, and it is the reason the INSERT failed.
+	GetOAuthIdentityIncludingDeleted(ctx context.Context, arg GetOAuthIdentityIncludingDeletedParams) (OauthIdentity, error)
 	// The confirm path's only lookup. Deliberately returns spent and expired rows too: the caller needs to
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
@@ -124,6 +130,15 @@ type Querier interface {
 	// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
 	// this is the whole of what "log everyone out" can currently mean.
 	RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error)
+	// Part of revoking everything a compromised credential could reach (CLAUDE.md rule 17).
+	//
+	// An outstanding exchange code is not a session, so revoking sessions and API tokens leaves it redeemable
+	// — and it is the one credential in this flow that gets rendered on screen. Without this, resetting a
+	// password to lock an intruder out still leaves them a code they can trade for a fresh token pair.
+	//
+	// No index on user_id, on purpose: the table only ever holds sign-ins from the last couple of minutes that
+	// nobody has redeemed yet, so a scan here is cheaper than the write this would add to every sign-in.
+	RevokeOAuthExchangeCodesForUser(ctx context.Context, userID int64) (int64, error)
 	RevokeSession(ctx context.Context, id int64) (Session, error)
 	// Reuse detection: revoke every live session in one device's family. Scoped by device_id as well as
 	// user_id so another machine's family is untouched — a user with daemons on two computers must not be

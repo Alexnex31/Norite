@@ -42,6 +42,15 @@ JOIN users u ON u.id = i.user_id
 WHERE i.provider = $1 AND i.provider_user_id = $2
   AND u.deleted_at IS NULL;
 
+-- name: GetOAuthIdentityIncludingDeleted :one
+-- The same lookup as GetOAuthIdentity, deliberately without the liveness join.
+--
+-- Used only after a unique violation, to find out which of oauth_identities' two constraints was hit and
+-- what it means. GetOAuthIdentity hides rows belonging to soft-deleted accounts, which is correct for
+-- signing in and exactly wrong here: a hidden row is still a row, and it is the reason the INSERT failed.
+SELECT * FROM oauth_identities
+WHERE provider = $1 AND provider_user_id = $2;
+
 -- name: CreateOAuthIdentity :one
 INSERT INTO oauth_identities (id, user_id, provider, provider_user_id, email)
 VALUES ($1, $2, $3, $4, $5)
@@ -69,6 +78,19 @@ UPDATE oauth_exchange_codes
 SET consumed_at = now()
 WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
 RETURNING *;
+
+-- name: RevokeOAuthExchangeCodesForUser :execrows
+-- Part of revoking everything a compromised credential could reach (CLAUDE.md rule 17).
+--
+-- An outstanding exchange code is not a session, so revoking sessions and API tokens leaves it redeemable
+-- — and it is the one credential in this flow that gets rendered on screen. Without this, resetting a
+-- password to lock an intruder out still leaves them a code they can trade for a fresh token pair.
+--
+-- No index on user_id, on purpose: the table only ever holds sign-ins from the last couple of minutes that
+-- nobody has redeemed yet, so a scan here is cheaper than the write this would add to every sign-in.
+UPDATE oauth_exchange_codes
+SET consumed_at = now()
+WHERE user_id = $1 AND consumed_at IS NULL;
 
 -- name: DeleteExpiredOAuthExchangeCodes :execrows
 DELETE FROM oauth_exchange_codes

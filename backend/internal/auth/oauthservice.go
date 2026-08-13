@@ -44,6 +44,26 @@ var (
 		"an account already uses this email address, and the provider has not verified it: " +
 			"sign in with your password and link this provider from settings")
 
+	// ErrOAuthEmailUnverified is the same refusal one step earlier: the provider will not vouch for the
+	// address, and no account owns it yet.
+	//
+	// Separate from ErrOAuthLinkRequired because the advice differs — there is no existing account to sign
+	// into with a password, so the way forward is to verify the address at the provider or register here
+	// directly.
+	ErrOAuthEmailUnverified = errors.New(
+		"the provider has not verified this email address: verify it with the provider and try again, " +
+			"or create an account with a password instead")
+
+	// ErrOAuthIdentityLinkedElsewhere is this provider account already belonging to a different Norite
+	// account — most often one that has since been deleted.
+	ErrOAuthIdentityLinkedElsewhere = errors.New(
+		"this provider account is already linked to a different Norite account")
+
+	// ErrOAuthAccountAlreadyLinked is the mirror image: the Norite account this would link to already has a
+	// different account at the same provider.
+	ErrOAuthAccountAlreadyLinked = errors.New(
+		"that account is already linked to a different account at this provider")
+
 	// ErrOAuthExchangeCode covers an unknown, expired, or already-spent exchange code.
 	ErrOAuthExchangeCode = errors.New("invalid or expired sign-in code")
 
@@ -190,8 +210,23 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		return OAuthOutcome{ExchangeCode: code}, nil
 
 	case errors.Is(err, pgx.ErrNoRows):
-		// Nobody owns the address: this is a new account. Nothing is written until a username is chosen —
-		// see issueOAuthSignupToken.
+		// Nobody owns the address — which does not mean nobody owns the *mailbox*. Creating an account from
+		// an address the provider will not vouch for is the same takeover the branch above refuses, one step
+		// earlier: it registers someone else's address to whoever typed it, and CreateOAuthUser records it as
+		// verified, a claim this instance has no basis for.
+		//
+		// Refused here rather than left to parseOAuthSignupToken, which also checks it. That check is a
+		// backstop against a future caller minting a token differently; reaching it from this path meant
+		// rendering "choose your username", accepting one, and answering "this sign-up has expired" — a
+		// dead end no amount of retrying escaped.
+		if !identity.EmailVerified {
+			log.Warn().
+				Str("provider", string(identity.Provider)).
+				Msg("oauth sign-up refused: provider has not verified the address")
+			return OAuthOutcome{}, ErrOAuthEmailUnverified
+		}
+
+		// Nothing is written until a username is chosen — see issueOAuthSignupToken.
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
 		}
@@ -224,15 +259,55 @@ func (s *Service) linkOAuthIdentity(ctx context.Context, userID int64, identity 
 		ProviderUserID: identity.UserID,
 		Email:          identity.Email,
 	})
-	if err != nil {
-		// Two callbacks racing for the same first link: the loser hits one of the table's unique
-		// constraints. The link the winner made is the one that was wanted, so this is a success.
-		if uniqueViolation(err) != "" {
-			return nil
-		}
+	switch {
+	case err == nil:
+		return nil
+	case uniqueViolation(err) != "":
+		return s.classifyLinkConflict(ctx, userID, identity)
+	default:
 		return fmt.Errorf("linking oauth identity: %w", err)
 	}
-	return nil
+}
+
+// classifyLinkConflict works out what a unique violation on oauth_identities actually meant.
+//
+// The table has two unique constraints and they mean opposite things, so treating every violation as
+// success — which is what this was — signs the person in while the link they just authorized goes
+// unrecorded. Nothing visibly breaks, which is the problem: every later sign-in silently falls back to the
+// email-match path, and ADR 0024's "once linked, sign-in consults the provider's immutable user ID and
+// nothing else" never takes effect for that identity.
+//
+// Decided by reading the row back rather than by matching pgErr.ConstraintName. Those names are Postgres'
+// own, derived from the column list, so a later migration that renames or restates a constraint would turn
+// this into a silent misclassification rather than something that fails to compile.
+func (s *Service) classifyLinkConflict(ctx context.Context, userID int64, identity OAuthIdentity) error {
+	existing, err := s.queries.GetOAuthIdentityIncludingDeleted(ctx,
+		db.GetOAuthIdentityIncludingDeletedParams{
+			Provider:       string(identity.Provider),
+			ProviderUserID: identity.UserID,
+		})
+	switch {
+	case err == nil && existing.UserID == userID:
+		// Two callbacks raced for the same first link. The winner wrote exactly the row this call wanted, so
+		// the loser has nothing left to do and the sign-in proceeds.
+		return nil
+
+	case err == nil:
+		// UNIQUE (provider, provider_user_id): this provider account belongs to someone else. Reachable
+		// because GetOAuthIdentity hides identities owned by soft-deleted accounts, so a deleted account's
+		// link can collide with a live account that happens to share the address. Refusing matches what
+		// password registration already does with a deleted account's address, rather than inventing a
+		// second answer for the same situation.
+		return ErrOAuthIdentityLinkedElsewhere
+
+	case errors.Is(err, pgx.ErrNoRows):
+		// No row for this provider account, so the violation was the other constraint,
+		// UNIQUE (user_id, provider): the account already has a different account at this provider.
+		return ErrOAuthAccountAlreadyLinked
+
+	default:
+		return fmt.Errorf("resolving oauth link conflict: %w", err)
+	}
 }
 
 // CompleteOAuthSignup creates the account a signup token stands for, once a username has been chosen.
