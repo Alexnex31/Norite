@@ -234,7 +234,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M5.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M6.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -259,7 +259,14 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   always-202 request and single-use confirm endpoints, and the server-rendered `/reset` page — this
   codebase's first HTML surface, which is why `httpx.HTMLPage` exists. The same PR carried nine fixes from
   a repo-wide review of already-merged M1/M2/M4 code.
-- **M6 — OAuth backend flow**: in progress.
+- **M6 — OAuth backend flow**: done (tag `m6`). `golang.org/x/oauth2` with PKCE for Google and GitHub,
+  migration `000004_oauth` (`oauth_identities`, plus `oauth_states` and `oauth_exchange_codes` — both
+  deliberate additions), the callback's server-rendered pages, and `auth.RunSweeper`, which expires the
+  short-lived rows M5 and M6 create because no milestone ever did. Decisions in ADR 0024: a provider is
+  trusted for one thing, nothing is written to `users` until a username is chosen, and a sign-in is bound
+  to the client that started it. Two review passes ran against the branch and everything they found was
+  fixed on it.
+- **M7 — CLI `norite login`, password plus keychain**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
