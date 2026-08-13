@@ -25,6 +25,12 @@ const (
 	// token authenticates exactly one endpoint, and routing it to the Bearer verifier would be the first
 	// step toward it ever authenticating anything else.
 	passwordResetPrefix = "nrp_"
+	// oauthStatePrefix and oauthExchangePrefix mark the two short-lived values the OAuth flow hands out.
+	// Both are deliberately absent from LooksLikeOpaqueToken for the same reason nrp_ is: each
+	// authenticates exactly one endpoint, and routing either to the Bearer verifier would be the first
+	// step toward it authenticating something else.
+	oauthStatePrefix    = "nos_"
+	oauthExchangePrefix = "noc_"
 )
 
 // ErrMalformedToken reports a token that cannot be a Norite token at all — wrong prefix, wrong length, not
@@ -71,6 +77,27 @@ func GeneratePasswordResetToken() (raw string, hash TokenHash, err error) {
 // ParsePasswordResetToken hashes a raw reset token for lookup, rejecting anything of the wrong shape.
 func ParsePasswordResetToken(raw string) (TokenHash, error) {
 	return parseOpaqueToken(raw, passwordResetPrefix)
+}
+
+// GenerateOAuthState mints the state parameter for an authorization request.
+//
+// A CSRF token in the OAuth sense: the provider echoes it back, so a callback carrying a state this server
+// never issued is a request nobody here started.
+func GenerateOAuthState() (raw string, hash TokenHash, err error) {
+	return generateOpaqueToken(oauthStatePrefix)
+}
+
+// ParseOAuthState hashes a state value for lookup, rejecting anything of the wrong shape.
+func ParseOAuthState(raw string) (TokenHash, error) { return parseOpaqueToken(raw, oauthStatePrefix) }
+
+// GenerateOAuthExchangeCode mints the one-time code a client trades for a token pair.
+func GenerateOAuthExchangeCode() (raw string, hash TokenHash, err error) {
+	return generateOpaqueToken(oauthExchangePrefix)
+}
+
+// ParseOAuthExchangeCode hashes an exchange code for lookup.
+func ParseOAuthExchangeCode(raw string) (TokenHash, error) {
+	return parseOpaqueToken(raw, oauthExchangePrefix)
 }
 
 func generateOpaqueToken(prefix string) (string, TokenHash, error) {

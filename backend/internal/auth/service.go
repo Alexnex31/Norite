@@ -85,6 +85,11 @@ type Service struct {
 	// config.PublicBaseURL.
 	publicBaseURL string
 
+	// oauth is the set of providers this instance offers. Empty on an instance that has configured none,
+	// which is the ordinary shape — every OAuth entry point reports ErrUnknownProvider rather than
+	// pretending a provider exists.
+	oauth OAuthProviders
+
 	now func() time.Time
 }
 
@@ -99,6 +104,9 @@ type ServiceOptions struct {
 	// and password reset is simply unavailable on it (ADR 0020).
 	Mailer        Mailer
 	PublicBaseURL string
+
+	// OAuth is optional: an instance with no provider credentials simply offers no OAuth sign-in.
+	OAuth OAuthProviders
 }
 
 // Mailer is the slice of internal/mail this package needs.
@@ -134,6 +142,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		queries:          db.New(opts.Pool),
 		mailer:           opts.Mailer,
 		publicBaseURL:    opts.PublicBaseURL,
+		oauth:            opts.OAuth,
 		ids:              opts.IDs,
 		issuer:           opts.Issuer,
 		registrationMode: mode,
