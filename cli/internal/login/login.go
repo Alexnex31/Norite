@@ -1,6 +1,7 @@
 package login
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -283,14 +284,7 @@ func terminalReaders(in *os.File, out io.Writer) (readLine func(string) (string,
 	fd := int(in.Fd())
 	interactive = term.IsTerminal(fd)
 
-	readLine = func(prompt string) (string, error) {
-		_, _ = fmt.Fprint(out, prompt)
-		var line string
-		if _, err := fmt.Fscanln(in, &line); err != nil {
-			return "", err
-		}
-		return line, nil
-	}
+	readLine = lineReader(in, out)
 
 	readSecret = func(prompt string) (string, error) {
 		_, _ = fmt.Fprint(out, prompt)
@@ -304,4 +298,29 @@ func terminalReaders(in *os.File, out io.Writer) (readLine func(string) (string,
 	}
 
 	return readLine, readSecret, interactive
+}
+
+// lineReader reads one visible line at a time from in.
+//
+// A buffered line read rather than fmt.Fscanln, which was the first thing here and was wrong twice over: on
+// an empty line it fails with "unexpected newline" instead of returning one, so pressing Enter at the
+// prompt produced a scanner error rather than "an email address is required"; and it stops at the first
+// space, so a mistyped address silently became its first word. The same reader the instance wizard uses,
+// for the same reasons.
+func lineReader(in io.Reader, out io.Writer) func(string) (string, error) {
+	buffered := bufio.NewReader(in)
+	return func(prompt string) (string, error) {
+		_, _ = fmt.Fprint(out, prompt)
+
+		line, err := buffered.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		// EOF with content on the line is a final answer, not a failure — a heredoc with no trailing
+		// newline is an ordinary way to drive this.
+		if err != nil && strings.TrimSpace(line) == "" {
+			return "", errors.New("no input: stdin ended before an answer was given")
+		}
+		return strings.TrimSpace(line), nil
+	}
 }

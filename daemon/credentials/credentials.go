@@ -143,6 +143,12 @@ type Store struct {
 	// secrets is the backing store for the refresh token — the OS keyring, or a file beside the record when
 	// the machine has no keyring. See newSecretStore.
 	secrets secretStore
+
+	// betweenWrites runs between the two halves of a Save, and exists only so a test can hold the window
+	// open and prove the lock closes it. Nothing outside this package can set it, and production leaves it
+	// nil: the interleaving it makes visible is real but narrow, and a test that waits for it to happen by
+	// chance proves nothing on the run where it does not.
+	betweenWrites func()
 }
 
 // Open resolves the store for the current user.
@@ -183,23 +189,34 @@ func (s *Store) Save(record Record, refreshToken string) error {
 		return errors.New("refusing to store an empty refresh token")
 	}
 
-	if err := s.secrets.set(keyringService, record.InstanceURL, refreshToken); err != nil {
-		return err
-	}
-	return s.writeRecord(record)
+	return s.withLock(true, func() error {
+		if err := s.secrets.set(keyringService, record.InstanceURL, refreshToken); err != nil {
+			return err
+		}
+		if s.betweenWrites != nil {
+			s.betweenWrites()
+		}
+		return s.writeRecord(record)
+	})
 }
 
 // Load returns the stored session.
 func (s *Store) Load() (Record, string, error) {
-	record, err := s.readRecord()
-	if err != nil {
-		return Record{}, "", err
-	}
-	if err := record.Validate(); err != nil {
-		return Record{}, "", fmt.Errorf("stored credential is unusable: %w", err)
-	}
-
-	token, err := s.secrets.get(keyringService, record.InstanceURL)
+	var (
+		record Record
+		token  string
+	)
+	err := s.withLock(false, func() error {
+		var err error
+		if record, err = s.readRecord(); err != nil {
+			return err
+		}
+		if err := record.Validate(); err != nil {
+			return fmt.Errorf("stored credential is unusable: %w", err)
+		}
+		token, err = s.secrets.get(keyringService, record.InstanceURL)
+		return err
+	})
 	if err != nil {
 		return Record{}, "", err
 	}
@@ -212,28 +229,36 @@ func (s *Store) Load() (Record, string, error) {
 // never has to touch the keyring. On a locked keyring that read prompts the user, and a status command that
 // pops a system dialog is a status command nobody runs twice.
 func (s *Store) LoadRecord() (Record, error) {
-	return s.readRecord()
+	var record Record
+	err := s.withLock(false, func() error {
+		var err error
+		record, err = s.readRecord()
+		return err
+	})
+	return record, err
 }
 
 // Clear removes the stored session. Absent is success: logging out twice is not an error.
 func (s *Store) Clear() error {
-	record, err := s.readRecord()
-	switch {
-	case errors.Is(err, ErrNoCredential):
-		return nil
-	case err != nil:
-		return err
-	}
+	return s.withLock(true, func() error {
+		record, err := s.readRecord()
+		switch {
+		case errors.Is(err, ErrNoCredential):
+			return nil
+		case err != nil:
+			return err
+		}
 
-	// The secret goes first, for the same reason it is written first: whichever half survives a partial
-	// failure, it should be the inert one.
-	if err := s.secrets.delete(keyringService, record.InstanceURL); err != nil {
-		return err
-	}
-	if err := os.Remove(s.recordPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("removing the credential record: %w", err)
-	}
-	return nil
+		// The secret goes first, for the same reason it is written first: whichever half survives a partial
+		// failure, it should be the inert one.
+		if err := s.secrets.delete(keyringService, record.InstanceURL); err != nil {
+			return err
+		}
+		if err := os.Remove(s.recordPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("removing the credential record: %w", err)
+		}
+		return nil
+	})
 }
 
 // SecretLocation describes where the token is actually kept, for a client that has to tell someone.

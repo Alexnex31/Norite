@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -337,4 +338,47 @@ func TestAnIncompleteTokenPairIsRejected(t *testing.T) {
 	err := runner.Run(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "incomplete token pair")
+}
+
+// ---------- reading a line ----------
+
+// This started as fmt.Fscanln, which was wrong twice over: it fails with "unexpected newline" on an empty
+// line, so pressing Enter at the prompt produced a scanner error instead of "an email address is required";
+// and it stops at the first space, so a mistyped address silently became its first word.
+func TestTheLineReaderHandlesWhatPeopleActuallyType(t *testing.T) {
+	for name, tc := range map[string]struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		"an ordinary answer":     {input: "ada@example.com\n", want: "ada@example.com"},
+		"surrounding space":      {input: "  ada@example.com  \n", want: "ada@example.com"},
+		"just pressing enter":    {input: "\n", want: ""},
+		"a space in the middle":  {input: "ada example\n", want: "ada example"},
+		"no trailing newline":    {input: "ada@example.com", want: "ada@example.com"},
+		"stdin closed with none": {input: "", wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			read := lineReader(strings.NewReader(tc.input), io.Discard)
+			got, err := read("Email: ")
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// An empty line reaches the flow as an empty answer, so the flow's own message is what a person sees.
+func TestPressingEnterAtTheEmailPromptSaysWhatIsMissing(t *testing.T) {
+	f := newFakeInstance(t)
+	runner, _, _ := testRunner(t, f, Options{})
+	runner.ReadLine = lineReader(strings.NewReader("\n"), io.Discard)
+
+	err := runner.Run(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "email address is required")
+	assert.Zero(t, f.lastLogin.Email, "nothing may reach the instance")
 }

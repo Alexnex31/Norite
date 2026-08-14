@@ -204,7 +204,9 @@ func TestWritingTheRecordLeavesNoTemporaryFilesBehind(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	for _, e := range entries {
-		assert.Equal(t, recordFileName, e.Name(), "only the record itself may remain")
+		// The record and the lock guarding it are expected; a leftover temp file is what this rules out.
+		assert.Contains(t, []string{recordFileName, lockFileName}, e.Name(),
+			"no partial write may be left behind, only the record and its lock")
 	}
 }
 
