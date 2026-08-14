@@ -11,6 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
+
+	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
+	"github.com/Alexnex31/Norite/cli/internal/login"
 )
 
 // runArgs exercises the command tree exactly as a real invocation would, minus the process.
@@ -159,4 +162,52 @@ func TestExitCodersReachTheCallerInsteadOfExitingTheProcess(t *testing.T) {
 	var coder cli.ExitCoder
 	require.ErrorAs(t, err, &coder, "the ExitCoder must travel back to the caller intact")
 	assert.Equal(t, 7, coder.ExitCode(), "main maps this code onto the process exit status")
+}
+
+// `norite login` is the first thing anyone runs, so it has to be discoverable from the root rather than
+// buried in a group — and its help has to steer people away from putting a password on the command line,
+// where it would be visible in the process list to every other user on the machine.
+func TestLoginIsMountedAndSteersAwayFromPasswordFlags(t *testing.T) {
+	out, _, err := runArgs(t, "--help")
+	require.NoError(t, err)
+	assert.Contains(t, out, "login", "login must be discoverable from the root")
+	assert.Contains(t, out, "logout", "a credential that can be stored must be removable")
+
+	out, _, err = runArgs(t, "login", "--help")
+	require.NoError(t, err)
+	assert.Contains(t, out, "NORITE_PASSWORD", "the scripted path must be named in the help")
+	assert.Contains(t, out, "process list", "the help must say why a password flag is not offered")
+
+	// ...and there is no such flag to reach for.
+	assert.NotContains(t, out, "--password")
+}
+
+// The flags login does offer are the ones it needs, and none of them is a credential.
+func TestLoginFlagsCarryNoCredential(t *testing.T) {
+	out, _, err := runArgs(t, "login", "--help")
+	require.NoError(t, err)
+	for _, flag := range []string{"--instance", "--email", "--device-name"} {
+		assert.Contains(t, out, flag)
+	}
+	for _, forbidden := range []string{"--password", "--secret", "--token"} {
+		assert.NotContains(t, out, forbidden,
+			"%s would put a credential in the process list and the shell history", forbidden)
+	}
+}
+
+// A command that needs a terminal and has not got one exits 2, so a script can tell "this needs input I
+// cannot give it" from "the credentials were wrong" without parsing a message. The wizard established the
+// code; login has to agree with it, and the two live in different packages, so nothing but a test keeps
+// them in step.
+func TestNeedingATerminalIsAlwaysExitCodeTwo(t *testing.T) {
+	// login returns the sentinel unwrapped rather than an ExitCoder, precisely so cmd/app/main.go can
+	// recognize it and print without the "norite:" prefix that would make a usage problem read like a
+	// crash. That means the contract is the error identity, not an exit code carried in the error.
+	assert.NotErrorIs(t, login.ErrNoTerminal, instanceinit.ErrNotATerminal,
+		"they are distinct sentinels; main matches both explicitly")
+
+	for _, err := range []error{login.ErrNoTerminal, instanceinit.ErrNotATerminal} {
+		assert.Contains(t, err.Error(), "terminal",
+			"the message is what a person reads when a script hits this; it must name the problem")
+	}
 }

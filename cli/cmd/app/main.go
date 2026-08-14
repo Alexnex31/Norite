@@ -17,6 +17,7 @@ import (
 
 	"github.com/Alexnex31/Norite/cli/internal/cliapp"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
+	"github.com/Alexnex31/Norite/cli/internal/login"
 )
 
 func main() {
@@ -43,7 +44,7 @@ func main() {
 	if err := cliapp.New(os.Stdout, os.Stderr).Run(ctx, os.Args); err != nil {
 		// A command that needs a terminal and hasn't got one is a usage problem, not a crash: say what to
 		// do about it without the "norite:" prefix that makes it read like an internal failure.
-		if errors.Is(err, instanceinit.ErrNotATerminal) {
+		if errors.Is(err, instanceinit.ErrNotATerminal) || errors.Is(err, login.ErrNoTerminal) {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(2)
 		}

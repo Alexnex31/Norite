@@ -63,11 +63,13 @@ func Command() *cli.Command {
 			}
 
 			if err := runner.Run(ctx); err != nil {
-				// Exit 2 for "nowhere to ask", matching what `norite instance init` returns for the same
-				// situation — a scripted caller can tell "this needs a terminal or an env var" from "the
-				// credentials were wrong" without parsing a message.
+				// Returned unwrapped, deliberately. `main` recognizes this one and exits 2 without the
+				// "norite:" prefix, exactly as it does for the wizard's equivalent — the prefix makes a
+				// usage problem read like an internal failure, and "you are not at a terminal" is the
+				// clearest possible usage problem. Wrapping it in cli.Exit here would keep the code and
+				// lose the identity main matches on.
 				if errors.Is(err, ErrNoTerminal) {
-					return cli.Exit(err.Error(), 2)
+					return err
 				}
 				return cli.Exit(err.Error(), 1)
 			}
