@@ -74,8 +74,11 @@ of this section.
   callback handling. Done when: completing a Google or GitHub OAuth flow against the backend issues a valid
   token pair.
 - **M7 — CLI `norite login`, password plus keychain**: a direct in-terminal password prompt, storing the
-  resulting tokens via `zalando/go-keyring`. Done when: `norite login` with a password succeeds, and the daemon
-  can use the stored token on next launch without re-prompting.
+  resulting tokens via `zalando/go-keyring` — and, where the machine has no keyring at all, in a `0600` file
+  in the daemon's `0700` per-user state directory instead, since a headless Linux server has no Secret
+  Service and that is precisely the kind of machine this CLI exists for
+  ([ADR 0025](adr/0025-credential-storage-without-a-keyring.md)). Done when: `norite login` with a password
+  succeeds, and the daemon can use the stored token on next launch without re-prompting.
 - **M8 — CLI OAuth loopback flow**: the system-browser-plus-localhost-callback loopback login, using the
   fixed local port (with its documented fallback-port list) registered as the exact callback URL with both
   providers. Done when: `norite login` opens a browser, completes Google or GitHub OAuth via the fixed

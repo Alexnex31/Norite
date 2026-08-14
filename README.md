@@ -11,12 +11,17 @@ you're using and does the real work; the clients are thin UIs over it.
 
 ## Status
 
-Early implementation — Phase A (foundation). `M0` (monorepo scaffolding) and `M1` (backend skeleton: chi
-router, pgx pool, advisory-lock-guarded auto-migration, structured logging, base rate limiting, `/healthz`)
-are done; no product features exist yet. See `docs/architecture.md` for the full architecture and
-`docs/roadmap.md` for the milestone sequence (`M0` through `M117`, dependency-ordered, phase-grouped). This is realistically
-multi-year, systems-engineering-team-sized work; the roadmap is a long-term critical path, not a near-term
-promise.
+Early implementation — Phase A (foundation), `M0` through `M6` done and `M7` in progress. What exists: the
+monorepo and CI (`M0`), the backend skeleton — chi router, pgx pool, advisory-lock-guarded auto-migration,
+structured logging, rate limiting, `/healthz` (`M1`), the `norite` command tree and instance setup wizard
+(`M2`), the user-scoped background daemon's lifecycle (`M3`), accounts with argon2id, device-scoped refresh
+families and scoped API tokens (`M4`), transactional email and password reset (`M5`), and OAuth sign-in with
+Google and GitHub (`M6`). `M7` adds `norite login` and the credential the daemon starts with.
+
+No product features exist yet — no guilds, channels, messages, or voice; those begin at `M12`. See
+`docs/architecture.md` for the full architecture and `docs/roadmap.md` for the milestone sequence (`M0`
+through `M117`, dependency-ordered, phase-grouped). This is realistically multi-year,
+systems-engineering-team-sized work; the roadmap is a long-term critical path, not a near-term promise.
 
 ### Running the backend locally
 

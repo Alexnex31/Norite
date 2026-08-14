@@ -67,6 +67,17 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go test ./... -race -count=1
 
+      # go.work resolves cross-module imports from the checkout, so a module whose own go.mod and go.sum
+      # are missing an entry still builds here. That was harmless while the four modules were independent
+      # and stopped being so at M7, when cli began requiring daemon: a dependency added to daemon is
+      # invisible from cli until something builds without the workspace, which is what a release build and
+      # anyone consuming a single module actually do. This is the cheapest place to notice.
+      - name: go build without the workspace
+        working-directory: ${{ matrix.module }}
+        env:
+          GOWORK: "off"
+        run: go build ./...
+
   codegen:
     name: codegen is up to date
     runs-on: ubuntu-latest
