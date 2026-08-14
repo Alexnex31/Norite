@@ -382,3 +382,41 @@ func TestPressingEnterAtTheEmailPromptSaysWhatIsMissing(t *testing.T) {
 	assert.Contains(t, err.Error(), "email address is required")
 	assert.Zero(t, f.lastLogin.Email, "nothing may reach the instance")
 }
+
+// A missing email and a missing password are the same class of problem — an input a script did not supply —
+// and must be reported the same way, so a caller can tell them apart from wrong credentials by exit code
+// alone. They were not: the email case exited 1 with the "norite:" prefix while the password case exited 2
+// without it.
+func TestEveryUnanswerableQuestionReportsTheSameWay(t *testing.T) {
+	for name, setup := range map[string]func(*Runner){
+		"no email":    func(r *Runner) { r.Options.Email = "" },
+		"no password": func(r *Runner) { r.Options.Email = "ada@example.com" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeInstance(t)
+			runner, _, _ := testRunner(t, f, Options{})
+			runner.Interactive = false
+			t.Setenv(passwordEnvVar, "")
+			setup(runner)
+
+			err := runner.Run(t.Context())
+			require.ErrorIs(t, err, ErrNoTerminal, "main matches on this to choose exit code 2")
+			assert.Contains(t, err.Error(), "terminal")
+		})
+	}
+}
+
+// ...and each still says what would actually have answered it, since the two are fixed differently.
+func TestEachUnanswerableQuestionSaysWhatWouldAnswerIt(t *testing.T) {
+	f := newFakeInstance(t)
+
+	runner, _, _ := testRunner(t, f, Options{})
+	runner.Interactive = false
+	t.Setenv(passwordEnvVar, "")
+	err := runner.Run(t.Context())
+	assert.Contains(t, err.Error(), "--email")
+
+	runner.Options.Email = "ada@example.com"
+	err = runner.Run(t.Context())
+	assert.Contains(t, err.Error(), passwordEnvVar)
+}

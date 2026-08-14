@@ -25,14 +25,18 @@ import (
 // password exists, and it exists in the process the person typed it into. Sending a password anywhere it
 // does not have to go is the thing worth avoiding.
 
-// ErrNoTerminal is returned when a password is needed and there is nowhere to ask for one.
+// ErrNoTerminal is returned when an answer is needed and there is nowhere to ask for one.
 //
 // The same shape as instanceinit.ErrNotATerminal, and for the same reason: a command that blocks forever on
 // input nobody is there to type, or reads EOF and treats an empty password as an answer, is worse than one
-// that says what it needs. `main` maps it to exit code 2.
-var ErrNoTerminal = errors.New(
-	"a password is required and this is not an interactive terminal; set " + passwordEnvVar +
-		" and re-run, or run this from a terminal")
+// that says what it needs. `main` maps it to exit code 2 and prints it without the "norite:" prefix, so a
+// usage problem does not read like a crash.
+//
+// Wrapped rather than returned bare, so each question can say what would have answered it — an email
+// address and a password are missing for the same reason and are fixed by different flags. A script that
+// omits either gets the same exit code, which is what lets it tell "I did not supply an input" apart from
+// "the credentials were wrong".
+var ErrNoTerminal = errors.New("this command needs an interactive terminal to ask its questions")
 
 // passwordEnvVar is the scripted way to supply a password.
 //
@@ -181,7 +185,7 @@ func (r *Runner) resolveEmail() (string, error) {
 		return email, nil
 	}
 	if !r.Interactive {
-		return "", errors.New("no email address given: pass --email, or run this from a terminal")
+		return "", fmt.Errorf("%w: pass --email, or run it from a terminal", ErrNoTerminal)
 	}
 
 	email, err := r.ReadLine("Email: ")
@@ -201,7 +205,7 @@ func (r *Runner) resolvePassword() (string, error) {
 		return password, nil
 	}
 	if !r.Interactive {
-		return "", ErrNoTerminal
+		return "", fmt.Errorf("%w: set %s, or run it from a terminal", ErrNoTerminal, passwordEnvVar)
 	}
 
 	password, err := r.ReadSecret("Password: ")
