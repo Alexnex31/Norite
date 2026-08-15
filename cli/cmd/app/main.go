@@ -18,6 +18,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/cliapp"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
+	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 )
 
 func main() {
@@ -45,7 +46,7 @@ func main() {
 		// A command that needs a terminal and hasn't got one is a usage problem, not a crash: say what to
 		// do about it without the "norite:" prefix that makes it read like an internal failure.
 		if errors.Is(err, instanceinit.ErrNotATerminal) || errors.Is(err, login.ErrNoTerminal) {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", errorText(err))
 			os.Exit(2)
 		}
 
@@ -56,16 +57,29 @@ func main() {
 		// the daemon is stopped, and "norite: " in front of nothing would be noise.
 		var exit cli.ExitCoder
 		if errors.As(err, &exit) {
-			if msg := exit.Error(); msg != "" {
+			if msg := errorText(exit); msg != "" {
 				fmt.Fprintf(os.Stderr, "norite: %v\n", msg)
 			}
 			os.Exit(exit.ExitCode())
 		}
 
-		fmt.Fprintf(os.Stderr, "norite: %v\n", err)
+		fmt.Fprintf(os.Stderr, "norite: %v\n", errorText(err))
 		os.Exit(1)
 	}
 }
+
+// errorText renders an error for a terminal.
+//
+// The backstop for CLAUDE.md rule 19, applied where every command's failure converges rather than inside
+// each command. An error message is assembled from whatever the failure had to hand — a server's response,
+// a filename, a tool's output — and the sanitizing that happens at those boundaries is only as complete as
+// the last person to add one remembered to make it. This costs nothing on text that is already clean, and
+// means no future command can put an escape sequence on a terminal by forgetting.
+//
+// Block rather than Text: some errors are deliberately multi-line, and a newline in one is the program's
+// own, not a stranger's — the values that arrive from outside are sanitized to a single line before they
+// are ever formatted into it.
+func errorText(err error) string { return termsafe.Block(err.Error()) }
 
 // captureTerminalState snapshots the terminal's settings, returning a function that restores them. Both
 // are no-ops when the stream is not a terminal, which is every piped and scripted run.

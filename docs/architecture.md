@@ -88,7 +88,8 @@ Locked-in decisions:
 │   ├── cmd/app/                  # main() only: process lifetime and exit codes, nothing else
 │   ├── internal/cliapp/          # urfave/cli v3 command tree, global --json/--help flags, completions
 │   ├── internal/<command>/       # one package per command group, e.g. instanceinit (`norite instance init`)
-│   ├── tui/                      # pane engine, keybindings, markdown renderer, sanitization, image rendering
+│   ├── internal/termsafe/        # the blanket terminal-escape sanitizer every untrusted string passes
+│   ├── tui/                      # pane engine, keybindings, markdown renderer, image rendering
 │   └── go.mod
 ├── gui/                          # The native GUI — Gio
 │   ├── app/                      # Gio window/event loop
@@ -780,9 +781,11 @@ where it does not — a headless Linux server has no Secret Service, and keyring
 unusable on exactly the machines it exists for. The fallback is plaintext, deliberately: a decryption key
 stored beside its ciphertext is obfuscation, not protection. `norite login` says which of the two it used,
 so the degradation is never discovered later. Only the refresh token is stored; an access token expires
-long before any restart it would be persisted to survive. Beside it sits a non-secret record — instance,
-account, and the per-installation `device_id` that scopes the refresh family — kept in a plain file so
-that showing which account is signed in never has to open the keyring.
+long before any restart it would be persisted to survive. Beside it sits a non-secret record — instance and
+account — kept in a plain file so that showing which account is signed in never has to open the keyring,
+and, in a third file, the per-installation `device_id` that scopes the refresh family. That one is separate
+precisely so a logout cannot take it: a local logout revokes nothing server-side, so a fresh ID would add a
+session-list entry while the family the old one named stayed live for its full TTL.
 
 **Registration** (M4, hardened at M10): today `POST /auth/register` answers 409 on an address that already
 has an account, which makes the instance enumerable. It is the one auth endpoint that discloses account
@@ -1026,10 +1029,20 @@ overridable via the config file's `[cli]` section.
 code, links, mentions, custom-emoji shortcodes) — not Charm's `glamour`, to keep the trusted-rendering
 surface as narrow as the security posture used for message content everywhere else.
 
-**Terminal-escape sanitization**: a blanket function strips/escapes ASCII control characters and ESC
-sequences from all untrusted text (usernames, message content, link-preview titles, plugin manifest
-descriptions, webhook display names) at the single point it meets terminal output — specific to the CLI,
-since a malicious string with raw ANSI sequences could otherwise manipulate the terminal.
+**Terminal-escape sanitization** (`cli/internal/termsafe`, built at M7): a blanket function strips ASCII
+control characters, DEL, and the C1 range from all untrusted text (usernames, message content, link-preview
+titles, plugin manifest descriptions, webhook display names, the output of any tool the CLI shells out to)
+— specific to the CLI, since a malicious string with raw ANSI sequences could otherwise manipulate the
+terminal. Two forms: `Text` for a value printed inside a line, which drops newlines and tabs as well,
+because a one-line value that can contain a newline can forge a whole line of output; and `Block` for text
+meant to span lines, which keeps them. Invalid UTF-8 is replaced before anything examines runes — a lone
+`0x9b` is CSI, is not valid UTF-8 on its own, and would otherwise be copied through as the byte it was.
+
+It is applied where foreign text *enters* the program rather than at each place it later leaves — the API
+client sanitizes a response as it decodes it, `daemonctl`'s `Runner` sanitizes what a subprocess printed —
+so a value is safe wherever it subsequently goes, including a file it is stored in. Text read back out of a
+file a person can edit is foreign again, and is sanitized at the print. `cmd/app` sanitizes every error on
+its way to stderr as a backstop, so a command that forgets cannot put an escape sequence on a terminal.
 
 **Image rendering**: `BourgeoisBear/rasterm`-based capability detection (Kitty/iTerm2/Sixel), inline when
 supported, filename/link fallback otherwise — the hook point for the "disable image loading" bandwidth

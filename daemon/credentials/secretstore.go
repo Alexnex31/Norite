@@ -171,31 +171,10 @@ func (f fileStore) path(account string) string {
 const maxTokenFilePrefix = 48
 
 func (f fileStore) set(_, account, secret string) error {
-	// Written with the same care as the record: 0600 from creation, flushed, renamed into place.
-	tmp, err := os.CreateTemp(f.dir, "token.*")
-	if err != nil {
-		return fmt.Errorf("creating a temporary credential file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if err := tmp.Chmod(filePerm); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("restricting the credential file: %w", err)
-	}
-	if _, err := tmp.WriteString(secret); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("writing the credential file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("flushing the credential file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing the credential file: %w", err)
-	}
-	if err := os.Rename(tmpName, f.path(account)); err != nil {
-		return fmt.Errorf("replacing the credential file: %w", err)
+	// Written with the same care as the record, and by the same function: 0600 from creation, flushed,
+	// renamed into place.
+	if err := writeFileAtomically(f.path(account), []byte(secret)); err != nil {
+		return fmt.Errorf("storing the credential in a file: %w", err)
 	}
 	return nil
 }

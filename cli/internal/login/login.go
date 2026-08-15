@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 )
 
@@ -81,8 +82,6 @@ type Runner struct {
 
 	// Hostname names this machine, for the default device name.
 	Hostname func() (string, error)
-	// NewDeviceID mints an identifier for a first login on this installation.
-	NewDeviceID func() (string, error)
 
 	// newClient builds the API client. Indirected for tests; production leaves it nil.
 	newClient func(baseURL string) *client
@@ -90,10 +89,10 @@ type Runner struct {
 
 // Run performs the login and stores the result.
 func (r *Runner) Run(ctx context.Context) error {
-	// Read once, at the top. Three separate LoadRecord calls used to answer three questions here, each
-	// taking and releasing the cross-process lock — so a daemon's startup Save landing between two of them
-	// produced a login that took its device ID from one record and its device name from another. It also
-	// meant an unreadable record failed at whichever question happened to ask second.
+	// Read once, at the top. Separate LoadRecord calls used to answer a question each, taking and releasing
+	// the cross-process lock every time — so a daemon's startup Save landing between two of them produced a
+	// login assembled from two different records. It also meant an unreadable record failed at whichever
+	// question happened to ask second.
 	previous, err := r.loadPrevious()
 	if err != nil {
 		return err
@@ -119,7 +118,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	deviceID, err := r.resolveDeviceID(previous)
+	// The store owns this, not the login: it has to outlive both a logout and the record file itself.
+	deviceID, err := r.Store.DeviceID()
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	r.printf("Signed in as %s on %s.\n", record.Username, instanceURL)
+	// Sanitized again at the print, though api.me already cleaned it: the fallback value is the address that
+	// was typed, and reading this line should not require tracing where the string came from (rule 19).
+	r.printf("Signed in as %s on %s.\n", termsafe.Text(record.Username), instanceURL)
 	r.printf("This device is %q; its credential is stored in %s.\n", deviceName, r.Store.SecretLocation())
 	r.printf("Start the background daemon with `norite daemon start` if it is not running already.\n")
 	return nil
@@ -240,18 +242,6 @@ func (r *Runner) resolvePassword() (string, error) {
 		return "", errors.New("a password is required")
 	}
 	return password, nil
-}
-
-// resolveDeviceID keeps this installation's existing identifier if there is one.
-//
-// A new ID on every login would strand the previous refresh-token family until it expired, and would fill
-// the account's session list with one entry per login. The ID is per installation, not per session
-// (ADR 0011).
-func (r *Runner) resolveDeviceID(previous credentials.Record) (string, error) {
-	if previous.DeviceID != "" {
-		return previous.DeviceID, nil
-	}
-	return r.NewDeviceID()
 }
 
 func (r *Runner) resolveDeviceName(previous credentials.Record) string {

@@ -474,9 +474,18 @@ And on the client-auth side, from M7:
   the restarts persistence would let it survive. The non-secret record beside it is a separate file so
   `LoadRecord` can answer "who is logged in" without opening a keyring, which on a locked one pops a
   system dialog.
-- **A `device_id` is per installation, not per login.** Regenerating it strands the previous refresh
-  family until it expires and adds a session-list entry each time; rotating it is what reuse detection
-  reads as theft.
+- **A `device_id` is per installation, not per login, and a logout keeps it.** Regenerating it strands the
+  previous refresh family until it expires and adds a session-list entry each time; rotating it is what
+  reuse detection reads as theft. It lives in its own file rather than in the credential record, because
+  `Clear` removes the record — and logging out revokes nothing on the instance, so a fresh ID would leave
+  the old family live for its full TTL beside a duplicate session. `Store.DeviceID()` is the only way to
+  obtain one; it mints on first use and adopts the ID of a record written before that file existed.
+- **Untrusted text goes through `cli/internal/termsafe` before it reaches a terminal** (rule 19). `Text`
+  for a value printed inside a line — it drops newlines too, since a one-line value that can contain one
+  can forge a line of output — and `Block` for output meant to span lines. Sanitize where foreign text
+  *enters* the program, as the API client and `daemonctl.Runner` do, so the value is safe wherever it goes
+  afterwards, including into a file; anything read back out of a file a person can edit is foreign again.
+  M7 is where this started to bite: `--instance` is a URL somebody hands you, and its answers are printed.
 - **Never take a password from a flag.** A flag value is in the process list and the shell history —
   `NORITE_PASSWORD` is the scripted path, matching the wizard's rule for the database password. Read
   interactively with `term.ReadPassword`, and refuse an empty answer locally rather than letting the

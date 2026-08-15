@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 )
 
 // The small piece of the Norite REST API `norite login` needs.
@@ -122,6 +124,15 @@ func (c *client) me(ctx context.Context, accessToken string) (account, error) {
 	if err := c.do(ctx, http.MethodGet, "/api/v1/users/@me", accessToken, nil, &out); err != nil {
 		return account{}, err
 	}
+
+	// Sanitized here, where it enters the program, rather than at the print sites (CLAUDE.md rule 19). This
+	// instance's own backend bounds a username to 32 characters of an allow-listed set, but nothing about
+	// *this* code path enforces that: `--instance` is a URL somebody handed the person running the command,
+	// and it is answered by whatever is at the other end. The username is written to the record file and
+	// printed by two commands, so cleaning it once at the boundary is what makes all three safe.
+	out.Username = termsafe.Text(out.Username)
+	out.Email = termsafe.Text(out.Email)
+	out.ID = termsafe.Text(out.ID)
 	return out, nil
 }
 
@@ -170,6 +181,12 @@ func (c *client) do(ctx context.Context, method, path, bearer string, body, out 
 }
 
 // errorFrom turns a failure response into something worth printing.
+//
+// Every string taken from the response is sanitized as it is lifted out of it. This is the CLI's most
+// direct route from a stranger's server to a user's terminal — the message is printed verbatim, prefixed
+// with "norite:", by a command that ran against a URL somebody supplied — so an `ESC [ 2 K CR` in it would
+// erase the line it was written on and replace a refusal with whatever the server preferred it to say.
+// resp.Status is no safer than the body: the reason phrase is the server's text too.
 func (c *client) errorFrom(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 
@@ -183,17 +200,18 @@ func (c *client) errorFrom(resp *http.Response) error {
 	if err := json.Unmarshal(data, &envelope); err == nil && envelope.Error.Message != "" {
 		return &APIError{
 			Status:    resp.StatusCode,
-			Code:      envelope.Error.Code,
-			Message:   envelope.Error.Message,
-			RequestID: envelope.Error.RequestID,
+			Code:      termsafe.Text(envelope.Error.Code),
+			Message:   termsafe.Text(envelope.Error.Message),
+			RequestID: termsafe.Text(envelope.Error.RequestID),
 		}
 	}
 
 	// Not this API's error shape. Most often a proxy, a captive portal, or a URL that is not a Norite
 	// instance at all — so the status is reported without pretending to have understood the body.
 	return &APIError{
-		Status:  resp.StatusCode,
-		Message: fmt.Sprintf("%s answered %s, which is not a Norite API response", c.baseURL, resp.Status),
+		Status: resp.StatusCode,
+		Message: fmt.Sprintf("%s answered %s, which is not a Norite API response",
+			c.baseURL, termsafe.Text(resp.Status)),
 	}
 }
 

@@ -45,8 +45,11 @@ that confirms the login.
 
 **Only the refresh token is stored.** An access token lives fifteen minutes, which is shorter than the gap
 between the restarts persistence would let it survive, so writing one down adds a credential at rest and
-buys nothing. Beside the secret sits a small non-secret record — instance, account, device ID — in a plain
-file, so that showing which account is logged in never has to open the keyring.
+buys nothing. Beside the secret sits a small non-secret record — instance and account — in a plain file, so
+that showing which account is logged in never has to open the keyring, and this installation's device ID in
+a third. The device ID is separate because a logout removes the record and must not remove the identity:
+logging out locally revokes nothing on the instance, so a newly minted ID would add a session-list entry
+while the refresh family the old one named stayed live for its full TTL (ADR 0011).
 
 ## Consequences
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 )
 
@@ -59,7 +60,6 @@ func Command() *cli.Command {
 				ReadSecret:  readSecret,
 				Interactive: interactive,
 				Hostname:    os.Hostname,
-				NewDeviceID: credentials.NewDeviceID,
 			}
 
 			if err := runner.Run(ctx); err != nil {
@@ -89,7 +89,9 @@ func LogoutCommand() *cli.Command {
 		Usage: "Remove this machine's stored credential",
 		Description: "Removes the credential `norite login` stored, so the daemon has nothing to start\n" +
 			"with. This is a local action: it does not revoke the session on the instance, which is\n" +
-			"what `norite daemon stop` and the account's session list are for.",
+			"what `norite daemon stop` and the account's session list are for.\n\n" +
+			"This installation's device identity is kept, so signing in again reuses its entry in the\n" +
+			"account's session list rather than adding a second one beside a session still live.",
 		Action: func(_ context.Context, cmd *cli.Command) error {
 			store, err := credentials.Open()
 			if err != nil {
@@ -115,8 +117,10 @@ func LogoutCommand() *cli.Command {
 				_, _ = fmt.Fprintln(cmd.Writer, "Removed an unreadable credential record.")
 				return nil
 			}
+			// Both values come back out of a file a person can edit, and one of them was a server's text
+			// before it was written there — so they are foreign again by the time they are read (rule 19).
 			_, _ = fmt.Fprintf(cmd.Writer, "Removed the credential for %s on %s.\n",
-				record.Username, record.InstanceURL)
+				termsafe.Text(record.Username), termsafe.Text(record.InstanceURL))
 			return nil
 		},
 	}

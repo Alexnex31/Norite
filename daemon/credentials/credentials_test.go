@@ -247,6 +247,14 @@ func TestParseInstanceURL(t *testing.T) {
 			// Credentials in the URL would land in the record file, and from there into any bug report
 			// that included it.
 			"https://ada:hunter2@chat.example.com",
+
+			// This string is printed, and refusing it is the only honest answer: stripping would leave a
+			// URL naming a different instance than the one that was typed. url.Parse catches the first of
+			// these itself, and neither of the others — U+009B is CSI with no ESC in front of it, and an
+			// invalid byte reaches a byte-oriented terminal as whatever it was.
+			"https://chat.example.com/\x1b[2K",
+			"https://chat.example.com/\u009b2K",
+			"https://chat.example.com/\xff",
 		} {
 			_, err := ParseInstanceURL(input)
 			assert.Error(t, err, "input %q must be refused", input)
@@ -274,6 +282,81 @@ func TestDeviceIDsAreRandomAndURLSafe(t *testing.T) {
 				"unexpected character %q in %q", r, id)
 		}
 	}
+}
+
+// The identity belongs to the installation, so asking twice must answer the same thing — including across
+// separate Store values, since the CLI and the daemon are different processes.
+func TestTheDeviceIDIsStableForTheInstallation(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+
+	first, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(first, "dev_"))
+
+	again, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.Equal(t, first, again)
+
+	other, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+	second, err := other.DeviceID()
+	require.NoError(t, err)
+	assert.Equal(t, first, second, "a second process on the same installation must see the same identity")
+}
+
+// A logout must not take the device identity with it. It did when the ID lived in the record: the next
+// login minted a fresh one, which adds a second entry to the account's session list while the family the
+// old ID named stays live for its full TTL, because logging out locally revokes nothing server-side.
+func TestLoggingOutKeepsTheDeviceIdentity(t *testing.T) {
+	store := storeIn(t, newMemoryStore())
+
+	before, err := store.DeviceID()
+	require.NoError(t, err)
+	require.NoError(t, store.Save(sampleRecord(), "nrt_secret"))
+
+	require.NoError(t, store.Clear())
+
+	_, _, err = store.Load()
+	require.ErrorIs(t, err, ErrNoCredential, "the session itself must be gone")
+
+	after, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}
+
+// An installation from before the identity had its own file keeps the ID its record already carries —
+// otherwise the first login after an upgrade looks exactly like the logout case above.
+func TestAnExistingRecordsDeviceIDIsAdopted(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+
+	// Written directly, as an older build would have left it: a record, and no device file beside it.
+	require.NoError(t, store.writeRecord(sampleRecord()))
+
+	id, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.Equal(t, sampleRecord().DeviceID, id)
+
+	// ...and it is now in the file, so a later logout cannot lose it.
+	require.NoError(t, store.Clear())
+	after, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.Equal(t, sampleRecord().DeviceID, after)
+}
+
+// A truncated write leaves a file that exists and says nothing. That is not an identity.
+func TestAnEmptyDeviceFileIsReplaced(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, deviceFileName), []byte("  \n"), 0o600))
+
+	id, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(id, "dev_"))
 }
 
 // ---------- switching instances ----------

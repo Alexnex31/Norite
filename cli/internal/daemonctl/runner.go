@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 )
 
 // Runner executes an external command.
@@ -45,9 +47,11 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) (Result,
 
 	err := cmd.Run()
 
+	// Block rather than Text: this output is multi-line and column-aligned, and a tool's own message is
+	// harder to read mangled for no gain — neither a newline nor a tab can move a cursor or repaint a line.
 	res := Result{
-		Stdout: terminalSafe(strings.TrimRight(stdout.String(), "\r\n")),
-		Stderr: terminalSafe(strings.TrimRight(stderr.String(), "\r\n")),
+		Stdout: termsafe.Block(strings.TrimRight(stdout.String(), "\r\n")),
+		Stderr: termsafe.Block(strings.TrimRight(stderr.String(), "\r\n")),
 	}
 
 	var exitErr *exec.ExitError
@@ -79,50 +83,6 @@ func mustSucceed(ctx context.Context, r Runner, name string, args ...string) (Re
 		return res, fmt.Errorf("`%s` failed (exit %d): %s", commandLine(name, args), res.ExitCode, firstNonEmpty(res.Stderr, res.Stdout, "no output"))
 	}
 	return res, nil
-}
-
-// terminalSafe strips ANSI escape sequences and stray control characters from subprocess output.
-//
-// Everything a Runner captures ends up on the user's terminal — inside a status line, or inside an error
-// message quoting what the tool said — which puts it squarely under CLAUDE.md rule 19: untrusted text is
-// never written to the terminal raw. "Untrusted" is a low bar to clear here, since reaching systemd's own
-// output means already being inside the user's session, but the rule exists precisely so that nobody has to
-// re-litigate the trust level of each new source. Applying it at the single point output enters the program
-// is cheaper than remembering it at every place output leaves.
-//
-// This is a narrow local version. The CLI's blanket sanitizer (docs/architecture.md §4) arrives with the TUI
-// milestone that needs it; when it does, this should call that instead of keeping a second implementation.
-func terminalSafe(s string) string {
-	if !strings.ContainsFunc(s, isUnsafeTerminalRune) {
-		return s
-	}
-
-	var sb strings.Builder
-	sb.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n' || r == '\t':
-			// Kept: the output is multi-line and column-aligned, and mangling it would make the tool's own
-			// message harder to read for no gain — neither can reposition a cursor or rewrite the screen.
-			sb.WriteRune(r)
-		case isUnsafeTerminalRune(r):
-			// Dropped rather than escaped. This text is shown to a human, not parsed, so a visible "\x1b"
-			// would be noise; what matters is that it cannot act on the terminal.
-			continue
-		default:
-			sb.WriteRune(r)
-		}
-	}
-	return sb.String()
-}
-
-func isUnsafeTerminalRune(r rune) bool {
-	if r == '\n' || r == '\t' {
-		return false
-	}
-	// C0 controls (including ESC, which starts every ANSI sequence), DEL, and the C1 range — the last
-	// because a single 0x9B byte is CSI on its own in some terminals, with no ESC to look for.
-	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
 func commandLine(name string, args []string) string {

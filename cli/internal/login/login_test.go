@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,6 +35,8 @@ type fakeInstance struct {
 	loginBody   string
 	// meStatus does the same for the identity call.
 	meStatus int
+	// meUsername overrides the name the instance claims the account has. Empty means "ada".
+	meUsername string
 	// logins counts calls to the login endpoint, so a test can assert nothing reached the instance.
 	logins int
 }
@@ -63,9 +66,13 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 			w.WriteHeader(f.meStatus)
 			return
 		}
+		username := f.meUsername
+		if username == "" {
+			username = "ada"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "123456789", "username": "ada", "email": "ada@example.com",
+			"id": "123456789", "username": username, "email": "ada@example.com",
 		})
 	})
 
@@ -93,7 +100,6 @@ func testRunner(t *testing.T, f *fakeInstance, opts Options) (*Runner, *credenti
 		ReadSecret:  func(string) (string, error) { return "a correct passphrase", nil },
 		Interactive: true,
 		Hostname:    func() (string, error) { return "ada-laptop", nil },
-		NewDeviceID: credentials.NewDeviceID,
 	}, store, out
 }
 
@@ -161,6 +167,23 @@ func TestLoggingInAgainKeepsTheDeviceIdentity(t *testing.T) {
 
 	assert.Equal(t, first.DeviceID, second.DeviceID)
 	assert.Equal(t, first.DeviceID, f.lastLogin.DeviceID)
+}
+
+// A logout must not cost the installation its identity. It used to: the ID lived in the record file, which
+// a logout removes, so the next login minted a new one — a second entry in the account's session list,
+// beside a refresh family still live, since logging out locally revokes nothing on the instance.
+func TestTheDeviceIdentitySurvivesALogout(t *testing.T) {
+	f := newFakeInstance(t)
+	runner, store, _ := testRunner(t, f, Options{})
+
+	require.NoError(t, runner.Run(t.Context()))
+	before := f.lastLogin.DeviceID
+	require.NotEmpty(t, before)
+
+	require.NoError(t, store.Clear())
+	require.NoError(t, runner.Run(t.Context()))
+
+	assert.Equal(t, before, f.lastLogin.DeviceID)
 }
 
 func TestTheDeviceNameFallsBackToTheHostname(t *testing.T) {
@@ -474,4 +497,70 @@ func TestAnUnreadableRecordFailsTheLoginWithTheWayOut(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "norite logout")
 	assert.Zero(t, f.logins, "nothing may reach the instance")
+}
+
+// ---------- nothing an instance says may act on the terminal ----------
+
+// A terminal executes what it is printed, and `--instance` is a URL somebody handed the person running the
+// command. `ESC [ 2 K CR` erases the line it was written on and rewrites it, so a name chosen by whatever
+// answered can replace what the CLI just said about it (CLAUDE.md rule 19).
+func TestAUsernameFromTheInstanceCannotActOnTheTerminal(t *testing.T) {
+	f := newFakeInstance(t)
+	f.meUsername = "\x1b[2K\rada\x1b[31m (verified admin)\x1b]0;retitled\x07"
+
+	runner, store, out := testRunner(t, f, Options{})
+	require.NoError(t, runner.Run(t.Context()))
+
+	assertInertOnATerminal(t, out.String())
+	assert.Contains(t, out.String(), "ada", "sanitizing must not destroy the name itself")
+
+	// ...and the stored copy is clean too, because it is cleaned as it enters rather than as it is printed:
+	// `norite logout` prints it back later, and the daemon logs it at every start.
+	record, _, err := store.Load()
+	require.NoError(t, err)
+	assertInertOnATerminal(t, record.Username)
+}
+
+// The most direct route from a stranger's server to a terminal: this message is printed verbatim behind a
+// "norite:" prefix. A 401 is replaced by the CLI's own wording, so an instance that wants to be heard has
+// to answer with something else.
+func TestAnErrorFromTheInstanceCannotActOnTheTerminal(t *testing.T) {
+	f := newFakeInstance(t)
+	f.loginStatus = http.StatusTooManyRequests
+	f.loginBody = `{"error":{"code":"rate_limited","message":"slow down\u001b[2K\rSigned in as admin"}}`
+
+	runner, _, _ := testRunner(t, f, Options{})
+	err := runner.Run(t.Context())
+
+	require.Error(t, err)
+	assertInertOnATerminal(t, err.Error())
+	assert.Contains(t, err.Error(), "slow down")
+}
+
+// A response that is not this API's error shape at all — a proxy, a captive portal — is reported by status,
+// and the reason phrase in that status is the server's text like everything else.
+func TestAnUnrecognizedResponseIsReportedWithoutItsEscapeSequences(t *testing.T) {
+	f := newFakeInstance(t)
+	f.loginStatus = http.StatusBadGateway
+	f.loginBody = "<html>not an API</html>"
+
+	runner, _, _ := testRunner(t, f, Options{})
+	err := runner.Run(t.Context())
+
+	require.Error(t, err)
+	assertInertOnATerminal(t, err.Error())
+	assert.Contains(t, err.Error(), "not a Norite API response")
+}
+
+// assertInertOnATerminal fails if s carries anything a terminal would act on rather than print.
+func assertInertOnATerminal(t *testing.T, s string) {
+	t.Helper()
+	for i, r := range s {
+		if r < 0x20 && r != '\n' || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			t.Errorf("%q carries %U at byte %d, which a terminal would act on", s, r, i)
+		}
+	}
+	if !utf8.ValidString(s) {
+		t.Errorf("%q is not valid UTF-8, so a terminal decoding bytes sees whatever byte was sent", s)
+	}
 }

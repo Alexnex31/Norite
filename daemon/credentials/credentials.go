@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
 )
@@ -48,6 +49,15 @@ const keyringService = "norite"
 // recordFileName holds the non-secret half. It sits in the daemon's state directory, which is 0700 and
 // per-user by construction (see paths.StateDir).
 const recordFileName = "account.json"
+
+// deviceFileName holds this installation's identity, and is deliberately not part of the record.
+//
+// A device ID belongs to the installation, not to the session (ADR 0011) — which means logging out must not
+// take it away. It was inside account.json first, and Clear removes that file, so a logout silently minted
+// a new identity at the next login: a second entry in the account's session list, while the refresh family
+// the old ID named stayed live for its full TTL, because a local logout revokes nothing server-side. Two
+// files is what makes that impossible rather than remembered.
+const deviceFileName = "device-id"
 
 // filePerm is owner-only. It applies to the record and, where there is no keyring, to the token beside it.
 const filePerm = 0o600
@@ -92,6 +102,20 @@ func ParseInstanceURL(raw string) (string, error) {
 	if trimmed == "" {
 		return "", errors.New("an instance URL is required")
 	}
+	// Refused rather than stripped, because this value is printed, sent, and turned into a filename: a URL
+	// quietly altered to make it printable would name a different instance than the one that was typed.
+	//
+	// url.Parse refuses ASCII control characters itself, but not U+009B — which is CSI, needs no ESC in
+	// front of it, and survives into u.Path — and not invalid UTF-8, which reaches a byte-oriented terminal
+	// as whatever byte it was. Neither belongs in a hostname either way. The CLI's own sanitizer would be
+	// the natural tool here and is the wrong module: this package is the daemon's, and the dependency runs
+	// the other way (CLAUDE.md, ADR 0025).
+	if !utf8.ValidString(trimmed) {
+		return "", fmt.Errorf("%q is not valid UTF-8, so it cannot be an instance URL", raw)
+	}
+	if strings.ContainsFunc(trimmed, isControl) {
+		return "", errors.New("an instance URL must not contain control characters")
+	}
 	// A bare host is what people type. Defaulting it to https rather than http means a slip cannot silently
 	// downgrade the connection that carries the password.
 	if !strings.Contains(trimmed, "://") {
@@ -122,6 +146,9 @@ func ParseInstanceURL(raw string) (string, error) {
 
 	return strings.TrimSuffix(u.Scheme+"://"+u.Host+u.Path, "/"), nil
 }
+
+// isControl reports whether r can act on a terminal: the C0 range (ESC among them), DEL, and C1.
+func isControl(r rune) bool { return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) }
 
 // NewDeviceID returns an identifier for this installation.
 //
@@ -285,10 +312,60 @@ func (s *Store) Clear() error {
 	})
 }
 
+// DeviceID returns this installation's device identifier, minting one the first time it is asked for.
+//
+// Every login on this machine uses the same value, including one that follows a logout. Rotating it is what
+// reuse detection reads as a stolen token (M4), and a fresh one per login would strand the previous refresh
+// family until it expired while adding a session-list entry nobody created.
+func (s *Store) DeviceID() (string, error) {
+	var id string
+	// Exclusive: this reads, and may then write.
+	err := s.withLock(true, func() error {
+		var err error
+		id, err = s.deviceID()
+		return err
+	})
+	return id, err
+}
+
+func (s *Store) deviceID() (string, error) {
+	data, err := os.ReadFile(s.devicePath())
+	switch {
+	case err == nil:
+		if id := strings.TrimSpace(string(data)); id != "" {
+			return id, nil
+		}
+		// An empty file is a truncated write, not an identity. Fall through and mint one, replacing it.
+	case !errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("reading the device identifier: %w", err)
+	}
+
+	// An installation that predates this file keeps the ID its record already carries. Without this, the
+	// first login after an upgrade would look exactly like the logout case it exists to prevent — and it
+	// only ever reads the record, so the identity moves one way and cannot be dragged backwards later.
+	if record, err := s.readRecord(); err == nil && record.DeviceID != "" {
+		return record.DeviceID, s.writeDeviceID(record.DeviceID)
+	}
+
+	id, err := NewDeviceID()
+	if err != nil {
+		return "", err
+	}
+	return id, s.writeDeviceID(id)
+}
+
+func (s *Store) writeDeviceID(id string) error {
+	if err := writeFileAtomically(s.devicePath(), []byte(id+"\n")); err != nil {
+		return fmt.Errorf("recording this installation's device identifier: %w", err)
+	}
+	return nil
+}
+
 // SecretLocation describes where the token is actually kept, for a client that has to tell someone.
 func (s *Store) SecretLocation() string { return s.secrets.describe() }
 
 func (s *Store) recordPath() string { return filepath.Join(s.dir, recordFileName) }
+func (s *Store) devicePath() string { return filepath.Join(s.dir, deviceFileName) }
 
 func (s *Store) readRecord() (Record, error) {
 	data, err := os.ReadFile(s.recordPath())
@@ -306,12 +383,6 @@ func (s *Store) readRecord() (Record, error) {
 	return record, nil
 }
 
-// writeRecord replaces the record atomically.
-//
-// Temp file plus rename, as every writer of shared client state does (architecture.md §3): a half-written
-// record is a daemon that cannot start, and a crash mid-write is exactly when someone is least able to
-// diagnose one. The temp file is created 0600 rather than tightened afterwards, so its contents are never
-// briefly world-readable.
 func (s *Store) writeRecord(record Record) error {
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
@@ -319,33 +390,51 @@ func (s *Store) writeRecord(record Record) error {
 	}
 	data = append(data, '\n')
 
-	tmp, err := os.CreateTemp(s.dir, recordFileName+".*")
+	if err := writeFileAtomically(s.recordPath(), data); err != nil {
+		return fmt.Errorf("saving the credential record: %w", err)
+	}
+	return nil
+}
+
+// writeFileAtomically replaces a file in the store's directory, owner-only, with no observable half-state.
+//
+// Temp file plus rename, as every writer of shared client state does (architecture.md §3): a half-written
+// file here is a daemon that cannot start, and a crash mid-write is exactly when someone is least able to
+// diagnose one. The temp file is created 0600 rather than tightened afterwards, so its contents are never
+// briefly world-readable — this writes a refresh token as well as the two plain files beside it.
+//
+// The temp file is created in the destination's own directory because a rename is only atomic within one
+// filesystem, and it is removed on every path out; once the rename has succeeded that removal is a no-op.
+func writeFileAtomically(path string, data []byte) error {
+	dir, name := filepath.Split(path)
+
+	tmp, err := os.CreateTemp(dir, name+".*")
 	if err != nil {
-		return fmt.Errorf("creating a temporary credential record: %w", err)
+		return fmt.Errorf("creating a temporary file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename has succeeded
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if err := tmp.Chmod(filePerm); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("restricting the credential record: %w", err)
+		return fmt.Errorf("restricting %s: %w", tmpName, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("writing the credential record: %w", err)
+		return fmt.Errorf("writing %s: %w", tmpName, err)
 	}
 	// Flushed before the rename, so a crash between the two cannot leave the new name pointing at an empty
 	// file — which is the one outcome a rename is supposed to rule out.
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("flushing the credential record: %w", err)
+		return fmt.Errorf("flushing %s: %w", tmpName, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing the credential record: %w", err)
+		return fmt.Errorf("closing %s: %w", tmpName, err)
 	}
 
-	if err := os.Rename(tmpName, s.recordPath()); err != nil {
-		return fmt.Errorf("replacing the credential record: %w", err)
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replacing %s: %w", path, err)
 	}
 	return nil
 }
