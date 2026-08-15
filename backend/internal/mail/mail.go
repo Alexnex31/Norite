@@ -269,6 +269,19 @@ func (q *Queue) deliver(msg Message) {
 	backoff := q.opts.Backoff
 
 	for attempt := 1; attempt <= q.opts.Attempts; attempt++ {
+		// Canceling the backoff was not enough on its own, and claiming otherwise was the mistake. The
+		// wait ended immediately on shutdown and the loop then went straight into the next attempt with a
+		// fresh SendTimeout, so a wedged relay still held the stop for very nearly as long as before — and
+		// the retries, no longer spaced by a backoff, now arrived back to back. A retry is a bet that the
+		// relay will recover; once the process is stopping there is no time left for it to pay off.
+		if attempt > 1 && q.shutdownCtx.Err() != nil {
+			q.opts.Logger.Warn().
+				Str("kind", string(msg.Kind)).
+				Int("attempts", attempt-1).
+				Msg("shutting down — giving up on an undelivered message")
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), q.opts.SendTimeout)
 		err := q.opts.Sender.Send(ctx, msg)
 		cancel()
