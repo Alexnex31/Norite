@@ -96,6 +96,10 @@ Locked-in decisions:
 │   ├── widgets/                  # hand-built: message list, pane tiling, voice UI, settings, whiteboard
 │   └── go.mod
 ├── daemon/                       # Shared background daemon
+│   ├── cmd/daemond/              # main() only: process lifetime, signals, exit codes
+│   ├── credentials/              # the stored session: keyring-or-file secret, record, device identity
+│   ├── internal/daemonproc/      # single-instance flock, log rotation, startup sign-in, clean shutdown
+│   ├── internal/paths/           # the per-user 0700 state directory, resolved per platform
 │   ├── gatewayclient/            # holds the real WS connection, in-memory scrollback/presence
 │   ├── ipc/                      # Unix socket / named pipe server, bot-automation TCP listener
 │   ├── config/                   # go-toml v2 document-editing, fsnotify hot-reload, flock, config split

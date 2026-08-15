@@ -275,10 +275,14 @@ re-derive:
   → blocking advisory-lock-guarded migration → *then* readiness. `/api/v1/healthz` answers 503
   `{"status":"starting"}` until migrations finish, then 200. `-migrate-only` runs migrations and exits —
   that's what `just db-migrate` and, later, the flagship's Helm pre-upgrade Job use.
-- **Middleware chain** (`cmd/server/router.go`), fixed by `docs/architecture.md` §2: RequestID →
-  EchoRequestID → RealIP *(only when `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders →
-  StructuredLogger → RateLimit. `AuthenticateBearer` slots in below RateLimit at M4. Domain routers mount
-  in the rate-limited group inside `/api/v1`; `/healthz` sits outside it on purpose.
+- **Middleware chain** (`cmd/server/router.go`), fixed by `docs/architecture.md` §2:
+  SanitizeInboundRequestID → RequestID → EchoRequestID → RealIP *(mounted only when
+  `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders → StructuredLogger → RateLimit.
+  `AuthenticateBearer` slots in below RateLimit at M4. SanitizeInboundRequestID and RealIP are one decision
+  made twice — whether a client-supplied forwarded header may be believed — and both take it from that one
+  setting, at the top, where nothing below re-opens it. A request ID is not cosmetic: it is echoed to the
+  client, written to every log line, and returned in every error body. Domain routers mount in the
+  rate-limited group inside `/api/v1`; `/healthz` sits outside it on purpose.
 - **Errors**: return `httpx.ErrNotFound` / `ErrForbidden` / … (or `httpx.Errorf(sentinel, …)`) from
   services and let `httpx.WriteError` map them. 5xx detail is logged, never returned. Every response
   carries `X-Request-Id`; every error body carries `request_id`.
