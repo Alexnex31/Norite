@@ -163,8 +163,11 @@ func (s *Service) AuthenticateAPIToken(ctx context.Context, raw string) (Actor, 
 	}
 
 	scopes := make([]Scope, 0, len(token.Scopes))
-	for _, s := range token.Scopes {
-		scopes = append(scopes, Scope(s))
+	// Named `scope`, not `s`: this is a method on *Service with receiver `s`, and a loop variable that
+	// shadows it turns the next line someone adds here — a log, a query, a clock read — into either a
+	// confusing compile error or, if the name happens to fit, the wrong thing silently.
+	for _, scope := range token.Scopes {
+		scopes = append(scopes, Scope(scope))
 	}
 
 	return Actor{

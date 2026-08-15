@@ -29,6 +29,23 @@ import (
 // predictable point — startup, before anything else can be attempted — is what keeps the store from
 // disagreeing with the server about which token is current.
 
+// newRefreshClient builds the HTTP client the startup refresh uses.
+//
+// Redirects are not followed, and that is the load-bearing part rather than a preference. The request body
+// carries the account's refresh token and is built from a *bytes.Reader, so net/http fills in GetBody and
+// replays it verbatim on a 307 or 308 — to whatever host the redirect names. A misconfigured proxy, a
+// self-hoster's stray redirect rule, or a hijacked hostname would be handed a 30-day credential. The CLI's
+// client refuses redirects for exactly this reason; this one was left on Go's default of following up to
+// ten.
+func newRefreshClient() *http.Client {
+	return &http.Client{
+		Timeout: refreshTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // refreshTimeout bounds the startup refresh. Long enough for a slow link, short enough that an instance
 // that is down does not hold the daemon in startup: a daemon with no session is still a running daemon,
 // and it must reach "ready" either way.

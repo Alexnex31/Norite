@@ -1,6 +1,8 @@
 package credentials
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -145,12 +147,28 @@ func (keyringStore) describe() string { return "the OS keyring" }
 
 type fileStore struct{ dir string }
 
-// tokenFileName is per instance, so a machine that later talks to two instances does not need this to
-// change shape. The instance URL is sanitized into it rather than used raw — it contains a scheme and
-// possibly a port, neither of which belongs in a path component.
+// path names the token file for one instance.
+//
+// A readable prefix plus a hash of the whole URL. The prefix alone was the first version and was wrong:
+// substituting every unsafe character for '_' is not injective, so `https://a.example.com:8443` and
+// `https://a.example.com/8443` — both valid, both distinct instances — produced one filename, and logging
+// in to the second silently overwrote the first's refresh token. The hash is what makes the mapping
+// one-to-one; the prefix is what lets a person looking at the directory tell which file is which.
+//
+// Hex rather than base64url, because a filesystem that is case-insensitive (Windows, and macOS by default)
+// would fold `A` and `a` together and put the collision straight back.
 func (f fileStore) path(account string) string {
-	return filepath.Join(f.dir, "token-"+sanitizeForFilename(account))
+	sum := sha256.Sum256([]byte(account))
+	prefix := sanitizeForFilename(account)
+	if len(prefix) > maxTokenFilePrefix {
+		prefix = prefix[:maxTokenFilePrefix]
+	}
+	return filepath.Join(f.dir, "token-"+prefix+"-"+hex.EncodeToString(sum[:])[:16])
 }
+
+// maxTokenFilePrefix keeps the readable part well inside every filesystem's component limit, leaving room
+// for the hash and the "token-" prefix.
+const maxTokenFilePrefix = 48
 
 func (f fileStore) set(_, account, secret string) error {
 	// Written with the same care as the record: 0600 from creation, flushed, renamed into place.
@@ -209,6 +227,9 @@ func (f fileStore) describe() string {
 // Everything outside a conservative allow-list becomes '_', which cannot produce a separator, a parent
 // reference, or a Windows-reserved character — the input is operator-supplied, and a filename built from
 // untrusted text is how a write lands somewhere it was never meant to.
+//
+// Lossy by design, and never used alone: see path, where a hash of the untouched URL carries the identity
+// this discards.
 func sanitizeForFilename(s string) string {
 	var b strings.Builder
 	for _, r := range s {

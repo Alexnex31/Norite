@@ -117,11 +117,33 @@ type Queue struct {
 	ch   chan Message
 	wg   sync.WaitGroup
 
+	// sendMu serializes Enqueue's send against Shutdown's close.
+	//
+	// The `stopped` channel alone is not enough and the comment below used to claim it was. Checking it and
+	// then sending on q.ch are two steps, and Shutdown closes both between them often enough to matter: the
+	// HTTP server's Shutdown returns when its timeout expires *without* waiting for handlers still running,
+	// so a RequestPasswordReset that has committed its token and is about to enqueue the mail can meet a
+	// closed channel and panic with "send on closed channel". Recoverer would turn that into a 500 on a
+	// request whose token was already written.
+	//
+	// Held for a non-blocking send only, so it never becomes the thing that makes Enqueue block.
+	sendMu sync.RWMutex
 	// closeOnce guards the channel close so a second Shutdown — which a failed startup path can easily
 	// produce — is a no-op rather than a panic on a closed channel.
 	closeOnce sync.Once
-	// stopped is closed when the queue stops accepting, so Enqueue can refuse without racing on the send.
+	// stopped is closed when the queue stops accepting. It is what makes a refusal cheap on the common
+	// path; sendMu is what makes it correct.
 	stopped chan struct{}
+
+	// shutdownCtx is canceled by Shutdown, and is what makes the retry backoff interruptible.
+	//
+	// deliver used to wait on context.Background(), which made q.sleep's context parameter dead and the
+	// wait unstoppable: with a wedged relay and the defaults, a worker sat uninterruptible for well over a
+	// minute while Shutdown's deadline elapsed, so a stop always reported "mail queue did not drain"
+	// whether or not anything was pending. Cancellation ends the *wait*, never a send already in flight —
+	// that keeps its own SendTimeout.
+	shutdownCtx    context.Context
+	cancelShutdown context.CancelFunc
 
 	// now is overridable so backoff can be tested without waiting for it.
 	sleep func(context.Context, time.Duration)
@@ -134,11 +156,14 @@ type Queue struct {
 func NewQueue(opts Options) *Queue {
 	opts.setDefaults()
 
+	shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
 	q := &Queue{
-		opts:    opts,
-		ch:      make(chan Message, opts.Capacity),
-		stopped: make(chan struct{}),
-		sleep:   sleepCtx,
+		opts:           opts,
+		ch:             make(chan Message, opts.Capacity),
+		stopped:        make(chan struct{}),
+		shutdownCtx:    shutdownCtx,
+		cancelShutdown: cancelShutdown,
+		sleep:          sleepCtx,
 	}
 	if opts.Sender == nil {
 		return q // nothing to run: Enqueue refuses before it ever reaches a worker
@@ -163,6 +188,11 @@ func (q *Queue) Enqueue(msg Message) error {
 	if !q.Enabled() {
 		return ErrDisabled
 	}
+
+	// The check and the send are one critical section. Under the read lock, so concurrent Enqueues still
+	// proceed in parallel — only Shutdown, which takes the write lock, excludes them.
+	q.sendMu.RLock()
+	defer q.sendMu.RUnlock()
 
 	select {
 	case <-q.stopped:
@@ -196,8 +226,14 @@ var ErrQueueFull = errors.New("mail: send queue is full")
 // will not stop.
 func (q *Queue) Shutdown(ctx context.Context) error {
 	q.closeOnce.Do(func() {
+		// Under the write lock, so no Enqueue can be between its stopped-check and its send.
+		q.sendMu.Lock()
+		defer q.sendMu.Unlock()
 		close(q.stopped)
 		close(q.ch)
+		// Ends any retry backoff in progress. A send already in flight is left to its own timeout: cutting
+		// that short would abandon a message mid-delivery, where waiting merely delays a stop.
+		q.cancelShutdown()
 	})
 
 	done := make(chan struct{})
@@ -261,7 +297,7 @@ func (q *Queue) deliver(msg Message) {
 			Dur("retry_in", backoff).
 			Msg("delivery failed — retrying")
 
-		q.sleep(context.Background(), backoff)
+		q.sleep(q.shutdownCtx, backoff)
 		backoff *= 2
 	}
 }

@@ -64,7 +64,7 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 // storedSession writes a credential the way `norite login` would.
 func storedSession(t *testing.T, instanceURL, refreshToken string) *credentials.Store {
 	t.Helper()
-	store, err := credentials.OpenIn(t.TempDir())
+	store, err := credentials.OpenLocalForTest(t.TempDir())
 	require.NoError(t, err)
 	require.NoError(t, store.Save(credentials.Record{
 		InstanceURL: instanceURL,
@@ -133,7 +133,7 @@ func TestTheAccessTokenIsNeverWrittenDown(t *testing.T) {
 // and `norite daemon install` deliberately runs before anything else (M3).
 func TestNoStoredCredentialIsNotAFailure(t *testing.T) {
 	f := newFakeInstance(t)
-	store, err := credentials.OpenIn(t.TempDir())
+	store, err := credentials.OpenLocalForTest(t.TempDir())
 	require.NoError(t, err)
 	logs := &strings.Builder{}
 

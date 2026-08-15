@@ -15,7 +15,6 @@ package daemonproc
 import (
 	"context"
 	"io"
-	"net/http"
 	"os"
 
 	"github.com/rs/zerolog"
@@ -128,7 +127,7 @@ func Run(ctx context.Context, opts Options) error {
 		if err != nil {
 			log.Error().Err(err).Msg("the credential store could not be opened")
 		} else {
-			establishSession(ctx, log, store, &http.Client{Timeout: refreshTimeout})
+			establishSession(ctx, log, store, newRefreshClient())
 		}
 	}
 

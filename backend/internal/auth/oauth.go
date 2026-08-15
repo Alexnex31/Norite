@@ -429,7 +429,14 @@ func getProviderJSON(ctx context.Context, client *http.Client, token *oauth2.Tok
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrOAuthExchange, redactOAuthError(err))
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Drained before closing, so the connection returns to the idle pool. The decoder can stop before the
+	// end of the body — a LimitReader cut, or trailing bytes after the JSON — and net/http will not reuse a
+	// connection whose body was left unread. GitHub costs two calls per sign-in, so without this the second
+	// pays a fresh TLS handshake every time.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxProviderResponse))
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		// The body is deliberately not included: it is a third party's text, and this string reaches a log.

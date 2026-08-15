@@ -1,7 +1,7 @@
 package credentials
 
 import (
-	"os/exec"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,7 +25,7 @@ import (
 func TestConcurrentSavesDoNotInterleave(t *testing.T) {
 	dir := t.TempDir()
 
-	slow, err := OpenIn(dir)
+	slow, err := OpenLocalForTest(dir)
 	require.NoError(t, err)
 
 	inWindow := make(chan struct{})
@@ -47,7 +47,7 @@ func TestConcurrentSavesDoNotInterleave(t *testing.T) {
 	// A second writer, as a separate process would be. It must not be able to slip its record in between.
 	second := make(chan error, 1)
 	go func() {
-		store, err := OpenIn(dir)
+		store, err := OpenLocalForTest(dir)
 		if err != nil {
 			second <- err
 			return
@@ -64,7 +64,7 @@ func TestConcurrentSavesDoNotInterleave(t *testing.T) {
 	require.NoError(t, <-done)
 	require.NoError(t, <-second)
 
-	store, err := OpenIn(dir)
+	store, err := OpenLocalForTest(dir)
 	require.NoError(t, err)
 	record, token, err := store.Load()
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestConcurrentSavesDoNotInterleave(t *testing.T) {
 // A read taken while a write is in flight must not see half of it.
 func TestLoadWaitsForAWriteInFlight(t *testing.T) {
 	dir := t.TempDir()
-	store, err := OpenIn(dir)
+	store, err := OpenLocalForTest(dir)
 	require.NoError(t, err)
 	require.NoError(t, store.Save(sampleRecord(), "nrt_initial"))
 
@@ -85,7 +85,7 @@ func TestLoadWaitsForAWriteInFlight(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, err := OpenIn(dir)
+			s, err := OpenLocalForTest(dir)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -96,7 +96,7 @@ func TestLoadWaitsForAWriteInFlight(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, err := OpenIn(dir)
+			s, err := OpenLocalForTest(dir)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -116,14 +116,17 @@ func TestLoadWaitsForAWriteInFlight(t *testing.T) {
 // protects nothing — the new file is a different inode, and the next process locks that one instead.
 func TestTheLockIsSeparateFromTheFilesItGuards(t *testing.T) {
 	dir := t.TempDir()
-	store, err := OpenIn(dir)
+	store, err := OpenLocalForTest(dir)
 	require.NoError(t, err)
 	require.NoError(t, store.Save(sampleRecord(), "nrt_secret"))
 
 	assert.NotEqual(t, filepath.Join(dir, lockFileName), store.recordPath())
 
-	// ...and it does not become a place a secret lands.
-	data, err := exec.Command("cat", filepath.Join(dir, lockFileName)).Output()
+	// ...and it does not become a place a secret lands. os.ReadFile rather than shelling out to `cat`,
+	// which this first did: this package is cross-platform — its own mode assertions skip on Windows
+	// rather than the file skipping — and there a missing `cat` would have failed as though the lock
+	// itself were broken.
+	data, err := os.ReadFile(filepath.Join(dir, lockFileName))
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "nrt_secret")
 	assert.Empty(t, strings.TrimSpace(string(data)))

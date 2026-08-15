@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,6 +34,8 @@ type fakeInstance struct {
 	loginBody   string
 	// meStatus does the same for the identity call.
 	meStatus int
+	// logins counts calls to the login endpoint, so a test can assert nothing reached the instance.
+	logins int
 }
 
 func newFakeInstance(t *testing.T) *fakeInstance {
@@ -40,6 +44,7 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		f.logins++
 		_ = json.NewDecoder(r.Body).Decode(&f.lastLogin)
 		if f.loginStatus != 0 {
 			w.WriteHeader(f.loginStatus)
@@ -73,7 +78,7 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 func testRunner(t *testing.T, f *fakeInstance, opts Options) (*Runner, *credentials.Store, *bytes.Buffer) {
 	t.Helper()
 
-	store, err := credentials.OpenIn(t.TempDir())
+	store, err := credentials.OpenLocalForTest(t.TempDir())
 	require.NoError(t, err)
 	out := &bytes.Buffer{}
 
@@ -168,7 +173,7 @@ func TestTheDeviceNameFallsBackToTheHostname(t *testing.T) {
 	// login.
 	runner.Options.DeviceName = ""
 	runner.Hostname = func() (string, error) { return "", errors.New("no hostname") }
-	fresh, err := credentials.OpenIn(t.TempDir())
+	fresh, err := credentials.OpenLocalForTest(t.TempDir())
 	require.NoError(t, err)
 	runner.Store = fresh
 	require.NoError(t, runner.Run(t.Context()))
@@ -419,4 +424,54 @@ func TestEachUnanswerableQuestionSaysWhatWouldAnswerIt(t *testing.T) {
 	runner.Options.Email = "ada@example.com"
 	err = runner.Run(t.Context())
 	assert.Contains(t, err.Error(), passwordEnvVar)
+}
+
+// ---------- the stored instance URL is not trusted ----------
+
+// LoadRecord does not validate, so nothing re-checks a record that was hand-edited or written by an older
+// build — and this value decides where the password is POSTed. `https://user:pass@evil.example` is exactly
+// the shape ParseInstanceURL refuses from a flag or the environment, and it used to be handed back from the
+// store verbatim.
+func TestAStoredInstanceURLIsRevalidatedBeforeThePasswordIsSent(t *testing.T) {
+	f := newFakeInstance(t)
+	dir := t.TempDir()
+	store, err := credentials.OpenLocalForTest(dir)
+	require.NoError(t, err)
+
+	runner, _, _ := testRunner(t, f, Options{})
+	runner.Store = store
+	require.NoError(t, runner.Run(t.Context()))
+	require.Equal(t, 1, f.logins)
+
+	// Hand-edit the record, the way a person or an older build could. "account.json" is the record file;
+	// if that ever changes this test fails loudly, which is the right outcome.
+	poisoned := `{"instance_url":"https://ada:hunter2@evil.example.com","user_id":"1","username":"ada",` +
+		`"device_id":"dev_x","device_name":"laptop"}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "account.json"), []byte(poisoned), 0o600))
+
+	runner.Options.Instance = ""
+	t.Setenv(instanceEnvVar, "")
+	err = runner.Run(t.Context())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "username or password")
+	assert.Equal(t, 1, f.logins, "no password may leave the machine for an unvalidated host")
+}
+
+// An unreadable record fails the login at the first step, with the way out, rather than at whichever
+// question happened to read it second.
+func TestAnUnreadableRecordFailsTheLoginWithTheWayOut(t *testing.T) {
+	f := newFakeInstance(t)
+	dir := t.TempDir()
+	store, err := credentials.OpenLocalForTest(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "account.json"), []byte("{not json"), 0o600))
+
+	runner, _, _ := testRunner(t, f, Options{})
+	runner.Store = store
+
+	err = runner.Run(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "norite logout")
+	assert.Zero(t, f.logins, "nothing may reach the instance")
 }

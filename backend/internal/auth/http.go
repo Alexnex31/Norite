@@ -70,7 +70,12 @@ type registerRequest struct {
 	// Bounds only. What a username may *contain* is decided by auth.ValidUsername, after normalization —
 	// see username.go. The tag's old `excludesall= ` excluded exactly one character and read as though it
 	// were a charset rule.
-	Username    string `json:"username" validate:"required,min=2,max=64"`
+	//
+	// The numbers must match MinUsernameLength and MaxUsernameLength, which they did not: this said 64
+	// while ValidUsername enforced 32, so a 40-character name passed the tag and came back rejected for
+	// its *characters* — a message that was simply untrue of the input and left no way to fix it. "Bounds
+	// only" is what let the two drift, since it reads as though the tag's numbers do not matter.
+	Username    string `json:"username" validate:"required,min=2,max=32"`
 	Email       string `json:"email" validate:"required,email,max=254"`
 	Password    string `json:"password" validate:"required"`
 	DisplayName string `json:"display_name" validate:"omitempty,max=64"`

@@ -90,7 +90,13 @@ func Errorf(sentinel error, format string, args ...any) *StatusError {
 // An encoding failure after the header is already flushed cannot be turned into an error response, so it
 // is logged and the connection is left for the client to notice as a truncated body.
 func WriteJSON(w http.ResponseWriter, r *http.Request, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// The header goes on only when there is a body to describe. A 204 carries none by definition
+	// (RFC 9110 §15.3.5), so announcing a JSON body on one is a claim the response cannot keep — harmless
+	// to most clients, and exactly the sort of thing a generated client or a content-sniffing proxy is
+	// entitled to believe. logout, the reset confirmation, and token revocation all answer 204.
+	if v != nil && status != http.StatusNoContent {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	}
 	w.WriteHeader(status)
 
 	if v == nil || status == http.StatusNoContent {

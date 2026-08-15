@@ -96,19 +96,24 @@ func LogoutCommand() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 
-			record, err := store.LoadRecord()
-			switch {
-			case errors.Is(err, credentials.ErrNoCredential):
-				// Not an error. Logging out when already logged out is a no-op someone should be able to
-				// put in a script without guarding it.
+			// Read for the confirmation line only. An unreadable record must not stop the clearing — this
+			// is the command someone reaches for *because* the stored state is broken, and refusing to run
+			// left them deleting files by hand.
+			record, readErr := store.LoadRecord()
+			if errors.Is(readErr, credentials.ErrNoCredential) {
+				// Logging out when already logged out is a no-op someone should be able to put in a script
+				// without guarding it.
 				_, _ = fmt.Fprintln(cmd.Writer, "No stored credential; nothing to remove.")
 				return nil
-			case err != nil:
-				return cli.Exit(err.Error(), 1)
 			}
 
 			if err := store.Clear(); err != nil {
 				return cli.Exit(err.Error(), 1)
+			}
+
+			if readErr != nil {
+				_, _ = fmt.Fprintln(cmd.Writer, "Removed an unreadable credential record.")
+				return nil
 			}
 			_, _ = fmt.Fprintf(cmd.Writer, "Removed the credential for %s on %s.\n",
 				record.Username, record.InstanceURL)

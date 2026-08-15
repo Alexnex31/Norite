@@ -90,7 +90,16 @@ type Runner struct {
 
 // Run performs the login and stores the result.
 func (r *Runner) Run(ctx context.Context) error {
-	instanceURL, err := r.resolveInstance()
+	// Read once, at the top. Three separate LoadRecord calls used to answer three questions here, each
+	// taking and releasing the cross-process lock — so a daemon's startup Save landing between two of them
+	// produced a login that took its device ID from one record and its device name from another. It also
+	// meant an unreadable record failed at whichever question happened to ask second.
+	previous, err := r.loadPrevious()
+	if err != nil {
+		return err
+	}
+
+	instanceURL, err := r.resolveInstance(previous)
 	if err != nil {
 		return err
 	}
@@ -110,14 +119,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	deviceID, err := r.resolveDeviceID()
+	deviceID, err := r.resolveDeviceID(previous)
 	if err != nil {
 		return err
 	}
-	deviceName, err := r.resolveDeviceName()
-	if err != nil {
-		return err
-	}
+	deviceName := r.resolveDeviceName(previous)
 
 	api := r.client(instanceURL)
 	pair, err := api.login(ctx, loginRequest{
@@ -160,24 +166,39 @@ func (r *Runner) Run(ctx context.Context) error {
 //
 // Flag, then environment, then the instance a previous login recorded. The last is what makes re-logging-in
 // after a password change a single word rather than a URL someone has to remember.
-func (r *Runner) resolveInstance() (string, error) {
+func (r *Runner) resolveInstance(previous credentials.Record) (string, error) {
 	if r.Options.Instance != "" {
 		return credentials.ParseInstanceURL(r.Options.Instance)
 	}
 	if fromEnv := strings.TrimSpace(os.Getenv(instanceEnvVar)); fromEnv != "" {
 		return credentials.ParseInstanceURL(fromEnv)
 	}
-
-	record, err := r.Store.LoadRecord()
-	switch {
-	case err == nil && record.InstanceURL != "":
-		return record.InstanceURL, nil
-	case err != nil && !errors.Is(err, credentials.ErrNoCredential):
-		return "", err
+	if previous.InstanceURL != "" {
+		// Re-parsed rather than trusted, even though this value was written by a previous run of this same
+		// command. The record is a plain file a person can edit and an older build may have written, and
+		// this string decides where a password is about to be POSTed — a `https://user:pass@evil.example`
+		// in it is exactly what ParseInstanceURL refuses from every other source.
+		return credentials.ParseInstanceURL(previous.InstanceURL)
 	}
 
 	return "", fmt.Errorf(
 		"no instance to log in to: pass --instance https://chat.example.com, or set %s", instanceEnvVar)
+}
+
+// loadPrevious reads the stored record, treating "nothing stored yet" as an empty one.
+func (r *Runner) loadPrevious() (credentials.Record, error) {
+	record, err := r.Store.LoadRecord()
+	switch {
+	case err == nil:
+		return record, nil
+	case errors.Is(err, credentials.ErrNoCredential):
+		return credentials.Record{}, nil
+	default:
+		// An unreadable record is reported with the way out, because logging in again is the fix and
+		// `norite logout` is what clears it.
+		return credentials.Record{}, fmt.Errorf(
+			"%w; run `norite logout` to clear it and sign in again", err)
+	}
 }
 
 func (r *Runner) resolveEmail() (string, error) {
@@ -226,32 +247,28 @@ func (r *Runner) resolvePassword() (string, error) {
 // A new ID on every login would strand the previous refresh-token family until it expired, and would fill
 // the account's session list with one entry per login. The ID is per installation, not per session
 // (ADR 0011).
-func (r *Runner) resolveDeviceID() (string, error) {
-	record, err := r.Store.LoadRecord()
-	if err == nil && record.DeviceID != "" {
-		return record.DeviceID, nil
-	}
-	if err != nil && !errors.Is(err, credentials.ErrNoCredential) {
-		return "", err
+func (r *Runner) resolveDeviceID(previous credentials.Record) (string, error) {
+	if previous.DeviceID != "" {
+		return previous.DeviceID, nil
 	}
 	return r.NewDeviceID()
 }
 
-func (r *Runner) resolveDeviceName() (string, error) {
+func (r *Runner) resolveDeviceName(previous credentials.Record) string {
 	if name := strings.TrimSpace(r.Options.DeviceName); name != "" {
-		return truncateDeviceName(name), nil
+		return truncateDeviceName(name)
 	}
-	if record, err := r.Store.LoadRecord(); err == nil && record.DeviceName != "" {
-		return record.DeviceName, nil
+	if previous.DeviceName != "" {
+		return previous.DeviceName
 	}
 
 	host, err := r.Hostname()
 	if err != nil || strings.TrimSpace(host) == "" {
 		// Not worth failing a login over. An unnamed device is a cosmetic problem in a session list; a
 		// login that refuses because the machine has no hostname is not.
-		return "this device", nil
+		return "this device"
 	}
-	return truncateDeviceName(host), nil
+	return truncateDeviceName(host)
 }
 
 // maxDeviceName matches the backend's own limit, so an over-long name is trimmed here rather than rejected

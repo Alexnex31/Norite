@@ -190,6 +190,22 @@ func (s *Store) Save(record Record, refreshToken string) error {
 	}
 
 	return s.withLock(true, func() error {
+		// Signing in to a different instance has to take the previous instance's secret with it. Without
+		// this the old refresh token stays live at rest for its full TTL — in a keyring entry or a file
+		// nothing references — and `norite logout` cannot reach it either, because Clear only knows the
+		// instance named by the current record. It would then report "Removed the credential", untruthfully.
+		//
+		// Failing the save when the removal fails is deliberate. A keyring or directory that refuses a
+		// delete will almost certainly refuse the write that follows, so this rarely costs a login that
+		// would otherwise have worked — and the alternative is proceeding while leaving a credential behind
+		// that nothing will ever clean up.
+		previous, err := s.readRecord()
+		if err == nil && previous.InstanceURL != "" && previous.InstanceURL != record.InstanceURL {
+			if err := s.secrets.delete(keyringService, previous.InstanceURL); err != nil {
+				return fmt.Errorf("removing the credential for %s: %w", previous.InstanceURL, err)
+			}
+		}
+
 		if err := s.secrets.set(keyringService, record.InstanceURL, refreshToken); err != nil {
 			return err
 		}
@@ -246,7 +262,15 @@ func (s *Store) Clear() error {
 		case errors.Is(err, ErrNoCredential):
 			return nil
 		case err != nil:
-			return err
+			// An unreadable record — a truncated write, a full disk, a hand edit — used to make this
+			// return, which left `norite logout` unable to clear the very state that was broken and the
+			// person deleting files by hand. The record is removed anyway; what cannot be done is find the
+			// secret it named, so that is reported rather than passed over.
+			if rmErr := os.Remove(s.recordPath()); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				return fmt.Errorf("removing the unreadable credential record: %w", rmErr)
+			}
+			return fmt.Errorf("%w; the record has been removed, but any stored secret it named could not "+
+				"be identified and may remain — sign in again to replace it", err)
 		}
 
 		// The secret goes first, for the same reason it is written first: whichever half survives a partial

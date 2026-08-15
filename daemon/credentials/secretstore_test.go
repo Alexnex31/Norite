@@ -166,3 +166,52 @@ func TestTheProbeReportsAWorkingKeyring(t *testing.T) {
 	_, err := keyring.Get(keyringService, keyringProbeAccount)
 	assert.ErrorIs(t, err, keyring.ErrNotFound)
 }
+
+// Sanitizing an instance URL into a filename is lossy, so it cannot be the whole name. `:8443` and `/8443`
+// are both valid and distinct — a port and a path — and both collapse to the same underscores. With that
+// alone, logging in to the second silently overwrote the first's refresh token, and a later load handed the
+// daemon the wrong instance's credential.
+func TestDistinctInstancesNeverShareATokenFile(t *testing.T) {
+	dir := t.TempDir()
+	fs := fileStore{dir: dir}
+
+	for _, pair := range [][2]string{
+		{"https://a.example.com:8443", "https://a.example.com/8443"},
+		{"https://a.example.com/x", "https://a.example.com:x"},
+		{"http://a.example.com", "https://a.example.com"},
+		{"https://a.example.com", "https://a-example-com"},
+	} {
+		assert.NotEqual(t, fs.path(pair[0]), fs.path(pair[1]),
+			"%q and %q are different instances and must not share a file", pair[0], pair[1])
+	}
+
+	// ...and the mapping is stable, or a daemon restart would not find what a login wrote.
+	assert.Equal(t, fs.path("https://a.example.com:8443"), fs.path("https://a.example.com:8443"))
+}
+
+// Written out end to end, because the collision was invisible at the unit level: both writes succeed, and
+// only the second read shows the loss.
+func TestLoggingInToATwinInstanceDoesNotOverwriteTheOther(t *testing.T) {
+	dir := t.TempDir()
+	fs := fileStore{dir: dir}
+
+	require.NoError(t, fs.set(keyringService, "https://a.example.com:8443", "nrt_port"))
+	require.NoError(t, fs.set(keyringService, "https://a.example.com/8443", "nrt_path"))
+
+	byPort, err := fs.get(keyringService, "https://a.example.com:8443")
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_port", byPort, "the second login must not have overwritten the first")
+}
+
+// The readable prefix is there so a person can tell the files apart; the hash is what makes them distinct.
+func TestATokenFilenameStaysReadableAndBounded(t *testing.T) {
+	dir := t.TempDir()
+	fs := fileStore{dir: dir}
+
+	base := filepath.Base(fs.path("https://chat.example.com"))
+	assert.Contains(t, base, "chat.example.com")
+	assert.Less(t, len(base), 128, "must stay inside every filesystem's component limit")
+
+	long := filepath.Base(fs.path("https://" + strings.Repeat("verylongsubdomain.", 20) + "example.com"))
+	assert.Less(t, len(long), 128)
+}

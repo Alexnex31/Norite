@@ -275,3 +275,68 @@ func TestDeviceIDsAreRandomAndURLSafe(t *testing.T) {
 		}
 	}
 }
+
+// ---------- switching instances ----------
+
+// Signing in to a different instance has to take the previous instance's secret with it. Without that the
+// old refresh token stays live at rest for its full TTL, and `norite logout` cannot reach it — Clear only
+// knows the instance the current record names — so it would report "Removed the credential" untruthfully.
+func TestSigningInToAnotherInstanceRemovesTheOldSecret(t *testing.T) {
+	secrets := newMemoryStore()
+	store := storeIn(t, secrets)
+
+	first := sampleRecord()
+	first.InstanceURL = "https://a.example.com"
+	require.NoError(t, store.Save(first, "nrt_a"))
+
+	second := sampleRecord()
+	second.InstanceURL = "https://b.example.com"
+	require.NoError(t, store.Save(second, "nrt_b"))
+
+	assert.NotContains(t, secrets.entries, "https://a.example.com",
+		"the old instance's refresh token must not be left live at rest")
+	assert.Equal(t, "nrt_b", secrets.entries["https://b.example.com"])
+
+	// ...and a logout afterwards leaves nothing at all behind.
+	require.NoError(t, store.Clear())
+	assert.Empty(t, secrets.entries)
+}
+
+// Signing in again to the *same* instance is the ordinary case and must not disturb anything.
+func TestSigningInAgainToTheSameInstanceKeepsWorking(t *testing.T) {
+	secrets := newMemoryStore()
+	store := storeIn(t, secrets)
+
+	require.NoError(t, store.Save(sampleRecord(), "nrt_first"))
+	require.NoError(t, store.Save(sampleRecord(), "nrt_second"))
+
+	_, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_second", token)
+	assert.Len(t, secrets.entries, 1)
+}
+
+// ---------- recovering from a broken record ----------
+
+// An unreadable record is exactly when someone reaches for `norite logout`, and it used to be the one case
+// it refused: Clear read the record first and returned the parse error, leaving them to delete files by
+// hand. The record goes; what cannot be done is identify the secret it named, so that is said rather than
+// passed over in silence.
+func TestClearRemovesAnUnreadableRecordAndSaysWhatItCouldNotDo(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, recordFileName), []byte("{not json"), 0o600))
+
+	err = store.Clear()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may remain")
+
+	assert.NoFileExists(t, filepath.Join(dir, recordFileName))
+
+	// ...and the store is usable again, which is the point.
+	require.NoError(t, store.Save(sampleRecord(), "nrt_fresh"))
+	_, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_fresh", token)
+}
