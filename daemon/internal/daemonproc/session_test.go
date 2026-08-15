@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -30,6 +32,9 @@ type fakeInstance struct {
 	body   string
 	// calls counts requests, so a test can assert the daemon did not call at all.
 	calls int
+	// beforeRefresh runs inside the handler, which is the one place a test can act while the daemon is
+	// between reading the record and writing it back.
+	beforeRefresh func()
 }
 
 func newFakeInstance(t *testing.T) *fakeInstance {
@@ -45,6 +50,10 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.received = body.RefreshToken
+
+		if f.beforeRefresh != nil {
+			f.beforeRefresh()
+		}
 
 		if f.status != 0 {
 			w.WriteHeader(f.status)
@@ -112,6 +121,61 @@ func TestTheRotatedTokenReplacesTheStoredOne(t *testing.T) {
 	// ...and a second start presents the rotated one rather than the original.
 	require.NotNil(t, establishSession(t.Context(), testLogger(io.Discard), store, f.server.Client()))
 	assert.Equal(t, "nrt_rotated", f.received)
+}
+
+// A login or a logout that lands while the refresh is in flight owns the store, and the daemon must leave
+// it alone. Save would not have: reading the record before a network round trip and writing it back after
+// is a read-modify-write across a released lock, so a stale record would delete the token the login had
+// just stored and put the old instance back in account.json.
+func TestALoginDuringTheRefreshIsNotUndone(t *testing.T) {
+	f := newFakeInstance(t)
+	store := storedSession(t, f.server.URL, "nrt_from_login")
+	logs := &strings.Builder{}
+
+	// What `norite login` to another instance would leave behind, mid-flight.
+	f.beforeRefresh = func() {
+		require.NoError(t, store.Save(credentials.Record{
+			InstanceURL: "https://other.example.com",
+			UserID:      "987654321",
+			Username:    "grace",
+			DeviceID:    "dev_test",
+			DeviceName:  "laptop",
+		}, "nrt_the_login_just_stored"))
+	}
+
+	sess := establishSession(t.Context(), testLogger(logs), store, f.server.Client())
+	assert.Nil(t, sess, "the session renewed is not the one this machine holds any more")
+
+	record, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "https://other.example.com", record.InstanceURL, "the login's record must survive")
+	assert.Equal(t, "nrt_the_login_just_stored", token, "the login's token must survive")
+	assert.Contains(t, logs.String(), "leaving it alone")
+}
+
+// A store that refuses the write-back still holds the token that was just spent. Presenting a rotated token
+// is what M4 reads as theft, and it revokes every session on this device family — for a full disk. Clearing
+// costs one `norite login` and takes nothing else down with it.
+func TestASpentTokenIsClearedRatherThanLeftToLookStolen(t *testing.T) {
+	f := newFakeInstance(t)
+	dir := t.TempDir()
+	store, err := credentials.OpenLocalForTest(dir)
+	require.NoError(t, err)
+	require.NoError(t, store.Save(credentials.Record{
+		InstanceURL: f.server.URL, UserID: "1", Username: "ada", DeviceID: "dev_test", DeviceName: "laptop",
+	}, "nrt_from_login"))
+
+	// The state directory goes read-only, so the write-back cannot land.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory modes do not describe Windows ACLs")
+	}
+	require.NoError(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	logs := &strings.Builder{}
+	sess := establishSession(t.Context(), testLogger(logs), store, f.server.Client())
+	assert.Nil(t, sess)
+	assert.Contains(t, logs.String(), "could not be stored")
 }
 
 // The access token stays in memory. Fifteen minutes is shorter than the interval between the restarts it

@@ -506,6 +506,31 @@ And on the client-auth side, from M7:
 - **A daemon with no session is still a daemon.** No credential, an unreachable instance, and a refused
   token are all logged and survived — refusing to start would mean the daemon cannot be installed before
   its first login, and `norite daemon install` deliberately runs first.
+- **A refresh writes back with `ReplaceToken`, never `Save`.** The record is read before a network round
+  trip and written after, so a `norite login` or `norite logout` landing in that window already owns the
+  store; `Save` would take the stale record as truth and delete the token the login just stored. The lock
+  makes each operation atomic and says nothing about a read-modify-write spanning two of them.
+- **The record names the backend its secret is in** (`Record.SecretBackend`), and reads and deletes go
+  there rather than to whatever this process's probe picks. The probe answers "where would a new secret go
+  here", which is not evidence about where an existing one is — a desktop login reaches the keyring, a
+  systemd user unit starting before it unlocks does not, and an SSH session has no session bus at all.
+- **What the store cannot finish, it says through `Notify`** — a credential left in a backend this session
+  cannot reach, a previous record too broken to name one. Failing instead would make `norite login`
+  impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
+  token from the only person who can deal with it. The CLI prints it, the daemon logs it.
+
+Three things this milestone deliberately leaves for the milestone that can do them properly:
+
+- **A dropped refresh token cannot be revoked yet.** When a login lands mid-refresh, the daemon discards
+  the token it just obtained; it stays valid at the instance until it expires. Handing it back needs M11's
+  revoke-a-session primitive, and reaching for it from the daemon needs M18's gateway connection.
+- **The daemon never re-probes for a keyring that unlocks later.** The backend is chosen once per process
+  (`sync.Once`), so a daemon that started before the session keyring was unlocked keeps reading the file
+  path for its whole life. Correct today because the record names the backend; worth revisiting when the
+  daemon becomes long-lived and reconnecting at M18.
+- **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
+  logs was sanitized by the login that stored it. At M18 the daemon fetches names of its own, and the
+  function has to move somewhere both modules reach — not be copied.
 
 ## Project-specific skills
 

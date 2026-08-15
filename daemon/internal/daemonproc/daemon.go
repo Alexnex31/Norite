@@ -127,6 +127,10 @@ func Run(ctx context.Context, opts Options) error {
 		if err != nil {
 			log.Error().Err(err).Msg("the credential store could not be opened")
 		} else {
+			// The store's own account of anything it could not finish — a credential left in a backend this
+			// process cannot reach, most likely. Nobody is watching a daemon's terminal, so it goes to the
+			// log at a level that gets read.
+			store.Notify = func(msg string) { log.Warn().Msg(msg) }
 			establishSession(ctx, log, store, newRefreshClient())
 		}
 	}

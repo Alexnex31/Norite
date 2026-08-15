@@ -100,8 +100,35 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 	// Written back before the session is used. The instance has already rotated the family, so the token in
 	// the store is spent from this moment; a crash between here and the next start would otherwise leave
 	// the daemon holding a token the server has already retired.
-	if err := store.Save(record, pair.RefreshToken); err != nil {
+	//
+	// ReplaceToken, not Save: the record was read before a network round trip that can take thirty seconds,
+	// and a `norite login` or `norite logout` inside that window has already replaced what is on disk. Save
+	// would take the stale record as the truth and undo them.
+	switch err := store.ReplaceToken(record, pair.RefreshToken); {
+	case err == nil:
+
+	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
+		// Somebody signed in or out while this was in flight, so the session just renewed is not the one
+		// this machine is holding any more. Leaving their credential alone is the whole point; the token
+		// obtained here is dropped with it. It stays valid at the instance until it expires, and there is
+		// no way to hand it back — revoking one session is M11's primitive, and reaching for it from here
+		// needs the gateway connection that arrives at M18.
+		log.Info().Err(err).Msg("the stored credential changed while it was being renewed; leaving it alone")
+		return nil
+
+	default:
+		// The store refused the write, so it still holds the token that was just spent. Presenting a
+		// rotated token is what M4's reuse detection reads as theft, and it revokes the whole device family
+		// — every other session on this installation, for a disk that was full. Clearing costs one `norite
+		// login` and takes nothing else down with it.
 		log.Error().Err(err).Msg("the renewed credential could not be stored")
+		if clearErr := store.Clear(); clearErr != nil {
+			log.Error().Err(clearErr).
+				Msg("the spent credential could not be cleared either; run `norite logout` then `norite login`")
+		} else {
+			log.Warn().Msg("cleared the spent credential; run `norite login` to sign in again")
+		}
+		return nil
 	}
 
 	// The instance and username are the instance's own text, and this log is read with `cat`. They are safe
@@ -150,8 +177,11 @@ func refreshSession(ctx context.Context, client *http.Client, instanceURL, refre
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)); _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		// The status and nothing else. The body is the instance's own text and reaches a log file.
-		return tokenPair{}, fmt.Errorf("the instance refused the stored credential (%s)", resp.Status)
+		// The status code and nothing else. Not resp.Status, which carries the reason phrase — that is the
+		// server's own text, exactly like the body, and this string reaches a log file people read with
+		// `cat` in a terminal. The CLI sanitizes the same value (cli/internal/login/api.go); this module
+		// cannot reach that package and does not need to, because the number says everything useful here.
+		return tokenPair{}, fmt.Errorf("the instance refused the stored credential (HTTP %d)", resp.StatusCode)
 	}
 
 	var pair tokenPair

@@ -52,6 +52,30 @@ type secretStore interface {
 	// describe names the backing store in one phrase, for a client that has to tell someone where their
 	// token went.
 	describe() string
+	// name is the stable identifier written into the record, so that a later process reads and deletes from
+	// the backend actually holding the secret rather than the one it would have picked for itself. Never
+	// change these strings: a record naming a backend nothing recognizes falls back to the probe, which is
+	// the behavior that made a live token unreachable in the first place.
+	name() string
+}
+
+// The values Record.SecretBackend may hold.
+const (
+	backendKeyring = "keyring"
+	backendFile    = "file"
+)
+
+// backendNamed returns the backend a record names, or nil when it names nothing recognizable — an empty
+// field on a record written before this existed, or a value from some later version.
+func backendNamed(dir, name string) secretStore {
+	switch name {
+	case backendKeyring:
+		return keyringStore{}
+	case backendFile:
+		return fileStore{dir: dir}
+	default:
+		return nil
+	}
 }
 
 // newSecretStore picks a backend for this machine.
@@ -90,6 +114,7 @@ func (a *autoStore) delete(service, account string) error {
 	return a.backend().delete(service, account)
 }
 func (a *autoStore) describe() string { return a.backend().describe() }
+func (a *autoStore) name() string     { return a.backend().name() }
 
 // keyringProbeAccount is the entry the probe writes and removes. Named so that one left behind by a crash
 // is obviously not a real credential.
@@ -142,6 +167,7 @@ func (keyringStore) delete(service, account string) error {
 }
 
 func (keyringStore) describe() string { return "the OS keyring" }
+func (keyringStore) name() string     { return backendKeyring }
 
 // ---------- the file fallback ----------
 
@@ -200,6 +226,8 @@ func (f fileStore) delete(_, account string) error {
 func (f fileStore) describe() string {
 	return "a file in " + f.dir + " (this machine has no usable OS keyring)"
 }
+
+func (fileStore) name() string { return backendFile }
 
 // sanitizeForFilename reduces an instance URL to something safe as one path component.
 //

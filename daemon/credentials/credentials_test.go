@@ -24,9 +24,10 @@ func storeIn(t *testing.T, secrets secretStore) *Store {
 // memoryStore is a secret backend with no machine behind it, for the cases that are about Store's own
 // behavior rather than about where a token ends up.
 type memoryStore struct {
-	entries  map[string]string
-	setErr   error
-	failNext bool
+	entries   map[string]string
+	setErr    error
+	deleteErr error
+	failNext  bool
 }
 
 func newMemoryStore() *memoryStore { return &memoryStore{entries: map[string]string{}} }
@@ -51,11 +52,42 @@ func (m *memoryStore) get(_, account string) (string, error) {
 }
 
 func (m *memoryStore) delete(_, account string) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
 	delete(m.entries, account)
 	return nil
 }
 
 func (m *memoryStore) describe() string { return "a test store" }
+
+// Deliberately not "keyring" or "file": backendNamed must not recognize it, so a record saved through this
+// double resolves back to the double rather than to a real backend pointed at the test's temp directory.
+func (m *memoryStore) name() string { return "memory" }
+
+// namedStore lets a double answer to one of the real backend names, so the cases where the record and the
+// probe disagree can be built without touching the machine's own keyring.
+type namedStore struct {
+	secretStore
+	backend string
+}
+
+func (n namedStore) name() string { return n.backend }
+
+// twoBackends wires a store so that a recorded backend name resolves to one of these doubles rather than to
+// the real keyring or a file in the test's directory.
+func twoBackends(s *Store, keyring, file secretStore) {
+	s.resolveBackend = func(name string) secretStore {
+		switch name {
+		case backendKeyring:
+			return keyring
+		case backendFile:
+			return file
+		default:
+			return nil
+		}
+	}
+}
 
 func sampleRecord() Record {
 	return Record{
@@ -76,8 +108,13 @@ func TestASavedSessionComesBack(t *testing.T) {
 
 	record, token, err := store.Load()
 	require.NoError(t, err)
-	assert.Equal(t, sampleRecord(), record)
 	assert.Equal(t, "nrt_secret", token)
+
+	// Save stamps where the secret actually went, so a later process reads it back from there rather than
+	// from wherever its own probe happens to point.
+	want := sampleRecord()
+	want.SecretBackend = "memory"
+	assert.Equal(t, want, record)
 }
 
 // The daemon reads this at every start, so absent has to be an answer rather than a fault.
@@ -363,6 +400,179 @@ func TestAnEmptyDeviceFileIsReplaced(t *testing.T) {
 	id, err := store.DeviceID()
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(id, "dev_"))
+}
+
+// ---------- which backend holds the secret ----------
+
+// The record is believed over the probe. A process whose probe points somewhere else must still find the
+// secret where it was actually put — otherwise the daemon reads an empty file store, gets ErrNoCredential,
+// and reports "no stored credential; run `norite login`" for a credential sitting beside it in account.json.
+func TestTheSecretIsReadFromTheBackendTheRecordNames(t *testing.T) {
+	dir := t.TempDir()
+	keyring, file := newMemoryStore(), newMemoryStore()
+
+	// A process that reaches the keyring stores there.
+	stored, err := openIn(dir, namedStore{keyring, backendKeyring})
+	require.NoError(t, err)
+	twoBackends(stored, keyring, file)
+	require.NoError(t, stored.Save(sampleRecord(), "nrt_secret"))
+
+	record, err := stored.LoadRecord()
+	require.NoError(t, err)
+	require.Equal(t, backendKeyring, record.SecretBackend, "Save must record where it put the secret")
+	require.NotEmpty(t, keyring.entries)
+
+	// A second process whose probe picks the other backend, which holds nothing.
+	other, err := openIn(dir, namedStore{file, backendFile})
+	require.NoError(t, err)
+	twoBackends(other, keyring, file)
+
+	_, token, err := other.Load()
+	require.NoError(t, err, "the record names a backend; the probe's answer is not evidence about it")
+	assert.Equal(t, "nrt_secret", token)
+}
+
+// The same mismatch on the delete path, which was worse: absent is success in either backend, so a logout
+// deleted nothing, removed the record, and reported "Removed the credential" for a token still valid for its
+// full TTL — and unreachable afterwards, since Clear derives the key from the record it just deleted.
+func TestLogoutRemovesTheSecretFromTheBackendThatHoldsIt(t *testing.T) {
+	dir := t.TempDir()
+	keyring, file := newMemoryStore(), newMemoryStore()
+
+	stored, err := openIn(dir, namedStore{keyring, backendKeyring})
+	require.NoError(t, err)
+	twoBackends(stored, keyring, file)
+	require.NoError(t, stored.Save(sampleRecord(), "nrt_secret"))
+	require.NotEmpty(t, keyring.entries)
+
+	other, err := openIn(dir, namedStore{file, backendFile})
+	require.NoError(t, err)
+	twoBackends(other, keyring, file)
+	require.NoError(t, other.Clear())
+
+	assert.Empty(t, keyring.entries, "the secret must be removed from where it actually is")
+}
+
+// And when it genuinely cannot be reached, that is reported instead of being reported as success.
+func TestLogoutSaysSoWhenTheSecretCannotBeRemoved(t *testing.T) {
+	dir := t.TempDir()
+	keyring, file := newMemoryStore(), newMemoryStore()
+
+	store, err := openIn(dir, namedStore{keyring, backendKeyring})
+	require.NoError(t, err)
+	twoBackends(store, keyring, file)
+	require.NoError(t, store.Save(sampleRecord(), "nrt_secret"))
+
+	keyring.deleteErr = errors.New("the keyring is locked")
+	err = store.Clear()
+	require.Error(t, err, "a delete that failed must never be reported as a credential removed")
+	assert.Contains(t, err.Error(), "may remain")
+
+	// The record stays, so a later logout from a session that can reach the backend still knows what to
+	// remove. Removing it anyway is what put the token beyond reach of every future logout.
+	_, loadErr := store.LoadRecord()
+	assert.NoError(t, loadErr)
+}
+
+// Signing in from a session that cannot reach the previous backend must still work — this CLI exists for
+// SSH — but it must say what it left behind.
+func TestALoginThatCannotReachTheOldBackendProceedsAndSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	keyring, file := newMemoryStore(), newMemoryStore()
+
+	first, err := openIn(dir, namedStore{keyring, backendKeyring})
+	require.NoError(t, err)
+	twoBackends(first, keyring, file)
+	require.NoError(t, first.Save(sampleRecord(), "nrt_first"))
+
+	keyring.deleteErr = errors.New("no session bus")
+
+	var told []string
+	second, err := openIn(dir, namedStore{file, backendFile})
+	require.NoError(t, err)
+	twoBackends(second, keyring, file)
+	second.Notify = func(msg string) { told = append(told, msg) }
+
+	elsewhere := sampleRecord()
+	elsewhere.InstanceURL = "https://other.example.com"
+	require.NoError(t, second.Save(elsewhere, "nrt_second"), "an unreachable old backend must not block a login")
+
+	require.Len(t, told, 1)
+	assert.Contains(t, told[0], "norite logout")
+
+	_, token, err := second.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_second", token)
+}
+
+// A record too corrupt to say what it named cannot be cleaned up from, and logging in must not be refused
+// because of it — but the token it named is still out there, and only a person can chase it.
+func TestAnUnreadableRecordIsReportedRatherThanBlockingALogin(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, recordFileName), []byte("{not json"), 0o600))
+
+	var told []string
+	store.Notify = func(msg string) { told = append(told, msg) }
+
+	require.NoError(t, store.Save(sampleRecord(), "nrt_secret"))
+	require.Len(t, told, 1)
+	assert.Contains(t, told[0], "may still")
+}
+
+// ---------- renewing a token that may have been replaced underneath ----------
+
+// The daemon reads the record, spends up to thirty seconds on the network, then writes back. A login landing
+// in that window has already stored a session; Save would take the stale record as the truth, delete the
+// token the login just stored, and rewrite the record back to the old instance.
+func TestRenewingRefusesWhenTheSessionWasReplaced(t *testing.T) {
+	store := storeIn(t, newMemoryStore())
+
+	read := sampleRecord()
+	require.NoError(t, store.Save(read, "nrt_old"))
+
+	// The login that happened while the refresh was in flight.
+	fresh := sampleRecord()
+	fresh.InstanceURL = "https://other.example.com"
+	require.NoError(t, store.Save(fresh, "nrt_fresh"))
+
+	err := store.ReplaceToken(read, "nrt_renewed")
+	require.ErrorIs(t, err, ErrCredentialChanged)
+
+	record, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "https://other.example.com", record.InstanceURL, "the login's record must survive")
+	assert.Equal(t, "nrt_fresh", token, "the login's token must survive")
+}
+
+// A logout in the same window is the other half of it.
+func TestRenewingRefusesWhenTheSessionWasCleared(t *testing.T) {
+	store := storeIn(t, newMemoryStore())
+	require.NoError(t, store.Save(sampleRecord(), "nrt_old"))
+	require.NoError(t, store.Clear())
+
+	err := store.ReplaceToken(sampleRecord(), "nrt_renewed")
+	require.ErrorIs(t, err, ErrNoCredential)
+
+	_, _, loadErr := store.Load()
+	assert.ErrorIs(t, loadErr, ErrNoCredential, "a logout must not be undone by a refresh already in flight")
+}
+
+// The ordinary case: nothing else touched the store, so the token is replaced and the record is left alone.
+func TestRenewingReplacesOnlyTheSecret(t *testing.T) {
+	store := storeIn(t, newMemoryStore())
+	require.NoError(t, store.Save(sampleRecord(), "nrt_old"))
+
+	before, err := store.LoadRecord()
+	require.NoError(t, err)
+
+	require.NoError(t, store.ReplaceToken(sampleRecord(), "nrt_renewed"))
+
+	after, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_renewed", token)
+	assert.Equal(t, before, after, "a renewal has nothing to say about the record")
 }
 
 // ---------- switching instances ----------
