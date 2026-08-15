@@ -481,11 +481,20 @@ And on the client-auth side, from M7:
   the old family live for its full TTL beside a duplicate session. `Store.DeviceID()` is the only way to
   obtain one; it mints on first use and adopts the ID of a record written before that file existed.
 - **Untrusted text goes through `cli/internal/termsafe` before it reaches a terminal** (rule 19). `Text`
-  for a value printed inside a line — it drops newlines too, since a one-line value that can contain one
+  for a value printed inside a line — it removes newlines too, since a one-line value that can contain one
   can forge a line of output — and `Block` for output meant to span lines. Sanitize where foreign text
   *enters* the program, as the API client and `daemonctl.Runner` do, so the value is safe wherever it goes
   afterwards, including into a file; anything read back out of a file a person can edit is foreign again.
   M7 is where this started to bite: `--instance` is a URL somebody hands you, and its answers are printed.
+- **The sanitizer removes what acts on a terminal or reorders it, and nothing else** — category `Cc` plus
+  the bidi embeddings/overrides/isolates, each removed run leaving one `U+FFFD` so that a name with an
+  override never renders as the name it imitates. It deliberately keeps invisible-but-inert characters:
+  the `Cf` category that holds zero-width spaces also holds parts of written Arabic and the joiners Persian,
+  Indic and composed emoji need, so filtering by "invisible" corrupts real text. Don't widen it to
+  categories; widen the *renderer* if legibility is the problem (`docs/architecture.md` §4).
+- **A value that also bounds something is rejected, not sanitized.** `ParseInstanceURL` refuses anything
+  unprintable because that string becomes a filename and a request target — altering it silently would
+  point a password at a host nobody typed, where refusing costs one retry.
 - **Never take a password from a flag.** A flag value is in the process list and the shell history —
   `NORITE_PASSWORD` is the scripted path, matching the wizard's rule for the database password. Read
   interactively with `term.ReadPassword`, and refuse an empty answer locally rather than letting the

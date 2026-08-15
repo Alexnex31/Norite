@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
@@ -102,19 +103,20 @@ func ParseInstanceURL(raw string) (string, error) {
 	if trimmed == "" {
 		return "", errors.New("an instance URL is required")
 	}
-	// Refused rather than stripped, because this value is printed, sent, and turned into a filename: a URL
+	// Refused rather than sanitized, because this value is printed, sent, and turned into a filename: a URL
 	// quietly altered to make it printable would name a different instance than the one that was typed.
+	// Refusing is also the safe direction to be wrong in — the answer is to type it again — which is why
+	// this is stricter than the CLI's sanitizer and rejects everything unprintable rather than the subset
+	// that can act on a terminal. Nothing unprintable belongs in a URL.
 	//
 	// url.Parse refuses ASCII control characters itself, but not U+009B — which is CSI, needs no ESC in
-	// front of it, and survives into u.Path — and not invalid UTF-8, which reaches a byte-oriented terminal
-	// as whatever byte it was. Neither belongs in a hostname either way. The CLI's own sanitizer would be
-	// the natural tool here and is the wrong module: this package is the daemon's, and the dependency runs
-	// the other way (CLAUDE.md, ADR 0025).
+	// front of it, and survives into u.Path — and not U+00A0, which is a hostname that reads as another
+	// one. Invalid UTF-8 is checked separately: it decodes to U+FFFD, which *is* printable.
 	if !utf8.ValidString(trimmed) {
 		return "", fmt.Errorf("%q is not valid UTF-8, so it cannot be an instance URL", raw)
 	}
-	if strings.ContainsFunc(trimmed, isControl) {
-		return "", errors.New("an instance URL must not contain control characters")
+	if strings.ContainsFunc(trimmed, func(r rune) bool { return !unicode.IsPrint(r) }) {
+		return "", errors.New("an instance URL must not contain control or invisible characters")
 	}
 	// A bare host is what people type. Defaulting it to https rather than http means a slip cannot silently
 	// downgrade the connection that carries the password.
@@ -146,9 +148,6 @@ func ParseInstanceURL(raw string) (string, error) {
 
 	return strings.TrimSuffix(u.Scheme+"://"+u.Host+u.Path, "/"), nil
 }
-
-// isControl reports whether r can act on a terminal: the C0 range (ESC among them), DEL, and C1.
-func isControl(r rune) bool { return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) }
 
 // NewDeviceID returns an identifier for this installation.
 //

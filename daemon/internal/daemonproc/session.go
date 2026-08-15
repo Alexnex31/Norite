@@ -104,6 +104,11 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 		log.Error().Err(err).Msg("the renewed credential could not be stored")
 	}
 
+	// The instance and username are the instance's own text, and this log is read with `cat`. They are safe
+	// here because `norite login` sanitized them before storing them (cli/internal/termsafe) — not because
+	// of anything this side does. zerolog escapes the ASCII controls on its way into JSON and passes C1 and
+	// the bidi overrides through untouched, so the day the daemon fetches a name for itself rather than
+	// reading one the CLI wrote (M18), it needs that sanitizer on its own side of the line.
 	log.Info().
 		Str("instance", record.InstanceURL).
 		Str("username", record.Username).

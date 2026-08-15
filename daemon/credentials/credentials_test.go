@@ -248,13 +248,19 @@ func TestParseInstanceURL(t *testing.T) {
 			// that included it.
 			"https://ada:hunter2@chat.example.com",
 
-			// This string is printed, and refusing it is the only honest answer: stripping would leave a
-			// URL naming a different instance than the one that was typed. url.Parse catches the first of
-			// these itself, and neither of the others — U+009B is CSI with no ESC in front of it, and an
-			// invalid byte reaches a byte-oriented terminal as whatever it was.
+			// This string is printed, and refusing it is the only honest answer: sanitizing would leave a
+			// URL naming a different instance than the one that was typed. This is stricter than the CLI's
+			// sanitizer on purpose, because rejecting is the recoverable direction — nothing unprintable
+			// belongs in a URL. url.Parse catches only the first of these: U+009B is CSI with no ESC in
+			// front of it, an invalid byte reaches a byte-oriented terminal as whatever it was, U+00A0 is a
+			// hostname that reads as another one, an override prints what follows it backwards, and a
+			// zero-width space is a host nobody can see.
 			"https://chat.example.com/\x1b[2K",
 			"https://chat.example.com/\u009b2K",
 			"https://chat.example.com/\xff",
+			"https://chat\u00a0example.com",
+			"https://chat.example.com/\u202enimda",
+			"https://chat\u200b.example.com",
 		} {
 			_, err := ParseInstanceURL(input)
 			assert.Error(t, err, "input %q must be refused", input)

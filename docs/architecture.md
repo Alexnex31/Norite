@@ -1029,20 +1029,44 @@ overridable via the config file's `[cli]` section.
 code, links, mentions, custom-emoji shortcodes) — not Charm's `glamour`, to keep the trusted-rendering
 surface as narrow as the security posture used for message content everywhere else.
 
-**Terminal-escape sanitization** (`cli/internal/termsafe`, built at M7): a blanket function strips ASCII
-control characters, DEL, and the C1 range from all untrusted text (usernames, message content, link-preview
-titles, plugin manifest descriptions, webhook display names, the output of any tool the CLI shells out to)
-— specific to the CLI, since a malicious string with raw ANSI sequences could otherwise manipulate the
-terminal. Two forms: `Text` for a value printed inside a line, which drops newlines and tabs as well,
-because a one-line value that can contain a newline can forge a whole line of output; and `Block` for text
-meant to span lines, which keeps them. Invalid UTF-8 is replaced before anything examines runes — a lone
-`0x9b` is CSI, is not valid UTF-8 on its own, and would otherwise be copied through as the byte it was.
+**Terminal-escape sanitization** (`cli/internal/termsafe`, built at M7). A blanket function over all
+untrusted text — usernames, message content, link-preview titles, plugin manifest descriptions, webhook
+display names, the output of any tool the CLI shells out to. Specific to the CLI, because a terminal acts on
+what it is printed and no other client does.
+
+Its guarantee: *what a terminal displays, and the order it displays it in, is the printable characters that
+were in the string.* Two classes break that and are removed — Unicode category `Cc` (C0, DEL, and C1, the
+last on its own because a lone `0x9b` is CSI with no ESC in front of it), and the bidirectional embeddings,
+overrides and isolates (`U+202A`–`U+202E`, `U+2066`–`U+2069`), which reorder what is printed. The three bidi
+*marks* (`U+061C`, `U+200E`, `U+200F`) are kept: they only set the direction of neighbouring neutrals, and
+they occur in ordinary Arabic and Hebrew.
+
+Deliberately **not** covered: characters that are merely invisible (zero-width spaces, word joiners, tag
+characters, soft hyphens) and confusable letters. They can deceive a reader but not about which visible
+characters are present or where — and removing them by category is actively harmful, since the same `Cf`
+category holds `U+0600` and `U+06DD` (written Arabic) and `U+200C`/`U+200D` (Persian and Indic joining,
+composed emoji). Legibility is a rendering policy for the TUI's renderer, which has the font and width
+rules; this filter is not the place. Escape sequences are likewise not *parsed*: removing the ESC leaves an
+inert `[2K`, which is worse-looking and strictly safer than a parser that must be right about DCS, OSC, and
+malformed input.
+
+Each removed run becomes one `U+FFFD` rather than vanishing, so that two different strings cannot render as
+one — an impostor's name is never displayed as the name it imitates — and so a reader can see something was
+taken out. Invalid UTF-8 is replaced before anything examines runes, since a decoded `U+FFFD` looks
+printable while the underlying byte is not.
+
+Two forms: `Text` for a value printed inside a line, which removes newlines and tabs as well, because a
+one-line value that can contain a newline can forge a whole line of output; and `Block` for text meant to
+span lines, which keeps them.
 
 It is applied where foreign text *enters* the program rather than at each place it later leaves — the API
 client sanitizes a response as it decodes it, `daemonctl`'s `Runner` sanitizes what a subprocess printed —
 so a value is safe wherever it subsequently goes, including a file it is stored in. Text read back out of a
 file a person can edit is foreign again, and is sanitized at the print. `cmd/app` sanitizes every error on
 its way to stderr as a backstop, so a command that forgets cannot put an escape sequence on a terminal.
+Values that also *bound* something (an instance URL, which becomes a filename and a request target) are
+**rejected** rather than sanitized: for those, silently altering the value is the worse failure, and asking
+for it again costs nothing.
 
 **Image rendering**: `BourgeoisBear/rasterm`-based capability detection (Kitty/iTerm2/Sixel), inline when
 supported, filename/link fallback otherwise — the hook point for the "disable image loading" bandwidth

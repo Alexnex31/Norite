@@ -34,6 +34,15 @@ const requestTimeout = 30 * time.Second
 // someone's terminal.
 const maxErrorBody = 8 << 10
 
+// maxDisplayed caps a value taken from the instance for display, in runes.
+//
+// The same reasoning as maxErrorBody, applied to the one value that survives the request: the username is
+// printed, written to the record, and printed again by `norite logout`. Filling a screen is how the rest of
+// what a command said gets pushed out of view, which is the goal an erase-line sequence has by a quicker
+// route. Generous enough that no name anyone chose is affected — this instance's own limit is 32 — and the
+// cut is marked, because a name silently shortened to `ada` is a name that reads as somebody else's.
+const maxDisplayed = 128
+
 // APIError is a structured failure from the instance.
 type APIError struct {
 	Status    int
@@ -130,10 +139,22 @@ func (c *client) me(ctx context.Context, accessToken string) (account, error) {
 	// *this* code path enforces that: `--instance` is a URL somebody handed the person running the command,
 	// and it is answered by whatever is at the other end. The username is written to the record file and
 	// printed by two commands, so cleaning it once at the boundary is what makes all three safe.
-	out.Username = termsafe.Text(out.Username)
-	out.Email = termsafe.Text(out.Email)
-	out.ID = termsafe.Text(out.ID)
+	out.Username = forDisplay(out.Username)
+	out.Email = forDisplay(out.Email)
+	out.ID = forDisplay(out.ID)
 	return out, nil
+}
+
+// forDisplay makes one value from the instance safe to print and to keep.
+func forDisplay(s string) string {
+	s = termsafe.Text(s)
+
+	// Counted in runes, cut on a rune boundary: cutting bytes would split a multi-byte character and put an
+	// invalid one on the terminal, which is the thing the sanitizer just finished ruling out.
+	if runes := []rune(s); len(runes) > maxDisplayed {
+		s = string(runes[:maxDisplayed]) + "…"
+	}
+	return s
 }
 
 // do performs one request and decodes its result.

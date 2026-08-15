@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -552,12 +553,47 @@ func TestAnUnrecognizedResponseIsReportedWithoutItsEscapeSequences(t *testing.T)
 	assert.Contains(t, err.Error(), "not a Norite API response")
 }
 
+// A name that reorders what follows it is the same lie as one that erases the line, reached by a different
+// mechanism — and a terminal that implements bidi will happily print it.
+func TestAUsernameCannotReorderWhatIsPrinted(t *testing.T) {
+	f := newFakeInstance(t)
+	f.meUsername = "ada\u202enimda"
+
+	runner, _, out := testRunner(t, f, Options{})
+	require.NoError(t, runner.Run(t.Context()))
+
+	assertInertOnATerminal(t, out.String())
+}
+
+// A megabyte of "username" would push everything the command said off the screen, which is what an
+// erase-line sequence is for. The cut is marked, so a name shortened to `ada` cannot read as `ada`.
+func TestAnEnormousUsernameIsCutAndMarked(t *testing.T) {
+	f := newFakeInstance(t)
+	f.meUsername = strings.Repeat("a", 4000)
+
+	runner, store, out := testRunner(t, f, Options{})
+	require.NoError(t, runner.Run(t.Context()))
+
+	record, _, err := store.Load()
+	require.NoError(t, err)
+	assert.Less(t, len([]rune(record.Username)), 200, "an unbounded name reaches the record and the screen")
+	assert.True(t, strings.HasSuffix(record.Username, "…"), "a silent cut renders as a different name")
+	assert.Less(t, len(out.String()), 1000)
+}
+
 // assertInertOnATerminal fails if s carries anything a terminal would act on rather than print.
+// Spelled out from the Unicode tables rather than by calling termsafe, so that this asserts the property
+// the login path needs rather than agreeing with whatever the sanitizer currently does.
 func assertInertOnATerminal(t *testing.T, s string) {
 	t.Helper()
 	for i, r := range s {
-		if r < 0x20 && r != '\n' || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		switch {
+		case r == '\n':
+			// The whole output is checked at once in places, and it has lines.
+		case unicode.Is(unicode.Cc, r):
 			t.Errorf("%q carries %U at byte %d, which a terminal would act on", s, r, i)
+		case unicode.Is(unicode.Bidi_Control, r) && r != '؜' && r != '‎' && r != '‏':
+			t.Errorf("%q carries %U at byte %d, which reorders what is printed", s, r, i)
 		}
 	}
 	if !utf8.ValidString(s) {
