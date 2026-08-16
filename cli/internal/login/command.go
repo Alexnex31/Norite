@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/urfave/cli/v3"
@@ -47,12 +48,7 @@ func Command() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 
-			// What the store cannot do for itself, said out loud rather than swallowed: a credential left
-			// in a backend this session cannot reach, or a previous record too broken to name one. Through
-			// the sanitizer because the text carries an instance URL read back out of that record (rule 19).
-			store.Notify = func(msg string) {
-				_, _ = fmt.Fprintln(cmd.Writer, termsafe.Text(msg))
-			}
+			store.Notify = notifier(cmd.Writer)
 
 			readLine, readSecret, interactive := terminalReaders(os.Stdin, cmd.Writer)
 			runner := &Runner{
@@ -105,9 +101,7 @@ func LogoutCommand() *cli.Command {
 				return cli.Exit(err.Error(), 1)
 			}
 
-			store.Notify = func(msg string) {
-				_, _ = fmt.Fprintln(cmd.Writer, termsafe.Text(msg))
-			}
+			store.Notify = notifier(cmd.Writer)
 
 			// Read for the confirmation line only. An unreadable record must not stop the clearing — this
 			// is the command someone reaches for *because* the stored state is broken, and refusing to run
@@ -140,5 +134,18 @@ func LogoutCommand() *cli.Command {
 				termsafe.Text(record.Username), termsafe.Text(record.InstanceURL))
 			return nil
 		},
+	}
+}
+
+// notifier builds the callback the credential store reports through.
+//
+// One function rather than the same closure in both commands: the sanitizing is the part worth stating
+// once. These messages interpolate an instance URL read back out of a file a person can edit and an error
+// string from a keyring or a filesystem, so they are untrusted text meeting a terminal (rule 19) — and the
+// copy without the reasoning beside it is the one where a later edit drops the call.
+func notifier(w io.Writer) func(string) {
+	return func(msg string) {
+		// The write error is dropped here, once, as the login flow's own printf does.
+		_, _ = fmt.Fprintln(w, termsafe.Text(msg))
 	}
 }

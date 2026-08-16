@@ -73,7 +73,14 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 // storedSession writes a credential the way `norite login` would.
 func storedSession(t *testing.T, instanceURL, refreshToken string) *credentials.Store {
 	t.Helper()
-	store, err := credentials.OpenLocalForTest(t.TempDir())
+	return storedSessionIn(t, t.TempDir(), instanceURL, refreshToken)
+}
+
+// storedSessionIn is storedSession for a test that needs the directory too — one record shape rather than
+// two, so a field added to credentials.Record (M7 added SecretBackend) is added in one place.
+func storedSessionIn(t *testing.T, dir, instanceURL, refreshToken string) *credentials.Store {
+	t.Helper()
+	store, err := credentials.OpenLocalForTest(dir)
 	require.NoError(t, err)
 	require.NoError(t, store.Save(credentials.Record{
 		InstanceURL: instanceURL,
@@ -159,11 +166,7 @@ func TestALoginDuringTheRefreshIsNotUndone(t *testing.T) {
 func TestASpentTokenIsClearedRatherThanLeftToLookStolen(t *testing.T) {
 	f := newFakeInstance(t)
 	dir := t.TempDir()
-	store, err := credentials.OpenLocalForTest(dir)
-	require.NoError(t, err)
-	require.NoError(t, store.Save(credentials.Record{
-		InstanceURL: f.server.URL, UserID: "1", Username: "ada", DeviceID: "dev_test", DeviceName: "laptop",
-	}, "nrt_from_login"))
+	store := storedSessionIn(t, dir, f.server.URL, "nrt_from_login")
 
 	// The state directory goes read-only, so the write-back cannot land.
 	if runtime.GOOS == "windows" {

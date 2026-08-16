@@ -61,8 +61,8 @@ func (m *memoryStore) delete(_, account string) error {
 
 func (m *memoryStore) describe() string { return "a test store" }
 
-// Deliberately not "keyring" or "file": backendNamed must not recognize it, so a record saved through this
-// double resolves back to the double rather than to a real backend pointed at the test's temp directory.
+// Deliberately not "keyring" or "file": Store.backends must not have an entry for it, so a record saved
+// through this double resolves back to the double rather than to a real backend pointed at the temp dir.
 func (m *memoryStore) name() string { return "memory" }
 
 // namedStore lets a double answer to one of the real backend names, so the cases where the record and the
@@ -77,16 +77,7 @@ func (n namedStore) name() string { return n.backend }
 // twoBackends wires a store so that a recorded backend name resolves to one of these doubles rather than to
 // the real keyring or a file in the test's directory.
 func twoBackends(s *Store, keyring, file secretStore) {
-	s.resolveBackend = func(name string) secretStore {
-		switch name {
-		case backendKeyring:
-			return keyring
-		case backendFile:
-			return file
-		default:
-			return nil
-		}
-	}
+	s.backends = map[string]secretStore{backendKeyring: keyring, backendFile: file}
 }
 
 func sampleRecord() Record {
@@ -310,7 +301,7 @@ func TestParseInstanceURL(t *testing.T) {
 func TestDeviceIDsAreRandomAndURLSafe(t *testing.T) {
 	seen := map[string]bool{}
 	for range 100 {
-		id, err := NewDeviceID()
+		id, err := newDeviceID()
 		require.NoError(t, err)
 		require.False(t, seen[id], "device IDs must not repeat")
 		seen[id] = true

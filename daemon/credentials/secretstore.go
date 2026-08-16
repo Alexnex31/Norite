@@ -65,19 +65,6 @@ const (
 	backendFile    = "file"
 )
 
-// backendNamed returns the backend a record names, or nil when it names nothing recognizable — an empty
-// field on a record written before this existed, or a value from some later version.
-func backendNamed(dir, name string) secretStore {
-	switch name {
-	case backendKeyring:
-		return keyringStore{}
-	case backendFile:
-		return fileStore{dir: dir}
-	default:
-		return nil
-	}
-}
-
 // newSecretStore picks a backend for this machine.
 //
 // The choice is made once and cached, because it costs a probe: a keyring call that fails on a headless box

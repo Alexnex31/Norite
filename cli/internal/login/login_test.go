@@ -588,11 +588,12 @@ func assertInertOnATerminal(t *testing.T, s string) {
 	t.Helper()
 	for i, r := range s {
 		switch {
-		case r == '\n':
-			// The whole output is checked at once in places, and it has lines.
+		case r == '\n', r == '\t':
+			// The whole output is checked at once in places, and it has lines — and Block, which every
+			// error passes through on its way to stderr, keeps tabs as well.
 		case unicode.Is(unicode.Cc, r):
 			t.Errorf("%q carries %U at byte %d, which a terminal would act on", s, r, i)
-		case unicode.Is(unicode.Bidi_Control, r) && r != '؜' && r != '‎' && r != '‏':
+		case unicode.Is(unicode.Bidi_Control, r) && r != '\u061c' && r != '\u200e' && r != '\u200f':
 			t.Errorf("%q carries %U at byte %d, which reorders what is printed", s, r, i)
 		}
 	}

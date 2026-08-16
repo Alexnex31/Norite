@@ -164,12 +164,18 @@ func ParseInstanceURL(raw string) (string, error) {
 	return strings.TrimSuffix(u.Scheme+"://"+u.Host+u.Path, "/"), nil
 }
 
-// NewDeviceID returns an identifier for this installation.
+// newDeviceID returns an identifier for this installation.
+//
+// Unexported deliberately. Store.DeviceID is the only way to obtain one, because it is the only way that
+// mints once, adopts what a record already carries, and survives a logout — and a second exported route to
+// a fresh ID is exactly how per-login rotation would come back, which strands the previous refresh family
+// and adds a session-list entry every time. The CLI called this directly until M7 moved that decision into
+// the store; nothing outside this package needs it now, and the compiler is a better guard than a comment.
 //
 // Random rather than derived from a hostname or a MAC address: it is sent to the instance and stored on the
 // account's session list, so deriving it from anything about the machine would put that detail on a server
 // the person may not control, to solve a problem randomness solves for free.
-func NewDeviceID() (string, error) {
+func newDeviceID() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("generating a device ID: %w", err)
@@ -195,11 +201,13 @@ type Store struct {
 	// to do anything about it. Nil is allowed and drops the message, which is what tests want.
 	Notify func(string)
 
-	// resolveBackend maps a name written into a record to the store that holds that secret. Overridden only
-	// by tests: resolving "keyring" for real reaches the machine's own keyring, and the paths where the
-	// record and the probe disagree are precisely the ones that were wrong, so they have to be reachable
-	// without depositing live tokens on whichever developer runs the suite.
-	resolveBackend func(name string) secretStore
+	// backends maps a name written into a record to the store that holds that secret. Populated by openIn;
+	// a test replaces the entries, because resolving "keyring" for real reaches the machine's own keyring
+	// and the paths where the record and the probe disagree are precisely the ones that were wrong, so they
+	// have to be reachable without depositing live tokens on whichever developer runs the suite.
+	//
+	// A nil map reads fine, so a Store built without this still falls back to the probe rather than panicking.
+	backends map[string]secretStore
 
 	// betweenWrites runs between the two halves of a Save, and exists only so a test can hold the window
 	// open and prove the lock closes it. Nothing outside this package can set it, and production leaves it
@@ -220,9 +228,11 @@ func (s *Store) notify(format string, args ...any) {
 // this process"; it is not evidence about where an existing one already is, and treating it as though it
 // were is what let a read and a delete miss a token that was plainly there.
 func (s *Store) secretsFor(record Record) secretStore {
-	if named := s.resolveBackend(record.SecretBackend); named != nil {
+	if named, ok := s.backends[record.SecretBackend]; ok {
 		return named
 	}
+	// A record written before the field existed, or naming a backend from some later version. The probe's
+	// choice is what it would have used then, which is the best guess available and what M7 shipped with.
 	return s.secrets
 }
 
@@ -249,9 +259,12 @@ func OpenIn(dir string) (*Store, error) {
 
 func openIn(dir string, secrets secretStore) (*Store, error) {
 	return &Store{
-		dir:            dir,
-		secrets:        secrets,
-		resolveBackend: func(name string) secretStore { return backendNamed(dir, name) },
+		dir:     dir,
+		secrets: secrets,
+		backends: map[string]secretStore{
+			backendKeyring: keyringStore{},
+			backendFile:    fileStore{dir: dir},
+		},
 	}, nil
 }
 
@@ -274,7 +287,7 @@ func (s *Store) Save(record Record, refreshToken string) error {
 		// it — see Record.SecretBackend.
 		record.SecretBackend = s.secrets.name()
 
-		if err := s.removeSuperseded(record); err != nil {
+		if err := s.removeSuperseded(record.InstanceURL, record.SecretBackend); err != nil {
 			return err
 		}
 
@@ -299,11 +312,18 @@ func (s *Store) Save(record Record, refreshToken string) error {
 //   - The previous secret is in the backend this save is about to write to, and the delete failed. That
 //     backend will almost certainly refuse the write that follows, so failing costs a login that was not
 //     going to work anyway — and proceeding would leave a credential nothing will ever clean up.
+//
+// The two parameters are the new secret's identity — where it is going and which backend it is going to.
+// They were read off the record instead, which only worked because Save stamps SecretBackend two lines
+// before calling this: reorder those statements and both comparisons silently become `== ""`, the
+// same-secret short-circuit stops firing, and a re-login to the same instance starts by deleting the
+// secret it is about to write.
+//
 //   - The previous secret is in the *other* backend, and this process cannot reach it. The reasoning above
 //     does not carry: a keyring this session cannot see says nothing about whether the file write will
 //     work. Failing here would mean that a machine which once logged in at its desktop can never log in
 //     over SSH again — on a CLI built for SSH. So it proceeds, and says so, which is ADR 0025's rule.
-func (s *Store) removeSuperseded(record Record) error {
+func (s *Store) removeSuperseded(instanceURL, backend string) error {
 	previous, err := s.readRecord()
 	switch {
 	case errors.Is(err, ErrNoCredential):
@@ -319,12 +339,12 @@ func (s *Store) removeSuperseded(record Record) error {
 	}
 
 	from := s.secretsFor(previous)
-	if previous.InstanceURL == record.InstanceURL && from.name() == record.SecretBackend {
+	if previous.InstanceURL == instanceURL && from.name() == backend {
 		return nil // the same secret, about to be overwritten in place
 	}
 
 	if err := from.delete(keyringService, previous.InstanceURL); err != nil {
-		if from.name() == record.SecretBackend {
+		if from.name() == backend {
 			return fmt.Errorf("removing the credential for %s: %w", previous.InstanceURL, err)
 		}
 		s.notify("The previous credential for %s is stored in %s, which this session cannot reach, so it "+
@@ -464,15 +484,14 @@ func (s *Store) DeviceID() (string, error) {
 }
 
 func (s *Store) deviceID() (string, error) {
+	// ReadFile returns nil data on error and TrimSpace("") is "", so a missing file and a file truncated to
+	// nothing converge here without either needing a branch: both fall to the minting below.
 	data, err := os.ReadFile(s.devicePath())
-	switch {
-	case err == nil:
-		if id := strings.TrimSpace(string(data)); id != "" {
-			return id, nil
-		}
-		// An empty file is a truncated write, not an identity. Fall through and mint one, replacing it.
-	case !errors.Is(err, os.ErrNotExist):
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("reading the device identifier: %w", err)
+	}
+	if id := strings.TrimSpace(string(data)); id != "" {
+		return id, nil
 	}
 
 	// An installation that predates this file keeps the ID its record already carries. Without this, the
@@ -482,7 +501,7 @@ func (s *Store) deviceID() (string, error) {
 		return record.DeviceID, s.writeDeviceID(record.DeviceID)
 	}
 
-	id, err := NewDeviceID()
+	id, err := newDeviceID()
 	if err != nil {
 		return "", err
 	}

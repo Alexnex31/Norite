@@ -523,13 +523,13 @@ Three things this milestone deliberately leaves for the milestone that can do th
 
 - **A dropped refresh token cannot be revoked yet.** When a login lands mid-refresh, the daemon discards
   the token it just obtained; it stays valid at the instance until it expires. Handing it back needs M11's
-  revoke-a-session primitive, and reaching for it from the daemon needs M18's gateway connection.
+  revoke-a-session primitive, and reaching for it from the daemon needs M19's gateway connection.
 - **The daemon never re-probes for a keyring that unlocks later.** The backend is chosen once per process
   (`sync.Once`), so a daemon that started before the session keyring was unlocked keeps reading the file
   path for its whole life. Correct today because the record names the backend; worth revisiting when the
-  daemon becomes long-lived and reconnecting at M18.
+  daemon becomes long-lived and reconnecting at M19.
 - **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
-  logs was sanitized by the login that stored it. At M18 the daemon fetches names of its own, and the
+  logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
   function has to move somewhere both modules reach — not be copied.
 
 ## Project-specific skills

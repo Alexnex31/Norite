@@ -19,7 +19,7 @@ import (
 //
 // This is the half of Milestone M7 the milestone's own criterion names: the daemon uses the stored token on
 // its next launch without re-prompting. There is nothing yet to *do* with the session — the gateway
-// connection arrives at M18 — so what this proves is that the credential survives a login, a restart, and
+// connection arrives at M19 — so what this proves is that the credential survives a login, a restart, and
 // the trip back to the instance, which is the property every later milestone builds on.
 //
 // # Why the refresh token is spent at startup rather than kept for later
@@ -104,19 +104,18 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 	// ReplaceToken, not Save: the record was read before a network round trip that can take thirty seconds,
 	// and a `norite login` or `norite logout` inside that window has already replaced what is on disk. Save
 	// would take the stale record as the truth and undo them.
-	switch err := store.ReplaceToken(record, pair.RefreshToken); {
-	case err == nil:
-
+	err = store.ReplaceToken(record, pair.RefreshToken)
+	switch {
 	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
 		// Somebody signed in or out while this was in flight, so the session just renewed is not the one
 		// this machine is holding any more. Leaving their credential alone is the whole point; the token
 		// obtained here is dropped with it. It stays valid at the instance until it expires, and there is
 		// no way to hand it back — revoking one session is M11's primitive, and reaching for it from here
-		// needs the gateway connection that arrives at M18.
+		// needs the gateway connection that arrives at M19.
 		log.Info().Err(err).Msg("the stored credential changed while it was being renewed; leaving it alone")
 		return nil
 
-	default:
+	case err != nil:
 		// The store refused the write, so it still holds the token that was just spent. Presenting a
 		// rotated token is what M4's reuse detection reads as theft, and it revokes the whole device family
 		// — every other session on this installation, for a disk that was full. Clearing costs one `norite
@@ -135,7 +134,7 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 	// here because `norite login` sanitized them before storing them (cli/internal/termsafe) — not because
 	// of anything this side does. zerolog escapes the ASCII controls on its way into JSON and passes C1 and
 	// the bidi overrides through untouched, so the day the daemon fetches a name for itself rather than
-	// reading one the CLI wrote (M18), it needs that sanitizer on its own side of the line.
+	// reading one the CLI wrote (M19), it needs that sanitizer on its own side of the line.
 	log.Info().
 		Str("instance", record.InstanceURL).
 		Str("username", record.Username).

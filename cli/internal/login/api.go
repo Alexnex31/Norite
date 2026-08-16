@@ -102,10 +102,13 @@ type loginRequest struct {
 }
 
 // account is the part of GET /users/@me this command shows.
+//
+// The email the endpoint also returns is deliberately not decoded: this command was given one to sign in
+// with and has no use for the instance's copy, and a field nobody reads still reads as a dependency on the
+// contract that carries it.
 type account struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
-	Email    string `json:"email"`
 }
 
 // login exchanges a password for a token pair.
@@ -140,8 +143,11 @@ func (c *client) me(ctx context.Context, accessToken string) (account, error) {
 	// and it is answered by whatever is at the other end. The username is written to the record file and
 	// printed by two commands, so cleaning it once at the boundary is what makes all three safe.
 	out.Username = forDisplay(out.Username)
-	out.Email = forDisplay(out.Email)
-	out.ID = forDisplay(out.ID)
+
+	// Sanitized but never truncated: the ID is an opaque identifier that goes into the record and is
+	// compared, not read. A display cap would write a prefix plus an ellipsis to disk — neither the
+	// instance's identifier nor recognizable as a cut by whatever reads it next.
+	out.ID = termsafe.Text(out.ID)
 	return out, nil
 }
 
