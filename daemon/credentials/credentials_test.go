@@ -7,7 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -528,7 +530,7 @@ func TestRenewingRefusesWhenTheSessionWasReplaced(t *testing.T) {
 	fresh.InstanceURL = "https://other.example.com"
 	require.NoError(t, store.Save(fresh, "nrt_fresh"))
 
-	err := store.ReplaceToken(read, "nrt_renewed")
+	err := store.ReplaceToken(read, "nrt_old", "nrt_renewed")
 	require.ErrorIs(t, err, ErrCredentialChanged)
 
 	record, token, err := store.Load()
@@ -543,11 +545,52 @@ func TestRenewingRefusesWhenTheSessionWasCleared(t *testing.T) {
 	require.NoError(t, store.Save(sampleRecord(), "nrt_old"))
 	require.NoError(t, store.Clear())
 
-	err := store.ReplaceToken(sampleRecord(), "nrt_renewed")
+	err := store.ReplaceToken(sampleRecord(), "nrt_old", "nrt_renewed")
 	require.ErrorIs(t, err, ErrNoCredential)
 
 	_, _, loadErr := store.Load()
 	assert.ErrorIs(t, loadErr, ErrNoCredential, "a logout must not be undone by a refresh already in flight")
+}
+
+// The gap the instance/device comparison left, and it is the ordinary way to sign in again: same instance
+// (resolveInstance falls back to the stored URL), same device (it is per installation now), so neither
+// field changes — while the backend revokes the device's previous family on that login and issues a new
+// token. Overwriting it puts back the one the login just killed, and the next start 401s on a session the
+// person had just successfully created.
+func TestRenewingRefusesWhenTheTokenWasReplacedForTheSameSession(t *testing.T) {
+	store := storeIn(t, newMemoryStore())
+
+	read := sampleRecord()
+	require.NoError(t, store.Save(read, "nrt_old"))
+
+	// `norite login` to the same instance, same device: the record is identical, the token is not.
+	require.NoError(t, store.Save(read, "nrt_from_the_new_login"))
+
+	err := store.ReplaceToken(read, "nrt_old", "nrt_renewed")
+	require.ErrorIs(t, err, ErrCredentialChanged)
+
+	_, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_from_the_new_login", token, "the login's token must survive")
+}
+
+// A lock this could not take says nothing about what is on disk, so it must be distinguishable from a write
+// that was refused: the caller clears the credential on the second and must not on the first.
+func TestABusyStoreIsItsOwnAnswer(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+	require.NoError(t, store.Save(sampleRecord(), "nrt_old"))
+	store.lockWait = 20 * time.Millisecond
+
+	// Hold the lock the way another process would, for longer than the wait.
+	held := flock.New(filepath.Join(dir, lockFileName))
+	require.NoError(t, held.Lock())
+	t.Cleanup(func() { _ = held.Unlock() })
+
+	err = store.ReplaceToken(sampleRecord(), "nrt_old", "nrt_renewed")
+	require.ErrorIs(t, err, ErrStoreBusy)
+	assert.NotErrorIs(t, err, ErrCredentialChanged)
 }
 
 // The ordinary case: nothing else touched the store, so the token is replaced and the record is left alone.
@@ -558,12 +601,78 @@ func TestRenewingReplacesOnlyTheSecret(t *testing.T) {
 	before, err := store.LoadRecord()
 	require.NoError(t, err)
 
-	require.NoError(t, store.ReplaceToken(sampleRecord(), "nrt_renewed"))
+	require.NoError(t, store.ReplaceToken(sampleRecord(), "nrt_old", "nrt_renewed"))
 
 	after, token, err := store.Load()
 	require.NoError(t, err)
 	assert.Equal(t, "nrt_renewed", token)
 	assert.Equal(t, before, after, "a renewal has nothing to say about the record")
+}
+
+// Both files this reads are plain files a person can edit, and the instance URL is re-parsed on every use
+// for exactly that reason while the device ID was taken on trust. A value the backend refuses makes login
+// answer 401, which the CLI maps to the same vague "email and password did not match" a wrong password
+// gets — so the person retypes a correct password forever, and an ID adopted from a broken record was kept.
+func TestAnUnusableStoredDeviceIDIsReplaced(t *testing.T) {
+	tooLong := strings.Repeat("d", maxDeviceID+1)
+	for name, stored := range map[string]string{
+		"too long for the instance to accept": tooLong,
+		"carries an escape sequence":          "dev_\x1b[2Kada",
+		"carries an invisible character":      "dev_\u200bada",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := openIn(dir, newMemoryStore())
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(dir, deviceFileName), []byte(stored), 0o600))
+
+			id, err := store.DeviceID()
+			require.NoError(t, err)
+			assert.NotEqual(t, stored, id, "a value the instance can only refuse must not be kept")
+			assert.True(t, strings.HasPrefix(id, "dev_"))
+		})
+	}
+}
+
+// The adoption path takes the same care: a hand-edited record must not put an unusable ID into the file
+// where it would then be kept forever.
+func TestAnUnusableDeviceIDIsNotAdoptedFromTheRecord(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+
+	broken := sampleRecord()
+	broken.DeviceID = strings.Repeat("d", maxDeviceID+1)
+	require.NoError(t, store.writeRecord(broken))
+
+	id, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.NotEqual(t, broken.DeviceID, id)
+}
+
+// OpenLocalForTest promises a store that never touches the machine's keyring. openIn wires "keyring" to the
+// real one, so the promise has to be re-made after it — a record naming that backend would otherwise send
+// reads and deletes to the developer's own keyring under the real service name.
+func TestOpenLocalForTestNeverReachesTheRealKeyring(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenLocalForTest(dir)
+	require.NoError(t, err)
+
+	for _, backend := range []string{backendKeyring, backendFile} {
+		if _, ok := store.backends[backend].(fileStore); !ok {
+			t.Errorf("backend %q resolves to %T, which is not the file store", backend, store.backends[backend])
+		}
+	}
+
+	// And a record naming the keyring round-trips through the directory rather than the machine.
+	record := sampleRecord()
+	record.SecretBackend = backendKeyring
+	require.NoError(t, store.writeRecord(record))
+	require.NoError(t, fileStore{dir: dir}.set(keyringService, record.InstanceURL, "nrt_secret"))
+
+	_, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_secret", token)
 }
 
 // ---------- switching instances ----------

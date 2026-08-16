@@ -52,6 +52,11 @@ func TestConcurrentSavesDoNotInterleave(t *testing.T) {
 			second <- err
 			return
 		}
+		// This test is the one place a wait is the point rather than a nuisance: the window below is held
+		// open deliberately, and what is being proven is that the second writer blocks until it closes
+		// rather than interleaving. So it keeps production's patience, not the shortened one a test store
+		// carries for contention it does not expect.
+		store.lockWait = lockTimeout
 		fast := sampleRecord()
 		fast.Username = "grace"
 		second <- store.Save(fast, "nrt_grace")

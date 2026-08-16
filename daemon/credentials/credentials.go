@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -208,6 +209,10 @@ type Store struct {
 	//
 	// A nil map reads fine, so a Store built without this still falls back to the probe rather than panicking.
 	backends map[string]secretStore
+
+	// lockWait overrides how long withLock waits, and exists so the test for a busy store does not spend the
+	// real five seconds proving it. Zero means the constant.
+	lockWait time.Duration
 
 	// betweenWrites runs between the two halves of a Save, and exists only so a test can hold the window
 	// open and prove the lock closes it. Nothing outside this package can set it, and production leaves it
@@ -450,7 +455,16 @@ var ErrCredentialChanged = errors.New("the stored credential changed while it wa
 //
 // So this refuses instead. It never writes the record, because a renewal has nothing to say about it, and
 // it touches the secret only while the session on disk is still the one the caller renewed.
-func (s *Store) ReplaceToken(renewed Record, refreshToken string) error {
+//
+// "Still the one" means the *token*, not the account it belongs to. Comparing the instance and the device
+// was not enough and the gap was the ordinary case rather than an exotic one: signing in again defaults to
+// the same instance (resolveInstance falls back to the stored URL) with the same device ID (it is per
+// installation now), so neither field changes — while the backend, on that login, revokes the device's
+// previous family and issues a new token (auth.Service.Login). The daemon would then pass the guard and
+// overwrite a live credential with the one the login had just killed, and the next start would 401 on a
+// session the person had just successfully created. So `spent` is what was read, and it has to still be
+// there.
+func (s *Store) ReplaceToken(renewed Record, spent, refreshToken string) error {
 	if refreshToken == "" {
 		return errors.New("refusing to store an empty refresh token")
 	}
@@ -463,7 +477,20 @@ func (s *Store) ReplaceToken(renewed Record, refreshToken string) error {
 		if current.InstanceURL != renewed.InstanceURL || current.DeviceID != renewed.DeviceID {
 			return ErrCredentialChanged
 		}
-		return s.secretsFor(current).set(keyringService, current.InstanceURL, refreshToken)
+
+		secrets := s.secretsFor(current)
+		stored, err := secrets.get(keyringService, current.InstanceURL)
+		if errors.Is(err, ErrNoCredential) {
+			return ErrCredentialChanged
+		}
+		if err != nil {
+			return err
+		}
+		if stored != spent {
+			return ErrCredentialChanged
+		}
+
+		return secrets.set(keyringService, current.InstanceURL, refreshToken)
 	})
 }
 
@@ -490,14 +517,14 @@ func (s *Store) deviceID() (string, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("reading the device identifier: %w", err)
 	}
-	if id := strings.TrimSpace(string(data)); id != "" {
+	if id := strings.TrimSpace(string(data)); usableDeviceID(id) {
 		return id, nil
 	}
 
 	// An installation that predates this file keeps the ID its record already carries. Without this, the
 	// first login after an upgrade would look exactly like the logout case it exists to prevent — and it
 	// only ever reads the record, so the identity moves one way and cannot be dragged backwards later.
-	if record, err := s.readRecord(); err == nil && record.DeviceID != "" {
+	if record, err := s.readRecord(); err == nil && usableDeviceID(record.DeviceID) {
 		return record.DeviceID, s.writeDeviceID(record.DeviceID)
 	}
 
@@ -506,6 +533,30 @@ func (s *Store) deviceID() (string, error) {
 		return "", err
 	}
 	return id, s.writeDeviceID(id)
+}
+
+// maxDeviceID mirrors the backend's own bound (auth.MaxDeviceIDLength). Checked here so that a value which
+// can only ever be refused is replaced while that is still cheap.
+const maxDeviceID = 128
+
+// usableDeviceID reports whether a stored identifier is one the instance could accept.
+//
+// Both files this reads are, in this package's own words, plain files a person can edit — and the instance
+// URL is re-parsed on every use for exactly that reason while this was taken on trust. The failure it
+// prevents is not subtle but is very hard to read: a device ID the backend rejects makes login answer 401,
+// which the CLI maps to the same deliberately vague "that email and password did not match an account"
+// every wrong password gets. The person would retype a correct password forever. Worse, an ID adopted from
+// a broken record was written to device-id and kept, so the state repaired itself only by hand.
+//
+// A bad value is replaced rather than reported: it is not a credential, nothing is lost by minting another,
+// and refusing to log in over a file the person never edited would be the worse answer.
+func usableDeviceID(id string) bool {
+	if id == "" || len(id) > maxDeviceID {
+		return false
+	}
+	// The instance stores it verbatim and shows it in a session list, and it reaches this machine's terminal
+	// through that list; anything unprintable in it was not put there by this program.
+	return !strings.ContainsFunc(id, func(r rune) bool { return !unicode.IsPrint(r) })
 }
 
 func (s *Store) writeDeviceID(id string) error {

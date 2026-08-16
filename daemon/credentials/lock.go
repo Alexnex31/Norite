@@ -2,6 +2,7 @@ package credentials
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -26,6 +27,15 @@ import (
 // architecture.md §3 requires exactly this of every writer of shared client state: atomic writes *plus*
 // `gofrs/flock` around each read-modify-write cycle. This is that lock for the credential pair.
 
+// ErrStoreBusy reports that the lock could not be taken, so nothing was read and nothing was written.
+//
+// Its own sentinel because "I could not look" and "I looked and the write failed" call for opposite
+// responses, and conflating them destroyed credentials: the daemon treats a refused write as proof that the
+// store still holds a token the instance has already rotated, and clears it. A lock timeout is not that
+// proof — the most likely holder of the lock is a `norite login` writing a *fresh* credential, which is
+// exactly the one that must not be cleared.
+var ErrStoreBusy = errors.New("the credential store is in use by another process")
+
 // lockFileName is a lock and never holds content. Separate from the files it guards, because a lock taken
 // on a file that is then replaced by rename protects nothing — the new file is a different inode, and the
 // next process locks that one instead.
@@ -48,7 +58,12 @@ const lockRetryInterval = 20 * time.Millisecond
 func (s *Store) withLock(exclusive bool, fn func() error) error {
 	lock := flock.New(filepath.Join(s.dir, lockFileName))
 
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	wait := lockTimeout
+	if s.lockWait > 0 {
+		wait = s.lockWait
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 
 	var (
@@ -61,12 +76,12 @@ func (s *Store) withLock(exclusive bool, fn func() error) error {
 		got, err = lock.TryRLockContext(ctx, lockRetryInterval)
 	}
 	if err != nil {
-		return fmt.Errorf("waiting for the credential lock: %w", err)
+		return fmt.Errorf("%w: waiting for the credential lock: %w", ErrStoreBusy, err)
 	}
 	if !got {
 		return fmt.Errorf(
-			"another process is using the credential store (waited %s); is a `norite login` already running?",
-			lockTimeout)
+			"%w: another process is using the credential store (waited %s); is a `norite login` already "+
+				"running?", ErrStoreBusy, wait)
 	}
 	defer func() { _ = lock.Unlock() }()
 

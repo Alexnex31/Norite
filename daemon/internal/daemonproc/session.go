@@ -104,8 +104,16 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 	// ReplaceToken, not Save: the record was read before a network round trip that can take thirty seconds,
 	// and a `norite login` or `norite logout` inside that window has already replaced what is on disk. Save
 	// would take the stale record as the truth and undo them.
-	err = store.ReplaceToken(record, pair.RefreshToken)
+	err = store.ReplaceToken(record, refreshToken, pair.RefreshToken)
 	switch {
+	case errors.Is(err, credentials.ErrStoreBusy):
+		// Nothing was read and nothing was written, so nothing is known about what is on disk — and the
+		// likeliest holder of that lock is a `norite login` part-way through storing a fresh credential,
+		// which is precisely what must not be cleared. Clearing here logged people out of the session they
+		// had just created, because a keyring prompt can hold the lock past the five-second wait.
+		log.Warn().Err(err).Msg("could not store the renewed credential; leaving the store untouched")
+		return nil
+
 	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
 		// Somebody signed in or out while this was in flight, so the session just renewed is not the one
 		// this machine is holding any more. Leaving their credential alone is the whole point; the token

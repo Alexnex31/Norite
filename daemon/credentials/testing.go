@@ -1,6 +1,9 @@
 package credentials
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // OpenLocalForTest returns a store that keeps everything in dir, including the secret, and never touches
 // the machine's OS keyring.
@@ -19,5 +22,23 @@ func OpenLocalForTest(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("a credential store needs a directory")
 	}
-	return openIn(dir, fileStore{dir: dir})
+
+	store, err := openIn(dir, fileStore{dir: dir})
+	if err != nil {
+		return nil, err
+	}
+
+	// Both names resolve to the file, which is what makes the promise above true rather than merely likely.
+	// openIn wires "keyring" to the real keyring, so a record carrying `"secret_backend": "keyring"` — a
+	// literal in a test, or one left in a reused directory — would otherwise send Load, Clear and
+	// ReplaceToken to the developer's own keyring under the real service name.
+	// A test that contends on the lock should find out in milliseconds. Production waits the full five
+	// seconds because the holder is a real command doing real work; a test's holder is the test itself.
+	store.lockWait = 100 * time.Millisecond
+
+	store.backends = map[string]secretStore{
+		backendKeyring: fileStore{dir: dir},
+		backendFile:    fileStore{dir: dir},
+	}
+	return store, nil
 }

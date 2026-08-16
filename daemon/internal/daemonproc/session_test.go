@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/gofrs/flock"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -179,6 +181,31 @@ func TestASpentTokenIsClearedRatherThanLeftToLookStolen(t *testing.T) {
 	sess := establishSession(t.Context(), testLogger(logs), store, f.server.Client())
 	assert.Nil(t, sess)
 	assert.Contains(t, logs.String(), "could not be stored")
+}
+
+// A lock the daemon could not take says nothing about what is on disk, and the likeliest holder of it is a
+// `norite login` writing a fresh credential — a keyring prompt can hold it past the five-second wait. This
+// used to fall into the "the write was refused, so the store holds a spent token" branch and clear it, which
+// logged the person out of the session they had just been told they were signed in to.
+func TestABusyStoreDoesNotCostTheCredential(t *testing.T) {
+	f := newFakeInstance(t)
+	dir := t.TempDir()
+	store := storedSessionIn(t, dir, f.server.URL, "nrt_from_login")
+
+	// Held for longer than the daemon is willing to wait, the way another process would.
+	held := flock.New(filepath.Join(dir, "credentials.lock"))
+	f.beforeRefresh = func() { require.NoError(t, held.Lock()) }
+	t.Cleanup(func() { _ = held.Unlock() })
+
+	logs := &strings.Builder{}
+	assert.Nil(t, establishSession(t.Context(), testLogger(logs), store, f.server.Client()))
+	require.NoError(t, held.Unlock())
+
+	record, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, f.server.URL, record.InstanceURL, "the credential must still be there")
+	assert.Equal(t, "nrt_from_login", token)
+	assert.Contains(t, logs.String(), "leaving the store untouched")
 }
 
 // The access token stays in memory. Fifteen minutes is shorter than the interval between the restarts it
