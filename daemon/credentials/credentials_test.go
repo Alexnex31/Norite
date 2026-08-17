@@ -576,7 +576,7 @@ func TestRenewingRefusesWhenTheTokenWasReplacedForTheSameSession(t *testing.T) {
 
 // A lock this could not take says nothing about what is on disk, so it must be distinguishable from a write
 // that was refused: the caller clears the credential on the second and must not on the first.
-func TestABusyStoreIsItsOwnAnswer(t *testing.T) {
+func TestAnUnreadableStoreIsItsOwnAnswer(t *testing.T) {
 	dir := t.TempDir()
 	store, err := openIn(dir, newMemoryStore())
 	require.NoError(t, err)
@@ -589,7 +589,22 @@ func TestABusyStoreIsItsOwnAnswer(t *testing.T) {
 	t.Cleanup(func() { _ = held.Unlock() })
 
 	err = store.ReplaceToken(sampleRecord(), "nrt_old", "nrt_renewed")
-	require.ErrorIs(t, err, ErrStoreBusy)
+	require.ErrorIs(t, err, ErrStoreUnavailable)
+	assert.NotErrorIs(t, err, ErrCredentialChanged)
+}
+
+// A secret that cannot be read is not a write that was refused. The caller answers a refused write by
+// deleting the credential, so reporting an unreadable one the same way deletes a credential that was
+// perfectly good — a token file whose mode changed under a restore, or a keyring that stopped answering.
+func TestRenewingReportsAnUnreadableSecretAsUnavailable(t *testing.T) {
+	secrets := newMemoryStore()
+	store := storeIn(t, secrets)
+	require.NoError(t, store.Save(sampleRecord(), "nrt_old"))
+
+	secrets.failNext = true
+	err := store.ReplaceToken(sampleRecord(), "nrt_old", "nrt_renewed")
+
+	require.ErrorIs(t, err, ErrStoreUnavailable)
 	assert.NotErrorIs(t, err, ErrCredentialChanged)
 }
 
@@ -614,11 +629,11 @@ func TestRenewingReplacesOnlyTheSecret(t *testing.T) {
 // answer 401, which the CLI maps to the same vague "email and password did not match" a wrong password
 // gets — so the person retypes a correct password forever, and an ID adopted from a broken record was kept.
 func TestAnUnusableStoredDeviceIDIsReplaced(t *testing.T) {
-	tooLong := strings.Repeat("d", maxDeviceID+1)
 	for name, stored := range map[string]string{
-		"too long for the instance to accept": tooLong,
-		"carries an escape sequence":          "dev_\x1b[2Kada",
-		"carries an invisible character":      "dev_\u200bada",
+		"too long for the instance to accept": strings.Repeat("d", maxDeviceID+1),
+		// json.Marshal turns each invalid byte into a 3-byte U+FFFD on the way to the instance, so this
+		// arrives well over the 128-byte bound even though the file is comfortably under it.
+		"invalid UTF-8 that grows when marshaled": "dev_" + strings.Repeat("\xff", 50),
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -631,6 +646,24 @@ func TestAnUnusableStoredDeviceIDIsReplaced(t *testing.T) {
 			assert.NotEqual(t, stored, id, "a value the instance can only refuse must not be kept")
 			assert.True(t, strings.HasPrefix(id, "dev_"))
 		})
+	}
+}
+
+// The other direction, and the one that costs more to get wrong: an identifier the instance accepts must
+// be kept, whatever it looks like. An earlier version of this check also demanded printable runes, which
+// discarded working IDs — and replacing a working device ID strands the previous refresh family for its
+// full TTL and adds a session-list entry nobody created, which is the harm the ID exists to avoid.
+func TestAnUnusualButAcceptableDeviceIDIsKept(t *testing.T) {
+	// auth.normalizeDeviceID rejects only empty and over-128-bytes; nothing in either client renders this.
+	for _, stored := range []string{"dev_\x1b[2Kada", "dev_\u200bada", "device id with spaces", "夢"} {
+		dir := t.TempDir()
+		store, err := openIn(dir, newMemoryStore())
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, deviceFileName), []byte(stored), 0o600))
+
+		id, err := store.DeviceID()
+		require.NoError(t, err)
+		assert.Equal(t, stored, id, "an identifier the instance would accept must not be replaced")
 	}
 }
 

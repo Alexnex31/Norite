@@ -104,14 +104,21 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 	// ReplaceToken, not Save: the record was read before a network round trip that can take thirty seconds,
 	// and a `norite login` or `norite logout` inside that window has already replaced what is on disk. Save
 	// would take the stale record as the truth and undo them.
-	err = store.ReplaceToken(record, refreshToken, pair.RefreshToken)
+	err = storeRenewedToken(store, record, refreshToken, pair.RefreshToken)
 	switch {
-	case errors.Is(err, credentials.ErrStoreBusy):
-		// Nothing was read and nothing was written, so nothing is known about what is on disk — and the
-		// likeliest holder of that lock is a `norite login` part-way through storing a fresh credential,
-		// which is precisely what must not be cleared. Clearing here logged people out of the session they
-		// had just created, because a keyring prompt can hold the lock past the five-second wait.
-		log.Warn().Err(err).Msg("could not store the renewed credential; leaving the store untouched")
+	case errors.Is(err, credentials.ErrStoreUnavailable):
+		// Nothing could be read and nothing was written, so nothing is known about what is on disk — and
+		// the likeliest holder of that lock is a `norite login` part-way through storing a fresh
+		// credential, which is precisely what must not be cleared. Clearing here logged people out of the
+		// session they had just created, because a keyring prompt can hold the lock past the wait.
+		//
+		// Said plainly rather than reassuringly: what is on disk is, unless somebody else replaced it, the
+		// token this refresh just spent, and presenting a spent token is what gets a device family revoked.
+		// There is nothing better to do about it from here — the one repair, clearing it, is the thing that
+		// must not happen while another writer may be mid-write.
+		log.Warn().Err(err).
+			Msg("could not store the renewed credential; the stored one may now be spent — if the next " +
+				"start reports a refused credential, run `norite login` again")
 		return nil
 
 	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
@@ -152,6 +159,36 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 
 	return &session{record: record, accessToken: pair.AccessToken, expiresAt: pair.ExpiresAt}
 }
+
+// storeRenewedToken writes the renewed token back, retrying a store that could not be read.
+//
+// The lock is free in milliseconds in every ordinary case, so the one thing worth waiting out is another
+// command holding it for the moment it takes to finish — a `norite login` writing its own credential, most
+// often. Giving up on the first attempt leaves the spent token on disk, which the next start presents and
+// M4's reuse detection reads as theft, revoking the whole device family.
+//
+// Bounded deliberately: a keyring's unlock dialog can hold that lock for as long as nobody answers it, and
+// this runs before the daemon reports ready. Two extra attempts is enough for a writer that is finishing
+// and pointless for one that is waiting on a person, so it stops rather than trading startup for a case
+// retrying cannot fix.
+func storeRenewedToken(store *credentials.Store, record credentials.Record, spent, renewed string) error {
+	var err error
+	for attempt := range renewAttempts {
+		if attempt > 0 {
+			time.Sleep(renewRetryPause)
+		}
+		err = store.ReplaceToken(record, spent, renewed)
+		if !errors.Is(err, credentials.ErrStoreUnavailable) {
+			return err
+		}
+	}
+	return err
+}
+
+const (
+	renewAttempts   = 3
+	renewRetryPause = 250 * time.Millisecond
+)
 
 // tokenPair is the instance's answer to a refresh.
 type tokenPair struct {

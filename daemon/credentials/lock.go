@@ -27,14 +27,20 @@ import (
 // architecture.md §3 requires exactly this of every writer of shared client state: atomic writes *plus*
 // `gofrs/flock` around each read-modify-write cycle. This is that lock for the credential pair.
 
-// ErrStoreBusy reports that the lock could not be taken, so nothing was read and nothing was written.
+// ErrStoreUnavailable reports that nothing could be determined about what is stored: the lock was not
+// taken, or the record or the secret could not be read. Nothing was written either.
 //
 // Its own sentinel because "I could not look" and "I looked and the write failed" call for opposite
-// responses, and conflating them destroyed credentials: the daemon treats a refused write as proof that the
-// store still holds a token the instance has already rotated, and clears it. A lock timeout is not that
-// proof — the most likely holder of the lock is a `norite login` writing a *fresh* credential, which is
+// responses, and conflating them destroys credentials: the daemon treats a refused write as proof that the
+// store still holds a token the instance has already rotated, and clears it. Not being able to look is not
+// that proof — the likeliest holder of the lock is a `norite login` writing a *fresh* credential, which is
 // exactly the one that must not be cleared.
-var ErrStoreBusy = errors.New("the credential store is in use by another process")
+//
+// It covers every failure *before* the write for the same reason. Once the compare-and-swap has confirmed
+// the stored secret is the one being replaced, a failure is genuinely "the write was refused"; anything
+// earlier is not, whatever caused it — a held lock, a lock file that could not be opened at all, a token
+// file whose mode changed under us.
+var ErrStoreUnavailable = errors.New("the credential store could not be read")
 
 // lockFileName is a lock and never holds content. Separate from the files it guards, because a lock taken
 // on a file that is then replaced by rename protects nothing — the new file is a different inode, and the
@@ -76,12 +82,12 @@ func (s *Store) withLock(exclusive bool, fn func() error) error {
 		got, err = lock.TryRLockContext(ctx, lockRetryInterval)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: waiting for the credential lock: %w", ErrStoreBusy, err)
+		return fmt.Errorf("%w: waiting for the credential lock: %w", ErrStoreUnavailable, err)
 	}
 	if !got {
 		return fmt.Errorf(
-			"%w: another process is using the credential store (waited %s); is a `norite login` already "+
-				"running?", ErrStoreBusy, wait)
+			"%w: another process holds the lock (waited %s); is a `norite login` already running?",
+			ErrStoreUnavailable, wait)
 	}
 	defer func() { _ = lock.Unlock() }()
 

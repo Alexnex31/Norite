@@ -28,14 +28,14 @@ func OpenLocalForTest(dir string) (*Store, error) {
 		return nil, err
 	}
 
-	// Both names resolve to the file, which is what makes the promise above true rather than merely likely.
-	// openIn wires "keyring" to the real keyring, so a record carrying `"secret_backend": "keyring"` — a
-	// literal in a test, or one left in a reused directory — would otherwise send Load, Clear and
-	// ReplaceToken to the developer's own keyring under the real service name.
 	// A test that contends on the lock should find out in milliseconds. Production waits the full five
 	// seconds because the holder is a real command doing real work; a test's holder is the test itself.
 	store.lockWait = 100 * time.Millisecond
 
+	// Both names resolve to the file, which is what makes the promise above true rather than merely likely.
+	// openIn wires "keyring" to the real keyring, so a record carrying `"secret_backend": "keyring"` — a
+	// literal in a test, or one left in a reused directory — would otherwise send Load, Clear and
+	// ReplaceToken to the developer's own keyring under the real service name.
 	store.backends = map[string]secretStore{
 		backendKeyring: fileStore{dir: dir},
 		backendFile:    fileStore{dir: dir},

@@ -471,8 +471,11 @@ func (s *Store) ReplaceToken(renewed Record, spent, refreshToken string) error {
 
 	return s.withLock(true, func() error {
 		current, err := s.readRecord()
-		if err != nil {
-			return err // ErrNoCredential included: a logout took it, and it is not coming back
+		switch {
+		case errors.Is(err, ErrNoCredential):
+			return err // a logout took it, and it is not coming back
+		case err != nil:
+			return fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 		}
 		if current.InstanceURL != renewed.InstanceURL || current.DeviceID != renewed.DeviceID {
 			return ErrCredentialChanged
@@ -480,16 +483,21 @@ func (s *Store) ReplaceToken(renewed Record, spent, refreshToken string) error {
 
 		secrets := s.secretsFor(current)
 		stored, err := secrets.get(keyringService, current.InstanceURL)
-		if errors.Is(err, ErrNoCredential) {
+		switch {
+		case errors.Is(err, ErrNoCredential):
 			return ErrCredentialChanged
-		}
-		if err != nil {
-			return err
+		case err != nil:
+			// Unreadable is not refused. A token file whose mode changed under us, or a keyring that has
+			// stopped answering, says nothing about what is in it — and the caller's answer to a refused
+			// write is to delete the credential, which here would delete one that is perfectly good.
+			return fmt.Errorf("%w: %w", ErrStoreUnavailable, err)
 		}
 		if stored != spent {
 			return ErrCredentialChanged
 		}
 
+		// Past this point the stored secret is known to be the one being replaced, so a failure really is
+		// the write being refused, and the caller may act on that.
 		return secrets.set(keyringService, current.InstanceURL, refreshToken)
 	})
 }
@@ -543,20 +551,26 @@ const maxDeviceID = 128
 //
 // Both files this reads are, in this package's own words, plain files a person can edit — and the instance
 // URL is re-parsed on every use for exactly that reason while this was taken on trust. The failure it
-// prevents is not subtle but is very hard to read: a device ID the backend rejects makes login answer 401,
+// prevents is not subtle but is very hard to read: a device ID the backend refuses makes login answer 401,
 // which the CLI maps to the same deliberately vague "that email and password did not match an account"
 // every wrong password gets. The person would retype a correct password forever. Worse, an ID adopted from
 // a broken record was written to device-id and kept, so the state repaired itself only by hand.
 //
+// It checks exactly what auth.normalizeDeviceID checks — non-empty, at most 128 *bytes* — and nothing
+// more. An earlier version also required every rune to be printable, which was wrong in the expensive
+// direction: the instance accepts those bytes happily, so this discarded working identifiers, and replacing
+// a working device ID is the harm Record.DeviceID exists to prevent — it strands the previous refresh
+// family for its full TTL and adds a session-list entry nobody created. Nothing renders this value either,
+// so rule 19 has no claim on it.
+//
+// Valid UTF-8 is required, and that is a length check rather than an aesthetic one: encoding/json coerces
+// each invalid byte to U+FFFD when the ID is marshaled into the login request, so a 60-byte identifier can
+// arrive at the instance as 140 and be refused for a length the file never had.
+//
 // A bad value is replaced rather than reported: it is not a credential, nothing is lost by minting another,
 // and refusing to log in over a file the person never edited would be the worse answer.
 func usableDeviceID(id string) bool {
-	if id == "" || len(id) > maxDeviceID {
-		return false
-	}
-	// The instance stores it verbatim and shows it in a session list, and it reaches this machine's terminal
-	// through that list; anything unprintable in it was not put there by this program.
-	return !strings.ContainsFunc(id, func(r rune) bool { return !unicode.IsPrint(r) })
+	return id != "" && len(id) <= maxDeviceID && utf8.ValidString(id)
 }
 
 func (s *Store) writeDeviceID(id string) error {

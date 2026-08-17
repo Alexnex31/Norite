@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/rs/zerolog"
@@ -187,7 +188,7 @@ func TestASpentTokenIsClearedRatherThanLeftToLookStolen(t *testing.T) {
 // `norite login` writing a fresh credential — a keyring prompt can hold it past the five-second wait. This
 // used to fall into the "the write was refused, so the store holds a spent token" branch and clear it, which
 // logged the person out of the session they had just been told they were signed in to.
-func TestABusyStoreDoesNotCostTheCredential(t *testing.T) {
+func TestAnUnreadableStoreDoesNotCostTheCredential(t *testing.T) {
 	f := newFakeInstance(t)
 	dir := t.TempDir()
 	store := storedSessionIn(t, dir, f.server.URL, "nrt_from_login")
@@ -205,7 +206,33 @@ func TestABusyStoreDoesNotCostTheCredential(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, f.server.URL, record.InstanceURL, "the credential must still be there")
 	assert.Equal(t, "nrt_from_login", token)
-	assert.Contains(t, logs.String(), "leaving the store untouched")
+	assert.Contains(t, logs.String(), "may now be spent")
+}
+
+// The lock is free in milliseconds in every ordinary case, so a writer that is simply finishing is worth
+// waiting out: giving up on the first attempt leaves the spent token on disk, and the next start presents
+// it and gets the device family revoked for reuse.
+func TestARenewalRetriesAStoreThatIsBrieflyLocked(t *testing.T) {
+	f := newFakeInstance(t)
+	dir := t.TempDir()
+	store := storedSessionIn(t, dir, f.server.URL, "nrt_from_login")
+
+	// Held while the refresh is in flight, then released the way a command finishing its own write would.
+	held := flock.New(filepath.Join(dir, "credentials.lock"))
+	f.beforeRefresh = func() {
+		require.NoError(t, held.Lock())
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			_ = held.Unlock()
+		}()
+	}
+
+	logs := &strings.Builder{}
+	require.NotNil(t, establishSession(t.Context(), testLogger(logs), store, f.server.Client()))
+
+	_, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_rotated", token, "the retry must land the renewed token rather than leaving a spent one")
 }
 
 // The access token stays in memory. Fifteen minutes is shorter than the interval between the restarts it
