@@ -525,15 +525,17 @@ func (s *Store) deviceID() (string, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("reading the device identifier: %w", err)
 	}
-	if id := strings.TrimSpace(string(data)); usableDeviceID(id) {
+	if id, ok := normalizedDeviceID(string(data)); ok {
 		return id, nil
 	}
 
 	// An installation that predates this file keeps the ID its record already carries. Without this, the
 	// first login after an upgrade would look exactly like the logout case it exists to prevent — and it
 	// only ever reads the record, so the identity moves one way and cannot be dragged backwards later.
-	if record, err := s.readRecord(); err == nil && usableDeviceID(record.DeviceID) {
-		return record.DeviceID, s.writeDeviceID(record.DeviceID)
+	if record, err := s.readRecord(); err == nil {
+		if id, ok := normalizedDeviceID(record.DeviceID); ok {
+			return id, s.writeDeviceID(id)
+		}
 	}
 
 	id, err := newDeviceID()
@@ -547,30 +549,34 @@ func (s *Store) deviceID() (string, error) {
 // can only ever be refused is replaced while that is still cheap.
 const maxDeviceID = 128
 
-// usableDeviceID reports whether a stored identifier is one the instance could accept.
+// normalizedDeviceID returns the identifier the instance would see, and whether it could accept it.
 //
-// Both files this reads are, in this package's own words, plain files a person can edit — and the instance
-// URL is re-parsed on every use for exactly that reason while this was taken on trust. The failure it
-// prevents is not subtle but is very hard to read: a device ID the backend refuses makes login answer 401,
-// which the CLI maps to the same deliberately vague "that email and password did not match an account"
-// every wrong password gets. The person would retype a correct password forever. Worse, an ID adopted from
-// a broken record was written to device-id and kept, so the state repaired itself only by hand.
+// It mirrors auth.normalizeDeviceID deliberately and in the same order: trim, then require non-empty and at
+// most 128 *bytes*. Checking a different string than the one that gets sent is what made an earlier version
+// of this wrong in a way that could not repair itself — a record holding "\t" passed the check untrimmed,
+// was adopted, and was written to device-id; the next run trimmed the file back to empty, fell through to
+// the record again, and adopted the same value forever, while every login sent "\t", which the instance
+// trims to nothing and answers with the 401 the CLI reports as "email and password did not match". The
+// returned value is the trimmed one, so what is stored is what will be sent.
 //
-// It checks exactly what auth.normalizeDeviceID checks — non-empty, at most 128 *bytes* — and nothing
-// more. An earlier version also required every rune to be printable, which was wrong in the expensive
-// direction: the instance accepts those bytes happily, so this discarded working identifiers, and replacing
-// a working device ID is the harm Record.DeviceID exists to prevent — it strands the previous refresh
-// family for its full TTL and adds a session-list entry nobody created. Nothing renders this value either,
-// so rule 19 has no claim on it.
+// Both files this reads are, in this package's own words, plain files a person can edit — the instance URL
+// is re-parsed on every use for exactly that reason, and this was taken on trust.
 //
-// Valid UTF-8 is required, and that is a length check rather than an aesthetic one: encoding/json coerces
-// each invalid byte to U+FFFD when the ID is marshaled into the login request, so a 60-byte identifier can
-// arrive at the instance as 140 and be refused for a length the file never had.
+// It checks nothing beyond what the backend checks. An earlier version also required every rune to be
+// printable, which was wrong in the expensive direction: the instance accepts those bytes happily, so it
+// discarded identifiers that work, and replacing a working device ID is the harm Record.DeviceID exists to
+// prevent — it strands the previous refresh family for its full TTL and adds a session-list entry nobody
+// created. Nothing renders this value either, so rule 19 has no claim on it.
 //
-// A bad value is replaced rather than reported: it is not a credential, nothing is lost by minting another,
-// and refusing to log in over a file the person never edited would be the worse answer.
-func usableDeviceID(id string) bool {
-	return id != "" && len(id) <= maxDeviceID && utf8.ValidString(id)
+// Valid UTF-8 is required, and that is part of the length rule rather than an aesthetic one: encoding/json
+// coerces each invalid byte to U+FFFD when the ID is marshaled into the login request, so a 60-byte
+// identifier can arrive at the instance as 140 and be refused for a length the file never had.
+//
+// A value that fails is replaced rather than reported: it is not a credential, nothing is lost by minting
+// another, and refusing to log in over a file the person never edited would be the worse answer.
+func normalizedDeviceID(raw string) (string, bool) {
+	id := strings.TrimSpace(raw)
+	return id, id != "" && len(id) <= maxDeviceID && utf8.ValidString(id)
 }
 
 func (s *Store) writeDeviceID(id string) error {

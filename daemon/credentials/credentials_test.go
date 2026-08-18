@@ -649,6 +649,49 @@ func TestAnUnusableStoredDeviceIDIsReplaced(t *testing.T) {
 	}
 }
 
+// A whitespace-only identifier passed an untrimmed check, was adopted, and was written to device-id — and
+// the next run trimmed the file back to empty, fell through to the same record, and adopted it again. There
+// was no run on which a fresh one was minted, while every login sent a value the instance trims to nothing
+// and answers with the 401 the CLI reports as "email and password did not match".
+func TestAWhitespaceOnlyDeviceIDIsReplacedRatherThanAdoptedForever(t *testing.T) {
+	for _, stored := range []string{"\t", " ", "\n", "  \t "} {
+		dir := t.TempDir()
+		store, err := openIn(dir, newMemoryStore())
+		require.NoError(t, err)
+
+		broken := sampleRecord()
+		broken.DeviceID = stored
+		require.NoError(t, store.writeRecord(broken))
+
+		first, err := store.DeviceID()
+		require.NoError(t, err)
+		assert.True(t, strings.HasPrefix(first, "dev_"), "a fresh ID must be minted on the first run, got %q", first)
+
+		// And it sticks, rather than being replaced by the record's value on the next run.
+		second, err := store.DeviceID()
+		require.NoError(t, err)
+		assert.Equal(t, first, second)
+	}
+}
+
+// The mirror image, which cuts the other way: the instance trims before it measures, so an identifier that
+// is over the bound only because of surrounding whitespace is one it would accept. Discarding it would
+// strand the refresh family it names.
+func TestADeviceIDIsTrimmedBeforeItIsMeasured(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openIn(dir, newMemoryStore())
+	require.NoError(t, err)
+
+	fits := "dev_" + strings.Repeat("d", maxDeviceID-4)
+	padded := "  " + fits + "  "
+	require.Greater(t, len(padded), maxDeviceID)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, deviceFileName), []byte(padded), 0o600))
+
+	id, err := store.DeviceID()
+	require.NoError(t, err)
+	assert.Equal(t, fits, id, "the stored value must be the one the instance will actually see")
+}
+
 // The other direction, and the one that costs more to get wrong: an identifier the instance accepts must
 // be kept, whatever it looks like. An earlier version of this check also demanded printable runes, which
 // discarded working IDs — and replacing a working device ID strands the previous refresh family for its

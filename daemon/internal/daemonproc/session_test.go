@@ -209,30 +209,28 @@ func TestAnUnreadableStoreDoesNotCostTheCredential(t *testing.T) {
 	assert.Contains(t, logs.String(), "may now be spent")
 }
 
-// The lock is free in milliseconds in every ordinary case, so a writer that is simply finishing is worth
-// waiting out: giving up on the first attempt leaves the spent token on disk, and the next start presents
-// it and gets the device family revoked for reuse.
-func TestARenewalRetriesAStoreThatIsBrieflyLocked(t *testing.T) {
+// A writer that is merely finishing is waited out by the lock itself — that is what its five-second bound
+// is for — so the write-back lands without any retry loop above it. The test store waits 100ms, so the
+// hold here is proportionally brief in the same way a real one is against five seconds.
+func TestARenewalWaitsOutABrieflyHeldLock(t *testing.T) {
 	f := newFakeInstance(t)
 	dir := t.TempDir()
 	store := storedSessionIn(t, dir, f.server.URL, "nrt_from_login")
 
-	// Held while the refresh is in flight, then released the way a command finishing its own write would.
 	held := flock.New(filepath.Join(dir, "credentials.lock"))
 	f.beforeRefresh = func() {
 		require.NoError(t, held.Lock())
 		go func() {
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			_ = held.Unlock()
 		}()
 	}
 
-	logs := &strings.Builder{}
-	require.NotNil(t, establishSession(t.Context(), testLogger(logs), store, f.server.Client()))
+	require.NotNil(t, establishSession(t.Context(), testLogger(io.Discard), store, f.server.Client()))
 
 	_, token, err := store.Load()
 	require.NoError(t, err)
-	assert.Equal(t, "nrt_rotated", token, "the retry must land the renewed token rather than leaving a spent one")
+	assert.Equal(t, "nrt_rotated", token, "a lock held briefly must not cost the renewed token")
 }
 
 // The access token stays in memory. Fifteen minutes is shorter than the interval between the restarts it
