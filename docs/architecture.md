@@ -88,13 +88,18 @@ Locked-in decisions:
 │   ├── cmd/app/                  # main() only: process lifetime and exit codes, nothing else
 │   ├── internal/cliapp/          # urfave/cli v3 command tree, global --json/--help flags, completions
 │   ├── internal/<command>/       # one package per command group, e.g. instanceinit (`norite instance init`)
-│   ├── tui/                      # pane engine, keybindings, markdown renderer, sanitization, image rendering
+│   ├── internal/termsafe/        # the blanket terminal-escape sanitizer every untrusted string passes
+│   ├── tui/                      # pane engine, keybindings, markdown renderer, image rendering
 │   └── go.mod
 ├── gui/                          # The native GUI — Gio
 │   ├── app/                      # Gio window/event loop
 │   ├── widgets/                  # hand-built: message list, pane tiling, voice UI, settings, whiteboard
 │   └── go.mod
 ├── daemon/                       # Shared background daemon
+│   ├── cmd/daemond/              # main() only: process lifetime, signals, exit codes
+│   ├── credentials/              # the stored session: keyring-or-file secret, record, device identity
+│   ├── internal/daemonproc/      # single-instance flock, log rotation, startup sign-in, clean shutdown
+│   ├── internal/paths/           # the per-user 0700 state directory, resolved per platform
 │   ├── gatewayclient/            # holds the real WS connection, in-memory scrollback/presence
 │   ├── ipc/                      # Unix socket / named pipe server, bot-automation TCP listener
 │   ├── config/                   # go-toml v2 document-editing, fsnotify hot-reload, flock, config split
@@ -770,7 +775,21 @@ callback URL), and a headless/SSH device-code fallback (`device_code` table, min
 server-rendered completion page, independent of the web SPA).
 
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
-entry, one process; CLI/GUI never independently store a token copy.
+entry, one process; CLI/GUI never independently store a token copy. `norite login` (M7) is the single
+exception and a temporary one: it writes that entry because it is the only process that ever sees the
+password, and stops doing so at M20, when the local IPC socket exists and credentials cross it instead.
+
+**Where the credential actually lives** (M7, [ADR 0025](adr/0025-credential-storage-without-a-keyring.md)):
+the OS keyring where the machine has one, and a `0600` file in the daemon's `0700` per-user state directory
+where it does not — a headless Linux server has no Secret Service, and keyring-only would make the CLI
+unusable on exactly the machines it exists for. The fallback is plaintext, deliberately: a decryption key
+stored beside its ciphertext is obfuscation, not protection. `norite login` says which of the two it used,
+so the degradation is never discovered later. Only the refresh token is stored; an access token expires
+long before any restart it would be persisted to survive. Beside it sits a non-secret record — instance and
+account — kept in a plain file so that showing which account is signed in never has to open the keyring,
+and, in a third file, the per-installation `device_id` that scopes the refresh family. That one is separate
+precisely so a logout cannot take it: a local logout revokes nothing server-side, so a fresh ID would add a
+session-list entry while the family the old one named stayed live for its full TTL.
 
 **Registration** (M4, hardened at M10): today `POST /auth/register` answers 409 on an address that already
 has an account, which makes the instance enumerable. It is the one auth endpoint that discloses account
@@ -1014,10 +1033,44 @@ overridable via the config file's `[cli]` section.
 code, links, mentions, custom-emoji shortcodes) — not Charm's `glamour`, to keep the trusted-rendering
 surface as narrow as the security posture used for message content everywhere else.
 
-**Terminal-escape sanitization**: a blanket function strips/escapes ASCII control characters and ESC
-sequences from all untrusted text (usernames, message content, link-preview titles, plugin manifest
-descriptions, webhook display names) at the single point it meets terminal output — specific to the CLI,
-since a malicious string with raw ANSI sequences could otherwise manipulate the terminal.
+**Terminal-escape sanitization** (`cli/internal/termsafe`, built at M7). A blanket function over all
+untrusted text — usernames, message content, link-preview titles, plugin manifest descriptions, webhook
+display names, the output of any tool the CLI shells out to. Specific to the CLI, because a terminal acts on
+what it is printed and no other client does.
+
+Its guarantee: *what a terminal displays, and the order it displays it in, is the printable characters that
+were in the string.* Two classes break that and are removed — Unicode category `Cc` (C0, DEL, and C1, the
+last on its own because a lone `0x9b` is CSI with no ESC in front of it), and the bidirectional embeddings,
+overrides and isolates (`U+202A`–`U+202E`, `U+2066`–`U+2069`), which reorder what is printed. The three bidi
+*marks* (`U+061C`, `U+200E`, `U+200F`) are kept: they only set the direction of neighbouring neutrals, and
+they occur in ordinary Arabic and Hebrew.
+
+Deliberately **not** covered: characters that are merely invisible (zero-width spaces, word joiners, tag
+characters, soft hyphens) and confusable letters. They can deceive a reader but not about which visible
+characters are present or where — and removing them by category is actively harmful, since the same `Cf`
+category holds `U+0600` and `U+06DD` (written Arabic) and `U+200C`/`U+200D` (Persian and Indic joining,
+composed emoji). Legibility is a rendering policy for the TUI's renderer, which has the font and width
+rules; this filter is not the place. Escape sequences are likewise not *parsed*: removing the ESC leaves an
+inert `[2K`, which is worse-looking and strictly safer than a parser that must be right about DCS, OSC, and
+malformed input.
+
+Each removed run becomes one `U+FFFD` rather than vanishing, so that two different strings cannot render as
+one — an impostor's name is never displayed as the name it imitates — and so a reader can see something was
+taken out. Invalid UTF-8 is replaced before anything examines runes, since a decoded `U+FFFD` looks
+printable while the underlying byte is not.
+
+Two forms: `Text` for a value printed inside a line, which removes newlines and tabs as well, because a
+one-line value that can contain a newline can forge a whole line of output; and `Block` for text meant to
+span lines, which keeps them.
+
+It is applied where foreign text *enters* the program rather than at each place it later leaves — the API
+client sanitizes a response as it decodes it, `daemonctl`'s `Runner` sanitizes what a subprocess printed —
+so a value is safe wherever it subsequently goes, including a file it is stored in. Text read back out of a
+file a person can edit is foreign again, and is sanitized at the print. `cmd/app` sanitizes every error on
+its way to stderr as a backstop, so a command that forgets cannot put an escape sequence on a terminal.
+Values that also *bound* something (an instance URL, which becomes a filename and a request target) are
+**rejected** rather than sanitized: for those, silently altering the value is the worse failure, and asking
+for it again costs nothing.
 
 **Image rendering**: `BourgeoisBear/rasterm`-based capability detection (Kitty/iTerm2/Sixel), inline when
 supported, filename/link fallback otherwise — the hook point for the "disable image loading" bandwidth

@@ -29,6 +29,8 @@ type recordingSender struct {
 	failures atomic.Int32 // fail this many times before succeeding
 	block    chan struct{}
 	started  chan struct{}
+	// beforeSend runs at the top of every attempt, so a test can act in the middle of one.
+	beforeSend func()
 }
 
 func (s *recordingSender) Send(ctx context.Context, msg Message) error {
@@ -37,6 +39,9 @@ func (s *recordingSender) Send(ctx context.Context, msg Message) error {
 		case s.started <- struct{}{}:
 		default:
 		}
+	}
+	if s.beforeSend != nil {
+		s.beforeSend()
 	}
 	if s.block != nil {
 		select {
@@ -186,6 +191,42 @@ func TestShutdownGivesUpOnADeadline(t *testing.T) {
 
 // Shutdown is called from a path that can run twice — a failed startup unwinds through it — so a second
 // call must be a no-op rather than a panic on an already-closed channel.
+// Canceling the backoff is not the same as stopping the retries, and the first version of this fix
+// confused the two: the wait ended immediately on shutdown and the loop went straight into the next attempt
+// with a full send timeout of its own, so a wedged relay held the stop for nearly as long as before — and
+// the retries, no longer spaced by a backoff, arrived back to back.
+func TestShutdownStopsRetryingRatherThanRetryingFaster(t *testing.T) {
+	sender := &recordingSender{}
+	sender.failures.Store(10) // never succeeds
+
+	q := newQueue(t, Options{Sender: sender, Attempts: 5, Backoff: time.Millisecond})
+
+	// Count attempts, and stop the queue from inside the first one — the moment the retry decision is
+	// about to be made for real.
+	var attempts atomic.Int32
+	stopped := make(chan struct{})
+	q.sleep = func(context.Context, time.Duration) {}
+	sender.beforeSend = func() {
+		if attempts.Add(1) == 1 {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = q.Shutdown(ctx)
+				close(stopped)
+			}()
+			// Give Shutdown time to close the channel and cancel, so the retry decision is made against a
+			// queue that is genuinely stopping rather than one that merely will be.
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	require.NoError(t, q.Enqueue(Message{Kind: KindPasswordReset, To: "ada@example.com"}))
+	<-stopped
+
+	assert.LessOrEqual(t, int(attempts.Load()), 2,
+		"a stopping queue must give up on the message, not spend its remaining attempts on it")
+}
+
 func TestShutdownIsIdempotent(t *testing.T) {
 	q := NewQueue(Options{Sender: &recordingSender{}, Logger: zerolog.New(io.Discard)})
 

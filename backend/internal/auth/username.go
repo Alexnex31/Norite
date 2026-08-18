@@ -33,9 +33,11 @@ func NormalizeUsername(raw string) string {
 // An allow-list, not a deny-list, and that is the whole design. The rule this replaced was
 // `excludesall= `, which excluded exactly one character — U+0020 — and therefore admitted tabs, newlines,
 // C0/C1 control bytes, DEL, ANSI escape introducers and the bidi override characters into a string every
-// client renders. CLAUDE.md rule 19 requires a terminal-safe sanitizer in front of untrusted text; that
-// sanitizer does not exist yet, so until it does this function is the only thing standing between a
-// crafted username and a terminal.
+// client renders. CLAUDE.md rule 19 requires a terminal-safe sanitizer in front of untrusted text, and one
+// exists as of M7 (`cli/internal/termsafe`) — but it protects the terminal of whoever is *reading*, and
+// only on the client that remembers to call it. This is the other half: what a name may contain at all, on
+// the one instance that decides, before it is stored and handed to every client that will ever render it.
+// Neither replaces the other, and a client is not the place to make an identifier well-formed.
 //
 // A deny-list would have to enumerate those classes correctly and stay correct as Unicode grows. The
 // allow-list is the inverse and cannot rot: letters and digits in any script, plus the three separators

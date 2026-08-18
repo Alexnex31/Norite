@@ -6,41 +6,8 @@ import (
 	"testing"
 )
 
-func TestTerminalSafeStripsEscapeSequences(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"plain text is untouched", "active", "active"},
-		{"newlines and tabs survive", "TaskName:\t\\X\nStatus:\tReady", "TaskName:\t\\X\nStatus:\tReady"},
-
-		// The attack this exists to stop: a sequence that repaints the line, so what the user reads is not
-		// what the command actually reported.
-		{"ANSI color", "\x1b[31mactive\x1b[0m", "[31mactive[0m"},
-		{"cursor movement", "stopped\x1b[2K\x1b[1Grunning", "stopped[2K[1Grunning"},
-		{"carriage return overwrite", "inactive\ractive", "inactiveactive"},
-
-		// 0x9b is CSI on its own in some terminals, with no ESC in front of it to look for — which is why
-		// the filter covers the whole C1 range rather than just hunting for 0x1b.
-		{"bare CSI with no ESC", "a\u009b31mb", "a31mb"},
-
-		{"DEL", "a\u007fb", "ab"},
-		{"NUL and bell", "a\x00b\ac", "abc"},
-
-		// Sanitizing must not mangle legitimate text. A localized Windows reports its task status in the
-		// system language, and those words have to survive intact.
-		{"non-ASCII text is preserved", "Prêt — 日本語", "Prêt — 日本語"},
-		{"empty", "", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := terminalSafe(tc.in); got != tc.want {
-				t.Errorf("terminalSafe(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
+// The sanitizer itself lives in cli/internal/termsafe and is tested there. What belongs here is that the
+// Runner actually applies it, which is the property every backend depends on without knowing it does.
 
 func TestExecRunnerSanitizesWhatItCaptures(t *testing.T) {
 	if _, err := exec.LookPath("printf"); err != nil {

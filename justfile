@@ -121,3 +121,18 @@ security-scan:
 # Build every binary via goreleaser, snapshot mode (no publish, no signing — that lands at Milestone M24).
 build:
     goreleaser build --snapshot --clean
+
+# Build every module with the workspace switched off.
+#
+# go.work resolves cross-module imports from the checkout, which since M7 hides a module whose own go.mod
+# and go.sum are missing an entry — cli requires daemon now, so a dependency added to daemon is invisible
+# from cli until something builds without the workspace. A release build does. So does anyone consuming one
+# module on its own.
+build-standalone:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for module in backend cli gui daemon; do
+        echo "[$module] building without the workspace"
+        (cd "$module" && GOWORK=off go build ./...)
+    done
+    echo "every module builds standalone"

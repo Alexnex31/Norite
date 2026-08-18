@@ -35,7 +35,7 @@ type oauthExchangeRequest struct {
 
 type oauthCompleteRequest struct {
 	SignupToken string `json:"signup_token" validate:"required"`
-	Username    string `json:"username" validate:"required,min=2,max=64"`
+	Username    string `json:"username" validate:"required,min=2,max=32"`
 }
 
 type oauthExchangeCodeResponse struct {

@@ -74,8 +74,11 @@ of this section.
   callback handling. Done when: completing a Google or GitHub OAuth flow against the backend issues a valid
   token pair.
 - **M7 — CLI `norite login`, password plus keychain**: a direct in-terminal password prompt, storing the
-  resulting tokens via `zalando/go-keyring`. Done when: `norite login` with a password succeeds, and the daemon
-  can use the stored token on next launch without re-prompting.
+  resulting tokens via `zalando/go-keyring` — and, where the machine has no keyring at all, in a `0600` file
+  in the daemon's `0700` per-user state directory instead, since a headless Linux server has no Secret
+  Service and that is precisely the kind of machine this CLI exists for
+  ([ADR 0025](adr/0025-credential-storage-without-a-keyring.md)). Done when: `norite login` with a password
+  succeeds, and the daemon can use the stored token on next launch without re-prompting.
 - **M8 — CLI OAuth loopback flow**: the system-browser-plus-localhost-callback loopback login, using the
   fixed local port (with its documented fallback-port list) registered as the exact callback URL with both
   providers. Done when: `norite login` opens a browser, completes Google or GitHub OAuth via the fixed
@@ -183,7 +186,11 @@ of this section.
   delivery to a second, healthy attached client.
 - **M21 — Config file**: the shared TOML config (`pelletier/go-toml` v2, document-editing mode for
   comment-preserving programmatic writes), atomic writes (temp file plus rename) plus `gofrs/flock`-based
-  locking around each read-modify-write cycle from every writer, the `fsnotify`-based hot-reload in the
+  locking around each read-modify-write cycle from every writer — by then there are two implementations of
+  that write to unify, `instanceinit.writeAtomically` (M2) and `credentials.writeFileAtomically` (M7), and
+  **neither fsyncs the parent directory after the rename**, so the rename itself is not durable across a
+  crash; one shared helper is one place to fix that, and it has to live where every writer can reach it
+  (the `daemon` module, as `credentials` already does) — the `fsnotify`-based hot-reload in the
   daemon, and the shared theme spec (named roles mapped to ANSI/native color, defined here, consumed later by
   the CLI at M42 and the GUI at M73). Also: the config-file split (hand-editable `config.toml` vs. the
   daemon-owned state file for plugin grants/hashes and the voice breadcrumb), the same-machine CLI/GUI
@@ -296,10 +303,18 @@ of this section.
 - **M43 — CLI markdown renderer**: the small custom allow-list-only renderer (bold/italic/code/links/
   mentions), not `glamour`. Done when: it renders exactly the allow-listed subset and nothing more, verified
   against a test corpus of disallowed markdown.
-- **M44 — CLI terminal-safe sanitization layer**: the blanket function stripping/escaping control characters
-  and ANSI escape sequences, applied at the single point where any untrusted text meets terminal output
-  (usernames, messages, link-preview titles, plugin manifest descriptions, webhook display names). Done when:
-  a test string containing raw escape sequences renders harmlessly instead of manipulating the terminal.
+- **M44 — CLI terminal-safe sanitization layer**: **the blanket function itself landed early, at M7**
+  (`cli/internal/termsafe`), because `norite login` prints a username and an error message that a stranger's
+  instance chose and rule 19 applies from the first such line — not from the milestone that happened to
+  schedule it. It removes category `Cc` and the bidi embeddings/overrides/isolates, leaving one `U+FFFD` per
+  removed run, and is applied where foreign text enters the program. What remains here is the surfaces that
+  do not exist yet: the TUI's per-frame render path (M41–M43), message content, link-preview titles, plugin
+  manifest descriptions and webhook display names, each sanitized as it enters rather than at each print.
+  Revisit two decisions then, with a renderer that has font and width rules: invisible-but-inert characters
+  (zero-width, tag characters) and confusables are deliberately *out* of scope at M7, because filtering by
+  "invisible" removes parts of written Arabic and the joiners Persian, Indic and composed emoji need. Done
+  when: a message, a username and a link-preview title containing raw escape sequences all render harmlessly
+  in the TUI instead of manipulating the terminal.
 - **M45 — CLI image rendering**: `BourgeoisBear/rasterm`-based capability detection (Kitty/iTerm2/Sixel),
   inline rendering with filename/link fallback, the "disable image loading" toggle hook point. Done when: the
   same attachment renders inline on a capable terminal and as a link on an incapable one.

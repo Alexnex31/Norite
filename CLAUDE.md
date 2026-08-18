@@ -234,7 +234,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M5.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M6.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -259,7 +259,14 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   always-202 request and single-use confirm endpoints, and the server-rendered `/reset` page — this
   codebase's first HTML surface, which is why `httpx.HTMLPage` exists. The same PR carried nine fixes from
   a repo-wide review of already-merged M1/M2/M4 code.
-- **M6 — OAuth backend flow**: in progress.
+- **M6 — OAuth backend flow**: done (tag `m6`). `golang.org/x/oauth2` with PKCE for Google and GitHub,
+  migration `000004_oauth` (`oauth_identities`, plus `oauth_states` and `oauth_exchange_codes` — both
+  deliberate additions), the callback's server-rendered pages, and `auth.RunSweeper`, which expires the
+  short-lived rows M5 and M6 create because no milestone ever did. Decisions in ADR 0024: a provider is
+  trusted for one thing, nothing is written to `users` until a username is chosen, and a sign-in is bound
+  to the client that started it. Two review passes ran against the branch and everything they found was
+  fixed on it.
+- **M7 — CLI `norite login`, password plus keychain**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -268,10 +275,14 @@ re-derive:
   → blocking advisory-lock-guarded migration → *then* readiness. `/api/v1/healthz` answers 503
   `{"status":"starting"}` until migrations finish, then 200. `-migrate-only` runs migrations and exits —
   that's what `just db-migrate` and, later, the flagship's Helm pre-upgrade Job use.
-- **Middleware chain** (`cmd/server/router.go`), fixed by `docs/architecture.md` §2: RequestID →
-  EchoRequestID → RealIP *(only when `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders →
-  StructuredLogger → RateLimit. `AuthenticateBearer` slots in below RateLimit at M4. Domain routers mount
-  in the rate-limited group inside `/api/v1`; `/healthz` sits outside it on purpose.
+- **Middleware chain** (`cmd/server/router.go`), fixed by `docs/architecture.md` §2:
+  SanitizeInboundRequestID → RequestID → EchoRequestID → RealIP *(mounted only when
+  `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders → StructuredLogger → RateLimit.
+  `AuthenticateBearer` slots in below RateLimit at M4. SanitizeInboundRequestID and RealIP are one decision
+  made twice — whether a client-supplied forwarded header may be believed — and both take it from that one
+  setting, at the top, where nothing below re-opens it. A request ID is not cosmetic: it is echoed to the
+  client, written to every log line, and returned in every error body. Domain routers mount in the
+  rate-limited group inside `/api/v1`; `/healthz` sits outside it on purpose.
 - **Errors**: return `httpx.ErrNotFound` / `ErrForbidden` / … (or `httpx.Errorf(sentinel, …)`) from
   services and let `httpx.WriteError` map them. 5xx detail is logged, never returned. Every response
   carries `X-Request-Id`; every error body carries `request_id`.
@@ -451,6 +462,75 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
   A new table with a TTL adds its delete to `SweepExpired`, and **ships a non-partial index on the column
   the sweep filters by**: a partial index predicated on "not yet consumed" cannot serve a sweep that
   deletes regardless, which is the mistake made on all three of these tables and corrected in `000005`.
+
+And on the client-auth side, from M7:
+
+- **The credential format lives in `daemon/credentials`, and the CLI imports it** — the repository's first
+  cross-module dependency (`cli` → `daemon`, relative `replace`). It follows from ADR 0011: the daemon is
+  the sole holder of its account's tokens, so the daemon module owns what a stored credential is. Two
+  implementations of one on-disk shape drift, and the failure mode is a login that appears to work and a
+  daemon that cannot find it.
+- **The keyring is not assumed to exist.** A headless Linux box has no Secret Service, which is exactly
+  where this CLI is meant to run, so storage falls back to a `0600` file in the `0700` state directory
+  (ADR 0025). The backend is chosen by *writing* a probe entry, never by reading one — a read of a missing
+  entry looks identical on a working keyring and a broken one. Never make the fallback silent.
+- **Only the refresh token is persisted.** An access token lives 15 minutes, shorter than the gap between
+  the restarts persistence would let it survive. The non-secret record beside it is a separate file so
+  `LoadRecord` can answer "who is logged in" without opening a keyring, which on a locked one pops a
+  system dialog.
+- **A `device_id` is per installation, not per login, and a logout keeps it.** Regenerating it strands the
+  previous refresh family until it expires and adds a session-list entry each time; rotating it is what
+  reuse detection reads as theft. It lives in its own file rather than in the credential record, because
+  `Clear` removes the record — and logging out revokes nothing on the instance, so a fresh ID would leave
+  the old family live for its full TTL beside a duplicate session. `Store.DeviceID()` is the only way to
+  obtain one; it mints on first use and adopts the ID of a record written before that file existed.
+- **Untrusted text goes through `cli/internal/termsafe` before it reaches a terminal** (rule 19). `Text`
+  for a value printed inside a line — it removes newlines too, since a one-line value that can contain one
+  can forge a line of output — and `Block` for output meant to span lines. Sanitize where foreign text
+  *enters* the program, as the API client and `daemonctl.Runner` do, so the value is safe wherever it goes
+  afterwards, including into a file; anything read back out of a file a person can edit is foreign again.
+  M7 is where this started to bite: `--instance` is a URL somebody hands you, and its answers are printed.
+- **The sanitizer removes what acts on a terminal or reorders it, and nothing else** — category `Cc` plus
+  the bidi embeddings/overrides/isolates, each removed run leaving one `U+FFFD` so that a name with an
+  override never renders as the name it imitates. It deliberately keeps invisible-but-inert characters:
+  the `Cf` category that holds zero-width spaces also holds parts of written Arabic and the joiners Persian,
+  Indic and composed emoji need, so filtering by "invisible" corrupts real text. Don't widen it to
+  categories; widen the *renderer* if legibility is the problem (`docs/architecture.md` §4).
+- **A value that also bounds something is rejected, not sanitized.** `ParseInstanceURL` refuses anything
+  unprintable because that string becomes a filename and a request target — altering it silently would
+  point a password at a host nobody typed, where refusing costs one retry.
+- **Never take a password from a flag.** A flag value is in the process list and the shell history —
+  `NORITE_PASSWORD` is the scripted path, matching the wizard's rule for the database password. Read
+  interactively with `term.ReadPassword`, and refuse an empty answer locally rather than letting the
+  instance's deliberately vague 401 read as "wrong password".
+- **A daemon with no session is still a daemon.** No credential, an unreachable instance, and a refused
+  token are all logged and survived — refusing to start would mean the daemon cannot be installed before
+  its first login, and `norite daemon install` deliberately runs first.
+- **A refresh writes back with `ReplaceToken`, never `Save`.** The record is read before a network round
+  trip and written after, so a `norite login` or `norite logout` landing in that window already owns the
+  store; `Save` would take the stale record as truth and delete the token the login just stored. The lock
+  makes each operation atomic and says nothing about a read-modify-write spanning two of them.
+- **The record names the backend its secret is in** (`Record.SecretBackend`), and reads and deletes go
+  there rather than to whatever this process's probe picks. The probe answers "where would a new secret go
+  here", which is not evidence about where an existing one is — a desktop login reaches the keyring, a
+  systemd user unit starting before it unlocks does not, and an SSH session has no session bus at all.
+- **What the store cannot finish, it says through `Notify`** — a credential left in a backend this session
+  cannot reach, a previous record too broken to name one. Failing instead would make `norite login`
+  impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
+  token from the only person who can deal with it. The CLI prints it, the daemon logs it.
+
+Three things this milestone deliberately leaves for the milestone that can do them properly:
+
+- **A dropped refresh token cannot be revoked yet.** When a login lands mid-refresh, the daemon discards
+  the token it just obtained; it stays valid at the instance until it expires. Handing it back needs M11's
+  revoke-a-session primitive, and reaching for it from the daemon needs M19's gateway connection.
+- **The daemon never re-probes for a keyring that unlocks later.** The backend is chosen once per process
+  (`sync.Once`), so a daemon that started before the session keyring was unlocked keeps reading the file
+  path for its whole life. Correct today because the record names the backend; worth revisiting when the
+  daemon becomes long-lived and reconnecting at M19.
+- **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
+  logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
+  function has to move somewhere both modules reach — not be copied.
 
 ## Project-specific skills
 
