@@ -243,7 +243,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M6.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
+**Phase A (foundation), through M7.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -275,7 +275,15 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   trusted for one thing, nothing is written to `users` until a username is chosen, and a sign-in is bound
   to the client that started it. Two review passes ran against the branch and everything they found was
   fixed on it.
-- **M7 — CLI `norite login`, password plus keychain**: in progress.
+- **M7 — CLI `norite login`, password plus keychain**: done (tag `m7`). `daemon/credentials` (the stored
+  session: a keyring-or-file secret, the non-secret record beside it, and this installation's device
+  identity in a third file), `cli/internal/login`, `cli/internal/termsafe`, and the daemon's startup
+  sign-in. Decisions in ADR 0025: the keyring where the machine has one and a `0600` file in the `0700`
+  state directory where it does not, chosen by *writing* a probe rather than reading one, and never
+  silently. The repository's first cross-module dependency (`cli` → `daemon`) starts here, because the
+  daemon owns what a stored credential is. Rule 19's sanitizer landed here too rather than at M43, since
+  this is the first command that prints a name a stranger's instance chose.
+- **M8 — CLI OAuth loopback flow**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
