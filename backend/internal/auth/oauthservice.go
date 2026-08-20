@@ -293,7 +293,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
 		}
-		token, err := s.issueOAuthSignupToken(identity, challenge)
+		token, err := s.issueOAuthSignupToken(identity, challenge, redirect)
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
@@ -374,33 +374,43 @@ func (s *Service) classifyLinkConflict(ctx context.Context, userID int64, identi
 	}
 }
 
+// OAuthSignupResult is a completed sign-up: something redeemable, and where to deliver it.
+type OAuthSignupResult struct {
+	ExchangeCode string
+	// ClientRedirectURI is the listener the flow was started with, carried across the form inside the
+	// continuation token. Empty for a flow that named none.
+	ClientRedirectURI string
+}
+
 // CompleteOAuthSignup creates the account a signup token stands for, once a username has been chosen.
-func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsername string) (string, error) {
-	identity, challenge, err := s.parseOAuthSignupToken(signupToken)
+func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsername string,
+) (OAuthSignupResult, error) {
+	continuation, err := s.parseOAuthSignupToken(signupToken)
 	if err != nil {
-		return "", err
+		return OAuthSignupResult{}, err
 	}
+	identity, challenge := continuation.Identity, continuation.Challenge
 
 	username := NormalizeUsername(rawUsername)
 	if !ValidUsername(username) {
-		return "", ErrInvalidUsername
+		return OAuthSignupResult{}, ErrInvalidUsername
 	}
 
 	// Re-checked here rather than trusted from the callback: the token is valid for half an hour, and the
 	// instance could have been switched to invite-only in between.
 	if s.registrationMode != RegistrationOpen {
-		return "", ErrOAuthRegistrationClosed
+		return OAuthSignupResult{}, ErrOAuthRegistrationClosed
 	}
 
 	email := strings.TrimSpace(strings.ToLower(identity.Email))
 
 	userID, err := s.ids.Next()
 	if err != nil {
-		return "", fmt.Errorf("generating user ID: %w", err)
+		return OAuthSignupResult{}, fmt.Errorf("generating user ID: %w", err)
 	}
 	identityID, err := s.ids.Next()
 	if err != nil {
-		return "", fmt.Errorf("generating oauth identity ID: %w", err)
+		return OAuthSignupResult{}, fmt.Errorf("generating oauth identity ID: %w", err)
 	}
 
 	var user db.User
@@ -450,10 +460,17 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return OAuthSignupResult{}, err
 	}
 
-	return s.issueOAuthExchangeCode(ctx, user.ID, challenge)
+	code, err := s.issueOAuthExchangeCode(ctx, user.ID, challenge)
+	if err != nil {
+		return OAuthSignupResult{}, err
+	}
+	return OAuthSignupResult{
+		ExchangeCode:      code,
+		ClientRedirectURI: continuation.ClientRedirectURI,
+	}, nil
 }
 
 // ExchangeOAuthCode trades a one-time code for a token pair.

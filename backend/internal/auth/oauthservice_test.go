@@ -288,7 +288,8 @@ func TestTheBindingSurvivesTheUsernameStep(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, outcome.SignupToken)
 
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	// The binding that came out the far side is the right one and not merely some value: a challenge
@@ -302,7 +303,8 @@ func TestTheBindingSurvivesTheUsernameStep(t *testing.T) {
 	stub.asGoogle("google-100", "another@example.com", true)
 	next, _, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
-	nextCode, err := svc.CompleteOAuthSignup(t.Context(), next.SignupToken, "another")
+	nextCodeResult, err := svc.CompleteOAuthSignup(t.Context(), next.SignupToken, "another")
+	nextCode := nextCodeResult.ExchangeCode
 	require.NoError(t, err)
 
 	wrong, _ := mustFlowChallenge(t)
@@ -411,7 +413,8 @@ func TestSignupCreatesNothingUntilAUsernameIsChosen(t *testing.T) {
 	assert.Zero(t, identities)
 
 	// Completing it creates account and link together.
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
@@ -452,7 +455,8 @@ func TestSignupAppliesTheUsernameRule(t *testing.T) {
 	}
 
 	// ...and a normalized one is accepted and stored in its normalized form.
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ﬁnn")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ﬁnn")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
@@ -620,7 +624,7 @@ func TestSignupTokensAreRejectedWhenTampered(t *testing.T) {
 	require.NoError(t, err)
 	forged, err := other.issueOAuthSignupToken(OAuthIdentity{
 		Provider: ProviderGoogle, UserID: "google-1", Email: "victim@example.com", EmailVerified: true,
-	}, challenge)
+	}, challenge, "")
 	require.NoError(t, err)
 
 	for name, token := range map[string]string{
@@ -782,7 +786,7 @@ func TestOAuthValuesExpire(t *testing.T) {
 		expired, err := svc.issueOAuthSignupToken(OAuthIdentity{
 			Provider: ProviderGoogle, UserID: "google-99",
 			Email: "newcomer@example.com", EmailVerified: true,
-		}, challenge)
+		}, challenge, "")
 		require.NoError(t, err)
 		svc.now = time.Now
 
@@ -930,7 +934,8 @@ func TestGitHubSignsInThroughTheService(t *testing.T) {
 	assert.Equal(t, "ada@example.com", outcome.Email,
 		"the verified address is what the account is created from, not the unverified primary")
 
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ada")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ada")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})

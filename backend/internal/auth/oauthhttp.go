@@ -155,9 +155,20 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 	token := r.PostFormValue("signup_token")
 	username := r.PostFormValue("username")
 
-	code, err := h.svc.CompleteOAuthSignup(r.Context(), token, username)
+	result, err := h.svc.CompleteOAuthSignup(r.Context(), token, username)
 	if err == nil {
-		h.renderPage(w, r, oauthDoneTemplate, http.StatusOK, oauthPageData{Nonce: nonce, Code: code})
+		// Where the code goes was decided when the flow started and travelled here inside the signed
+		// continuation token, not in this form. That distinction is the point: this request body is
+		// written by whoever is looking at the page, and a hidden redirect field would let them choose
+		// where somebody else's exchange code is delivered.
+		if result.ClientRedirectURI != "" {
+			http.Redirect(w, r,
+				oauthReturnURL(result.ClientRedirectURI, url.Values{"code": {result.ExchangeCode}}),
+				http.StatusFound)
+			return
+		}
+		h.renderPage(w, r, oauthDoneTemplate, http.StatusOK,
+			oauthPageData{Nonce: nonce, Code: result.ExchangeCode})
 		return
 	}
 
@@ -196,8 +207,8 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 	// with "Creating an account for…" is a phishing surface handed over for free. The token parses here by
 	// construction — the switch above sent every other outcome to an error page.
 	var email string
-	if identity, _, err := h.svc.parseOAuthSignupToken(token); err == nil {
-		email = identity.Email
+	if continuation, err := h.svc.parseOAuthSignupToken(token); err == nil {
+		email = continuation.Identity.Email
 	}
 
 	h.renderPage(w, r, oauthSignupTemplate, http.StatusBadRequest, oauthPageData{
@@ -235,14 +246,18 @@ func (h *Handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code, err := h.svc.CompleteOAuthSignup(r.Context(), req.SignupToken, req.Username)
+	result, err := h.svc.CompleteOAuthSignup(r.Context(), req.SignupToken, req.Username)
 	if err != nil {
 		h.writeErr(w, r, err)
 		return
 	}
 	// An exchange code rather than a token pair, so both completion paths end the same way and a client
 	// has one place to turn a code into a session.
-	httpx.WriteJSON(w, r, http.StatusOK, oauthExchangeCodeResponse{Code: code})
+	//
+	// result.ClientRedirectURI is deliberately ignored. A client driving the flow through this endpoint
+	// rather than the form is already holding the answer in its own process — it has no browser to send
+	// anywhere, and handing it back a URL to visit would be answering a question it did not ask.
+	httpx.WriteJSON(w, r, http.StatusOK, oauthExchangeCodeResponse{Code: result.ExchangeCode})
 }
 
 // renderOAuthFailure maps a service error onto a page.

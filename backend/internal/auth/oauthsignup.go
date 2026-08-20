@@ -62,10 +62,33 @@ type oauthSignupClaims struct {
 	// would mean trusting the submitter, which is the thing being guarded against — so it rides inside the
 	// signed token, where the signature makes it as tamper-proof as the identity beside it.
 	FlowChallenge string `json:"flw"`
+	// ClientRedirect carries the loopback listener across the username step, for the same reason
+	// FlowChallenge does and against the same party.
+	//
+	// The form is submitted by whoever is looking at it. If the redirect came back as a hidden field, the
+	// submitter would choose where the exchange code is delivered — which is precisely the choice the
+	// binding beside it exists to take away from them. Inside the signature it is as tamper-proof as the
+	// identity.
+	//
+	// Empty for a flow that named no listener, which is every flow a browser starts.
+	ClientRedirect string `json:"rdr,omitempty"`
+}
+
+// oauthSignupContinuation is what a valid continuation token carries.
+//
+// A struct rather than three return values, because two of the three are strings with very different
+// meanings and the third is a hash — an argument list nobody should have to get right by position.
+type oauthSignupContinuation struct {
+	Identity  OAuthIdentity
+	Challenge TokenHash
+	// ClientRedirectURI is where to send the browser once the account exists, or empty to render.
+	ClientRedirectURI string
 }
 
 // issueOAuthSignupToken mints the token that stands in for an account that does not exist yet.
-func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, challenge TokenHash) (string, error) {
+func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, challenge TokenHash,
+	redirect string,
+) (string, error) {
 	now := s.now()
 
 	claims := oauthSignupClaims{
@@ -77,12 +100,13 @@ func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, challenge TokenH
 			ExpiresAt: jwt.NewNumericDate(now.Add(OAuthSignupTTL)),
 			ID:        newJTI(),
 		},
-		TokenType:     oauthSignupTokenType,
-		Provider:      string(identity.Provider),
-		Email:         identity.Email,
-		EmailVerified: identity.EmailVerified,
-		DisplayName:   identity.DisplayName,
-		FlowChallenge: OAuthFlowChallengeFor(challenge),
+		TokenType:      oauthSignupTokenType,
+		Provider:       string(identity.Provider),
+		Email:          identity.Email,
+		EmailVerified:  identity.EmailVerified,
+		DisplayName:    identity.DisplayName,
+		FlowChallenge:  OAuthFlowChallengeFor(challenge),
+		ClientRedirect: redirect,
 	}
 
 	signed, err := s.issuer.sign(claims)
@@ -92,8 +116,8 @@ func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, challenge TokenH
 	return signed, nil
 }
 
-// parseOAuthSignupToken validates a continuation token and returns the identity it carries.
-func (s *Service) parseOAuthSignupToken(raw string) (OAuthIdentity, TokenHash, error) {
+// parseOAuthSignupToken validates a continuation token and returns what it carries.
+func (s *Service) parseOAuthSignupToken(raw string) (oauthSignupContinuation, error) {
 	var claims oauthSignupClaims
 
 	_, err := jwt.ParseWithClaims(raw, &claims, s.issuer.keyFunc,
@@ -103,39 +127,51 @@ func (s *Service) parseOAuthSignupToken(raw string) (OAuthIdentity, TokenHash, e
 		jwt.WithTimeFunc(s.issuer.now),
 	)
 	if err != nil {
-		return OAuthIdentity{}, nil, ErrOAuthSignupToken
+		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
 
 	// The check that makes `typ` worth carrying: an access token is signed with the same key, and without
 	// this an ordinary user's access token would be accepted here as a signup for an account of their
 	// choosing.
 	if claims.TokenType != oauthSignupTokenType {
-		return OAuthIdentity{}, nil, ErrOAuthSignupToken
+		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
 	if !ValidOAuthProvider(claims.Provider) || claims.Subject == "" || claims.Email == "" {
-		return OAuthIdentity{}, nil, ErrOAuthSignupToken
+		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
 	// A token minted without a verified address should not exist, since resolveOAuthIdentity refuses that
 	// case before ever getting here. Checked anyway: this is the one place the linking rule could be
 	// bypassed by a future caller, and the cost of the check is a comparison.
 	if !claims.EmailVerified {
-		return OAuthIdentity{}, nil, ErrOAuthSignupToken
+		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
 
 	// A token with no usable binding cannot produce a redeemable code, so it is refused here rather than
 	// allowed to create an account whose sign-in then fails.
 	challenge, err := ParseOAuthFlowChallenge(claims.FlowChallenge)
 	if err != nil {
-		return OAuthIdentity{}, nil, ErrOAuthSignupToken
+		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
 
-	return OAuthIdentity{
-		Provider:      OAuthProviderName(claims.Provider),
-		UserID:        claims.Subject,
-		Email:         claims.Email,
-		EmailVerified: claims.EmailVerified,
-		DisplayName:   claims.DisplayName,
-	}, challenge, nil
+	// Re-validated rather than trusted, exactly as the challenge above is, and for the same reason its
+	// comment gives: a backstop against a future caller minting a token differently. The cost is one parse
+	// of a value this service itself wrote.
+	redirect, err := ParseOAuthClientRedirect(claims.ClientRedirect)
+	if err != nil {
+		return oauthSignupContinuation{}, ErrOAuthSignupToken
+	}
+
+	return oauthSignupContinuation{
+		Identity: OAuthIdentity{
+			Provider:      OAuthProviderName(claims.Provider),
+			UserID:        claims.Subject,
+			Email:         claims.Email,
+			EmailVerified: claims.EmailVerified,
+			DisplayName:   claims.DisplayName,
+		},
+		Challenge:         challenge,
+		ClientRedirectURI: redirect,
+	}, nil
 }
 
 // sign produces a token from any claims this package defines.

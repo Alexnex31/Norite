@@ -286,3 +286,113 @@ func keysOf(v url.Values) []string {
 	slices.Sort(out)
 	return out
 }
+
+// ---------- the signup hop ----------
+
+// A brand-new OAuth account still returns to the listener. Without this a first-time user's sign-in
+// completes in a browser and the CLI waits forever, which is the difference between `norite login`
+// onboarding somebody and only ever working for accounts that already exist.
+func TestTheLoopbackRedirectSurvivesTheUsernameForm(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-99", "newcomer@example.com", true)
+
+	page, verifier := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	require.Equal(t, http.StatusOK, page.Code, "a new identity must reach the form, not a redirect: %s", page)
+	assert.Contains(t, page.String(), "Choose your username")
+
+	form := url.Values{"signup_token": {hiddenField(t, page, "signup_token")}, "username": {"newcomer"}}
+	done := api.call(http.MethodPost, "/oauth/signup", form.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	got := returnedTo(t, done)
+	assert.Equal(t, "127.0.0.1:51763", got.Host)
+	assert.Equal(t, "/callback", got.Path)
+	assert.Equal(t, []string{"code"}, keysOf(got.Query()))
+
+	// And the delivered code redeems, so the account really exists.
+	exchanged := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
+		"code": got.Query().Get("code"), "flow_verifier": verifier, "device_id": "laptop",
+	})
+	require.Equal(t, http.StatusOK, exchanged.Code, exchanged)
+
+	var pair tokenPair
+	exchanged.decode(&pair)
+	me := api.call(http.MethodGet, "/api/v1/users/@me", nil, withToken(pair.AccessToken))
+	require.Equal(t, http.StatusOK, me.Code, me)
+	var self struct {
+		Username string `json:"username"`
+	}
+	me.decode(&self)
+	assert.Equal(t, "newcomer", self.Username)
+}
+
+// The security property of the signup hop, and the reason the redirect rides inside the signed token
+// rather than in a hidden field: this form is submitted by whoever is looking at the page, so a redirect
+// they could supply would let them choose where somebody else's exchange code is delivered.
+func TestTheSignupFormCannotChooseWhereTheCodeIsDelivered(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-99", "newcomer@example.com", true)
+
+	page, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	// Every spelling a well-meaning client — or an attacker — might try.
+	form := url.Values{
+		"signup_token":        {hiddenField(t, page, "signup_token")},
+		"username":            {"newcomer"},
+		"client_redirect_uri": {"http://127.0.0.1:9999/steal"},
+		"redirect_uri":        {"http://127.0.0.1:9999/steal"},
+		"rdr":                 {"http://127.0.0.1:9999/steal"},
+	}
+	done := api.call(http.MethodPost, "/oauth/signup", form.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	got := returnedTo(t, done)
+	assert.Equal(t, "127.0.0.1:51763", got.Host, "the destination must come from the token, not the form")
+	assert.NotContains(t, got.String(), "9999")
+	assert.NotContains(t, got.String(), "steal")
+}
+
+// A rejected username re-renders the form with the same token, so the listener survives a second attempt.
+// Free, given where the redirect lives — asserted because "free" is a claim about the design that a
+// future change to the re-render path could quietly break.
+func TestTheListenerSurvivesARejectedUsername(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-99", "newcomer@example.com", true)
+
+	page, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	require.Equal(t, http.StatusOK, page.Code, page)
+	token := hiddenField(t, page, "signup_token")
+
+	rejected := api.call(http.MethodPost, "/oauth/signup",
+		url.Values{"signup_token": {token}, "username": {"!"}}.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+	require.Equal(t, http.StatusBadRequest, rejected.Code, rejected)
+
+	done := api.call(http.MethodPost, "/oauth/signup",
+		url.Values{"signup_token": {hiddenField(t, rejected, "signup_token")}, "username": {"newcomer"}}.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+	assert.Equal(t, "127.0.0.1:51763", returnedTo(t, done).Host)
+}
+
+// The JSON completion endpoint has no browser to send anywhere, so it answers with a code and says nothing
+// about a redirect — a client driving the flow itself already knows where it lives.
+func TestTheJSONSignupEndpointReturnsACodeAndNoRedirect(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-99", "newcomer@example.com", true)
+
+	page, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	done := api.call(http.MethodPost, "/api/v1/auth/oauth/complete", map[string]string{
+		"signup_token": hiddenField(t, page, "signup_token"), "username": "newcomer",
+	})
+	require.Equal(t, http.StatusOK, done.Code, done)
+	assert.Empty(t, done.Header.Get("Location"))
+
+	var body map[string]any
+	done.decode(&body)
+	assert.Contains(t, body, "code")
+	assert.NotContains(t, body, "client_redirect_uri")
+	assert.NotContains(t, done.String(), "127.0.0.1")
+}
