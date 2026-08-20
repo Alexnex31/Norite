@@ -41,11 +41,18 @@ func signInBound(t *testing.T, svc *Service, stub *stubProvider, provider string
 	verifier, challenge, err := GenerateOAuthFlowVerifier()
 	require.NoError(t, err)
 
-	authURL, err := svc.StartOAuth(t.Context(), provider, OAuthFlowChallengeFor(challenge))
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{
+		Provider:      provider,
+		FlowChallenge: OAuthFlowChallengeFor(challenge),
+	})
 	require.NoError(t, err)
 
 	state := stateFromURL(t, authURL)
-	outcome, err := svc.CompleteOAuth(t.Context(), provider, state, "authorization-code")
+	outcome, err := svc.CompleteOAuth(t.Context(), OAuthCallbackInput{
+		Provider: provider,
+		State:    state,
+		Code:     "authorization-code",
+	})
 	return outcome, verifier, err
 }
 
@@ -261,7 +268,7 @@ func TestAFlowCannotStartWithoutAUsableBinding(t *testing.T) {
 		"wrong length": "c2hvcnQ", // valid base64url, but not 32 bytes
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := svc.StartOAuth(t.Context(), "google", challenge)
+			_, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 			assert.ErrorIs(t, err, ErrOAuthFlowChallenge)
 		})
 	}
@@ -505,14 +512,14 @@ func TestAStateIsSingleUse(t *testing.T) {
 	stub.asGoogle("google-1", "ada@example.com", true)
 
 	_, challenge := mustFlowChallenge(t)
-	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 	require.NoError(t, err)
 	state := stateFromURL(t, authURL)
 
-	_, err = svc.CompleteOAuth(t.Context(), "google", state, "code")
+	_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{Provider: "google", State: state, Code: "code"})
 	require.NoError(t, err)
 
-	_, err = svc.CompleteOAuth(t.Context(), "google", state, "code")
+	_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{Provider: "google", State: state, Code: "code"})
 	assert.ErrorIs(t, err, ErrOAuthState, "a spent state must not start a second exchange")
 }
 
@@ -524,10 +531,14 @@ func TestAStateIsBoundToItsProvider(t *testing.T) {
 	stub.githubEmails = []map[string]any{{"email": "ada@example.com", "primary": true, "verified": true}}
 
 	_, challenge := mustFlowChallenge(t)
-	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 	require.NoError(t, err)
 
-	_, err = svc.CompleteOAuth(t.Context(), "github", stateFromURL(t, authURL), "code")
+	_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{
+		Provider: "github",
+		State:    stateFromURL(t, authURL),
+		Code:     "code",
+	})
 	assert.ErrorIs(t, err, ErrOAuthState)
 }
 
@@ -541,7 +552,7 @@ func TestUnknownStatesAreRefused(t *testing.T) {
 		"never issued": "nos_" + strings.Repeat("A", 43),
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := svc.CompleteOAuth(t.Context(), "google", state, "code")
+			_, err := svc.CompleteOAuth(t.Context(), OAuthCallbackInput{Provider: "google", State: state, Code: "code"})
 			assert.ErrorIs(t, err, ErrOAuthState)
 		})
 	}
@@ -724,7 +735,7 @@ func TestOAuthValuesExpire(t *testing.T) {
 		stub.asGoogle("google-1", "ada@example.com", true)
 
 		_, challenge := mustFlowChallenge(t)
-		authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+		authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 		require.NoError(t, err)
 
 		// Age the row rather than moving a clock: the WHERE clause compares against the database's now(),
@@ -733,7 +744,11 @@ func TestOAuthValuesExpire(t *testing.T) {
 			"UPDATE oauth_states SET expires_at = now() - interval '1 minute'")
 		require.NoError(t, err)
 
-		_, err = svc.CompleteOAuth(t.Context(), "google", stateFromURL(t, authURL), "code")
+		_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{
+			Provider: "google",
+			State:    stateFromURL(t, authURL),
+			Code:     "code",
+		})
 		assert.ErrorIs(t, err, ErrOAuthState)
 	})
 
@@ -787,7 +802,7 @@ func TestConcurrentCallbacksConsumeTheStateOnce(t *testing.T) {
 	stub.asGoogle("google-1", "ada@example.com", true)
 
 	_, challenge := mustFlowChallenge(t)
-	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 	require.NoError(t, err)
 	state := stateFromURL(t, authURL)
 
@@ -801,7 +816,11 @@ func TestConcurrentCallbacksConsumeTheStateOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, results[i] = svc.CompleteOAuth(context.Background(), "google", state, "code")
+			_, results[i] = svc.CompleteOAuth(context.Background(), OAuthCallbackInput{
+				Provider: "google",
+				State:    state,
+				Code:     "code",
+			})
 		}()
 	}
 	close(start)
@@ -968,7 +987,10 @@ func TestExpiredRowsAreSweptAndLiveOnesAreNot(t *testing.T) {
 	require.NotEmpty(t, outcome.ExchangeCode)
 
 	_, challenge := mustFlowChallenge(t)
-	_, err = svc.StartOAuth(t.Context(), "google", challenge) // a second, still-live state
+	_, err = svc.StartOAuth(t.Context(), StartOAuthInput{
+		Provider:      "google",
+		FlowChallenge: challenge,
+	}) // a second, still-live state
 	require.NoError(t, err)
 	_, err = svc.pool.Exec(t.Context(),
 		"UPDATE oauth_states SET expires_at = now() - interval '1 hour' WHERE consumed_at IS NOT NULL")

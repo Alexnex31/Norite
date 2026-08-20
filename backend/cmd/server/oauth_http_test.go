@@ -108,8 +108,10 @@ func (a *api) authorizeAndCallbackBound(t *testing.T) (*response, string) {
 		"/api/v1/auth/oauth/google/callback?state="+url.QueryEscape(state)+"&code=stub-code", nil), verifier
 }
 
-// exchangeCodeFromPage pulls the one-time code out of the rendered page, which is the only place it
-// appears — it is deliberately never in a URL.
+// exchangeCodeFromPage pulls the one-time code out of the rendered page.
+//
+// The page is where it appears for a flow that named no loopback listener, which is every flow in this
+// file. A flow that named one gets the code on the redirect instead (oauth_loopback_test.go).
 func exchangeCodeFromPage(t *testing.T, page *response) string {
 	t.Helper()
 	_, after, found := strings.Cut(page.String(), `<code class="code">`)
@@ -133,7 +135,10 @@ func TestOAuthSignInIssuesATokenPair(t *testing.T) {
 	assert.Contains(t, page.String(), "You're signed in")
 
 	code := exchangeCodeFromPage(t, page)
-	assert.NotContains(t, page.Header.Get("Location"), code, "the code must never travel in a URL")
+	// This flow named no listener, so there is no redirect at all — the code is on the page and nowhere
+	// else. A flow that does name one gets it delivered instead; see oauth_loopback_test.go for what may
+	// travel there and why that is not the token-in-a-URL shape ADR 0024 refused.
+	assert.Empty(t, page.Header.Get("Location"), "a flow with no listener must not redirect anywhere")
 
 	exchanged := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
 		"code": code, "flow_verifier": verifier, "device_id": "laptop",

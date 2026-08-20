@@ -4,6 +4,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 
@@ -69,7 +70,13 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// The binding the client keeps: it publishes the hash here and presents the secret at /exchange, so
 	// the code this flow produces is redeemable by this client and by nobody who merely opens the link.
-	url, err := h.svc.StartOAuth(r.Context(), provider, r.URL.Query().Get("flow_challenge"))
+	authURL, err := h.svc.StartOAuth(r.Context(), StartOAuthInput{
+		Provider:      provider,
+		FlowChallenge: r.URL.Query().Get("flow_challenge"),
+		// Where a command-line client asked to be returned to. Absent for a browser, which is the only
+		// caller that has somewhere to render.
+		ClientRedirectURI: r.URL.Query().Get("client_redirect_uri"),
+	})
 	if err != nil {
 		h.writeErr(w, r, err)
 		return
@@ -77,7 +84,7 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// 302 rather than 307: this is a GET with no body to preserve, and 302 is what every provider's
 	// documentation and every browser expects here.
-	http.Redirect(w, r, url, http.StatusFound)
+	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
 // oauthCallback is where the provider sends the user back.
@@ -96,14 +103,29 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outcome, err := h.svc.CompleteOAuth(r.Context(), provider,
-		r.URL.Query().Get("state"), r.URL.Query().Get("code"))
+	outcome, err := h.svc.CompleteOAuth(r.Context(), OAuthCallbackInput{
+		Provider: provider,
+		State:    r.URL.Query().Get("state"),
+		Code:     r.URL.Query().Get("code"),
+	})
 	if err != nil {
 		h.renderOAuthFailure(w, r, nonce, err)
 		return
 	}
 
 	if outcome.SignedIn() {
+		// A client waiting on a loopback listener gets the code delivered rather than displayed. Note what
+		// travels: a single-use code with a two-minute life that is worthless without the flow verifier,
+		// over a hop that never leaves the machine — not the token pair ADR 0024 refused to put in a URL.
+		//
+		// The destination came out of the consumed state row, not out of this request. Nothing here reads
+		// client_redirect_uri from r.URL, and a test asserts that a callback carrying one is ignored.
+		if outcome.ClientRedirectURI != "" {
+			http.Redirect(w, r,
+				oauthReturnURL(outcome.ClientRedirectURI, url.Values{"code": {outcome.ExchangeCode}}),
+				http.StatusFound)
+			return
+		}
 		h.renderPage(w, r, oauthDoneTemplate, http.StatusOK, oauthPageData{
 			Nonce: nonce,
 			Code:  outcome.ExchangeCode,

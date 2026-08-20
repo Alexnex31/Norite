@@ -93,25 +93,53 @@ type OAuthOutcome struct {
 	SuggestedUsername string
 	// Email is shown on the signup page so the person can see which account they are about to create.
 	Email string
+
+	// ClientRedirectURI is the loopback listener this flow was started with, or empty for a flow that
+	// has nowhere to return to and gets a rendered page instead.
+	//
+	// Set on both branches above, not just the signed-in one: the signup branch has to carry it further
+	// still, across the username form, or a client's sign-up would complete in a browser and never reach
+	// the process waiting for it.
+	ClientRedirectURI string
 }
 
 // SignedIn reports whether the flow completed against an existing account.
 func (o OAuthOutcome) SignedIn() bool { return o.ExchangeCode != "" }
+
+// StartOAuthInput is what a client supplies to begin a sign-in.
+//
+// A struct rather than three positional strings, and the reason is that they are all strings: a reordered
+// argument list would still compile and would send the challenge where the redirect belongs. LoginInput
+// beside it is the precedent, and M9 adds a fourth field here.
+type StartOAuthInput struct {
+	Provider      string
+	FlowChallenge string
+	// ClientRedirectURI is a loopback listener to return to instead of rendering the callback's page.
+	// Optional: a browser has nowhere to be sent, and neither will the device-code flow.
+	ClientRedirectURI string
+}
 
 // StartOAuth begins an authorization request and returns the URL to send the user to.
 //
 // The flow challenge is required, not optional. An optional binding is not a binding: the attack it
 // prevents is constructed by whoever starts the flow, so anyone who wanted to skip the check could simply
 // start a flow without one.
-func (s *Service) StartOAuth(ctx context.Context, providerName, rawChallenge string) (string, error) {
-	provider, err := s.oauth.Get(providerName)
+func (s *Service) StartOAuth(ctx context.Context, in StartOAuthInput) (string, error) {
+	provider, err := s.oauth.Get(in.Provider)
 	if err != nil {
 		return "", err
 	}
 
-	challenge, err := ParseOAuthFlowChallenge(rawChallenge)
+	challenge, err := ParseOAuthFlowChallenge(in.FlowChallenge)
 	if err != nil {
 		return "", ErrOAuthFlowChallenge
+	}
+
+	// Validated before a state is minted or a row written. /authorize is unauthenticated, so a malformed
+	// value should cost a parse and nothing else — no crypto/rand draw, no insert, no row for the sweeper.
+	redirect, err := ParseOAuthClientRedirect(in.ClientRedirectURI)
+	if err != nil {
+		return "", err
 	}
 
 	rawState, stateHash, err := GenerateOAuthState()
@@ -132,6 +160,8 @@ func (s *Service) StartOAuth(ctx context.Context, providerName, rawChallenge str
 		CodeVerifier:  verifier,
 		FlowChallenge: challenge,
 		ExpiresAt:     timestamptz(s.now().Add(OAuthStateTTL)),
+		// Canonical form, not what the client sent — see ParseOAuthClientRedirect.
+		ClientRedirectUri: redirect,
 	}); err != nil {
 		return "", fmt.Errorf("recording oauth state: %w", err)
 	}
@@ -139,14 +169,24 @@ func (s *Service) StartOAuth(ctx context.Context, providerName, rawChallenge str
 	return provider.AuthCodeURL(rawState, verifier), nil
 }
 
+// OAuthCallbackInput is what arrives on the provider's redirect back to this instance.
+//
+// A struct for the same reason StartOAuthInput is one: every field is a string, and the state and the
+// authorization code are the two most consequential of them.
+type OAuthCallbackInput struct {
+	Provider string
+	State    string
+	Code     string
+}
+
 // CompleteOAuth handles the provider's callback.
-func (s *Service) CompleteOAuth(ctx context.Context, providerName, rawState, code string) (OAuthOutcome, error) {
-	provider, err := s.oauth.Get(providerName)
+func (s *Service) CompleteOAuth(ctx context.Context, in OAuthCallbackInput) (OAuthOutcome, error) {
+	provider, err := s.oauth.Get(in.Provider)
 	if err != nil {
 		return OAuthOutcome{}, err
 	}
 
-	stateHash, err := ParseOAuthState(rawState)
+	stateHash, err := ParseOAuthState(in.State)
 	if err != nil {
 		return OAuthOutcome{}, ErrOAuthState
 	}
@@ -168,17 +208,20 @@ func (s *Service) CompleteOAuth(ctx context.Context, providerName, rawState, cod
 		return OAuthOutcome{}, ErrOAuthState
 	}
 
-	identity, err := provider.Identity(ctx, code, state.CodeVerifier)
+	identity, err := provider.Identity(ctx, in.Code, state.CodeVerifier)
 	if err != nil {
 		return OAuthOutcome{}, err
 	}
 
-	return s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge)
+	// The redirect comes from the row, never from in — the callback's own URL is written by whoever is
+	// presenting it, and this value decides where a credential is delivered. Fixed when the flow started;
+	// see the column's comment in 000006.
+	return s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge, state.ClientRedirectUri)
 }
 
 // resolveOAuthIdentity decides what an authenticated provider identity means for this instance.
 func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdentity,
-	challenge TokenHash,
+	challenge TokenHash, redirect string,
 ) (OAuthOutcome, error) {
 	log := logging.FromContext(ctx)
 
@@ -192,7 +235,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
-		return OAuthOutcome{ExchangeCode: code}, nil
+		return OAuthOutcome{ExchangeCode: code, ClientRedirectURI: redirect}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return OAuthOutcome{}, fmt.Errorf("looking up oauth identity: %w", err)
@@ -227,7 +270,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
-		return OAuthOutcome{ExchangeCode: code}, nil
+		return OAuthOutcome{ExchangeCode: code, ClientRedirectURI: redirect}, nil
 
 	case errors.Is(err, pgx.ErrNoRows):
 		// Nobody owns the address — which does not mean nobody owns the *mailbox*. Creating an account from
@@ -258,6 +301,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 			SignupToken:       token,
 			SuggestedUsername: suggestUsername(identity),
 			Email:             email,
+			ClientRedirectURI: redirect,
 		}, nil
 
 	default:
