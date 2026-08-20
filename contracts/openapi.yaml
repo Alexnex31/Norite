@@ -404,6 +404,13 @@ paths:
         Same effects as `POST /api/v1/auth/oauth/complete`. A rejected username re-renders the form so it
         can be fixed without restarting the flow; an expired token cannot be re-rendered and ends on an
         error page.
+
+
+        If the flow that produced this form named a `client_redirect_uri`, success is a 302 to it rather
+        than a page. **The destination comes from the signed continuation token, never from this form**,
+        and a `client_redirect_uri` field in the body is ignored. That is the whole reason it rides in the
+        token: this request is written by whoever is looking at the page, and a redirect they could supply
+        would let them choose where somebody else's exchange code is delivered.
       operationId: submitOAuthSignup
       tags: [auth]
       security: []
@@ -428,6 +435,15 @@ paths:
             text/html:
               schema:
                 type: string
+        "302":
+          description: >
+            The account was created and the flow named a loopback listener, so the code goes there
+            instead. Same shape as the callback's 302.
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "http://127.0.0.1:51763/callback?code=noc_..."
         "400":
           description: The username was rejected, or the sign-up expired. HTML.
           content:
@@ -552,6 +568,36 @@ paths:
         authorization request, and the code that came back would sign whoever opened the link into
         whichever account consented. It is PKCE's guarantee applied to the client-to-Norite hop, and it is
         mandatory because an optional binding is none — the attack is built by whoever starts the flow.
+
+
+        **`client_redirect_uri` is optional**, and is how a program with no browser of its own — a
+        command-line client, an editor plugin — receives the result. Name a listener you have already
+        bound on this machine, and the callback returns there carrying the one-time code instead of
+        rendering a page for a person to read. Omit it and nothing changes from a browser's point of view.
+
+
+        The rules are strict, and each one is refusing a way a URL can look like one host and resolve as
+        another. It must be `http` (never `https`: a loopback listener has no certificate anyone can
+        validate), on a **loopback IP literal** with an **explicit port**, carrying no userinfo, no query
+        and no fragment, and at most 256 characters. `http://127.0.0.1:51763/callback` is the shape.
+        `http://[::1]:51763/callback` is accepted too.
+
+
+        **`localhost` is refused**, and this is the rule that surprises people. A name is resolved by the
+        browser through `/etc/hosts` and DNS, either of which can be made to point off this machine, so it
+        cannot carry the guarantee the check exists to make. An IP literal is resolved by nobody. RFC 8252
+        §8.3 says the same.
+
+
+        No port is privileged and none is registered anywhere: the provider never sees this URI — it
+        redirects to *this instance*, which then redirects to you — so pick any free port. Nothing about
+        it needs to match what is registered with Google or GitHub, which is and stays this instance's own
+        callback.
+
+
+        An authorization request lives **15 minutes**. A client waiting on a listener should not give up
+        sooner than that: a second factor is unhurried, and the instance will still complete a sign-in the
+        client has stopped listening for.
       operationId: beginOAuth
       tags: [auth]
       security: []
@@ -564,6 +610,16 @@ paths:
           schema:
             type: string
             pattern: "^[A-Za-z0-9_-]{43}$"
+        - name: client_redirect_uri
+          in: query
+          required: false
+          description: >
+            A loopback listener to return to instead of rendering the callback's page. `http` only, on a
+            loopback IP literal, with an explicit port, and with no userinfo, query or fragment.
+          schema:
+            type: string
+            maxLength: 256
+            example: "http://127.0.0.1:51763/callback"
       responses:
         "302":
           description: Redirect to the provider.
@@ -584,13 +640,28 @@ paths:
 
 
         **It never returns tokens.** A redirect carrying a token pair would put credentials in a URL, and
-        so in history, in a Referer, and in every proxy log on the way. It renders a one-time code
+        so in history, in a Referer, and in every proxy log on the way. It hands over a one-time code
         instead, which a client trades at `POST /auth/oauth/exchange`.
 
 
         Three outcomes: an already-linked identity, or one whose provider-verified email matches an
         account, ends on a page carrying that code; an unrecognised identity ends on a form asking for a
         username, because no account is created until one is chosen; anything else ends on an error page.
+
+
+        **When the flow named a `client_redirect_uri`, the first and third of those become a 302** to that
+        listener instead — `?code=…` on success, `?error=…` on failure, and never both. The second still
+        renders the username form; the redirect is carried across it inside the signed continuation token
+        and applies to the form's own result.
+
+
+        What travels there is worth separating from the paragraph above, because it looks like the same
+        thing and is not. A token pair is long-lived, bearer, and would cross the public internet. This is
+        a code that expires in two minutes, works once, is useless to anyone without the `flow_verifier`
+        that never left your process, and goes to an address on the machine it was already on. The
+        destination is fixed when the flow starts and read back from the state — supplying
+        `client_redirect_uri` on *this* request does nothing, deliberately, since this URL is presented by
+        whoever holds the link.
 
 
         The refusal worth naming: **an address the provider has not verified never reaches an account**,
@@ -628,7 +699,7 @@ paths:
           required: false
           schema:
             type: string
-          description: Set by the provider when the user declined or it refused. Rendered as an ordinary
+          description: Set by the provider when the user declined or it refused. Treated as an ordinary
             abandonment, not a fault.
       responses:
         "200":
@@ -637,10 +708,36 @@ paths:
             text/html:
               schema:
                 type: string
+        "302":
+          description: >
+            Only when the flow was started with a `client_redirect_uri`. The Location is that URI with
+            exactly one parameter: `code` on success, or `error` on failure. A failure never carries a
+            code.
+
+
+            The error values are a fixed vocabulary and there is deliberately no `error_description`: a
+            loopback listener is a socket any local process can write to, so nothing free-form — from a
+            provider or from anyone else — is put on it. Write your own wording from these.
+
+
+            `access_denied` (declined at the provider), `email_unverified` (the provider will not vouch
+            for the address, so it reaches no account), `identity_linked_elsewhere`,
+            `account_already_linked`, `registration_closed`, `no_email`, `server_error`. Treat an
+            unrecognised value as `server_error`.
+          headers:
+            Location:
+              schema:
+                type: string
+                example: "http://127.0.0.1:51763/callback?code=noc_..."
         "400":
           description: >
             The state was unknown, expired or already spent; the provider refused; or the identity was
             refused by the linking rule. HTML, with one message per case.
+
+
+            A failure this early cannot know a listener — the state has not been consumed, and the only
+            other place a destination could come from is this request, which is exactly what is not
+            trusted. So a bad state renders even for a flow that named one.
           content:
             text/html:
               schema:
