@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -553,4 +556,88 @@ func TestASignupThatCannotCompleteReachesTheListener(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already registered")
 	assert.NotContains(t, err.Error(), "server_error")
+}
+
+// ---------- the two vocabularies cannot drift apart ----------
+
+// contractPath is contracts/openapi.yaml, which is where the failure codes are actually specified.
+//
+// The same arrangement instanceinit uses for contracts/instance-config.toml: the backend proves it emits
+// these, this side proves the CLI has something to say about each. The two live in separate Go modules and
+// share no types, so a hand-maintained list on each side is exactly the shape that drifts — and the drift
+// is silent, because an unrecognized code still reduces cleanly and just prints as itself.
+const contractPath = "../../../contracts/openapi.yaml"
+
+// documentedFailureCodes pulls the enumerated codes out of the callback's 302 description.
+func documentedFailureCodes(t *testing.T) []string {
+	t.Helper()
+
+	body, err := os.ReadFile(contractPath)
+	require.NoError(t, err)
+
+	// The sentence that enumerates them, anchored on both ends so nothing else in the document is picked
+	// up. The opening anchor is the end of the paragraph *above* the list rather than its start: that
+	// paragraph says there is deliberately no `error_description`, and a looser anchor swept that word up
+	// as a code — which this test then correctly reported as missing wording.
+	_, after, found := strings.Cut(string(body), "Write your own wording from these.")
+	require.True(t, found, "the contract no longer introduces the vocabulary where this test expects")
+	block, _, found := strings.Cut(after, "Treat an")
+	require.True(t, found, "the vocabulary sentence no longer ends where this test expects")
+
+	var codes []string
+	for _, m := range regexp.MustCompile("`([a-z_]+)`").FindAllStringSubmatch(block, -1) {
+		codes = append(codes, m[1])
+	}
+	require.NotEmpty(t, codes, "no codes found in:\n%s", block)
+	return codes
+}
+
+// Every code the instance can send has wording of this client's own. Without this, a code added on the
+// backend arrives here, falls through to the generic branch, and is shown to a person as the raw
+// identifier — which is precisely what sending codes instead of sentences was supposed to avoid.
+func TestEveryDocumentedFailureCodeHasWording(t *testing.T) {
+	for _, code := range documentedFailureCodes(t) {
+		if code == "server_error" {
+			// The one deliberate exception, asserted rather than skipped silently: it means "something
+			// went wrong that the vocabulary cannot describe", so the generic branch *is* the right
+			// answer and the instance's own word for it is worth showing.
+			assert.Contains(t, oauthFailure(code).Error(), code)
+			continue
+		}
+
+		msg := oauthFailure(code).Error()
+		assert.NotContains(t, msg, "could not complete the sign-in (",
+			"%q reached the generic branch: the contract documents it and this client has no wording", code)
+		assert.NotContains(t, msg, code,
+			"%q is shown to a person verbatim rather than explained", code)
+	}
+}
+
+// And the reverse: a code this client explains must be one the instance can actually send, or a local one
+// the listener itself produces. A branch for something nobody emits is dead code that reads as coverage.
+func TestTheCLIExplainsNoCodeNobodySends(t *testing.T) {
+	documented := documentedFailureCodes(t)
+
+	// Produced by the listener rather than by the instance — see loopback.go's read and reduceFailure.
+	local := []string{"malformed_code", "no_result"}
+
+	source, err := os.ReadFile("oauth.go")
+	require.NoError(t, err)
+	handled := regexp.MustCompile(`case "([a-z_]+)":`).FindAllStringSubmatch(string(source), -1)
+	require.NotEmpty(t, handled)
+
+	for _, m := range handled {
+		code := m[1]
+		assert.True(t, slices.Contains(documented, code) || slices.Contains(local, code),
+			"%q is explained here but the contract does not list it and the listener does not produce it",
+			code)
+	}
+}
+
+// The listener's own reduction keeps every documented code intact. A code that survived the wire only to
+// be stripped here would take the same generic branch as an attack payload.
+func TestReduceFailureKeepsEveryDocumentedCode(t *testing.T) {
+	for _, code := range documentedFailureCodes(t) {
+		assert.Equal(t, code, reduceFailure(code), "%q must survive reduction unchanged", code)
+	}
 }
