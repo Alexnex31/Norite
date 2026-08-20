@@ -396,3 +396,59 @@ func TestTheJSONSignupEndpointReturnsACodeAndNoRedirect(t *testing.T) {
 	assert.NotContains(t, body, "client_redirect_uri")
 	assert.NotContains(t, done.String(), "127.0.0.1")
 }
+
+// ---------- telling a listener why a sign-in failed ----------
+
+// The common failure, and the reason it is worth reporting at all: without this a person who presses
+// "cancel" leaves the CLI looking hung until its own timeout expires, for the most ordinary outcome there
+// is. The code vocabulary is fixed and server-owned, so nothing free-form crosses the loopback boundary.
+func TestADeclinedConsentRedirectsWithAnErrorCode(t *testing.T) {
+	api, _ := newOAuthAPI(t, auth.RegistrationOpen)
+
+	_, challenge, err := auth.GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+	start := api.call(http.MethodGet, "/api/v1/auth/oauth/google/authorize?flow_challenge="+
+		url.QueryEscape(auth.OAuthFlowChallengeFor(challenge))+
+		"&client_redirect_uri="+url.QueryEscape(loopbackRedirect), nil)
+	require.Equal(t, http.StatusFound, start.Code, start)
+	location, err := url.Parse(start.Header.Get("Location"))
+	require.NoError(t, err)
+
+	// The provider sends back the state it was given, plus its own error. That is what makes the redirect
+	// knowable: the state row is consumed, and the listener it named comes out of it.
+	back := api.call(http.MethodGet, "/api/v1/auth/oauth/google/callback?error=access_denied&state="+
+		url.QueryEscape(location.Query().Get("state")), nil)
+
+	got := returnedTo(t, back)
+	assert.Equal(t, "127.0.0.1:51763", got.Host)
+	assert.Equal(t, []string{"error"}, keysOf(got.Query()))
+	assert.Equal(t, "access_denied", got.Query().Get("error"))
+	assert.Empty(t, got.Query().Get("code"), "a failure must never carry a redeemable code")
+}
+
+// A refusal this instance decides — rather than one the provider reported — reaches the listener too, and
+// as a code from the same fixed vocabulary rather than as the sentence the page would show.
+func TestAnUnverifiedAddressRedirectsWithItsOwnCode(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+	stub.as("google-1", "ada@example.com", false) // the provider will not vouch for the address
+
+	back, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	got := returnedTo(t, back)
+
+	assert.Equal(t, "email_unverified", got.Query().Get("error"))
+	// The long, deliberately specific sentence the page carries must not travel here: a listener gets a
+	// code it can branch on, and the client writes its own prose.
+	assert.NotContains(t, got.String(), "Verify it with the provider")
+}
+
+// A failure before the state is consumed cannot know a listener, so it renders. Not a gap — the only way
+// to learn a destination at that point would be to trust one supplied on the callback's own URL.
+func TestAFailureBeforeTheStateIsSpentStillRendersItsPage(t *testing.T) {
+	api, _ := newOAuthAPI(t, auth.RegistrationOpen)
+
+	page := api.call(http.MethodGet, "/api/v1/auth/oauth/google/callback?state=nos_unknown&code=x", nil)
+	require.Equal(t, http.StatusBadRequest, page.Code, page)
+	assert.Empty(t, page.Header.Get("Location"))
+	assert.Contains(t, page.String(), "no longer valid")
+}

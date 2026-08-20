@@ -374,15 +374,43 @@ func TestOAuthCallbackStateIsSingleUseThroughTheRouter(t *testing.T) {
 
 // A provider reporting its own failure — most often someone pressing "cancel" — is an abandonment, not a
 // fault, and must not read like a broken instance.
+//
+// Driven through a real flow rather than a made-up state, because that is what a provider actually sends:
+// the state it was given, alongside the error. The state is consumed before the error is considered, which
+// is what lets a waiting client be told (oauth_loopback_test.go); this asserts the page half.
 func TestOAuthCallbackHandlesAProviderError(t *testing.T) {
 	api, _ := newOAuthAPI(t, auth.RegistrationOpen)
 
-	page := api.call(http.MethodGet,
-		"/api/v1/auth/oauth/google/callback?error=access_denied&state=x", nil)
+	_, challenge, err := auth.GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+	start := api.call(http.MethodGet, "/api/v1/auth/oauth/google/authorize?flow_challenge="+
+		url.QueryEscape(auth.OAuthFlowChallengeFor(challenge)), nil)
+	require.Equal(t, http.StatusFound, start.Code, start)
+	location, err := url.Parse(start.Header.Get("Location"))
+	require.NoError(t, err)
+
+	page := api.call(http.MethodGet, "/api/v1/auth/oauth/google/callback?error=access_denied&state="+
+		url.QueryEscape(location.Query().Get("state")), nil)
 
 	require.Equal(t, http.StatusBadRequest, page.Code)
 	assert.Contains(t, page.String(), "not completed")
 	assert.NotContains(t, page.String(), "wrong on our end", "a declined consent is not a server fault")
+}
+
+// The precedence when both are wrong, stated so it is a decision rather than an accident of ordering.
+//
+// The state is examined first, so a declined consent whose state has expired or been replayed reads as
+// "this link is no longer valid" rather than "you canceled". That is the right way round: the state has
+// to be consumed before anything can be reported to a client's listener at all, and "start again" is true
+// and actionable for someone whose link is fifteen minutes old however they left the provider.
+func TestAnExpiredStateOutranksADeclinedConsent(t *testing.T) {
+	api, _ := newOAuthAPI(t, auth.RegistrationOpen)
+
+	page := api.call(http.MethodGet,
+		"/api/v1/auth/oauth/google/callback?error=access_denied&state=nos_nonsense", nil)
+
+	require.Equal(t, http.StatusBadRequest, page.Code)
+	assert.Contains(t, page.String(), "no longer valid")
 }
 
 // The callback echoes nothing a provider supplied as markup. The provider controls the display name and

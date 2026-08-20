@@ -20,7 +20,7 @@ func TestAcceptedLoopbackRedirects(t *testing.T) {
 		// IPv6 loopback is accepted even though this repository's CLI binds v4. The server has no business
 		// encoding a client's implementation choice, and a future client may well bind v6.
 		{"http://[::1]:51763/callback", "http://[::1]:51763/callback"},
-		// An absent path is canonicalised, so what is stored is what will be emitted.
+		// An absent path is canonicalized, so what is stored is what will be emitted.
 		{"http://127.0.0.1:51763", "http://127.0.0.1:51763/"},
 		{"", ""},
 	} {
@@ -80,7 +80,7 @@ func TestRefusedLoopbackRedirects(t *testing.T) {
 	}
 }
 
-// The returned value is the parser's own re-serialisation, not the input. That is what makes "no query, no
+// The returned value is the parser's own re-serialization, not the input. That is what makes "no query, no
 // fragment, no userinfo" a property of the stored string rather than of a check that ran once — a later
 // reader gets to trust the column without re-deriving whether the parser and the bytes agreed.
 func TestTheCanonicalFormIsWhatComesBack(t *testing.T) {

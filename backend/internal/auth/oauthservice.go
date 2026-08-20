@@ -78,6 +78,10 @@ var (
 	// ErrOAuthRegistrationClosed is an invite-only instance refusing to create an account. Linking an
 	// existing account is still allowed — the gate is on new accounts, not on providers.
 	ErrOAuthRegistrationClosed = errors.New("registration on this instance requires an invite code")
+
+	// ErrOAuthProviderDeclined is the provider reporting its own failure on the callback — someone pressing
+	// "cancel" on the consent screen, almost always. An ordinary abandonment rather than a fault.
+	ErrOAuthProviderDeclined = errors.New("the sign-in was not completed at the provider")
 )
 
 // OAuthOutcome is what happened at the callback.
@@ -177,6 +181,12 @@ type OAuthCallbackInput struct {
 	Provider string
 	State    string
 	Code     string
+	// ProviderError is the provider's own `error` parameter, if it sent one.
+	//
+	// Handled here rather than in the handler so that the state row is consumed first and the client's
+	// listener is therefore known. A declined consent that only rendered a page would leave a waiting CLI
+	// looking hung until its own timeout, for the most ordinary outcome there is.
+	ProviderError string
 }
 
 // CompleteOAuth handles the provider's callback.
@@ -208,15 +218,36 @@ func (s *Service) CompleteOAuth(ctx context.Context, in OAuthCallbackInput) (OAu
 		return OAuthOutcome{}, ErrOAuthState
 	}
 
+	// Everything from here on knows where the client is waiting, so every failure is wrapped and can be
+	// reported to it rather than only to a page nobody is reading.
+	fail := func(err error) (OAuthOutcome, error) {
+		return OAuthOutcome{}, &OAuthCallbackError{
+			Err:               err,
+			Code:              oauthErrorCodeFor(err),
+			ClientRedirectURI: state.ClientRedirectUri,
+		}
+	}
+
+	// The provider's own refusal, checked after the state is spent. Spending it is correct rather than
+	// wasteful: the authorization code is gone either way and the person declined, so there is nothing
+	// left to retry with this state.
+	if in.ProviderError != "" {
+		return fail(ErrOAuthProviderDeclined)
+	}
+
 	identity, err := provider.Identity(ctx, in.Code, state.CodeVerifier)
 	if err != nil {
-		return OAuthOutcome{}, err
+		return fail(err)
 	}
 
 	// The redirect comes from the row, never from in — the callback's own URL is written by whoever is
 	// presenting it, and this value decides where a credential is delivered. Fixed when the flow started;
 	// see the column's comment in 000006.
-	return s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge, state.ClientRedirectUri)
+	outcome, err := s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge, state.ClientRedirectUri)
+	if err != nil {
+		return fail(err)
+	}
+	return outcome, nil
 }
 
 // resolveOAuthIdentity decides what an authenticated provider identity means for this instance.

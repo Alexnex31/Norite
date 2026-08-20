@@ -54,7 +54,7 @@ const maxClientRedirect = 256
 // The empty string is valid and means "no redirect": the callback renders its page, which is what a
 // browser gets, what the device-code flow will get, and what every client got before this existed.
 //
-// The returned value is url.URL's own re-serialisation rather than the input. That is deliberate: it makes
+// The returned value is url.URL's own re-serialization rather than the input. That is deliberate: it makes
 // "no query, no fragment, no userinfo" a property of what is *stored*, not merely of what was inspected,
 // so a later reader does not have to re-derive whether the parser and the string agreed.
 func ParseOAuthClientRedirect(raw string) (string, error) {
@@ -90,7 +90,7 @@ func ParseOAuthClientRedirect(raw string) (string, error) {
 	// scheme-relative URI that a browser resolves against whatever origin it is already on. An explicit
 	// !u.IsAbs() check for that last case was written here first and removed: IsAbs is exactly
 	// `Scheme != ""`, so it could never fire ahead of this line, and a guard that cannot fire is a comment
-	// claiming a defence that is really being made somewhere else.
+	// claiming a defense that is really being made somewhere else.
 	if u.Scheme != "http" {
 		return "", ErrOAuthClientRedirect
 	}
@@ -165,10 +165,69 @@ func oauthReturnURL(redirect string, query url.Values) string {
 	u, err := url.Parse(redirect)
 	if err != nil {
 		// Unreachable: redirect came back from ParseOAuthClientRedirect, which parsed it and returned its
-		// own re-serialisation. Falling back to the bare URI keeps a mistake here from becoming an open
+		// own re-serialization. Falling back to the bare URI keeps a mistake here from becoming an open
 		// redirect or a panic, and the client fails cleanly on a callback carrying no code.
 		return redirect
 	}
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+// ---------- telling a listener why a sign-in failed ----------
+
+// The error codes a loopback client can receive, and the whole vocabulary.
+//
+// Fixed, small, and owned by this package — never a provider's text and never a person's. That is the
+// rule-19 decision that matters most here: a client's listener is a socket any local process can write to,
+// so keeping free-form text off it entirely is strictly better than sanitizing it on the far side. There
+// is deliberately no error_description; a client that wants prose writes its own from these.
+const (
+	oauthErrDeclined             = "access_denied"
+	oauthErrEmailUnverified      = "email_unverified"
+	oauthErrIdentityLinked       = "identity_linked_elsewhere"
+	oauthErrAccountAlreadyLinked = "account_already_linked"
+	oauthErrRegistrationClosed   = "registration_closed"
+	oauthErrNoEmail              = "no_email"
+	oauthErrServer               = "server_error"
+)
+
+// OAuthCallbackError is a callback failure that happened after the state was consumed, so it knows where
+// the client asked to be returned to.
+//
+// It wraps rather than replaces, so every errors.Is in renderOAuthFailure keeps working unchanged — the
+// page path is not aware this type exists.
+type OAuthCallbackError struct {
+	Err error
+	// Code is from the vocabulary above.
+	Code string
+	// ClientRedirectURI is empty for a flow that named no listener, in which case this type carries
+	// nothing the page path did not already have.
+	ClientRedirectURI string
+}
+
+func (e *OAuthCallbackError) Error() string { return e.Err.Error() }
+func (e *OAuthCallbackError) Unwrap() error { return e.Err }
+
+// oauthErrorCodeFor maps a failure onto the vocabulary.
+//
+// The default is server_error rather than anything more specific, and unknown failures stay unknown: a
+// code is a thing a client branches on, so inventing one per sentinel would make every new sentinel a
+// silent contract change.
+func oauthErrorCodeFor(err error) string {
+	switch {
+	case errors.Is(err, ErrOAuthProviderDeclined):
+		return oauthErrDeclined
+	case errors.Is(err, ErrOAuthEmailUnverified):
+		return oauthErrEmailUnverified
+	case errors.Is(err, ErrOAuthIdentityLinkedElsewhere):
+		return oauthErrIdentityLinked
+	case errors.Is(err, ErrOAuthAccountAlreadyLinked):
+		return oauthErrAccountAlreadyLinked
+	case errors.Is(err, ErrOAuthRegistrationClosed):
+		return oauthErrRegistrationClosed
+	case errors.Is(err, ErrOAuthNoEmail):
+		return oauthErrNoEmail
+	default:
+		return oauthErrServer
+	}
 }
