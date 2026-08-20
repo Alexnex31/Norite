@@ -21,11 +21,16 @@ func Command() *cli.Command {
 	return &cli.Command{
 		Name:  "login",
 		Usage: "Sign in to a Norite instance and store the credential for the daemon",
-		Description: "Signs in with an email address and password, and stores the resulting credential\n" +
-			"where the background daemon will find it on its next start.\n\n" +
-			"The password is read without echo and is never accepted as a flag — a flag value is\n" +
-			"visible in the process list to every other user on the machine. For scripted use, set\n" +
+		Description: "Signs in and stores the resulting credential where the background daemon will\n" +
+			"find it on its next start.\n\n" +
+			"With no flags, signs in with an email address and password. The password is read\n" +
+			"without echo and is never accepted as a flag — a flag value is visible in the\n" +
+			"process list to every other user on the machine. For scripted use, set\n" +
 			passwordEnvVar + " instead.\n\n" +
+			"With --provider, signs in through Google or GitHub instead: a browser opens, and a\n" +
+			"listener on this machine receives the result. The sign-in URL is always printed too,\n" +
+			"so a browser that opens the wrong profile is not a dead end. Use --no-browser to skip\n" +
+			"launching one and open the link yourself.\n\n" +
 			"Signing in again on the same machine replaces the stored credential and keeps this\n" +
 			"installation's device identity, so the account's other sessions are untouched.",
 		Flags: []cli.Flag{
@@ -41,8 +46,26 @@ func Command() *cli.Command {
 				Name:  "device-name",
 				Usage: "`NAME` for this device in the account's session list (default: this machine's hostname)",
 			},
+			&cli.StringFlag{
+				Name:  "provider",
+				Usage: "sign in through an OAuth `PROVIDER` (google or github) instead of a password",
+			},
+			&cli.BoolFlag{
+				Name:  "no-browser",
+				Usage: "with --provider, print the sign-in URL instead of opening a browser",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			// Refused rather than resolved by precedence. The two flags describe different sign-ins, and
+			// silently ignoring one would leave somebody looking at a browser window wondering why the
+			// address they passed was not used.
+			if cmd.String("provider") != "" && cmd.String("email") != "" {
+				return cli.Exit("--email is for signing in with a password; --provider does not use one", 2)
+			}
+			if cmd.Bool("no-browser") && cmd.String("provider") == "" {
+				return cli.Exit("--no-browser only applies to --provider sign-ins", 2)
+			}
+
 			store, err := credentials.Open()
 			if err != nil {
 				return cli.Exit(err.Error(), 1)
@@ -56,6 +79,8 @@ func Command() *cli.Command {
 					Instance:   cmd.String("instance"),
 					Email:      cmd.String("email"),
 					DeviceName: cmd.String("device-name"),
+					Provider:   cmd.String("provider"),
+					NoBrowser:  cmd.Bool("no-browser"),
 				},
 				Store:       store,
 				Out:         cmd.Writer,

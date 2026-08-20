@@ -59,6 +59,14 @@ type Options struct {
 	// DeviceName is what this machine will be called in the account's session list. Empty means the
 	// hostname, which is what a person will recognize.
 	DeviceName string
+	// Provider selects an OAuth sign-in — "google" or "github". Empty means the password path, which is
+	// what bare `norite login` still does.
+	Provider string
+	// NoBrowser prints the sign-in URL instead of launching anything, and keeps listening.
+	//
+	// It does not mean "headless": a machine with no browser at all is M9's device-code flow. This is for
+	// SSH with a forwarded port, and for anyone whose default browser opens the wrong profile.
+	NoBrowser bool
 }
 
 // Runner performs a login. Its dependencies are injected so the whole flow is testable without a terminal,
@@ -85,67 +93,124 @@ type Runner struct {
 
 	// newClient builds the API client. Indirected for tests; production leaves it nil.
 	newClient func(baseURL string) *client
+	// openBrowser launches the sign-in URL. Indirected for tests; production leaves it nil.
+	openBrowser func(ctx context.Context, target string) error
+	// loopbackPorts overrides the built-in list, so tests never contend for a fixed port on a machine
+	// running several packages at once.
+	loopbackPorts []int
+}
+
+// session is what both sign-in methods need, and what the tail below consumes.
+//
+// A struct so that finish takes three arguments rather than six, four of which would be strings. Six
+// positional strings is how the wrong one eventually gets passed.
+type session struct {
+	instanceURL string
+	deviceID    string
+	deviceName  string
+	api         *client
 }
 
 // Run performs the login and stores the result.
+//
+// Three parts, and the split is the shape M8 needed: everything before a credential exists is shared,
+// everything after it is shared, and only the middle differs between a password and a provider.
 func (r *Runner) Run(ctx context.Context) error {
+	s, err := r.prepare()
+	if err != nil {
+		return err
+	}
+
+	var pair tokenPair
+	var fallbackName string
+	if provider := r.Options.Provider; provider != "" {
+		pair, err = r.signInWithOAuth(ctx, s, provider)
+	} else {
+		pair, fallbackName, err = r.signInWithPassword(ctx, s)
+	}
+	if err != nil {
+		return err
+	}
+
+	return r.finish(ctx, s, pair, fallbackName)
+}
+
+// prepare works out where this login is going and who is doing it, before any credential exists.
+func (r *Runner) prepare() (session, error) {
 	// Read once, at the top. Separate LoadRecord calls used to answer a question each, taking and releasing
 	// the cross-process lock every time — so a daemon's startup Save landing between two of them produced a
 	// login assembled from two different records. It also meant an unreadable record failed at whichever
 	// question happened to ask second.
 	previous, err := r.loadPrevious()
 	if err != nil {
-		return err
+		return session{}, err
 	}
 
 	instanceURL, err := r.resolveInstance(previous)
 	if err != nil {
-		return err
+		return session{}, err
 	}
 
-	// Said before the password is asked for, never after: the point of the warning is to let someone stop.
+	// Said before anything is typed or any browser opens, never after: the point of a warning is to let
+	// someone stop. It covers both methods deliberately — an OAuth sign-in has no password to expose, and
+	// the exchange code and the token pair cross the same cleartext hop.
 	if looksLikeHTTP(instanceURL) {
-		r.printf("Warning: %s is plain HTTP, so your password and token cross the network unencrypted.\n",
-			instanceURL)
-	}
-
-	email, err := r.resolveEmail()
-	if err != nil {
-		return err
-	}
-	password, err := r.resolvePassword()
-	if err != nil {
-		return err
+		r.printf("Warning: %s is plain HTTP, so everything this sends — including your credentials —\n"+
+			"crosses the network unencrypted.\n", instanceURL)
 	}
 
 	// The store owns this, not the login: it has to outlive both a logout and the record file itself.
 	deviceID, err := r.Store.DeviceID()
 	if err != nil {
-		return err
+		return session{}, err
 	}
-	deviceName := r.resolveDeviceName(previous)
 
-	api := r.client(instanceURL)
-	pair, err := api.login(ctx, loginRequest{
+	return session{
+		instanceURL: instanceURL,
+		deviceID:    deviceID,
+		deviceName:  r.resolveDeviceName(previous),
+		api:         r.client(instanceURL),
+	}, nil
+}
+
+// signInWithPassword is M7's flow.
+//
+// The second return is the address that was typed, shown if the /users/@me lookup fails. The OAuth path has
+// no equivalent — it never learns an address — and passes an empty one.
+func (r *Runner) signInWithPassword(ctx context.Context, s session) (tokenPair, string, error) {
+	email, err := r.resolveEmail()
+	if err != nil {
+		return tokenPair{}, "", err
+	}
+	password, err := r.resolvePassword()
+	if err != nil {
+		return tokenPair{}, "", err
+	}
+
+	pair, err := s.api.login(ctx, loginRequest{
 		Email:      email,
 		Password:   password,
-		DeviceID:   deviceID,
-		DeviceName: deviceName,
+		DeviceID:   s.deviceID,
+		DeviceName: s.deviceName,
 	})
 	if err != nil {
-		return err
+		return tokenPair{}, "", err
 	}
+	return pair, email, nil
+}
 
+// finish is everything below the prompt: who the token belongs to, storing it, and saying so.
+func (r *Runner) finish(ctx context.Context, s session, pair tokenPair, fallbackName string) error {
 	// Who the token belongs to, from the instance rather than from what was typed: an email address is how
 	// someone signs in, and a username is how everyone else sees them. A failure here is not fatal — the
-	// session is valid either way — so it degrades to showing the address instead.
+	// session is valid either way — so it degrades to showing whatever the method had, or nothing.
 	record := credentials.Record{
-		InstanceURL: instanceURL,
-		Username:    email,
-		DeviceID:    deviceID,
-		DeviceName:  deviceName,
+		InstanceURL: s.instanceURL,
+		Username:    fallbackName,
+		DeviceID:    s.deviceID,
+		DeviceName:  s.deviceName,
 	}
-	if who, err := api.me(ctx, pair.AccessToken); err == nil {
+	if who, err := s.api.me(ctx, pair.AccessToken); err == nil {
 		record.UserID = who.ID
 		record.Username = who.Username
 	}
@@ -158,8 +223,12 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// Sanitized again at the print, though api.me already cleaned it: the fallback value is the address that
 	// was typed, and reading this line should not require tracing where the string came from (rule 19).
-	r.printf("Signed in as %s on %s.\n", termsafe.Text(record.Username), instanceURL)
-	r.printf("This device is %q; its credential is stored in %s.\n", deviceName, r.Store.SecretLocation())
+	if record.Username != "" {
+		r.printf("Signed in as %s on %s.\n", termsafe.Text(record.Username), s.instanceURL)
+	} else {
+		r.printf("Signed in on %s.\n", s.instanceURL)
+	}
+	r.printf("This device is %q; its credential is stored in %s.\n", s.deviceName, r.Store.SecretLocation())
 	r.printf("Start the background daemon with `norite daemon start` if it is not running already.\n")
 	return nil
 }
@@ -208,7 +277,8 @@ func (r *Runner) resolveEmail() (string, error) {
 		return email, nil
 	}
 	if !r.Interactive {
-		return "", fmt.Errorf("%w: pass --email, or run it from a terminal", ErrNoTerminal)
+		return "", fmt.Errorf("%w: pass --email, use --provider to sign in with Google or GitHub, "+
+			"or run it from a terminal", ErrNoTerminal)
 	}
 
 	email, err := r.ReadLine("Email: ")
@@ -228,7 +298,8 @@ func (r *Runner) resolvePassword() (string, error) {
 		return password, nil
 	}
 	if !r.Interactive {
-		return "", fmt.Errorf("%w: set %s, or run it from a terminal", ErrNoTerminal, passwordEnvVar)
+		return "", fmt.Errorf("%w: set %s, use --provider to sign in with Google or GitHub, "+
+			"or run it from a terminal", ErrNoTerminal, passwordEnvVar)
 	}
 
 	password, err := r.ReadSecret("Password: ")
