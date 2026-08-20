@@ -203,6 +203,7 @@ CREATE TABLE oauth_states (
   provider varchar(32) NOT NULL,
   code_verifier text NOT NULL,                            -- necessarily plaintext: sent to the provider
   flow_challenge bytea NOT NULL,                          -- sha256 of the *client's* verifier (ADR 0024)
+  client_redirect_uri text NOT NULL DEFAULT '',           -- M8: loopback listener to return to, or ''
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL, consumed_at timestamptz NULL
 );
@@ -769,13 +770,22 @@ consults the provider's immutable user ID and never the address again.
 **No account exists until a username is chosen**, and nothing is written to `users` before that: the
 callback returns a short-lived signed continuation token, and the account, its `oauth_identities` row and
 its first session are created together in one transaction. There is deliberately no pending-account state
-for later milestones to have to respect. **The callback never returns tokens** — it renders a page carrying
+for later milestones to have to respect. **The callback never returns tokens** — it hands over
 a single-use exchange code, because a redirect carrying a token pair would put credentials in a URL, in
-browser history, and in every proxy log on the way. Two CLI login paths: a system-browser-plus-localhost-callback
-loopback flow (a fixed registered port, e.g. `http://127.0.0.1:51763/callback`, the same for both
-providers, plus a documented fallback-port list, since GitHub OAuth Apps require an exact pre-registered
-callback URL), and a headless/SSH device-code fallback (`device_code` table, minimal
-server-rendered completion page, independent of the web SPA).
+browser history, and in every proxy log on the way. It renders that code on a page, or, when the client
+named a loopback listener, `302`s to it carrying the code (M8,
+[ADR 0027](adr/0027-loopback-redirect-for-the-oauth-callback.md)) — a two-minute single-use value, useless
+without the flow verifier that never left the client, on a hop that never leaves the machine.
+
+Two CLI login paths: a system-browser-plus-loopback-listener flow, and a headless/SSH device-code fallback
+(`device_code` table, minimal server-rendered completion page, independent of the web SPA). **What is
+registered with Google and GitHub is this instance's own callback**,
+`{public_base_url}/api/v1/auth/oauth/{provider}/callback`, and nothing else — the provider never sees the
+loopback URI, which is a second hop it has no opinion about. The instance validates that URI by host
+(loopback IP literal, explicit port, `http`, nothing else) and accepts any port. The CLI's fixed primary
+port `http://127.0.0.1:51763/callback` plus its fallback list is therefore a **client-side convention**,
+kept because it makes the port predictable enough to document and to allow through a local firewall, not a
+protocol requirement.
 
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
 entry, one process; CLI/TUI/GUI never independently store a token copy. `norite login` (M7) is the single
@@ -1589,8 +1599,12 @@ E2E key-boundary violations.
 14. **Password-reset and reports anti-abuse**: always-identical response regardless of email existence
     (anti-enumeration), rate-limited; report filing rate-limited per user with reporter-history triage.
 
-15. **OAuth loopback design**: a fixed registered local callback port with a documented fallback-port list,
-    since GitHub OAuth Apps require an exact pre-registered callback URL.
+15. **OAuth loopback design**: the callback returns the one-time exchange code to a listener the client
+    named, validated by host — `http` on a loopback IP literal with an explicit port, no userinfo, query or
+    fragment, any port. `localhost` is refused because a name resolves through `/etc/hosts` and DNS and an
+    IP literal resolves through nobody (RFC 8252 §8.3). The fixed primary port and fallback list are the
+    CLI's own convention; what is registered with the providers is the instance's callback. See ADR 0027,
+    which also records why an exchange code may travel in a loopback URL where a token pair may not.
 
 16. **Auto-update hardening**: Sigstore/cosign signature verification via self-contained offline-verifiable
     bundles, anti-downgrade protection, fail-closed on verify failure, auto-rollback on repeated crash-loop —

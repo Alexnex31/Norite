@@ -283,7 +283,9 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   silently. The repository's first cross-module dependency (`cli` → `daemon`) starts here, because the
   daemon owns what a stored credential is. Rule 19's sanitizer landed here too rather than at M43, since
   this is the first command that prints a name a stranger's instance chose.
-- **M8 — CLI OAuth loopback flow**: in progress.
+- **M8 — CLI OAuth loopback flow**: in progress. Note it carries a backend half M6 did not build: an
+  optional `client_redirect_uri` at `/authorize`, so the callback can return the exchange code to a
+  listener instead of rendering it (migration `000006`, ADR 0027).
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -548,6 +550,41 @@ Three things this milestone deliberately leaves for the milestone that can do th
 - **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
   logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
   function has to move somewhere both modules reach — not be copied.
+
+And on the CLI OAuth side, from M8 (decisions in ADR 0027):
+
+- **The loopback listener receives the code from the *instance*, not the provider's callback.** The
+  provider redirects to `{public_base_url}/api/v1/auth/oauth/{provider}/callback`, which is what is
+  registered with Google and GitHub and is unchanged from M6; the instance then `302`s to the listener. The
+  older reading — that the port is registered with the provider — requires the client secret in the CLI
+  binary and is what ADR 0027 exists to correct. Three documents said it and all three are fixed.
+- **A client-supplied redirect is validated by host, never by port.** `http` on a loopback IP literal, an
+  explicit port, no userinfo, no query, no fragment, ≤256 bytes, and the parser's own re-serialization is
+  what gets stored. **`localhost` is refused**: a name resolves through `/etc/hosts` and DNS, an IP literal
+  resolves through nobody. A port allowlist was rejected — it would couple two independently-versioned
+  modules and stops nothing the host check and the verifier binding do not already stop.
+- **The destination is fixed when the flow starts.** It comes out of the consumed `oauth_states` row, and
+  the callback never reads `client_redirect_uri` from its own URL — that URL is presented by whoever holds
+  the link. Across the sign-up form it rides in the **signed continuation token** (`rdr`), never in a form
+  field, for the same reason. Both properties have a test that fails if the handler reads the untrusted
+  copy; both were confirmed by making it do so.
+- **What crosses the loopback socket is a fixed vocabulary, not prose.** Seven error codes, no
+  `error_description`, ever. A listener is a socket any local process can write to, so keeping free-form
+  text off it entirely is a better answer to rule 19 than sanitizing it on arrival — the client writes the
+  wording. On the CLI side an unknown code is bounded and stripped to `[a-z0-9_]` as well.
+- **Bind `127.0.0.1:port` explicitly.** `":port"` binds `0.0.0.0` and puts a sign-in listener on the LAN,
+  and it looks identical on a developer's machine. The test prints what it bound when it fails.
+- **A busy port is walked past, never diagnosed.** A bind error says something holds the port and nothing
+  about what; finding out means speaking HTTP at an unknown local service. The exception is a permission
+  error, which is reported, because "free this port and retry" is the wrong advice for it. Safe because a
+  squatter receives a code it cannot redeem without the verifier.
+- **The listener is bound before the URL is built**, so the redirect names the port actually bound. A bug
+  here is invisible until the first fallback and then hangs forever.
+- **The sign-in URL is always printed**, whether or not a browser opened. It carries the challenge, which
+  is a hash and publishable by construction, and never the verifier. A browser opening the wrong profile is
+  the ordinary case, not the rare one.
+- **`--no-browser` prints and keeps listening; it does not mean headless.** A machine with no browser at
+  all is M9's device code. This refines ADR 0011's sentence rather than reversing it.
 
 ## Project-specific skills
 

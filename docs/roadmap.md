@@ -80,16 +80,24 @@ of this section.
   Service and that is precisely the kind of machine this CLI exists for
   ([ADR 0025](adr/0025-credential-storage-without-a-keyring.md)). Done when: `norite login` with a password
   succeeds, and the daemon can use the stored token on next launch without re-prompting.
-- **M8 — CLI OAuth loopback flow**: the system-browser-plus-localhost-callback loopback login, using the
-  fixed local port (with its documented fallback-port list) registered as the exact callback URL with both
-  providers. Done when: `norite login` opens a browser, completes Google or GitHub OAuth via the fixed
-  registered port, and stores the resulting token via the same keychain path as M7; and if the primary port is
-  occupied, the CLI falls back to the next registered port and only fails with a clear "free this port and
-  retry" error once every registered fallback is exhausted. The loopback listener mints a
-  `flow_verifier` and passes its challenge to `/authorize`, exactly as any other client must (M6, ADR 0024)
-  — that binding is what stops a crafted callback URL delivering somebody else's exchange code into a
-  listener that would otherwise redeem it without the user doing anything at all.
-- **M9 — CLI headless device-code fallback**: the `device_code` table, the minimal unstyled server-rendered
+- **M8 — CLI OAuth loopback flow**: the system-browser-plus-loopback-listener login. The client binds a
+  local port, names it at `/authorize`, and the **instance's** callback returns the one-time exchange code
+  there instead of rendering it. Requires a backend half M6 did not build — an optional `client_redirect_uri`
+  validated by host, carried on the `oauth_states` row and across the sign-up form inside the signed
+  continuation token (ADR 0027). What is registered with Google and GitHub is unchanged and stays the
+  instance's own callback; the fixed primary port plus fallback list is a client-side convention, which is
+  the correction ADR 0027 records. Done when: `norite login --provider` opens a browser, completes Google or
+  GitHub OAuth, and stores the resulting token via the same keychain path as M7 — including for an account
+  that does not exist yet, where the sign-up form still returns to the listener; if the primary port is
+  occupied the CLI falls back to the next one and only fails with a clear "free this port and retry" error
+  naming every port tried once the list is exhausted; and a declined consent is reported promptly rather
+  than waited out. The listener mints a `flow_verifier` and passes its challenge to `/authorize`, exactly as
+  any other client must (M6, ADR 0024) — that binding is what stops a crafted callback URL delivering
+  somebody else's exchange code into a listener that would otherwise redeem it without the user doing
+  anything at all, and it is also what makes validating the return URI by host alone sufficient.
+- **M9 — CLI headless device-code fallback** (note `--no-browser` at M8 prints the sign-in URL and keeps
+  listening rather than switching to a device code; this milestone is what a machine with no browser *at
+  all* falls back to, refining ADR 0011): the `device_code` table, the minimal unstyled server-rendered
   auth-completion page, and CLI headless-context detection plus polling logic. Depends on M6 (OAuth) and M8
   (loopback, to detect when to fall back from it). Done when: `norite login --no-browser` (or an auto-detected
   headless context) displays a code, and completing it on a separate device with a browser finishes the login
