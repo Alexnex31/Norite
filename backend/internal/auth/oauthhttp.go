@@ -165,6 +165,16 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A failure that ends the flow, on a sign-up that named a listener, is reported there — otherwise the
+	// browser shows a page and the client waits out its whole timeout for a decision already made. The
+	// username errors below are deliberately not routed here: the form re-renders and the listener is
+	// still waiting for the eventual success.
+	var callback *OAuthCallbackError
+	if errors.As(err, &callback) && callback.ClientRedirectURI != "" {
+		h.reportOAuthFailureToListener(w, r, callback)
+		return
+	}
+
 	// A rejected username is worth re-rendering the form for: the person can fix it without starting the
 	// whole flow again. Anything else means the continuation token is gone, and there is nothing to
 	// re-render with.
@@ -262,12 +272,7 @@ func (h *Handler) renderOAuthFailure(w http.ResponseWriter, r *http.Request, non
 	// own URL, which is the one thing this design refuses to do.
 	var callback *OAuthCallbackError
 	if errors.As(err, &callback) && callback.ClientRedirectURI != "" {
-		logging.FromContext(r.Context()).Debug().
-			Str("oauth_error", callback.Code).
-			Msg("returning an oauth failure to a client's listener")
-		http.Redirect(w, r,
-			oauthReturnURL(callback.ClientRedirectURI, url.Values{"error": {callback.Code}}),
-			http.StatusFound)
+		h.reportOAuthFailureToListener(w, r, callback)
 		return
 	}
 
@@ -295,6 +300,27 @@ func (h *Handler) renderOAuthFailure(w http.ResponseWriter, r *http.Request, non
 		logging.FromContext(r.Context()).Error().Err(err).Msg("oauth callback failed")
 		h.renderOAuthError(w, r, nonce, "Something went wrong on our end. Please try again.")
 	}
+}
+
+// reportOAuthFailureToListener sends a failure code to the client's loopback listener.
+func (h *Handler) reportOAuthFailureToListener(w http.ResponseWriter, r *http.Request,
+	callback *OAuthCallbackError,
+) {
+	log := logging.FromContext(r.Context())
+	if callback.Code == oauthErrServer {
+		// The one failure the vocabulary cannot describe, so it has to be recorded here. Redirecting skips
+		// renderOAuthFailure's switch, whose default case is otherwise the only place an unclassified
+		// failure is logged at all — a pool exhausted mid-flow, or a failed token exchange, would answer
+		// the client and leave nothing behind at the default level. Once M8 ships this is the common login
+		// path, which is exactly the wrong thing to make unobservable.
+		log.Error().Err(callback.Err).Msg("oauth flow failed; reporting server_error to a listener")
+	} else {
+		log.Debug().Str("oauth_error", callback.Code).
+			Msg("returning an oauth failure to a client's listener")
+	}
+	http.Redirect(w, r,
+		oauthReturnURL(callback.ClientRedirectURI, url.Values{"error": {callback.Code}}),
+		http.StatusFound)
 }
 
 func (h *Handler) renderOAuthError(w http.ResponseWriter, r *http.Request, nonce, message string) {

@@ -95,13 +95,19 @@ of this section.
   any other client must (M6, ADR 0024) — that binding is what stops a crafted callback URL delivering
   somebody else's exchange code into a listener that would otherwise redeem it without the user doing
   anything at all, and it is also what makes validating the return URI by host alone sufficient.
-- **M9 — CLI headless device-code fallback** (note `--no-browser` at M8 prints the sign-in URL and keeps
-  listening rather than switching to a device code; this milestone is what a machine with no browser *at
-  all* falls back to, refining ADR 0011): the `device_code` table, the minimal unstyled server-rendered
+- **M9 — CLI headless device-code fallback**: the `device_code` table, the minimal unstyled server-rendered
   auth-completion page, and CLI headless-context detection plus polling logic. Depends on M6 (OAuth) and M8
-  (loopback, to detect when to fall back from it). Done when: `norite login --no-browser` (or an auto-detected
-  headless context) displays a code, and completing it on a separate device with a browser finishes the login
-  on the original CLI session.
+  (loopback, to detect when to fall back from it).
+
+  **`--no-browser` is not the trigger, and this is the correction M8 forces.** That flag means "do not
+  launch anything, print the URL, keep listening", which is a working flow for SSH with a forwarded port
+  and is what M8 ships; overloading it to mean "use a device code instead" would give one flag two
+  incompatible behaviours. The device code is what a machine with **no browser reachable at all** falls
+  back to — detected, not asked for — which is the case M8 currently fails fast on. This refines ADR 0011,
+  which named `--no-browser` as the trigger before either flow existed. Give the deliberate choice its own
+  flag if one is wanted. Done when: a login on a host with no browser displays a code instead of binding a
+  listener, and completing it on a separate device with a browser finishes the login on the original CLI
+  session.
 - **M10 — `norite instance init` finish, and registration hardening**: adds the first-admin-account-creation
   step (now that M4 exists) and wires up instance-level registration gating (the `instance_invites` table
   plus enforcement at registration). Depends on M2 and M4.

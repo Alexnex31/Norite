@@ -487,3 +487,70 @@ func TestAnUnknownProviderFailsBeforeAnythingIsBound(t *testing.T) {
 	assert.False(t, launched, "nothing may have been opened")
 	assert.Zero(t, f.exchanges)
 }
+
+// ---------- findings from review ----------
+
+// A scripted run on a machine where no browser can open must fail at once rather than binding a socket and
+// waiting fifteen minutes for somebody who is not there. The ErrNoTerminal messages used to offer
+// --provider as the way out of "you are not at a terminal", which it is not: it needs a browser, not a TTY.
+func TestANonInteractiveRunWithNoBrowserFailsAtOnce(t *testing.T) {
+	f := newOAuthFake(t)
+	runner, _, _ := oauthRunner(t, f, Options{})
+	runner.Interactive = false
+	runner.openBrowser = func(context.Context, string) error { return assert.AnError }
+
+	start := time.Now()
+	err := runner.Run(t.Context())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no terminal")
+	assert.Less(t, time.Since(start), 5*time.Second, "it must not have waited out the listener timeout")
+	assert.Zero(t, f.exchanges)
+}
+
+// The same run with a browser that *does* open is a real case — a script launched from a desktop session —
+// and must still work. Only the combination is hopeless.
+func TestANonInteractiveRunWithAWorkingBrowserStillSucceeds(t *testing.T) {
+	f := newOAuthFake(t)
+	runner, store, _ := oauthRunner(t, f, Options{})
+	runner.Interactive = false
+
+	require.NoError(t, runner.Run(t.Context()))
+	_, _, err := store.Load()
+	assert.NoError(t, err)
+}
+
+// --no-browser is a deliberate choice to read the link yourself, so the absence of a terminal must not
+// turn it into the fail-fast case above: the output may well be going somewhere a person is watching.
+//
+// Asserted by canceling rather than by completing the flow — what matters is that it *waits*, and the
+// difference between "waited and was interrupted" and "refused immediately" is the whole property.
+func TestNoBrowserIsNotOverriddenByANonInteractiveSession(t *testing.T) {
+	f := newOAuthFake(t)
+	runner, _, out := oauthRunner(t, f, Options{NoBrowser: true})
+	runner.Interactive = false
+	runner.openBrowser = func(context.Context, string) error {
+		t.Error("--no-browser must not launch anything")
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	err := runner.Run(ctx)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded, "it must have been waiting, not refusing")
+	assert.Contains(t, out.String(), "Open this in a browser")
+}
+
+// An address claimed between the callback and the sign-up form ends the flow in the browser, so a waiting
+// client is told rather than left to time out — and told something true, not "server_error".
+func TestASignupThatCannotCompleteReachesTheListener(t *testing.T) {
+	f := newOAuthFake(t)
+	f.failWith = "email_taken"
+	runner, _, _ := oauthRunner(t, f, Options{})
+
+	err := runner.Run(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered")
+	assert.NotContains(t, err.Error(), "server_error")
+}

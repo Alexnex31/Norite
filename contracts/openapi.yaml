@@ -437,8 +437,11 @@ paths:
                 type: string
         "302":
           description: >
-            The account was created and the flow named a loopback listener, so the code goes there
-            instead. Same shape as the callback's 302.
+            The flow named a loopback listener, so the result goes there instead of onto a page — `?code=`
+            when the account was created, or `?error=` when something ended the sign-up that retyping a
+            username cannot fix (`registration_closed`, `email_taken`, `server_error`). A rejected or taken
+            username is *not* reported this way: the form re-renders so it can be corrected, and the
+            listener keeps waiting.
           headers:
             Location:
               schema:
@@ -722,8 +725,9 @@ paths:
 
             `access_denied` (declined at the provider), `email_unverified` (the provider will not vouch
             for the address, so it reaches no account), `identity_linked_elsewhere`,
-            `account_already_linked`, `registration_closed`, `no_email`, `server_error`. Treat an
-            unrecognised value as `server_error`.
+            `account_already_linked`, `registration_closed`, `email_taken` (claimed between the callback
+            and the sign-up form), `no_email`, `server_error`. Treat an unrecognised value as
+            `server_error`.
           headers:
             Location:
               schema:

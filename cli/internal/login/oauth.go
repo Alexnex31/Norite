@@ -45,6 +45,12 @@ func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string
 
 	target := authorizeURL(s.instanceURL, provider, challenge, listener.redirectURI())
 
+	// Nobody is watching, and nothing opened. Waiting the full timeout here would be the worst of both:
+	// a cron job that hangs for fifteen minutes and then reports a timeout, when the answer was knowable
+	// at once. A non-interactive run with a *working* browser is a real case — a script launched from a
+	// desktop session — so only the combination fails, and it names the flow that will cover it.
+	failFast := !r.Interactive && !r.Options.NoBrowser
+
 	// Printed whether or not the browser opens, and that is deliberate rather than defensive: a browser
 	// that opens the wrong profile is the ordinary case, not the rare one, and this line is what rescues
 	// it. Safe to print — see authorizeURL.
@@ -53,6 +59,12 @@ func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string
 	} else {
 		r.printf("Opening your browser to sign in. If it does not open, go to:\n\n  %s\n\n", target)
 		if err := r.launchBrowser(ctx, target); err != nil {
+			if failFast {
+				return tokenPair{}, fmt.Errorf(
+					"could not open a browser (%s), and there is no terminal for anyone to read the "+
+						"sign-in link from; sign in with a password, or run this where a browser can open",
+					termsafe.Text(err.Error()))
+			}
 			// Sanitized because it can carry an OS message and a path, and because it is printed rather
 			// than returned — so main's errorText backstop never sees it (rule 19).
 			r.printf("Could not open a browser (%s); use the link above.\n\n", termsafe.Text(err.Error()))
@@ -113,6 +125,10 @@ func oauthFailure(code string) error {
 		return errors.New("that account is already linked to a different account at this provider")
 	case "registration_closed":
 		return errors.New("this instance requires an invite code to create an account")
+	case "email_taken":
+		return errors.New(
+			"that provider account's email address is already registered here; sign in with a password " +
+				"instead, and link the provider from settings")
 	case "no_email":
 		return errors.New("the provider did not share an email address, which this instance needs")
 	case "malformed_code":

@@ -277,8 +277,9 @@ func (r *Runner) resolveEmail() (string, error) {
 		return email, nil
 	}
 	if !r.Interactive {
-		return "", fmt.Errorf("%w: pass --email, use --provider to sign in with Google or GitHub, "+
-			"or run it from a terminal", ErrNoTerminal)
+		return "", fmt.Errorf("%w: pass --email, or run it from a terminal. (--provider signs in "+
+			"through a browser and needs one to be openable, not a terminal — M9 adds the flow for a "+
+			"machine with neither.)", ErrNoTerminal)
 	}
 
 	email, err := r.ReadLine("Email: ")
@@ -298,8 +299,9 @@ func (r *Runner) resolvePassword() (string, error) {
 		return password, nil
 	}
 	if !r.Interactive {
-		return "", fmt.Errorf("%w: set %s, use --provider to sign in with Google or GitHub, "+
-			"or run it from a terminal", ErrNoTerminal, passwordEnvVar)
+		return "", fmt.Errorf("%w: set %s, or run it from a terminal. (--provider signs in through a "+
+			"browser and needs one to be openable, not a terminal — M9 adds the flow for a machine with "+
+			"neither.)", ErrNoTerminal, passwordEnvVar)
 	}
 
 	password, err := r.ReadSecret("Password: ")

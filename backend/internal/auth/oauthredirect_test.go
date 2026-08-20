@@ -73,6 +73,10 @@ func TestRefusedLoopbackRedirects(t *testing.T) {
 		{"a newline", "http://127.0.0.1:51763/cb\nX: y"},
 		{"a NUL", "http://127.0.0.1:51763/cb\x00"},
 		{"a value longer than the cap", "http://127.0.0.1:51763/" + strings.Repeat("a", maxClientRedirect)},
+		// Under the cap as written and over it once canonicalized, because url.String() escapes each space
+		// as %20. Accepting it produced a signup that could never be completed — see the cap's comment.
+		{"a value that only exceeds the cap once escaped",
+			"http://127.0.0.1:51763/" + strings.Repeat(" ", 200)},
 	} {
 		got, err := ParseOAuthClientRedirect(tc.in)
 		assert.ErrorIs(t, err, ErrOAuthClientRedirect, "%s: %q must be refused", tc.why, tc.in)
@@ -99,6 +103,34 @@ func TestTheCanonicalFormIsWhatComesBack(t *testing.T) {
 	again, err := ParseOAuthClientRedirect(got)
 	require.NoError(t, err)
 	assert.Equal(t, got, again)
+}
+
+// Idempotency asserted on the values that could actually break it, rather than on one short URI that was
+// never going to. Anything url.String() rewrites is a candidate: escaping is what makes the output differ
+// from the input, and a difference in *length* is what used to turn an accepted redirect into a signup
+// nobody could finish.
+func TestEveryAcceptedRedirectSurvivesRevalidation(t *testing.T) {
+	for _, in := range []string{
+		"http://127.0.0.1:51763/callback",
+		"http://127.0.0.1:51763",
+		"http://[::1]:51763/callback",
+		"http://127.0.0.1:51763/a b",                          // a space, escaped on the way out
+		"http://127.0.0.1:51763/" + strings.Repeat(" ", 60),   // escaping triples the length
+		"http://127.0.0.1:51763/" + strings.Repeat("%20", 60), // already escaped
+		"http://127.0.0.1:51763/callback~-._",                 // unreserved, must not be escaped
+		"http://127.0.0.1:51763/" + strings.Repeat("a", 200),  // long but not escapable
+	} {
+		first, err := ParseOAuthClientRedirect(in)
+		if err != nil {
+			continue // refused outright is fine; the property is about what is accepted
+		}
+		require.LessOrEqual(t, len(first), maxClientRedirect,
+			"%q was accepted as a %d-byte canonical form, over the cap", in, len(first))
+
+		second, err := ParseOAuthClientRedirect(first)
+		require.NoError(t, err, "%q canonicalized to %q, which this function then refuses", in, first)
+		assert.Equal(t, first, second, "%q is not idempotent", in)
+	}
 }
 
 // The code is assigned into the query, never appended to whatever was there, and the input is refused if

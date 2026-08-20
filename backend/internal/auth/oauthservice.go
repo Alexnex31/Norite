@@ -418,9 +418,22 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 ) (OAuthSignupResult, error) {
 	continuation, err := s.parseOAuthSignupToken(signupToken)
 	if err != nil {
+		// Before the token parsed there is no redirect to know, so this one cannot be reported to a
+		// listener — the same boundary CompleteOAuth has around state consumption.
 		return OAuthSignupResult{}, err
 	}
 	identity, challenge := continuation.Identity, continuation.Challenge
+
+	// Failures from here on know where a client is waiting, and the ones that end the flow say so. A
+	// username that can simply be retyped is deliberately *not* wrapped: the form re-renders, the person
+	// fixes it, and the listener is still waiting for the eventual success.
+	fail := func(err error) (OAuthSignupResult, error) {
+		return OAuthSignupResult{}, &OAuthCallbackError{
+			Err:               err,
+			Code:              oauthErrorCodeFor(err),
+			ClientRedirectURI: continuation.ClientRedirectURI,
+		}
+	}
 
 	username := NormalizeUsername(rawUsername)
 	if !ValidUsername(username) {
@@ -428,20 +441,21 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 	}
 
 	// Re-checked here rather than trusted from the callback: the token is valid for half an hour, and the
-	// instance could have been switched to invite-only in between.
+	// instance could have been switched to invite-only in between. That is exactly the window in which a
+	// waiting client would otherwise sit out its full timeout for a decision already made.
 	if s.registrationMode != RegistrationOpen {
-		return OAuthSignupResult{}, ErrOAuthRegistrationClosed
+		return fail(ErrOAuthRegistrationClosed)
 	}
 
 	email := strings.TrimSpace(strings.ToLower(identity.Email))
 
 	userID, err := s.ids.Next()
 	if err != nil {
-		return OAuthSignupResult{}, fmt.Errorf("generating user ID: %w", err)
+		return fail(fmt.Errorf("generating user ID: %w", err))
 	}
 	identityID, err := s.ids.Next()
 	if err != nil {
-		return OAuthSignupResult{}, fmt.Errorf("generating oauth identity ID: %w", err)
+		return fail(fmt.Errorf("generating oauth identity ID: %w", err))
 	}
 
 	var user db.User
@@ -491,12 +505,19 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		return nil
 	})
 	if err != nil {
-		return OAuthSignupResult{}, err
+		// ErrUsernameTaken is the one the form can still recover from, so it stays unwrapped and
+		// re-renders. Everything else here — the address claimed since the callback, a second submission
+		// of the same signup, a database failure — ends the flow in the browser, and a client waiting on a
+		// listener has to be told rather than left to time out.
+		if errors.Is(err, ErrUsernameTaken) {
+			return OAuthSignupResult{}, err
+		}
+		return fail(err)
 	}
 
 	code, err := s.issueOAuthExchangeCode(ctx, user.ID, challenge)
 	if err != nil {
-		return OAuthSignupResult{}, err
+		return fail(err)
 	}
 	return OAuthSignupResult{
 		ExchangeCode:      code,

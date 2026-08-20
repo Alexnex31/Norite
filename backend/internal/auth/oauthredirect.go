@@ -47,6 +47,13 @@ var ErrOAuthClientRedirect = errors.New(
 // Generous for the shape this accepts — http://127.0.0.1:65535/ plus a path — and small enough that the
 // column and the header stay uninteresting. A client needing more than this is doing something the design
 // does not anticipate.
+//
+// Checked against the **canonical form**, not the input, and the difference is not cosmetic. url.String()
+// percent-escapes the path, so a URI can grow roughly threefold on the way out: 200 spaces is 223 bytes in
+// and 623 out. Bounding only the input let such a value be accepted, stored in the signup token's `rdr`
+// claim, and then refused by parseOAuthSignupToken's own re-validation — which reports "this sign-up has
+// expired", forever, with nothing in the logs to say why. The input is still bounded first, but only to
+// keep url.Parse from being handed something enormous.
 const maxClientRedirect = 256
 
 // ParseOAuthClientRedirect validates a loopback return URI and returns its canonical form.
@@ -61,6 +68,7 @@ func ParseOAuthClientRedirect(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
+	// A cheap pre-parse bound. The authoritative check is on the canonical form below.
 	if len(raw) > maxClientRedirect {
 		return "", ErrOAuthClientRedirect
 	}
@@ -151,7 +159,13 @@ func ParseOAuthClientRedirect(raw string) (string, error) {
 		return "", ErrOAuthClientRedirect
 	}
 
-	return u.String(), nil
+	// The value that will actually be stored and re-emitted, so this is the length that matters — and the
+	// one that makes this function idempotent, which parseOAuthSignupToken depends on.
+	canonical := u.String()
+	if len(canonical) > maxClientRedirect {
+		return "", ErrOAuthClientRedirect
+	}
+	return canonical, nil
 }
 
 // oauthReturnURL puts a one-time exchange code on an already-validated loopback URI.
@@ -187,6 +201,7 @@ const (
 	oauthErrIdentityLinked       = "identity_linked_elsewhere"
 	oauthErrAccountAlreadyLinked = "account_already_linked"
 	oauthErrRegistrationClosed   = "registration_closed"
+	oauthErrEmailTaken           = "email_taken"
 	oauthErrNoEmail              = "no_email"
 	oauthErrServer               = "server_error"
 )
@@ -225,6 +240,11 @@ func oauthErrorCodeFor(err error) string {
 		return oauthErrAccountAlreadyLinked
 	case errors.Is(err, ErrOAuthRegistrationClosed):
 		return oauthErrRegistrationClosed
+	case errors.Is(err, ErrEmailTaken):
+		// Reachable only from the signup form: the address was claimed between the callback and the
+		// submission. server_error would be untrue and unactionable, and it discloses nothing the page
+		// on the same path does not already say.
+		return oauthErrEmailTaken
 	case errors.Is(err, ErrOAuthNoEmail):
 		return oauthErrNoEmail
 	default:

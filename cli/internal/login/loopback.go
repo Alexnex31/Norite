@@ -204,7 +204,7 @@ func reduceFailure(raw string) string {
 	}
 	switch raw {
 	case "access_denied", "email_unverified", "identity_linked_elsewhere",
-		"account_already_linked", "registration_closed", "no_email", "server_error":
+		"account_already_linked", "registration_closed", "email_taken", "no_email", "server_error":
 		return raw
 	}
 

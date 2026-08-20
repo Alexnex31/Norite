@@ -452,3 +452,50 @@ func TestAFailureBeforeTheStateIsSpentStillRendersItsPage(t *testing.T) {
 	assert.Empty(t, page.Header.Get("Location"))
 	assert.Contains(t, page.String(), "no longer valid")
 }
+
+// A sign-up that cannot complete must reach the listener too. The callback path was given this at M8 and
+// the form path was not, which left every window the form-time re-checks exist for — the address claimed
+// since the callback, the instance switched to invite-only — ending with a browser error page and a client
+// waiting out its full fifteen minutes for a decision already made.
+//
+// The address-claimed window is the one that can be produced here: registration mode is fixed when the
+// router is built, and an invite-only instance refuses at the callback and never renders a form at all.
+func TestASignupFailureReachesTheListener(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-99", "newcomer@example.com", true)
+
+	page, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	require.Equal(t, http.StatusOK, page.Code, page)
+	token := hiddenField(t, page, "signup_token")
+
+	// The window: somebody else registers that address between the callback and the submission.
+	api.newAccount("someone", "newcomer@example.com", "laptop")
+
+	done := api.call(http.MethodPost, "/oauth/signup",
+		url.Values{"signup_token": {token}, "username": {"newcomer"}}.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	got := returnedTo(t, done)
+	assert.Equal(t, "127.0.0.1:51763", got.Host)
+	assert.Equal(t, "email_taken", got.Query().Get("error"),
+		"and it must say what happened, not server_error")
+	assert.Empty(t, got.Query().Get("code"), "a failure must never carry a redeemable code")
+}
+
+// A username that can simply be retyped is deliberately *not* reported to the listener: the form
+// re-renders, the person fixes it, and the listener is still waiting for the eventual success. Reporting
+// it would end a sign-in that has not actually failed.
+func TestARetypeableUsernameDoesNotEndTheFlow(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-99", "newcomer@example.com", true)
+
+	page, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	rejected := api.call(http.MethodPost, "/oauth/signup",
+		url.Values{"signup_token": {hiddenField(t, page, "signup_token")}, "username": {"!"}}.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	require.Equal(t, http.StatusBadRequest, rejected.Code, rejected)
+	assert.Empty(t, rejected.Header.Get("Location"), "a fixable username must not end the sign-in")
+}
