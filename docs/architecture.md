@@ -5,35 +5,38 @@
 > nobody trusts is worse than no doc; if you deviate from something here, update this file in the same PR).
 > See also: `/CLAUDE.md` for the fast-loading summary + non-negotiable rules, and `docs/adr/` for short,
 > focused records of the most contested individual decisions below, and `docs/roadmap.md` for the
-> dependency-ordered milestone sequence (`M0`–`M117`) that this document deliberately does not restate.
+> dependency-ordered milestone sequence (`M0`–`M125`) that this document deliberately does not restate.
 
 ## Context
 
 Norite is a voice-and-text chat platform. The primary way to use it is the free, global, publicly-hosted
 flagship instance (§12) — self-hosting is a real, fully-built feature, not the platform's core identity: a
 one-time-purchase-licensed offering (§11) aimed at enterprises and other private groups who want their own
-instance. Source visible but under no public license (all rights reserved, §11). Three clients: a
-scriptable CLI, a native GUI, and a lower-priority web SPA built later, all sharing one local background
-daemon per OS user account. The full scope described here is realistically multi-year,
+instance. Source visible but under no public license (all rights reserved, §11). Four clients: the
+scriptable CLI (§4), the full-screen TUI (§4a), a native GUI (§5), and a lower-priority web SPA built later
+(§9) — the first three sharing one local background daemon per OS user account, as the Clients bullet
+below sets out. The full scope described here is realistically multi-year,
 systems-engineering-team-sized work; the milestone roadmap (§13) is a long-term dependency-ordered critical
 path, not a near-term promise. No scope described in this document is removable; the roadmap is ordered so
 the most foundational pieces land first.
 
 Locked-in decisions:
 - **V1 scope is large and real, not text-first-then-later**: guilds/channels/roles/permissions, real-time
-  messaging, DMs, presence, invites, **voice calling on every client including the CLI**, BYOK end-to-end
-  encryption (DM-only), public matchmaking, friends, blocks, Deep Work, message tagging, whispers, regex
-  notification filters, per-guild custom emoji, incoming webhooks, a client-side WASM plugin system, P2P file
-  transfer, the Instance Admin/reports moderation system, and self-hosting infrastructure (SMTP, automatic
-  HTTPS) all ship in v1. Video/screen-share is the one genuinely deferred-but-seamed piece.
-- **Clients**: CLI first, native GUI second, a web SPA third and lowest-priority, built later. All three are
-  thin UIs; the CLI and GUI attach to one shared local daemon per OS user account (§3) which does the real
-  work. See [ADR 0009](adr/0009-cli-and-gui-client-architecture.md).
+  messaging, DMs, presence, invites, **voice calling on every client including the terminal ones**, BYOK
+  end-to-end encryption (DM-only), public matchmaking, friends, blocks, Deep Work, message tagging,
+  whispers, regex notification filters, per-guild custom emoji, incoming webhooks, a client-side WASM plugin
+  system, P2P file transfer, the Instance Admin/reports moderation system, and self-hosting infrastructure
+  (SMTP, automatic HTTPS) all ship in v1. Video/screen-share is the one genuinely deferred-but-seamed piece.
+- **Clients**: four, not three — the scriptable CLI (the command tree, §4) and the full-screen TUI (§4a)
+  ship in one binary and share one command tree, the native GUI (§5) mirrors the TUI's information
+  architecture, and the web SPA (§9) is third and lowest-priority. All are thin UIs; CLI, TUI and GUI
+  attach to one shared local daemon per OS user account (§3) which does the real work. See [ADR
+  0009](adr/0009-cli-and-gui-client-architecture.md).
 - **Backend architecture**: Go modular monolith (single deployable), organized so pieces could be peeled into
   services later, without building actual service separation now. See
   [ADR 0001](adr/0001-modular-monolith.md).
 - **Auth**: token-based (Bearer access + refresh, OS-keychain storage, `device_id`-scoped families) for the
-  CLI/GUI/daemon; email/password + OAuth (Google/GitHub) with account linking at the backend. See
+  CLI/TUI/GUI/daemon; email/password + OAuth (Google/GitHub) with account linking at the backend. See
   [ADR 0011](adr/0011-token-based-client-auth.md).
 - **Security and performance are first-class concerns**, not an afterthought pass at the end — §14 and §15
   below are as load-bearing as the feature sections and should be implemented alongside each milestone, not
@@ -84,7 +87,7 @@ Locked-in decisions:
 │   ├── migrations/               # golang-migrate .sql up/down, go:embed'd into the binary
 │   ├── sqlc.yaml
 │   └── go.mod
-├── cli/                          # The `norite` CLI — Bubble Tea/Lip Gloss/Bubbles TUI
+├── cli/                          # The `norite` binary — command tree (§4) and TUI (§4a)
 │   ├── cmd/app/                  # main() only: process lifetime and exit codes, nothing else
 │   ├── internal/cliapp/          # urfave/cli v3 command tree, global --json/--help flags, completions
 │   ├── internal/<command>/       # one package per command group, e.g. instanceinit (`norite instance init`)
@@ -215,7 +218,7 @@ CREATE TABLE oauth_exchange_codes (
   expires_at timestamptz NOT NULL, consumed_at timestamptz NULL
 );
 
--- Sessions/tokens: token-based auth for CLI/GUI, device_id-scoped refresh families (ADR 0011)
+-- Sessions/tokens: token-based auth for CLI/TUI/GUI, device_id-scoped refresh families (ADR 0011)
 CREATE TABLE sessions (
   id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   device_id text NOT NULL,                     -- stable per daemon install; scopes the refresh-token family
@@ -357,7 +360,7 @@ CREATE TABLE voice_states (                    -- now ACTIVE, not reserved
   guild_id bigint NOT NULL, channel_id bigint NOT NULL, user_id bigint NOT NULL, session_id text NOT NULL,
   self_mute boolean NOT NULL DEFAULT false, self_deaf boolean NOT NULL DEFAULT false,
   mute boolean NOT NULL DEFAULT false, deaf boolean NOT NULL DEFAULT false,
-  supports_video boolean NOT NULL DEFAULT false,   -- client capability flag; CLI always false
+  supports_video boolean NOT NULL DEFAULT false,   -- client capability flag; terminal clients always false
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (guild_id, user_id)
 );
@@ -608,11 +611,11 @@ target list entirely — never sent over the wire to the blocker's connection, a
 client-side. A block/unblock action updates the affected connection's cached set immediately.
 
 **Voice signaling**: `internal/voice.MediaCoordinator` is now `PionMediaCoordinator`, backed by the real SFU
-(§6). The voice-join payload carries `supports_video: bool` (CLI always `false`).
+(§6). The voice-join payload carries `supports_video: bool` (the terminal clients always `false`).
 
 ### REST API
 
-Base `/api/v1`. Auth endpoints issue Bearer tokens directly (JSON body), never cookies, for the CLI/GUI/daemon
+Base `/api/v1`. Auth endpoints issue Bearer tokens directly (JSON body), never cookies, for the CLI/TUI/GUI/daemon
 surface (a future BFF layer in front of this same API handles cookie issuance for the web SPA, §9):
 
 ```
@@ -726,7 +729,7 @@ Attachments served from a separate origin/subdomain with no ambient credentials 
 values, SHA-256-hashed at rest, **scoped per `device_id`** — rotation on one device's daemon never
 invalidates another device's session (a user may run daemons on more than one machine under the same
 account); reuse-detection revokes only the affected device's chain. Scoped `api_tokens` support named scopes
-for bots/automation, minted from either CLI or GUI once logged in.
+for bots/automation, minted from any attach client once logged in.
 
 **Settled at Milestone M4** (ADR 0022):
 
@@ -775,7 +778,7 @@ callback URL), and a headless/SSH device-code fallback (`device_code` table, min
 server-rendered completion page, independent of the web SPA).
 
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
-entry, one process; CLI/GUI never independently store a token copy. `norite login` (M7) is the single
+entry, one process; CLI/TUI/GUI never independently store a token copy. `norite login` (M7) is the single
 exception and a temporary one: it writes that entry because it is the only process that ever sees the
 password, and stops doing so at M20, when the local IPC socket exists and credentials cross it instead.
 
@@ -825,7 +828,7 @@ soft-delete with placeholder username/email, hard-delete `oauth_identities`/`ses
 content in place rendered as "Deleted User."
 
 `GET /users/@me/export` covers everything the server can see. **For E2E-encrypted DMs, the daemon — not the
-server, not the CLI/GUI independently — performs its own local decrypt-and-export step**, producing a
+server, not the CLI/TUI/GUI independently — performs its own local decrypt-and-export step**, producing a
 standalone `local_e2e_export.zip` presented alongside, never merged into, the server-side export (ADR 0014).
 **Export asymmetries**, applied consistently everywhere they occur: a user's own export includes reports
 they filed and accounts they've blocked (their own actions), but excludes reports filed against them and who
@@ -844,7 +847,7 @@ mirrored by a Helm `pre-upgrade` Job hook for the flagship (§12), same tooling,
 
 ## 3. Client daemon architecture
 
-The CLI and GUI are thin "attach" UIs over one shared local background daemon, one process per OS user
+The CLI, TUI and GUI are thin "attach" UIs over one shared local background daemon, one process per OS user
 account. See [ADR 0010](adr/0010-client-daemon.md) for the full reasoning.
 
 **Ownership**: the daemon holds the persistent WebSocket gateway connection, presence/Deep Work state,
@@ -879,12 +882,12 @@ has no per-exit-code equivalent and is throttled instead (see the platform diffe
 signal-initiated stop exits **0**, not 128+signum: every service manager reads a non-zero exit as a crash
 and answers with a restart, which would make an ordinary stop loop. `norite daemon status` reports through
 its exit code — 0 running, 1 installed-but-stopped, 2 not installed — so a script can branch without parsing
-prose, and until the CLI's `--json` machinery lands (M46) that code is the machine-readable surface.
+prose, and until the `--json` machinery lands (M48) that code is the machine-readable surface.
 
 **Daemon-owned state directory**: `$XDG_STATE_HOME/norite` (`~/.local/state/norite`), `~/Library/Application
 Support/Norite`, or `%LOCALAPPDATA%\Norite`, created `0700` — it will later hold plugin capability grants and
 pinned `.wasm` hashes (§8), so the mode is established now rather than migrated. It holds the lock and, by
-default, the daemon's own rotating log (`natefinch/lumberjack`, per §4's file-based logging rule); the
+default, the daemon's own rotating log (`natefinch/lumberjack`, per §4a's file-based logging rule); the
 daemon also copies every line to stderr, which is what journald captures, so `systemctl --user status` and
 the log file both show something useful. **The lock always stays in the state directory** even when the log
 is redirected — it is the per-user rendezvous point, and a lock that moved with the logs would let two
@@ -909,13 +912,13 @@ start — breaking the single-instance invariant with no error anywhere.
 **Dual IPC, different trust tiers**:
 - **Daemon↔attach-client**: a Unix domain socket / Windows named pipe, OS-file-permission-protected (no
   secret needed — only the owning OS user can open it). Reuses the gateway's exact op-code/DISPATCH protocol
-  over 4-byte-length-prefixed JSON framing, so CLI and GUI share one client-side event parser. The shared
-  HELLO/IDENTIFY handshake carries a semver field (MAJOR must match exactly; a defined MINOR-version-back
-  window is tolerated). **The daemon's write path to each attach client is asynchronous and bounded** — a
-  per-connection outbound channel with fixed capacity, fed by its own writer goroutine (see "Concurrency
-  model" below); a client whose buffer fills gets **dropped**, never allowed to block the daemon's core loop,
-  since that would also stall E2E ratchet advancement and voice signaling for everyone else attached. The
-  dropped client resyncs on reattach.
+  over 4-byte-length-prefixed JSON framing, so every attach client shares one client-side event parser. The
+  shared HELLO/IDENTIFY handshake carries a semver field (MAJOR must match exactly; a defined
+  MINOR-version-back window is tolerated). **The daemon's write path to each attach client is asynchronous
+  and bounded** — a per-connection outbound channel with fixed capacity, fed by its own writer goroutine
+  (see "Concurrency model" below); a client whose buffer fills gets **dropped**, never allowed to block the
+  daemon's core loop, since that would also stall E2E ratchet advancement and voice signaling for everyone
+  else attached. The dropped client resyncs on reattach.
 - **Local bot-automation port**: a separate, localhost-only TCP listener with its own per-session secret
   (`0600` file or env var), authenticated via scoped `api_tokens` — deliberately lower-trust than the attach
   socket, since external scripts must not receive first-party trust.
@@ -929,16 +932,30 @@ debounced, so opening any client on any machine shows accurate unread state.
 
 **Config file** (`~/.config/norite/config.toml`, TOML, `pelletier/go-toml` v2 document-editing mode —
 preserves hand-written comments/formatting): covers theme, keybindings, notification filters, pane-layout
-preferences — anything a user should freely hand-edit. Keys are namespaced by client (`[cli]`, `[gui]`,
-`[shared]`) so one file serves both UIs without collision, and `norite config get`/`norite config set` expose the
-same file as a scriptable interface rather than a second source of truth. Every writer (CLI, GUI, daemon)
+preferences — anything a user should freely hand-edit. Keys are namespaced `[shared]`, `[tui]`, `[gui]`:
+cross-cutting settings live in `[shared]` and a client section overrides them. There is deliberately **no
+`[cli]` section** — the scriptable command tree has nothing to style, and the section that used to carry
+that name was really about chords and colours, which belong to the TUI (§4a, ADR 0026). Chords are
+`[tui.keys]`. Namespacing this way and `norite config get`/`norite config set` expose the
+same file as a scriptable interface rather than a second source of truth. Every writer (CLI, TUI, GUI,
+daemon)
 uses atomic writes
 (temp file + rename) **plus `gofrs/flock`-based locking** around each read-modify-write cycle. The daemon
 hot-reloads on external changes via `fsnotify`. A **second, daemon-owned state file** holds anything
 daemon-written-only: plugin capability grants + pinned `.wasm` hashes (§8), the voice-channel breadcrumb, and
 the same-machine config-toggle setting below — never hand-edited, never included in export.
 
-**Same-machine CLI/GUI config toggle**: default off (CLI and GUI share one `config.toml`, as above). An
+**Themes are files, and files are untrusted.** A theme lives at `~/.config/norite/themes/<name>.toml` and
+is selected by name from `[tui]`; a few ship built in. The default maps the token roles onto the terminal's
+own ANSI 0–15, so a user's existing palette is inherited rather than overridden, and `docs/design/tui/`'s
+hex palette is a named theme they opt into. Sharing themes is the point of the format, which makes a theme
+file text from a stranger on its way to a terminal: every string in one passes `termsafe` (rule 19), every
+colour must parse or the theme fails to load as a whole rather than half-applying, and **a glyph override
+must be exactly one cell wide** — a two-cell glyph shears every row it lands in, which is why `TOKENS.md`
+bans emoji in the first place. A theme sets appearance only; it cannot bind keys, run commands, or reach
+the network.
+
+**Same-machine config toggle**: default off (all local clients share one `config.toml`, as above). An
 app-settings toggle (living in the daemon state file) lets them diverge into separate files on one machine;
 flipping on copies the current shared file to both as a starting point, flipping off reconciles via
 last-write-wins onto one shared file.
@@ -961,22 +978,33 @@ carries a semver field; MAJOR must match exactly, a defined MINOR-version-back w
 
 ---
 
-## 4. CLI
+## 4. CLI — the scriptable command tree
 
 A separate, performance-focused, fully scriptable client (Unix-style: one action, exit, pipeable
 stdin/stdout), attaching to the shared daemon (§3). See [ADR 0009](adr/0009-cli-and-gui-client-architecture.md).
+
+**This section is the command tree only.** The full-screen terminal client — panes, chords, screens — is
+§4a, and is a client in its own right ([ADR 0026](adr/0026-tui-as-a-first-class-client.md)). They ship in
+one binary and share one command tree: every verb here is invocable from the TUI's `M-x`, which is what
+stops the two surfaces drifting apart. Where this document said "CLI" and meant the terminal UI, it now
+says TUI; that conflation is why the roadmap once held six milestones of TUI capabilities and no milestone
+that drew a screen.
 
 **Command routing**: `urfave/cli` v3 — the argument parser and command tree (`norite instance init`,
 `norite config get`, …), distinct from the Charm stack, which is only the interactive TUI layer. It carries
 `--help` and shell completions for every command, and declares the global `--json` flag; the machinery that
 *renders* JSON, and the per-command schemas in `contracts/cli-json/`, arrive with the first data-printing
-command (Milestone M46) — until then the flag is a declared seam, not a working output mode. The tree lives
+command (Milestone M48) — until then the flag is a declared seam, not a working output mode. The tree lives
 in `internal/cliapp`, not under `cmd/`, so it can be constructed and exercised in tests without spawning a
 process; `cmd/app/main.go` owns process lifetime and exit codes and nothing else. A mistyped command exits
 non-zero rather than printing help and succeeding, which `urfave/cli` does by default. *Where the choice was contested*: over
 `spf13/cobra`, the heavier ecosystem default, for a lighter dependency and less per-command boilerplate
 across what will become dozens of commands; nested subcommand groups, the one thing this CLI genuinely needs
 from a router, work equally well in both.
+
+**Structured output**: every data-printing command supports `--json`, schemas versioned in
+`contracts/cli-json/` as a third source-of-truth contract alongside `openapi.yaml`/`gateway-events.schema.json`
+— schema changes ship in the same commit as the code change causing them.
 
 **Instance setup wizard** (`norite instance init`): the self-hosted operator's first-run flow, living in the
 `norite` CLI rather than the server binary so that the step added later — creating the first admin account —
@@ -993,7 +1021,7 @@ containing `@`, `/`, or `:` has to be percent-encoded to survive in a URL and ma
 right by hand is a trap.
 
 **Instance config file** (settled at Milestone M2): **TOML**, at `/etc/norite/instance.toml`
-(`%ProgramData%\Norite\instance.toml` on Windows). TOML for consistency with the CLI/GUI client config
+(`%ProgramData%\Norite\instance.toml` on Windows). TOML for consistency with the CLI/TUI/GUI client config
 above, and because the generated file is meant to be hand-edited afterwards — it ships as a commented
 document explaining every setting it writes, which a struct marshal cannot produce. This is a *different
 file* from `~/.config/norite/config.toml`: that one is per-user client preferences, this one configures a
@@ -1021,13 +1049,68 @@ variable and the file key (`NORITE_REGISTRATION_MODE ([registration].mode in /et
 modules that cannot import each other's types: the backend proves it loads that document, the CLI proves
 the wizard writes only keys appearing in it, and between them the two sides cannot drift apart.
 
-**Pane engine**: a custom TUI pane/split engine on the Charm stack (Bubble Tea + Lip Gloss + Bubbles), not a
-real installed tmux, for identical cross-platform behavior. Any pane is a fully flexible viewport pointed at
-any channel/DM independently. Tested with `teatest` (key-press/message simulation, rendered-output
-assertions).
 
-**Keybindings**: Emacs-style chorded (Ctrl/Meta combinations), not vim-modal, shipped default — stored in and
-overridable via the config file's `[cli]` section.
+## 4a. TUI — the in-terminal client
+
+The full-screen terminal client: a Discord-shaped layout (guild rail → channel list → message area →
+member list) with tmux-like pane splitting, driven entirely by Emacs-style chorded keybindings. It is where
+a person actually spends time, and it is the in-terminal form of the same application the native GUI (§5)
+presents natively — not a different product sharing a backend.
+[ADR 0026](adr/0026-tui-as-a-first-class-client.md) records why it is its own client rather than a mode of
+§4.
+
+**The screens are specified, not described here.** `docs/design/tui/` is normative: `SCREENS.md` (25
+screens, stable ids `1a`…`7a`), `KEYMAP.md` (every chord), `TOKENS.md` (palette, glyphs, component
+recipes), `README.md` (the grid, the responsive rules, and the corrections applied to the original
+handoff). Milestones cite screen ids rather than restating them. `mockups.dc.html` is a visual reference
+rendered as HTML — a simulation of a terminal, not a web app to ship, and not authoritative where it
+disagrees with the markdown.
+
+**Stack**: Bubble Tea (`tea.Model`) for the event loop, Lip Gloss for styling and layout, Bubbles for
+reusable widgets, over the daemon's local socket. A custom pane/split engine rather than shelling out to a
+real tmux, for identical cross-platform behavior including Windows. Tested with `teatest` (key-press
+simulation, rendered-output assertions).
+
+**Panes and windows**: a pane is any viewport, not just a conversation — `chat`, `log`, `shell` (a pty),
+`peers` (file-transfer sessions, ADR 0016), `scratch`. Panes live in named windows shown in a tab bar. The
+layout tree and per-pane scroll offsets belong to the **daemon** (ADR 0010), so detaching and reattaching
+restores them; they are in-memory, so a daemon restart does not.
+
+**Chrome is a function of pane count**, and this is the rule the engine is built around: one or two panes
+may each be a *complete client* — own rail, own channel list, own member list, a different guild each —
+while three or more draw chrome once for the window and hold content only. At three panes there is no
+width left for per-pane columns, and pretending otherwise produces columns nobody can read. `C-x 1`
+restores full chrome.
+
+**`M-x` — one command tree, two front ends**: every verb in §4's tree is invocable from the TUI and renders
+into a pane, with `--json` output syntax-coloured (`3e`). Plugin-registered commands appear alongside the
+built-ins. Verbs that are interactive by construction — `norite instance init`, a sequential stdin
+conversation that refuses to run without a TTY — run in a **pty pane**, so they get a real terminal and
+there is no second implementation of any prompt flow.
+
+**Keybindings**: Emacs-style chorded, two prefixes — `C-x` for panes and windows, `C-c` for app actions,
+`M-x` for command mode, `M-1`…`M-9` to jump to a guild. An armed prefix is shown in the status bar; an
+unknown chord is a status-bar error, never a modal. Bindings live in `[tui.keys]` (§3) and are
+hot-reloaded. Plugins never bind chords ([ADR 0015](adr/0015-plugin-sandboxing.md) as extended by ADR
+0026); binding a chord to a plugin's command is the user's own override.
+
+**Security state is on screen and never overclaims**: `◈` verified E2E, `▲` unverified device, `○`
+offline. `◈` appears on 1:1 DMs and nowhere else — E2E is `DM`-only (rule 13, ADR 0014), so a group DM
+says it is encrypted by the instance and a whisper says it is delivered to a private recipient set and
+stored like any other message. Search (`3c`) shows server hits and DM hits as separate labelled groups: the
+instance holds DM ciphertext and cannot match against it, so that group is served by the daemon's own
+**mandatory local FTS5 index** over its decrypted E2E message store, encrypted at rest under the keystore
+master key (§7, ADR 0014). Everything else — guild channels, group DMs — is in-memory scrollback re-fetched
+from the instance (ADR 0010); the local store exists for exactly the messages the server cannot search.
+
+**Appearance is the user's** (§3, `[tui]`): the default theme maps the token roles onto the terminal's own
+ANSI 0–15, so Norite inherits a palette somebody already tuned; `TOKENS.md`'s hex palette is a named theme
+(`norite-dark`) they opt into. Palette, border style, density, timestamp format, author colours, the glyph
+table and the column widths are all overridable; the information architecture is not.
+
+**Below 120×40** the drop order is specified in `docs/design/tui/README.md` — member list, then channel
+list, then side-by-side splitting is refused, then the rail collapses — because 80 columns is the
+commonest terminal width and leaving that to the layout code is how it gets decided badly.
 
 **Markdown rendering**: a small custom renderer implementing only the allow-listed subset (bold, italic,
 code, links, mentions, custom-emoji shortcodes) — not Charm's `glamour`, to keep the trusted-rendering
@@ -1035,8 +1118,9 @@ surface as narrow as the security posture used for message content everywhere el
 
 **Terminal-escape sanitization** (`cli/internal/termsafe`, built at M7). A blanket function over all
 untrusted text — usernames, message content, link-preview titles, plugin manifest descriptions, webhook
-display names, the output of any tool the CLI shells out to. Specific to the CLI, because a terminal acts on
-what it is printed and no other client does.
+display names, the output of any tool the CLI shells out to. Specific to the terminal clients, because a
+terminal acts on what it is printed and no other client does — it covers both front ends in that binary,
+§4's command output as much as this section's screens.
 
 Its guarantee: *what a terminal displays, and the order it displays it in, is the printable characters that
 were in the string.* Two classes break that and are removed — Unicode category `Cc` (C0, DEL, and C1, the
@@ -1076,20 +1160,21 @@ for it again costs nothing.
 supported, filename/link fallback otherwise — the hook point for the "disable image loading" bandwidth
 toggle (which does not suppress custom-emoji rendering).
 
-**Structured output**: every data-printing command supports `--json`, schemas versioned in
-`contracts/cli-json/` as a third source-of-truth contract alongside `openapi.yaml`/`gateway-events.schema.json`
-— schema changes ship in the same commit as the code change causing them.
-
 **Logging**: file-based, never stderr (Bubble Tea owns the alternate screen buffer), `norite logs tail`,
-`natefinch/lumberjack` rotation — reused by daemon, CLI, and GUI alike.
+`natefinch/lumberjack` rotation — reused by the daemon, both front ends of this binary, and the GUI alike.
 
-**Voice controls**: join/leave/mute/deafen via keybinding, a status line (no visual call UI — it's a
-terminal), an active-speaker indicator in the status line/participant list, and two separate actions
-(keybind each) for local-mute and report (§6).
+**Voice controls**: join/leave/mute/deafen on a chord, an active-speaker indicator, and two separate
+actions (keybind each) for local-mute and report (§6). A call is *drawn* here, not merely announced: `4b`
+is a one-row in-call strip above the composer that hides nothing, and `C-c V` promotes it to `4a` — speaker
+tiles with level meters and the transport/processing/levels cards. "No visual call UI — it's a terminal"
+was this section's earlier claim and was true only while there was no terminal application to draw one in;
+the roadmap records M54 superseding it.
 
-**Integrated shell and dev tools**: the integrated shell spawns the user's actual shell, the same trust
-boundary as a real terminal, no extra sandboxing. Code block copy/fold, local bot automation, CLI piping/
-local port forwarding, and link previews (GitHub-aware + generic) are all real v1 CLI-native scope.
+**Dev tools**: the `shell` pane above *is* the integrated shell — the user's own shell, the same trust
+boundary a terminal emulator has, no extra sandboxing ([ADR 0017](adr/0017-local-automation-security.md)).
+It is not a second feature scheduled separately. Code block copy/fold, local bot automation, shell piping
+and local port forwarding, and link previews (GitHub-aware + generic) are the rest of the terminal-native
+v1 scope.
 
 ---
 
@@ -1099,21 +1184,27 @@ Built with **Gio** (`gioui.org`) — immediate-mode, GPU-rendered, tight memory 
 that control despite the lack of a built-in widget library. See
 [ADR 0009](adr/0009-cli-and-gui-client-architecture.md).
 
-**Message rendering**: a virtualized message list, the same allow-listed markdown renderer as the CLI
+**Message rendering**: a virtualized message list, the same allow-listed markdown renderer as the TUI
 reimplemented for Gio's immediate-mode primitives, including emoji-shortcode resolution.
 
-**Pane splitting**: native widget-based tiling, the same flexible pane-content model as the CLI (§3/§4) —
-independently implemented, never synced with the CLI's pane state by default.
+**Pane splitting**: native widget-based tiling, the same flexible pane-content model as the TUI (§3/§4a) —
+independently implemented, never synced with the TUI's pane state by default.
+
+**Information architecture**: the GUI mirrors the TUI (§4a) — same layout, same vocabulary, same screens
+(`docs/design/tui/SCREENS.md`), presented natively: real scrollbars, pointer input, resizable splits,
+native dialogs where the TUI uses a status-bar confirm. One application in two renderings, so a person
+moving between them is not learning a second product. It does not inherit the terminal's constraints, only
+its structure.
 
 **Theming**: the shared theme spec (named roles: background/accent/danger/muted/etc.), mapped to Gio's
-native rendering, defined once in config and shared with the CLI's ANSI mapping.
+native rendering, defined once in config and shared with the TUI's ANSI mapping.
 
-**Settings**: config read/write via the same `go-toml` v2 document-editing approach as the CLI, plus a voice
+**Settings**: config read/write via the same `go-toml` v2 document-editing approach as the TUI, plus a voice
 input/output device-selection tab.
 
 **Voice UI**: participant list, mute/deafen controls, an active-speaker indicator (a highlight/ring around
 whoever is transmitting), and separate local-mute and report actions — wired to the same voice-worker
-control path the CLI uses.
+control path the TUI uses.
 
 **Accessibility** is an explicit, documented non-goal for v1 (ADR 0009) — Gio provides no OS-level
 accessibility-API integration, and building it on an immediate-mode toolkit with no component tree is a real,
@@ -1130,7 +1221,7 @@ the lowest-priority item in the whole GUI milestone phase, built last.
 
 ## 6. Voice architecture
 
-Voice is real, working audio calling on every client in v1, including the CLI. Video/screen-share is
+Voice is real, working audio calling on every client in v1, including the terminal ones. Video/screen-share is
 deferred but architected now so it's additive later. See [ADR 0012](adr/0012-voice-in-v1.md).
 
 **Media server**: a self-hosted, custom-built SFU on Pion (Go), not LiveKit, not a plain P2P mesh.
@@ -1151,7 +1242,7 @@ rather than assumed free (§2/ADR 0012).
 down on leaving (never a persistent idle process). Owns the entire audio session: capture/encode/send,
 receive/decode/play, noise suppression, echo cancellation, AGC. Daemon↔worker IPC uses the child's inherited
 stdin/stdout pipes (free, no socket/port allocation, pipe-close is itself a crash signal), the same
-4-byte-length-prefix JSON framing as the daemon↔CLI/GUI socket. The worker holds its own direct WebRTC
+4-byte-length-prefix JSON framing as the daemon↔CLI/TUI/GUI socket. The worker holds its own direct WebRTC
 connection to the SFU — RTP audio never flows through the daemon, only control signaling, which is what makes
 fault isolation real: a media-pipeline bug can only crash the worker.
 
@@ -1199,18 +1290,18 @@ self-hosters don't run a separate `coturn`.
 
 **Voice deployment opt-out**: TURN/SFU need a reachable public IP and forwarded UDP range — a real burden
 many home self-hosters can't satisfy. An Instance Admin can disable voice entirely; the SFU/TURN never start,
-voice+text channel pairs degrade to text-only, and voice UI is hidden entirely in CLI/GUI (never grayed out).
+voice+text channel pairs degrade to text-only, and voice UI is hidden entirely in TUI/GUI (never grayed out).
 
 **No call recording, ever** — a permanent non-goal. Public-matchmaking voice abuse therefore has no recorded
-evidence; both CLI and GUI mitigate this with a real-time **active-speaker indicator** (a highlight/ring
+evidence; both TUI and GUI mitigate this with a real-time **active-speaker indicator** (a highlight/ring
 around whoever is transmitting) plus two **separate** actions (each its own keybind/click) — local-mute
 (silences a participant for this user alone) and report.
 
-**Mic permission and global hotkey**: the foreground CLI/GUI triggers the OS permission prompt on first voice
+**Mic permission and global hotkey**: the foreground TUI/GUI triggers the OS permission prompt on first voice
 use, then hands capture to the worker once granted — unverified per-OS behavior until a dedicated spike
 milestone determines the real answer (macOS TCC, Input Monitoring entitlement for global hotkeys).
 Voice-activity-detection is the default input mode; push-to-talk (`golang.design/x/hotkey`) is registered
-once by the daemon (not either attach client), avoiding double-registration if both CLI and GUI are attached.
+once by the daemon (not an attach client), avoiding double-registration if several clients are attached.
 
 **Auto-rejoin**: on daemon crash/restart mid-call, the daemon respawns the worker and rejoins using the
 persisted "last active voice channel" breadcrumb (§3) — the one exception to otherwise-ephemeral daemon
@@ -1219,7 +1310,7 @@ it never forces a mid-call daemon restart.
 
 **Video/screen-share (deferred, seamed now)**: owned directly by the GUI/web client — a second, separate
 WebRTC connection to the SFU, never through the daemon. The voice-join payload carries `supports_video: bool`
-from day one (CLI always `false`).
+from day one (terminal clients always `false`).
 
 ---
 
@@ -1233,7 +1324,7 @@ with the project's restrictive license (ADR 0007) is a **blocking prerequisite**
 integration code is written.
 
 **Key boundary — the daemon holds the keys**: the daemon owns the E2E keystore/ratchet state end to end and
-performs all decryption itself; CLI/GUI receive plaintext over the already-trusted local IPC socket (§3),
+performs all decryption itself; CLI/TUI/GUI receive plaintext over the already-trusted local IPC socket (§3),
 same as every other event. They never independently hold key material.
 
 **Keystore**: `modernc.org/sqlite` (pure Go), master key in the OS keychain, surviving daemon restarts. All
@@ -1244,9 +1335,10 @@ encrypted at rest via the keystore master key — E2E DMs lose server-side searc
 optional.
 
 **Device linking**: a fully custom flow (no off-the-shelf equivalent — a second real piece of custom crypto
-protocol) where the primary device authorizes a new device. CLI-side verification is text/code-based safety
-numbers (no camera/QR). **No history-transfer mechanism exists** — a newly linked device sees only messages
-sent after linking, matching the permanent-loss framing below.
+protocol) where the primary device authorizes a new device. Verification is text/code-based safety numbers
+read out of band, never a camera or a QR code — screen `6a` in the terminal, mirrored by the GUI.
+**No history-transfer mechanism exists** — a newly linked device sees only messages sent after linking,
+matching the permanent-loss framing below.
 
 **External cryptographic security review — hard release gate**: a build/instance-level flag keeps E2E
 unavailable to any account beyond the developer's own test accounts until a real external audit of the
@@ -1271,11 +1363,14 @@ device-link trust in the same action.
 
 ## 8. Client-side plugins
 
-Sandboxed via WASM using `wazero` (pure Go, no cgo), running inside the daemon (one host, available to both
-CLI and GUI). See [ADR 0015](adr/0015-plugin-sandboxing.md).
+Sandboxed via WASM using `wazero` (pure Go, no cgo), running inside the daemon (one host, available to every
+attach client). See [ADR 0015](adr/0015-plugin-sandboxing.md), extended by
+[ADR 0026](adr/0026-tui-as-a-first-class-client.md): a plugin registers **`M-x` commands, never
+keybindings** — binding a chord to a plugin's command is the user's own override, so no plugin can take a
+binding from them or phish for whatever is typed after a prefix it claimed.
 
 **Headless by design**: the host-function API surface is slash-commands, text-parsing, and data/message
-reads only — no UI-injection capability, no IPC bridge for painting native CLI/GUI elements. A plugin affects
+reads only — no UI-injection capability, no IPC bridge for painting native TUI/GUI elements. A plugin affects
 what the user sees only through the data/text an already-capability-gated host function returns.
 
 **Distribution**: local files only in v1 (drop a `.wasm` in a plugins folder) — no registry/marketplace.
@@ -1298,14 +1393,15 @@ primary mechanism if metering costs more than what it measures.
 ## 9. The (later) web client
 
 The originally-planned React SPA design is kept, demoted to the third, lowest-priority client, built only
-after the CLI and GUI exist (Phase O). See [ADR 0009](adr/0009-cli-and-gui-client-architecture.md).
+after the terminal clients and the GUI exist (Phase O). See
+[ADR 0009](adr/0009-cli-and-gui-client-architecture.md).
 
 **Stack**: React 18 + TypeScript (strict) + Vite, React Router v7, Tailwind + shadcn/ui, TanStack Query,
 Zustand (gateway-fed real-time stores), Zod (validates every gateway payload + form input), react-hook-form,
 `@tanstack/react-virtual`, pnpm, Vitest + Playwright.
 
-**Auth**: its own BFF-style httpOnly-cookie exchange layer in front of the same token API the CLI/GUI/daemon
-use (§2) — the web client never holds a raw Bearer token in JS. See
+**Auth**: its own BFF-style httpOnly-cookie exchange layer in front of the same token API the
+CLI/TUI/GUI/daemon use (§2) — the web client never holds a raw Bearer token in JS. See
 [ADR 0002](adr/0002-cookie-based-auth.md) (still-correct historical rationale) and
 [ADR 0011](adr/0011-token-based-client-auth.md) (current design). `openapi.yaml`/`gateway-events.schema.json`
 are sanity-checked against real browser constraints (CORS, chattiness, BFF-compatibility) on an ongoing
@@ -1315,7 +1411,7 @@ basis, starting the moment each contract becomes load-bearing — not deferred u
 gateway-fed real-time stores with one dispatcher routing DISPATCH frames, local/component UI state).
 
 **Pane splitting**: CSS grid/flex-based resizable panes, `localStorage`-based layout persistence — the web
-client's own independent implementation of the same pane-content model the CLI/GUI use, never synced with
+client's own independent implementation of the same pane-content model the TUI/GUI use, never synced with
 either by default (the manual `norite config export`/`import` path, §3, is how a user manually carries
 preferences across clients).
 
@@ -1406,7 +1502,7 @@ See [ADR 0021](adr/0021-flagship-kubernetes-deployment.md) for full reasoning. S
 
 ## 13. Milestone roadmap
 
-**The roadmap lives in [`roadmap.md`](roadmap.md)** — `M0` through `M117`, phase-grouped, each with its
+**The roadmap lives in [`roadmap.md`](roadmap.md)** — `M0` through `M125`, phase-grouped, each with its
 scope, dependencies, and a checkable "done when" condition.
 
 It is deliberately not restated here. It used to exist in two places, which meant every milestone change
@@ -1414,8 +1510,8 @@ needed two edits and the two copies could disagree; `roadmap.md` is now the sing
 milestone numbering and scope.
 
 Two properties of it are worth knowing without opening the file: Phase P (the flagship Kubernetes
-deployment, `M104`–`M115`) is an explicitly **parallel** track that can start once core messaging and voice
-are usable, rather than following the feature phases; and `M116`/`M117` sit at the numeric end but belong
+deployment, `M112`–`M123`) is an explicitly **parallel** track that can start once core messaging and voice
+are usable, rather than following the feature phases; and `M124`/`M125` sit at the numeric end but belong
 logically much earlier, each annotated with where.
 
 Completion status is tracked in `CLAUDE.md` and `README.md`, not in the roadmap.
@@ -1427,7 +1523,7 @@ Completion status is tracked in `CLAUDE.md` and `README.md`, not in the roadmap.
 **Threat model summary**: a multi-tenant system exposed to the public internet, handling user-generated
 content, third-party OAuth, credential/key material (auth tokens, E2E keys), and — new in this design — a
 local-machine daemon holding real secrets and two distinct local IPC trust tiers. Main threat classes: authz
-bypass, injection, session/token/key theft, SSRF, terminal-escape injection (CLI-specific), abuse/DoS, and
+bypass, injection, session/token/key theft, SSRF, terminal-escape injection (terminal-only), abuse/DoS, and
 E2E key-boundary violations.
 
 1. **Injection**: unchanged from the original design — 100% parameterized SQL via `sqlc`, validated request
@@ -1442,17 +1538,17 @@ E2E key-boundary violations.
    `api_tokens`. **The daemon is the sole holder of its account's credential material** — access/refresh
    tokens and, once E2E ships, the E2E keystore — never an attach client independently.
 
-4. **Two-tier local IPC trust model**: the daemon↔CLI/GUI Unix socket (OS-permission-protected, first-party)
+4. **Two-tier local IPC trust model**: the daemon↔CLI/TUI/GUI Unix socket (OS-permission-protected, first-party)
    vs. the local bot-automation TCP port (secret-protected, external scripts) — never treated as
    interchangeable; any new local IPC surface must state its trust tier explicitly.
 
 5. **XSS / terminal-escape injection**: web/GUI message content renders through the allow-listed markdown
-   subset, never raw HTML. The CLI has an additional, CLI-specific risk: untrusted text (usernames, messages,
+   subset, never raw HTML. The terminal clients have an additional risk: untrusted text (usernames, messages,
    link-preview titles, plugin manifest descriptions, webhook display names) must pass through the
    terminal-safe sanitization function before reaching terminal output, or a malicious ANSI escape sequence
    could manipulate the user's terminal.
 
-6. **CSRF/CSWSH**: not applicable to the CLI/GUI/daemon token-authenticated surface (no ambient browser
+6. **CSRF/CSWSH**: not applicable to the CLI/TUI/GUI/daemon token-authenticated surface (no ambient browser
    credential). Returns, scoped to the future web SPA's BFF cookie layer only, when that client is built.
 
 7. **WASM plugin sandbox boundary**: `wazero`, no raw filesystem/network/syscall access unless explicitly
@@ -1509,7 +1605,7 @@ E2E key-boundary violations.
     one feature), stricter limits on `/auth/*`, per-webhook rate limiting independent of the creating user's
     own limit. The client address the limiter groups on is decided once, in the router: `X-Forwarded-For`
     is honored only when explicitly configured, and is read from the right-hand end (the entry a trusted
-    proxy appended) rather than the leftmost, client-supplied one. **Known gap, closed at `M114`**: the
+    proxy appended) rather than the leftmost, client-supplied one. **Known gap, closed at `M122`**: the
     backend does not yet verify that the immediate peer *is* a trusted proxy, which matters only on
     Kubernetes, where a pod can reach the API Service without passing the Ingress.
 
@@ -1571,9 +1667,9 @@ E2E key-boundary violations.
     from the separate attachment origin.
 
 13. **Measure before optimizing further**: `net/http/pprof` (internal-only) and the Prometheus `/metrics`
-    endpoint (auth-gated, aggregate-only labels) both arrive at `M85`, not earlier — real production
+    endpoint (auth-gated, aggregate-only labels) both arrive at `M93`, not earlier — real production
     numbers drive future optimization work, not guesses. They are deliberately not in the foundational
-    milestone: `/metrics` is auth-gated on an Instance Admin token, which does not exist until `M63`, and
+    milestone: `/metrics` is auth-gated on an Instance Admin token, which does not exist until `M71`, and
     there is nothing worth profiling before there are features generating load.
 
 ---
@@ -1581,26 +1677,32 @@ E2E key-boundary violations.
 ## 16. Verification
 
 The project is in early implementation, so verification means both an internal-consistency pass over this
-document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/`, and real tests:
+document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, and real tests:
 
 - **One authority per topic**: this document describes what the system *is*; `docs/roadmap.md` owns
-  milestone numbering and scope; `docs/adr/` owns the contested rationale. If the same thing is described
-  in two of them, that is drift — collapse it to one and leave a pointer, rather than keeping both in
-  sync by hand. (This is not hypothetical: a duplicated roadmap lived in two files until M1.)
+  milestone numbering and scope; `docs/adr/` owns the contested rationale; `docs/design/tui/` owns what the
+  terminal client looks like, screen by screen. If the same thing is described in two of them, that is
+  drift — collapse it to one and leave a pointer, rather than keeping both in sync by hand. (This is not
+  hypothetical: a duplicated roadmap lived in two files until M1.)
 - **Consistency**: grep this doc set for "AGPL," "cookie," "CSRF," "frontend" (outside §9's now-scoped
-  usage), and "voice"+"deferred" — confirm none read as stale (licensing/auth/voice language should all match
-  the current design, not the pre-v2 one). Confirm the daemon-holds-E2E-keys language is consistent
-  everywhere (never "the CLI/GUI hold the keys"). Confirm every milestone number referenced in prose matches
-  `docs/roadmap.md` exactly (`M0`–`M117`), and that no milestone is described in two places.
+  usage), and "voice"+"deferred" — confirm none read as stale (licensing/auth/voice language should all
+  match the current design, not the pre-v2 one). Confirm the daemon-holds-E2E-keys language is consistent
+  everywhere (never "the CLI/TUI/GUI hold the keys"). Confirm every milestone number referenced in prose
+  matches `docs/roadmap.md` exactly (`M0`–`M125`), and that no milestone is described in two places.
+- **The terminal client's two vocabularies**: grep for "CLI" and confirm each use means the *command tree*
+  (§4) and not the full-screen application (§4a) — that conflation is what ADR 0026 exists to undo, and it
+  reappears every time a paragraph written before it is edited. Confirm every screen id in
+  `docs/design/tui/SCREENS.md` is claimed by exactly one milestone and that no milestone cites an id that
+  does not exist, and that every chord a screen names appears in `KEYMAP.md` with a scope.
 - **Backend**: `go test ./...` clean, `govulncheck ./...` clean; manually exercise the token-based auth
   round-trip (register → login → Bearer-authenticated request) and a raw WS connection through
   Hello→Identify→READY with a real access token; confirm a request scoped to another guild/channel is
   rejected (403, not a silent empty result); confirm the block-aware fan-out filter actually removes a
   blocked author's events from the DISPATCH stream (inspect the stream, not just client rendering).
-- **Daemon/CLI/GUI**: confirm a CLI-side test client attached to the daemon's socket receives the same
+- **Daemon/clients**: confirm a client-side test client attached to the daemon's socket receives the same
   DISPATCH events the daemon gets from the real gateway; confirm a deliberately frozen attach client gets
-  dropped without stalling a second, healthy attached client; confirm `norite config export`/`import` round-trips
-  correctly.
+  dropped without stalling a second, healthy attached client; confirm `norite config export`/`import`
+  round-trips correctly.
 - **Voice**: confirm the DSP chain order (AEC before RNNoise) via a two-party echo test; confirm the
   voice-worker crash is detected via the closed pipe without affecting messaging.
 - **E2E**: confirm two test identities complete a key exchange with forward secrecy demonstrated; confirm the
@@ -1626,7 +1728,7 @@ during implementation, and must be documented plainly wherever the relevant subs
   never inside the daemon process itself. A crash in the voice-worker must never take down messaging,
   presence, or plugins.
 - **Mic-permission handoff is unverified until Milestone M25 completes.** The design intent is that a
-  foreground CLI/GUI client triggers the OS permission prompt on first voice use, then hands audio capture off
+  foreground TUI/GUI client triggers the OS permission prompt on first voice use, then hands audio capture off
   to the voice-worker subprocess once granted. OS mic-permission grants (especially macOS TCC) are typically
   tied to whichever binary actually opens the audio device, which may end up being the voice-worker process
   rather than whichever attach client displayed the prompt. Milestone M25 is a throwaway prototype/spike that
@@ -1640,27 +1742,27 @@ during implementation, and must be documented plainly wherever the relevant subs
   text-only self-hosting. Voice is real v1 product functionality, but is a deployment-time opt-out
   (Milestone M37) specifically because of this burden.
 - **cgo is confined to the voice-worker binary.** The pure-Go, cgo-free constraint used everywhere else in the
-  stack (daemon, CLI, GUI, backend) does not extend to the voice-worker: Opus (`hraban/opus`), RNNoise, and
+  stack (daemon, CLI/TUI, GUI, backend) does not extend to the voice-worker: Opus (`hraban/opus`), RNNoise, and
   WebRTC's APM are all cgo bindings, because no mature pure-Go equivalents exist for production-grade audio
   codec/DSP work. This exception is contained entirely to the isolated, opt-out-gated voice-worker binary; the
-  daemon, CLI, and GUI stay pure Go and cross-compile cleanly regardless.
-- **E2E encryption carries compounding, not merely additive, cryptographic risk.** The feature depends on two
-  independent custom protocol surfaces: the device-linking protocol (fully custom, no off-the-shelf
+  daemon, CLI/TUI, and GUI stay pure Go and cross-compile cleanly regardless.
+- **E2E encryption carries compounding, not merely additive, cryptographic risk.** The feature depends on
+  two independent custom protocol surfaces: the device-linking protocol (fully custom, no off-the-shelf
   equivalent) and the correct integration of the `go.mau.fi/libsignal` library into this project's own
   key-management and multi-device model. Either surface can silently break forward secrecy or device-trust
   guarantees with no visible symptom. Both require the dedicated external cryptographic security review at
-  Milestone M95 before E2E is enabled for any account beyond the developer's own test accounts — enforced by a
-  build/instance-level flag, not a documentation policy. This is a hard release gate, not optional polish.
-  No history-transfer mechanism exists for a newly linked device, either: a device linked via Milestone M92
-  sees only messages sent after linking, matching the no-backup, permanent-loss-on-device-loss philosophy
-  already accepted below. This is a deliberate limitation, not an oversight — it adds zero new custom-crypto
-  surface to a protocol already carrying the two risks above.
-- **The SFU's codec-agnostic track model is necessary but not sufficient for video.** §6 deliberately
-  keeps Pion's internal track/participant model track-kind-agnostic now, specifically so a video track type
-  is additive later rather than a redesign — but that agnosticism only covers whether the SFU *can* forward
-  a track, not whether it forwards it *well* under real-world bandwidth constraints. Simulcast/SVC (dropping
+  Milestone M103 before E2E is enabled for any account beyond the developer's own test accounts — enforced
+  by a build/instance-level flag, not a documentation policy. This is a hard release gate, not optional
+  polish. No history-transfer mechanism exists for a newly linked device, either: a device linked via
+  Milestone M100 sees only messages sent after linking, matching the no-backup,
+  permanent-loss-on-device-loss philosophy already accepted below. This is a deliberate limitation, not an
+  oversight — it adds zero new custom-crypto surface to a protocol already carrying the two risks above.
+- **The SFU's codec-agnostic track model is necessary but not sufficient for video.** §6 deliberately keeps
+  Pion's internal track/participant model track-kind-agnostic now, specifically so a video track type is
+  additive later rather than a redesign — but that agnosticism only covers whether the SFU *can* forward a
+  track, not whether it forwards it *well* under real-world bandwidth constraints. Simulcast/SVC (dropping
   spatial/temporal layers for a participant on a poor connection) is real, separate engineering work,
-  deliberately scoped into Phase N (Milestones M97–M99) rather than assumed to fall out for free from the
+  deliberately scoped into Phase N (Milestones M105–M107) rather than assumed to fall out for free from the
   agnostic track model. Stated explicitly so it is never mistaken for scope the current design already
   covers.
 - **Gio's engineering cost is real, not just a toolkit-choice footnote.** Gio provides no built-in widget

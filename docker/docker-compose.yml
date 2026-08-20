@@ -1,4 +1,4 @@
-# Local dev + self-hosted docker-compose production option (docs/architecture.md §1, §8.16/M88).
+# Local dev + self-hosted docker-compose production option (docs/architecture.md §1, §8.16/M96).
 #
 # Redis is present from the start even though it stays reserved-but-unused by self-hosted single-process
 # instances (docs/architecture.md §11) — only the flagship activates it. Having it here means the
@@ -64,7 +64,7 @@ services:
       - gobin:/go/bin
     # air rebuilds and restarts the server on save. Installed at container start rather than baked into an
     # image because there is no backend Dockerfile yet — that arrives with the production container image
-    # at Milestone M87/M88, and this service switches to it then.
+    # at Milestone M95/M96, and this service switches to it then.
     #
     # /go/bin is a named volume, so the install happens on first run and is reused after that; combined
     # with the module cache volume, later starts need no network.

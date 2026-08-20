@@ -3,6 +3,11 @@
 ## Status
 Accepted
 
+Extended by [ADR 0026](0026-tui-as-a-first-class-client.md): a plugin may register `M-x` commands,
+which is a capability like any other and is granted the same way. It may **not** register keybindings —
+that would need a precedence rule against the user's own bindings, and a plugin able to bind `C-c`
+something can phish for whatever is typed next.
+
 ## Context
 Client-side extensibility is real v1 scope, but plugin code is inherently untrusted (whether written by the
 user or downloaded from somewhere). It needs a real sandbox boundary, not just "run it and hope," and running

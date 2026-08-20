@@ -55,10 +55,11 @@
 // description, a webhook display name, the output of a tool the CLI shelled out to. Text the operator typed
 // at this CLI's own prompt is not in scope — a person cannot attack their own terminal by typing into it.
 //
-// This is the CLI's package because a terminal is the CLI's problem. The daemon does not import it: what it
-// writes is JSON, where zerolog escapes the ASCII controls, and the values it holds were sanitized by the
-// login that stored them. When the daemon starts rendering foreign text of its own (M19, where it holds
-// the gateway connection rather than reading a file the CLI wrote), this moves
+// It lives in the cli module because a terminal is the terminal clients' problem — it serves both front
+// ends in that binary, the scriptable command tree and the TUI (ADR 0026). The daemon does not import it:
+// what it writes is JSON, where zerolog escapes the ASCII controls, and the values it holds were sanitized
+// by the login that stored them. When the daemon starts rendering foreign text of its own (M19, where it
+// holds the gateway connection rather than reading a file the CLI wrote), this moves
 // somewhere both modules can reach rather than being copied — the mistake daemonctl's local version was
 // already marked to avoid.
 package termsafe

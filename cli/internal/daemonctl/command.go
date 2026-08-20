@@ -181,7 +181,7 @@ func statusCommand() *cli.Command {
 				fprintf(out, "Run `norite daemon install` to register it with this machine's service manager.\n")
 				// A distinct exit code per state, so `norite daemon status` is usable as a condition. Exit
 				// codes are the machine-readable surface here; --json arrives with the CLI's JSON output
-				// machinery at M46 (docs/architecture.md §4), and inventing a one-off shape for it now would
+				// machinery at M48 (docs/architecture.md §4), and inventing a one-off shape for it now would
 				// mean shipping a contract that the real one has to break.
 				return cli.Exit("", 2)
 			case !state.Running:

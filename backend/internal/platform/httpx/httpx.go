@@ -178,7 +178,7 @@ func statusFor(sentinel error) (int, string) {
 
 // maxRequestBody caps how much of a request body DecodeJSON will read. Generous for the JSON payloads
 // this API accepts, small enough that an unbounded body can't exhaust memory. Attachment uploads
-// (Milestone M50) get their own, larger, streaming path rather than raising this.
+// (Milestone M58) get their own, larger, streaming path rather than raising this.
 const maxRequestBody = 1 << 20 // 1 MiB
 
 // DecodeJSON reads a JSON request body into dst.

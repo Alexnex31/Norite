@@ -35,7 +35,7 @@ func New(out, errOut io.Writer) *cli.Command {
 		Name:    "norite",
 		Usage:   "Norite — voice and text chat",
 		Version: Version,
-		Description: "The Norite command-line client.\n\n" +
+		Description: "The Norite command-line client — the scriptable command tree.\n\n" +
 			"Most commands talk to a local daemon that holds the connection to your instance. Instance\n" +
 			"administration commands, `norite instance init` among them, work on this machine's own\n" +
 			"configuration and need no daemon and no network.",

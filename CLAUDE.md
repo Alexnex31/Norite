@@ -11,9 +11,14 @@ contested individual decisions — read the relevant one before proposing to cha
 Norite is a voice-and-text chat platform. The primary way to use it is the free, global, publicly-hosted
 flagship instance — self-hosting is a real, fully-built, one-time-purchase-licensed feature (aimed at
 enterprises and other private groups who want their own instance), not the platform's core identity. Source
-visible but under no public license (all rights reserved). Three clients: a
-scriptable CLI, a native GUI, and a lower-priority web SPA built later — all sharing one local background
-daemon per OS user account. Servers ("guilds"), channels, roles/permissions, real-time text and voice
+visible but under no public license (all rights reserved). **Four clients**: a scriptable CLI (the
+command tree — one action, exit, pipeable), a full-screen **TUI** (the in-terminal application: panes,
+chords, 25 specified screens), a native GUI mirroring the TUI's information architecture, and a
+lower-priority web SPA built later. The CLI, TUI and GUI share one local background
+daemon per OS user account; the CLI and TUI share one command tree, so `M-x` in the TUI runs every verb
+(ADR 0026). "CLI" here means the command tree only; where it once meant both, that conflation
+is what left the roadmap with six milestones of TUI capabilities and none that drew a screen.
+Servers ("guilds"), channels, roles/permissions, real-time text and voice
 messaging, DMs, presence, invites, public matchmaking, BYOK end-to-end encryption, client-side plugins, and
 more all ship as real v1 scope — see `docs/architecture.md` Section 7 for the full list. **No public
 license** — default copyright, all rights reserved; self-hosted customers are granted rights individually via
@@ -39,15 +44,15 @@ a signed license file, not a public license text. Not AGPL, not open source. See
   IDENTIFY/READY handshake, heartbeats, RESUME, DISPATCH events), carrying a semver version field
   (MAJOR must match exactly, a defined MINOR-version-back window is tolerated). REST is used for all CRUD;
   the gateway is used for live push plus a handful of gateway-only client ops (typing, presence, voice
-  state). The same protocol is reused, unmodified, over the local daemon↔CLI/GUI socket.
+  state). The same protocol is reused, unmodified, over the local daemon↔CLI/TUI/GUI socket.
 - **IDs**: Discord-style Snowflakes (`bigint`, time-sortable), not UUIDs, not serial — see
   `internal/platform/snowflake`. Always JSON-marshaled as a quoted string (avoid JS float64 precision loss).
 - **Auth transport**: token-based (Bearer access + refresh tokens, `device_id`-scoped families, OS-keychain
-  storage via `zalando/go-keyring`, scoped `api_tokens`) is primary and exclusive for the CLI/GUI — the
+  storage via `zalando/go-keyring`, scoped `api_tokens`) is primary and exclusive for the CLI/TUI/GUI — the
   daemon is the sole holder of its account's tokens, never an attach client. Cookie/CSRF is retired entirely
-  for the CLI/GUI/daemon REST surface; it returns, decided but not yet built, as a BFF-style httpOnly-cookie
-  exchange layer in front of the same token API once the web SPA is built (Phase O).
-- **E2E encryption**: the daemon — never the CLI/GUI independently — holds the E2E keystore/ratchet state
+  for the CLI/TUI/GUI/daemon REST surface; it returns, decided but not yet built, as a BFF-style
+  httpOnly-cookie exchange layer in front of the same token API once the web SPA is built (Phase O).
+- **E2E encryption**: the daemon — never the CLI/TUI/GUI independently — holds the E2E keystore/ratchet state
   and performs decryption, relaying plaintext to attach clients over the already-trusted local IPC socket.
   Opt-in, `DM` channel type only.
 
@@ -59,9 +64,12 @@ a signed license file, not a public license text. Not AGPL, not open source. See
 GIN + `pg_trgm` for search), Redis (activated only for the flagship's horizontal-scale event bus/rate
 limiting; self-hosted single-process instances never touch it).
 
-**CLI**: Go, `urfave/cli` v3 (command tree, flag parsing, `--json`/`--help`, completions — chosen over
-`spf13/cobra`), Bubble Tea + Lip Gloss + Bubbles (Charm stack, the interactive TUI layer only), `teatest`
-for testing, `pelletier/go-toml` v2.
+**CLI** (command tree): Go, `urfave/cli` v3 (command tree, flag parsing, `--json`/`--help`, completions —
+chosen over `spf13/cobra`), `pelletier/go-toml` v2.
+
+**TUI** (in-terminal client): Bubble Tea + Lip Gloss + Bubbles (Charm stack) with a custom pane/split
+engine, `teatest` for testing, `BourgeoisBear/rasterm` for inline images. Screens, keymap and tokens are
+specified in `docs/design/tui/` and are normative.
 
 **Native GUI**: Go, Gio (`gioui.org`) — immediate-mode, hand-built widgets, golden-image testing for the
 highest-value surfaces.
@@ -88,7 +96,7 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 3. **All SQL goes through sqlc-generated, parameterized queries.** No `fmt.Sprintf`-built SQL, ever.
 4. **No mutating logic in GET handlers.** GET must stay side-effect-free — the CSRF double-submit scheme
    depends on this, but that scheme itself only exists for the future web SPA's BFF layer; the
-   token-authenticated CLI/GUI/daemon REST surface has no CSRF exposure at all (no ambient browser
+   token-authenticated CLI/TUI/GUI/daemon REST surface has no CSRF exposure at all (no ambient browser
    credentials), so this rule's purpose there is REST hygiene, not CSRF defense.
 5. **Gateway events dispatch only after the originating DB transaction commits**, never before, never inside it.
 6. **New gateway dispatch types update `contracts/gateway-events.schema.json` in the same commit.** New REST
@@ -122,7 +130,7 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 15. **New gateway dispatch types and REST endpoints that affect CLI-observable state must also update the
     CLI's `--json` output schema** in `contracts/`, in the same commit — a versioned source-of-truth
     contract, not best-effort output.
-16. **Any new local IPC surface** (daemon↔CLI/GUI socket, the local bot-automation port) **must state its
+16. **Any new local IPC surface** (daemon↔CLI/TUI/GUI socket, the local bot-automation port) **must state its
     trust tier explicitly** in its design — OS-permission-protected (first-party clients) vs.
     secret-protected (external scripts) — never assume the two are interchangeable.
 17. **A ban or self-service account deletion must invoke the general-purpose revoke-all-sessions primitive**
@@ -147,8 +155,9 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 ```
 backend/       Go modular monolith — cmd/server, internal/{config,platform,auth,users,guilds,channels,
                roles,messages,gateway,presence,voice,db}, migrations/
-cli/           The `norite` CLI — Bubble Tea/Lip Gloss/Bubbles TUI, pane engine, keybindings
-gui/           The native GUI — Gio app, shares the daemon/config model with cli/
+cli/           The `norite` binary — the scriptable command tree (internal/cliapp) *and* the TUI
+               (shell, panes, chords, screens); one binary, two front ends onto one command tree
+gui/           The native GUI — Gio app, mirrors the TUI's screens; shares the daemon/config model
 daemon/        Shared background daemon — gateway client, dual IPC, plugin host, config/state files
 internal/voice/  Pion-based SFU, embedded TURN server (lives under backend/, server-side infra)
 contracts/     openapi.yaml (REST), gateway-events.schema.json (WS), CLI --json schemas — source of truth
@@ -234,7 +243,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M6.** Full dependency-ordered roadmap (`M0` through `M117`, phase-grouped,
+**Phase A (foundation), through M6.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -476,8 +485,8 @@ And on the client-auth side, from M7:
   entry looks identical on a working keyring and a broken one. Never make the fallback silent.
 - **Only the refresh token is persisted.** An access token lives 15 minutes, shorter than the gap between
   the restarts persistence would let it survive. The non-secret record beside it is a separate file so
-  `LoadRecord` can answer "who is logged in" without opening a keyring, which on a locked one pops a
-  system dialog.
+  `LoadRecord` can answer "who is logged in" without opening a keyring, which on a locked one pops a system
+  dialog.
 - **A `device_id` is per installation, not per login, and a logout keeps it.** Regenerating it strands the
   previous refresh family until it expires and adds a session-list entry each time; rotating it is what
   reuse detection reads as theft. It lives in its own file rather than in the credential record, because
@@ -563,12 +572,16 @@ Where they exist, invoke with `/<name>`:
 The doc set has one authority per topic — if two files seem to cover the same ground, that is drift and
 should be fixed, not tolerated:
 
+- `docs/design/tui/` — **what the terminal client looks like and does.** `SCREENS.md` (25 screens with
+  stable ids `1a`…`7a`), `KEYMAP.md`, `TOKENS.md`, and `README.md` (the grid, the responsive rules, and the
+  corrections applied to the original handoff). Normative: milestones cite screen ids rather than restating
+  them, and `mockups.dc.html` is an illustrative rendering, not authoritative where it disagrees.
 - `docs/architecture.md` — **what the system is.** Full Postgres DDL, the permission-resolution algorithm,
-  the exact gateway op-code/frame shapes, the daemon/CLI/GUI design, the voice architecture, the complete
+  the exact gateway op-code/frame shapes, the daemon/CLI/TUI/GUI design, the voice architecture, the complete
   REST endpoint list, the OAuth linking/PKCE flow, deep dives on security (§14) and performance (§15), and
   the known tensions and accepted limitations (§17). Read it before making an architectural decision this
   file doesn't already cover.
-- `docs/roadmap.md` — **what gets built, in what order.** `M0`–`M117`, each with scope, dependencies, and a
+- `docs/roadmap.md` — **what gets built, in what order.** `M0`–`M125`, each with scope, dependencies, and a
   checkable "done when". The single source of truth for milestone numbering; `architecture.md` §13 only
   points here.
 - `docs/adr/` — **why the contested calls went the way they did.** Superseded ADRs stay, marked as such in

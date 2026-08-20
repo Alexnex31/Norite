@@ -5,9 +5,12 @@ instance — self-hosting your own instance is a real, fully-built feature, not 
 useful for enterprises and other private groups who want their own instance, available via a one-time
 license purchase. Source is visible here but under no public license (see License, below).
 
-Three clients: a scriptable CLI, a native GUI, and a lower-priority web SPA built later. All three attach to
-one local background daemon per OS user account, which holds the real connection to whichever instance
-you're using and does the real work; the clients are thin UIs over it.
+Four clients: a scriptable CLI (the `norite` command tree — one action, exit, pipeable), a full-screen TUI
+(the in-terminal application: panes, chords, 25 specified screens), a native GUI mirroring the TUI's
+information architecture, and a lower-priority web SPA built later. The first three attach to one local
+background daemon per OS user account, which holds the real connection to whichever instance you're using
+and does the real work; the clients are thin UIs over it. The CLI and the TUI ship in one binary and share
+one command tree, so every verb is runnable from the TUI's `M-x`.
 
 ## Status
 
@@ -20,7 +23,7 @@ Google and GitHub (`M6`). `M7` adds `norite login` and the credential the daemon
 
 No product features exist yet — no guilds, channels, messages, or voice; those begin at `M12`. See
 `docs/architecture.md` for the full architecture and `docs/roadmap.md` for the milestone sequence (`M0`
-through `M117`, dependency-ordered, phase-grouped). This is realistically multi-year,
+through `M125`, dependency-ordered, phase-grouped). This is realistically multi-year,
 systems-engineering-team-sized work; the roadmap is a long-term critical path, not a near-term promise.
 
 ### Running the backend locally
@@ -40,9 +43,9 @@ never race, and `GET /api/v1/healthz` returns 200 only once that has completed.
 
 - **Servers ("guilds"), channels, roles & permissions** — real-time messaging over a WebSocket gateway
   modeled on Discord's real protocol (op-codes, HELLO/IDENTIFY/READY handshake, heartbeats, RESUME).
-- **Voice calling on every client**, including the CLI — a self-hosted, custom-built SFU (Pion/Go), embedded
-  TURN server, noise suppression/echo cancellation/AGC, adaptive bitrate. Video/screen-share is deferred but
-  architected now so it's additive when it lands, never a rework.
+- **Voice calling on every client**, the terminal ones included — a self-hosted, custom-built SFU
+  (Pion/Go), embedded TURN server, noise suppression/echo cancellation/AGC, adaptive bitrate.
+  Video/screen-share is deferred but architected now so it's additive when it lands, never a rework.
 - **BYOK end-to-end encryption**, opt-in, `DM` channel type only — a Signal-style double ratchet
   (`go.mau.fi/libsignal`) plus a custom device-linking flow, gated behind a hard external-cryptographic-review
   release gate before it's trusted with real conversations beyond the developer's own test accounts.
@@ -51,9 +54,9 @@ never race, and `GET /api/v1/healthz` returns 200 only once that has completed.
 - **Chat power features**: Deep Work status (with an `@urgent` bypass and an optional offline email
   fallback), message tagging, in-channel whispers, regex notification filters, bandwidth/network toggles.
 - **Per-guild custom emoji** and **incoming webhooks** — real, free v1 scope on every instance.
-- **Dev tools and extensibility**: code block copy/fold, an integrated shell, local bot automation, CLI
-  piping, GitHub-aware and generic link previews, a client-side WASM plugin system (sandboxed, capability-
-  gated, headless by design).
+- **Dev tools and extensibility**: code block copy/fold, a shell pane running your own shell, local bot
+  automation, shell piping, GitHub-aware and generic link previews, a client-side WASM plugin system
+  (sandboxed, capability-gated, headless by design — a plugin registers commands, never keybindings).
 - **P2P (WebRTC) file transfer** — explicit opt-in per transfer, consent-gated before any IP address is
   exposed.
 - **The Instance Admin tier**, platform-wide bans, a unified reports/moderation system, and instance-level
@@ -63,11 +66,17 @@ never race, and `GET /api/v1/healthz` returns 200 only once that has completed.
 
 ## Clients
 
-Build order is CLI first, native GUI second, web SPA third (demoted from primary to a lower-priority later
-client). The CLI and native GUI are both thin "attach" UIs over one shared local daemon per OS user account,
-which owns the actual gateway connection, presence, scrollback, the plugin host, and local bot automation.
-Voice is deliberately not in the daemon — a separate voice-worker subprocess, spawned on demand, owns the
-whole audio pipeline so a media bug can never take down messaging or presence.
+Build order is the terminal clients first, native GUI second, web SPA third (demoted from primary to a
+lower-priority later client). They are all thin "attach" UIs over one shared local daemon per OS user
+account, which owns the actual gateway connection, presence, scrollback, the plugin host, and local bot
+automation. Voice is deliberately not in the daemon — a separate voice-worker subprocess, spawned on
+demand, owns the whole audio pipeline so a media bug can never take down messaging or presence.
+
+The **CLI** is the scriptable half: Unix-style, one action then exit, `--json` on every data-printing verb.
+The **TUI** is where a person actually spends time — a Discord-shaped layout (guild rail → channel list →
+message area → member list) with tmux-like pane splitting and Emacs-style chorded keybindings, specified
+screen by screen in `docs/design/tui/`. They are two front ends onto one command tree rather than two
+programs, which is what keeps the scriptable surface and the interactive one from drifting apart.
 
 ## Tech stack
 
@@ -75,8 +84,12 @@ whole audio pipeline so a media bug can never take down messaging or presence.
 (`coder/websocket`), PostgreSQL, Redis (reserved for the flagship's horizontal-scale event bus and rate
 limiting; self-hosted single-process instances never activate it).
 
-**CLI**: Go, Bubble Tea + Lip Gloss + Bubbles (Charm stack) — a custom TUI with its own pane/split engine,
-Emacs-style chorded keybindings by default.
+**CLI** (the command tree): Go, `urfave/cli` v3 — flag parsing, nested subcommands, `--json`/`--help`,
+shell completions.
+
+**TUI** (the in-terminal client): Go, Bubble Tea + Lip Gloss + Bubbles (Charm stack) with its own
+pane/split engine, Emacs-style chorded keybindings by default, and inline images where the terminal
+supports them.
 
 **Native GUI**: Go, Gio (`gioui.org`) — immediate-mode, GPU-rendered, hand-built widgets (no built-in widget
 library), for tight memory control.
@@ -108,11 +121,13 @@ stands alone.
 
 - `CLAUDE.md` — fast-loading project summary and non-negotiable engineering rules, for both human
   contributors and AI coding agents working in this repo.
-- `docs/architecture.md` — the full architecture: data model, permission system, daemon/CLI/GUI design,
+- `docs/architecture.md` — the full architecture: data model, permission system, daemon/CLI/TUI/GUI design,
   voice architecture, gateway protocol, REST API, security and performance deep dives, and the known
   tensions this design accepts.
-- `docs/roadmap.md` — the dependency-ordered milestone sequence (`M0`–`M117`), each with a checkable
+- `docs/roadmap.md` — the dependency-ordered milestone sequence (`M0`–`M125`), each with a checkable
   "done when" condition.
+- `docs/design/tui/` — the terminal client's normative design: 25 screens with stable ids, the keymap, the
+  design tokens, and a visual HTML mock of each screen.
 - `docs/adr/` — Architecture Decision Records for the most contested individual choices.
 - `.claude/skills/` — repo-specific workflows (`/new-endpoint`, `/new-gateway-event`, `/db-migration`,
   `/security-audit`) encoding the conventions above.

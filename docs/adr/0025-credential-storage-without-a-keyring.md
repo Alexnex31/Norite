@@ -83,8 +83,9 @@ while the refresh family the old one named stayed live for its full TTL (ADR 001
   nothing else; the cost is that the file looks protected.
 - **Prompt for a passphrase and encrypt with that**: rejected for M7. It genuinely protects the file at
   rest, and it means the daemon cannot start unattended — which is the entire point of a daemon that
-  reconnects after a reboot. Worth revisiting only alongside the E2E keystore's own key handling (M92),
-  where the same question is asked about material that cannot be re-obtained by logging in again.
+  reconnects after a reboot. Worth revisiting only alongside the E2E keystore's own key handling (M98,
+  which puts that store's master key in the same OS keychain this ADR is about), where the same question is
+  asked about material that cannot be re-obtained by logging in again.
 - **A file always, ignoring the keyring**: rejected. It would be simpler and one path to test, and it
   throws away real protection on the majority of machines to avoid a branch.
 - **Refuse to run without a keyring unless a flag is passed**: rejected as a worse version of the same

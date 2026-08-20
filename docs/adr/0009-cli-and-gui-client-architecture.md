@@ -1,7 +1,12 @@
 # ADR 0009: CLI and native GUI as primary clients, Gio for the GUI, web SPA demoted
 
 ## Status
-Accepted
+Accepted, and refined by [ADR 0026](0026-tui-as-a-first-class-client.md), which splits what this ADR calls
+"the CLI" into two clients: the scriptable command tree, and the full-screen terminal UI. The build order
+below is unchanged — terminal clients first, native GUI second, web SPA third — but "the CLI is a separate,
+performance-focused, fully scriptable client … with its own custom pane/split TUI engine" describes two
+programs, and reading it as one is what left the roadmap with six milestones of TUI capabilities and no
+milestone that draws a screen.
 
 ## Context
 The original plan (see ADR 0001/0002-era design) had a React web SPA as the primary, and only, client. The

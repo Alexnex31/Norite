@@ -73,7 +73,7 @@ func TestStatusExitCodesDistinguishEveryState(t *testing.T) {
 		wantCode int
 		wantText string
 	}{
-		// The exit code is the machine-readable surface until the CLI's --json machinery arrives at M46, so
+		// The exit code is the machine-readable surface until the CLI's --json machinery arrives at M48, so
 		// a script can branch on it without parsing prose that is free to change.
 		{"running", State{Installed: true, Running: true, Detail: "active"}, 0, "is running"},
 		{"stopped", State{Installed: true, Detail: "inactive"}, 1, "not running"},

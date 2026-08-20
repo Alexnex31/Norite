@@ -41,14 +41,14 @@ import (
 // is no way to tell a value a trusted proxy set from one a client sent; honoring them would reopen the
 // hole this function exists to close.
 //
-// # Known gap: the immediate peer is not verified (closed at Milestone M114)
+// # Known gap: the immediate peer is not verified (closed at Milestone M122)
 //
 // This trusts X-Forwarded-For whenever the caller enabled it, without checking that r.RemoteAddr is
 // actually one of the trusted proxies. That is sound wherever the process is reachable *only* through its
 // proxy, which covers the self-hosted deployment shape. It is not sound on Kubernetes: any pod can dial
 // the API Service directly, bypassing the Ingress, and one forged header per request would then mint an
-// unlimited supply of rate-limit identities. M114 adds a configurable trusted-peer CIDR list checked
-// before any forwarded header is read — see docs/roadmap.md (M114, Phase P) and docs/architecture.md §14.18.
+// unlimited supply of rate-limit identities. M122 adds a configurable trusted-peer CIDR list checked
+// before any forwarded header is read — see docs/roadmap.md (M122, Phase P) and docs/architecture.md §14.18.
 func RealIP(hops int) func(http.Handler) http.Handler {
 	if hops < 1 {
 		hops = 1

@@ -10,7 +10,7 @@
 // The CLI is the operator's interface to the daemon, and it is what the install instructions point at. The
 // GUI will eventually want the same operations, but cli/ and daemon/ are separate Go modules that cannot
 // import each other, and the alternative — a shared module dependency — is a real cost to pay ahead of a
-// need that arrives at Milestone M70. When it does, the GUI shelling out to `norite daemon install` is
+// need that arrives at Milestone M78. When it does, the GUI shelling out to `norite daemon install` is
 // likely to be the right answer anyway, since that is the path that gets exercised.
 //
 // # Why every backend shells out
