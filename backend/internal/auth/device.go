@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
 
@@ -240,19 +241,45 @@ func (s *Service) RedeemDeviceCode(ctx context.Context, rawCode string, ip netip
 		return TokenPair{}, ErrDeviceAuthorizationPending
 	}
 
-	// Spent in SQL, so two processes holding the same device code produce one session between them rather
-	// than one each. The row read above is a snapshot; this is the decision.
-	row, err := s.queries.ConsumeDeviceCode(ctx, hash)
+	// Spending the code and creating the session are one transaction, which is the difference between a
+	// transient failure costing a retry and costing a walk back to another device. Consuming first and
+	// starting the session afterwards — the shape the OAuth exchange has, where a code is two minutes old
+	// and locally retriable — would leave a spent authorization and no session, and every later poll
+	// answering expired_token for a pool timeout nobody saw.
+	//
+	// The consume is still where single-use lives: two processes holding the same device code both reach
+	// it and exactly one matches a row. The poll above is a snapshot; this is the decision.
+	raw, tokenHash, err := GenerateRefreshToken()
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return TokenPair{}, ErrDeviceCodeExpired
-		}
-		return TokenPair{}, fmt.Errorf("consuming device authorization: %w", err)
+		return TokenPair{}, err
+	}
+	sessionID, err := s.ids.Next()
+	if err != nil {
+		return TokenPair{}, fmt.Errorf("generating session ID: %w", err)
 	}
 
-	// The same session machinery a password login and an OAuth exchange use, scoped to the device identity
-	// captured when the code was issued — never to anything the approving browser said.
-	return s.startSession(ctx, snowflake.ID(*row.UserID), row.DeviceID, row.DeviceName, ip)
+	var userID snowflake.ID
+	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+
+		row, err := q.ConsumeDeviceCode(ctx, hash)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrDeviceCodeExpired
+			}
+			return fmt.Errorf("consuming device authorization: %w", err)
+		}
+		userID = snowflake.ID(*row.UserID)
+
+		// The same session machinery a password login and an OAuth exchange use, scoped to the device
+		// identity captured when the code was issued — never to anything the approving browser said.
+		return s.writeSession(ctx, q, sessionID, userID, row.DeviceID, row.DeviceName, ip, tokenHash)
+	})
+	if err != nil {
+		return TokenPair{}, err
+	}
+
+	return s.issuePair(userID, sessionID, raw)
 }
 
 // LookUpDeviceCode finds a live authorization by the code somebody typed.

@@ -381,3 +381,38 @@ func TestDenyReportsWhatItManagedToDo(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, DeviceDenyTooLate, outcome, "a redeemed code is past reach from the page")
 }
+
+// Spending the code and creating the session are one thing or neither. Without that, a transient failure
+// between them leaves a spent authorization and no session — and every later poll answering expired_token
+// for a pool timeout nobody saw, which costs a walk back to the other device rather than a retry.
+//
+// Forced with a constraint the session insert cannot satisfy, since a transient database failure is not
+// something a test can ask for politely.
+func TestAFailedSessionDoesNotBurnTheDeviceCode(t *testing.T) {
+	svc, pool := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "other-device")
+	auth := startDeviceAuth(t, svc, pool)
+	approve(t, svc, auth, user.ID)
+	letThePollIntervalPass(t, pool)
+
+	// A trigger standing in for anything that can fail while the session is being written.
+	_, err := pool.Exec(t.Context(), `
+		CREATE FUNCTION fail_session() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'transient'; END; $$ LANGUAGE plpgsql;
+		CREATE TRIGGER fail_session BEFORE INSERT ON sessions
+		  FOR EACH ROW EXECUTE FUNCTION fail_session();`)
+	require.NoError(t, err)
+
+	_, err = svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrDeviceCodeExpired, "a failure here is not the code being spent")
+
+	_, err = pool.Exec(t.Context(), `DROP TRIGGER fail_session ON sessions`)
+	require.NoError(t, err)
+
+	// And the authorization is still there to collect, which is the whole property.
+	letThePollIntervalPass(t, pool)
+	pair, err := svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, pair.RefreshToken)
+}

@@ -306,34 +306,44 @@ func (s *Service) startSession(ctx context.Context, userID snowflake.ID, deviceI
 	}
 
 	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-
-		if _, err := q.RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
-			UserID:   int64(userID),
-			DeviceID: deviceID,
-		}); err != nil {
-			return fmt.Errorf("revoking the previous session for this device: %w", err)
-		}
-
-		_, err := q.CreateSession(ctx, db.CreateSessionParams{
-			ID:               int64(sessionID),
-			UserID:           int64(userID),
-			DeviceID:         deviceID,
-			RefreshTokenHash: hash,
-			DeviceName:       optionalString(deviceName),
-			IpAddress:        optionalAddr(ip),
-			ExpiresAt:        timestamptz(s.now().Add(RefreshTokenTTL)),
-		})
-		if err != nil {
-			return fmt.Errorf("creating session: %w", err)
-		}
-		return nil
+		return s.writeSession(ctx, s.queries.WithTx(tx), sessionID, userID, deviceID, deviceName, ip, hash)
 	})
 	if err != nil {
 		return TokenPair{}, err
 	}
 
 	return s.issuePair(userID, sessionID, raw)
+}
+
+// writeSession is startSession's database half, taking the queries handle rather than opening its own
+// transaction.
+//
+// Split out so a caller with something else to commit atomically alongside the session can do so. The
+// device flow is the one that needs it: spending the code and creating the session have to be one thing,
+// or a transient failure between them burns an authorization the person can only replace by walking back
+// to another device (M9).
+func (s *Service) writeSession(ctx context.Context, q *db.Queries, sessionID, userID snowflake.ID,
+	deviceID, deviceName string, ip netip.Addr, hash TokenHash,
+) error {
+	if _, err := q.RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
+		UserID:   int64(userID),
+		DeviceID: deviceID,
+	}); err != nil {
+		return fmt.Errorf("revoking the previous session for this device: %w", err)
+	}
+
+	if _, err := q.CreateSession(ctx, db.CreateSessionParams{
+		ID:               int64(sessionID),
+		UserID:           int64(userID),
+		DeviceID:         deviceID,
+		RefreshTokenHash: hash,
+		DeviceName:       optionalString(deviceName),
+		IpAddress:        optionalAddr(ip),
+		ExpiresAt:        timestamptz(s.now().Add(RefreshTokenTTL)),
+	}); err != nil {
+		return fmt.Errorf("creating session: %w", err)
+	}
+	return nil
 }
 
 // Refresh rotates a refresh token within its own device's family.
