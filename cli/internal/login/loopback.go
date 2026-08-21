@@ -133,22 +133,26 @@ func (l *loopback) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	delivered := false
-	l.once.Do(func() {
-		delivered = true
-		l.result <- l.read(r)
-	})
-
 	// Only the first callback counts. A second one is a refresh, a prefetch, or something local being
 	// curious; none of them may replace a result already in hand.
+	page := loopbackAlreadyDonePage
+	l.once.Do(func() {
+		result := l.read(r)
+		// The page has to agree with what actually arrived. Serving "Signed in" to somebody who just
+		// pressed cancel is a lie the terminal then contradicts, and the browser is where they are
+		// looking — closing the tab believing it worked is the obvious next move.
+		if result.code != "" {
+			page = loopbackDonePage
+		} else {
+			page = loopbackFailedPage
+		}
+		l.result <- result
+	})
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
-	if delivered {
-		_, _ = w.Write([]byte(loopbackDonePage))
-		return
-	}
-	_, _ = w.Write([]byte(loopbackAlreadyDonePage))
+	_, _ = w.Write([]byte(page))
 }
 
 // read turns the browser's query into a result.
@@ -260,6 +264,18 @@ const loopbackDonePage = `<!doctype html>
 <body style="font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem">
 <h1>Signed in</h1>
 <p>You can close this tab and go back to your terminal.</p>
+</body></html>
+`
+
+// Deliberately says nothing about *why*. The reason is a code from a fixed vocabulary, and putting it
+// here would mean interpolating into HTML the one value on this path that a hostile local process can
+// influence — trading the zero-injection-surface property for information the terminal already has, in
+// better words, two feet away.
+const loopbackFailedPage = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Sign-in not completed</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem">
+<h1>Sign-in not completed</h1>
+<p>Nothing has been signed in. Go back to your terminal, which says what happened.</p>
 </body></html>
 `
 

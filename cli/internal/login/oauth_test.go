@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -640,4 +641,48 @@ func TestReduceFailureKeepsEveryDocumentedCode(t *testing.T) {
 	for _, code := range documentedFailureCodes(t) {
 		assert.Equal(t, code, reduceFailure(code), "%q must survive reduction unchanged", code)
 	}
+}
+
+// The browser is where the person is looking, so the page it lands on has to agree with what happened.
+// Serving "Signed in" after a canceled sign-in is a lie the terminal then contradicts — and closing the
+// tab believing it worked is the obvious next move. Found by running the flow, not by reading it.
+func TestTheCallbackPageSaysWhatActuallyHappened(t *testing.T) {
+	for _, tc := range []struct {
+		why, query, wants, forbids string
+	}{
+		{"a delivered code", "?code=noc_" + strings.Repeat("a", 43), "Signed in", "not completed"},
+		{"a declined sign-in", "?error=access_denied", "not completed", "Signed in"},
+		{"a code this instance did not issue", "?code=garbage", "not completed", "Signed in"},
+		{"nothing at all", "", "not completed", "Signed in"},
+	} {
+		l, err := listenLoopback([]int{0})
+		require.NoError(t, err)
+
+		resp, err := http.Get(l.redirectURI() + tc.query)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+
+		assert.Contains(t, string(body), tc.wants, "%s: the page must say so", tc.why)
+		assert.NotContains(t, string(body), tc.forbids, "%s: the page must not claim otherwise", tc.why)
+		_ = l.Close()
+	}
+}
+
+// The failure page carries no part of the query that produced it. The error code is the one value on this
+// path a hostile local process can influence, and the terminal already reports it in better words.
+func TestTheFailurePageInterpolatesNothing(t *testing.T) {
+	l, err := listenLoopback([]int{0})
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+
+	resp, err := http.Get(l.redirectURI() + "?error=" + url.QueryEscape("<script>alert(1)</script>"))
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, resp.Body.Close())
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(body), "script>alert")
+	assert.Equal(t, loopbackFailedPage, string(body), "the page is a constant and must stay one")
 }
