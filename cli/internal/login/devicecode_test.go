@@ -32,6 +32,8 @@ type fakeDeviceInstance struct {
 	slowDowns int
 	// finalError, when set, is the code every poll answers with instead of ever succeeding.
 	finalError string
+	// throttleFirst is how many polls answer 429 before the flow is allowed to proceed.
+	throttleFirst int
 
 	// userCode, verificationURI and interval override what the issuing endpoint returns.
 	userCode        string
@@ -79,6 +81,11 @@ func newFakeDeviceInstance(t *testing.T) *fakeDeviceInstance {
 			f.lastDeviceCode = body.DeviceCode
 
 			switch {
+			case f.throttleFirst > 0:
+				f.throttleFirst--
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":{"code":"rate_limited","message":"slow down"}}`))
 			case f.finalError != "":
 				writeDeviceError(w, f.finalError)
 			case f.slowDowns > 0:
@@ -208,6 +215,11 @@ func TestOnlyTheInstanceItselfIsAcceptedAsAVerificationURI(t *testing.T) {
 		{"a scheme that is not a browser navigation", "javascript:alert(1)"},
 		{"a bare path with no origin of its own", "/device"},
 		{"nothing at all", ""},
+
+		// The right host with a query built to read as another one. url.Parse rejects ASCII controls and
+		// stops there — the bidi overrides are multi-byte — and String() emits RawQuery verbatim, so
+		// nothing before the sanitizer check would have noticed (rule 19).
+		{"a bidi override in the query", "https://chat.example.com/device?x=\u202emoc.live"},
 	} {
 		got, err := checkVerificationURI(instance, tc.uri)
 		assert.Error(t, err, "%s: %q must be refused", tc.why, tc.uri)
@@ -222,6 +234,16 @@ func TestOnlyTheInstanceItselfIsAcceptedAsAVerificationURI(t *testing.T) {
 		require.NoError(t, err, "%q is this instance and must be accepted", uri)
 		assert.Equal(t, uri, got)
 	}
+
+	// The same override in the *path* is accepted, and that is not an oversight in the check above.
+	// url.URL.String() percent-encodes a path, so what reaches the terminal is literal ASCII that reorders
+	// nothing — the danger is the raw bytes, and by then there are none. Asserted rather than assumed,
+	// because the difference between the path and the query here is one line of the standard library's
+	// behavior and nothing in this file would otherwise record that it was checked.
+	escaped, err := checkVerificationURI(instance, "https://chat.example.com/\u202emoc.live")
+	require.NoError(t, err)
+	assert.NotContains(t, escaped, "\u202e")
+	assert.Contains(t, escaped, "%E2%80%AE")
 }
 
 // And end to end, so the refusal is one the flow actually reaches rather than one only a unit test sees.
@@ -311,6 +333,21 @@ func TestTheFirstPollWaitsForTheInterval(t *testing.T) {
 	require.NoError(t, runner.Run(t.Context()))
 	require.NotEmpty(t, waits, "the client must not poll the instant it has a code")
 	assert.Equal(t, 7*time.Second, waits[0], "and it must use the interval the instance published")
+}
+
+// A 429 is an instruction to wait, not a reason to throw away a sign-in. By the time a poll is throttled
+// the person may already have approved it on their phone, and giving up there costs them a fresh code and
+// a second trip to the other device.
+func TestBeingRateLimitedBacksOffRatherThanGivingUp(t *testing.T) {
+	f := newFakeDeviceInstance(t)
+	f.throttleFirst = 2
+	runner, store, _ := deviceRunner(t, f, Options{DeviceCode: true})
+
+	require.NoError(t, runner.Run(t.Context()))
+
+	_, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_stored", token, "the approved code must still be collected")
 }
 
 // A denial is not an expiry, and saying so is the point: somebody pressed Deny, and "try again" is the

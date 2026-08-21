@@ -184,7 +184,9 @@ type deviceCodeRequest struct {
 // this client writes the prose.
 var (
 	errDeviceAuthorizationPending = errors.New("waiting for approval")
-	errDeviceSlowDown             = errors.New("polling too fast")
+	// errDeviceSlowDown covers both the instance asking for room and the rate limiter refusing outright.
+	// They are the same instruction — wait longer — and the loop's response to them is identical.
+	errDeviceSlowDown = errors.New("polling too fast")
 
 	// ErrDeviceCodeExpired is a code that ran out, was already redeemed, or was never issued here.
 	ErrDeviceCodeExpired = errors.New("that sign-in code has expired; run `norite login` again")
@@ -237,8 +239,12 @@ func (c *client) pollDeviceAuth(ctx context.Context, deviceCode string) (tokenPa
 				return tokenPair{}, ErrDeviceCodeExpired
 			}
 			if apiErr.Status == http.StatusTooManyRequests {
-				return tokenPair{}, errors.New(
-					"this instance is rate-limiting sign-ins; wait a minute and try again")
+				// Backed off rather than reported, which is the difference between a pause and a lost
+				// sign-in. By the time a poll is throttled the person has already opened the page on
+				// their phone, typed the code and may well have approved it — giving up there throws
+				// that away and sends them back for a new code. 429 is the one status that means "later",
+				// and this loop already knows how to wait.
+				return tokenPair{}, errDeviceSlowDown
 			}
 		}
 		return tokenPair{}, err

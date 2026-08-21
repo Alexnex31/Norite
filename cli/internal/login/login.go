@@ -148,7 +148,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	var pair tokenPair
 	var fallbackName string
 	switch {
-	case r.useDeviceCode():
+	case r.chooseDeviceCode():
 		pair, err = r.signInWithDeviceCode(ctx, s)
 	case r.Options.Provider != "":
 		pair, err = r.signInWithOAuth(ctx, s, r.Options.Provider)
@@ -162,27 +162,42 @@ func (r *Runner) Run(ctx context.Context) error {
 	return r.finish(ctx, s, pair, fallbackName)
 }
 
-// useDeviceCode decides between the two browser flows.
+// chooseDeviceCode decides between the two browser flows, and announces the decision when it is one
+// nobody asked for.
 //
 // Asked for, or detected. The detection is deliberately narrow: it only ever redirects a sign-in that was
 // already going to need a browser, so a bare `norite login` with a password is untouched no matter what
 // this machine is. Somebody over SSH who types a password should get exactly what they typed.
 //
-// Never silent when it fires. See deviceCodeFallbackNotice.
-func (r *Runner) useDeviceCode() bool {
+// The printing lives here rather than inside the predicate underneath it, which is where it used to be.
+// A boolean method with a side effect is correct only while it is called exactly once, and the second
+// caller — a log line naming the chosen flow, a --dry-run, a re-check after prepare fails — prints the
+// notice again or prints it on a path that then does not take this flow at all.
+func (r *Runner) chooseDeviceCode() bool {
+	chosen, detected := r.wantsDeviceCode()
+	if detected {
+		// Never silent, for the reason ADR 0025 gives about the keyring fallback: a degradation nobody is
+		// told about is one discovered later, at a worse time.
+		r.printf("%s\n\n", deviceCodeFallbackNotice(r.Options.Provider))
+	}
+	return chosen
+}
+
+// wantsDeviceCode answers the question and nothing else. The second return is whether the answer was
+// arrived at rather than asked for, which is the only case worth announcing.
+func (r *Runner) wantsDeviceCode() (chosen, detected bool) {
 	if r.Options.DeviceCode {
-		return true
+		return true, false
 	}
 	if r.Options.Provider == "" || r.Options.NoBrowser {
 		// --no-browser is a deliberate "print the link, I will open it myself", which works over SSH with
 		// a forwarded port. Overriding it here would take away the one flow it exists to provide.
-		return false
+		return false, false
 	}
 	if !r.browserIsReachable() {
-		r.printf("%s\n\n", deviceCodeFallbackNotice(r.Options.Provider))
-		return true
+		return true, true
 	}
-	return false
+	return false, false
 }
 
 func (r *Runner) browserIsReachable() bool {

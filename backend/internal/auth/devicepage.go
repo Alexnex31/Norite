@@ -85,6 +85,19 @@ var deviceProviderLabels = map[string]string{
 	"github": "GitHub",
 }
 
+// deviceProviderLabel names a provider for a person, falling back to the identifier.
+//
+// The fallback is the point. A bare map index yields "" for anything not listed, and the first provider
+// added to OAuthProviders without also touching the table above — the exact split-knowledge failure that
+// table exists because of — would render an empty anchor: a zero-width link nobody can click, with nothing
+// logged and nothing failing. An unlovely "gitlab" is a better page than an invisible one.
+func deviceProviderLabel(name string) string {
+	if label, ok := deviceProviderLabels[name]; ok {
+		return label
+	}
+	return name
+}
+
 // DevicePageRoutes mounts the verification pages, at the root beside /reset.
 func (h *Handler) DevicePageRoutes(r chi.Router) {
 	r.Get(devicePagePath, h.devicePage)
@@ -159,7 +172,10 @@ func (h *Handler) devicePageSignIn(w http.ResponseWriter, r *http.Request) {
 		}
 		// The same message a JSON login gets, and for the same reason: "that account exists but signs in
 		// with Google" turns a form into an account-discovery tool.
-		h.renderDeviceSignIn(w, r, http.StatusUnauthorized, row, entry.UserCode, deviceBadPasswordMsg)
+		// row.UserCode, not entry.UserCode. They agree today only because the token happened to be minted
+		// from the same lookup; taking both facts from the row the handler just re-read is what keeps them
+		// agreeing, and the approval page's whole job is showing a code that matches the terminal.
+		h.renderDeviceSignIn(w, r, http.StatusUnauthorized, row, row.UserCode, deviceBadPasswordMsg)
 		return
 	}
 
@@ -286,7 +302,7 @@ func (h *Handler) deviceProviderLinks(entryToken string) []deviceProviderLink {
 	var out []deviceProviderLink
 	for _, name := range h.svc.oauth.Names() {
 		out = append(out, deviceProviderLink{
-			Label: deviceProviderLabels[name],
+			Label: deviceProviderLabel(name),
 			URL:   oauthAuthorizePath(name) + "?device_token=" + url.QueryEscape(entryToken),
 		})
 	}

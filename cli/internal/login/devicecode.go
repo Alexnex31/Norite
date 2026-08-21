@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"time"
+
+	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 )
 
 // `norite login --device-code`, and what `--provider` falls back to on a machine with no browser of its
@@ -162,9 +164,21 @@ func checkVerificationURI(instanceURL, raw string) (string, error) {
 	if got.Scheme != want.Scheme || got.Host != want.Host || got.User != nil {
 		return "", errors.New(refused)
 	}
+
 	// The parser's own re-serialization, so what is printed is what was understood — the same reason
 	// ParseOAuthClientRedirect returns one on the other side of this flow.
-	return got.String(), nil
+	//
+	// Checked against the sanitizer rather than passed through it, because this string is an instruction:
+	// somebody is about to open it. Cleaning it silently would print an address that is not the one the
+	// instance sent, and refusing costs a legitimate instance nothing, since a verification URI has no
+	// reason to contain anything the sanitizer removes. url.Parse rejects ASCII controls and stops there —
+	// the bidi overrides are multi-byte and travel through it and through String() untouched, which is
+	// enough to make a path render as another host (rule 19).
+	out := got.String()
+	if termsafe.Text(out) != out {
+		return "", errors.New(refused)
+	}
+	return out, nil
 }
 
 // lifetimeOf is how long the instance says the code lives, bounded.

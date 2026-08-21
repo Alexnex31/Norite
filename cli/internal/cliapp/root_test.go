@@ -3,6 +3,7 @@ package cliapp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"regexp"
@@ -225,11 +226,22 @@ func TestDeviceCodeWithConflictingFlagsIsRefused(t *testing.T) {
 }
 
 // And --device-code with --provider is *not* refused: the automatic fallback produces exactly that
-// combination, and the choice of provider is made in the browser rather than here.
+// combination, so a guard against it would exit 2 for every SSH user the flow exists for.
+//
+// Run rather than grepped for. This used to assert only that `login --help` mentions the flag, which a
+// third guard in command.go would leave passing while breaking the path it is named after.
 func TestDeviceCodeWithAProviderIsAllowed(t *testing.T) {
-	out, _, err := runArgs(t, "login", "--help")
-	require.NoError(t, err)
-	assert.Contains(t, out, "--device-code")
+	_, _, err := runArgs(t, "login", "--device-code", "--provider", "google",
+		"--instance", "http://127.0.0.1:1")
+
+	// It fails — there is no instance at that address — but not as a usage error, which is the property.
+	var exit cli.ExitCoder
+	if errors.As(err, &exit) {
+		assert.NotEqual(t, 2, exit.ExitCode(), "the pair the fallback produces must not be a usage error")
+	}
+
+	out, _, helpErr := runArgs(t, "login", "--help")
+	require.NoError(t, helpErr)
 	assert.Contains(t, out, "chosen in the browser",
 		"the help must say where the provider choice happens on that path")
 }
