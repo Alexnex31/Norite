@@ -317,3 +317,53 @@ func uniqueRunes(s string) map[rune]bool {
 	}
 	return out
 }
+
+// An approval token names one account, and the revocation Deny reaches has to be scoped to it. Tested here
+// rather than over HTTP because a token for one account naming another's authorization is not something a
+// browser can produce — it needs the signing key, which is exactly what makes the scoping a property of
+// the query rather than of the token.
+func TestADenialCannotRevokeAnotherAccountsAuthorization(t *testing.T) {
+	svc, pool := newService(t, RegistrationOpen)
+	ada, _ := registerAndLogin(t, svc, "ada@example.com", "ada-device")
+	grace, _ := registerAndLogin(t, svc, "grace@example.com", "grace-device")
+
+	auth := startDeviceAuth(t, svc, pool)
+	approve(t, svc, auth, ada.ID)
+
+	outcome, err := svc.DenyDeviceAuthorization(t.Context(), auth.rowID, grace.ID)
+	require.NoError(t, err)
+	assert.Equal(t, DeviceDenyTooLate, outcome,
+		"another account's denial must reach nothing, and must not claim to have stopped anything")
+
+	// Ada's authorization is untouched and still collectable.
+	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	pair, err := svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, pair.RefreshToken)
+}
+
+// The three outcomes, each reached the way somebody actually reaches it.
+func TestDenyReportsWhatItManagedToDo(t *testing.T) {
+	svc, pool := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "other-device")
+
+	pending := startDeviceAuth(t, svc, pool)
+	outcome, err := svc.DenyDeviceAuthorization(t.Context(), pending.rowID, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, DeviceDenyStopped, outcome, "nothing had been authorized")
+
+	approved := startDeviceAuth(t, svc, pool)
+	approve(t, svc, approved, user.ID)
+	outcome, err = svc.DenyDeviceAuthorization(t.Context(), approved.rowID, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, DeviceDenyRevoked, outcome, "an approval not yet collected can still be taken back")
+
+	collected := startDeviceAuth(t, svc, pool)
+	approve(t, svc, collected, user.ID)
+	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	_, err = svc.RedeemDeviceCode(t.Context(), collected.DeviceCode, netip.Addr{})
+	require.NoError(t, err)
+	outcome, err = svc.DenyDeviceAuthorization(t.Context(), collected.rowID, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, DeviceDenyTooLate, outcome, "a redeemed code is past reach from the page")
+}

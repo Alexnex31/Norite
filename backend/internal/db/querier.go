@@ -199,6 +199,17 @@ type Querier interface {
 	// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
 	// this is the whole of what "log everyone out" can currently mean.
 	RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error)
+	// Takes back an approval that has not been collected yet.
+	//
+	// This is what makes Deny a real recovery path rather than a promise. Somebody who approves and realizes a
+	// second later — the likeliest way anybody escapes the phishing this flow is vulnerable to — presses Deny
+	// and lands here, because DenyDeviceCode by then matches nothing. Spending the code is the strongest thing
+	// still available: the waiting client's next poll gets expired_token and no session is ever created.
+	//
+	// Scoped to the account the approval token names, so an approval for one account cannot revoke another's.
+	// Matches nothing once the code has been redeemed, which is the one case where this is too late and the
+	// caller has to say so.
+	RevokeApprovedDeviceCode(ctx context.Context, arg RevokeApprovedDeviceCodeParams) (DeviceCode, error)
 	// Part of revoking everything a compromised credential could reach (CLAUDE.md rule 17).
 	//
 	// An approved-but-unpolled device code is exactly the same kind of outstanding claim on an account as an

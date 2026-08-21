@@ -309,22 +309,57 @@ func (s *Service) ApproveDeviceAuthorization(ctx context.Context, deviceCodeID, 
 	return nil
 }
 
-// DenyDeviceAuthorization ends an authorization now.
+// DeviceDenyOutcome is what pressing Deny actually managed to do.
+//
+// Three answers rather than one, because the page has to tell the truth and the three are not the same
+// news. The distinction exists at all because of the order people press things: approving and then
+// realizing is the likeliest way anybody escapes the phishing this flow is vulnerable to, and Deny is
+// where they go.
+type DeviceDenyOutcome int
+
+const (
+	// DeviceDenyStopped is the ordinary case: nothing had been authorized, and now nothing can be.
+	DeviceDenyStopped DeviceDenyOutcome = iota
+	// DeviceDenyRevoked is an approval taken back before the waiting client collected it. The code is
+	// spent, so the next poll gets expired_token and no session is ever created.
+	DeviceDenyRevoked
+	// DeviceDenyTooLate is an approval the client already redeemed. There is a live session now, and
+	// nothing on this page can reach it — the person has to be told that plainly.
+	DeviceDenyTooLate
+)
+
+// DenyDeviceAuthorization ends an authorization now, and reports how much of it there was left to end.
 //
 // Worth having rather than letting the code expire: a person who realizes they were sent a code by
 // somebody else can stop it at once, and the waiting client is told to give up on its next poll instead of
 // sitting there for the rest of the twenty minutes.
-func (s *Service) DenyDeviceAuthorization(ctx context.Context, deviceCodeID int64) error {
-	_, err := s.queries.DenyDeviceCode(ctx, deviceCodeID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Already decided or already gone. Nothing left to deny and nothing to report: the outcome the
-			// caller wanted — that this authorization cannot be used — already holds.
-			return nil
-		}
-		return fmt.Errorf("denying device authorization: %w", err)
+//
+// The second and third outcomes are what this function used to get wrong. It reported success for every
+// row it did not match, so pressing Deny a second after pressing Approve rendered "nothing was signed in"
+// while the device was authorized and about to collect — the page telling somebody they were safe at
+// exactly the moment they were not, on the one recovery path ADR 0028 promises.
+func (s *Service) DenyDeviceAuthorization(ctx context.Context, deviceCodeID, userID int64,
+) (DeviceDenyOutcome, error) {
+	if _, err := s.queries.DenyDeviceCode(ctx, deviceCodeID); err == nil {
+		return DeviceDenyStopped, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return DeviceDenyStopped, fmt.Errorf("denying device authorization: %w", err)
 	}
-	return nil
+
+	// Nothing to deny, which most often means it has already been approved — by the person now pressing
+	// Deny. Spending the code is the strongest thing still available, and it is scoped to the account the
+	// approval named so one account's regret cannot revoke another's sign-in.
+	if _, err := s.queries.RevokeApprovedDeviceCode(ctx, db.RevokeApprovedDeviceCodeParams{
+		ID:     deviceCodeID,
+		UserID: &userID,
+	}); err == nil {
+		return DeviceDenyRevoked, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return DeviceDenyStopped, fmt.Errorf("revoking device authorization: %w", err)
+	}
+
+	// Already redeemed, already expired, or never this account's. All three are past reach from here.
+	return DeviceDenyTooLate, nil
 }
 
 // GenerateUserCode mints a code a person can read off one screen and type into another.

@@ -317,6 +317,47 @@ func (q *Queries) PollDeviceCode(ctx context.Context, deviceCodeHash []byte) (Po
 	return i, err
 }
 
+const revokeApprovedDeviceCode = `-- name: RevokeApprovedDeviceCode :one
+UPDATE device_codes
+SET consumed_at = now()
+WHERE id = $1 AND user_id = $2 AND consumed_at IS NULL
+RETURNING id, device_code_hash, user_code, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
+`
+
+type RevokeApprovedDeviceCodeParams struct {
+	ID     int64
+	UserID *int64
+}
+
+// Takes back an approval that has not been collected yet.
+//
+// This is what makes Deny a real recovery path rather than a promise. Somebody who approves and realizes a
+// second later — the likeliest way anybody escapes the phishing this flow is vulnerable to — presses Deny
+// and lands here, because DenyDeviceCode by then matches nothing. Spending the code is the strongest thing
+// still available: the waiting client's next poll gets expired_token and no session is ever created.
+//
+// Scoped to the account the approval token names, so an approval for one account cannot revoke another's.
+// Matches nothing once the code has been redeemed, which is the one case where this is too late and the
+// caller has to say so.
+func (q *Queries) RevokeApprovedDeviceCode(ctx context.Context, arg RevokeApprovedDeviceCodeParams) (DeviceCode, error) {
+	row := q.db.QueryRow(ctx, revokeApprovedDeviceCode, arg.ID, arg.UserID)
+	var i DeviceCode
+	err := row.Scan(
+		&i.ID,
+		&i.DeviceCodeHash,
+		&i.UserCode,
+		&i.DeviceID,
+		&i.DeviceName,
+		&i.UserID,
+		&i.DeniedAt,
+		&i.ConsumedAt,
+		&i.LastPolledAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const revokeDeviceCodesForUser = `-- name: RevokeDeviceCodesForUser :execrows
 UPDATE device_codes
 SET consumed_at = now()

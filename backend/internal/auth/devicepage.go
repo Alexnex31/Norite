@@ -183,10 +183,17 @@ func (h *Handler) devicePageApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if form.Get("decision") != "approve" {
-		if err := h.svc.DenyDeviceAuthorization(r.Context(), approval.DeviceCodeID); err != nil {
+		outcome, err := h.svc.DenyDeviceAuthorization(r.Context(), approval.DeviceCodeID, approval.UserID)
+		if err != nil {
 			logging.FromContext(r.Context()).Error().Err(err).Msg("denying a device authorization failed")
+			h.renderDeviceExpired(w, r)
+			return
 		}
-		h.renderDevice(w, r, deviceDeniedTemplate, http.StatusOK,
+
+		// One template per outcome, because they are not the same news and this page's whole job is being
+		// believed. Telling somebody "nothing was signed in" when a device is about to collect their
+		// session would be the worst thing on it.
+		h.renderDevice(w, r, denyTemplateFor(outcome), http.StatusOK,
 			devicePageData{Nonce: httpx.NonceFrom(r.Context())})
 		return
 	}
@@ -305,6 +312,18 @@ func (h *Handler) renderDevice(w http.ResponseWriter, r *http.Request, tmpl *tem
 	}
 }
 
+// denyTemplateFor picks the page that matches what Deny actually managed to do.
+func denyTemplateFor(outcome DeviceDenyOutcome) *template.Template {
+	switch outcome {
+	case DeviceDenyRevoked:
+		return deviceRevokedTemplate
+	case DeviceDenyTooLate:
+		return deviceTooLateTemplate
+	default:
+		return deviceDeniedTemplate
+	}
+}
+
 // prefillUserCode returns a code fit to put back in the form, or nothing.
 //
 // A value that will not parse is dropped entirely rather than escaped and echoed. It is going into an
@@ -398,8 +417,12 @@ var deviceApproveTemplate = template.Must(template.New("device-approve").Parse(`
 to enter is asking you to sign them in as you.</p>
 <form method="post" action="/device/approve">
   <input type="hidden" name="device_token" value="{{ .Token }}">
+  <!-- Deny first, and that is not a layout preference. A form submitted without a button being chosen -
+       Enter from a text field, a keyboard user pressing Return, an assistive-technology default - sends
+       the first submit button in DOM order. The handler treats anything that is not exactly "approve" as
+       a denial precisely so this page fails closed; putting Approve first would undo that in markup. -->
+  <button type="submit" name="decision" value="deny" class="deny">Deny</button>
   <button type="submit" name="decision" value="approve">Approve</button>
-  <button type="submit" name="decision" value="deny">Deny</button>
 </form>
 </body>
 </html>
@@ -417,6 +440,47 @@ var deviceApprovedTemplate = template.Must(template.New("device-approved").Parse
 <body>
 <h1>Device approved</h1>
 <p>You can close this page. The device will finish signing in within a few seconds.</p>
+</body>
+</html>
+`))
+
+// The two outcomes a Deny can have other than the ordinary one. Separate documents rather than one with a
+// conditional, so that what each says can be read whole — these are the pages somebody reads at the worst
+// moment this flow has.
+var deviceRevokedTemplate = template.Must(template.New("device-revoked").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device stopped</title>
+<style nonce="{{ .Nonce }}">
+` + pageStyle + `</style>
+</head>
+<body>
+<h1>That device has been stopped</h1>
+<p>It had already been approved, and it has now been prevented from finishing. It never received a way in
+to your account, and it cannot try again with the same code.</p>
+<p class="note">If somebody sent you that code, they were trying to sign in as you. Nothing of yours was
+given away, and there is nothing else you need to do.</p>
+</body>
+</html>
+`))
+
+var deviceTooLateTemplate = template.Must(template.New("device-too-late").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>That device already signed in</title>
+<style nonce="{{ .Nonce }}">
+` + pageStyle + `</style>
+</head>
+<body>
+<h1>That device has already signed in</h1>
+<p class="error">This could not be undone from here. The device finished signing in before you pressed
+Deny, so it is holding a session on your account right now.</p>
+<p>Sign that device out from your account&#39;s device list, and change your password if you did not
+recognize it.</p>
 </body>
 </html>
 `))

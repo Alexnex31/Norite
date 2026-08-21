@@ -281,3 +281,73 @@ func deviceTokenFrom(t *testing.T, body string) string {
 	require.NotEmpty(t, token)
 	return token
 }
+
+// Deny is the one recovery path this flow promises (ADR 0028, §14.21), and the way somebody most often
+// reaches it is by approving and realizing a second later. Until this was fixed that path did nothing at
+// all and still rendered "nothing was signed in" — the page telling a person they were safe at exactly the
+// moment they were not.
+func TestDenyingAfterApprovingStopsTheDeviceAndSaysSo(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+	issued := api.issueDeviceCode(t)
+
+	entry := api.enterUserCode(t, issued.UserCode)
+	approval := api.signInOnDevicePage(t, entry, "ada@example.com", testPassword)
+	api.decideDevice(t, approval, "approve")
+
+	// The back button: the approval page is still in history and its token is still good.
+	resp := api.call(http.MethodPost, "/device/approve", formBody(url.Values{
+		"device_token": {approval}, "decision": {"deny"},
+	}), asForm)
+	require.Equal(t, http.StatusOK, resp.Code, resp)
+	assert.Contains(t, resp.String(), "has been stopped")
+	assert.NotContains(t, resp.String(), "Nothing was signed in",
+		"the page must not claim nothing happened when something did")
+
+	// And it is true: the waiting client gets nothing.
+	poll := api.call(http.MethodPost, "/api/v1/auth/device/token",
+		map[string]string{"device_code": issued.DeviceCode})
+	require.Equal(t, http.StatusBadRequest, poll.Code, poll)
+	assert.Equal(t, "expired_token", poll.errorBody().Code)
+}
+
+// And when it genuinely is too late, that is what it says. Nothing on this page can reach a session that
+// already exists, so promising otherwise would be the same lie in the other direction.
+func TestDenyingAfterTheDeviceCollectedSaysItIsTooLate(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+	issued := api.issueDeviceCode(t)
+
+	entry := api.enterUserCode(t, issued.UserCode)
+	approval := api.signInOnDevicePage(t, entry, "ada@example.com", testPassword)
+	api.decideDevice(t, approval, "approve")
+	api.pollUntilSignedIn(t, issued.DeviceCode)
+
+	resp := api.call(http.MethodPost, "/device/approve", formBody(url.Values{
+		"device_token": {approval}, "decision": {"deny"},
+	}), asForm)
+	require.Equal(t, http.StatusOK, resp.Code, resp)
+	assert.Contains(t, resp.String(), "already signed in")
+	assert.Contains(t, resp.String(), "device list", "and say what can still be done about it")
+}
+
+// Fail-closed in the handler is undone if the markup fails open. A form submitted without a button being
+// chosen sends the first submit button in DOM order, so Deny has to be first.
+func TestTheApprovalFormsDefaultButtonDenies(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+	issued := api.issueDeviceCode(t)
+
+	entry := api.enterUserCode(t, issued.UserCode)
+	page := api.call(http.MethodPost, "/device/signin", formBody(url.Values{
+		"device_token": {entry}, "email": {"ada@example.com"}, "password": {testPassword},
+	}), asForm)
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	deny := strings.Index(page.String(), `value="deny"`)
+	approve := strings.Index(page.String(), `value="approve"`)
+	require.Positive(t, deny)
+	require.Positive(t, approve)
+	assert.Less(t, deny, approve,
+		"Deny must be the first submit button, or an implicit submission approves")
+}

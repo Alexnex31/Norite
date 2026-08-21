@@ -132,3 +132,19 @@ WHERE id = $1
   AND denied_at IS NULL
   AND consumed_at IS NULL
   AND expires_at > now();
+
+-- name: RevokeApprovedDeviceCode :one
+-- Takes back an approval that has not been collected yet.
+--
+-- This is what makes Deny a real recovery path rather than a promise. Somebody who approves and realizes a
+-- second later — the likeliest way anybody escapes the phishing this flow is vulnerable to — presses Deny
+-- and lands here, because DenyDeviceCode by then matches nothing. Spending the code is the strongest thing
+-- still available: the waiting client's next poll gets expired_token and no session is ever created.
+--
+-- Scoped to the account the approval token names, so an approval for one account cannot revoke another's.
+-- Matches nothing once the code has been redeemed, which is the one case where this is too late and the
+-- caller has to say so.
+UPDATE device_codes
+SET consumed_at = now()
+WHERE id = $1 AND user_id = $2 AND consumed_at IS NULL
+RETURNING *;
