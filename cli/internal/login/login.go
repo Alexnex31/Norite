@@ -131,6 +131,15 @@ type session struct {
 // Three parts, and the split is the shape M8 needed: everything before a credential exists is shared,
 // everything after it is shared, and only the middle differs between a password and a provider.
 func (r *Runner) Run(ctx context.Context) error {
+	// Before anything else, and before the flow is chosen. A typo in --provider used to be caught inside
+	// the OAuth path, which stopped being good enough the moment a second path could be taken instead: on
+	// a machine with no browser the device flow runs, ignores --provider entirely, and `--provider gooogle`
+	// silently becomes a working sign-in that never mentions the typo. Where a mistake is reported must
+	// not depend on what machine it was made on.
+	if err := checkProvider(r.Options.Provider); err != nil {
+		return err
+	}
+
 	s, err := r.prepare()
 	if err != nil {
 		return err
