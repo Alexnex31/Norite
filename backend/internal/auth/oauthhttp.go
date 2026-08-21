@@ -76,6 +76,9 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		// Where a command-line client asked to be returned to. Absent for a browser, which is the only
 		// caller that has somewhere to render.
 		ClientRedirectURI: r.URL.Query().Get("client_redirect_uri"),
+		// The other way in: somebody finishing a device-code sign-in, arriving from a link on this
+		// instance's own verification page and carrying the continuation it gave them (M9).
+		DeviceToken: r.URL.Query().Get("device_token"),
 	})
 	if err != nil {
 		h.writeErr(w, r, err)
@@ -107,6 +110,15 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if outcome.SignedIn() {
+		// A device flow ends on a page rather than in a credential. The person has proved who they are and
+		// has still to say yes, which is the step that whole page exists for — see devicepage.go.
+		//
+		// Which device, like every other destination here, came out of the consumed state row.
+		if outcome.DeviceCodeID != 0 {
+			h.renderDeviceApproval(w, r, outcome.DeviceCodeID, outcome.UserID)
+			return
+		}
+
 		// A client waiting on a loopback listener gets the code delivered rather than displayed. Note what
 		// travels: a single-use code with a two-minute life that is worthless without the flow verifier,
 		// over a hop that never leaves the machine — not the token pair ADR 0024 refused to put in a URL.
@@ -150,6 +162,13 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.svc.CompleteOAuthSignup(r.Context(), token, username)
 	if err == nil {
+		// A brand-new account signing up from the verification page lands on the approval step, exactly as
+		// an existing one does. Which device is waiting came out of the signed token, not this form.
+		if result.DeviceCodeID != 0 {
+			h.renderDeviceApproval(w, r, result.DeviceCodeID, result.UserID)
+			return
+		}
+
 		// Where the code goes was decided when the flow started and traveled here inside the signed
 		// continuation token, not in this form. That distinction is the point: this request body is
 		// written by whoever is looking at the page, and a hidden redirect field would let them choose

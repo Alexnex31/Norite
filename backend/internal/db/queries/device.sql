@@ -9,12 +9,12 @@
 -- device_id and device_name come from the client asking for the code, which is the client that will hold
 -- the resulting session. The browser that approves never supplies either.
 INSERT INTO device_codes (
-  id, device_code_hash, user_code_hash, device_id, device_name, expires_at
+  id, device_code_hash, user_code, device_id, device_name, expires_at
 )
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
--- name: GetDeviceCodeByUserCodeHash :one
+-- name: GetDeviceCodeByUserCode :one
 -- The verification page's lookup, for a code that can still be acted on.
 --
 -- Approved, denied, spent and expired rows are all excluded, so all four produce the same "no such code"
@@ -22,7 +22,7 @@ RETURNING *;
 -- told the authorization is over, instead of being walked through a sign-in that would then fail at the
 -- approval step for a reason nobody could see.
 SELECT * FROM device_codes
-WHERE user_code_hash = $1
+WHERE user_code = $1
   AND user_id IS NULL
   AND denied_at IS NULL
   AND consumed_at IS NULL

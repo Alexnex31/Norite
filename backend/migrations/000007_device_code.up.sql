@@ -24,10 +24,18 @@ CREATE TABLE device_codes (
 
   -- SHA-256 of the `nod_…` value only the waiting client holds. This is the credential the poll spends.
   device_code_hash bytea NOT NULL,
-  -- SHA-256 of the short code a person reads off their terminal and types into a phone. Hashed for the
-  -- same reason as everything else here, and it costs nothing: the page looks it up by exact match, which
-  -- an index on the hash serves exactly as well as one on the value.
-  user_code_hash   bytea NOT NULL,
+  -- The short code a person reads off their terminal and types into a phone. In plaintext, which is the
+  -- one credential-shaped value in this schema that is not hashed, and the exception is deliberate.
+  --
+  -- It is not a bearer credential: holding it authorizes nothing. Whoever enters it must then authenticate
+  -- as themselves and press Approve, and what that authorizes is somebody else's machine to act as *their*
+  -- account — so a stolen user code buys an attacker the ability to give their own account away. The
+  -- device code beside it is the credential, and that one is hashed.
+  --
+  -- And it has to be readable back: the approval page shows it so a person can compare it against the
+  -- screen that produced it, which is the only comparison standing between them and authorizing a device
+  -- they were talked into. A hash cannot serve that, and the page is where this flow's real defense is.
+  user_code        varchar(9) NOT NULL,
 
   -- Captured when the code is issued, because the client that will hold the resulting session is the one
   -- that asked for the code — not the browser that approves it. device_name is shown on the approval
@@ -61,7 +69,7 @@ CREATE UNIQUE INDEX device_codes_device_code_hash_idx ON device_codes (device_co
 -- than hopeful. A user code is short by construction — a person types it — so two live codes colliding is
 -- rare but not negligible, and the generator retries on the unique violation this raises rather than
 -- checking first and racing.
-CREATE UNIQUE INDEX device_codes_user_code_hash_idx ON device_codes (user_code_hash);
+CREATE UNIQUE INDEX device_codes_user_code_idx ON device_codes (user_code);
 
 -- The sweep's index (auth.RunSweeper). Abandoned authorizations are the common case here, more so than
 -- for oauth_states: a person who runs `norite login` on a server and gets distracted leaves a row behind,

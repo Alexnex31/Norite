@@ -59,9 +59,12 @@ type Querier interface {
 	//
 	// Two tables with very different lifetimes: oauth_identities is a permanent link between an account and a
 	// provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
-	// client_redirect_uri is '' for a flow with nowhere to return to — a browser, and the device-code path.
-	// It is written once here and only ever read back out of the row ConsumeOAuthState spends, which is what
-	// keeps the destination a property of the flow rather than of whoever presents the callback.
+	// Two columns decide where a completed flow ends, and at most one of them is ever set.
+	//
+	// client_redirect_uri is '' for a flow with nowhere to return to — a browser, and a device flow.
+	// device_code_id is NULL except for a flow started from the device verification page (M9). Both are
+	// written once here and only ever read back out of the row ConsumeOAuthState spends, which is what keeps
+	// the destination a property of the flow rather than of whoever presents the callback.
 	CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) (OauthState, error)
 	// An account created by an OAuth sign-in, with no password.
 	//
@@ -126,7 +129,7 @@ type Querier interface {
 	// as a code that never existed. That is worth having beyond tidiness: a code entered a second time gets
 	// told the authorization is over, instead of being walked through a sign-in that would then fail at the
 	// approval step for a reason nobody could see.
-	GetDeviceCodeByUserCodeHash(ctx context.Context, userCodeHash []byte) (DeviceCode, error)
+	GetDeviceCodeByUserCode(ctx context.Context, userCode string) (DeviceCode, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its

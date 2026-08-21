@@ -32,6 +32,16 @@ import (
 // travels through a browser this server does not control, and later through a loopback listener on the
 // user's own machine (Milestone M8) where other local processes can see it.
 
+// oauthProviderPath is where a provider's endpoints are mounted, relative to the instance root.
+//
+// One definition rather than a string literal at each site: the callback path is registered with Google
+// and GitHub, so it is not something to reconstruct by hand in a second place and get subtly wrong.
+func oauthProviderPath(provider string) string { return "/api/v1/auth/oauth/" + provider }
+
+// oauthAuthorizePath is where a browser is sent to start a sign-in. Same-origin and relative, because the
+// only page that links to it is served by this instance.
+func oauthAuthorizePath(provider string) string { return oauthProviderPath(provider) + "/authorize" }
+
 // OAuthProviderName identifies a provider in URLs and in the database.
 type OAuthProviderName string
 
@@ -211,7 +221,7 @@ func NewOAuthProviders(opts OAuthOptions) OAuthProviders {
 // was registered, and building it from a Host header would make that match depend on whatever a caller
 // sent.
 func OAuthRedirectURL(baseURL string, provider OAuthProviderName) string {
-	return strings.TrimSuffix(baseURL, "/") + "/api/v1/auth/oauth/" + string(provider) + "/callback"
+	return strings.TrimSuffix(baseURL, "/") + oauthProviderPath(string(provider)) + "/callback"
 }
 
 // GenerateOAuthVerifier returns a PKCE code verifier.

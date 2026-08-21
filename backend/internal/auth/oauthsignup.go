@@ -3,6 +3,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -72,6 +73,14 @@ type oauthSignupClaims struct {
 	//
 	// Empty for a flow that named no listener, which is every flow a browser starts.
 	ClientRedirect string `json:"rdr,omitempty"`
+	// DeviceCode carries which device authorization is waiting on this sign-up, for a flow started from
+	// the verification page (M9). Inside the signature for the same reason as the two above and against
+	// the same party: the username form is submitted by whoever is looking at it, and a hidden field here
+	// would let them choose whose machine gets authorized.
+	//
+	// A decimal string rather than a number, because JSON numbers are float64 on the way back through and
+	// a snowflake does not survive that — the same reason every ID this API emits is quoted.
+	DeviceCode string `json:"dvc,omitempty"`
 }
 
 // oauthSignupContinuation is what a valid continuation token carries.
@@ -83,13 +92,18 @@ type oauthSignupContinuation struct {
 	Challenge TokenHash
 	// ClientRedirectURI is where to send the browser once the account exists, or empty to render.
 	ClientRedirectURI string
+	// DeviceCodeID is the authorization waiting on this sign-up, or zero.
+	DeviceCodeID int64
 }
 
 // issueOAuthSignupToken mints the token that stands in for an account that does not exist yet.
-func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, challenge TokenHash,
-	redirect string,
-) (string, error) {
+func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, dest oauthDestination) (string, error) {
 	now := s.now()
+
+	deviceCode := ""
+	if dest.forDevice() {
+		deviceCode = strconv.FormatInt(*dest.DeviceCodeID, 10)
+	}
 
 	claims := oauthSignupClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -105,8 +119,9 @@ func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, challenge TokenH
 		Email:          identity.Email,
 		EmailVerified:  identity.EmailVerified,
 		DisplayName:    identity.DisplayName,
-		FlowChallenge:  OAuthFlowChallengeFor(challenge),
-		ClientRedirect: redirect,
+		FlowChallenge:  OAuthFlowChallengeFor(dest.Challenge),
+		ClientRedirect: dest.Redirect,
+		DeviceCode:     deviceCode,
 	}
 
 	signed, err := s.issuer.sign(claims)
@@ -161,6 +176,16 @@ func (s *Service) parseOAuthSignupToken(raw string) (oauthSignupContinuation, er
 		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
 
+	// Zero unless this sign-up came from the verification page. Parsed rather than carried as a number for
+	// the reason the claim's comment gives.
+	var deviceCodeID int64
+	if claims.DeviceCode != "" {
+		deviceCodeID, err = strconv.ParseInt(claims.DeviceCode, 10, 64)
+		if err != nil || deviceCodeID == 0 {
+			return oauthSignupContinuation{}, ErrOAuthSignupToken
+		}
+	}
+
 	return oauthSignupContinuation{
 		Identity: OAuthIdentity{
 			Provider:      OAuthProviderName(claims.Provider),
@@ -171,6 +196,7 @@ func (s *Service) parseOAuthSignupToken(raw string) (oauthSignupContinuation, er
 		},
 		Challenge:         challenge,
 		ClientRedirectURI: redirect,
+		DeviceCodeID:      deviceCodeID,
 	}, nil
 }
 

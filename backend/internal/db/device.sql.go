@@ -19,7 +19,7 @@ WHERE id = $1
   AND denied_at IS NULL
   AND consumed_at IS NULL
   AND expires_at > now()
-RETURNING id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
+RETURNING id, device_code_hash, user_code, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
 `
 
 type ApproveDeviceCodeParams struct {
@@ -38,7 +38,7 @@ func (q *Queries) ApproveDeviceCode(ctx context.Context, arg ApproveDeviceCodePa
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceCodeHash,
-		&i.UserCodeHash,
+		&i.UserCode,
 		&i.DeviceID,
 		&i.DeviceName,
 		&i.UserID,
@@ -59,7 +59,7 @@ WHERE device_code_hash = $1
   AND denied_at IS NULL
   AND consumed_at IS NULL
   AND expires_at > now()
-RETURNING id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
+RETURNING id, device_code_hash, user_code, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
 `
 
 // Spends an approved code for the one token pair it is worth.
@@ -73,7 +73,7 @@ func (q *Queries) ConsumeDeviceCode(ctx context.Context, deviceCodeHash []byte) 
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceCodeHash,
-		&i.UserCodeHash,
+		&i.UserCode,
 		&i.DeviceID,
 		&i.DeviceName,
 		&i.UserID,
@@ -89,16 +89,16 @@ func (q *Queries) ConsumeDeviceCode(ctx context.Context, deviceCodeHash []byte) 
 const createDeviceCode = `-- name: CreateDeviceCode :one
 
 INSERT INTO device_codes (
-  id, device_code_hash, user_code_hash, device_id, device_name, expires_at
+  id, device_code_hash, user_code, device_id, device_name, expires_at
 )
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
+RETURNING id, device_code_hash, user_code, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
 `
 
 type CreateDeviceCodeParams struct {
 	ID             int64
 	DeviceCodeHash []byte
-	UserCodeHash   []byte
+	UserCode       string
 	DeviceID       string
 	DeviceName     string
 	ExpiresAt      pgtype.Timestamptz
@@ -116,7 +116,7 @@ func (q *Queries) CreateDeviceCode(ctx context.Context, arg CreateDeviceCodePara
 	row := q.db.QueryRow(ctx, createDeviceCode,
 		arg.ID,
 		arg.DeviceCodeHash,
-		arg.UserCodeHash,
+		arg.UserCode,
 		arg.DeviceID,
 		arg.DeviceName,
 		arg.ExpiresAt,
@@ -125,7 +125,7 @@ func (q *Queries) CreateDeviceCode(ctx context.Context, arg CreateDeviceCodePara
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceCodeHash,
-		&i.UserCodeHash,
+		&i.UserCode,
 		&i.DeviceID,
 		&i.DeviceName,
 		&i.UserID,
@@ -161,7 +161,7 @@ WHERE id = $1
   AND denied_at IS NULL
   AND consumed_at IS NULL
   AND expires_at > now()
-RETURNING id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
+RETURNING id, device_code_hash, user_code, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at
 `
 
 // The other half of the approval page, and the reason it is worth a column rather than letting the code
@@ -173,7 +173,7 @@ func (q *Queries) DenyDeviceCode(ctx context.Context, id int64) (DeviceCode, err
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceCodeHash,
-		&i.UserCodeHash,
+		&i.UserCode,
 		&i.DeviceID,
 		&i.DeviceName,
 		&i.UserID,
@@ -187,7 +187,7 @@ func (q *Queries) DenyDeviceCode(ctx context.Context, id int64) (DeviceCode, err
 }
 
 const getDeviceCodeByID = `-- name: GetDeviceCodeByID :one
-SELECT id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at FROM device_codes
+SELECT id, device_code_hash, user_code, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at FROM device_codes
 WHERE id = $1
   AND user_id IS NULL
   AND denied_at IS NULL
@@ -208,7 +208,7 @@ func (q *Queries) GetDeviceCodeByID(ctx context.Context, id int64) (DeviceCode, 
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceCodeHash,
-		&i.UserCodeHash,
+		&i.UserCode,
 		&i.DeviceID,
 		&i.DeviceName,
 		&i.UserID,
@@ -221,9 +221,9 @@ func (q *Queries) GetDeviceCodeByID(ctx context.Context, id int64) (DeviceCode, 
 	return i, err
 }
 
-const getDeviceCodeByUserCodeHash = `-- name: GetDeviceCodeByUserCodeHash :one
-SELECT id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at FROM device_codes
-WHERE user_code_hash = $1
+const getDeviceCodeByUserCode = `-- name: GetDeviceCodeByUserCode :one
+SELECT id, device_code_hash, user_code, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at FROM device_codes
+WHERE user_code = $1
   AND user_id IS NULL
   AND denied_at IS NULL
   AND consumed_at IS NULL
@@ -236,13 +236,13 @@ WHERE user_code_hash = $1
 // as a code that never existed. That is worth having beyond tidiness: a code entered a second time gets
 // told the authorization is over, instead of being walked through a sign-in that would then fail at the
 // approval step for a reason nobody could see.
-func (q *Queries) GetDeviceCodeByUserCodeHash(ctx context.Context, userCodeHash []byte) (DeviceCode, error) {
-	row := q.db.QueryRow(ctx, getDeviceCodeByUserCodeHash, userCodeHash)
+func (q *Queries) GetDeviceCodeByUserCode(ctx context.Context, userCode string) (DeviceCode, error) {
+	row := q.db.QueryRow(ctx, getDeviceCodeByUserCode, userCode)
 	var i DeviceCode
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceCodeHash,
-		&i.UserCodeHash,
+		&i.UserCode,
 		&i.DeviceID,
 		&i.DeviceName,
 		&i.UserID,
@@ -267,13 +267,13 @@ UPDATE device_codes d
 SET last_polled_at = now()
 FROM previous
 WHERE d.id = previous.id
-RETURNING d.id, d.device_code_hash, d.user_code_hash, d.device_id, d.device_name, d.user_id, d.denied_at, d.consumed_at, d.last_polled_at, d.created_at, d.expires_at, previous.last_polled_at AS previous_polled_at
+RETURNING d.id, d.device_code_hash, d.user_code, d.device_id, d.device_name, d.user_id, d.denied_at, d.consumed_at, d.last_polled_at, d.created_at, d.expires_at, previous.last_polled_at AS previous_polled_at
 `
 
 type PollDeviceCodeRow struct {
 	ID               int64
 	DeviceCodeHash   []byte
-	UserCodeHash     []byte
+	UserCode         string
 	DeviceID         string
 	DeviceName       string
 	UserID           *int64
@@ -303,7 +303,7 @@ func (q *Queries) PollDeviceCode(ctx context.Context, deviceCodeHash []byte) (Po
 	err := row.Scan(
 		&i.ID,
 		&i.DeviceCodeHash,
-		&i.UserCodeHash,
+		&i.UserCode,
 		&i.DeviceID,
 		&i.DeviceName,
 		&i.UserID,

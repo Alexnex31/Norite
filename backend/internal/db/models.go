@@ -24,7 +24,7 @@ type ApiToken struct {
 type DeviceCode struct {
 	ID             int64
 	DeviceCodeHash []byte
-	UserCodeHash   []byte
+	UserCode       string
 	DeviceID       string
 	DeviceName     string
 	UserID         *int64

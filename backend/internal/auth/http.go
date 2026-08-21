@@ -441,7 +441,7 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong),
 		errors.Is(err, ErrUnknownScope), errors.Is(err, ErrInvalidUsername),
 		errors.Is(err, ErrInvalidTokenName), errors.Is(err, ErrOAuthFlowChallenge),
-		errors.Is(err, ErrOAuthClientRedirect):
+		errors.Is(err, ErrOAuthClientRedirect), errors.Is(err, ErrDeviceContinuation):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
 
 	case errors.Is(err, ErrUnknownProvider):

@@ -787,8 +787,13 @@ paths:
         - $ref: "#/components/parameters/OAuthProvider"
         - name: flow_challenge
           in: query
-          required: true
-          description: Base64url (unpadded) SHA-256 of the flow verifier. 43 characters.
+          required: false
+          description: >
+            Base64url (unpadded) SHA-256 of the flow verifier. 43 characters.
+
+
+            Required for every flow a client starts. Exactly one of `flow_challenge` and `device_token`
+            must be present — see `device_token` for what the second one is and why it does not need this.
           schema:
             type: string
             pattern: "^[A-Za-z0-9_-]{43}$"
@@ -798,10 +803,36 @@ paths:
           description: >
             A loopback listener to return to instead of rendering the callback's page. `http` only, on a
             loopback IP literal, with an explicit port, and with no userinfo, query or fragment.
+
+
+            Refused alongside `device_token`: a device flow ends on a page this instance renders, so there
+            is no listener for it to be returned to.
           schema:
             type: string
             maxLength: 256
             example: "http://127.0.0.1:51763/callback"
+        - name: device_token
+          in: query
+          required: false
+          description: >
+            The continuation from this instance's own device-verification page, present exactly when
+            somebody is finishing a device-code sign-in with a provider (`/device`). It names the
+            authorization being completed, so the callback ends on that flow's approval step rather than
+            on a code or a redirect.
+
+
+            **Not a substitute for `flow_challenge`, and not a case of the binding becoming optional.** A
+            challenge exists so that the code a flow produces is redeemable only by the client that began
+            it — and a device flow produces no code at all. The credential the waiting client will redeem
+            is its device code, which it has held since before the browser was involved. Somebody who
+            stole this parameter and completed the flow in their own browser would be shown an approval
+            page for their own provider account, authorizing a device they already control.
+
+
+            Clients do not construct this value. It comes from a link on the verification page and is
+            useless anywhere else.
+          schema:
+            type: string
       responses:
         "302":
           description: Redirect to the provider.

@@ -624,7 +624,7 @@ func TestSignupTokensAreRejectedWhenTampered(t *testing.T) {
 	require.NoError(t, err)
 	forged, err := other.issueOAuthSignupToken(OAuthIdentity{
 		Provider: ProviderGoogle, UserID: "google-1", Email: "victim@example.com", EmailVerified: true,
-	}, challenge, "")
+	}, oauthDestination{Challenge: challenge})
 	require.NoError(t, err)
 
 	for name, token := range map[string]string{
@@ -786,7 +786,7 @@ func TestOAuthValuesExpire(t *testing.T) {
 		expired, err := svc.issueOAuthSignupToken(OAuthIdentity{
 			Provider: ProviderGoogle, UserID: "google-99",
 			Email: "newcomer@example.com", EmailVerified: true,
-		}, challenge, "")
+		}, oauthDestination{Challenge: challenge})
 		require.NoError(t, err)
 		svc.now = time.Now
 

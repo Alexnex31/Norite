@@ -177,7 +177,7 @@ func (s *Service) StartDeviceAuth(ctx context.Context, in StartDeviceAuthInput) 
 		row, err = s.queries.CreateDeviceCode(ctx, db.CreateDeviceCodeParams{
 			ID:             int64(id),
 			DeviceCodeHash: codeHash,
-			UserCodeHash:   HashToken(userCode),
+			UserCode:       userCode,
 			DeviceID:       deviceID,
 			DeviceName:     truncateDeviceName(in.DeviceName),
 			ExpiresAt:      timestamptz(expiresAt),
@@ -266,7 +266,7 @@ func (s *Service) LookUpDeviceCode(ctx context.Context, rawUserCode string) (str
 		return "", db.DeviceCode{}, ErrDeviceUserCode
 	}
 
-	row, err := s.queries.GetDeviceCodeByUserCodeHash(ctx, HashToken(code))
+	row, err := s.queries.GetDeviceCodeByUserCode(ctx, code)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", db.DeviceCode{}, ErrDeviceUserCode

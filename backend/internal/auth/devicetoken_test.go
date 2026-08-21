@@ -69,7 +69,7 @@ func TestNoOtherTokenIsADeviceContinuation(t *testing.T) {
 		UserID:        "google-1",
 		Email:         "ada@example.com",
 		EmailVerified: true,
-	}, TokenHash(make([]byte, 32)), "")
+	}, oauthDestination{Challenge: TokenHash(make([]byte, 32))})
 	require.NoError(t, err)
 
 	for _, tc := range []struct{ why, token string }{

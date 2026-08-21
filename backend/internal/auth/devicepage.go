@@ -62,8 +62,27 @@ type devicePageData struct {
 	// DeviceName is the one attacker-influenceable value on these pages. Bounded at issuance and escaped
 	// by html/template; the approval page presents it as a quoted claim rather than as its own words.
 	DeviceName string
+	// Providers are the sign-in buttons to offer, which is whatever this instance has configured. Empty on
+	// an instance with no provider set up, where the password form is the whole page.
+	Providers []deviceProviderLink
 	// Error is one of a fixed set of messages this file owns, never a service error and never user input.
 	Error string
+}
+
+// deviceProviderLink is one provider button.
+//
+// The URL carries the entry continuation, which is why these are built per render rather than once: it
+// names the authorization being worked on and expires with it.
+type deviceProviderLink struct {
+	Label string
+	URL   string
+}
+
+// deviceProviderLabels are the names to show. A map rather than strings.Title on the identifier, because
+// "Github" is wrong and the fix for it is a table, not a rule.
+var deviceProviderLabels = map[string]string{
+	"google": "Google",
+	"github": "GitHub",
 }
 
 // DevicePageRoutes mounts the verification pages, at the root beside /reset.
@@ -144,7 +163,7 @@ func (h *Handler) devicePageSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.renderDeviceApproval(w, r, entry.DeviceCodeID, entry.UserCode, user.ID)
+	h.renderDeviceApproval(w, r, entry.DeviceCodeID, user.ID)
 }
 
 // devicePageApprove is the last step, and the one this page exists to make deliberate.
@@ -213,13 +232,18 @@ func (h *Handler) renderDeviceSignIn(w http.ResponseWriter, r *http.Request, sta
 		Nonce:      httpx.NonceFrom(r.Context()),
 		Token:      token,
 		DeviceName: row.DeviceName,
+		Providers:  h.deviceProviderLinks(token),
 		Error:      message,
 	})
 }
 
 // renderDeviceApproval draws the last step.
+//
+// The user code comes off the row rather than from the caller, which is what lets the OAuth callback reach
+// this page: it arrives back from a provider holding a state row and an account, and never saw what
+// somebody typed. That is the reason device_codes stores the code and not a hash of it.
 func (h *Handler) renderDeviceApproval(w http.ResponseWriter, r *http.Request,
-	deviceCodeID int64, userCode string, userID int64,
+	deviceCodeID, userID int64,
 ) {
 	row, err := h.svc.deviceCodeByID(r.Context(), deviceCodeID)
 	if err != nil {
@@ -227,7 +251,7 @@ func (h *Handler) renderDeviceApproval(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	token, err := h.svc.issueDeviceApprovalToken(deviceCodeID, userCode, userID)
+	token, err := h.svc.issueDeviceApprovalToken(deviceCodeID, row.UserCode, userID)
 	if err != nil {
 		logging.FromContext(r.Context()).Error().Err(err).Msg("issuing a device approval failed")
 		h.renderDeviceExpired(w, r)
@@ -237,9 +261,29 @@ func (h *Handler) renderDeviceApproval(w http.ResponseWriter, r *http.Request,
 	h.renderDevice(w, r, deviceApproveTemplate, http.StatusOK, devicePageData{
 		Nonce:      httpx.NonceFrom(r.Context()),
 		Token:      token,
-		UserCode:   FormatUserCode(userCode),
+		UserCode:   FormatUserCode(row.UserCode),
 		DeviceName: row.DeviceName,
 	})
+}
+
+// deviceProviderLinks builds one button per configured provider.
+//
+// A link into the ordinary /authorize endpoint, carrying the entry continuation instead of a flow
+// challenge. That is the whole join between the two flows: from there the provider round trip is the one
+// M6 built and M8 extended, and the callback finds its way back here because the continuation put a
+// device on the state row.
+//
+// The continuation in a URL is not a leak. It names an authorization and asserts nothing about who is
+// signing in, no-referrer is already set on these pages, and the next thing it reaches is this instance.
+func (h *Handler) deviceProviderLinks(entryToken string) []deviceProviderLink {
+	var out []deviceProviderLink
+	for _, name := range h.svc.oauth.Names() {
+		out = append(out, deviceProviderLink{
+			Label: deviceProviderLabels[name],
+			URL:   oauthAuthorizePath(name) + "?device_token=" + url.QueryEscape(entryToken),
+		})
+	}
+	return out
 }
 
 func (h *Handler) renderDeviceExpired(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +363,11 @@ var deviceSignInTemplate = template.Must(template.New("device-signin").Parse(`<!
 <h1>Sign in</h1>
 {{ if .Error }}<p class="error">{{ .Error }}</p>{{ end }}
 <p>To finish signing in on <strong>{{ .DeviceName }}</strong>, sign in to your account here.</p>
+{{ if .Providers }}
+<p class="note">Sign in with a provider:</p>
+<p>{{ range .Providers }}<a class="provider" href="{{ .URL }}">{{ .Label }}</a> {{ end }}</p>
+<p class="note">or with your email and password:</p>
+{{ end }}
 <form method="post" action="/device/signin">
   <input type="hidden" name="device_token" value="{{ .Token }}">
   <label for="email">Email</label>
