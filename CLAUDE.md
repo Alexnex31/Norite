@@ -571,7 +571,10 @@ And on the device-code side, from M9 (decisions in ADR 0028):
   So approval is a separate explicit step that a successful sign-in never implies; the page names the device
   and shows the code back for comparison; a decision that is neither approve nor deny denies; and there is
   no `verification_uri_complete`, because a URL carrying the code makes the whole attack one click. Anything
-  that would shorten those screens is reopening that decision.
+  that would shorten those screens is reopening that decision. **With one qualification a review found**:
+  the page's provider buttons carry a continuation that nothing binds to the browser it was issued to, so a
+  link *can* skip the code-entry step — it cannot skip approval, which is where the defense is, and binding
+  it needs a browser session this surface has none of until Phase O.
 - **The user code is stored in plaintext and the device code is hashed.** The exception is deliberate and
   has two halves, both needed: a user code is not a bearer credential — whoever holds it must still
   authenticate and approve, and what that authorizes is somebody else's machine acting as *their* account —

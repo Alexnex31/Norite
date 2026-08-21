@@ -56,6 +56,25 @@ entry step from the URL, which is exactly what turns the attack above into a sin
 attacker sends. The `?code=` parameter `/device` does accept only prefills a field that still has to be
 looked at and submitted; that is the whole distance between the two.
 
+**That claim is narrower than it first reads, and the narrowing was found by review rather than by
+design.** The verification page's provider buttons are links to
+`/api/v1/auth/oauth/{provider}/authorize?device_token=…`, and the continuation in them is not bound to the
+browser it was issued to. An attacker who starts their own authorization, enters their own code and copies
+that link out of the page holds a ten-minute URL that carries a victim past the entry step — no code typed,
+and the entry page's "nobody should ever send you a code" warning never seen. That is the same shape as the
+parameter this section refuses, arrived at by a different route.
+
+What it does *not* skip is the approval page, which is where this flow's defense actually is: the device is
+still named, the code is still shown for comparison against a screen the victim does not have, the warning
+is repeated, and Deny is still the default button. So the property that survives is "no link reaches an
+authorized device without a human decision on a page that describes it", which is the one worth stating —
+not "no link skips a step". The wording above is kept and qualified rather than deleted, because the
+distinction between those two claims is the whole finding.
+
+Closing it properly means the entry continuation being unusable by a browser other than the one it was
+issued to, and there is nothing to bind it with: this surface has no sessions and no cookies until Phase O.
+It is left open, stated here and in §14.21, rather than papered over.
+
 ### A device flow carries no flow challenge, and this is not the binding becoming optional
 `/authorize` requires exactly one of `flow_challenge` and `device_token`. A challenge exists so that the
 *code* a flow produces is redeemable only by the client that began the flow (see `GenerateOAuthFlowVerifier`),

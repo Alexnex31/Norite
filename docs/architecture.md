@@ -667,6 +667,10 @@ POST   /auth/device/code                  -- CLI headless device-code flow: issu
 POST   /auth/device/token                 -- poll for completion; POST because it spends the code and
                                           --   starts a session, which rule 4 forbids a GET from doing,
                                           --   and because a path is logged and this one is a credential
+GET    /device                            -- the verification page (root, HTML): enter the code
+POST   /device                            -- ...look it up, and offer the ways to sign in
+POST   /device/signin                     -- ...the password branch; a provider is a link to /authorize
+POST   /device/approve                    -- ...approve or deny, a separate step on purpose (§14.21)
 POST   /auth/tokens                       -- mint a scoped api_token
 DELETE /auth/tokens/{id}
 
@@ -1678,10 +1682,17 @@ E2E key-boundary violations.
     code turns the whole attack into one click (RFC 8628 §3.3.1, §5.4), and the `?code=` parameter the page
     does accept only prefills a field that still has to be submitted.
 
+    One qualification on "no code-carrying URL", found by review: the page's provider buttons are links
+    carrying a continuation that is not bound to the browser it was issued to, so an attacker holding one
+    can carry a victim past the code-entry step. It does not carry them past the *approval* step, which is
+    where the defense is — so the property that holds is "no link reaches an authorized device without a
+    human decision on a page that names it", not "no link skips a step". Binding that continuation needs a
+    browser session, which this surface does not have until Phase O.
+
     The residual risk belongs to the flow, not to this implementation, and is stated rather than implied:
     somebody who is talked all the way through those screens is signed in to an attacker's device. `Deny`
-    exists so that realizing it a moment later is actionable, and it ends the authorization at once rather
-    than leaving the code live for its remaining minutes.
+    exists so that realizing it a moment later is actionable — it revokes an approval the waiting client
+    has not yet collected, so the sign-in never completes — and it says plainly when it was too late.
 
 ## 15. Performance & Optimization (deep dive)
 
