@@ -243,7 +243,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M7.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
+**Phase A (foundation), through M8.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -283,9 +283,13 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   silently. The repository's first cross-module dependency (`cli` → `daemon`) starts here, because the
   daemon owns what a stored credential is. Rule 19's sanitizer landed here too rather than at M43, since
   this is the first command that prints a name a stranger's instance chose.
-- **M8 — CLI OAuth loopback flow**: in progress. Note it carries a backend half M6 did not build: an
-  optional `client_redirect_uri` at `/authorize`, so the callback can return the exchange code to a
-  listener instead of rendering it (migration `000006`, ADR 0027).
+- **M8 — CLI OAuth loopback flow**: done (tag `m8`). `cli/internal/login`'s loopback listener, browser
+  launcher and flow binding, plus the backend half M6 did not build: an optional `client_redirect_uri` at
+  `/authorize`, so the callback returns the exchange code to a listener instead of rendering it (migration
+  `000006`). Decisions in ADR 0027, which also corrects four documents that described the loopback port as
+  registered *with the provider* — a design requiring the client secret in the CLI binary. What is
+  registered is the instance's own callback, unchanged since M6.
+- **M9 — CLI headless device-code fallback**: in progress.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
