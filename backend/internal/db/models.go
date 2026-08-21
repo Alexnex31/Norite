@@ -41,14 +41,15 @@ type OauthIdentity struct {
 }
 
 type OauthState struct {
-	ID            int64
-	StateHash     []byte
-	Provider      string
-	CodeVerifier  string
-	FlowChallenge []byte
-	CreatedAt     pgtype.Timestamptz
-	ExpiresAt     pgtype.Timestamptz
-	ConsumedAt    pgtype.Timestamptz
+	ID                int64
+	StateHash         []byte
+	Provider          string
+	CodeVerifier      string
+	FlowChallenge     []byte
+	CreatedAt         pgtype.Timestamptz
+	ExpiresAt         pgtype.Timestamptz
+	ConsumedAt        pgtype.Timestamptz
+	ClientRedirectUri string
 }
 
 type PasswordResetToken struct {

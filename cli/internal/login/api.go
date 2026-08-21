@@ -130,6 +130,48 @@ func (c *client) login(ctx context.Context, req loginRequest) (tokenPair, error)
 	return pair, nil
 }
 
+// oauthExchangeRequest redeems a one-time code from the loopback callback.
+type oauthExchangeRequest struct {
+	Code         string `json:"code"`
+	FlowVerifier string `json:"flow_verifier"`
+	DeviceID     string `json:"device_id"`
+	DeviceName   string `json:"device_name,omitempty"`
+}
+
+// ErrOAuthCodeRefused is the instance declining to redeem a code.
+//
+// One message for every reason it can decline — unknown, expired, already spent, or issued to a different
+// client's flow — because the instance itself does not distinguish them, deliberately, and inventing a
+// finer answer here would report a distinction it went to trouble not to make.
+var ErrOAuthCodeRefused = errors.New(
+	"that sign-in could not be completed; run `norite login` again")
+
+// exchangeOAuthCode trades the one-time code for a token pair.
+func (c *client) exchangeOAuthCode(ctx context.Context, req oauthExchangeRequest) (tokenPair, error) {
+	var pair tokenPair
+	err := c.do(ctx, http.MethodPost, "/api/v1/auth/oauth/exchange", "", req, &pair)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.Status {
+			case http.StatusUnauthorized:
+				return tokenPair{}, ErrOAuthCodeRefused
+			case http.StatusTooManyRequests:
+				// Worth its own wording: a loopback sign-in is three requests against a bucket the browser
+				// shares, since both come from this machine's address. "The instance answered 429" tells
+				// somebody nothing they can act on.
+				return tokenPair{}, errors.New(
+					"this instance is rate-limiting sign-ins; wait a minute and try again")
+			}
+		}
+		return tokenPair{}, err
+	}
+	if pair.AccessToken == "" || pair.RefreshToken == "" {
+		return tokenPair{}, errors.New("the instance returned an incomplete token pair")
+	}
+	return pair, nil
+}
+
 // me identifies the account a token belongs to, for display.
 func (c *client) me(ctx context.Context, accessToken string) (account, error) {
 	var out account

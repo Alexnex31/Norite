@@ -4,6 +4,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 
@@ -69,7 +70,13 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// The binding the client keeps: it publishes the hash here and presents the secret at /exchange, so
 	// the code this flow produces is redeemable by this client and by nobody who merely opens the link.
-	url, err := h.svc.StartOAuth(r.Context(), provider, r.URL.Query().Get("flow_challenge"))
+	authURL, err := h.svc.StartOAuth(r.Context(), StartOAuthInput{
+		Provider:      provider,
+		FlowChallenge: r.URL.Query().Get("flow_challenge"),
+		// Where a command-line client asked to be returned to. Absent for a browser, which is the only
+		// caller that has somewhere to render.
+		ClientRedirectURI: r.URL.Query().Get("client_redirect_uri"),
+	})
 	if err != nil {
 		h.writeErr(w, r, err)
 		return
@@ -77,7 +84,7 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// 302 rather than 307: this is a GET with no body to preserve, and 302 is what every provider's
 	// documentation and every browser expects here.
-	http.Redirect(w, r, url, http.StatusFound)
+	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
 // oauthCallback is where the provider sends the user back.
@@ -85,25 +92,33 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	nonce := httpx.NonceFrom(r.Context())
 	provider := chi.URLParam(r, "provider")
 
-	// A provider that reports its own failure — a user who pressed "cancel" most often — sends error
-	// rather than code. Treated as an ordinary abandonment, not a fault.
-	if reason := r.URL.Query().Get("error"); reason != "" {
-		logging.FromContext(r.Context()).Debug().
-			Str("provider", provider).
-			Msg("oauth callback reported an error from the provider")
-		h.renderOAuthError(w, r, nonce,
-			"The sign-in was not completed. You can close this page and try again.")
-		return
-	}
-
-	outcome, err := h.svc.CompleteOAuth(r.Context(), provider,
-		r.URL.Query().Get("state"), r.URL.Query().Get("code"))
+	outcome, err := h.svc.CompleteOAuth(r.Context(), OAuthCallbackInput{
+		Provider: provider,
+		State:    r.URL.Query().Get("state"),
+		Code:     r.URL.Query().Get("code"),
+		// A provider that reports its own failure — someone who pressed "cancel", most often — sends this
+		// instead of a code. The service decides what it means, because only the service has consumed the
+		// state row and therefore knows whether a client is waiting to be told.
+		ProviderError: r.URL.Query().Get("error"),
+	})
 	if err != nil {
 		h.renderOAuthFailure(w, r, nonce, err)
 		return
 	}
 
 	if outcome.SignedIn() {
+		// A client waiting on a loopback listener gets the code delivered rather than displayed. Note what
+		// travels: a single-use code with a two-minute life that is worthless without the flow verifier,
+		// over a hop that never leaves the machine — not the token pair ADR 0024 refused to put in a URL.
+		//
+		// The destination came out of the consumed state row, not out of this request. Nothing here reads
+		// client_redirect_uri from r.URL, and a test asserts that a callback carrying one is ignored.
+		if outcome.ClientRedirectURI != "" {
+			http.Redirect(w, r,
+				oauthReturnURL(outcome.ClientRedirectURI, url.Values{"code": {outcome.ExchangeCode}}),
+				http.StatusFound)
+			return
+		}
 		h.renderPage(w, r, oauthDoneTemplate, http.StatusOK, oauthPageData{
 			Nonce: nonce,
 			Code:  outcome.ExchangeCode,
@@ -133,9 +148,30 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 	token := r.PostFormValue("signup_token")
 	username := r.PostFormValue("username")
 
-	code, err := h.svc.CompleteOAuthSignup(r.Context(), token, username)
+	result, err := h.svc.CompleteOAuthSignup(r.Context(), token, username)
 	if err == nil {
-		h.renderPage(w, r, oauthDoneTemplate, http.StatusOK, oauthPageData{Nonce: nonce, Code: code})
+		// Where the code goes was decided when the flow started and traveled here inside the signed
+		// continuation token, not in this form. That distinction is the point: this request body is
+		// written by whoever is looking at the page, and a hidden redirect field would let them choose
+		// where somebody else's exchange code is delivered.
+		if result.ClientRedirectURI != "" {
+			http.Redirect(w, r,
+				oauthReturnURL(result.ClientRedirectURI, url.Values{"code": {result.ExchangeCode}}),
+				http.StatusFound)
+			return
+		}
+		h.renderPage(w, r, oauthDoneTemplate, http.StatusOK,
+			oauthPageData{Nonce: nonce, Code: result.ExchangeCode})
+		return
+	}
+
+	// A failure that ends the flow, on a sign-up that named a listener, is reported there — otherwise the
+	// browser shows a page and the client waits out its whole timeout for a decision already made. The
+	// username errors below are deliberately not routed here: the form re-renders and the listener is
+	// still waiting for the eventual success.
+	var callback *OAuthCallbackError
+	if errors.As(err, &callback) && callback.ClientRedirectURI != "" {
+		h.reportOAuthFailureToListener(w, r, callback)
 		return
 	}
 
@@ -174,8 +210,8 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 	// with "Creating an account for…" is a phishing surface handed over for free. The token parses here by
 	// construction — the switch above sent every other outcome to an error page.
 	var email string
-	if identity, _, err := h.svc.parseOAuthSignupToken(token); err == nil {
-		email = identity.Email
+	if continuation, err := h.svc.parseOAuthSignupToken(token); err == nil {
+		email = continuation.Identity.Email
 	}
 
 	h.renderPage(w, r, oauthSignupTemplate, http.StatusBadRequest, oauthPageData{
@@ -213,18 +249,33 @@ func (h *Handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code, err := h.svc.CompleteOAuthSignup(r.Context(), req.SignupToken, req.Username)
+	result, err := h.svc.CompleteOAuthSignup(r.Context(), req.SignupToken, req.Username)
 	if err != nil {
 		h.writeErr(w, r, err)
 		return
 	}
 	// An exchange code rather than a token pair, so both completion paths end the same way and a client
 	// has one place to turn a code into a session.
-	httpx.WriteJSON(w, r, http.StatusOK, oauthExchangeCodeResponse{Code: code})
+	//
+	// result.ClientRedirectURI is deliberately ignored. A client driving the flow through this endpoint
+	// rather than the form is already holding the answer in its own process — it has no browser to send
+	// anywhere, and handing it back a URL to visit would be answering a question it did not ask.
+	httpx.WriteJSON(w, r, http.StatusOK, oauthExchangeCodeResponse{Code: result.ExchangeCode})
 }
 
-// renderOAuthFailure maps a service error onto a page.
+// renderOAuthFailure reports a callback failure — to the client's listener when the flow named one, and
+// on a page otherwise.
 func (h *Handler) renderOAuthFailure(w http.ResponseWriter, r *http.Request, nonce string, err error) {
+	// A failure that happened after the state was consumed knows where the client is waiting. Failures
+	// before it — an unknown, expired or replayed state — genuinely do not, and rendering is the right
+	// answer there rather than a gap: the alternative is trusting a destination supplied on the callback's
+	// own URL, which is the one thing this design refuses to do.
+	var callback *OAuthCallbackError
+	if errors.As(err, &callback) && callback.ClientRedirectURI != "" {
+		h.reportOAuthFailureToListener(w, r, callback)
+		return
+	}
+
 	switch {
 	case errors.Is(err, ErrOAuthEmailUnverified):
 		// The one failure worth explaining at length: the person can act on it, and a generic message would
@@ -235,6 +286,9 @@ func (h *Handler) renderOAuthFailure(w http.ResponseWriter, r *http.Request, non
 		h.renderOAuthError(w, r, nonce, err.Error())
 	case errors.Is(err, ErrOAuthRegistrationClosed):
 		h.renderOAuthError(w, r, nonce, "This instance requires an invite code to create an account.")
+	case errors.Is(err, ErrOAuthProviderDeclined):
+		h.renderOAuthError(w, r, nonce,
+			"The sign-in was not completed. You can close this page and try again.")
 	case errors.Is(err, ErrOAuthState):
 		h.renderOAuthError(w, r, nonce, "This sign-in link is no longer valid. Please start again.")
 	case errors.Is(err, ErrUnknownProvider):
@@ -246,6 +300,27 @@ func (h *Handler) renderOAuthFailure(w http.ResponseWriter, r *http.Request, non
 		logging.FromContext(r.Context()).Error().Err(err).Msg("oauth callback failed")
 		h.renderOAuthError(w, r, nonce, "Something went wrong on our end. Please try again.")
 	}
+}
+
+// reportOAuthFailureToListener sends a failure code to the client's loopback listener.
+func (h *Handler) reportOAuthFailureToListener(w http.ResponseWriter, r *http.Request,
+	callback *OAuthCallbackError,
+) {
+	log := logging.FromContext(r.Context())
+	if callback.Code == oauthErrServer {
+		// The one failure the vocabulary cannot describe, so it has to be recorded here. Redirecting skips
+		// renderOAuthFailure's switch, whose default case is otherwise the only place an unclassified
+		// failure is logged at all — a pool exhausted mid-flow, or a failed token exchange, would answer
+		// the client and leave nothing behind at the default level. Once M8 ships this is the common login
+		// path, which is exactly the wrong thing to make unobservable.
+		log.Error().Err(callback.Err).Msg("oauth flow failed; reporting server_error to a listener")
+	} else {
+		log.Debug().Str("oauth_error", callback.Code).
+			Msg("returning an oauth failure to a client's listener")
+	}
+	http.Redirect(w, r,
+		oauthReturnURL(callback.ClientRedirectURI, url.Values{"error": {callback.Code}}),
+		http.StatusFound)
 }
 
 func (h *Handler) renderOAuthError(w http.ResponseWriter, r *http.Request, nonce, message string) {

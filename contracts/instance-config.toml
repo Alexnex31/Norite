@@ -183,8 +183,9 @@ client_secret = "REPLACE-ME-with-the-google-client-secret"
 # Sign in with GitHub. Same rules as [oauth.google] above; the callback registered with GitHub is
 # <public_base_url>/api/v1/auth/oauth/github/callback.
 #
-# GitHub OAuth Apps require an exact pre-registered callback URL, which is why the CLI's loopback flow
-# (Milestone M8) uses a fixed local port rather than an ephemeral one.
+# GitHub OAuth Apps require an exact pre-registered callback URL. That is the URL above and nothing else:
+# the CLI's loopback listener (Milestone M8) is a second hop the provider never sees, so no local port is
+# registered here or anywhere. See docs/adr/0027-loopback-redirect-for-the-oauth-callback.md.
 client_id = "Iv1.0123456789abcdef"
 client_secret = "REPLACE-ME-with-the-github-client-secret"
 

@@ -4,6 +4,8 @@
 Accepted. Built at Milestone M6. Refines [ADR 0011](0011-token-based-client-auth.md), which established
 token-based client auth and named OAuth as a login path but left the linking rule and the signup shape
 open. Uses the `typ`-claim mechanism from [ADR 0022](0022-access-token-signing-and-scope-model.md).
+Extended by [ADR 0027](0027-loopback-redirect-for-the-oauth-callback.md), which gives the callback a second
+exit — a `302` to a listener the client named — without changing what may travel out of it.
 
 ## Context
 "Sign in with Google" has to answer two questions that look like product decisions and are actually
@@ -107,6 +109,10 @@ mandatory.
   on a table an unauthenticated caller writes — is closed by `auth.RunSweeper` rather than accepted.
 - **An invite-only instance refuses new accounts through a provider but still permits linking**, because
   the gate is on account creation, not on providers.
+- **The signup token gained a second claim at M8.** `rdr` carries a client's loopback listener across the
+  username form, beside `flw`, and for the same reason: the form is submitted by whoever is looking at it,
+  so the destination of the resulting exchange code cannot be one of its fields. It is re-validated when
+  the token is parsed, as `flw` already was.
 - **GitHub costs two requests per sign-in.** Unavoidable given where the verification flag lives.
 
 ## Alternatives considered
@@ -126,6 +132,14 @@ mandatory.
   public identifier they never chose.
 - **Returning the token pair from the callback**: rejected. It works, and it puts credentials in a URL, in
   browser history, in the `Referer` header, and in every proxy log along the way.
+
+  Still rejected after [ADR 0027](0027-loopback-redirect-for-the-oauth-callback.md), which does put
+  something in a URL, and the distinction is worth having in writing because the two look alike. What
+  travels there is the exchange code this ADR invented precisely so that a *token pair* would not have to:
+  single-use, two minutes, and worthless to whoever receives it without the flow verifier that never left
+  the client. The hop is to an address on the machine the browser is already running on, so there is no
+  proxy and no network. Every clause of the rejection above remains true of a token pair, and none of it
+  is true of that.
 - **A per-flow cookie set at `/authorize`, instead of a client-held verifier**: the textbook answer for a
   browser-driven flow, and rejected because it protects the wrong leg. It would bind the *browser*, which
   is not who redeems the code — and it would be the first cookie in a codebase that retired them

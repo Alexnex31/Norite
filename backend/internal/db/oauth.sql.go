@@ -39,7 +39,7 @@ const consumeOAuthState = `-- name: ConsumeOAuthState :one
 UPDATE oauth_states
 SET consumed_at = now()
 WHERE state_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri
 `
 
 // Spends a state, with single-use and expiry both in the WHERE clause rather than in Go.
@@ -60,6 +60,7 @@ func (q *Queries) ConsumeOAuthState(ctx context.Context, stateHash []byte) (Oaut
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
+		&i.ClientRedirectUri,
 	)
 	return i, err
 }
@@ -135,24 +136,30 @@ func (q *Queries) CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdenti
 
 const createOAuthState = `-- name: CreateOAuthState :one
 
-INSERT INTO oauth_states (id, state_hash, provider, code_verifier, flow_challenge, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at
+INSERT INTO oauth_states (
+  id, state_hash, provider, code_verifier, flow_challenge, expires_at, client_redirect_uri
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri
 `
 
 type CreateOAuthStateParams struct {
-	ID            int64
-	StateHash     []byte
-	Provider      string
-	CodeVerifier  string
-	FlowChallenge []byte
-	ExpiresAt     pgtype.Timestamptz
+	ID                int64
+	StateHash         []byte
+	Provider          string
+	CodeVerifier      string
+	FlowChallenge     []byte
+	ExpiresAt         pgtype.Timestamptz
+	ClientRedirectUri string
 }
 
 // OAuth sign-in queries.
 //
 // Two tables with very different lifetimes: oauth_identities is a permanent link between an account and a
 // provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
+// client_redirect_uri is ” for a flow with nowhere to return to — a browser, and the device-code path.
+// It is written once here and only ever read back out of the row ConsumeOAuthState spends, which is what
+// keeps the destination a property of the flow rather than of whoever presents the callback.
 func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) (OauthState, error) {
 	row := q.db.QueryRow(ctx, createOAuthState,
 		arg.ID,
@@ -161,6 +168,7 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		arg.CodeVerifier,
 		arg.FlowChallenge,
 		arg.ExpiresAt,
+		arg.ClientRedirectUri,
 	)
 	var i OauthState
 	err := row.Scan(
@@ -172,6 +180,7 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
+		&i.ClientRedirectUri,
 	)
 	return i, err
 }

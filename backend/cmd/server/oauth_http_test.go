@@ -108,8 +108,10 @@ func (a *api) authorizeAndCallbackBound(t *testing.T) (*response, string) {
 		"/api/v1/auth/oauth/google/callback?state="+url.QueryEscape(state)+"&code=stub-code", nil), verifier
 }
 
-// exchangeCodeFromPage pulls the one-time code out of the rendered page, which is the only place it
-// appears — it is deliberately never in a URL.
+// exchangeCodeFromPage pulls the one-time code out of the rendered page.
+//
+// The page is where it appears for a flow that named no loopback listener, which is every flow in this
+// file. A flow that named one gets the code on the redirect instead (oauth_loopback_test.go).
 func exchangeCodeFromPage(t *testing.T, page *response) string {
 	t.Helper()
 	_, after, found := strings.Cut(page.String(), `<code class="code">`)
@@ -133,7 +135,10 @@ func TestOAuthSignInIssuesATokenPair(t *testing.T) {
 	assert.Contains(t, page.String(), "You're signed in")
 
 	code := exchangeCodeFromPage(t, page)
-	assert.NotContains(t, page.Header.Get("Location"), code, "the code must never travel in a URL")
+	// This flow named no listener, so there is no redirect at all — the code is on the page and nowhere
+	// else. A flow that does name one gets it delivered instead; see oauth_loopback_test.go for what may
+	// travel there and why that is not the token-in-a-URL shape ADR 0024 refused.
+	assert.Empty(t, page.Header.Get("Location"), "a flow with no listener must not redirect anywhere")
 
 	exchanged := api.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
 		"code": code, "flow_verifier": verifier, "device_id": "laptop",
@@ -369,15 +374,43 @@ func TestOAuthCallbackStateIsSingleUseThroughTheRouter(t *testing.T) {
 
 // A provider reporting its own failure — most often someone pressing "cancel" — is an abandonment, not a
 // fault, and must not read like a broken instance.
+//
+// Driven through a real flow rather than a made-up state, because that is what a provider actually sends:
+// the state it was given, alongside the error. The state is consumed before the error is considered, which
+// is what lets a waiting client be told (oauth_loopback_test.go); this asserts the page half.
 func TestOAuthCallbackHandlesAProviderError(t *testing.T) {
 	api, _ := newOAuthAPI(t, auth.RegistrationOpen)
 
-	page := api.call(http.MethodGet,
-		"/api/v1/auth/oauth/google/callback?error=access_denied&state=x", nil)
+	_, challenge, err := auth.GenerateOAuthFlowVerifier()
+	require.NoError(t, err)
+	start := api.call(http.MethodGet, "/api/v1/auth/oauth/google/authorize?flow_challenge="+
+		url.QueryEscape(auth.OAuthFlowChallengeFor(challenge)), nil)
+	require.Equal(t, http.StatusFound, start.Code, start)
+	location, err := url.Parse(start.Header.Get("Location"))
+	require.NoError(t, err)
+
+	page := api.call(http.MethodGet, "/api/v1/auth/oauth/google/callback?error=access_denied&state="+
+		url.QueryEscape(location.Query().Get("state")), nil)
 
 	require.Equal(t, http.StatusBadRequest, page.Code)
 	assert.Contains(t, page.String(), "not completed")
 	assert.NotContains(t, page.String(), "wrong on our end", "a declined consent is not a server fault")
+}
+
+// The precedence when both are wrong, stated so it is a decision rather than an accident of ordering.
+//
+// The state is examined first, so a declined consent whose state has expired or been replayed reads as
+// "this link is no longer valid" rather than "you canceled". That is the right way round: the state has
+// to be consumed before anything can be reported to a client's listener at all, and "start again" is true
+// and actionable for someone whose link is fifteen minutes old however they left the provider.
+func TestAnExpiredStateOutranksADeclinedConsent(t *testing.T) {
+	api, _ := newOAuthAPI(t, auth.RegistrationOpen)
+
+	page := api.call(http.MethodGet,
+		"/api/v1/auth/oauth/google/callback?error=access_denied&state=nos_nonsense", nil)
+
+	require.Equal(t, http.StatusBadRequest, page.Code)
+	assert.Contains(t, page.String(), "no longer valid")
 }
 
 // The callback echoes nothing a provider supplied as markup. The provider controls the display name and

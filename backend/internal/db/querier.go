@@ -38,6 +38,9 @@ type Querier interface {
 	//
 	// Two tables with very different lifetimes: oauth_identities is a permanent link between an account and a
 	// provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
+	// client_redirect_uri is '' for a flow with nowhere to return to — a browser, and the device-code path.
+	// It is written once here and only ever read back out of the row ConsumeOAuthState spends, which is what
+	// keeps the destination a property of the flow rather than of whoever presents the callback.
 	CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) (OauthState, error)
 	// An account created by an OAuth sign-in, with no password.
 	//

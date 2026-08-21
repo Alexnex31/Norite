@@ -41,11 +41,18 @@ func signInBound(t *testing.T, svc *Service, stub *stubProvider, provider string
 	verifier, challenge, err := GenerateOAuthFlowVerifier()
 	require.NoError(t, err)
 
-	authURL, err := svc.StartOAuth(t.Context(), provider, OAuthFlowChallengeFor(challenge))
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{
+		Provider:      provider,
+		FlowChallenge: OAuthFlowChallengeFor(challenge),
+	})
 	require.NoError(t, err)
 
 	state := stateFromURL(t, authURL)
-	outcome, err := svc.CompleteOAuth(t.Context(), provider, state, "authorization-code")
+	outcome, err := svc.CompleteOAuth(t.Context(), OAuthCallbackInput{
+		Provider: provider,
+		State:    state,
+		Code:     "authorization-code",
+	})
 	return outcome, verifier, err
 }
 
@@ -261,7 +268,7 @@ func TestAFlowCannotStartWithoutAUsableBinding(t *testing.T) {
 		"wrong length": "c2hvcnQ", // valid base64url, but not 32 bytes
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := svc.StartOAuth(t.Context(), "google", challenge)
+			_, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 			assert.ErrorIs(t, err, ErrOAuthFlowChallenge)
 		})
 	}
@@ -281,7 +288,8 @@ func TestTheBindingSurvivesTheUsernameStep(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, outcome.SignupToken)
 
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	// The binding that came out the far side is the right one and not merely some value: a challenge
@@ -295,7 +303,8 @@ func TestTheBindingSurvivesTheUsernameStep(t *testing.T) {
 	stub.asGoogle("google-100", "another@example.com", true)
 	next, _, err := signInBound(t, svc, stub, "google")
 	require.NoError(t, err)
-	nextCode, err := svc.CompleteOAuthSignup(t.Context(), next.SignupToken, "another")
+	nextCodeResult, err := svc.CompleteOAuthSignup(t.Context(), next.SignupToken, "another")
+	nextCode := nextCodeResult.ExchangeCode
 	require.NoError(t, err)
 
 	wrong, _ := mustFlowChallenge(t)
@@ -404,7 +413,8 @@ func TestSignupCreatesNothingUntilAUsernameIsChosen(t *testing.T) {
 	assert.Zero(t, identities)
 
 	// Completing it creates account and link together.
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "newcomer")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
@@ -445,7 +455,8 @@ func TestSignupAppliesTheUsernameRule(t *testing.T) {
 	}
 
 	// ...and a normalized one is accepted and stored in its normalized form.
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ﬁnn")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ﬁnn")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
@@ -505,14 +516,14 @@ func TestAStateIsSingleUse(t *testing.T) {
 	stub.asGoogle("google-1", "ada@example.com", true)
 
 	_, challenge := mustFlowChallenge(t)
-	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 	require.NoError(t, err)
 	state := stateFromURL(t, authURL)
 
-	_, err = svc.CompleteOAuth(t.Context(), "google", state, "code")
+	_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{Provider: "google", State: state, Code: "code"})
 	require.NoError(t, err)
 
-	_, err = svc.CompleteOAuth(t.Context(), "google", state, "code")
+	_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{Provider: "google", State: state, Code: "code"})
 	assert.ErrorIs(t, err, ErrOAuthState, "a spent state must not start a second exchange")
 }
 
@@ -524,10 +535,14 @@ func TestAStateIsBoundToItsProvider(t *testing.T) {
 	stub.githubEmails = []map[string]any{{"email": "ada@example.com", "primary": true, "verified": true}}
 
 	_, challenge := mustFlowChallenge(t)
-	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 	require.NoError(t, err)
 
-	_, err = svc.CompleteOAuth(t.Context(), "github", stateFromURL(t, authURL), "code")
+	_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{
+		Provider: "github",
+		State:    stateFromURL(t, authURL),
+		Code:     "code",
+	})
 	assert.ErrorIs(t, err, ErrOAuthState)
 }
 
@@ -541,7 +556,7 @@ func TestUnknownStatesAreRefused(t *testing.T) {
 		"never issued": "nos_" + strings.Repeat("A", 43),
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := svc.CompleteOAuth(t.Context(), "google", state, "code")
+			_, err := svc.CompleteOAuth(t.Context(), OAuthCallbackInput{Provider: "google", State: state, Code: "code"})
 			assert.ErrorIs(t, err, ErrOAuthState)
 		})
 	}
@@ -609,7 +624,7 @@ func TestSignupTokensAreRejectedWhenTampered(t *testing.T) {
 	require.NoError(t, err)
 	forged, err := other.issueOAuthSignupToken(OAuthIdentity{
 		Provider: ProviderGoogle, UserID: "google-1", Email: "victim@example.com", EmailVerified: true,
-	}, challenge)
+	}, challenge, "")
 	require.NoError(t, err)
 
 	for name, token := range map[string]string{
@@ -724,7 +739,7 @@ func TestOAuthValuesExpire(t *testing.T) {
 		stub.asGoogle("google-1", "ada@example.com", true)
 
 		_, challenge := mustFlowChallenge(t)
-		authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+		authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 		require.NoError(t, err)
 
 		// Age the row rather than moving a clock: the WHERE clause compares against the database's now(),
@@ -733,7 +748,11 @@ func TestOAuthValuesExpire(t *testing.T) {
 			"UPDATE oauth_states SET expires_at = now() - interval '1 minute'")
 		require.NoError(t, err)
 
-		_, err = svc.CompleteOAuth(t.Context(), "google", stateFromURL(t, authURL), "code")
+		_, err = svc.CompleteOAuth(t.Context(), OAuthCallbackInput{
+			Provider: "google",
+			State:    stateFromURL(t, authURL),
+			Code:     "code",
+		})
 		assert.ErrorIs(t, err, ErrOAuthState)
 	})
 
@@ -767,7 +786,7 @@ func TestOAuthValuesExpire(t *testing.T) {
 		expired, err := svc.issueOAuthSignupToken(OAuthIdentity{
 			Provider: ProviderGoogle, UserID: "google-99",
 			Email: "newcomer@example.com", EmailVerified: true,
-		}, challenge)
+		}, challenge, "")
 		require.NoError(t, err)
 		svc.now = time.Now
 
@@ -787,7 +806,7 @@ func TestConcurrentCallbacksConsumeTheStateOnce(t *testing.T) {
 	stub.asGoogle("google-1", "ada@example.com", true)
 
 	_, challenge := mustFlowChallenge(t)
-	authURL, err := svc.StartOAuth(t.Context(), "google", challenge)
+	authURL, err := svc.StartOAuth(t.Context(), StartOAuthInput{Provider: "google", FlowChallenge: challenge})
 	require.NoError(t, err)
 	state := stateFromURL(t, authURL)
 
@@ -801,7 +820,11 @@ func TestConcurrentCallbacksConsumeTheStateOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, results[i] = svc.CompleteOAuth(context.Background(), "google", state, "code")
+			_, results[i] = svc.CompleteOAuth(context.Background(), OAuthCallbackInput{
+				Provider: "google",
+				State:    state,
+				Code:     "code",
+			})
 		}()
 	}
 	close(start)
@@ -911,7 +934,8 @@ func TestGitHubSignsInThroughTheService(t *testing.T) {
 	assert.Equal(t, "ada@example.com", outcome.Email,
 		"the verified address is what the account is created from, not the unverified primary")
 
-	code, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ada")
+	codeResult, err := svc.CompleteOAuthSignup(t.Context(), outcome.SignupToken, "ada")
+	code := codeResult.ExchangeCode
 	require.NoError(t, err)
 
 	pair, err := svc.ExchangeOAuthCode(t.Context(), code, verifier, LoginInput{DeviceID: "laptop"})
@@ -968,7 +992,10 @@ func TestExpiredRowsAreSweptAndLiveOnesAreNot(t *testing.T) {
 	require.NotEmpty(t, outcome.ExchangeCode)
 
 	_, challenge := mustFlowChallenge(t)
-	_, err = svc.StartOAuth(t.Context(), "google", challenge) // a second, still-live state
+	_, err = svc.StartOAuth(t.Context(), StartOAuthInput{
+		Provider:      "google",
+		FlowChallenge: challenge,
+	}) // a second, still-live state
 	require.NoError(t, err)
 	_, err = svc.pool.Exec(t.Context(),
 		"UPDATE oauth_states SET expires_at = now() - interval '1 hour' WHERE consumed_at IS NOT NULL")

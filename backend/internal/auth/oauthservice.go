@@ -78,6 +78,10 @@ var (
 	// ErrOAuthRegistrationClosed is an invite-only instance refusing to create an account. Linking an
 	// existing account is still allowed — the gate is on new accounts, not on providers.
 	ErrOAuthRegistrationClosed = errors.New("registration on this instance requires an invite code")
+
+	// ErrOAuthProviderDeclined is the provider reporting its own failure on the callback — someone pressing
+	// "cancel" on the consent screen, almost always. An ordinary abandonment rather than a fault.
+	ErrOAuthProviderDeclined = errors.New("the sign-in was not completed at the provider")
 )
 
 // OAuthOutcome is what happened at the callback.
@@ -93,25 +97,53 @@ type OAuthOutcome struct {
 	SuggestedUsername string
 	// Email is shown on the signup page so the person can see which account they are about to create.
 	Email string
+
+	// ClientRedirectURI is the loopback listener this flow was started with, or empty for a flow that
+	// has nowhere to return to and gets a rendered page instead.
+	//
+	// Set on both branches above, not just the signed-in one: the signup branch has to carry it further
+	// still, across the username form, or a client's sign-up would complete in a browser and never reach
+	// the process waiting for it.
+	ClientRedirectURI string
 }
 
 // SignedIn reports whether the flow completed against an existing account.
 func (o OAuthOutcome) SignedIn() bool { return o.ExchangeCode != "" }
+
+// StartOAuthInput is what a client supplies to begin a sign-in.
+//
+// A struct rather than three positional strings, and the reason is that they are all strings: a reordered
+// argument list would still compile and would send the challenge where the redirect belongs. LoginInput
+// beside it is the precedent, and M9 adds a fourth field here.
+type StartOAuthInput struct {
+	Provider      string
+	FlowChallenge string
+	// ClientRedirectURI is a loopback listener to return to instead of rendering the callback's page.
+	// Optional: a browser has nowhere to be sent, and neither will the device-code flow.
+	ClientRedirectURI string
+}
 
 // StartOAuth begins an authorization request and returns the URL to send the user to.
 //
 // The flow challenge is required, not optional. An optional binding is not a binding: the attack it
 // prevents is constructed by whoever starts the flow, so anyone who wanted to skip the check could simply
 // start a flow without one.
-func (s *Service) StartOAuth(ctx context.Context, providerName, rawChallenge string) (string, error) {
-	provider, err := s.oauth.Get(providerName)
+func (s *Service) StartOAuth(ctx context.Context, in StartOAuthInput) (string, error) {
+	provider, err := s.oauth.Get(in.Provider)
 	if err != nil {
 		return "", err
 	}
 
-	challenge, err := ParseOAuthFlowChallenge(rawChallenge)
+	challenge, err := ParseOAuthFlowChallenge(in.FlowChallenge)
 	if err != nil {
 		return "", ErrOAuthFlowChallenge
+	}
+
+	// Validated before a state is minted or a row written. /authorize is unauthenticated, so a malformed
+	// value should cost a parse and nothing else — no crypto/rand draw, no insert, no row for the sweeper.
+	redirect, err := ParseOAuthClientRedirect(in.ClientRedirectURI)
+	if err != nil {
+		return "", err
 	}
 
 	rawState, stateHash, err := GenerateOAuthState()
@@ -132,6 +164,8 @@ func (s *Service) StartOAuth(ctx context.Context, providerName, rawChallenge str
 		CodeVerifier:  verifier,
 		FlowChallenge: challenge,
 		ExpiresAt:     timestamptz(s.now().Add(OAuthStateTTL)),
+		// Canonical form, not what the client sent — see ParseOAuthClientRedirect.
+		ClientRedirectUri: redirect,
 	}); err != nil {
 		return "", fmt.Errorf("recording oauth state: %w", err)
 	}
@@ -139,14 +173,30 @@ func (s *Service) StartOAuth(ctx context.Context, providerName, rawChallenge str
 	return provider.AuthCodeURL(rawState, verifier), nil
 }
 
+// OAuthCallbackInput is what arrives on the provider's redirect back to this instance.
+//
+// A struct for the same reason StartOAuthInput is one: every field is a string, and the state and the
+// authorization code are the two most consequential of them.
+type OAuthCallbackInput struct {
+	Provider string
+	State    string
+	Code     string
+	// ProviderError is the provider's own `error` parameter, if it sent one.
+	//
+	// Handled here rather than in the handler so that the state row is consumed first and the client's
+	// listener is therefore known. A declined consent that only rendered a page would leave a waiting CLI
+	// looking hung until its own timeout, for the most ordinary outcome there is.
+	ProviderError string
+}
+
 // CompleteOAuth handles the provider's callback.
-func (s *Service) CompleteOAuth(ctx context.Context, providerName, rawState, code string) (OAuthOutcome, error) {
-	provider, err := s.oauth.Get(providerName)
+func (s *Service) CompleteOAuth(ctx context.Context, in OAuthCallbackInput) (OAuthOutcome, error) {
+	provider, err := s.oauth.Get(in.Provider)
 	if err != nil {
 		return OAuthOutcome{}, err
 	}
 
-	stateHash, err := ParseOAuthState(rawState)
+	stateHash, err := ParseOAuthState(in.State)
 	if err != nil {
 		return OAuthOutcome{}, ErrOAuthState
 	}
@@ -168,17 +218,41 @@ func (s *Service) CompleteOAuth(ctx context.Context, providerName, rawState, cod
 		return OAuthOutcome{}, ErrOAuthState
 	}
 
-	identity, err := provider.Identity(ctx, code, state.CodeVerifier)
-	if err != nil {
-		return OAuthOutcome{}, err
+	// Everything from here on knows where the client is waiting, so every failure is wrapped and can be
+	// reported to it rather than only to a page nobody is reading.
+	fail := func(err error) (OAuthOutcome, error) {
+		return OAuthOutcome{}, &OAuthCallbackError{
+			Err:               err,
+			Code:              oauthErrorCodeFor(err),
+			ClientRedirectURI: state.ClientRedirectUri,
+		}
 	}
 
-	return s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge)
+	// The provider's own refusal, checked after the state is spent. Spending it is correct rather than
+	// wasteful: the authorization code is gone either way and the person declined, so there is nothing
+	// left to retry with this state.
+	if in.ProviderError != "" {
+		return fail(ErrOAuthProviderDeclined)
+	}
+
+	identity, err := provider.Identity(ctx, in.Code, state.CodeVerifier)
+	if err != nil {
+		return fail(err)
+	}
+
+	// The redirect comes from the row, never from in — the callback's own URL is written by whoever is
+	// presenting it, and this value decides where a credential is delivered. Fixed when the flow started;
+	// see the column's comment in 000006.
+	outcome, err := s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge, state.ClientRedirectUri)
+	if err != nil {
+		return fail(err)
+	}
+	return outcome, nil
 }
 
 // resolveOAuthIdentity decides what an authenticated provider identity means for this instance.
 func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdentity,
-	challenge TokenHash,
+	challenge TokenHash, redirect string,
 ) (OAuthOutcome, error) {
 	log := logging.FromContext(ctx)
 
@@ -192,7 +266,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
-		return OAuthOutcome{ExchangeCode: code}, nil
+		return OAuthOutcome{ExchangeCode: code, ClientRedirectURI: redirect}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return OAuthOutcome{}, fmt.Errorf("looking up oauth identity: %w", err)
@@ -227,7 +301,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
-		return OAuthOutcome{ExchangeCode: code}, nil
+		return OAuthOutcome{ExchangeCode: code, ClientRedirectURI: redirect}, nil
 
 	case errors.Is(err, pgx.ErrNoRows):
 		// Nobody owns the address — which does not mean nobody owns the *mailbox*. Creating an account from
@@ -250,7 +324,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
 		}
-		token, err := s.issueOAuthSignupToken(identity, challenge)
+		token, err := s.issueOAuthSignupToken(identity, challenge, redirect)
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
@@ -258,6 +332,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 			SignupToken:       token,
 			SuggestedUsername: suggestUsername(identity),
 			Email:             email,
+			ClientRedirectURI: redirect,
 		}, nil
 
 	default:
@@ -330,33 +405,57 @@ func (s *Service) classifyLinkConflict(ctx context.Context, userID int64, identi
 	}
 }
 
+// OAuthSignupResult is a completed sign-up: something redeemable, and where to deliver it.
+type OAuthSignupResult struct {
+	ExchangeCode string
+	// ClientRedirectURI is the listener the flow was started with, carried across the form inside the
+	// continuation token. Empty for a flow that named none.
+	ClientRedirectURI string
+}
+
 // CompleteOAuthSignup creates the account a signup token stands for, once a username has been chosen.
-func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsername string) (string, error) {
-	identity, challenge, err := s.parseOAuthSignupToken(signupToken)
+func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsername string,
+) (OAuthSignupResult, error) {
+	continuation, err := s.parseOAuthSignupToken(signupToken)
 	if err != nil {
-		return "", err
+		// Before the token parsed there is no redirect to know, so this one cannot be reported to a
+		// listener — the same boundary CompleteOAuth has around state consumption.
+		return OAuthSignupResult{}, err
+	}
+	identity, challenge := continuation.Identity, continuation.Challenge
+
+	// Failures from here on know where a client is waiting, and the ones that end the flow say so. A
+	// username that can simply be retyped is deliberately *not* wrapped: the form re-renders, the person
+	// fixes it, and the listener is still waiting for the eventual success.
+	fail := func(err error) (OAuthSignupResult, error) {
+		return OAuthSignupResult{}, &OAuthCallbackError{
+			Err:               err,
+			Code:              oauthErrorCodeFor(err),
+			ClientRedirectURI: continuation.ClientRedirectURI,
+		}
 	}
 
 	username := NormalizeUsername(rawUsername)
 	if !ValidUsername(username) {
-		return "", ErrInvalidUsername
+		return OAuthSignupResult{}, ErrInvalidUsername
 	}
 
 	// Re-checked here rather than trusted from the callback: the token is valid for half an hour, and the
-	// instance could have been switched to invite-only in between.
+	// instance could have been switched to invite-only in between. That is exactly the window in which a
+	// waiting client would otherwise sit out its full timeout for a decision already made.
 	if s.registrationMode != RegistrationOpen {
-		return "", ErrOAuthRegistrationClosed
+		return fail(ErrOAuthRegistrationClosed)
 	}
 
 	email := strings.TrimSpace(strings.ToLower(identity.Email))
 
 	userID, err := s.ids.Next()
 	if err != nil {
-		return "", fmt.Errorf("generating user ID: %w", err)
+		return fail(fmt.Errorf("generating user ID: %w", err))
 	}
 	identityID, err := s.ids.Next()
 	if err != nil {
-		return "", fmt.Errorf("generating oauth identity ID: %w", err)
+		return fail(fmt.Errorf("generating oauth identity ID: %w", err))
 	}
 
 	var user db.User
@@ -406,10 +505,24 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		return nil
 	})
 	if err != nil {
-		return "", err
+		// ErrUsernameTaken is the one the form can still recover from, so it stays unwrapped and
+		// re-renders. Everything else here — the address claimed since the callback, a second submission
+		// of the same signup, a database failure — ends the flow in the browser, and a client waiting on a
+		// listener has to be told rather than left to time out.
+		if errors.Is(err, ErrUsernameTaken) {
+			return OAuthSignupResult{}, err
+		}
+		return fail(err)
 	}
 
-	return s.issueOAuthExchangeCode(ctx, user.ID, challenge)
+	code, err := s.issueOAuthExchangeCode(ctx, user.ID, challenge)
+	if err != nil {
+		return fail(err)
+	}
+	return OAuthSignupResult{
+		ExchangeCode:      code,
+		ClientRedirectURI: continuation.ClientRedirectURI,
+	}, nil
 }
 
 // ExchangeOAuthCode trades a one-time code for a token pair.

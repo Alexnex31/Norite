@@ -180,13 +180,38 @@ func TestLoginIsMountedAndSteersAwayFromPasswordFlags(t *testing.T) {
 
 	// ...and there is no such flag to reach for.
 	assert.NotContains(t, out, "--password")
+
+	// The browser path is discoverable from the same help, since it is the one that needs no secret at all.
+	assert.Contains(t, out, "--provider", "the OAuth path must be findable without reading the docs")
+}
+
+// The two sign-in methods are not combined by precedence. Passing flags from both is a mistake worth
+// naming, because silently ignoring one leaves somebody watching a browser window and wondering why the
+// address they gave was not used. Exit 2, the usage code, not 1.
+func TestProviderAndEmailTogetherIsRefused(t *testing.T) {
+	_, errOut, err := runArgs(t, "login", "--provider", "google", "--email", "ada@example.com")
+
+	var exit cli.ExitCoder
+	require.ErrorAs(t, err, &exit)
+	assert.Equal(t, 2, exit.ExitCode())
+	assert.Contains(t, exit.Error()+errOut, "--email")
+}
+
+// And --no-browser without --provider is refused rather than ignored, for the same reason.
+func TestNoBrowserWithoutAProviderIsRefused(t *testing.T) {
+	_, errOut, err := runArgs(t, "login", "--no-browser")
+
+	var exit cli.ExitCoder
+	require.ErrorAs(t, err, &exit)
+	assert.Equal(t, 2, exit.ExitCode())
+	assert.Contains(t, exit.Error()+errOut, "--provider")
 }
 
 // The flags login does offer are the ones it needs, and none of them is a credential.
 func TestLoginFlagsCarryNoCredential(t *testing.T) {
 	out, _, err := runArgs(t, "login", "--help")
 	require.NoError(t, err)
-	for _, flag := range []string{"--instance", "--email", "--device-name"} {
+	for _, flag := range []string{"--instance", "--email", "--device-name", "--provider", "--no-browser"} {
 		assert.Contains(t, out, flag)
 	}
 	for _, forbidden := range []string{"--password", "--secret", "--token"} {

@@ -18,12 +18,20 @@ so rotating one device's daemon never invalidates another device's session/refre
 run daemons on more than one machine). Personal API tokens support scopes (e.g. `messages:send`-only), not
 just one full-access token per user, for bots/automation.
 
-`norite login` supports direct password login and, for OAuth (Google, GitHub), a system-browser-plus-localhost-
-callback loopback flow — a fixed registered local port with a documented fallback-port list, since GitHub
-OAuth Apps require an exact pre-registered callback URL. A headless/SSH context (no local browser, or
-`--no-browser`) falls back to a device-code flow (`gh`/`gcloud`/`aws`-style): a code and URL completed on any
-other device with a browser, backed by a `device_code` table and a minimal server-rendered completion page
-shipped as part of the backend, independent of the web SPA.
+`norite login` supports direct password login and, for OAuth (Google, GitHub), a
+system-browser-plus-loopback-listener flow: the instance's callback returns the one-time exchange code to a
+listener the client bound, which the client then redeems. A headless/SSH context (no local browser) falls
+back to a device-code flow (`gh`/`gcloud`/`aws`-style): a code and URL completed on any other device with a
+browser, backed by a `device_code` table and a minimal server-rendered completion page shipped as part of
+the backend, independent of the web SPA.
+
+*Amended by [ADR 0027](0027-loopback-redirect-for-the-oauth-callback.md).* This paragraph originally read
+"a fixed registered local port with a documented fallback-port list, since GitHub OAuth Apps require an
+exact pre-registered callback URL", which states the causality backwards and describes a flow that cannot
+be built: it implies the loopback URL is what is registered *with the provider*, which would require the
+client secret to live in the CLI. What is registered is the instance's own callback. The fixed port and
+fallback list survive as a client-side convention, and `--no-browser` at M8 prints the URL and keeps
+listening rather than switching to the device code, which is M9's.
 
 Cookie/CSRF/double-submit auth is retired entirely for the CLI/GUI/daemon REST surface — there's no ambient
 browser credential to protect against CSRF for a token-authenticated client. It returns, decided but not yet

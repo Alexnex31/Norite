@@ -4,8 +4,13 @@
 -- provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
 
 -- name: CreateOAuthState :one
-INSERT INTO oauth_states (id, state_hash, provider, code_verifier, flow_challenge, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- client_redirect_uri is '' for a flow with nowhere to return to — a browser, and the device-code path.
+-- It is written once here and only ever read back out of the row ConsumeOAuthState spends, which is what
+-- keeps the destination a property of the flow rather than of whoever presents the callback.
+INSERT INTO oauth_states (
+  id, state_hash, provider, code_verifier, flow_challenge, expires_at, client_redirect_uri
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- name: ConsumeOAuthState :one
