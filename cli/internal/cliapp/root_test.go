@@ -207,11 +207,40 @@ func TestNoBrowserWithoutAProviderIsRefused(t *testing.T) {
 	assert.Contains(t, exit.Error()+errOut, "--provider")
 }
 
+// --device-code describes a browser on another device; --email and --no-browser both describe this one.
+// Refused rather than resolved by precedence, for the reason above: whichever is quietly dropped, somebody
+// waits for something that is never going to happen.
+func TestDeviceCodeWithConflictingFlagsIsRefused(t *testing.T) {
+	for _, args := range [][]string{
+		{"login", "--device-code", "--email", "ada@example.com"},
+		{"login", "--device-code", "--no-browser"},
+	} {
+		_, errOut, err := runArgs(t, args...)
+
+		var exit cli.ExitCoder
+		require.ErrorAs(t, err, &exit, "%v", args)
+		assert.Equal(t, 2, exit.ExitCode(), "%v", args)
+		assert.Contains(t, exit.Error()+errOut, "--device-code", "%v", args)
+	}
+}
+
+// And --device-code with --provider is *not* refused: the automatic fallback produces exactly that
+// combination, and the choice of provider is made in the browser rather than here.
+func TestDeviceCodeWithAProviderIsAllowed(t *testing.T) {
+	out, _, err := runArgs(t, "login", "--help")
+	require.NoError(t, err)
+	assert.Contains(t, out, "--device-code")
+	assert.Contains(t, out, "chosen in the browser",
+		"the help must say where the provider choice happens on that path")
+}
+
 // The flags login does offer are the ones it needs, and none of them is a credential.
 func TestLoginFlagsCarryNoCredential(t *testing.T) {
 	out, _, err := runArgs(t, "login", "--help")
 	require.NoError(t, err)
-	for _, flag := range []string{"--instance", "--email", "--device-name", "--provider", "--no-browser"} {
+	for _, flag := range []string{
+		"--instance", "--email", "--device-name", "--provider", "--no-browser", "--device-code",
+	} {
 		assert.Contains(t, out, flag)
 	}
 	for _, forbidden := range []string{"--password", "--secret", "--token"} {

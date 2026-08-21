@@ -172,6 +172,83 @@ func (c *client) exchangeOAuthCode(ctx context.Context, req oauthExchangeRequest
 	return pair, nil
 }
 
+// deviceCodeRequest starts a device-code sign-in.
+type deviceCodeRequest struct {
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name,omitempty"`
+}
+
+// The poll's four answers, which are the instance's vocabulary from contracts/openapi.yaml and RFC 8628
+// §3.5. Sentinels rather than messages, because the loop branches on two of them and only the last two
+// ever reach a person — the same bargain M8 struck with the loopback listener: the instance sends codes,
+// this client writes the prose.
+var (
+	errDeviceAuthorizationPending = errors.New("waiting for approval")
+	errDeviceSlowDown             = errors.New("polling too fast")
+
+	// ErrDeviceCodeExpired is a code that ran out, was already redeemed, or was never issued here.
+	ErrDeviceCodeExpired = errors.New("that sign-in code has expired; run `norite login` again")
+
+	// ErrDeviceAccessDenied is somebody pressing Deny on the verification page. Distinct from an expiry
+	// because it is the one answer a person acted on deliberately, and telling them it "expired" would be
+	// untrue and would invite them to try again.
+	ErrDeviceAccessDenied = errors.New("that sign-in was denied on the other device")
+)
+
+// startDeviceAuth asks for a pair of codes.
+func (c *client) startDeviceAuth(ctx context.Context, req deviceCodeRequest) (deviceAuth, error) {
+	var out deviceAuth
+	if err := c.do(ctx, http.MethodPost, "/api/v1/auth/device/code", "", req, &out); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Code == "device_flow_unavailable" {
+			// Worth its own wording: this is an operator's configuration problem, and the person running
+			// the command needs to know it is not theirs and what else still works.
+			return deviceAuth{}, errors.New(
+				"this instance is not set up for code sign-in; sign in with a password, or from a " +
+					"machine where a browser can open")
+		}
+		return deviceAuth{}, err
+	}
+	if out.DeviceCode == "" || out.UserCode == "" {
+		return deviceAuth{}, errors.New("the instance returned an incomplete sign-in code")
+	}
+	return out, nil
+}
+
+// pollDeviceAuth asks once whether the authorization has been approved.
+func (c *client) pollDeviceAuth(ctx context.Context, deviceCode string) (tokenPair, error) {
+	var pair tokenPair
+	err := c.do(ctx, http.MethodPost, "/api/v1/auth/device/token", "",
+		map[string]string{"device_code": deviceCode}, &pair)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			// Branching on the code and never on the message. The code is a fixed vocabulary both sides
+			// publish; the message is prose that may be reworded at any time, and on an instance somebody
+			// else runs.
+			switch apiErr.Code {
+			case "authorization_pending":
+				return tokenPair{}, errDeviceAuthorizationPending
+			case "slow_down":
+				return tokenPair{}, errDeviceSlowDown
+			case "access_denied":
+				return tokenPair{}, ErrDeviceAccessDenied
+			case "expired_token":
+				return tokenPair{}, ErrDeviceCodeExpired
+			}
+			if apiErr.Status == http.StatusTooManyRequests {
+				return tokenPair{}, errors.New(
+					"this instance is rate-limiting sign-ins; wait a minute and try again")
+			}
+		}
+		return tokenPair{}, err
+	}
+	if pair.AccessToken == "" || pair.RefreshToken == "" {
+		return tokenPair{}, errors.New("the instance returned an incomplete token pair")
+	}
+	return pair, nil
+}
+
 // me identifies the account a token belongs to, for display.
 func (c *client) me(ctx context.Context, accessToken string) (account, error) {
 	var out account
