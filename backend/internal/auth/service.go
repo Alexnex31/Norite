@@ -250,7 +250,22 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 	if err != nil {
 		return TokenPair{}, err
 	}
-	email := strings.TrimSpace(strings.ToLower(in.Email))
+	user, err := s.verifyCredentials(ctx, in.Email, in.Password)
+	if err != nil {
+		return TokenPair{}, err
+	}
+
+	return s.startSession(ctx, snowflake.ID(user.ID), deviceID, in.DeviceName, in.IP)
+}
+
+// verifyCredentials resolves an email address and password to an account, or refuses.
+//
+// Split out of Login because the device-flow verification page has to do the same thing and must not do it
+// slightly differently (M9). Everything below is a property that survives only if there is one
+// implementation of it: the dummy hash on a missing account, the single error for wrong-password and
+// no-password-at-all, and the absence of any early return between them.
+func (s *Service) verifyCredentials(ctx context.Context, rawEmail, password string) (db.User, error) {
+	email := strings.TrimSpace(strings.ToLower(rawEmail))
 
 	user, err := s.queries.GetUserByEmail(ctx, email)
 	if err != nil {
@@ -258,25 +273,24 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 			// Burn the same argon2id work a real verification costs, so response time does not reveal
 			// whether the address is registered. Returning early here is exactly the timing oracle that
 			// lets an attacker enumerate an entire user base without guessing a single password.
-			return TokenPair{}, VerifyPasswordForMissingUser(ctx, in.Password)
+			return db.User{}, VerifyPasswordForMissingUser(ctx, password)
 		}
-		return TokenPair{}, fmt.Errorf("looking up account: %w", err)
+		return db.User{}, fmt.Errorf("looking up account: %w", err)
 	}
 
 	stored := ""
 	if user.PasswordHash != nil {
 		stored = *user.PasswordHash
 	}
-	if err := VerifyPassword(ctx, stored, in.Password); err != nil {
+	if err := VerifyPassword(ctx, stored, password); err != nil {
 		if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrPasswordNotSet) {
 			// Both are reported to the client identically. "This account exists but signs in with Google"
 			// is precisely the kind of detail that turns a login form into an account-discovery tool.
-			return TokenPair{}, ErrInvalidCredentials
+			return db.User{}, ErrInvalidCredentials
 		}
-		return TokenPair{}, err
+		return db.User{}, err
 	}
-
-	return s.startSession(ctx, snowflake.ID(user.ID), deviceID, in.DeviceName, in.IP)
+	return user, nil
 }
 
 // startSession revokes the device's previous family and issues a fresh pair.
