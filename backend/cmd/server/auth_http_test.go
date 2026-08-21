@@ -118,6 +118,20 @@ func newAPIWith(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer,
 	providers auth.OAuthProviders,
 ) *api {
 	t.Helper()
+	return newAPIWithBaseURL(t, mode, mailer, providers, "https://chat.example.com")
+}
+
+// newAPIWithoutPublicBaseURL models an instance that has not been told its own address, which is a
+// supported configuration until something needs to build a link (M9's device flow, M5's reset mail).
+func newAPIWithoutPublicBaseURL(t *testing.T) *api {
+	t.Helper()
+	return newAPIWithBaseURL(t, auth.RegistrationOpen, &captureMailer{disabled: true}, nil, "")
+}
+
+func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer,
+	providers auth.OAuthProviders, publicBaseURL string,
+) *api {
+	t.Helper()
 	dbtest.RequireContainer(t)
 
 	ctx := t.Context()
@@ -151,7 +165,7 @@ func newAPIWith(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer,
 		Issuer:           issuer,
 		RegistrationMode: mode,
 		Mailer:           mailer,
-		PublicBaseURL:    "https://chat.example.com",
+		PublicBaseURL:    publicBaseURL,
 		OAuth:            providers,
 	})
 	require.NoError(t, err)

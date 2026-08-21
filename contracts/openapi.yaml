@@ -839,6 +839,116 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /auth/device/code:
+    post:
+      summary: Start a device-code sign-in
+      description: >
+        For a client on a machine with no browser it can reach — a server over SSH, a container, anything
+        headless. The loopback flow (`client_redirect_uri`) cannot help there: it binds a listener on
+        127.0.0.1, so the browser that finishes the sign-in has to be on the same machine. This flow moves
+        the browser half to a different device entirely.
+
+
+        Two codes come back. `device_code` is a credential: keep it, poll `/auth/device/token` with it, and
+        never display or log it. `user_code` is the short one to show a person, who opens `verification_uri`
+        on their phone or laptop and types it in.
+
+
+        The provider account they sign in with there is theirs to choose — this endpoint takes no provider,
+        because the choice is made on the verification page, which offers a password as well as Google and
+        GitHub.
+
+
+        `expires_in` and `interval` are seconds and are the source of truth for a client's own loop. Do not
+        hardcode either: an instance is free to tune them, and a client that assumed would poll a dead code
+        or be told to slow down forever. On this instance today they are 1200 and 5.
+
+
+        There is deliberately no `verification_uri_complete`. A URL that carries the user code inside it
+        turns this flow's one real attack — sending somebody a code and having them approve a stranger's
+        machine — into a single click, so the code is only ever typed (RFC 8628 §3.3.1, §5.4).
+      operationId: startDeviceAuthorization
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceCodeRequest"
+      responses:
+        "200":
+          description: An issued authorization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceCodeResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: >
+            This instance has no `public_base_url` configured, so it cannot say where to send anybody
+            (`device_flow_unavailable`). Sign in with a password, or with the loopback flow where a browser
+            is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/device/token:
+    post:
+      summary: Poll a device-code sign-in
+      description: >
+        Ask whether the authorization has been approved yet. Poll no faster than the `interval` that came
+        back from `/auth/device/code`.
+
+
+        A POST with the code in the body, not a GET with it in the path. Two reasons, both structural: the
+        successful call spends the code and starts a session, which a GET must never do — a prefetch, a
+        link checker or a retry would fire it on somebody's behalf — and request paths are logged, which is
+        no place for a credential.
+
+
+        Every unsuccessful answer is `400` carrying one of four codes, which are RFC 8628 §3.5's and mean
+        what they do there:
+
+
+        * `authorization_pending` — nobody has approved it yet. Keep polling. The ordinary answer.
+
+        * `slow_down` — you polled inside the interval. Wait longer and try again. Returned even once the
+        authorization has landed, so ignoring the interval delays the sign-in rather than winning it; the
+        code is not spent.
+
+        * `access_denied` — somebody pressed Deny on the verification page. Stop; nothing will change.
+
+        * `expired_token` — unknown, expired, or already redeemed. One answer for all three, as everywhere
+        else here. Start again.
+      operationId: pollDeviceAuthorization
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceTokenRequest"
+      responses:
+        "200":
+          description: Approved. A token pair, identical to what a password login returns.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          description: >
+            One of `authorization_pending`, `slow_down`, `access_denied`, `expired_token` — or an ordinary
+            malformed request. Branch on `error.code`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /auth/tokens:
     post:
       summary: Mint a scoped API token
@@ -1227,6 +1337,74 @@ components:
         code:
           type: string
           description: Trade at `/auth/oauth/exchange` for a token pair.
+
+    DeviceCodeRequest:
+      type: object
+      required: [device_id]
+      additionalProperties: false
+      properties:
+        device_id:
+          type: string
+          maxLength: 128
+          description: >
+            Stable per client install, and supplied here rather than at poll time because it is what the
+            resulting session is scoped to — the browser that approves has no idea what it is. Rotation and
+            reuse detection act within one device_id and never across them.
+        device_name:
+          type: string
+          maxLength: 64
+          description: >
+            What this machine is called in the account's session list. Also shown on the verification page,
+            so a person can see which device they are about to authorize. Bounded and escaped there; it is
+            the client's own string, so a page presents it as one.
+
+    DeviceCodeResponse:
+      type: object
+      required: [device_code, user_code, verification_uri, expires_in, interval]
+      additionalProperties: false
+      properties:
+        device_code:
+          type: string
+          pattern: "^nod_[A-Za-z0-9_-]{43}$"
+          description: >
+            The credential half. Trades for a token pair at `/auth/device/token` and must never be
+            displayed, logged, or written anywhere a person could read it back.
+        user_code:
+          type: string
+          pattern: "^[BCDFGHJKMNPQRSTVWXYZ]{4}-[BCDFGHJKMNPQRSTVWXYZ]{4}$"
+          description: >
+            The half to show. Eight characters from a twenty-character alphabet — A-Z minus the vowels, so
+            a draw does not spell anything, and minus `L`, which is misread as `1` or `I`; there are no
+            digits at all, so `0` and `O` never meet. The dash is presentation only and the instance
+            accepts the code with or without it, in any case.
+
+
+            Display it verbatim. A client that re-cases or re-groups it is showing something other than
+            what the instance issued.
+        verification_uri:
+          type: string
+          format: uri
+          description: >
+            Where to send the person. Absolute, and always on this instance's own origin — a client should
+            check that before printing it, since it is a URL somebody is about to visit and type
+            credentials into.
+        expires_in:
+          type: integer
+          description: Seconds until both codes stop working. 1200 on this instance.
+        interval:
+          type: integer
+          description: >
+            Minimum seconds between polls. 5 on this instance. Read it rather than assuming it — see the
+            endpoint description.
+
+    DeviceTokenRequest:
+      type: object
+      required: [device_code]
+      additionalProperties: false
+      properties:
+        device_code:
+          type: string
+          description: The `device_code` from `/auth/device/code`, verbatim.
 
     PasswordResetRequest:
       type: object

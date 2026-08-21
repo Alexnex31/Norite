@@ -38,6 +38,19 @@ type routerOptions struct {
 // requests — the two are counted independently (see internal/platform/ratelimit).
 const authRateLimit = "20-M"
 
+// devicePollRateLimit is the bucket the device-code endpoints sit in.
+//
+// The auth bucket is the wrong shape here in a way that would break the flow rather than protect it: a
+// client polling at the documented five-second interval spends twelve requests a minute, which on its own
+// is most of that bucket, and two people signing in from behind one NAT would throttle each other off the
+// instance. So it counts separately and is sized for what a well-behaved client actually does, with room
+// for a handful of them at once.
+//
+// Still a ceiling rather than an exemption. A poll is one indexed lookup and, at most once, a session
+// insert — cheap, but the endpoint is unauthenticated and takes a credential, so it gets a limit like
+// everything else that does.
+const devicePollRateLimit = "120-M"
+
 // newRouter assembles the HTTP router and its middleware chain.
 //
 // The chain order is fixed by docs/architecture.md §2 and is load-bearing rather than stylistic:
@@ -65,6 +78,14 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 	authLimiter, err := ratelimit.Middleware(ratelimit.Options{
 		Rate:   authRateLimit,
 		Bucket: "auth",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	devicePollLimiter, err := ratelimit.Middleware(ratelimit.Options{
+		Rate:   devicePollRateLimit,
+		Bucket: "device-poll",
 	})
 	if err != nil {
 		return nil, err
@@ -157,6 +178,14 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 				// /exchange spends a credential, so both are worth counting separately from ordinary API
 				// traffic.
 				opts.Auth.OAuthRoutes(r)
+			})
+			// The device-code endpoints sit beside /auth but in their own bucket, because polling is
+			// supposed to be repetitive and the auth bucket exists to stop repetition. Issuing a code
+			// carries the same limiter as the poll: it is the cheaper of the two and the one a flood would
+			// use to fill the table, so counting them together bounds both.
+			r.Route("/auth/device", func(r chi.Router) {
+				r.Use(devicePollLimiter)
+				opts.Auth.DeviceRoutes(r)
 			})
 			r.Route("/users", opts.Auth.UserRoutes)
 		}

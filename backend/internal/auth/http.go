@@ -493,6 +493,14 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		// them tells whoever holds a stolen link which of those it is.
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid or expired password reset token"))
 
+	case errors.Is(err, ErrDeviceFlowUnavailable):
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusServiceUnavailable,
+			Code:    "device_flow_unavailable",
+			Message: "the device sign-in flow is unavailable: this instance has no public base URL configured",
+			Err:     err,
+		})
+
 	case errors.Is(err, ErrResetUnavailable):
 		httpx.WriteError(w, r, &httpx.StatusError{
 			Status:  http.StatusServiceUnavailable,
