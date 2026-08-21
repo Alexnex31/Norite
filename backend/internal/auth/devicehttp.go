@@ -56,10 +56,19 @@ type deviceTokenRequest struct {
 	DeviceCode string `json:"device_code" validate:"required"`
 }
 
-// DeviceRoutes mounts the device-code endpoints. The caller supplies the /auth/device prefix, along with
-// the rate-limit bucket these two share and the rest of /auth does not.
-func (h *Handler) DeviceRoutes(r chi.Router) {
+// DeviceIssueRoutes mounts the half that mints a row. The caller supplies the /auth/device prefix and the
+// same stricter bucket every other row-minting unauthenticated endpoint carries.
+func (h *Handler) DeviceIssueRoutes(r chi.Router) {
 	r.Post("/code", h.deviceCode)
+}
+
+// DevicePollRoutes mounts the half that is meant to repeat, which needs a bucket sized for repetition.
+//
+// Split from the above rather than sharing one, because the two have opposite shapes: issuing happens once
+// per sign-in and writes a row, polling happens twelve times a minute and writes almost nothing. A single
+// bucket has to be permissive enough for the second, which makes it six times looser than /authorize for
+// the first — and /authorize's own comment says why that matters.
+func (h *Handler) DevicePollRoutes(r chi.Router) {
 	r.Post("/token", h.deviceToken)
 }
 

@@ -183,13 +183,20 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 				// traffic.
 				opts.Auth.OAuthRoutes(r)
 			})
-			// The device-code endpoints sit beside /auth but in their own bucket, because polling is
-			// supposed to be repetitive and the auth bucket exists to stop repetition. Issuing a code
-			// carries the same limiter as the poll: it is the cheaper of the two and the one a flood would
-			// use to fill the table, so counting them together bounds both.
+			// The device-code endpoints, in two buckets rather than one, because the two halves have
+			// opposite shapes. Issuing mints a database row per call and happens once per sign-in, so it
+			// carries the stricter bucket for exactly the reason /authorize does. Polling is repetitive by
+			// design — twelve requests a minute at the documented interval — and the bucket that stops
+			// repetition would throttle a well-behaved client off the instance, so it counts separately.
 			r.Route("/auth/device", func(r chi.Router) {
-				r.Use(devicePollLimiter)
-				opts.Auth.DeviceRoutes(r)
+				r.Group(func(r chi.Router) {
+					r.Use(authLimiter)
+					opts.Auth.DeviceIssueRoutes(r)
+				})
+				r.Group(func(r chi.Router) {
+					r.Use(devicePollLimiter)
+					opts.Auth.DevicePollRoutes(r)
+				})
 			})
 			r.Route("/users", opts.Auth.UserRoutes)
 		}

@@ -251,6 +251,31 @@ func uniqueSorted(in []string) []string {
 	return out
 }
 
+// Issuing a code mints a database row from an unauthenticated request, which is exactly the shape the
+// stricter bucket exists for — /authorize's own comment says so. It shares the /auth/device prefix with the
+// poll and deliberately not the poll's bucket, because a bucket permissive enough for twelve requests a
+// minute is six times looser than this half should be.
+func TestIssuingACodeCarriesTheStricterBucket(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+
+	throttled := false
+	for range 30 {
+		resp := api.call(http.MethodPost, "/api/v1/auth/device/code",
+			map[string]string{"device_id": "waiting-device"}, fromIP("198.51.100.9"))
+		if resp.Code == http.StatusTooManyRequests {
+			throttled = true
+			break
+		}
+	}
+	assert.True(t, throttled, "issuing must be bounded by the same limit as every other row-minting route")
+
+	// And the poll is not, from the same address: the two are counted apart, which is the point of the
+	// split. This is what stops a throttled flood of issuance also killing a sign-in already in flight.
+	resp := api.call(http.MethodPost, "/api/v1/auth/device/token",
+		map[string]string{"device_code": "nod_" + strings.Repeat("A", 43)}, fromIP("198.51.100.9"))
+	assert.NotEqual(t, http.StatusTooManyRequests, resp.Code, resp)
+}
+
 // issuedCode is what a client gets back from /auth/device/code.
 type issuedCode struct {
 	DeviceCode      string `json:"device_code"`
