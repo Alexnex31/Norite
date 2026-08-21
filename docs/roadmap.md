@@ -95,9 +95,9 @@ of this section.
   any other client must (M6, ADR 0024) — that binding is what stops a crafted callback URL delivering
   somebody else's exchange code into a listener that would otherwise redeem it without the user doing
   anything at all, and it is also what makes validating the return URI by host alone sufficient.
-- **M9 — CLI headless device-code fallback**: the `device_code` table, the minimal unstyled server-rendered
-  auth-completion page, and CLI headless-context detection plus polling logic. Depends on M6 (OAuth) and M8
-  (loopback, to detect when to fall back from it).
+- **M9 — CLI headless device-code fallback**: done (tag `m9`). The `device_codes` table, the
+  server-rendered verification page at `/device`, and CLI headless-context detection plus polling logic.
+  Depends on M6 (OAuth) and M8 (loopback, to detect when to fall back from it).
 
   **`--no-browser` is not the trigger, and this is the correction M8 forces.** That flag means "do not
   launch anything, print the URL, keep listening", which is a working flow for SSH with a forwarded port
@@ -105,9 +105,16 @@ of this section.
   incompatible behaviours. The device code is what a machine with **no browser reachable at all** falls
   back to — detected, not asked for — which is the case M8 currently fails fast on. This refines ADR 0011,
   which named `--no-browser` as the trigger before either flow existed. Give the deliberate choice its own
-  flag if one is wanted. Done when: a login on a host with no browser displays a code instead of binding a
-  listener, and completing it on a separate device with a browser finishes the login on the original CLI
-  session.
+  flag if one is wanted — it is `--device-code`. Done when: a login on a host with no browser displays a
+  code instead of binding a listener, and completing it on a separate device with a browser finishes the
+  login on the original CLI session.
+
+  **The verification page offers providers, not only a password**, and that is the scope call worth
+  recording. `norite login` already does headless password sign-in, so a password-only page would add
+  almost nothing — while an account that signs in only with Google or GitHub had no way onto a server at
+  all, since M8's listener binds `127.0.0.1` and the phone completing the flow cannot reach it. Decisions
+  in ADR 0028, including why approval is a separate explicit step, why the user code is the one
+  credential-shaped value stored in plaintext, and why the poll is a POST where §2 sketched a GET.
 - **M10 — `norite instance init` finish, and registration hardening**: adds the first-admin-account-creation
   step (now that M4 exists) and wires up instance-level registration gating (the `instance_invites` table
   plus enforcement at registration). Depends on M2 and M4.

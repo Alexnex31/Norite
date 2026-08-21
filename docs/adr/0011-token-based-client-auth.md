@@ -25,6 +25,14 @@ back to a device-code flow (`gh`/`gcloud`/`aws`-style): a code and URL completed
 browser, backed by a `device_code` table and a minimal server-rendered completion page shipped as part of
 the backend, independent of the web SPA.
 
+*Amended by [ADR 0028](0028-device-code-flow-for-headless-clients.md).* The device-code sentence above is
+right in substance and wrong in one detail it could not have known: it names no trigger, and the obvious
+reading — the one M8 half-corrected — was that `--no-browser` selects it. That flag means "print the URL
+and keep listening", which is a working flow with a forwarded port. The device code is what a machine with
+**no reachable browser at all** falls back to, detected rather than asked for, with `--device-code` for
+anyone who wants to choose deliberately. ADR 0028 also records what actually protects that flow, which is
+an explicit approval step rather than anything in the protocol.
+
 *Amended by [ADR 0027](0027-loopback-redirect-for-the-oauth-callback.md).* This paragraph originally read
 "a fixed registered local port with a documented fallback-port list, since GitHub OAuth Apps require an
 exact pre-registered callback URL", which states the causality backwards and describes a flow that cannot

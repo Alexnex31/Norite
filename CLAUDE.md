@@ -243,7 +243,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M8.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
+**Phase A (foundation), through M9.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -289,7 +289,12 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   `000006`). Decisions in ADR 0027, which also corrects four documents that described the loopback port as
   registered *with the provider* — a design requiring the client secret in the CLI binary. What is
   registered is the instance's own callback, unchanged since M6.
-- **M9 — CLI headless device-code fallback**: in progress.
+- **M9 — CLI headless device-code fallback**: done (tag `m9`). Migration `000007`, `internal/auth`'s
+  `device.go`/`devicetoken.go`/`devicepage.go`/`devicehttp.go`, the verification page at `/device`, and
+  `cli/internal/login`'s `headless.go` and `devicecode.go`. Decisions in ADR 0028: the completion page
+  offers providers and not only a password (which is what makes the milestone worth its size), approval is
+  a separate explicit step, and the user code is the one credential-shaped value stored in plaintext.
+- **M10 — `norite instance init` finish, and registration hardening**: next.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -554,6 +559,53 @@ Three things this milestone deliberately leaves for the milestone that can do th
 - **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
   logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
   function has to move somewhere both modules reach — not be copied.
+
+And on the device-code side, from M9 (decisions in ADR 0028):
+
+- **The verification page offers providers, not only a password**, and that is the milestone. `norite login`
+  has done headless password sign-in since M7, so a password-only page would add almost nothing — while an
+  account that signs in only with Google or GitHub had no way onto a server at all, because M8's listener
+  binds `127.0.0.1` and the phone completing the flow cannot reach it.
+- **What protects this flow is a page, not a protocol.** The device-code grant's live risk is somebody
+  being *sent* a code and authorizing a stranger's machine, and nothing cryptographic prevents it (§14.21).
+  So approval is a separate explicit step that a successful sign-in never implies; the page names the device
+  and shows the code back for comparison; a decision that is neither approve nor deny denies; and there is
+  no `verification_uri_complete`, because a URL carrying the code makes the whole attack one click. Anything
+  that would shorten those screens is reopening that decision.
+- **The user code is stored in plaintext and the device code is hashed.** The exception is deliberate and
+  has two halves, both needed: a user code is not a bearer credential — whoever holds it must still
+  authenticate and approve, and what that authorizes is somebody else's machine acting as *their* account —
+  and it has to be readable back, because the approval page shows it and the OAuth callback reaching that
+  page never saw what anybody typed.
+- **The poll is `POST /auth/device/token`.** `architecture.md` sketched `GET /auth/device/code/{code}` and
+  both halves are wrong here: the call spends the code and starts a session, which rule 4 forbids a GET
+  from doing, and a path is logged where a body is not (rule 8). The document is corrected, not the code
+  bent to it.
+- **A device flow carries no flow challenge, and that is not the binding going optional.** `/authorize`
+  requires exactly one of `flow_challenge` and `device_token`. A challenge makes a *code* redeemable only by
+  the client that began the flow; a device flow mints no code, because the waiting client has held its
+  credential since before a browser was involved.
+- **Which device is being authorized travels inside a signature or inside a consumed row**, never in a form
+  body or a callback URL — `oauth_states.device_code_id` across the provider round trip, the `dvc` claim
+  across the username form. The same discipline and the same tests M8 built for `client_redirect_uri`.
+- **Two continuations on the page, not one.** An entry token says a browser has entered a live code; an
+  approval token says it has also proved whose account this is. `parseDeviceToken` takes the type it wants
+  rather than reporting the type it found, because a single token with an optional user field would
+  authorize before authentication happened.
+- **The fallback is detected and never silent.** `SSH_CONNECTION` is checked before anything platform-
+  specific, since a desktop administered over SSH looks local in every other way and macOS would open Safari
+  on a screen nobody is at. Detection only ever redirects a sign-in that *already* needed a browser, so a
+  password login over SSH is untouched. `--no-browser` keeps M8's meaning; `--device-code` asks deliberately.
+- **Values from the instance that direct an action are checked, not sanitized.** The user code is printed as
+  an instruction, so a cleaned-up version is worse than none; the verification URI is about to be opened and
+  typed into, so it must be the instance that was asked for, scheme and host and port. Rule 8 covers the
+  third: the device code never reaches the terminal.
+- **`OAuthOutcome.SignedIn()` means "resolved to an account"**, not "has an exchange code". Those stopped
+  being the same thing here.
+
+One thing this milestone deliberately leaves: **screen `5a` in `docs/design/tui/` is normative and
+specifies a code box with a countdown and a progress bar.** The CLI prints the plain-text equivalent
+because it is not the TUI; M55 draws the box. The two are not in disagreement.
 
 And on the CLI OAuth side, from M8 (decisions in ADR 0027):
 
