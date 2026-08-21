@@ -156,6 +156,10 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			r.Use(authLimiter)
 			r.Use(httpx.HTMLPage)
 			opts.Auth.PageRoutes(r)
+			// The device-code verification pages, in the same bucket for the same reason: /device is
+			// where a user code is guessed at, and /device/signin takes a password. Both are exactly the
+			// kind of endpoint that bucket exists for.
+			opts.Auth.DevicePageRoutes(r)
 		})
 	}
 

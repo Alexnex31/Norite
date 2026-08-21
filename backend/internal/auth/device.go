@@ -108,6 +108,12 @@ var (
 	// expired, already approved, already denied, already spent. One answer for all of them.
 	ErrDeviceUserCode = errors.New("that code is not valid. Check it and try again, or start again on your device")
 
+	// ErrDeviceContinuation is a verification-page continuation that is missing, expired, tampered with,
+	// or of the wrong kind. One answer for all of them, and the wrong-kind case is the one that matters:
+	// an entry token presented where an approval token belongs is a browser that knows a code trying to
+	// authorize an account it has proved nothing about.
+	ErrDeviceContinuation = errors.New("that sign-in step has expired; start again")
+
 	// ErrDeviceFlowUnavailable is an instance with no public_base_url, which cannot tell a client where to
 	// send a person. The same shape as ErrPasswordResetUnavailable: a feature that needs configuration
 	// says so rather than half-working.
@@ -243,6 +249,82 @@ func (s *Service) RedeemDeviceCode(ctx context.Context, rawCode string, ip netip
 	// The same session machinery a password login and an OAuth exchange use, scoped to the device identity
 	// captured when the code was issued — never to anything the approving browser said.
 	return s.startSession(ctx, snowflake.ID(*row.UserID), row.DeviceID, row.DeviceName, ip)
+}
+
+// LookUpDeviceCode finds a live authorization by the code somebody typed.
+//
+// Every reason a code cannot be acted on — never issued, expired, already approved, denied, spent — is one
+// answer, for the reason every other credential lookup in this package gives. A person who mistyped theirs
+// is told the same actionable thing either way.
+// Returns the normalized code alongside the row, because every later step carries it — the page shows it
+// back for comparison against the terminal, and the row holds only its hash.
+func (s *Service) LookUpDeviceCode(ctx context.Context, rawUserCode string) (string, db.DeviceCode, error) {
+	code, err := ParseUserCode(rawUserCode)
+	if err != nil {
+		// Shape-checked before the database is touched, so a run of guesses at the verification page costs
+		// a string scan each rather than an indexed lookup.
+		return "", db.DeviceCode{}, ErrDeviceUserCode
+	}
+
+	row, err := s.queries.GetDeviceCodeByUserCodeHash(ctx, HashToken(code))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", db.DeviceCode{}, ErrDeviceUserCode
+		}
+		return "", db.DeviceCode{}, fmt.Errorf("looking up device authorization: %w", err)
+	}
+	return code, row, nil
+}
+
+// deviceCodeByID re-reads a live authorization between the verification page's steps.
+func (s *Service) deviceCodeByID(ctx context.Context, id int64) (db.DeviceCode, error) {
+	row, err := s.queries.GetDeviceCodeByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.DeviceCode{}, ErrDeviceUserCode
+		}
+		return db.DeviceCode{}, fmt.Errorf("looking up device authorization: %w", err)
+	}
+	return row, nil
+}
+
+// ApproveDeviceAuthorization records that somebody authorized this device, which is the moment a waiting
+// client's next poll starts returning a token pair.
+//
+// Single-use lives in the query's WHERE clause, so a replayed approval — a reloaded page, a stale tab,
+// somebody pressing the button twice — matches nothing rather than re-pointing an authorization at another
+// account. That is what makes the approval token safe to be an ordinary signed value with no store of its
+// own.
+func (s *Service) ApproveDeviceAuthorization(ctx context.Context, deviceCodeID, userID int64) error {
+	_, err := s.queries.ApproveDeviceCode(ctx, db.ApproveDeviceCodeParams{
+		ID:     deviceCodeID,
+		UserID: &userID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrDeviceUserCode
+		}
+		return fmt.Errorf("approving device authorization: %w", err)
+	}
+	return nil
+}
+
+// DenyDeviceAuthorization ends an authorization now.
+//
+// Worth having rather than letting the code expire: a person who realizes they were sent a code by
+// somebody else can stop it at once, and the waiting client is told to give up on its next poll instead of
+// sitting there for the rest of the twenty minutes.
+func (s *Service) DenyDeviceAuthorization(ctx context.Context, deviceCodeID int64) error {
+	_, err := s.queries.DenyDeviceCode(ctx, deviceCodeID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Already decided or already gone. Nothing left to deny and nothing to report: the outcome the
+			// caller wanted — that this authorization cannot be used — already holds.
+			return nil
+		}
+		return fmt.Errorf("denying device authorization: %w", err)
+	}
+	return nil
 }
 
 // GenerateUserCode mints a code a person can read off one screen and type into another.

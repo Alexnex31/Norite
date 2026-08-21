@@ -117,3 +117,18 @@ WHERE user_id = $1 AND consumed_at IS NULL;
 -- them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
 DELETE FROM device_codes
 WHERE expires_at < now();
+
+-- name: GetDeviceCodeByID :one
+-- The verification page's re-read between steps.
+--
+-- By id because that is what the signed continuation carries: the device code never reaches the browser at
+-- all, and the user code is what a person types, so putting either back into a value the browser holds
+-- would give a page something to replay. Same liveness conditions as the lookup by user code, so an
+-- authorization that expired or was decided while somebody was typing is caught at every step rather than
+-- only at the first.
+SELECT * FROM device_codes
+WHERE id = $1
+  AND user_id IS NULL
+  AND denied_at IS NULL
+  AND consumed_at IS NULL
+  AND expires_at > now();

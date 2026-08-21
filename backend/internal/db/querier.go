@@ -112,6 +112,14 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// The verification page's re-read between steps.
+	//
+	// By id because that is what the signed continuation carries: the device code never reaches the browser at
+	// all, and the user code is what a person types, so putting either back into a value the browser holds
+	// would give a page something to replay. Same liveness conditions as the lookup by user code, so an
+	// authorization that expired or was decided while somebody was typing is caught at every step rather than
+	// only at the first.
+	GetDeviceCodeByID(ctx context.Context, id int64) (DeviceCode, error)
 	// The verification page's lookup, for a code that can still be acted on.
 	//
 	// Approved, denied, spent and expired rows are all excluded, so all four produce the same "no such code"

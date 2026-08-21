@@ -454,6 +454,185 @@ paths:
               schema:
                 type: string
 
+  /device:
+    # Served at the instance root, beside /reset: this is a URL somebody types by hand, from one screen
+    # onto another, and every character of it is a character they have to copy. Documented here because
+    # cmd/server/contract_test.go holds the router and this file to the same set.
+    servers:
+      - url: /
+    get:
+      summary: The device-code entry form
+      description: >
+        Where a person goes to finish a sign-in started on a machine with no browser. Returns HTML and
+        needs no authentication — signing in is what the page is for.
+      operationId: getDevicePage
+      tags: [auth]
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            Prefills the field and does nothing else — no lookup, no state, no step skipped. A value that
+            is not a well-formed user code is dropped rather than echoed back.
+
+
+            This is deliberately not `verification_uri_complete`. That parameter completes the entry step
+            from the URL, which turns a phished link into a single click; this one saves eight keystrokes
+            somebody still has to look at before pressing Continue.
+      responses:
+        "200":
+          description: The form.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      summary: Submit a user code
+      description: >
+        Looks the code up and, if it is live, offers the ways to sign in. Never issued, expired, already
+        approved, denied and already spent all return the same message — the differences are only useful to
+        somebody trying codes.
+      operationId: submitDevicePage
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [user_code]
+              properties:
+                user_code:
+                  type: string
+                  description: >
+                    Case, spaces and the grouping dash are all normalized away, so a person is not punished
+                    for typing what their phone keyboard offered.
+      responses:
+        "200":
+          description: The sign-in step, carrying a signed continuation.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: The code cannot be acted on. The entry form is re-rendered with one message.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /device/signin:
+    servers:
+      - url: /
+    post:
+      summary: Sign in on the device-code page with a password
+      description: >
+        The password branch of the verification page. Answers exactly what `POST /api/v1/auth/login`
+        answers for a wrong password, a missing account and an account that has no password at all —
+        one message — for the reason that endpoint gives.
+
+
+        Succeeding does **not** authorize anything. It produces the approval step, which is a separate
+        request. No CSRF token participates and none is needed: the continuation in the body is the
+        authority, and no ambient credential is involved.
+      operationId: signInOnDevicePage
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [device_token, email, password]
+              properties:
+                device_token:
+                  type: string
+                  description: >
+                    The signed continuation from the previous step. Carries which authorization is being
+                    worked on; asserts nothing about who is signing in, which is what the next one is for.
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        "200":
+          description: The approval step.
+          content:
+            text/html:
+              schema:
+                type: string
+        "401":
+          description: The credentials did not match. The sign-in step is re-rendered.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: The continuation has expired, or the authorization has since been decided.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /device/approve:
+    servers:
+      - url: /
+    post:
+      summary: Approve or deny a device authorization
+      description: >
+        The step this flow exists to make deliberate, and the only real defense it has.
+
+
+        The device-code grant's live risk is not somebody guessing a code — it is somebody being sent one
+        and authorizing a stranger's machine without understanding that is what they did (RFC 8628 §5.4).
+        Nothing cryptographic prevents that, so what is done instead is done here: the page names the
+        device asking, shows the code back so it can be compared against the screen it came from, and says
+        plainly that a code somebody sent you is a request to sign them in as you.
+
+
+        Requires an approval continuation specifically. The one from the entry step is refused, because a
+        browser that knows a code has not proved whose account it is.
+      operationId: decideDeviceAuthorization
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [device_token, decision]
+              properties:
+                device_token:
+                  type: string
+                  description: The signed continuation from the sign-in step, which names both the
+                    authorization and the account.
+                decision:
+                  type: string
+                  enum: [approve, deny]
+                  description: >
+                    Anything other than `approve` denies, so a malformed submission fails closed. A denial
+                    is final: the waiting client is told on its next poll and the code cannot be reused.
+      responses:
+        "200":
+          description: Approved or denied. HTML confirmation either way.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: The continuation has expired, or the authorization has since been decided.
+          content:
+            text/html:
+              schema:
+                type: string
+
   /auth/password/reset/request:
     post:
       summary: Request a password reset email

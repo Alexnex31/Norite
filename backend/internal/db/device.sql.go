@@ -186,6 +186,41 @@ func (q *Queries) DenyDeviceCode(ctx context.Context, id int64) (DeviceCode, err
 	return i, err
 }
 
+const getDeviceCodeByID = `-- name: GetDeviceCodeByID :one
+SELECT id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at FROM device_codes
+WHERE id = $1
+  AND user_id IS NULL
+  AND denied_at IS NULL
+  AND consumed_at IS NULL
+  AND expires_at > now()
+`
+
+// The verification page's re-read between steps.
+//
+// By id because that is what the signed continuation carries: the device code never reaches the browser at
+// all, and the user code is what a person types, so putting either back into a value the browser holds
+// would give a page something to replay. Same liveness conditions as the lookup by user code, so an
+// authorization that expired or was decided while somebody was typing is caught at every step rather than
+// only at the first.
+func (q *Queries) GetDeviceCodeByID(ctx context.Context, id int64) (DeviceCode, error) {
+	row := q.db.QueryRow(ctx, getDeviceCodeByID, id)
+	var i DeviceCode
+	err := row.Scan(
+		&i.ID,
+		&i.DeviceCodeHash,
+		&i.UserCodeHash,
+		&i.DeviceID,
+		&i.DeviceName,
+		&i.UserID,
+		&i.DeniedAt,
+		&i.ConsumedAt,
+		&i.LastPolledAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const getDeviceCodeByUserCodeHash = `-- name: GetDeviceCodeByUserCodeHash :one
 SELECT id, device_code_hash, user_code_hash, device_id, device_name, user_id, denied_at, consumed_at, last_polled_at, created_at, expires_at FROM device_codes
 WHERE user_code_hash = $1
