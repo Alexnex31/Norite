@@ -148,7 +148,7 @@ func TestPollingTooFastIsSlowedDownEvenAfterApproval(t *testing.T) {
 	assert.ErrorIs(t, err, ErrDeviceSlowDown)
 
 	// And the code is still there to collect once the client behaves — a slow_down must not spend it.
-	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	letThePollIntervalPass(t, pool)
 	pair, err := svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, pair.RefreshToken)
@@ -162,7 +162,7 @@ func TestAnApprovedDeviceCodeBecomesASessionForTheWaitingDevice(t *testing.T) {
 	auth := startDeviceAuth(t, svc, pool)
 	approve(t, svc, auth, user.ID)
 
-	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	letThePollIntervalPass(t, pool)
 	pair, err := svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.MustParseAddr("192.0.2.10"))
 	require.NoError(t, err)
 	require.NotEmpty(t, pair.AccessToken)
@@ -191,11 +191,11 @@ func TestADeviceCodeIsSingleUse(t *testing.T) {
 	auth := startDeviceAuth(t, svc, pool)
 	approve(t, svc, auth, user.ID)
 
-	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	letThePollIntervalPass(t, pool)
 	_, err := svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
 	require.NoError(t, err)
 
-	svc.now = func() time.Time { return time.Now().Add(2 * DevicePollInterval) }
+	letThePollIntervalPass(t, pool)
 	_, err = svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
 	assert.ErrorIs(t, err, ErrDeviceCodeExpired)
 }
@@ -258,7 +258,7 @@ func TestRevokingSessionsAlsoRevokesAnApprovedDeviceCode(t *testing.T) {
 	_, err := svc.queries.RevokeDeviceCodesForUser(t.Context(), &user.ID)
 	require.NoError(t, err)
 
-	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	letThePollIntervalPass(t, pool)
 	_, err = svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
 	assert.ErrorIs(t, err, ErrDeviceCodeExpired)
 }
@@ -303,6 +303,20 @@ func startDeviceAuth(t *testing.T, svc *Service, pool *pgxpool.Pool) issuedDevic
 	return issuedDeviceAuth{DeviceAuth: auth, rowID: id}
 }
 
+// letThePollIntervalPass backdates the last poll so the next one is not refused as too soon.
+//
+// The service's own clock is no longer the one that decides this — the comparison moved into SQL, because
+// measuring a database timestamp against the application's clock measures the skew between two machines as
+// well as the gap between two polls. So a test that wants to poll again has to move the value the query
+// actually reads, which is also the only version of this that would catch the check being deleted.
+func letThePollIntervalPass(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(),
+		`UPDATE device_codes SET last_polled_at = last_polled_at - make_interval(secs => $1)`,
+		2*DevicePollInterval.Seconds())
+	require.NoError(t, err)
+}
+
 func approve(t *testing.T, svc *Service, auth issuedDeviceAuth, userID int64) {
 	t.Helper()
 	_, err := svc.queries.ApproveDeviceCode(t.Context(),
@@ -336,7 +350,7 @@ func TestADenialCannotRevokeAnotherAccountsAuthorization(t *testing.T) {
 		"another account's denial must reach nothing, and must not claim to have stopped anything")
 
 	// Ada's authorization is untouched and still collectable.
-	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	letThePollIntervalPass(t, pool)
 	pair, err := svc.RedeemDeviceCode(t.Context(), auth.DeviceCode, netip.Addr{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, pair.RefreshToken)
@@ -360,7 +374,7 @@ func TestDenyReportsWhatItManagedToDo(t *testing.T) {
 
 	collected := startDeviceAuth(t, svc, pool)
 	approve(t, svc, collected, user.ID)
-	svc.now = func() time.Time { return time.Now().Add(DevicePollInterval) }
+	letThePollIntervalPass(t, pool)
 	_, err = svc.RedeemDeviceCode(t.Context(), collected.DeviceCode, netip.Addr{})
 	require.NoError(t, err)
 	outcome, err = svc.DenyDeviceAuthorization(t.Context(), collected.rowID, user.ID)

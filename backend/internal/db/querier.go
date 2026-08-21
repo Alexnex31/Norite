@@ -180,8 +180,15 @@ type Querier interface {
 	// keep being told to slow down, and only updating on well-behaved polls would let the first one reset the
 	// clock forever.
 	//
+	// `too_soon` is computed here rather than in Go, and that is not a style preference. last_polled_at is
+	// written by this database's now(); comparing it against the *application's* clock measures the difference
+	// between two machines as well as the gap between two polls. A client at exactly the published interval
+	// has only a round trip of margin, so a database node running a few tens of milliseconds ahead would
+	// answer slow_down to every well-behaved poll, and one running behind would make the interval
+	// unenforceable. Both are routine between two pods and neither is visible in a test that fakes the clock.
+	//
 	// Expired and already-spent rows match nothing, which the service reports as one answer.
-	PollDeviceCode(ctx context.Context, deviceCodeHash []byte) (PollDeviceCodeRow, error)
+	PollDeviceCode(ctx context.Context, arg PollDeviceCodeParams) (PollDeviceCodeRow, error)
 	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
 	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)

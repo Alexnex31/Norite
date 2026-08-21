@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
@@ -179,7 +180,7 @@ func (s *Service) StartDeviceAuth(ctx context.Context, in StartDeviceAuthInput) 
 			DeviceCodeHash: codeHash,
 			UserCode:       userCode,
 			DeviceID:       deviceID,
-			DeviceName:     truncateDeviceName(in.DeviceName),
+			DeviceName:     sanitizeDeviceName(in.DeviceName),
 			ExpiresAt:      timestamptz(expiresAt),
 		})
 		if err == nil {
@@ -212,8 +213,12 @@ func (s *Service) RedeemDeviceCode(ctx context.Context, rawCode string, ip netip
 		return TokenPair{}, ErrDeviceCodeExpired
 	}
 
-	// One statement: records this poll and reports the state as it was before it did.
-	polled, err := s.queries.PollDeviceCode(ctx, hash)
+	// One statement: records this poll and reports the state as it was before it did, including whether it
+	// came too soon — measured against the database's own clock, for the reason the query gives.
+	polled, err := s.queries.PollDeviceCode(ctx, db.PollDeviceCodeParams{
+		DeviceCodeHash:     hash,
+		MinIntervalSeconds: DevicePollInterval.Seconds(),
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return TokenPair{}, ErrDeviceCodeExpired
@@ -224,8 +229,7 @@ func (s *Service) RedeemDeviceCode(ctx context.Context, rawCode string, ip netip
 	// Checked before anything else, and before the outcome is even looked at. A client polling every
 	// second must keep being told to slow down rather than being rewarded once its authorization lands,
 	// which is what RFC 8628 §3.5 asks for and the only thing that makes the interval mean anything.
-	if polled.PreviousPolledAt.Valid &&
-		s.now().Sub(polled.PreviousPolledAt.Time) < DevicePollInterval {
+	if polled.TooSoon {
 		return TokenPair{}, ErrDeviceSlowDown
 	}
 
@@ -424,15 +428,51 @@ func FormatUserCode(code string) string {
 	return code[:userCodeGroup] + "-" + code[userCodeGroup:]
 }
 
-// truncateDeviceName bounds a device name to what the approval page can show.
+// sanitizeDeviceName makes a client-supplied name fit to display, and bounds it.
 //
-// By runes rather than bytes, so cutting a name does not leave half a character behind — the same reason
-// the CLI's own truncation works that way.
-func truncateDeviceName(name string) string {
-	name = strings.TrimSpace(name)
-	runes := []rune(name)
+// Cleaned where it enters rather than where it is shown, which is this codebase's rule for foreign text
+// (see cli/internal/termsafe): the value goes into a database column and comes back out on a page whose
+// entire job is being read carefully, so making it safe once at the boundary is what makes it safe
+// everywhere afterwards.
+//
+// html/template escaping is not enough here and the comment on this page used to say it was. Escaping
+// stops markup; it passes C0 controls and the bidi overrides straight through. Those reorder rendered
+// text, and the sentence they would be reordering is "A device calling itself X is asking to sign in to
+// your account", printed above a warning that this flow depends on somebody reading in the right order.
+//
+// The same rule as the terminal sanitizer, and deliberately the same narrow one: category Cc plus the
+// bidi embeddings, overrides and isolates, each removed run leaving one replacement character so a name
+// built to imitate another does not simply render as it. Everything invisible-but-inert stays, because the
+// category that holds zero-width spaces also holds parts of written Arabic.
+//
+// Bounded by runes rather than bytes, so cutting does not leave half a character behind.
+func sanitizeDeviceName(name string) string {
+	var b strings.Builder
+	removed := false
+	for _, r := range strings.TrimSpace(name) {
+		if unicode.Is(unicode.Cc, r) || isBidiControl(r) {
+			if !removed {
+				b.WriteRune('\uFFFD')
+				removed = true
+			}
+			continue
+		}
+		removed = false
+		b.WriteRune(r)
+	}
+
+	runes := []rune(strings.TrimSpace(b.String()))
 	if len(runes) <= maxDeviceNameLength {
-		return name
+		return string(runes)
 	}
 	return string(runes[:maxDeviceNameLength])
+}
+
+// isBidiControl reports whether r reorders the text around it.
+//
+// The embeddings and overrides (U+202A-U+202E), the pops (U+202C, U+2069) and the isolates
+// (U+2066-U+2069). Listed rather than taken from a category, because Cf holds the joiners real writing
+// systems need.
+func isBidiControl(r rune) bool {
+	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }

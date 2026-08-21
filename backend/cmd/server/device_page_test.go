@@ -351,3 +351,83 @@ func TestTheApprovalFormsDefaultButtonDenies(t *testing.T) {
 	assert.Less(t, deny, approve,
 		"Deny must be the first submit button, or an implicit submission approves")
 }
+
+// The device name is the one value on these pages somebody else chose, and it lands in a sentence above a
+// warning this flow depends on being read in the right order. html/template stops markup and nothing else:
+// it passes C0 controls and the bidi overrides straight through, and those reorder what is rendered.
+func TestAHostileDeviceNameCannotReorderTheApprovalPage(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+
+	resp := api.call(http.MethodPost, "/api/v1/auth/device/code", map[string]string{
+		"device_id": "waiting-device",
+		// A right-to-left override and its pop, escaped rather than written literally so this file
+		// cannot itself be misread — and a carriage return for the other half of the same class.
+		"device_name": "laptop\u202egnihtemos\u202c\r\nelse",
+	})
+	require.Equal(t, http.StatusOK, resp.Code, resp)
+	var issued issuedCode
+	resp.decode(&issued)
+
+	entry := api.enterUserCode(t, issued.UserCode)
+	page := api.call(http.MethodPost, "/device/signin", formBody(url.Values{
+		"device_token": {entry}, "email": {"ada@example.com"}, "password": {testPassword},
+	}), asForm)
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	body := page.String()
+	name := body[strings.Index(body, "<strong>"):strings.Index(body, "</strong>")]
+	for _, bad := range []string{"\u202e", "\u202c", "\r", "\x00"} {
+		assert.NotContains(t, name, bad,
+			"nothing that reorders or controls rendered text may reach this page")
+	}
+	assert.Contains(t, name, "laptop", "and the legible part of the name survives")
+	assert.Contains(t, name, "�", "with the removal marked rather than silent")
+}
+
+// A device code that expired and was swept while somebody was still on the page must answer the same way
+// one that expired a moment ago does. It used to be a 500: the continuation outlives the row it names, so
+// the click on a provider button reached a foreign key pointing at nothing.
+func TestAProviderClickAfterTheCodeWasSweptSaysToStartAgain(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-1", "ada@example.com", true)
+
+	issued := api.issueDeviceCode(t)
+	entry := api.enterUserCode(t, issued.UserCode)
+
+	// The sweeper, exactly: expired rows deleted regardless of state.
+	_, err := api.pool.Exec(t.Context(), `DELETE FROM device_codes`)
+	require.NoError(t, err)
+
+	resp := api.call(http.MethodGet,
+		"/api/v1/auth/oauth/google/authorize?device_token="+url.QueryEscape(entry), nil)
+	require.Equal(t, http.StatusBadRequest, resp.Code, "a swept code must not be a 500: %s", resp)
+
+	var states int
+	require.NoError(t, api.pool.QueryRow(t.Context(), `SELECT count(*) FROM oauth_states`).Scan(&states))
+	assert.Zero(t, states, "and no state row is left behind for the sweeper")
+}
+
+// The JSON completion endpoint cannot finish a device flow — that one ends on an approval page in a
+// browser. It used to create the account anyway and answer 200 with an empty code, which the contract
+// marks required and which a client would then try to redeem.
+func TestTheJSONCompletionEndpointRefusesADeviceSignup(t *testing.T) {
+	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
+	stub.as("google-new", "newcomer@example.com", true)
+
+	issued := api.issueDeviceCode(t)
+	entry := api.enterUserCode(t, issued.UserCode)
+	form := api.followProviderLink(t, entry)
+	token := signupTokenFrom(t, form.String())
+
+	resp := api.call(http.MethodPost, "/api/v1/auth/oauth/complete",
+		map[string]string{"signup_token": token, "username": "newcomer"})
+	require.Equal(t, http.StatusBadRequest, resp.Code, resp)
+	assert.Contains(t, resp.errorBody().Message, "device verification page")
+
+	// And nothing was created on the way to refusing.
+	var users int
+	require.NoError(t, api.pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM users WHERE username = 'newcomer'`).Scan(&users))
+	assert.Zero(t, users)
+}

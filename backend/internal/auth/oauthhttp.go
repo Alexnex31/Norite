@@ -268,6 +268,15 @@ func (h *Handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Checked before the account is created, because this endpoint cannot finish a device flow: that one
+	// ends on an approval page in a browser, and there is nothing here to render or to hand back. Without
+	// this it created the account and answered 200 with an empty code.
+	if continuation, err := h.svc.parseOAuthSignupToken(req.SignupToken); err == nil &&
+		continuation.DeviceCodeID != 0 {
+		h.writeErr(w, r, ErrOAuthSignupForDevice)
+		return
+	}
+
 	result, err := h.svc.CompleteOAuthSignup(r.Context(), req.SignupToken, req.Username)
 	if err != nil {
 		h.writeErr(w, r, err)

@@ -79,6 +79,15 @@ var (
 	// existing account is still allowed — the gate is on new accounts, not on providers.
 	ErrOAuthRegistrationClosed = errors.New("registration on this instance requires an invite code")
 
+	// ErrOAuthSignupForDevice is a device-flow sign-up presented at the JSON completion endpoint.
+	//
+	// That flow finishes on the verification page's approval step, which is a browser screen this endpoint
+	// has no way to reach and no way to describe. Refused before anything is created rather than after:
+	// the alternative was creating the account and answering 200 with an empty code, which the contract
+	// says is required and which a client would then try to redeem.
+	ErrOAuthSignupForDevice = errors.New(
+		"this sign-up was started from a device verification page and has to be finished there")
+
 	// ErrOAuthProviderDeclined is the provider reporting its own failure on the callback — someone pressing
 	// "cancel" on the consent screen, almost always. An ordinary abandonment rather than a fault.
 	ErrOAuthProviderDeclined = errors.New("the sign-in was not completed at the provider")
@@ -156,7 +165,7 @@ func (s *Service) StartOAuth(ctx context.Context, in StartOAuthInput) (string, e
 		return "", err
 	}
 
-	challenge, deviceCodeID, err := s.oauthFlowBinding(in)
+	challenge, deviceCodeID, err := s.oauthFlowBinding(ctx, in)
 	if err != nil {
 		return "", err
 	}
@@ -217,7 +226,7 @@ func (s *Service) StartOAuth(ctx context.Context, in StartOAuthInput) (string, e
 // it in their own browser would be shown an approval page for their own provider account, authorizing the
 // device they already control, which is not an attack. The risk on this path is a person being talked into
 // approving, and that is what the approval page is for.
-func (s *Service) oauthFlowBinding(in StartOAuthInput) (TokenHash, int64, error) {
+func (s *Service) oauthFlowBinding(ctx context.Context, in StartOAuthInput) (TokenHash, int64, error) {
 	if (in.FlowChallenge == "") == (in.DeviceToken == "") {
 		return nil, 0, ErrOAuthFlowChallenge
 	}
@@ -225,6 +234,20 @@ func (s *Service) oauthFlowBinding(in StartOAuthInput) (TokenHash, int64, error)
 	if in.DeviceToken != "" {
 		entry, err := s.parseDeviceToken(in.DeviceToken, deviceEntryTokenType)
 		if err != nil {
+			return nil, 0, err
+		}
+
+		// The row is checked, not assumed, because the token outlives it. A continuation is good for ten
+		// minutes from the moment a code is entered and a device code for twenty from the moment it is
+		// issued, so one minted at minute nineteen is still valid after its row has expired and been
+		// swept. Without this, that person's click on "Google" reached CreateOAuthState with a foreign key
+		// pointing at nothing and got a 500 with a request ID — where the identical not-yet-swept case
+		// gets "that sign-in step has expired; start again". Same action, two answers, decided by when the
+		// sweeper last ran.
+		if _, err := s.deviceCodeByID(ctx, entry.DeviceCodeID); err != nil {
+			if errors.Is(err, ErrDeviceUserCode) {
+				return nil, 0, ErrDeviceContinuation
+			}
 			return nil, 0, err
 		}
 		return HashToken(in.DeviceToken), entry.DeviceCodeID, nil

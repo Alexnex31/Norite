@@ -257,9 +257,14 @@ func (q *Queries) GetDeviceCodeByUserCode(ctx context.Context, userCode string) 
 
 const pollDeviceCode = `-- name: PollDeviceCode :one
 WITH previous AS (
-  SELECT dc.id, dc.last_polled_at
+  SELECT dc.id,
+         -- Written as a CASE with literal branches so this arrives in Go as a plain bool. The
+         -- comparison is never NULL in Postgres, but sqlc cannot prove that of a nullable column, and a
+         -- three-state answer to "did this poll come too soon" invites a nil check that means nothing.
+         CASE WHEN dc.last_polled_at > now() - make_interval(secs => $1::float8)
+              THEN true ELSE false END AS too_soon
   FROM device_codes dc
-  WHERE dc.device_code_hash = $1
+  WHERE dc.device_code_hash = $2
     AND dc.consumed_at IS NULL
     AND dc.expires_at > now()
 )
@@ -267,22 +272,27 @@ UPDATE device_codes d
 SET last_polled_at = now()
 FROM previous
 WHERE d.id = previous.id
-RETURNING d.id, d.device_code_hash, d.user_code, d.device_id, d.device_name, d.user_id, d.denied_at, d.consumed_at, d.last_polled_at, d.created_at, d.expires_at, previous.last_polled_at AS previous_polled_at
+RETURNING d.id, d.device_code_hash, d.user_code, d.device_id, d.device_name, d.user_id, d.denied_at, d.consumed_at, d.last_polled_at, d.created_at, d.expires_at, previous.too_soon
 `
 
+type PollDeviceCodeParams struct {
+	MinIntervalSeconds float64
+	DeviceCodeHash     []byte
+}
+
 type PollDeviceCodeRow struct {
-	ID               int64
-	DeviceCodeHash   []byte
-	UserCode         string
-	DeviceID         string
-	DeviceName       string
-	UserID           *int64
-	DeniedAt         pgtype.Timestamptz
-	ConsumedAt       pgtype.Timestamptz
-	LastPolledAt     pgtype.Timestamptz
-	CreatedAt        pgtype.Timestamptz
-	ExpiresAt        pgtype.Timestamptz
-	PreviousPolledAt pgtype.Timestamptz
+	ID             int64
+	DeviceCodeHash []byte
+	UserCode       string
+	DeviceID       string
+	DeviceName     string
+	UserID         *int64
+	DeniedAt       pgtype.Timestamptz
+	ConsumedAt     pgtype.Timestamptz
+	LastPolledAt   pgtype.Timestamptz
+	CreatedAt      pgtype.Timestamptz
+	ExpiresAt      pgtype.Timestamptz
+	TooSoon        bool
 }
 
 // One poll: records that it happened and reports the state as it was *before* it did.
@@ -296,9 +306,16 @@ type PollDeviceCodeRow struct {
 // keep being told to slow down, and only updating on well-behaved polls would let the first one reset the
 // clock forever.
 //
+// `too_soon` is computed here rather than in Go, and that is not a style preference. last_polled_at is
+// written by this database's now(); comparing it against the *application's* clock measures the difference
+// between two machines as well as the gap between two polls. A client at exactly the published interval
+// has only a round trip of margin, so a database node running a few tens of milliseconds ahead would
+// answer slow_down to every well-behaved poll, and one running behind would make the interval
+// unenforceable. Both are routine between two pods and neither is visible in a test that fakes the clock.
+//
 // Expired and already-spent rows match nothing, which the service reports as one answer.
-func (q *Queries) PollDeviceCode(ctx context.Context, deviceCodeHash []byte) (PollDeviceCodeRow, error) {
-	row := q.db.QueryRow(ctx, pollDeviceCode, deviceCodeHash)
+func (q *Queries) PollDeviceCode(ctx context.Context, arg PollDeviceCodeParams) (PollDeviceCodeRow, error) {
+	row := q.db.QueryRow(ctx, pollDeviceCode, arg.MinIntervalSeconds, arg.DeviceCodeHash)
 	var i PollDeviceCodeRow
 	err := row.Scan(
 		&i.ID,
@@ -312,7 +329,7 @@ func (q *Queries) PollDeviceCode(ctx context.Context, deviceCodeHash []byte) (Po
 		&i.LastPolledAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
-		&i.PreviousPolledAt,
+		&i.TooSoon,
 	)
 	return i, err
 }

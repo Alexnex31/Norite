@@ -68,11 +68,23 @@ RETURNING *;
 -- keep being told to slow down, and only updating on well-behaved polls would let the first one reset the
 -- clock forever.
 --
+-- `too_soon` is computed here rather than in Go, and that is not a style preference. last_polled_at is
+-- written by this database's now(); comparing it against the *application's* clock measures the difference
+-- between two machines as well as the gap between two polls. A client at exactly the published interval
+-- has only a round trip of margin, so a database node running a few tens of milliseconds ahead would
+-- answer slow_down to every well-behaved poll, and one running behind would make the interval
+-- unenforceable. Both are routine between two pods and neither is visible in a test that fakes the clock.
+--
 -- Expired and already-spent rows match nothing, which the service reports as one answer.
 WITH previous AS (
-  SELECT dc.id, dc.last_polled_at
+  SELECT dc.id,
+         -- Written as a CASE with literal branches so this arrives in Go as a plain bool. The
+         -- comparison is never NULL in Postgres, but sqlc cannot prove that of a nullable column, and a
+         -- three-state answer to "did this poll come too soon" invites a nil check that means nothing.
+         CASE WHEN dc.last_polled_at > now() - make_interval(secs => sqlc.arg(min_interval_seconds)::float8)
+              THEN true ELSE false END AS too_soon
   FROM device_codes dc
-  WHERE dc.device_code_hash = $1
+  WHERE dc.device_code_hash = sqlc.arg(device_code_hash)
     AND dc.consumed_at IS NULL
     AND dc.expires_at > now()
 )
@@ -80,7 +92,7 @@ UPDATE device_codes d
 SET last_polled_at = now()
 FROM previous
 WHERE d.id = previous.id
-RETURNING d.*, previous.last_polled_at AS previous_polled_at;
+RETURNING d.*, previous.too_soon;
 
 -- name: ConsumeDeviceCode :one
 -- Spends an approved code for the one token pair it is worth.
