@@ -1012,6 +1012,12 @@ paths:
 
 
         Returns an exchange code rather than a token pair, so both completion paths end the same way.
+
+
+        **A sign-up started from the device verification page cannot be finished here** and is refused
+        `400`. That flow ends on an approval screen in a browser — a person still has to say yes — and
+        there is nothing this endpoint could render or hand back. The refusal happens before the account is
+        created, so retrying it changes nothing; finish the sign-up in the browser the code was entered in.
       operationId: completeOAuthSignup
       tags: [auth]
       security: []
@@ -1028,7 +1034,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OAuthExchangeCode"
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "400":
+          description: >
+            A malformed request, or a signup token belonging to a device-code flow — which finishes on the
+            verification page's approval step and not here. Nothing is created either way.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           description: The signup token is unknown, expired, or not a signup token.
           content:

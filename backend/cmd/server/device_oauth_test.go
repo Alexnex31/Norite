@@ -265,3 +265,24 @@ func signupTokenFrom(t *testing.T, body string) string {
 	require.NotEmpty(t, token)
 	return token
 }
+
+// Rule 6, on a refusal rather than a route: the JSON completion endpoint gained a case, and a client
+// driving that flow has no way to know it exists unless the contract says so.
+func TestTheDeviceRefusalIsDocumented(t *testing.T) {
+	doc := readContract(t)
+
+	start := strings.Index(doc, "  /auth/oauth/complete:")
+	require.Positive(t, start)
+	section := doc[start:]
+	section = section[:strings.Index(section, "\n  /auth/device/code:")]
+
+	// Whitespace-folded before searching. YAML wraps a description across lines and the raw file keeps
+	// those breaks, so a phrase assertion that does not fold is really an assertion about where somebody
+	// happened to wrap a sentence — it passes or fails on an edit that changed nothing.
+	folded := strings.Join(strings.Fields(section), " ")
+
+	assert.Contains(t, folded, "device verification page",
+		"the case POST /auth/oauth/complete now refuses must be described where a client would look")
+	assert.Contains(t, folded, "before the account is created",
+		"and a client needs to know retrying changes nothing")
+}
