@@ -39,7 +39,7 @@ const consumeOAuthState = `-- name: ConsumeOAuthState :one
 UPDATE oauth_states
 SET consumed_at = now()
 WHERE state_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri, device_code_id
 `
 
 // Spends a state, with single-use and expiry both in the WHERE clause rather than in Go.
@@ -61,6 +61,7 @@ func (q *Queries) ConsumeOAuthState(ctx context.Context, stateHash []byte) (Oaut
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.ClientRedirectUri,
+		&i.DeviceCodeID,
 	)
 	return i, err
 }
@@ -140,7 +141,7 @@ INSERT INTO oauth_states (
   id, state_hash, provider, code_verifier, flow_challenge, expires_at, client_redirect_uri
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri, device_code_id
 `
 
 type CreateOAuthStateParams struct {
@@ -181,6 +182,7 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.ClientRedirectUri,
+		&i.DeviceCodeID,
 	)
 	return i, err
 }

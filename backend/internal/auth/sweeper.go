@@ -41,16 +41,19 @@ type SweepResult struct {
 	ResetTokens   int64
 	OAuthStates   int64
 	ExchangeCodes int64
+	DeviceCodes   int64
 }
 
 // Total is how many rows the pass removed altogether.
-func (r SweepResult) Total() int64 { return r.ResetTokens + r.OAuthStates + r.ExchangeCodes }
+func (r SweepResult) Total() int64 {
+	return r.ResetTokens + r.OAuthStates + r.ExchangeCodes + r.DeviceCodes
+}
 
 // SweepExpired removes every expired row this package owns.
 //
-// Not transactional, deliberately: three independent deletes with nothing to be consistent *between*, and
-// wrapping them would hold one connection for all three against a pool that is small on purpose (§15.3).
-// A failure part-way leaves the rest for the next pass, ten minutes later.
+// Not transactional, deliberately: independent deletes with nothing to be consistent *between*, and
+// wrapping them would hold one connection for all of them against a pool that is small on purpose
+// (§15.3). A failure part-way leaves the rest for the next pass, ten minutes later.
 func (s *Service) SweepExpired(ctx context.Context) (SweepResult, error) {
 	var out SweepResult
 	var err error
@@ -63,6 +66,9 @@ func (s *Service) SweepExpired(ctx context.Context) (SweepResult, error) {
 	}
 	if out.ExchangeCodes, err = s.queries.DeleteExpiredOAuthExchangeCodes(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired oauth exchange codes: %w", err)
+	}
+	if out.DeviceCodes, err = s.queries.DeleteExpiredDeviceCodes(ctx); err != nil {
+		return out, fmt.Errorf("sweeping expired device codes: %w", err)
 	}
 	return out, nil
 }
@@ -106,6 +112,7 @@ func (s *Service) RunSweeper(ctx context.Context) {
 				Int64("reset_tokens", result.ResetTokens).
 				Int64("oauth_states", result.OAuthStates).
 				Int64("oauth_exchange_codes", result.ExchangeCodes).
+				Int64("device_codes", result.DeviceCodes).
 				Msg("swept expired auth rows")
 		}
 

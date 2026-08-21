@@ -21,6 +21,20 @@ type ApiToken struct {
 	RevokedAt  pgtype.Timestamptz
 }
 
+type DeviceCode struct {
+	ID             int64
+	DeviceCodeHash []byte
+	UserCodeHash   []byte
+	DeviceID       string
+	DeviceName     string
+	UserID         *int64
+	DeniedAt       pgtype.Timestamptz
+	ConsumedAt     pgtype.Timestamptz
+	LastPolledAt   pgtype.Timestamptz
+	CreatedAt      pgtype.Timestamptz
+	ExpiresAt      pgtype.Timestamptz
+}
+
 type OauthExchangeCode struct {
 	ID            int64
 	CodeHash      []byte
@@ -50,6 +64,7 @@ type OauthState struct {
 	ExpiresAt         pgtype.Timestamptz
 	ConsumedAt        pgtype.Timestamptz
 	ClientRedirectUri string
+	DeviceCodeID      *int64
 }
 
 type PasswordResetToken struct {
