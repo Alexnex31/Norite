@@ -205,6 +205,24 @@ contributor list is meant to reflect that. Note this is not retroactively fixabl
 trailer after the fact means rewriting history, which invalidates the GPG signature GitHub applies to
 web-UI merges, so the cost of getting it wrong once is a permanently unsigned commit on `main`.
 
+**Staging — never `git add -A`, `git add .`, or `git commit -a`.** Stage the paths the commit is actually
+about, by name. This is not tidiness: those commands sweep up whatever else happens to be in the tree, and
+what is in the tree during a manual test is a config file holding real credentials. That is exactly how a
+GitHub OAuth client secret reached a pushed commit on the M9 branch — swept into a commit whose subject and
+body were entirely about something else, so nothing in the review would have drawn an eye to it.
+
+**Before every commit, read what is staged and confirm no credential is in it.** `git diff --cached` in
+full, not `--stat`. Look for anything shaped like a key, a token, a password, a client secret or a
+connection string with a password in it — in *any* file, including ones the commit is legitimately
+touching. `.env`, `docker/docker-compose.yml` and anything under `docker/` deserve a second look, because
+they are where a real value gets typed during local testing.
+
+**A committed secret is not fixable by a later commit.** Removing it means rewriting history, and once the
+branch has been pushed the object stays fetchable from the remote by SHA regardless — so the only step that
+actually protects anything is revoking the credential at the provider. Treat any secret that reaches a
+commit as compromised from that moment, revoke first, and rewrite afterwards as hygiene rather than as the
+fix. The cost of getting this wrong once is a rotation, not a cleanup.
+
 **Branching**: `main` always reflects the state right after the most recently *completed* milestone — never
 a half-finished one. Each milestone (see `docs/roadmap.md`) gets its own branch, named `m<N>-<kebab-slug>`
 matching the milestone's title (e.g. `m1-backend-skeleton`). Child branches off a
