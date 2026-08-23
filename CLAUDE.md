@@ -223,6 +223,25 @@ actually protects anything is revoking the credential at the provider. Treat any
 commit as compromised from that moment, revoke first, and rewrite afterwards as hygiene rather than as the
 fix. The cost of getting this wrong once is a rotation, not a cleanup.
 
+**Two local git hooks back the two rules above**, and both are in `.git/hooks/`, which git does not track —
+so a fresh clone has neither, and neither is where the rule lives. They are a backstop under the habit, not
+a replacement for it, for the same reason the project skills are described here rather than relied on:
+this file is the authority, and anything enforced only by an untracked file is enforced only on one
+machine.
+
+- `commit-msg` rejects a message crediting an AI agent as author or co-author.
+- `pre-commit` rejects staged content that looks like a live credential: a provider token format
+  (`ghp_`, `AKIA`, `AIza`, a PEM private-key header), a secret-named setting given a long opaque value, or
+  a `.env` file forced past `.gitignore`. It deliberately ignores values that announce themselves as fakes
+  — `dev-only`, `insecure`, `example`, `changeme`, `test…key` and similar — because this repository is full
+  of those on purpose, and a hook that cried wolf on the compose stack's own signing key would be
+  `--no-verify`'d within a week and protect nothing afterwards. It never blocks a commit that *removes* a
+  secret, since standing between somebody and that cleanup is the one way it could do harm.
+
+Rewriting either to be stricter is fine; making either the reason a rule above is not followed is not.
+`--no-verify` exists and is sometimes right — a deliberate fake the filters do not recognise is the usual
+case, and labelling the value is the better fix.
+
 **Branching**: `main` always reflects the state right after the most recently *completed* milestone — never
 a half-finished one. Each milestone (see `docs/roadmap.md`) gets its own branch, named `m<N>-<kebab-slug>`
 matching the milestone's title (e.g. `m1-backend-skeleton`). Child branches off a
