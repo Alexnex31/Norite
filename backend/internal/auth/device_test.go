@@ -416,3 +416,32 @@ func TestAFailedSessionDoesNotBurnTheDeviceCode(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, pair.RefreshToken)
 }
+
+// The account line goes through the same sanitizer the device name does, because a page with one hole
+// plugged and the other open is the same page.
+//
+// Registration constrains a username and an address, so this is a backstop rather than a reachable case
+// today — written because "constrained somewhere else" is exactly the reasoning that quietly stops being
+// true when a later milestone adds an import, an admin rename, or a second registration path. Driven
+// against a row written directly, since the constrained path cannot produce one.
+func TestAHostileAccountNameCannotReorderTheApprovalPage(t *testing.T) {
+	svc, pool := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	_, err := pool.Exec(t.Context(),
+		`UPDATE users SET username = $2 WHERE id = $1`, user.ID, "ada\u202elaptop")
+	require.NoError(t, err)
+
+	described := svc.describeAccount(t.Context(), user.ID)
+	assert.NotContains(t, described, "\u202e", "nothing that reorders rendered text may reach the page")
+	assert.Contains(t, described, "�", "with the removal marked rather than silent")
+	assert.Contains(t, described, "ada@example.com", "and the address still identifies the account")
+}
+
+// A lookup failure degrades the line rather than the page. The approval screen's job is to let somebody
+// notice a mismatch, and refusing to render it because a name could not be read would remove the check
+// entirely — the device name, the code and the buttons are all still worth showing.
+func TestAnUnreadableAccountStillRendersTheApprovalPage(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	assert.Equal(t, "your account", svc.describeAccount(t.Context(), 0))
+}

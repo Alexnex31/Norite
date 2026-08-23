@@ -431,3 +431,54 @@ func TestTheJSONCompletionEndpointRefusesADeviceSignup(t *testing.T) {
 		`SELECT count(*) FROM users WHERE username = 'newcomer'`).Scan(&users))
 	assert.Zero(t, users)
 }
+
+// The approval page says who is about to be authorized, not just what. It read "your account" for its
+// whole first draft, which is a certainty the page does not have: somebody can reach this screen signed in
+// as an account they did not mean to use — a second provider identity, or one an attacker authenticated as
+// after obtaining their code. This line is the only place that mismatch can surface before the decision.
+func TestTheApprovalPageNamesTheAccountBeingAuthorized(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+	issued := api.issueDeviceCode(t)
+
+	entry := api.enterUserCode(t, issued.UserCode)
+	page := api.call(http.MethodPost, "/device/signin", formBody(url.Values{
+		"device_token": {entry}, "email": {"ada@example.com"}, "password": {testPassword},
+	}), asForm)
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	assert.Contains(t, page.String(), "ada (ada@example.com)")
+	assert.NotContains(t, page.String(), "to your account",
+		"the page must name the account rather than assert it is theirs")
+}
+
+// The recovery path ADR 0028 promises has to be reachable, not merely implemented. It was neither
+// linked nor described from the page somebody actually ends on — and a phone will not re-render a POST
+// response, so the back button does not get there either. Approving and then realizing is the way people
+// arrive at Deny, so the way out belongs on the page that says it worked.
+func TestTheApprovedPageCanStillStopTheDevice(t *testing.T) {
+	api := newAPIWithoutMail(t, auth.RegistrationOpen)
+	api.newAccount("ada", "ada@example.com", "laptop")
+	issued := api.issueDeviceCode(t)
+
+	entry := api.enterUserCode(t, issued.UserCode)
+	approval := api.signInOnDevicePage(t, entry, "ada@example.com", testPassword)
+
+	approved := api.call(http.MethodPost, "/device/approve", formBody(url.Values{
+		"device_token": {approval}, "decision": {"approve"},
+	}), asForm)
+	require.Equal(t, http.StatusOK, approved.Code, approved)
+	assert.Contains(t, approved.String(), "stop it", "the way out must be on the page, not only in the API")
+
+	// And following it from that page — the token it carries — actually stops the device.
+	stopped := api.call(http.MethodPost, "/device/approve", formBody(url.Values{
+		"device_token": {deviceTokenFrom(t, approved.String())}, "decision": {"deny"},
+	}), asForm)
+	require.Equal(t, http.StatusOK, stopped.Code, stopped)
+	assert.Contains(t, stopped.String(), "has been stopped")
+
+	poll := api.call(http.MethodPost, "/api/v1/auth/device/token",
+		map[string]string{"device_code": issued.DeviceCode})
+	require.Equal(t, http.StatusBadRequest, poll.Code, poll)
+	assert.Equal(t, "expired_token", poll.errorBody().Code)
+}

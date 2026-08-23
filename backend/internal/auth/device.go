@@ -14,6 +14,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
+	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
 
@@ -62,6 +63,11 @@ const DevicePollInterval = 5 * time.Second
 // unbounded one could push the warning beside it off the screen. html/template escapes it; this stops it
 // shouting.
 const maxDeviceNameLength = 64
+
+// maxAccountNameLength bounds the account line on the approval page. A username is capped at 32 and an
+// address at 254 by the registration path; this is the sentence's own limit, not a second opinion on
+// either.
+const maxAccountNameLength = 128
 
 // userCodeAlphabet is what a user code is built from.
 //
@@ -307,6 +313,25 @@ func (s *Service) LookUpDeviceCode(ctx context.Context, rawUserCode string) (str
 	return code, row, nil
 }
 
+// describeAccount names an account for the approval page.
+//
+// Username and address both, because either alone can be the wrong disambiguator: two provider accounts
+// can share a display name, and somebody with several addresses will not recognize a username they chose
+// once. Both are constrained at registration — ValidUsername allows no controls, and the address is
+// validated — but they go through the page sanitizer anyway, for the reason its comment gives.
+//
+// A lookup failure is not fatal here. The page's job is to let somebody notice a mismatch, and refusing to
+// render it because a name could not be read would remove the check entirely rather than degrade it; the
+// device name, the code and the buttons are all still there.
+func (s *Service) describeAccount(ctx context.Context, userID int64) string {
+	user, err := s.queries.GetUserByID(ctx, userID)
+	if err != nil {
+		logging.FromContext(ctx).Error().Err(err).Msg("naming the account on the device approval page failed")
+		return "your account"
+	}
+	return sanitizeForPage(user.Username+" ("+user.Email+")", maxAccountNameLength)
+}
+
 // deviceCodeByID re-reads a live authorization between the verification page's steps.
 func (s *Service) deviceCodeByID(ctx context.Context, id int64) (db.DeviceCode, error) {
 	row, err := s.queries.GetDeviceCodeByID(ctx, id)
@@ -474,9 +499,18 @@ func FormatUserCode(code string) string {
 //
 // Bounded by runes rather than bytes, so cutting does not leave half a character behind.
 func sanitizeDeviceName(name string) string {
+	return sanitizeForPage(name, maxDeviceNameLength)
+}
+
+// sanitizeForPage is the rule above, applied to any foreign string a server-rendered page displays.
+//
+// Shared rather than written twice, because the second caller is the account line on the approval page and
+// the two have to agree: a page whose device name cannot reorder text but whose account name can is a page
+// with the same hole in a different sentence.
+func sanitizeForPage(s string, maxRunes int) string {
 	var b strings.Builder
 	removed := false
-	for _, r := range strings.TrimSpace(name) {
+	for _, r := range strings.TrimSpace(s) {
 		if unicode.Is(unicode.Cc, r) || isBidiControl(r) {
 			if !removed {
 				b.WriteRune('\uFFFD')
@@ -489,10 +523,10 @@ func sanitizeDeviceName(name string) string {
 	}
 
 	runes := []rune(strings.TrimSpace(b.String()))
-	if len(runes) <= maxDeviceNameLength {
+	if len(runes) <= maxRunes {
 		return string(runes)
 	}
-	return string(runes[:maxDeviceNameLength])
+	return string(runes[:maxRunes])
 }
 
 // isBidiControl reports whether r reorders the text around it.

@@ -62,6 +62,13 @@ type devicePageData struct {
 	// DeviceName is the one attacker-influenceable value on these pages. Bounded at issuance and escaped
 	// by html/template; the approval page presents it as a quoted claim rather than as its own words.
 	DeviceName string
+	// Account names who is about to be authorized, on the approval page and nowhere else.
+	//
+	// The page said "your account" for its whole first draft, which reads as a certainty and is not one: a
+	// person can reach this screen signed in as somebody other than they assumed — a second provider
+	// account, or, in the direction that matters, an account an attacker authenticated as after obtaining
+	// their code. This line is the only place that mismatch can surface before the decision is made.
+	Account string
 	// Providers are the sign-in buttons to offer, which is whatever this instance has configured. Empty on
 	// an instance with no provider set up, where the password form is the whole page.
 	Providers []deviceProviderLink
@@ -222,8 +229,13 @@ func (h *Handler) devicePageApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.renderDevice(w, r, deviceApprovedTemplate, http.StatusOK,
-		devicePageData{Nonce: httpx.NonceFrom(r.Context())})
+	// The same token is handed back to the page, which is what makes the recovery path reachable rather
+	// than merely implemented. It is still valid, and presenting it at this handler again denies — which,
+	// after an approval, revokes it. See the template.
+	h.renderDevice(w, r, deviceApprovedTemplate, http.StatusOK, devicePageData{
+		Nonce: httpx.NonceFrom(r.Context()),
+		Token: form.Get("device_token"),
+	})
 }
 
 // deviceForm reads a posted form, or renders the failure and reports that it did.
@@ -286,6 +298,7 @@ func (h *Handler) renderDeviceApproval(w http.ResponseWriter, r *http.Request,
 		Token:      token,
 		UserCode:   FormatUserCode(row.UserCode),
 		DeviceName: row.DeviceName,
+		Account:    h.svc.describeAccount(r.Context(), userID),
 	})
 }
 
@@ -426,7 +439,9 @@ var deviceApproveTemplate = template.Must(template.New("device-approve").Parse(`
 </head>
 <body>
 <h1>Approve this device?</h1>
-<p>A device calling itself <strong>{{ .DeviceName }}</strong> is asking to sign in to your account.</p>
+<p>A device calling itself <strong>{{ .DeviceName }}</strong> is asking to sign in
+as <strong>{{ .Account }}</strong>.</p>
+<p class="note">If that is not the account you meant to use, press Deny and start again.</p>
 <p>It should be showing this code:</p>
 <p><code class="code">{{ .UserCode }}</code></p>
 <p class="error">If that code is not on a screen in front of you, press Deny. Somebody who sends you a code
@@ -456,6 +471,13 @@ var deviceApprovedTemplate = template.Must(template.New("device-approved").Parse
 <body>
 <h1>Device approved</h1>
 <p>You can close this page. The device will finish signing in within a few seconds.</p>
+<hr>
+<p class="note">Not what you meant to do? For the next few minutes this can still be stopped, and the
+device will never finish signing in.</p>
+<form method="post" action="/device/approve">
+  <input type="hidden" name="device_token" value="{{ .Token }}">
+  <button type="submit" name="decision" value="deny" class="deny">This wasn&#39;t me — stop it</button>
+</form>
 </body>
 </html>
 `))
