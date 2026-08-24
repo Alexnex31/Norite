@@ -218,6 +218,10 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		Email:        email,
 		PasswordHash: &hash,
 		DisplayName:  displayName,
+		// Unverified. Stated rather than left to the zero value, because the zero value being correct
+		// here is a coincidence of pgtype and not a decision anybody wrote down — and M10's next commits
+		// turn this column into the one that decides whether the account can sign in at all.
+		EmailVerifiedAt: pgtype.Timestamptz{},
 	})
 	if err != nil {
 		// Lost the race described above. Report it as the same conflict the pre-check would have — but only

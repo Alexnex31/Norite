@@ -5,8 +5,17 @@
 -- profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
 
 -- name: CreateUser :one
-INSERT INTO users (id, username, email, password_hash, display_name)
-VALUES ($1, $2, $3, $4, $5)
+-- email_verified_at is a parameter rather than a default, because the three callers disagree about it and
+-- each is right.
+--
+-- Registration passes NULL: the address is a claim until somebody follows a link sent to it. Bootstrap
+-- passes now(), because the operator proved filesystem access to the instance's own config, which is
+-- strictly more than an emailed link proves — asking them to check their mail to finish setting up a
+-- server they are holding the keys to would be theatre, and would make bootstrap impossible on an
+-- instance with no relay. The OAuth path has its own insert (CreateOAuthUser) because it creates an
+-- account with no password at all.
+INSERT INTO users (id, username, email, password_hash, display_name, email_verified_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetUserByID :one

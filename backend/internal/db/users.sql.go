@@ -7,21 +7,24 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createUser = `-- name: CreateUser :one
 
-INSERT INTO users (id, username, email, password_hash, display_name)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO users (id, username, email, password_hash, display_name, email_verified_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, username, email, password_hash, display_name, avatar_hash, email_verified_at, created_at, updated_at, deleted_at
 `
 
 type CreateUserParams struct {
-	ID           int64
-	Username     string
-	Email        string
-	PasswordHash *string
-	DisplayName  string
+	ID              int64
+	Username        string
+	Email           string
+	PasswordHash    *string
+	DisplayName     string
+	EmailVerifiedAt pgtype.Timestamptz
 }
 
 // Account queries.
@@ -29,6 +32,15 @@ type CreateUserParams struct {
 // Every read filters `deleted_at IS NULL`: a soft-deleted account keeps its row so authored content can
 // still render as "Deleted User", but it must never be findable for login, registration collision, or
 // profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
+// email_verified_at is a parameter rather than a default, because the three callers disagree about it and
+// each is right.
+//
+// Registration passes NULL: the address is a claim until somebody follows a link sent to it. Bootstrap
+// passes now(), because the operator proved filesystem access to the instance's own config, which is
+// strictly more than an emailed link proves — asking them to check their mail to finish setting up a
+// server they are holding the keys to would be theatre, and would make bootstrap impossible on an
+// instance with no relay. The OAuth path has its own insert (CreateOAuthUser) because it creates an
+// account with no password at all.
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
 	row := q.db.QueryRow(ctx, createUser,
 		arg.ID,
@@ -36,6 +48,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		arg.Email,
 		arg.PasswordHash,
 		arg.DisplayName,
+		arg.EmailVerifiedAt,
 	)
 	var i User
 	err := row.Scan(

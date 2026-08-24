@@ -428,6 +428,17 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 			Err:     err,
 		})
 
+	case errors.Is(err, ErrAlreadyBootstrapped):
+		// 409 rather than 403: the credential was accepted and the request was well formed, but the
+		// instance is in a state where this operation no longer applies. A 403 would read as "your
+		// operator token is wrong" and send somebody hunting for a config problem that is not there.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusConflict,
+			Code:    "already_bootstrapped",
+			Message: ErrAlreadyBootstrapped.Error(),
+			Err:     err,
+		})
+
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUsernameTaken):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
 
