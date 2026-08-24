@@ -79,6 +79,15 @@ var (
 	// existing account is still allowed — the gate is on new accounts, not on providers.
 	ErrOAuthRegistrationClosed = errors.New("registration on this instance requires an invite code")
 
+	// ErrOAuthSignupForDevice is a device-flow sign-up presented at the JSON completion endpoint.
+	//
+	// That flow finishes on the verification page's approval step, which is a browser screen this endpoint
+	// has no way to reach and no way to describe. Refused before anything is created rather than after:
+	// the alternative was creating the account and answering 200 with an empty code, which the contract
+	// says is required and which a client would then try to redeem.
+	ErrOAuthSignupForDevice = errors.New(
+		"this sign-up was started from a device verification page and has to be finished there")
+
 	// ErrOAuthProviderDeclined is the provider reporting its own failure on the callback — someone pressing
 	// "cancel" on the consent screen, almost always. An ordinary abandonment rather than a fault.
 	ErrOAuthProviderDeclined = errors.New("the sign-in was not completed at the provider")
@@ -86,8 +95,21 @@ var (
 
 // OAuthOutcome is what happened at the callback.
 type OAuthOutcome struct {
-	// ExchangeCode is set when the person is signed in and a client may now collect a token pair.
+	// UserID is the account this flow resolved to, or zero when there is no account yet and a username
+	// must be chosen. It is what SignedIn reports on.
+	UserID int64
+
+	// ExchangeCode is set when a client may now collect a token pair. Set on every signed-in flow except
+	// a device one, which has no client waiting on a code — see DeviceCodeID.
 	ExchangeCode string
+
+	// DeviceCodeID is set when this flow was started from the device verification page, and it changes
+	// where the callback ends: an approval page rather than a code or a redirect.
+	//
+	// No exchange code is minted on that path. The waiting client already holds a credential — its device
+	// code — and issuing a second redeemable value for the same sign-in would mean one nobody collects,
+	// sitting in the table until it expires.
+	DeviceCodeID int64
 
 	// SignupToken is set when there is no account yet and a username must be chosen. Mutually exclusive
 	// with ExchangeCode.
@@ -107,8 +129,11 @@ type OAuthOutcome struct {
 	ClientRedirectURI string
 }
 
-// SignedIn reports whether the flow completed against an existing account.
-func (o OAuthOutcome) SignedIn() bool { return o.ExchangeCode != "" }
+// SignedIn reports whether the flow resolved to an account rather than to a sign-up.
+//
+// On UserID rather than on ExchangeCode, which is what it used to read: a device flow signs somebody in
+// and mints no code, so the two stopped meaning the same thing at M9.
+func (o OAuthOutcome) SignedIn() bool { return o.UserID != 0 }
 
 // StartOAuthInput is what a client supplies to begin a sign-in.
 //
@@ -119,8 +144,14 @@ type StartOAuthInput struct {
 	Provider      string
 	FlowChallenge string
 	// ClientRedirectURI is a loopback listener to return to instead of rendering the callback's page.
-	// Optional: a browser has nowhere to be sent, and neither will the device-code flow.
+	// Optional: a browser has nowhere to be sent, and neither does a device flow.
 	ClientRedirectURI string
+	// DeviceToken is an entry continuation from the verification page, present exactly when this flow was
+	// started by somebody finishing a device-code sign-in (M9).
+	//
+	// Mutually exclusive with FlowChallenge, and one of the two is required. That is not FlowChallenge
+	// becoming optional — see StartOAuth.
+	DeviceToken string
 }
 
 // StartOAuth begins an authorization request and returns the URL to send the user to.
@@ -134,9 +165,9 @@ func (s *Service) StartOAuth(ctx context.Context, in StartOAuthInput) (string, e
 		return "", err
 	}
 
-	challenge, err := ParseOAuthFlowChallenge(in.FlowChallenge)
+	challenge, deviceCodeID, err := s.oauthFlowBinding(ctx, in)
 	if err != nil {
-		return "", ErrOAuthFlowChallenge
+		return "", err
 	}
 
 	// Validated before a state is minted or a row written. /authorize is unauthenticated, so a malformed
@@ -144,6 +175,11 @@ func (s *Service) StartOAuth(ctx context.Context, in StartOAuthInput) (string, e
 	redirect, err := ParseOAuthClientRedirect(in.ClientRedirectURI)
 	if err != nil {
 		return "", err
+	}
+	if deviceCodeID != 0 && redirect != "" {
+		// A device flow finishes on a page this instance renders, so there is no listener for it to be
+		// returned to. Accepting both would mean a flow with two exits and a question about which wins.
+		return "", ErrOAuthFlowChallenge
 	}
 
 	rawState, stateHash, err := GenerateOAuthState()
@@ -166,11 +202,70 @@ func (s *Service) StartOAuth(ctx context.Context, in StartOAuthInput) (string, e
 		ExpiresAt:     timestamptz(s.now().Add(OAuthStateTTL)),
 		// Canonical form, not what the client sent — see ParseOAuthClientRedirect.
 		ClientRedirectUri: redirect,
+		DeviceCodeID:      optionalID(deviceCodeID),
 	}); err != nil {
 		return "", fmt.Errorf("recording oauth state: %w", err)
 	}
 
 	return provider.AuthCodeURL(rawState, verifier), nil
+}
+
+// oauthFlowBinding resolves what this flow is bound to, and to what it will return.
+//
+// Exactly one of the two inputs, never both and never neither. A client redeeming a code presents a flow
+// challenge; a browser finishing a device sign-in presents the continuation the verification page gave it.
+// Requiring one of them keeps GenerateOAuthFlowVerifier's rule intact — an optional binding is not a
+// binding, because whoever wanted to skip it would simply start a flow without one.
+//
+// # What is stored in flow_challenge on the device path, and why it is not a challenge
+//
+// The SHA-256 of the continuation, so the column stays NOT NULL and a state row can be traced back to the
+// page visit that started it. Nothing verifies it later, and nothing should: there is no second party to
+// bind on this path. A challenge exists because a code produced by a flow must be redeemable only by the
+// client that began it — and a device flow produces no code. Somebody who stole this state and completed
+// it in their own browser would be shown an approval page for their own provider account, authorizing the
+// device they already control, which is not an attack. The risk on this path is a person being talked into
+// approving, and that is what the approval page is for.
+func (s *Service) oauthFlowBinding(ctx context.Context, in StartOAuthInput) (TokenHash, int64, error) {
+	if (in.FlowChallenge == "") == (in.DeviceToken == "") {
+		return nil, 0, ErrOAuthFlowChallenge
+	}
+
+	if in.DeviceToken != "" {
+		entry, err := s.parseDeviceToken(in.DeviceToken, deviceEntryTokenType)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		// The row is checked, not assumed, because the token outlives it. A continuation is good for ten
+		// minutes from the moment a code is entered and a device code for twenty from the moment it is
+		// issued, so one minted at minute nineteen is still valid after its row has expired and been
+		// swept. Without this, that person's click on "Google" reached CreateOAuthState with a foreign key
+		// pointing at nothing and got a 500 with a request ID — where the identical not-yet-swept case
+		// gets "that sign-in step has expired; start again". Same action, two answers, decided by when the
+		// sweeper last ran.
+		if _, err := s.deviceCodeByID(ctx, entry.DeviceCodeID); err != nil {
+			if errors.Is(err, ErrDeviceUserCode) {
+				return nil, 0, ErrDeviceContinuation
+			}
+			return nil, 0, err
+		}
+		return HashToken(in.DeviceToken), entry.DeviceCodeID, nil
+	}
+
+	challenge, err := ParseOAuthFlowChallenge(in.FlowChallenge)
+	if err != nil {
+		return nil, 0, ErrOAuthFlowChallenge
+	}
+	return challenge, 0, nil
+}
+
+// optionalID renders a zero id as SQL NULL, which is what a flow with no device attached stores.
+func optionalID(id int64) *int64 {
+	if id == 0 {
+		return nil
+	}
+	return &id
 }
 
 // OAuthCallbackInput is what arrives on the provider's redirect back to this instance.
@@ -243,16 +338,34 @@ func (s *Service) CompleteOAuth(ctx context.Context, in OAuthCallbackInput) (OAu
 	// The redirect comes from the row, never from in — the callback's own URL is written by whoever is
 	// presenting it, and this value decides where a credential is delivered. Fixed when the flow started;
 	// see the column's comment in 000006.
-	outcome, err := s.resolveOAuthIdentity(ctx, identity, state.FlowChallenge, state.ClientRedirectUri)
+	outcome, err := s.resolveOAuthIdentity(ctx, identity, oauthDestination{
+		Challenge:    state.FlowChallenge,
+		Redirect:     state.ClientRedirectUri,
+		DeviceCodeID: state.DeviceCodeID,
+	})
 	if err != nil {
 		return fail(err)
 	}
 	return outcome, nil
 }
 
+// oauthDestination is where a completed flow is meant to end, read out of the state row the callback
+// consumed and never out of the callback's own URL.
+//
+// A struct because there are now three of them and two are strings. Which one is set decides the shape of
+// the answer: a loopback redirect, a device approval page, or the rendered code page every browser gets.
+type oauthDestination struct {
+	Challenge    TokenHash
+	Redirect     string
+	DeviceCodeID *int64
+}
+
+// forDevice reports whether this flow was started from the device verification page.
+func (d oauthDestination) forDevice() bool { return d.DeviceCodeID != nil }
+
 // resolveOAuthIdentity decides what an authenticated provider identity means for this instance.
 func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdentity,
-	challenge TokenHash, redirect string,
+	dest oauthDestination,
 ) (OAuthOutcome, error) {
 	log := logging.FromContext(ctx)
 
@@ -262,11 +375,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		ProviderUserID: identity.UserID,
 	})
 	if err == nil {
-		code, err := s.issueOAuthExchangeCode(ctx, existing.UserID, challenge)
-		if err != nil {
-			return OAuthOutcome{}, err
-		}
-		return OAuthOutcome{ExchangeCode: code, ClientRedirectURI: redirect}, nil
+		return s.signedInOutcome(ctx, existing.UserID, dest)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return OAuthOutcome{}, fmt.Errorf("looking up oauth identity: %w", err)
@@ -297,11 +406,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if err := s.linkOAuthIdentity(ctx, user.ID, identity); err != nil {
 			return OAuthOutcome{}, err
 		}
-		code, err := s.issueOAuthExchangeCode(ctx, user.ID, challenge)
-		if err != nil {
-			return OAuthOutcome{}, err
-		}
-		return OAuthOutcome{ExchangeCode: code, ClientRedirectURI: redirect}, nil
+		return s.signedInOutcome(ctx, user.ID, dest)
 
 	case errors.Is(err, pgx.ErrNoRows):
 		// Nobody owns the address — which does not mean nobody owns the *mailbox*. Creating an account from
@@ -324,7 +429,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
 		}
-		token, err := s.issueOAuthSignupToken(identity, challenge, redirect)
+		token, err := s.issueOAuthSignupToken(identity, dest)
 		if err != nil {
 			return OAuthOutcome{}, err
 		}
@@ -332,12 +437,39 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 			SignupToken:       token,
 			SuggestedUsername: suggestUsername(identity),
 			Email:             email,
-			ClientRedirectURI: redirect,
+			ClientRedirectURI: dest.Redirect,
+			DeviceCodeID:      derefID(dest.DeviceCodeID),
 		}, nil
 
 	default:
 		return OAuthOutcome{}, fmt.Errorf("looking up account by email: %w", err)
 	}
+}
+
+// signedInOutcome builds what the callback returns once a flow has resolved to an account.
+//
+// The split between the two shapes lives here rather than in the handler, because it is a statement about
+// what was minted: a device flow ends on a page this instance renders and the person has still to approve,
+// so there is no code, and minting one anyway would leave a redeemable value nobody collects.
+func (s *Service) signedInOutcome(ctx context.Context, userID int64, dest oauthDestination,
+) (OAuthOutcome, error) {
+	if dest.forDevice() {
+		return OAuthOutcome{UserID: userID, DeviceCodeID: *dest.DeviceCodeID}, nil
+	}
+
+	code, err := s.issueOAuthExchangeCode(ctx, userID, dest.Challenge)
+	if err != nil {
+		return OAuthOutcome{}, err
+	}
+	return OAuthOutcome{UserID: userID, ExchangeCode: code, ClientRedirectURI: dest.Redirect}, nil
+}
+
+// derefID reads an optional device-code id back out.
+func derefID(id *int64) int64 {
+	if id == nil {
+		return 0
+	}
+	return *id
 }
 
 // linkOAuthIdentity records the link between a provider account and an existing Norite account.
@@ -407,10 +539,17 @@ func (s *Service) classifyLinkConflict(ctx context.Context, userID int64, identi
 
 // OAuthSignupResult is a completed sign-up: something redeemable, and where to deliver it.
 type OAuthSignupResult struct {
+	// UserID is the account that was just created.
+	UserID int64
+	// ExchangeCode is what the client trades for a token pair, or empty on a device flow — see
+	// signedInOutcome for why nothing is minted there.
 	ExchangeCode string
 	// ClientRedirectURI is the listener the flow was started with, carried across the form inside the
 	// continuation token. Empty for a flow that named none.
 	ClientRedirectURI string
+	// DeviceCodeID is the authorization waiting on this sign-up, or zero. Also carried inside the
+	// signature rather than in the form.
+	DeviceCodeID int64
 }
 
 // CompleteOAuthSignup creates the account a signup token stands for, once a username has been chosen.
@@ -422,7 +561,12 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		// listener — the same boundary CompleteOAuth has around state consumption.
 		return OAuthSignupResult{}, err
 	}
-	identity, challenge := continuation.Identity, continuation.Challenge
+	identity := continuation.Identity
+	dest := oauthDestination{
+		Challenge:    continuation.Challenge,
+		Redirect:     continuation.ClientRedirectURI,
+		DeviceCodeID: optionalID(continuation.DeviceCodeID),
+	}
 
 	// Failures from here on know where a client is waiting, and the ones that end the flow say so. A
 	// username that can simply be retyped is deliberately *not* wrapped: the form re-renders, the person
@@ -515,11 +659,18 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		return fail(err)
 	}
 
-	code, err := s.issueOAuthExchangeCode(ctx, user.ID, challenge)
+	// A device sign-up mints no code, exactly as a device sign-in does not: the person still has to
+	// approve, and the waiting client already holds the credential it will redeem.
+	if dest.forDevice() {
+		return OAuthSignupResult{UserID: user.ID, DeviceCodeID: continuation.DeviceCodeID}, nil
+	}
+
+	code, err := s.issueOAuthExchangeCode(ctx, user.ID, dest.Challenge)
 	if err != nil {
 		return fail(err)
 	}
 	return OAuthSignupResult{
+		UserID:            user.ID,
 		ExchangeCode:      code,
 		ClientRedirectURI: continuation.ClientRedirectURI,
 	}, nil

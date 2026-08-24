@@ -441,7 +441,8 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong),
 		errors.Is(err, ErrUnknownScope), errors.Is(err, ErrInvalidUsername),
 		errors.Is(err, ErrInvalidTokenName), errors.Is(err, ErrOAuthFlowChallenge),
-		errors.Is(err, ErrOAuthClientRedirect):
+		errors.Is(err, ErrOAuthClientRedirect), errors.Is(err, ErrDeviceContinuation),
+		errors.Is(err, ErrOAuthSignupForDevice):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
 
 	case errors.Is(err, ErrUnknownProvider):
@@ -492,6 +493,14 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		// One answer for expired, spent, unknown, and issued-to-a-since-changed-address. Distinguishing
 		// them tells whoever holds a stolen link which of those it is.
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid or expired password reset token"))
+
+	case errors.Is(err, ErrDeviceFlowUnavailable):
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusServiceUnavailable,
+			Code:    "device_flow_unavailable",
+			Message: "the device sign-in flow is unavailable: this instance has no public base URL configured",
+			Err:     err,
+		})
 
 	case errors.Is(err, ErrResetUnavailable):
 		httpx.WriteError(w, r, &httpx.StatusError{

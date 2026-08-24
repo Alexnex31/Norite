@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
@@ -64,9 +65,15 @@ type Options struct {
 	Provider string
 	// NoBrowser prints the sign-in URL instead of launching anything, and keeps listening.
 	//
-	// It does not mean "headless": a machine with no browser at all is M9's device-code flow. This is for
+	// It does not mean "headless": a machine with no browser at all is what DeviceCode is for. This is for
 	// SSH with a forwarded port, and for anyone whose default browser opens the wrong profile.
 	NoBrowser bool
+	// DeviceCode signs in with a code completed in a browser on another device.
+	//
+	// Chosen automatically when a provider sign-in is asked for and no browser is reachable here, which is
+	// the case it exists for; this flag is for asking deliberately — most often to keep a password off a
+	// machine somebody is only visiting.
+	DeviceCode bool
 }
 
 // Runner performs a login. Its dependencies are injected so the whole flow is testable without a terminal,
@@ -98,6 +105,14 @@ type Runner struct {
 	// loopbackPorts overrides the built-in list, so tests never contend for a fixed port on a machine
 	// running several packages at once.
 	loopbackPorts []int
+	// browserReachable answers whether a browser on this machine can be put in front of the person. Nil in
+	// production, where the real detection runs; a test sets it so the platform rules and the flow that
+	// depends on them can be exercised separately.
+	browserReachable func() bool
+	// after and now are the device-code poll loop's clock, so a twenty-minute flow runs instantly in a
+	// test. Both nil in production.
+	after func(time.Duration) <-chan time.Time
+	now   func() time.Time
 }
 
 // session is what both sign-in methods need, and what the tail below consumes.
@@ -116,6 +131,15 @@ type session struct {
 // Three parts, and the split is the shape M8 needed: everything before a credential exists is shared,
 // everything after it is shared, and only the middle differs between a password and a provider.
 func (r *Runner) Run(ctx context.Context) error {
+	// Before anything else, and before the flow is chosen. A typo in --provider used to be caught inside
+	// the OAuth path, which stopped being good enough the moment a second path could be taken instead: on
+	// a machine with no browser the device flow runs, ignores --provider entirely, and `--provider gooogle`
+	// silently becomes a working sign-in that never mentions the typo. Where a mistake is reported must
+	// not depend on what machine it was made on.
+	if err := checkProvider(r.Options.Provider); err != nil {
+		return err
+	}
+
 	s, err := r.prepare()
 	if err != nil {
 		return err
@@ -123,9 +147,12 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	var pair tokenPair
 	var fallbackName string
-	if provider := r.Options.Provider; provider != "" {
-		pair, err = r.signInWithOAuth(ctx, s, provider)
-	} else {
+	switch {
+	case r.chooseDeviceCode():
+		pair, err = r.signInWithDeviceCode(ctx, s)
+	case r.Options.Provider != "":
+		pair, err = r.signInWithOAuth(ctx, s, r.Options.Provider)
+	default:
 		pair, fallbackName, err = r.signInWithPassword(ctx, s)
 	}
 	if err != nil {
@@ -133,6 +160,51 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	return r.finish(ctx, s, pair, fallbackName)
+}
+
+// chooseDeviceCode decides between the two browser flows, and announces the decision when it is one
+// nobody asked for.
+//
+// Asked for, or detected. The detection is deliberately narrow: it only ever redirects a sign-in that was
+// already going to need a browser, so a bare `norite login` with a password is untouched no matter what
+// this machine is. Somebody over SSH who types a password should get exactly what they typed.
+//
+// The printing lives here rather than inside the predicate underneath it, which is where it used to be.
+// A boolean method with a side effect is correct only while it is called exactly once, and the second
+// caller — a log line naming the chosen flow, a --dry-run, a re-check after prepare fails — prints the
+// notice again or prints it on a path that then does not take this flow at all.
+func (r *Runner) chooseDeviceCode() bool {
+	chosen, detected := r.wantsDeviceCode()
+	if detected {
+		// Never silent, for the reason ADR 0025 gives about the keyring fallback: a degradation nobody is
+		// told about is one discovered later, at a worse time.
+		r.printf("%s\n\n", deviceCodeFallbackNotice(r.Options.Provider))
+	}
+	return chosen
+}
+
+// wantsDeviceCode answers the question and nothing else. The second return is whether the answer was
+// arrived at rather than asked for, which is the only case worth announcing.
+func (r *Runner) wantsDeviceCode() (chosen, detected bool) {
+	if r.Options.DeviceCode {
+		return true, false
+	}
+	if r.Options.Provider == "" || r.Options.NoBrowser {
+		// --no-browser is a deliberate "print the link, I will open it myself", which works over SSH with
+		// a forwarded port. Overriding it here would take away the one flow it exists to provide.
+		return false, false
+	}
+	if !r.browserIsReachable() {
+		return true, true
+	}
+	return false, false
+}
+
+func (r *Runner) browserIsReachable() bool {
+	if r.browserReachable != nil {
+		return r.browserReachable()
+	}
+	return browserReachable()
 }
 
 // prepare works out where this login is going and who is doing it, before any credential exists.
@@ -277,9 +349,8 @@ func (r *Runner) resolveEmail() (string, error) {
 		return email, nil
 	}
 	if !r.Interactive {
-		return "", fmt.Errorf("%w: pass --email, or run it from a terminal. (--provider signs in "+
-			"through a browser and needs one to be openable, not a terminal — M9 adds the flow for a "+
-			"machine with neither.)", ErrNoTerminal)
+		return "", fmt.Errorf("%w: pass --email, or run it from a terminal. (--device-code needs "+
+			"neither, and completes the sign-in in a browser on another device.)", ErrNoTerminal)
 	}
 
 	email, err := r.ReadLine("Email: ")
@@ -299,9 +370,8 @@ func (r *Runner) resolvePassword() (string, error) {
 		return password, nil
 	}
 	if !r.Interactive {
-		return "", fmt.Errorf("%w: set %s, or run it from a terminal. (--provider signs in through a "+
-			"browser and needs one to be openable, not a terminal — M9 adds the flow for a machine with "+
-			"neither.)", ErrNoTerminal, passwordEnvVar)
+		return "", fmt.Errorf("%w: set %s, or run it from a terminal. (--device-code needs neither, "+
+			"and completes the sign-in in a browser on another device.)", ErrNoTerminal, passwordEnvVar)
 	}
 
 	password, err := r.ReadSecret("Password: ")

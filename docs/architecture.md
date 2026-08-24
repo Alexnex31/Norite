@@ -241,12 +241,42 @@ CREATE TABLE api_tokens (                      -- scoped personal/bot tokens, re
   created_at timestamptz NOT NULL DEFAULT now(), last_used_at timestamptz NULL, revoked_at timestamptz NULL
 );
 
-CREATE TABLE device_code (                     -- CLI headless/SSH OAuth fallback
-  code varchar(16) PRIMARY KEY, user_code varchar(9) UNIQUE NOT NULL,   -- short human-typeable code
-  status smallint NOT NULL DEFAULT 0,          -- 0 pending, 1 completed, 2 expired
-  session_id bigint NULL REFERENCES sessions(id),
+CREATE TABLE device_codes (                    -- CLI headless/SSH sign-in (M9, ADR 0028)
+  id bigint PRIMARY KEY,
+  device_code_hash bytea NOT NULL,             -- SHA-256; this half redeems for a token pair
+  user_code varchar(9) NOT NULL,               -- the half a person types; plaintext, see below
+  device_id text NOT NULL, device_name text NOT NULL,   -- captured at issuance: the session is scoped to
+                                                        -- device_id, and the browser approving has no idea
+                                                        -- what it is
+  user_id bigint NULL REFERENCES users(id) ON DELETE CASCADE,   -- set on approval; NULL is "still waiting"
+  denied_at timestamptz NULL,                  -- pressing Deny, distinct from an expiry so a client stops
+  consumed_at timestamptz NULL,                -- single-use lives in ConsumeDeviceCode's WHERE
+  last_polled_at timestamptz NULL,             -- the interval, advisory (RFC 8628 §3.5 slow_down)
   created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL
 );
+CREATE UNIQUE INDEX ON device_codes (device_code_hash);
+CREATE UNIQUE INDEX ON device_codes (user_code);       -- also what collision-on-generate retries against
+CREATE INDEX ON device_codes (expires_at);             -- the sweep; non-partial, see 000005
+```
+
+Three things above differ from what this section specified before M9 built it, and each is a rule this
+codebase does not bend. **The device code is hashed**, because it is redeemable for a token pair and every
+credential here is stored only as its SHA-256. **There is no status column**, because "expired" is
+`expires_at` and a second copy of a fact can disagree with the first. **There is no `session_id`**, because
+approval cannot create the session: a session is scoped to one `device_id` and the approving browser does
+not know the waiting client's, and the raw refresh token could not be kept here to hand over later anyway.
+The row records *who* approved; the session is minted at poll time by the request that carries the device
+identity, exactly as the OAuth exchange does.
+
+**The user code is deliberately not hashed**, which is the one credential-shaped exception in this schema.
+It is not a bearer credential — whoever holds it must still authenticate as themselves and press Approve,
+and what that authorizes is somebody else's machine acting as *their* account, so a stolen user code buys
+an attacker the ability to give their own account away. And it has to be readable back: the approval page
+shows it so a person can compare it against the screen that produced it, which is where this flow's real
+defense is (§14.21), and the OAuth callback reaching that page arrives holding a state row and an account,
+never what somebody typed.
+
+```sql
 
 CREATE TABLE password_reset_tokens (
   id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -633,9 +663,14 @@ GET    /auth/oauth/{provider}/callback
 POST   /auth/oauth/exchange              -- trade the callback's one-time code for a token pair
 POST   /auth/oauth/complete              -- finish a sign-up by choosing a username (M6)
 POST   /oauth/signup                     -- the same, as the form the rendered page submits (root, HTML)
-POST   /auth/device/code                  -- CLI headless device-code flow: issue a code
-GET    /auth/device/code/{code}           -- poll for completion
-GET    /auth/device                       -- minimal server-rendered completion page (enter code, log in)
+POST   /auth/device/code                  -- CLI headless device-code flow: issue a code (M9)
+POST   /auth/device/token                 -- poll for completion; POST because it spends the code and
+                                          --   starts a session, which rule 4 forbids a GET from doing,
+                                          --   and because a path is logged and this one is a credential
+GET    /device                            -- the verification page (root, HTML): enter the code
+POST   /device                            -- ...look it up, and offer the ways to sign in
+POST   /device/signin                     -- ...the password branch; a provider is a link to /authorize
+POST   /device/approve                    -- ...approve or deny, a separate step on purpose (§14.21)
 POST   /auth/tokens                       -- mint a scoped api_token
 DELETE /auth/tokens/{id}
 
@@ -778,7 +813,11 @@ named a loopback listener, `302`s to it carrying the code (M8,
 without the flow verifier that never left the client, on a hop that never leaves the machine.
 
 Two CLI login paths: a system-browser-plus-loopback-listener flow, and a headless/SSH device-code fallback
-(`device_code` table, minimal server-rendered completion page, independent of the web SPA). **What is
+(`device_codes` table, server-rendered verification page at `/device`, independent of the web SPA). The
+second is **detected, not asked for** — a provider sign-in on a machine where no browser can be reached
+falls back to it and says so, while a password login is left alone; `--device-code` asks for it directly,
+and `--no-browser` keeps its own meaning of "print the link, I will open it myself" (M9, ADR 0028). It is
+the only way an account with no password signs in on a server, which is why it exists at all. **What is
 registered with Google and GitHub is this instance's own callback**,
 `{public_base_url}/api/v1/auth/oauth/{provider}/callback`, and nothing else — the provider never sees the
 loopback URI, which is a second hop it has no opinion about. The instance validates that URI by host
@@ -1627,6 +1666,33 @@ E2E key-boundary violations.
 
 20. **Testing security properties**: adversarial `Resolve` unit tests, cross-guild access-control integration
     tests, and (new) an automated test asserting the export asymmetries (blocks, reports) hold.
+
+21. **Device-code phishing** (M9, ADR 0028): the one threat in this system that no amount of correct
+    cryptography prevents. An attacker starts a device authorization on their own machine, sends the user
+    code to a victim — "enter this to verify your account" — and the victim, who signs in legitimately and
+    presses Approve, has authorized the attacker's machine to act as them. It is not hypothetical; there
+    have been real campaigns against other implementations of this grant.
+
+    What is done about it, all of it on the verification page rather than in the protocol: **approval is a
+    separate, explicit step** after authenticating, never implied by a successful sign-in; the page **names
+    the device** asking and **shows the code back** so it can be compared against the screen that produced
+    it; the wording says plainly that a code somebody sent you is a request to sign them in as you; a
+    decision that is neither approve nor deny **denies**, because failing open here means authorizing a
+    machine nobody chose to. There is deliberately **no `verification_uri_complete`** — a URL carrying the
+    code turns the whole attack into one click (RFC 8628 §3.3.1, §5.4), and the `?code=` parameter the page
+    does accept only prefills a field that still has to be submitted.
+
+    One qualification on "no code-carrying URL", found by review: the page's provider buttons are links
+    carrying a continuation that is not bound to the browser it was issued to, so an attacker holding one
+    can carry a victim past the code-entry step. It does not carry them past the *approval* step, which is
+    where the defense is — so the property that holds is "no link reaches an authorized device without a
+    human decision on a page that names it", not "no link skips a step". Binding that continuation needs a
+    browser session, which this surface does not have until Phase O.
+
+    The residual risk belongs to the flow, not to this implementation, and is stated rather than implied:
+    somebody who is talked all the way through those screens is signed in to an attacker's device. `Deny`
+    exists so that realizing it a moment later is actionable — it revokes an approval the waiting client
+    has not yet collected, so the sign-in never completes — and it says plainly when it was too late.
 
 ## 15. Performance & Optimization (deep dive)
 

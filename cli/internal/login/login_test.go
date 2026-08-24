@@ -101,6 +101,15 @@ func testRunner(t *testing.T, f *fakeInstance, opts Options) (*Runner, *credenti
 		ReadSecret:  func(string) (string, error) { return "a correct passphrase", nil },
 		Interactive: true,
 		Hostname:    func() (string, error) { return "ada-laptop", nil },
+
+		// Pinned here rather than left to the machine, and it is the default every test in this package
+		// starts from — one that wants the other answer says so.
+		//
+		// From M9 a provider sign-in checks whether a browser can be reached and takes the device-code
+		// path when it cannot, so an unpinned suite quietly tests a different flow on a runner with no
+		// DISPLAY than on a desktop. That is not hypothetical: it turned fourteen of M8's tests red in CI
+		// while every one of them passed locally.
+		browserReachable: func() bool { return true },
 	}, store, out
 }
 

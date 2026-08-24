@@ -129,6 +129,48 @@ func TestMigrateGivesUpWhenTheLockIsNeverReleased(t *testing.T) {
 	assert.Contains(t, err.Error(), "pg_locks", "the error should tell an operator where to look")
 }
 
+// The same message, whichever way the deadline is noticed — which is not one way.
+//
+// The wait loop selects on ctx.Done() and a poll timer, and Go picks uniformly among ready cases, so
+// whenever the timeout is a whole multiple of the poll interval the two are ready together and it is a
+// coin flip which branch runs. The timer winning means the next query carries an already-expired context
+// and fails inside pgx instead. A timeout shorter than one poll interval takes that path every time.
+//
+// This failed in CI on the one-second case above before it was fixed, reporting pgx's "context already
+// done" and none of what an operator needs. Each timeout here is chosen to force a different branch.
+func TestTheLockTimeoutIsReportedTheSameWayHoweverItIsNoticed(t *testing.T) {
+	dsn := freshDatabase(t)
+	ctx := context.Background()
+
+	holder, err := pgx.Connect(ctx, dsn)
+	require.NoError(t, err)
+	defer func() { _ = holder.Close(context.Background()) }()
+
+	var acquired bool
+	require.NoError(t, holder.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", MigrationAdvisoryLockKey).Scan(&acquired))
+	require.True(t, acquired)
+
+	for _, tc := range []struct {
+		why     string
+		timeout time.Duration
+	}{
+		{"expired before the first query even runs", time.Nanosecond},
+		{"exactly one poll interval, so the timer and the deadline race", lockPollInterval},
+		{"a whole multiple of the poll interval, the case CI hit", 4 * lockPollInterval},
+		{"not a multiple, so the deadline lands mid-sleep", 3 * lockPollInterval / 2},
+	} {
+		opts := migrateOptions(dsn)
+		opts.LockTimeout = tc.timeout
+
+		err := Migrate(ctx, opts)
+		require.Error(t, err, tc.why)
+		assert.ErrorIs(t, err, context.DeadlineExceeded, tc.why)
+		assert.Contains(t, err.Error(), "timed out", tc.why)
+		assert.Contains(t, err.Error(), "pg_locks",
+			"%s: an operator needs to be told where to look however this was noticed", tc.why)
+	}
+}
+
 // Canceling the context (SIGTERM during startup) must abort the wait promptly.
 func TestMigrateHonorsContextCancellationWhileWaiting(t *testing.T) {
 	dsn := freshDatabase(t)
@@ -155,6 +197,10 @@ func TestMigrateHonorsContextCancellationWhileWaiting(t *testing.T) {
 	case err := <-done:
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.Canceled)
+		// And it does not call it a timeout. A SIGTERM during startup is not a stuck migration, and
+		// saying so would send an operator to pg_locks looking for a process that was never there.
+		assert.NotContains(t, err.Error(), "timed out")
+		assert.Contains(t, err.Error(), "canceled")
 	case <-time.After(10 * time.Second):
 		t.Fatal("Migrate ignored context cancellation")
 	}

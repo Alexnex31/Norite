@@ -104,6 +104,18 @@ func acquireMigrationLock(ctx context.Context, conn *pgx.Conn, timeout time.Dura
 	for {
 		var acquired bool
 		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", MigrationAdvisoryLockKey).Scan(&acquired); err != nil {
+			// A query that failed because the wait is over is the wait ending, not a database problem, and
+			// it has to be reported as one — otherwise the poll that straddles the deadline answers with
+			// pgx's "context already done" and loses the only message that says where to look.
+			//
+			// Not a rare race. The bottom of this loop selects on ctx.Done() and a poll timer, and Go
+			// picks uniformly among ready cases — so whenever the timeout is a whole multiple of
+			// lockPollInterval the two are ready together and it is a coin flip which one wins. A timeout
+			// shorter than one interval loses every time, because the first query already carries an
+			// expired context.
+			if ctx.Err() != nil {
+				return lockWaitEnded(ctx, timeout)
+			}
 			return fmt.Errorf("migrate: could not take the migration advisory lock: %w", err)
 		}
 		if acquired {
@@ -123,12 +135,25 @@ func acquireMigrationLock(ctx context.Context, conn *pgx.Conn, timeout time.Dura
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("migrate: timed out after %s waiting for the migration advisory lock "+
-				"(another process may be stuck mid-migration; check pg_locks for objid %d): %w",
-				timeout, MigrationAdvisoryLockKey, ctx.Err())
+			return lockWaitEnded(ctx, timeout)
 		case <-time.After(lockPollInterval):
 		}
 	}
+}
+
+// lockWaitEnded reports why the wait for the lock stopped, which is two different things.
+//
+// A deadline means somebody should go and look at pg_locks, and the message says so with the objid to look
+// for. A cancellation means this process was asked to stop — a SIGTERM during startup, most often — and
+// telling that operator a migration timed out would send them hunting for a stuck process that does not
+// exist. Both wrap ctx.Err(), so errors.Is still distinguishes them for a caller.
+func lockWaitEnded(ctx context.Context, timeout time.Duration) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("migrate: timed out after %s waiting for the migration advisory lock "+
+			"(another process may be stuck mid-migration; check pg_locks for objid %d): %w",
+			timeout, MigrationAdvisoryLockKey, ctx.Err())
+	}
+	return fmt.Errorf("migrate: canceled while waiting for the migration advisory lock: %w", ctx.Err())
 }
 
 // releaseMigrationLock drops the advisory lock. A failure here is logged, not returned: the migration

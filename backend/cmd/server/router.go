@@ -38,6 +38,19 @@ type routerOptions struct {
 // requests — the two are counted independently (see internal/platform/ratelimit).
 const authRateLimit = "20-M"
 
+// devicePollRateLimit is the bucket the device-code endpoints sit in.
+//
+// The auth bucket is the wrong shape here in a way that would break the flow rather than protect it: a
+// client polling at the documented five-second interval spends twelve requests a minute, which on its own
+// is most of that bucket, and two people signing in from behind one NAT would throttle each other off the
+// instance. So it counts separately and is sized for what a well-behaved client actually does, with room
+// for a handful of them at once.
+//
+// Still a ceiling rather than an exemption. A poll is one indexed lookup and, at most once, a session
+// insert — cheap, but the endpoint is unauthenticated and takes a credential, so it gets a limit like
+// everything else that does.
+const devicePollRateLimit = "120-M"
+
 // newRouter assembles the HTTP router and its middleware chain.
 //
 // The chain order is fixed by docs/architecture.md §2 and is load-bearing rather than stylistic:
@@ -65,6 +78,14 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 	authLimiter, err := ratelimit.Middleware(ratelimit.Options{
 		Rate:   authRateLimit,
 		Bucket: "auth",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	devicePollLimiter, err := ratelimit.Middleware(ratelimit.Options{
+		Rate:   devicePollRateLimit,
+		Bucket: "device-poll",
 	})
 	if err != nil {
 		return nil, err
@@ -135,6 +156,10 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			r.Use(authLimiter)
 			r.Use(httpx.HTMLPage)
 			opts.Auth.PageRoutes(r)
+			// The device-code verification pages, in the same bucket for the same reason: /device is
+			// where a user code is guessed at, and /device/signin takes a password. Both are exactly the
+			// kind of endpoint that bucket exists for.
+			opts.Auth.DevicePageRoutes(r)
 		})
 	}
 
@@ -157,6 +182,21 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 				// /exchange spends a credential, so both are worth counting separately from ordinary API
 				// traffic.
 				opts.Auth.OAuthRoutes(r)
+			})
+			// The device-code endpoints, in two buckets rather than one, because the two halves have
+			// opposite shapes. Issuing mints a database row per call and happens once per sign-in, so it
+			// carries the stricter bucket for exactly the reason /authorize does. Polling is repetitive by
+			// design — twelve requests a minute at the documented interval — and the bucket that stops
+			// repetition would throttle a well-behaved client off the instance, so it counts separately.
+			r.Route("/auth/device", func(r chi.Router) {
+				r.Group(func(r chi.Router) {
+					r.Use(authLimiter)
+					opts.Auth.DeviceIssueRoutes(r)
+				})
+				r.Group(func(r chi.Router) {
+					r.Use(devicePollLimiter)
+					opts.Auth.DevicePollRoutes(r)
+				})
 			})
 			r.Route("/users", opts.Auth.UserRoutes)
 		}

@@ -24,14 +24,24 @@ import (
 // offers — this list is about spelling, not about configuration.
 var oauthProviders = []string{"github", "google"}
 
+// oauthProviderLabels are the names to print. A table rather than capitalizing the first letter, because
+// that rule produces "Github", which is wrong, and no rule produces "GitHub" — the backend's verification
+// page carries the same table for the same reason.
+var oauthProviderLabels = map[string]string{
+	"github": "GitHub",
+	"google": "Google",
+}
+
+// providerLabel names a provider for a person, falling back to whatever was asked for.
+func providerLabel(provider string) string {
+	if label, ok := oauthProviderLabels[provider]; ok {
+		return label
+	}
+	return provider
+}
+
 // signInWithOAuth runs the browser flow and returns the pair it produced.
 func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string) (tokenPair, error) {
-	if !slices.Contains(oauthProviders, provider) {
-		return tokenPair{}, fmt.Errorf(
-			"unknown sign-in provider %q: this client knows %s, and the instance decides which it offers",
-			termsafe.Text(provider), strings.Join(oauthProviders, " and "))
-	}
-
 	listener, err := listenLoopback(r.ports())
 	if err != nil {
 		return tokenPair{}, err
@@ -62,7 +72,7 @@ func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string
 			if failFast {
 				return tokenPair{}, fmt.Errorf(
 					"could not open a browser (%s), and there is no terminal for anyone to read the "+
-						"sign-in link from; sign in with a password, or run this where a browser can open",
+						"sign-in link from; use --device-code, which needs neither",
 					termsafe.Text(err.Error()))
 			}
 			// Sanitized because it can carry an OS message and a path, and because it is printed rather
@@ -86,6 +96,21 @@ func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string
 		DeviceID:     s.deviceID,
 		DeviceName:   s.deviceName,
 	})
+}
+
+// checkProvider refuses a name this client does not know, before any flow is chosen.
+//
+// Checked locally so a typo fails at the terminal rather than as a 404 page in a browser, after a listener
+// has been bound and a request made — and now also rather than as a device-code sign-in that quietly
+// ignores the flag. The instance remains the authority on which providers it actually offers; this is
+// about spelling.
+func checkProvider(provider string) error {
+	if provider == "" || slices.Contains(oauthProviders, provider) {
+		return nil
+	}
+	return fmt.Errorf(
+		"unknown sign-in provider %q: this client knows %s, and the instance decides which it offers",
+		termsafe.Text(provider), strings.Join(oauthProviders, " and "))
 }
 
 // launchBrowser opens a URL. Indirected for tests; production leaves the field nil.

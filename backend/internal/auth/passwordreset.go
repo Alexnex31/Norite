@@ -204,6 +204,12 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 		if _, err := q.RevokeOAuthExchangeCodesForUser(ctx, token.UserID); err != nil {
 			return fmt.Errorf("revoking oauth exchange codes: %w", err)
 		}
+		// And any device authorization already approved but not yet collected, which is the same kind of
+		// outstanding claim on the account for the same reason (M9). A code still waiting for approval
+		// belongs to nobody yet and is correctly untouched.
+		if _, err := q.RevokeDeviceCodesForUser(ctx, &token.UserID); err != nil {
+			return fmt.Errorf("revoking device codes: %w", err)
+		}
 		return nil
 	})
 }

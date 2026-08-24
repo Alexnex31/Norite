@@ -39,7 +39,7 @@ const consumeOAuthState = `-- name: ConsumeOAuthState :one
 UPDATE oauth_states
 SET consumed_at = now()
 WHERE state_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri, device_code_id
 `
 
 // Spends a state, with single-use and expiry both in the WHERE clause rather than in Go.
@@ -61,6 +61,7 @@ func (q *Queries) ConsumeOAuthState(ctx context.Context, stateHash []byte) (Oaut
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.ClientRedirectUri,
+		&i.DeviceCodeID,
 	)
 	return i, err
 }
@@ -137,10 +138,10 @@ func (q *Queries) CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdenti
 const createOAuthState = `-- name: CreateOAuthState :one
 
 INSERT INTO oauth_states (
-  id, state_hash, provider, code_verifier, flow_challenge, expires_at, client_redirect_uri
+  id, state_hash, provider, code_verifier, flow_challenge, expires_at, client_redirect_uri, device_code_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, state_hash, provider, code_verifier, flow_challenge, created_at, expires_at, consumed_at, client_redirect_uri, device_code_id
 `
 
 type CreateOAuthStateParams struct {
@@ -151,15 +152,19 @@ type CreateOAuthStateParams struct {
 	FlowChallenge     []byte
 	ExpiresAt         pgtype.Timestamptz
 	ClientRedirectUri string
+	DeviceCodeID      *int64
 }
 
 // OAuth sign-in queries.
 //
 // Two tables with very different lifetimes: oauth_identities is a permanent link between an account and a
 // provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
-// client_redirect_uri is ” for a flow with nowhere to return to — a browser, and the device-code path.
-// It is written once here and only ever read back out of the row ConsumeOAuthState spends, which is what
-// keeps the destination a property of the flow rather than of whoever presents the callback.
+// Two columns decide where a completed flow ends, and at most one of them is ever set.
+//
+// client_redirect_uri is ” for a flow with nowhere to return to — a browser, and a device flow.
+// device_code_id is NULL except for a flow started from the device verification page (M9). Both are
+// written once here and only ever read back out of the row ConsumeOAuthState spends, which is what keeps
+// the destination a property of the flow rather than of whoever presents the callback.
 func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) (OauthState, error) {
 	row := q.db.QueryRow(ctx, createOAuthState,
 		arg.ID,
@@ -169,6 +174,7 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		arg.FlowChallenge,
 		arg.ExpiresAt,
 		arg.ClientRedirectUri,
+		arg.DeviceCodeID,
 	)
 	var i OauthState
 	err := row.Scan(
@@ -181,6 +187,7 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.ClientRedirectUri,
+		&i.DeviceCodeID,
 	)
 	return i, err
 }

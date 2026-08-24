@@ -9,6 +9,18 @@ import (
 )
 
 type Querier interface {
+	// Records who authorized this device.
+	//
+	// `user_id IS NULL` is what makes an approval single-use, and it is the reason the approval token needs
+	// no store of its own: replaying one matches zero rows. The remaining conditions mean an approval racing
+	// a denial or an expiry loses rather than overwriting it.
+	ApproveDeviceCode(ctx context.Context, arg ApproveDeviceCodeParams) (DeviceCode, error)
+	// Spends an approved code for the one token pair it is worth.
+	//
+	// Single-use in the WHERE clause, for the reason ConsumeOAuthExchangeCode gives: two processes holding
+	// the same device code both reach here, and exactly one matches a row. Reading, checking consumed_at in
+	// Go, then updating would issue two sessions for one authorization.
+	ConsumeDeviceCode(ctx context.Context, deviceCodeHash []byte) (DeviceCode, error)
 	// Single-use and expiry in the WHERE clause, so a code seen in an address bar and replayed matches zero
 	// rows the second time rather than issuing a second token pair.
 	ConsumeOAuthExchangeCode(ctx context.Context, codeHash []byte) (OauthExchangeCode, error)
@@ -32,15 +44,27 @@ type Querier interface {
 	// 15-minute access tokens a logged-in client holds. They are stored only as a SHA-256 hash, so the raw
 	// value is recoverable exactly once — in the response that created it.
 	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
+	// Device-code flow queries (Milestone M9).
+	//
+	// One table with a short life and a small state machine: issued, then approved or denied by a browser
+	// somewhere else, then spent exactly once by the client that has been polling for it. Every transition
+	// that must happen at most once is expressed as a WHERE clause here rather than as a check in Go, so two
+	// concurrent attempts produce one winner without anything in the service having to remember to look.
+	// device_id and device_name come from the client asking for the code, which is the client that will hold
+	// the resulting session. The browser that approves never supplies either.
+	CreateDeviceCode(ctx context.Context, arg CreateDeviceCodeParams) (DeviceCode, error)
 	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
 	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
 	// OAuth sign-in queries.
 	//
 	// Two tables with very different lifetimes: oauth_identities is a permanent link between an account and a
 	// provider, oauth_states is a single-use row that exists for the minutes between /authorize and /callback.
-	// client_redirect_uri is '' for a flow with nowhere to return to — a browser, and the device-code path.
-	// It is written once here and only ever read back out of the row ConsumeOAuthState spends, which is what
-	// keeps the destination a property of the flow rather than of whoever presents the callback.
+	// Two columns decide where a completed flow ends, and at most one of them is ever set.
+	//
+	// client_redirect_uri is '' for a flow with nowhere to return to — a browser, and a device flow.
+	// device_code_id is NULL except for a flow started from the device verification page (M9). Both are
+	// written once here and only ever read back out of the row ConsumeOAuthState spends, which is what keeps
+	// the destination a property of the flow rather than of whoever presents the callback.
 	CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) (OauthState, error)
 	// An account created by an OAuth sign-in, with no password.
 	//
@@ -66,6 +90,9 @@ type Querier interface {
 	// still render as "Deleted User", but it must never be findable for login, registration collision, or
 	// profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// Called by auth.RunSweeper. Abandoned authorizations are the common case, and the endpoint that creates
+	// them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
+	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
 	DeleteExpiredOAuthExchangeCodes(ctx context.Context) (int64, error)
 	// Abandoned flows are the common case: opening the provider page and closing the tab leaves a row behind.
 	// Called by auth.RunSweeper. Without it the table grows for the life of the instance, and it is written
@@ -77,6 +104,10 @@ type Querier interface {
 	// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
 	// non-partial in 000005 for exactly this query.
 	DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error)
+	// The other half of the approval page, and the reason it is worth a column rather than letting the code
+	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
+	// the waiting client stops immediately instead of polling for another twenty minutes.
+	DenyDeviceCode(ctx context.Context, id int64) (DeviceCode, error)
 	// Runs on every request authenticated with an API token, which is why the hash column is indexed.
 	//
 	// One statement, not three: the owning account's liveness is joined in rather than fetched separately, and
@@ -84,6 +115,21 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// The verification page's re-read between steps.
+	//
+	// By id because that is what the signed continuation carries: the device code never reaches the browser at
+	// all, and the user code is what a person types, so putting either back into a value the browser holds
+	// would give a page something to replay. Same liveness conditions as the lookup by user code, so an
+	// authorization that expired or was decided while somebody was typing is caught at every step rather than
+	// only at the first.
+	GetDeviceCodeByID(ctx context.Context, id int64) (DeviceCode, error)
+	// The verification page's lookup, for a code that can still be acted on.
+	//
+	// Approved, denied, spent and expired rows are all excluded, so all four produce the same "no such code"
+	// as a code that never existed. That is worth having beyond tidiness: a code entered a second time gets
+	// told the authorization is over, instead of being walked through a sign-in that would then fail at the
+	// approval step for a reason nobody could see.
+	GetDeviceCodeByUserCode(ctx context.Context, userCode string) (DeviceCode, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
@@ -123,6 +169,26 @@ type Querier interface {
 	// TCP connection but cannot actually execute a statement (exhausted, wedged on a failover, blocked by a
 	// broken search_path) is not ready, and a bare ping would report it as healthy.
 	Ping(ctx context.Context) (int32, error)
+	// One poll: records that it happened and reports the state as it was *before* it did.
+	//
+	// The CTE is what makes the previous poll time readable at all. RETURNING sees the updated row, so
+	// last_polled_at there is always now() and always useless; `previous` is evaluated against the same
+	// statement snapshot and therefore holds the value from the poll before this one. That is what the
+	// slow_down decision is made against.
+	//
+	// The row is touched even when the poll came too soon, deliberately: a client hammering every second must
+	// keep being told to slow down, and only updating on well-behaved polls would let the first one reset the
+	// clock forever.
+	//
+	// `too_soon` is computed here rather than in Go, and that is not a style preference. last_polled_at is
+	// written by this database's now(); comparing it against the *application's* clock measures the difference
+	// between two machines as well as the gap between two polls. A client at exactly the published interval
+	// has only a round trip of margin, so a database node running a few tens of milliseconds ahead would
+	// answer slow_down to every well-behaved poll, and one running behind would make the interval
+	// unenforceable. Both are routine between two pods and neither is visible in a test that fakes the clock.
+	//
+	// Expired and already-spent rows match nothing, which the service reports as one answer.
+	PollDeviceCode(ctx context.Context, arg PollDeviceCodeParams) (PollDeviceCodeRow, error)
 	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
 	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
@@ -140,6 +206,28 @@ type Querier interface {
 	// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
 	// this is the whole of what "log everyone out" can currently mean.
 	RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error)
+	// Takes back an approval that has not been collected yet.
+	//
+	// This is what makes Deny a real recovery path rather than a promise. Somebody who approves and realizes a
+	// second later — the likeliest way anybody escapes the phishing this flow is vulnerable to — presses Deny
+	// and lands here, because DenyDeviceCode by then matches nothing. Spending the code is the strongest thing
+	// still available: the waiting client's next poll gets expired_token and no session is ever created.
+	//
+	// Scoped to the account the approval token names, so an approval for one account cannot revoke another's.
+	// Matches nothing once the code has been redeemed, which is the one case where this is too late and the
+	// caller has to say so.
+	RevokeApprovedDeviceCode(ctx context.Context, arg RevokeApprovedDeviceCodeParams) (DeviceCode, error)
+	// Part of revoking everything a compromised credential could reach (CLAUDE.md rule 17).
+	//
+	// An approved-but-unpolled device code is exactly the same kind of outstanding claim on an account as an
+	// OAuth exchange code, and RevokeOAuthExchangeCodesForUser exists for that reason — this one closes the
+	// same hole on the path M9 adds. Without it, a password reset performed to lock an intruder out leaves
+	// them a code that still trades for a fresh token pair.
+	//
+	// Rows still waiting for approval have a NULL user_id and belong to nobody yet, so they are correctly
+	// outside this. No index on user_id, for the reason RevokeOAuthExchangeCodesForUser gives: the table
+	// holds minutes of unfinished sign-ins, so a scan is cheaper than a write on every issuance.
+	RevokeDeviceCodesForUser(ctx context.Context, userID *int64) (int64, error)
 	// Part of revoking everything a compromised credential could reach (CLAUDE.md rule 17).
 	//
 	// An outstanding exchange code is not a session, so revoking sessions and API tokens leaves it redeemable

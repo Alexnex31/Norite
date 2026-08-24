@@ -205,6 +205,43 @@ contributor list is meant to reflect that. Note this is not retroactively fixabl
 trailer after the fact means rewriting history, which invalidates the GPG signature GitHub applies to
 web-UI merges, so the cost of getting it wrong once is a permanently unsigned commit on `main`.
 
+**Staging — never `git add -A`, `git add .`, or `git commit -a`.** Stage the paths the commit is actually
+about, by name. This is not tidiness: those commands sweep up whatever else happens to be in the tree, and
+what is in the tree during a manual test is a config file holding real credentials. That is exactly how a
+GitHub OAuth client secret reached a pushed commit on the M9 branch — swept into a commit whose subject and
+body were entirely about something else, so nothing in the review would have drawn an eye to it.
+
+**Before every commit, read what is staged and confirm no credential is in it.** `git diff --cached` in
+full, not `--stat`. Look for anything shaped like a key, a token, a password, a client secret or a
+connection string with a password in it — in *any* file, including ones the commit is legitimately
+touching. `.env`, `docker/docker-compose.yml` and anything under `docker/` deserve a second look, because
+they are where a real value gets typed during local testing.
+
+**A committed secret is not fixable by a later commit.** Removing it means rewriting history, and once the
+branch has been pushed the object stays fetchable from the remote by SHA regardless — so the only step that
+actually protects anything is revoking the credential at the provider. Treat any secret that reaches a
+commit as compromised from that moment, revoke first, and rewrite afterwards as hygiene rather than as the
+fix. The cost of getting this wrong once is a rotation, not a cleanup.
+
+**Two local git hooks back the two rules above**, and both are in `.git/hooks/`, which git does not track —
+so a fresh clone has neither, and neither is where the rule lives. They are a backstop under the habit, not
+a replacement for it, for the same reason the project skills are described here rather than relied on:
+this file is the authority, and anything enforced only by an untracked file is enforced only on one
+machine.
+
+- `commit-msg` rejects a message crediting an AI agent as author or co-author.
+- `pre-commit` rejects staged content that looks like a live credential: a provider token format
+  (`ghp_`, `AKIA`, `AIza`, a PEM private-key header), a secret-named setting given a long opaque value, or
+  a `.env` file forced past `.gitignore`. It deliberately ignores values that announce themselves as fakes
+  — `dev-only`, `insecure`, `example`, `changeme`, `test…key` and similar — because this repository is full
+  of those on purpose, and a hook that cried wolf on the compose stack's own signing key would be
+  `--no-verify`'d within a week and protect nothing afterwards. It never blocks a commit that *removes* a
+  secret, since standing between somebody and that cleanup is the one way it could do harm.
+
+Rewriting either to be stricter is fine; making either the reason a rule above is not followed is not.
+`--no-verify` exists and is sometimes right — a deliberate fake the filters do not recognise is the usual
+case, and labelling the value is the better fix.
+
 **Branching**: `main` always reflects the state right after the most recently *completed* milestone — never
 a half-finished one. Each milestone (see `docs/roadmap.md`) gets its own branch, named `m<N>-<kebab-slug>`
 matching the milestone's title (e.g. `m1-backend-skeleton`). Child branches off a
@@ -243,7 +280,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M7.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
+**Phase A (foundation), through M9.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -283,9 +320,18 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   silently. The repository's first cross-module dependency (`cli` → `daemon`) starts here, because the
   daemon owns what a stored credential is. Rule 19's sanitizer landed here too rather than at M43, since
   this is the first command that prints a name a stranger's instance chose.
-- **M8 — CLI OAuth loopback flow**: in progress. Note it carries a backend half M6 did not build: an
-  optional `client_redirect_uri` at `/authorize`, so the callback can return the exchange code to a
-  listener instead of rendering it (migration `000006`, ADR 0027).
+- **M8 — CLI OAuth loopback flow**: done (tag `m8`). `cli/internal/login`'s loopback listener, browser
+  launcher and flow binding, plus the backend half M6 did not build: an optional `client_redirect_uri` at
+  `/authorize`, so the callback returns the exchange code to a listener instead of rendering it (migration
+  `000006`). Decisions in ADR 0027, which also corrects four documents that described the loopback port as
+  registered *with the provider* — a design requiring the client secret in the CLI binary. What is
+  registered is the instance's own callback, unchanged since M6.
+- **M9 — CLI headless device-code fallback**: done (tag `m9`). Migration `000007`, `internal/auth`'s
+  `device.go`/`devicetoken.go`/`devicepage.go`/`devicehttp.go`, the verification page at `/device`, and
+  `cli/internal/login`'s `headless.go` and `devicecode.go`. Decisions in ADR 0028: the completion page
+  offers providers and not only a password (which is what makes the milestone worth its size), approval is
+  a separate explicit step, and the user code is the one credential-shaped value stored in plaintext.
+- **M10 — `norite instance init` finish, and registration hardening**: next.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -550,6 +596,56 @@ Three things this milestone deliberately leaves for the milestone that can do th
 - **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
   logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
   function has to move somewhere both modules reach — not be copied.
+
+And on the device-code side, from M9 (decisions in ADR 0028):
+
+- **The verification page offers providers, not only a password**, and that is the milestone. `norite login`
+  has done headless password sign-in since M7, so a password-only page would add almost nothing — while an
+  account that signs in only with Google or GitHub had no way onto a server at all, because M8's listener
+  binds `127.0.0.1` and the phone completing the flow cannot reach it.
+- **What protects this flow is a page, not a protocol.** The device-code grant's live risk is somebody
+  being *sent* a code and authorizing a stranger's machine, and nothing cryptographic prevents it (§14.21).
+  So approval is a separate explicit step that a successful sign-in never implies; the page names the device
+  and shows the code back for comparison; a decision that is neither approve nor deny denies; and there is
+  no `verification_uri_complete`, because a URL carrying the code makes the whole attack one click. Anything
+  that would shorten those screens is reopening that decision. **With one qualification a review found**:
+  the page's provider buttons carry a continuation that nothing binds to the browser it was issued to, so a
+  link *can* skip the code-entry step — it cannot skip approval, which is where the defense is, and binding
+  it needs a browser session this surface has none of until Phase O.
+- **The user code is stored in plaintext and the device code is hashed.** The exception is deliberate and
+  has two halves, both needed: a user code is not a bearer credential — whoever holds it must still
+  authenticate and approve, and what that authorizes is somebody else's machine acting as *their* account —
+  and it has to be readable back, because the approval page shows it and the OAuth callback reaching that
+  page never saw what anybody typed.
+- **The poll is `POST /auth/device/token`.** `architecture.md` sketched `GET /auth/device/code/{code}` and
+  both halves are wrong here: the call spends the code and starts a session, which rule 4 forbids a GET
+  from doing, and a path is logged where a body is not (rule 8). The document is corrected, not the code
+  bent to it.
+- **A device flow carries no flow challenge, and that is not the binding going optional.** `/authorize`
+  requires exactly one of `flow_challenge` and `device_token`. A challenge makes a *code* redeemable only by
+  the client that began the flow; a device flow mints no code, because the waiting client has held its
+  credential since before a browser was involved.
+- **Which device is being authorized travels inside a signature or inside a consumed row**, never in a form
+  body or a callback URL — `oauth_states.device_code_id` across the provider round trip, the `dvc` claim
+  across the username form. The same discipline and the same tests M8 built for `client_redirect_uri`.
+- **Two continuations on the page, not one.** An entry token says a browser has entered a live code; an
+  approval token says it has also proved whose account this is. `parseDeviceToken` takes the type it wants
+  rather than reporting the type it found, because a single token with an optional user field would
+  authorize before authentication happened.
+- **The fallback is detected and never silent.** `SSH_CONNECTION` is checked before anything platform-
+  specific, since a desktop administered over SSH looks local in every other way and macOS would open Safari
+  on a screen nobody is at. Detection only ever redirects a sign-in that *already* needed a browser, so a
+  password login over SSH is untouched. `--no-browser` keeps M8's meaning; `--device-code` asks deliberately.
+- **Values from the instance that direct an action are checked, not sanitized.** The user code is printed as
+  an instruction, so a cleaned-up version is worse than none; the verification URI is about to be opened and
+  typed into, so it must be the instance that was asked for, scheme and host and port. Rule 8 covers the
+  third: the device code never reaches the terminal.
+- **`OAuthOutcome.SignedIn()` means "resolved to an account"**, not "has an exchange code". Those stopped
+  being the same thing here.
+
+One thing this milestone deliberately leaves: **screen `5a` in `docs/design/tui/` is normative and
+specifies a code box with a countdown and a progress bar.** The CLI prints the plain-text equivalent
+because it is not the TUI; M55 draws the box. The two are not in disagreement.
 
 And on the CLI OAuth side, from M8 (decisions in ADR 0027):
 

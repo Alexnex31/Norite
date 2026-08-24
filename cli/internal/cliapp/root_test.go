@@ -3,6 +3,7 @@ package cliapp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"regexp"
@@ -207,11 +208,51 @@ func TestNoBrowserWithoutAProviderIsRefused(t *testing.T) {
 	assert.Contains(t, exit.Error()+errOut, "--provider")
 }
 
+// --device-code describes a browser on another device; --email and --no-browser both describe this one.
+// Refused rather than resolved by precedence, for the reason above: whichever is quietly dropped, somebody
+// waits for something that is never going to happen.
+func TestDeviceCodeWithConflictingFlagsIsRefused(t *testing.T) {
+	for _, args := range [][]string{
+		{"login", "--device-code", "--email", "ada@example.com"},
+		{"login", "--device-code", "--no-browser"},
+	} {
+		_, errOut, err := runArgs(t, args...)
+
+		var exit cli.ExitCoder
+		require.ErrorAs(t, err, &exit, "%v", args)
+		assert.Equal(t, 2, exit.ExitCode(), "%v", args)
+		assert.Contains(t, exit.Error()+errOut, "--device-code", "%v", args)
+	}
+}
+
+// And --device-code with --provider is *not* refused: the automatic fallback produces exactly that
+// combination, so a guard against it would exit 2 for every SSH user the flow exists for.
+//
+// Run rather than grepped for. This used to assert only that `login --help` mentions the flag, which a
+// third guard in command.go would leave passing while breaking the path it is named after.
+func TestDeviceCodeWithAProviderIsAllowed(t *testing.T) {
+	_, _, err := runArgs(t, "login", "--device-code", "--provider", "google",
+		"--instance", "http://127.0.0.1:1")
+
+	// It fails — there is no instance at that address — but not as a usage error, which is the property.
+	var exit cli.ExitCoder
+	if errors.As(err, &exit) {
+		assert.NotEqual(t, 2, exit.ExitCode(), "the pair the fallback produces must not be a usage error")
+	}
+
+	out, _, helpErr := runArgs(t, "login", "--help")
+	require.NoError(t, helpErr)
+	assert.Contains(t, out, "chosen in the browser",
+		"the help must say where the provider choice happens on that path")
+}
+
 // The flags login does offer are the ones it needs, and none of them is a credential.
 func TestLoginFlagsCarryNoCredential(t *testing.T) {
 	out, _, err := runArgs(t, "login", "--help")
 	require.NoError(t, err)
-	for _, flag := range []string{"--instance", "--email", "--device-name", "--provider", "--no-browser"} {
+	for _, flag := range []string{
+		"--instance", "--email", "--device-name", "--provider", "--no-browser", "--device-code",
+	} {
 		assert.Contains(t, out, flag)
 	}
 	for _, forbidden := range []string{"--password", "--secret", "--token"} {

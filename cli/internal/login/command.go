@@ -31,6 +31,11 @@ func Command() *cli.Command {
 			"listener on this machine receives the result. The sign-in URL is always printed too,\n" +
 			"so a browser that opens the wrong profile is not a dead end. Use --no-browser to skip\n" +
 			"launching one and open the link yourself.\n\n" +
+			"On a machine with no browser of its own — a server over SSH, most often — a provider\n" +
+			"sign-in falls back to a code you type into a browser on any other device, and says so\n" +
+			"when it does. Ask for that flow directly with --device-code, which needs no browser\n" +
+			"here and no password on this machine; whether you sign in with a provider or a\n" +
+			"password is chosen in the browser, not here.\n\n" +
 			"Signing in again on the same machine replaces the stored credential and keeps this\n" +
 			"installation's device identity, so the account's other sessions are untouched.",
 		Flags: []cli.Flag{
@@ -54,6 +59,10 @@ func Command() *cli.Command {
 				Name:  "no-browser",
 				Usage: "with --provider, print the sign-in URL instead of opening a browser",
 			},
+			&cli.BoolFlag{
+				Name:  "device-code",
+				Usage: "sign in with a code completed in a browser on another device",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			// Refused rather than resolved by precedence. The two flags describe different sign-ins, and
@@ -61,6 +70,23 @@ func Command() *cli.Command {
 			// address they passed was not used.
 			if cmd.String("provider") != "" && cmd.String("email") != "" {
 				return cli.Exit("--email is for signing in with a password; --provider does not use one", 2)
+			}
+			// Both refused rather than resolved by precedence, for the reason --provider and --email are.
+			// The first pair describe different sign-ins; these describe opposite answers to the same
+			// question — whether the browser is on this machine — and quietly picking one would leave
+			// somebody watching for a window that was never going to open.
+			//
+			// Checked before the rule below, and the order is the whole point: --device-code --no-browser
+			// would otherwise be answered "--no-browser only applies to --provider sign-ins", which is
+			// advice that does not fix it. The two flags contradict each other with or without a provider.
+			if cmd.Bool("device-code") && cmd.String("email") != "" {
+				return cli.Exit(
+					"--email is for signing in with a password here; --device-code asks in a browser "+
+						"on another device", 2)
+			}
+			if cmd.Bool("device-code") && cmd.Bool("no-browser") {
+				return cli.Exit(
+					"--no-browser waits for a browser on this machine; --device-code needs none", 2)
 			}
 			if cmd.Bool("no-browser") && cmd.String("provider") == "" {
 				return cli.Exit("--no-browser only applies to --provider sign-ins", 2)
@@ -81,6 +107,7 @@ func Command() *cli.Command {
 					DeviceName: cmd.String("device-name"),
 					Provider:   cmd.String("provider"),
 					NoBrowser:  cmd.Bool("no-browser"),
+					DeviceCode: cmd.Bool("device-code"),
 				},
 				Store:       store,
 				Out:         cmd.Writer,

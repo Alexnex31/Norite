@@ -52,6 +52,9 @@ const pageStyle = `
               font-size: 1.1rem; word-break: break-all; }
   .note { color: #555; font-size: 0.9rem; }
   .error { color: #a12; font-weight: 600; }
+  button.deny { background: #a12; }
+  a.provider { display: inline-block; margin: 0.3rem 0.4rem 0 0; padding: 0.6rem 1.2rem;
+               border: 1px solid #2b5eaa; border-radius: 4px; color: #2b5eaa; text-decoration: none; }
 `
 
 // resetPageData is everything the templates render. Deliberately tiny, and deliberately containing no

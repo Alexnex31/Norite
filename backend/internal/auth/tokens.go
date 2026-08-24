@@ -35,6 +35,11 @@ const (
 	// redeeming is the one it started. Never stored, never sent to a provider, and it crosses the browser
 	// exactly never; only its hash does.
 	oauthFlowPrefix = "nof_"
+	// deviceCodePrefix marks the device code a headless client polls with. Absent from
+	// LooksLikeOpaqueToken for the same reason nrp_, nos_ and noc_ are: it authenticates exactly one
+	// endpoint, and routing it to the Bearer verifier would be the first step toward it authenticating
+	// something else.
+	deviceCodePrefix = "nod_"
 )
 
 // ErrMalformedToken reports a token that cannot be a Norite token at all — wrong prefix, wrong length, not
@@ -103,6 +108,18 @@ func GenerateOAuthExchangeCode() (raw string, hash TokenHash, err error) {
 func ParseOAuthExchangeCode(raw string) (TokenHash, error) {
 	return parseOpaqueToken(raw, oauthExchangePrefix)
 }
+
+// GenerateDeviceCode mints the value a headless client polls with.
+//
+// The long half of a two-part credential: this one is never displayed and never typed, so it is a full
+// 256 bits like everything else here. Its short companion is the user code, which a person reads aloud
+// and types on another device — see GenerateUserCode for why that one is built differently.
+func GenerateDeviceCode() (raw string, hash TokenHash, err error) {
+	return generateOpaqueToken(deviceCodePrefix)
+}
+
+// ParseDeviceCode hashes a device code for lookup, rejecting anything of the wrong shape.
+func ParseDeviceCode(raw string) (TokenHash, error) { return parseOpaqueToken(raw, deviceCodePrefix) }
 
 // GenerateOAuthFlowVerifier mints the secret that binds a sign-in to the client that started it.
 //

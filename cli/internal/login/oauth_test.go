@@ -492,6 +492,28 @@ func TestAnUnknownProviderFailsBeforeAnythingIsBound(t *testing.T) {
 	assert.Zero(t, f.exchanges)
 }
 
+// And it fails the same way on a machine with no browser, which is where it stopped doing so.
+//
+// The check used to live inside the OAuth path. That was good enough while there was one path; from M9 a
+// headless machine takes the device-code path instead, which ignores --provider entirely — so
+// `--provider gooogle` became a working sign-in that never mentioned the typo, on exactly the machines
+// where somebody is least able to see what happened. Where a mistake is reported must not depend on what
+// machine it was made on.
+func TestAnUnknownProviderFailsWhereverItIsTyped(t *testing.T) {
+	for _, reachable := range []bool{true, false} {
+		f := newOAuthFake(t)
+		runner, store, _ := oauthRunner(t, f, Options{Provider: "gooogle"})
+		runner.browserReachable = func() bool { return reachable }
+
+		err := runner.Run(t.Context())
+		require.Error(t, err, "browser reachable: %v", reachable)
+		assert.Contains(t, err.Error(), "gooogle", "browser reachable: %v", reachable)
+
+		_, _, loadErr := store.Load()
+		assert.Error(t, loadErr, "a typo must not sign anybody in: browser reachable %v", reachable)
+	}
+}
+
 // ---------- findings from review ----------
 
 // A scripted run on a machine where no browser can open must fail at once rather than binding a socket and
