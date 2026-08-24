@@ -7,6 +7,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/backend/operatortoken"
 )
 
 // The operator token is signed with the same key as every access token on the instance, so nothing about
@@ -23,6 +25,14 @@ func operatorIssuer(t *testing.T) *TokenIssuer {
 	issuer, err := NewTokenIssuer([]byte("an-operator-test-signing-key-of-sufficient-length"))
 	require.NoError(t, err)
 	return issuer
+}
+
+// The one constant now defined in two modules' worth of code, and the one that cannot be allowed to
+// drift: operatortoken.Verify pins `iss`, so an operator token minted by the CLI is refused outright if
+// these ever disagree — with the undifferentiated error every other failure produces, which would make it
+// look like a key problem.
+func TestTheIssuerClaimIsTheSameOnBothSides(t *testing.T) {
+	assert.Equal(t, tokenIssuer, operatortoken.Issuer)
 }
 
 // Every signed-in user holds an access token signed with this same key; if that satisfied the operator
@@ -114,14 +124,14 @@ func TestAnOperatorTokenNamingAnAccountIsRefused(t *testing.T) {
 	issuer := operatorIssuer(t)
 
 	now := time.Now()
-	forged, err := issuer.sign(operatorClaims{
+	forged, err := issuer.sign(operatortoken.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    tokenIssuer,
+			Issuer:    operatortoken.Issuer,
 			Subject:   "12345",
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(time.Minute)),
 		},
-		TokenType: operatorTokenType,
+		TokenType: operatortoken.TokenType,
 	})
 	require.NoError(t, err)
 
@@ -134,13 +144,13 @@ func TestAnUnsignedOperatorTokenIsRefused(t *testing.T) {
 	issuer := operatorIssuer(t)
 
 	now := time.Now()
-	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, operatorClaims{
+	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, operatortoken.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    tokenIssuer,
+			Issuer:    operatortoken.Issuer,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(time.Minute)),
 		},
-		TokenType: operatorTokenType,
+		TokenType: operatortoken.TokenType,
 	}).SignedString(jwt.UnsafeAllowNoneSignatureType)
 	require.NoError(t, err)
 
@@ -152,12 +162,12 @@ func TestAnUnsignedOperatorTokenIsRefused(t *testing.T) {
 func TestAnOperatorTokenWithoutAnExpiryIsRefused(t *testing.T) {
 	issuer := operatorIssuer(t)
 
-	eternal, err := issuer.sign(operatorClaims{
+	eternal, err := issuer.sign(operatortoken.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:   tokenIssuer,
 			IssuedAt: jwt.NewNumericDate(time.Now()),
 		},
-		TokenType: operatorTokenType,
+		TokenType: operatortoken.TokenType,
 	})
 	require.NoError(t, err)
 

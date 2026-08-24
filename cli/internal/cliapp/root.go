@@ -13,6 +13,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/daemonctl"
+	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
 )
@@ -86,7 +87,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			login.Command(),
 			login.LogoutCommand(),
 			daemonctl.GroupCommand(),
-			instanceinit.GroupCommand(),
+			instanceinit.GroupCommand(instanceadmin.Command()),
 		},
 	}
 }

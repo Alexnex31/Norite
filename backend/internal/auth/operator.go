@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
-
-	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
+	"github.com/Alexnex31/Norite/backend/operatortoken"
 )
 
 // The operator: whoever holds this instance's configuration file.
@@ -43,23 +41,15 @@ import (
 // # Why it is minted by the client and not handed out by the server
 //
 // There is no endpoint to ask for one, because asking would require authenticating, which is the problem.
-// The CLI builds it from the key it read off disk. That makes the issuing half of this file the only code
-// in this package the server itself never calls — it exists here anyway so the claim shape has exactly one
-// definition, for the reason daemon/credentials owns the stored-credential format (M7): two
-// implementations of one wire format drift, and the failure is a bootstrap that reports a bad signature
-// against a token that is perfectly well formed.
-
-// operatorTokenType is the `typ` claim that separates an operator token from every other JWT this package
-// signs. The same mechanism keeps an access token from being spendable as an OAuth signup.
-const operatorTokenType = "operator"
-
-// OperatorTokenTTL is how long a minted operator token stays valid.
+// The CLI builds it from the key it read off disk.
 //
-// Two minutes, which is far shorter than any other credential here and is sized for its actual use: the
-// CLI mints one, makes one request, and discards it. Nothing holds one, nothing stores one, and nothing
-// refreshes one. The short life matters because this is the only credential in the system that is not
-// revocable — there is no row to delete, so the only thing that ends it is the clock.
-const OperatorTokenTTL = 2 * time.Minute
+// That is why the *format* is not in this package: Go's internal/ rule makes backend/internal unreachable
+// from the CLI module, so the claims, the type, the lifetime and the algorithm pin live in
+// backend/operatortoken, which both sides import. What stays here is the authorization decision — which
+// requests such a token may authorize — because that belongs where the routes are.
+
+// OperatorTokenTTL is how long a minted operator token stays valid. See operatortoken.TTL.
+const OperatorTokenTTL = operatortoken.TTL
 
 // ErrNotOperator is the one refusal every way of failing the operator check produces.
 //
@@ -67,63 +57,20 @@ const OperatorTokenTTL = 2 * time.Minute
 // their token had expired confirms they hold a genuine signing key.
 var ErrNotOperator = errors.New("this operation requires the instance operator or an instance administrator")
 
-// operatorClaims is what an operator token carries, which is as close to nothing as a JWT gets.
-//
-// No subject: there is no account. No scopes: the authority is not delegable, so there is nothing to
-// narrow it to. What the signature proves is the whole message — that whoever produced this could read
-// the instance's signing key — and any further claim would be a fact the server can check for itself.
-type operatorClaims struct {
-	jwt.RegisteredClaims
-
-	TokenType string `json:"typ"`
-}
-
 // IssueOperatorToken mints a token proving possession of the instance signing key.
 //
-// Called by the `norite` CLI, never by the server. See this file's header for why it lives here anyway.
+// Present on this type for symmetry with Issue, and used by the tests here; the `norite` CLI calls
+// operatortoken.Issue directly, since it has a key and no Service.
 func (t *TokenIssuer) IssueOperatorToken() (string, error) {
-	now := t.now()
-	claims := operatorClaims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    tokenIssuer,
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(OperatorTokenTTL)),
-			ID:        newJTI(),
-		},
-		TokenType: operatorTokenType,
-	}
-
-	signed, err := t.sign(claims)
-	if err != nil {
-		return "", err
-	}
-	return signed, nil
+	return operatortoken.Issue(t.key, t.now())
 }
 
 // VerifyOperatorToken reports whether raw is a live operator token issued for this instance.
+//
+// The format — claims, type, lifetime, algorithm pin — belongs to operatortoken, which the CLI implements
+// the other half of. What stays here is which requests such a token may authorize, below.
 func (t *TokenIssuer) VerifyOperatorToken(raw string) error {
-	var claims operatorClaims
-
-	_, err := jwt.ParseWithClaims(raw, &claims, t.keyFunc,
-		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
-		jwt.WithIssuer(tokenIssuer),
-		jwt.WithExpirationRequired(),
-		jwt.WithTimeFunc(t.now),
-	)
-	if err != nil {
-		return ErrNotOperator
-	}
-
-	// The claim that does the work. Without it every access token on the instance is also an operator
-	// token, since both are signed with the same key and the registered claims alone would validate.
-	if claims.TokenType != operatorTokenType {
-		return ErrNotOperator
-	}
-	// An operator names no account, and a token that does is not one this package minted. Refused rather
-	// than ignored: a subject here would mean somebody built a token from a different template, and
-	// guessing which parts of it to honor is how a confused deputy starts.
-	if claims.Subject != "" {
+	if err := operatortoken.Verify(t.key, raw, t.now()); err != nil {
 		return ErrNotOperator
 	}
 	return nil
