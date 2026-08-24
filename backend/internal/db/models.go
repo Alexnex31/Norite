@@ -35,6 +35,12 @@ type DeviceCode struct {
 	ExpiresAt      pgtype.Timestamptz
 }
 
+type InstanceAdmin struct {
+	UserID    int64
+	GrantedBy *int64
+	GrantedAt pgtype.Timestamptz
+}
+
 type OauthExchangeCode struct {
 	ID            int64
 	CodeHash      []byte

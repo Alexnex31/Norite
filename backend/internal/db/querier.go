@@ -37,6 +37,20 @@ type Querier interface {
 	// matches zero rows, and is failed. Checking `used_at IS NULL` in the service and updating afterwards
 	// would let both win and would make the "single-use" promise a comment rather than a guarantee.
 	ConsumePasswordResetToken(ctx context.Context, id int64) (PasswordResetToken, error)
+	// Instance-administration queries.
+	//
+	// The Instance Admin tier, which is instance-wide and sits outside roles.Resolve entirely (ADR 0013).
+	// M10 creates the first row and reads it; M71 adds granting, revoking, and the last-admin safety rail.
+	// The bootstrap guard, and the reason it is a count rather than an existence check.
+	//
+	// POST /instance/bootstrap is authorized by an operator token, which is minted from the instance signing
+	// key by anyone holding the config file. That is the right authority for creating the *first* admin and
+	// the wrong one for creating a second — an operator token replayed later must not be able to add an
+	// account to this table quietly. So the endpoint refuses unless this answers 0, which makes bootstrap
+	// self-disabling rather than needing a flag somewhere that says whether it already ran.
+	//
+	// Read inside the same transaction as the insert, so two simultaneous bootstraps cannot both see zero.
+	CountInstanceAdmins(ctx context.Context) (int64, error)
 	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
 	// Scoped API token queries.
 	//
@@ -53,6 +67,8 @@ type Querier interface {
 	// device_id and device_name come from the client asking for the code, which is the client that will hold
 	// the resulting session. The browser that approves never supplies either.
 	CreateDeviceCode(ctx context.Context, arg CreateDeviceCodeParams) (DeviceCode, error)
+	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
+	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
 	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
 	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
 	// OAuth sign-in queries.
@@ -161,6 +177,13 @@ type Querier interface {
 	// that works. Without this, every request an anxious user makes leaves another live token behind, and the
 	// window a leaked one is redeemable in becomes the union of all of them.
 	InvalidateOutstandingResetTokens(ctx context.Context, userID int64) (int64, error)
+	// The tier check, on every request to an instance-administration endpoint.
+	//
+	// Joined against users for liveness, the same shape and the same reasoning as GetActiveAPITokenByHash
+	// and GetOAuthIdentity: a soft-deleted account keeps its rows so its authored content still renders as
+	// "Deleted User", and this row is one of them. Without the join, deleting an admin's account would leave
+	// their tier intact and usable by any credential still outstanding on it.
+	IsInstanceAdmin(ctx context.Context, userID int64) (bool, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
 	// Health-check queries.
 	//
