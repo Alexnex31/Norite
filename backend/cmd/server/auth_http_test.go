@@ -744,9 +744,14 @@ func TestRegisterReportsConflicts(t *testing.T) {
 	require.Equal(t, http.StatusConflict, sameUsername.Code, sameUsername)
 }
 
-// An instance in invite mode must refuse self-service registration, with its own code so a client can tell
-// this apart from a permissions failure and say something useful.
-func TestRegistrationIsRefusedInInviteMode(t *testing.T) {
+// An instance in invite mode refuses registration that brings no code, with its own error code so a client
+// can tell this apart from a permissions failure and prompt for one.
+//
+// The code changed at M10, from `registration_closed` to `invite_required`. The old name was accurate only
+// while there was nothing to redeem: registration is not closed on a gated instance, it has a precondition,
+// and a client that can tell the two apart can ask for a code instead of giving up. See the invite tests
+// for the other half — the same instance admits somebody who brings one.
+func TestRegistrationIsRefusedInInviteModeWithoutACode(t *testing.T) {
 	api := newAPI(t, auth.RegistrationInvite)
 
 	resp := api.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
@@ -754,7 +759,7 @@ func TestRegistrationIsRefusedInInviteMode(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusForbidden, resp.Code, resp)
-	assert.Equal(t, "registration_closed", resp.errorBody().Code)
+	assert.Equal(t, "invite_required", resp.errorBody().Code)
 }
 
 func TestMintingRejectsAnUnknownScope(t *testing.T) {

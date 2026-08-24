@@ -119,9 +119,17 @@ paths:
         device identity.
 
 
-        Returns 403 `registration_closed` while the instance is configured for invite-only registration.
-        Invite redemption arrives at Milestone M10; until then a gated instance refuses registration
-        outright rather than silently behaving as if it were open, so the setting is never a lie.
+        While the instance is configured for invite-only registration, `invite_code` is required: a request
+        without one is refused 403 `invite_required`, and one whose code is unknown, exhausted or expired is
+        refused 403 `invite_invalid`. On an open instance the field is ignored rather than rejected, so a
+        client that always sends one works against either mode without knowing which it faces.
+
+
+        Between M4 and M10 a gated instance refused registration outright with `registration_closed`. That
+        code is gone: registration is not closed on a gated instance, it has a precondition, and a client
+        that can tell "you need a code" from "your code does not work" can prompt for one instead of giving
+        up. Note that OAuth sign-up still refuses outright on a gated instance — there is no way to carry a
+        code through a provider redirect, so an invite-only instance is password-registration-only.
 
 
         Unlike login, this endpoint necessarily discloses whether an email or username is already taken —
@@ -152,8 +160,10 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "403":
           description: >
-            Registration is closed on this instance (`registration_closed`). The instance requires an invite
-            code, which cannot yet be redeemed — see M10.
+            This instance requires an invite code and the request brought none (`invite_required`), or the
+            code it brought is not usable (`invite_invalid`). The second is deliberately one answer for
+            unknown, exhausted and expired: distinguishing them would let somebody holding no valid code
+            learn which codes exist by watching the message change.
           content:
             application/json:
               schema:
@@ -1264,6 +1274,184 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /instance/bootstrap:
+    post:
+      summary: Create this instance's first administrator
+      description: >
+        Creates the account an instance is administered from, on an instance that has none yet. This is the
+        step `norite instance init` cannot perform: the wizard writes a configuration file before the
+        backend is running, so there is nothing to create an account on until afterwards.
+
+
+        **Authorization is an operator token**, not an account credential — there is no account yet. See the
+        `operatorToken` security scheme for what one is and how it is built. The endpoint additionally
+        requires that no administrator exists, which is what makes it disable itself on success rather than
+        needing a flag recording that it ran. A replayed operator token buys nothing.
+
+
+        The account is created with its address already verified. The caller proved they can read this
+        instance's configuration file, which is strictly stronger evidence than following a link sent to an
+        address — and requiring mail would make an instance with no SMTP relay impossible to set up.
+
+
+        No credential is returned. A session is scoped to a `device_id`, and the shell running setup is not
+        the device that will hold one; `POST /auth/login` is the next step.
+      operationId: bootstrapInstance
+      tags: [instance]
+      security:
+        - operatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapRequest"
+      responses:
+        "201":
+          description: The administrator account was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: >
+            This instance already has an administrator (`already_bootstrapped`), or the username or address
+            is taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /instance/invites:
+    post:
+      summary: Create an instance invite
+      description: >
+        Mints a code that admits one or more account creations while the instance is configured for
+        invite-only registration. Callable by an instance administrator's access token or by an operator
+        token; an API token is refused, because instance administration is not delegable for the same
+        reason token management is not.
+
+
+        Omitting `max_uses` means unlimited, and omitting `expires_in_seconds` means it never expires. Both
+        are real things to want — a link in a group chat that everybody in it may use — and expressing them
+        as very large numbers would be a lie a client has to interpret.
+      operationId: createInstanceInvite
+      tags: [instance]
+      security:
+        - operatorToken: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInviteRequest"
+      responses:
+        "201":
+          description: The invite was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceInvite"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The credential is genuine but does not administer this instance. 403 rather than 401: the caller
+            is authenticated, so re-authenticating would not help.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    get:
+      summary: List instance invites
+      description: >
+        Every outstanding invite, newest first, **including exhausted and expired ones**. An administrator
+        asking what invites exist is usually asking why somebody could not use one, and a list that silently
+        omits the answer is worse than one they have to read.
+
+
+        Codes are returned in full. The caller is an administrator or the operator, and an invite exists to
+        be handed to somebody — a list that cannot show its own contents is not a list.
+      operationId: listInstanceInvites
+      tags: [instance]
+      security:
+        - operatorToken: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The invites.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InstanceInvite"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The credential is genuine but does not administer this instance. 403 rather than 401: the caller
+            is authenticated, so re-authenticating would not help.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /instance/invites/{code}:
+    delete:
+      summary: Revoke an instance invite
+      description: >
+        Deletes an invite so it can no longer be redeemed. Takes effect immediately.
+
+
+        The code travels in the path, which is the one place in this API a credential-shaped value does. It
+        is acceptable here and was not for the device flow's poll: this request does not spend the code, the
+        caller already holds administrator authority over the instance, and the alternative is a DELETE
+        carrying a body, which several proxies drop.
+
+
+        Returns 404 when there was no such invite, so a successful revocation is distinguishable from a
+        mistyped code.
+      operationId: revokeInstanceInvite
+      tags: [instance]
+      security:
+        - operatorToken: []
+        - bearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: >
+            The invite code. Case, spaces and dashes are normalised away before lookup.
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        "204":
+          description: The invite is revoked. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The credential is genuine but does not administer this instance. 403 rather than 401: the caller
+            is authenticated, so re-authenticating would not help.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such invite.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /auth/tokens/{tokenId}:
     delete:
       summary: Revoke an API token
@@ -1356,6 +1544,28 @@ components:
         Refresh tokens (`nrt_…`) are **not** Bearer credentials. They go in the body of `/auth/refresh` and
         `/auth/logout` and authenticate nothing else.
 
+    operatorToken:
+      type: http
+      scheme: bearer
+      description: >
+        `Authorization: Bearer <operator token>` — the credential that authorizes instance administration
+        before any account exists, and the only one in this system minted by a client rather than by the
+        server.
+
+
+        It is an HS256 JWT signed with the instance's own signing key (`[auth].jwt_secret`, or
+        `NORITE_JWT_SECRET`), carrying `iss: "norite"`, `typ: "operator"`, an `exp`, and **no subject** — an
+        operator is not an account. A token carrying a subject is refused, as is one with any other `typ`:
+        without that check a device entry token would qualify, since it also names no account and carries
+        the same issuer and key.
+
+
+        What it proves is possession of the instance's configuration file, which is why it is the right
+        authority for creating the first administrator and the wrong one for anything an account can do. It
+        is not revocable — there is no row to delete — so it lives **two minutes** and is minted per
+        request. `norite instance bootstrap` builds one; the shared definition is Go package
+        `backend/operatortoken`, which both the server and the CLI import.
+
   parameters:
     OAuthProvider:
       name: provider
@@ -1423,6 +1633,19 @@ components:
           type: string
           format: email
           description: Unique, case-insensitively.
+        invite_code:
+          type: string
+          maxLength: 64
+          description: >
+            Required while the instance is configured for invite-only registration, ignored while it is
+            open. Sixteen characters drawn from `BCDFGHJKMNPQRSTVWXYZ` — no vowels, so a code is unlikely
+            to spell anything, and no `L`, which is the third member of the `1`/`I`/`L` group that gets
+            misread. Case, spaces and dashes are normalised away before lookup, so a code may be presented
+            however it was pasted.
+
+            The maximum here is deliberately looser than the code's own length: what a code may contain is
+            the instance's decision, and a bound that disagreed with it would refuse a valid code for the
+            wrong reason.
         display_name:
           type: string
         avatar_hash:
@@ -1654,6 +1877,88 @@ components:
           maxLength: 256
           description: Same rules as registration — length only, counted in characters.
 
+    BootstrapRequest:
+      type: object
+      required: [username, email, password]
+      additionalProperties: false
+      description: >
+        The first administrator's account. The same fields and the same bounds as RegisterRequest, and they
+        must stay the same: both create rows in one table under one set of constraints, so a value one
+        accepts and the other rejects is a difference with nothing behind it.
+      properties:
+        username:
+          type: string
+          minLength: 2
+          maxLength: 32
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 12
+          maxLength: 256
+        display_name:
+          type: string
+          maxLength: 64
+
+    CreateInviteRequest:
+      type: object
+      additionalProperties: false
+      description: Both fields are optional, and omitting either means "no limit".
+      properties:
+        max_uses:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: How many accounts may be created with this code. Omit for unlimited.
+        expires_in_seconds:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+          description: >
+            Lifetime from now. Omit for an invite that never expires. Capped at a year — a longer-lived
+            invite is almost always a mistake, and a permanent one is spelled by omitting the field rather
+            than by a number nobody meant to type.
+
+    InstanceInvite:
+      type: object
+      required: [code, uses, created_at]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: >
+            Sixteen characters from `BCDFGHJKMNPQRSTVWXYZ`, about 69 bits. Returned in full to an
+            administrator, and stored in plaintext, which is a deliberate exception to this project's
+            hash-everything rule: an invite exists to be handed to somebody, so it must be readable back,
+            and what it authorizes is bounded — presenting one lets an account be created subject to every
+            other rule registration enforces, and reaches no existing account or data.
+        created_by:
+          description: >
+            Who issued it, or `null` when the instance operator did — the operator is not an account and
+            has no id to record.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        max_uses:
+          description: How many uses it allows, or `null` for unlimited.
+          oneOf:
+            - type: integer
+            - type: "null"
+        uses:
+          type: integer
+          description: How many accounts have been created with it.
+        expires_at:
+          description: When it stops working, or `null` if it never does.
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+
     RegisterRequest:
       type: object
       required: [username, email, password]
@@ -1774,6 +2079,9 @@ components:
                 - service_unavailable
                 - internal_error
                 - registration_closed
+                - invite_required
+                - invite_invalid
+                - already_bootstrapped
             message:
               type: string
               description: >

@@ -41,6 +41,15 @@ type InstanceAdmin struct {
 	GrantedAt pgtype.Timestamptz
 }
 
+type InstanceInvite struct {
+	Code      string
+	CreatedBy *int64
+	MaxUses   *int32
+	Uses      int32
+	ExpiresAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
 type OauthExchangeCode struct {
 	ID            int64
 	CodeHash      []byte

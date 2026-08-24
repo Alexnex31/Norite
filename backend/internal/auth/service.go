@@ -51,7 +51,6 @@ const MaxDeviceIDLength = 128
 var (
 	ErrEmailTaken          = errors.New("that email is already registered")
 	ErrUsernameTaken       = errors.New("that username is already taken")
-	ErrRegistrationClosed  = errors.New("registration requires an invite code")
 	ErrInvalidRefreshToken = errors.New("invalid or expired refresh token")
 	ErrSessionReuse        = errors.New("refresh token was already used")
 	ErrUnknownScope        = errors.New("unknown scope")
@@ -156,6 +155,10 @@ type RegisterInput struct {
 	Email       string
 	Password    string
 	DisplayName string
+	// InviteCode is required while the instance is gated and ignored while it is open. Ignored rather
+	// than rejected: a client that always sends one is not doing anything wrong, and an open instance
+	// refusing a stray code would make the two modes differ in a way no caller can predict.
+	InviteCode string
 }
 
 // Register creates an account.
@@ -164,11 +167,16 @@ type RegisterInput struct {
 // login needs a device_id, which registration has no business requiring — and fusing them would mean a
 // client that only wanted to create an account also had to invent a device identity.
 func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, error) {
-	// The gate comes first, before any validation work or database round trip: a closed instance should
+	// The gate comes first, before any validation work or database round trip: a gated instance should
 	// cost an attacker exactly one cheap rejection, and should not reveal through timing or error detail
 	// whether the email they tried is already registered.
-	if s.registrationMode != RegistrationOpen {
-		return db.User{}, ErrRegistrationClosed
+	//
+	// Only the *presence* of a code is checked here. Whether it is redeemable is decided inside the
+	// transaction below, together with the account insert — checking it here as well would spend a use
+	// on a registration that then failed its username check, burning somebody else's invite.
+	gated := s.registrationMode != RegistrationOpen
+	if gated && strings.TrimSpace(in.InviteCode) == "" {
+		return db.User{}, ErrInviteRequired
 	}
 
 	// Normalized and validated here rather than only by the handler's struct tags, so every caller gets
@@ -212,24 +220,43 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return db.User{}, fmt.Errorf("generating user ID: %w", err)
 	}
 
-	user, err := s.queries.CreateUser(ctx, db.CreateUserParams{
-		ID:           int64(id),
-		Username:     username,
-		Email:        email,
-		PasswordHash: &hash,
-		DisplayName:  displayName,
-		// Unverified. Stated rather than left to the zero value, because the zero value being correct
-		// here is a coincidence of pgtype and not a decision anybody wrote down — and M10's next commits
-		// turn this column into the one that decides whether the account can sign in at all.
-		EmailVerifiedAt: pgtype.Timestamptz{},
+	// Redemption and the insert commit together, so a registration that fails after redeeming does not
+	// burn a use of somebody else's invite. On an open instance there is nothing to redeem and the
+	// transaction holds one statement, which costs a round trip and buys one code path instead of two.
+	var user db.User
+	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+
+		if gated {
+			if err := redeemInvite(ctx, q, in.InviteCode); err != nil {
+				return err
+			}
+		}
+
+		var err error
+		user, err = q.CreateUser(ctx, db.CreateUserParams{
+			ID:           int64(id),
+			Username:     username,
+			Email:        email,
+			PasswordHash: &hash,
+			DisplayName:  displayName,
+			// Unverified. Stated rather than left to the zero value, because the zero value being correct
+			// here is a coincidence of pgtype and not a decision anybody wrote down — and M10's next
+			// commits turn this column into the one that decides whether the account can sign in at all.
+			EmailVerifiedAt: pgtype.Timestamptz{},
+		})
+		if err != nil {
+			// Lost the race described above. Report it as the same conflict the pre-check would have —
+			// but only for the constraints that actually mean that; see registerConflict.
+			if conflict := registerConflict(err); conflict != nil {
+				return conflict
+			}
+			return fmt.Errorf("creating user: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
-		// Lost the race described above. Report it as the same conflict the pre-check would have — but only
-		// for the constraints that actually mean that; see registerConflict.
-		if conflict := registerConflict(err); conflict != nil {
-			return db.User{}, conflict
-		}
-		return db.User{}, fmt.Errorf("creating user: %w", err)
+		return db.User{}, err
 	}
 	return user, nil
 }

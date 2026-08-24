@@ -66,6 +66,8 @@ type Querier interface {
 	CreateDeviceCode(ctx context.Context, arg CreateDeviceCodeParams) (DeviceCode, error)
 	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
+	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
+	CreateInstanceInvite(ctx context.Context, arg CreateInstanceInviteParams) (InstanceInvite, error)
 	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
 	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
 	// OAuth sign-in queries.
@@ -115,6 +117,17 @@ type Querier interface {
 	// Called by auth.RunSweeper. Abandoned authorizations are the common case, and the endpoint that creates
 	// them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
 	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
+	// Called by auth.RunSweeper.
+	//
+	// The IS NOT NULL is redundant against SQL's own semantics — a NULL expires_at makes the comparison NULL
+	// rather than true, so a never-expiring invite is already skipped — and it is here anyway, because that is
+	// a fact about three-valued logic rather than about this table, and the row it would wrongly delete is one
+	// an administrator deliberately made permanent.
+	//
+	// Unlike the other swept tables, these rows are not garbage the moment they expire: this is the only sweep
+	// that removes something a person created on purpose. It is still right — an expired invite is refused by
+	// RedeemInstanceInvite regardless, so the row has no effect on anything except the administrator's list.
+	DeleteExpiredInstanceInvites(ctx context.Context) (int64, error)
 	DeleteExpiredOAuthExchangeCodes(ctx context.Context) (int64, error)
 	// Abandoned flows are the common case: opening the provider page and closing the tab leaves a row behind.
 	// Called by auth.RunSweeper. Without it the table grows for the life of the instance, and it is written
@@ -126,6 +139,9 @@ type Querier interface {
 	// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
 	// non-partial in 000005 for exactly this query.
 	DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error)
+	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
+	// never there, which is the difference between "done" and "check what you typed".
+	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
 	// The other half of the approval page, and the reason it is worth a column rather than letting the code
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
 	// the waiting client stops immediately instead of polling for another twenty minutes.
@@ -191,6 +207,17 @@ type Querier interface {
 	// their tier intact and usable by any credential still outstanding on it.
 	IsInstanceAdmin(ctx context.Context, userID int64) (bool, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
+	// Everything outstanding, newest first.
+	//
+	// Deliberately includes exhausted and expired rows. An administrator asking "what invites exist" is
+	// usually asking why somebody could not use one, and a list that silently omits the answer is worse than
+	// one they have to read. The sweep removes expired rows eventually; nothing removes exhausted ones, since
+	// `3 of 3 used` is the record of an invite having done its job.
+	//
+	// No index needed: an instance holds tens of these, not thousands, and this is an administrator-facing
+	// call made by hand. An index on created_at would be a write on every registration to serve a query
+	// nobody makes in a loop.
+	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
 	// Instance-administration queries.
 	//
 	// The Instance Admin tier, which is instance-wide and sits outside roles.Resolve entirely (ADR 0013).
@@ -237,6 +264,27 @@ type Querier interface {
 	//
 	// Expired and already-spent rows match nothing, which the service reports as one answer.
 	PollDeviceCode(ctx context.Context, arg PollDeviceCodeParams) (PollDeviceCodeRow, error)
+	// Instance invite queries.
+	//
+	// The codes that gate account creation while registration_mode = "invite". Distinct from the per-guild
+	// `invites` table, which admits an existing account to a guild.
+	// Spends one use of an invite, with every guard in the WHERE clause rather than in Go.
+	//
+	// This is the whole of the concurrency story, and it has to be: two people redeeming a one-use code at the
+	// same moment both read `uses = 0`, and a check-then-update in the service would let both through. As a
+	// single statement, Postgres serializes the two updates on the row itself — the second re-evaluates the
+	// WHERE against the first's committed value and matches nothing. Exactly the shape
+	// ConsumePasswordResetToken uses for single-use, generalized from one use to n.
+	//
+	// Both NULLs mean "unlimited" and "never expires", and both are written as explicit IS NULL branches
+	// rather than left to three-valued logic: `uses < NULL` is NULL, not true, so an unlimited invite would
+	// match nothing at all and the most permissive setting would be the most restrictive one.
+	//
+	// Zero rows is the only failure this reports, and it deliberately does not say which guard refused. An
+	// unknown code, an exhausted one and an expired one are one answer to the caller — the same treatment
+	// every credential lookup in this package gets, and here it also stops the endpoint from being a way to
+	// probe which codes exist.
+	RedeemInstanceInvite(ctx context.Context, code string) (InstanceInvite, error)
 	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
 	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)

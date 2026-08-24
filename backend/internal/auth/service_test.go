@@ -161,7 +161,7 @@ func TestRegistrationIsRefusedWhenTheInstanceIsInviteOnly(t *testing.T) {
 	_, err := svc.Register(t.Context(), RegisterInput{
 		Username: "ada", Email: "ada@example.com", Password: testPassword,
 	})
-	assert.ErrorIs(t, err, ErrRegistrationClosed)
+	assert.ErrorIs(t, err, ErrInviteRequired)
 }
 
 // ---------- refresh rotation ----------

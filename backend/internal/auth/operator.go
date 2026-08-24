@@ -108,6 +108,18 @@ func IsOperator(ctx context.Context) bool {
 func AuthenticateInstanceAdmin(svc *Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Fail closed on a service-less router rather than leaving the caller to guard the mount.
+			//
+			// This is not hypothetical tidiness: the contract test builds a router with a nil AuthSvc to
+			// walk the route table without a database, and while the /instance mount was conditional on
+			// that field those routes did not exist there at all — so the check that every served route
+			// appears in openapi.yaml (rule 6) could not see them. Making the middleware handle nil lets
+			// the routes mount unconditionally, which is what puts them back under that check.
+			if svc == nil {
+				unauthorizedInstance(w, r)
+				return
+			}
+
 			raw, ok := bearerCredential(r)
 			if !ok {
 				unauthorizedInstance(w, r)

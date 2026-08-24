@@ -42,11 +42,16 @@ type SweepResult struct {
 	OAuthStates   int64
 	ExchangeCodes int64
 	DeviceCodes   int64
+	// Invites is the one sweep here that removes something a person created on purpose, rather than
+	// garbage a protocol left behind. Still right — an expired invite is refused by RedeemInstanceInvite
+	// regardless, so the row affects nothing but an administrator's list — and worth naming separately so
+	// a count that looks surprising can be traced to the right table.
+	Invites int64
 }
 
 // Total is how many rows the pass removed altogether.
 func (r SweepResult) Total() int64 {
-	return r.ResetTokens + r.OAuthStates + r.ExchangeCodes + r.DeviceCodes
+	return r.ResetTokens + r.OAuthStates + r.ExchangeCodes + r.DeviceCodes + r.Invites
 }
 
 // SweepExpired removes every expired row this package owns.
@@ -66,6 +71,9 @@ func (s *Service) SweepExpired(ctx context.Context) (SweepResult, error) {
 	}
 	if out.ExchangeCodes, err = s.queries.DeleteExpiredOAuthExchangeCodes(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired oauth exchange codes: %w", err)
+	}
+	if out.Invites, err = s.queries.DeleteExpiredInstanceInvites(ctx); err != nil {
+		return out, fmt.Errorf("sweeping expired instance invites: %w", err)
 	}
 	if out.DeviceCodes, err = s.queries.DeleteExpiredDeviceCodes(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired device codes: %w", err)
@@ -113,6 +121,7 @@ func (s *Service) RunSweeper(ctx context.Context) {
 				Int64("oauth_states", result.OAuthStates).
 				Int64("oauth_exchange_codes", result.ExchangeCodes).
 				Int64("device_codes", result.DeviceCodes).
+				Int64("instance_invites", result.Invites).
 				Msg("swept expired auth rows")
 		}
 

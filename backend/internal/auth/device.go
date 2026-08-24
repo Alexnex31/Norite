@@ -424,20 +424,30 @@ func (s *Service) DenyDeviceAuthorization(ctx context.Context, deviceCodeID, use
 // make the first sixteen letters of the alphabet more likely than the last four. That costs about 6% of
 // draws to reject and buys the entropy figure above being true rather than approximately true.
 func GenerateUserCode() (string, error) {
+	return randomCode(userCodeLength)
+}
+
+// randomCode draws length characters from userCodeAlphabet.
+//
+// Shared by the device flow's user code (8) and M10's instance invite code (16), which want the same
+// alphabet for the same reason — both are read off one screen and typed into another — and differ only in
+// how long they must resist guessing. Extracted rather than copied so the rejection sampling above is
+// implemented once; a second copy is where a modulo quietly reappears.
+func randomCode(length int) (string, error) {
 	const limit = 256 - (256 % len(userCodeAlphabet)) // 240: the largest whole number of buckets
 
-	out := make([]byte, 0, userCodeLength)
-	buf := make([]byte, userCodeLength)
-	for len(out) < userCodeLength {
+	out := make([]byte, 0, length)
+	buf := make([]byte, length)
+	for len(out) < length {
 		if _, err := rand.Read(buf); err != nil {
-			return "", fmt.Errorf("generating user code: %w", err)
+			return "", fmt.Errorf("generating code: %w", err)
 		}
 		for _, b := range buf {
 			if int(b) >= limit {
 				continue
 			}
 			out = append(out, userCodeAlphabet[int(b)%len(userCodeAlphabet)])
-			if len(out) == userCodeLength {
+			if len(out) == length {
 				break
 			}
 		}

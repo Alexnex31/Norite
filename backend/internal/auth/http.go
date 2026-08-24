@@ -79,6 +79,11 @@ type registerRequest struct {
 	Email       string `json:"email" validate:"required,email,max=254"`
 	Password    string `json:"password" validate:"required"`
 	DisplayName string `json:"display_name" validate:"omitempty,max=64"`
+	// InviteCode is required while the instance is gated and ignored while it is open, so it is optional
+	// here and the service decides. Bounded generously rather than at the exact code length: what a code
+	// may contain is ParseInviteCode's decision, and a tag that disagreed with it would refuse a valid
+	// code for the wrong reason — the mistake registerRequest's username bounds already made once.
+	InviteCode string `json:"invite_code" validate:"omitempty,max=64"`
 }
 
 type loginRequest struct {
@@ -217,6 +222,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		Email:       req.Email,
 		Password:    req.Password,
 		DisplayName: req.DisplayName,
+		InviteCode:  req.InviteCode,
 	})
 	if err != nil {
 		h.writeErr(w, r, err)
@@ -420,13 +426,29 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		// legitimate client got there first.
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid or expired refresh token"))
 
-	case errors.Is(err, ErrRegistrationClosed):
+	case errors.Is(err, ErrInviteRequired):
+		// `invite_required` rather than M4's `registration_closed`, which was accurate only while there
+		// was no way to redeem anything: registration is not closed on a gated instance, it has a
+		// precondition. A client that can tell the two apart can prompt for a code instead of giving up.
 		httpx.WriteError(w, r, &httpx.StatusError{
 			Status:  http.StatusForbidden,
-			Code:    "registration_closed",
-			Message: "registration on this instance requires an invite code",
+			Code:    "invite_required",
+			Message: ErrInviteRequired.Error(),
 			Err:     err,
 		})
+
+	case errors.Is(err, ErrInviteInvalid):
+		// Deliberately one code for unknown, exhausted and expired. Distinguishing them would let
+		// somebody holding no valid code learn which codes exist by watching the message change.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "invite_invalid",
+			Message: ErrInviteInvalid.Error(),
+			Err:     err,
+		})
+
+	case errors.Is(err, ErrInviteExpiry), errors.Is(err, ErrInviteMaxUses):
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
 
 	case errors.Is(err, ErrAlreadyBootstrapped):
 		// 409 rather than 403: the credential was accepted and the request was well formed, but the

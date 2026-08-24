@@ -179,9 +179,13 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 		//
 		// The stricter bucket, for the reason /auth carries it: bootstrap runs argon2id, and it is the one
 		// endpoint on the instance whose success is irreversible.
-		if opts.Auth != nil && opts.AuthSvc != nil {
+		if opts.Auth != nil {
 			r.Route("/instance", func(r chi.Router) {
 				r.Use(authLimiter)
+				// Mounted whether or not a service is present. AuthenticateInstanceAdmin refuses
+				// everything when it has none, which keeps these routes visible to the contract test's
+				// route walk — that test builds a router with a nil service, and a conditional mount hid
+				// this whole group from rule 6's check.
 				r.Use(auth.AuthenticateInstanceAdmin(opts.AuthSvc))
 				opts.Auth.InstanceRoutes(r)
 			})

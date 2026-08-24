@@ -1,0 +1,68 @@
+-- Instance invite queries.
+--
+-- The codes that gate account creation while registration_mode = "invite". Distinct from the per-guild
+-- `invites` table, which admits an existing account to a guild.
+
+-- name: RedeemInstanceInvite :one
+-- Spends one use of an invite, with every guard in the WHERE clause rather than in Go.
+--
+-- This is the whole of the concurrency story, and it has to be: two people redeeming a one-use code at the
+-- same moment both read `uses = 0`, and a check-then-update in the service would let both through. As a
+-- single statement, Postgres serializes the two updates on the row itself — the second re-evaluates the
+-- WHERE against the first's committed value and matches nothing. Exactly the shape
+-- ConsumePasswordResetToken uses for single-use, generalized from one use to n.
+--
+-- Both NULLs mean "unlimited" and "never expires", and both are written as explicit IS NULL branches
+-- rather than left to three-valued logic: `uses < NULL` is NULL, not true, so an unlimited invite would
+-- match nothing at all and the most permissive setting would be the most restrictive one.
+--
+-- Zero rows is the only failure this reports, and it deliberately does not say which guard refused. An
+-- unknown code, an exhausted one and an expired one are one answer to the caller — the same treatment
+-- every credential lookup in this package gets, and here it also stops the endpoint from being a way to
+-- probe which codes exist.
+UPDATE instance_invites
+SET uses = uses + 1
+WHERE code = $1
+  AND (max_uses IS NULL OR uses < max_uses)
+  AND (expires_at IS NULL OR expires_at > now())
+RETURNING *;
+
+-- name: CreateInstanceInvite :one
+-- created_by is NULL when the instance operator issued it, who is not an account. See 000009.
+INSERT INTO instance_invites (code, created_by, max_uses, expires_at)
+VALUES ($1, $2, $3, $4)
+RETURNING *;
+
+-- name: ListInstanceInvites :many
+-- Everything outstanding, newest first.
+--
+-- Deliberately includes exhausted and expired rows. An administrator asking "what invites exist" is
+-- usually asking why somebody could not use one, and a list that silently omits the answer is worse than
+-- one they have to read. The sweep removes expired rows eventually; nothing removes exhausted ones, since
+-- `3 of 3 used` is the record of an invite having done its job.
+--
+-- No index needed: an instance holds tens of these, not thousands, and this is an administrator-facing
+-- call made by hand. An index on created_at would be a write on every registration to serve a query
+-- nobody makes in a loop.
+SELECT * FROM instance_invites
+ORDER BY created_at DESC;
+
+-- name: DeleteInstanceInvite :execrows
+-- Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
+-- never there, which is the difference between "done" and "check what you typed".
+DELETE FROM instance_invites
+WHERE code = $1;
+
+-- name: DeleteExpiredInstanceInvites :execrows
+-- Called by auth.RunSweeper.
+--
+-- The IS NOT NULL is redundant against SQL's own semantics — a NULL expires_at makes the comparison NULL
+-- rather than true, so a never-expiring invite is already skipped — and it is here anyway, because that is
+-- a fact about three-valued logic rather than about this table, and the row it would wrongly delete is one
+-- an administrator deliberately made permanent.
+--
+-- Unlike the other swept tables, these rows are not garbage the moment they expire: this is the only sweep
+-- that removes something a person created on purpose. It is still right — an expired invite is refused by
+-- RedeemInstanceInvite regardless, so the row has no effect on anything except the administrator's list.
+DELETE FROM instance_invites
+WHERE expires_at IS NOT NULL AND expires_at < now();
