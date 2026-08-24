@@ -87,7 +87,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			login.Command(),
 			login.LogoutCommand(),
 			daemonctl.GroupCommand(),
-			instanceinit.GroupCommand(instanceadmin.Command()),
+			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 		},
 	}
 }

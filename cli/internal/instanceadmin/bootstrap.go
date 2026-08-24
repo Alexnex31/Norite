@@ -67,6 +67,10 @@ type Runner struct {
 	ReadSecret func(prompt string) (string, error)
 	// Interactive reports whether the readers above are attached to a terminal.
 	Interactive bool
+	// JSON switches data-printing commands to their machine-readable form (CLAUDE.md rule 15). Bootstrap
+	// ignores it: it is a conversation that ends in an account, not a command that prints data, the same
+	// reason `norite instance init` has no JSON form.
+	JSON bool
 
 	// LoadConfig is indirected for tests; production leaves it nil and the real reader is used.
 	LoadConfig func(path string) (Config, error)

@@ -26,39 +26,19 @@ func Command() *cli.Command {
 			"The password is read from the terminal, or from " + passwordEnvVar + " for an unattended\n" +
 			"run. There is deliberately no flag for it: a flag value is visible in the process list to\n" +
 			"every other user on the machine.",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:  "config",
-				Usage: "read the instance configuration from `PATH` instead of the usual location",
-			},
-			&cli.StringFlag{
-				Name: "instance",
-				Usage: "instance `URL` to reach, if it differs from the configured public_base_url " +
-					"(a server behind a proxy often answers on localhost)",
-			},
+		Flags: append(configFlags(),
 			&cli.StringFlag{Name: "username", Usage: "the administrator's `USERNAME`"},
 			&cli.StringFlag{Name: "email", Usage: "the administrator's `EMAIL` address"},
 			&cli.StringFlag{
 				Name:  "display-name",
 				Usage: "the administrator's display `NAME`, defaulting to the username",
 			},
-		},
+		),
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			readLine, readSecret, interactive := terminalReaders(os.Stdin, cmd.Writer)
-
-			runner := &Runner{
-				Options: Options{
-					ConfigPath:  cmd.String("config"),
-					Instance:    cmd.String("instance"),
-					Username:    cmd.String("username"),
-					Email:       cmd.String("email"),
-					DisplayName: cmd.String("display-name"),
-				},
-				Out:         cmd.Writer,
-				ReadLine:    readLine,
-				ReadSecret:  readSecret,
-				Interactive: interactive,
-			}
+			runner := runnerFrom(cmd)
+			runner.Options.Username = cmd.String("username")
+			runner.Options.Email = cmd.String("email")
+			runner.Options.DisplayName = cmd.String("display-name")
 			return runner.Run(ctx)
 		},
 	}
@@ -89,3 +69,47 @@ func terminalReaders(in *os.File, out io.Writer) (readLine func(string) (string,
 
 	return readLine, readSecret, interactive
 }
+
+// configFlags are the two every instance-administration command needs: where the configuration is, and
+// where the instance answers.
+//
+// Shared rather than repeated so the wording stays identical across the group — a flag documented three
+// slightly different ways reads as three different flags.
+func configFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:  "config",
+			Usage: "read the instance configuration from `PATH` instead of the usual location",
+		},
+		&cli.StringFlag{
+			Name: "instance",
+			Usage: "instance `URL` to reach, if it differs from the configured public_base_url " +
+				"(a server behind a proxy often answers on localhost)",
+		},
+	}
+}
+
+// runnerFrom builds a Runner wired to the real terminal and the flags this invocation carried.
+//
+// jsonFlagName is read off the root command rather than declared here: --json is a promise about the whole
+// CLI, made once at the root (see cliapp.JSONFlagName). It is spelled out rather than imported because
+// cliapp mounts this package, so importing it back would be a cycle — cliapp's root_test asserts the flag
+// exists under that name, which is what keeps the two in step.
+func runnerFrom(cmd *cli.Command) *Runner {
+	readLine, readSecret, interactive := terminalReaders(os.Stdin, cmd.Writer)
+
+	return &Runner{
+		Options: Options{
+			ConfigPath: cmd.String("config"),
+			Instance:   cmd.String("instance"),
+		},
+		Out:         cmd.Writer,
+		ReadLine:    readLine,
+		ReadSecret:  readSecret,
+		Interactive: interactive,
+		JSON:        cmd.Root().Bool(jsonFlagName),
+	}
+}
+
+// jsonFlagName must match cliapp.JSONFlagName. See runnerFrom.
+const jsonFlagName = "json"
