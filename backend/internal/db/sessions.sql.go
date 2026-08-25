@@ -79,6 +79,37 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 	return i, err
 }
 
+const getSessionByID = `-- name: GetSessionByID :one
+SELECT id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id FROM sessions
+WHERE id = $1
+`
+
+// Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
+//
+// The caller that needs this is "which device is this request coming from", answered from the sid claim in
+// the access token. That claim names the session the token was minted from, and a rotation inside the
+// token's fifteen-minute life revokes that row while the token stays valid. Filtering revoked rows here
+// would make every recently-refreshed client look like it had no current device — and POST /auth/logout/all
+// would then spare nothing and log the caller out of itself.
+func (q *Queries) GetSessionByID(ctx context.Context, id int64) (Session, error) {
+	row := q.db.QueryRow(ctx, getSessionByID, id)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.DeviceID,
+		&i.RefreshTokenHash,
+		&i.DeviceName,
+		&i.IpAddress,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.ReplacedByID,
+	)
+	return i, err
+}
+
 const getSessionByRefreshTokenHash = `-- name: GetSessionByRefreshTokenHash :one
 SELECT id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id FROM sessions
 WHERE refresh_token_hash = $1
@@ -104,6 +135,49 @@ func (q *Queries) GetSessionByRefreshTokenHash(ctx context.Context, refreshToken
 		&i.ReplacedByID,
 	)
 	return i, err
+}
+
+const revokeAllSessionsForUser = `-- name: RevokeAllSessionsForUser :execrows
+UPDATE sessions
+SET revoked_at = now()
+WHERE user_id = $1 AND revoked_at IS NULL
+`
+
+// Every live session for an account, across every device.
+//
+// Moved here from password_reset_tokens.sql at M11, where M5 had put it because reset was its only caller.
+// It belongs to sessions now: auth.revokeEverything is what calls it, and reset is one of that primitive's
+// callers rather than its owner (CLAUDE.md rule 17).
+func (q *Queries) RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAllSessionsForUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeAllSessionsForUserExceptDevice = `-- name: RevokeAllSessionsForUserExceptDevice :execrows
+UPDATE sessions
+SET revoked_at = now()
+WHERE user_id = $1 AND device_id <> $2 AND revoked_at IS NULL
+`
+
+type RevokeAllSessionsForUserExceptDeviceParams struct {
+	UserID   int64
+	DeviceID string
+}
+
+// The same, sparing one device — what "sign out everywhere else" means.
+//
+// The spared device is named rather than the spared session, because a session is one row of a rotating
+// family: sparing a row would leave the caller signed in only until its next refresh, which is at most
+// fifteen minutes away.
+func (q *Queries) RevokeAllSessionsForUserExceptDevice(ctx context.Context, arg RevokeAllSessionsForUserExceptDeviceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAllSessionsForUserExceptDevice, arg.UserID, arg.DeviceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const revokeSession = `-- name: RevokeSession :one

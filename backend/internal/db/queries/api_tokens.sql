@@ -48,3 +48,12 @@ UPDATE api_tokens
 SET revoked_at = now()
 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
 RETURNING *;
+
+-- name: RevokeAllAPITokensForUser :execrows
+-- Every API token the account holds.
+--
+-- Moved here from password_reset_tokens.sql at M11, for the reason RevokeAllSessionsForUser gives. The
+-- argument for revoking these alongside sessions moved with it, onto auth.revokeEverything.
+UPDATE api_tokens
+SET revoked_at = now()
+WHERE user_id = $1 AND revoked_at IS NULL;

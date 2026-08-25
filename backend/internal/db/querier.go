@@ -207,6 +207,14 @@ type Querier interface {
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash []byte) (PasswordResetToken, error)
+	// Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
+	//
+	// The caller that needs this is "which device is this request coming from", answered from the sid claim in
+	// the access token. That claim names the session the token was minted from, and a rotation inside the
+	// token's fifteen-minute life revokes that row while the token stays valid. Filtering revoked rows here
+	// would make every recently-refreshed client look like it had no current device — and POST /auth/logout/all
+	// would then spare nothing and log the caller out of itself.
+	GetSessionByID(ctx context.Context, id int64) (Session, error)
 	// The hot path: every refresh looks a session up by hash. Deliberately returns revoked and rotated rows
 	// too — the caller must be able to tell "no such token" from "a token that was already used", since only
 	// the second is a replay worth revoking a family over.
@@ -325,18 +333,21 @@ type Querier interface {
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
 	// Every API token the account holds.
 	//
-	// A password reset revokes these as well as sessions. The case that decides it is the one where the reset
-	// is happening *because* the account was compromised: an attacker who minted a token while they had
-	// access would otherwise keep it, and the reset would restore the owner's password while leaving the
-	// intruder's credential working. The cost is real and accepted — a user who simply forgot their password
-	// has to re-mint their bots — so the confirmation page says so plainly.
+	// Moved here from password_reset_tokens.sql at M11, for the reason RevokeAllSessionsForUser gives. The
+	// argument for revoking these alongside sessions moved with it, onto auth.revokeEverything.
 	RevokeAllAPITokensForUser(ctx context.Context, userID int64) (int64, error)
 	// Every live session for an account, across every device.
 	//
-	// The narrow ancestor of M11's general-purpose revoke-all-sessions primitive (CLAUDE.md rule 17). M11
-	// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
-	// this is the whole of what "log everyone out" can currently mean.
+	// Moved here from password_reset_tokens.sql at M11, where M5 had put it because reset was its only caller.
+	// It belongs to sessions now: auth.revokeEverything is what calls it, and reset is one of that primitive's
+	// callers rather than its owner (CLAUDE.md rule 17).
 	RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error)
+	// The same, sparing one device — what "sign out everywhere else" means.
+	//
+	// The spared device is named rather than the spared session, because a session is one row of a rotating
+	// family: sparing a row would leave the caller signed in only until its next refresh, which is at most
+	// fifteen minutes away.
+	RevokeAllSessionsForUserExceptDevice(ctx context.Context, arg RevokeAllSessionsForUserExceptDeviceParams) (int64, error)
 	// Takes back an approval that has not been collected yet.
 	//
 	// This is what makes Deny a real recovery path rather than a promise. Somebody who approves and realizes a

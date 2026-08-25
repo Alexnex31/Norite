@@ -146,6 +146,24 @@ func (q *Queries) RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) 
 	return i, err
 }
 
+const revokeAllAPITokensForUser = `-- name: RevokeAllAPITokensForUser :execrows
+UPDATE api_tokens
+SET revoked_at = now()
+WHERE user_id = $1 AND revoked_at IS NULL
+`
+
+// Every API token the account holds.
+//
+// Moved here from password_reset_tokens.sql at M11, for the reason RevokeAllSessionsForUser gives. The
+// argument for revoking these alongside sessions moved with it, onto auth.revokeEverything.
+func (q *Queries) RevokeAllAPITokensForUser(ctx context.Context, userID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAllAPITokensForUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const touchAPIToken = `-- name: TouchAPIToken :exec
 UPDATE api_tokens
 SET last_used_at = now()

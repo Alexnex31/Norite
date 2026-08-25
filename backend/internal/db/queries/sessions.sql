@@ -43,3 +43,34 @@ WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL;
 -- name: CountLiveSessionsForDevice :one
 SELECT count(*) FROM sessions
 WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL AND expires_at > now();
+
+-- name: GetSessionByID :one
+-- Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
+--
+-- The caller that needs this is "which device is this request coming from", answered from the sid claim in
+-- the access token. That claim names the session the token was minted from, and a rotation inside the
+-- token's fifteen-minute life revokes that row while the token stays valid. Filtering revoked rows here
+-- would make every recently-refreshed client look like it had no current device — and POST /auth/logout/all
+-- would then spare nothing and log the caller out of itself.
+SELECT * FROM sessions
+WHERE id = $1;
+
+-- name: RevokeAllSessionsForUser :execrows
+-- Every live session for an account, across every device.
+--
+-- Moved here from password_reset_tokens.sql at M11, where M5 had put it because reset was its only caller.
+-- It belongs to sessions now: auth.revokeEverything is what calls it, and reset is one of that primitive's
+-- callers rather than its owner (CLAUDE.md rule 17).
+UPDATE sessions
+SET revoked_at = now()
+WHERE user_id = $1 AND revoked_at IS NULL;
+
+-- name: RevokeAllSessionsForUserExceptDevice :execrows
+-- The same, sparing one device — what "sign out everywhere else" means.
+--
+-- The spared device is named rather than the spared session, because a session is one row of a rotating
+-- family: sparing a row would leave the caller signed in only until its next refresh, which is at most
+-- fifteen minutes away.
+UPDATE sessions
+SET revoked_at = now()
+WHERE user_id = $1 AND device_id <> $2 AND revoked_at IS NULL;
