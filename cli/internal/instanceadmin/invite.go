@@ -127,6 +127,16 @@ func (r *Runner) createInvite(ctx context.Context, maxUses int, expiresIn time.D
 		return err
 	}
 
+	// A negative value is refused rather than treated as absent. `--max-uses -1` used to produce an
+	// unlimited, never-expiring invite — the opposite of what was asked for, silently, because the
+	// service-side guards are unreachable when the field is never sent.
+	if maxUses < 0 {
+		return errors.New("--max-uses cannot be negative; omit it for an unlimited invite")
+	}
+	if expiresIn < 0 {
+		return errors.New("--expires-in cannot be negative; omit it for an invite that never expires")
+	}
+
 	body := map[string]any{}
 	if maxUses > 0 {
 		body["max_uses"] = maxUses
@@ -146,7 +156,10 @@ func (r *Runner) createInvite(ctx context.Context, maxUses int, expiresIn time.D
 		return r.printJSON(invite)
 	}
 
-	r.printf("%s\n\n", invite.Code)
+	// Sanitized like every other value this CLI takes from an instance (CLAUDE.md rule 19). A code is
+	// chosen by whatever server --instance points at, and it is printed on its own line — an erase-line
+	// sequence in one would rewrite whatever was above it.
+	r.printf("%s\n\n", apiclient.ForDisplay(invite.Code))
 	r.printf("  uses:    %s\n", describeUses(invite))
 	r.printf("  expires: %s\n", describeExpiry(invite))
 	return nil
@@ -170,6 +183,9 @@ func (r *Runner) listInvites(ctx context.Context) error {
 		if invites == nil {
 			invites = []inviteView{}
 		}
+		// Unsanitized on purpose here, and only here: --json output is parsed, not printed to a terminal,
+		// and a caller piping it into jq needs the code the instance actually issued rather than one with
+		// a replacement character in it. json.Marshal escapes control characters for the parser's sake.
 		return r.printJSON(invites)
 	}
 
@@ -178,7 +194,8 @@ func (r *Runner) listInvites(ctx context.Context) error {
 		return nil
 	}
 	for _, invite := range invites {
-		r.printf("%s  %-14s %s\n", invite.Code, describeUses(invite), describeExpiry(invite))
+		r.printf("%s  %-14s %s\n", apiclient.ForDisplay(invite.Code),
+			describeUses(invite), describeExpiry(invite))
 	}
 	return nil
 }

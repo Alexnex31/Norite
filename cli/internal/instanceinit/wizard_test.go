@@ -590,3 +590,23 @@ func TestFullRunAsksForThePublicBaseURLWithoutSMTP(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "https://chat.example.com", http["public_base_url"])
 }
+
+// An operator who declines SMTP is told what they are turning off, and told again in the summary — which
+// is the only one of the two a --non-interactive run ever prints.
+//
+// Both were missing when the code claiming them was written: the note mentioned only password reset, and
+// there was no summary line at all. A review caught the comment promising three warnings where one
+// existed. This is the downgrade nobody would otherwise discover, because it is a security posture rather
+// than a missing feature.
+func TestDecliningSMTPSaysWhatElseItTurnsOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	p, out := silent()
+
+	require.NoError(t, run(Options{NonInteractive: true, Output: path, DBPassword: "pw"}, p))
+
+	transcript := out.String()
+	assert.Contains(t, transcript, "address confirmation",
+		"the summary must say confirmation is off, not only password reset")
+	assert.Contains(t, transcript, "already has an account",
+		"and that registration can no longer hide whether an address is taken")
+}

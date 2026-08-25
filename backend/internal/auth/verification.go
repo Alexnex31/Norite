@@ -50,9 +50,10 @@ var (
 // creation and the enumeration hole stays open there. Refusing to register instead would trade a working
 // instance for nothing — the hole cannot be closed by any route without a relay.
 //
-// Stated in three places rather than left to be discovered: the wizard warns when SMTP is declined, the
-// server logs it once at startup, and docs/architecture.md §14 records it. The failure mode to guard
-// against is this becoming quiet, not it existing.
+// Stated in four places rather than left to be discovered: the wizard warns when SMTP is declined *and*
+// repeats it in the summary a scripted run still prints, `cmd/server/main.go` logs it once at startup, and
+// docs/architecture.md §14 records it. The failure mode to guard against is this becoming quiet, not it
+// existing — and two of those did not exist when this comment first claimed three, which a review caught.
 func (s *Service) VerificationRequired() bool {
 	return s.mailer != nil && s.mailer.Enabled()
 }

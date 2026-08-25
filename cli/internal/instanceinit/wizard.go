@@ -298,8 +298,11 @@ func gatherStorage(p *prompter, opts Options, doc *Document) error {
 // not have would turn an opt-out into a hurdle.
 func gatherSMTP(p *prompter, opts Options, doc *Document) error {
 	p.section("Outbound email")
-	p.note("Norite sends password-reset emails through an SMTP relay you provide.")
-	p.note("Say no for now if you have none — the instance runs fine, and password reset is simply off.")
+	p.note("Norite sends password-reset and address-confirmation emails through an SMTP relay you provide.")
+	p.note("Say no for now if you have none — the instance runs fine, with two things turned off:")
+	p.note("  password reset, and confirming that an address belongs to whoever registered it.")
+	p.note("Without confirmation, new accounts are usable immediately and someone can tell whether an")
+	p.note("address already has an account here. Fine for a private instance; worth knowing for a public one.")
 
 	enabled, err := p.askBool("Send email through an SMTP relay", opts.SMTP, false)
 	if err != nil {
@@ -474,6 +477,16 @@ func printSummary(p *prompter, doc Document, path string, full bool) {
 		p.println("\nEverything not asked about took its default. Re-run with --full to be asked " +
 			"about all of them,")
 		p.println("or edit the file directly — it documents every setting it writes.")
+	}
+
+	if !doc.SMTPEnabled {
+		// Repeated here because the prompt above is skipped entirely on a scripted run, and this is the
+		// downgrade nobody would otherwise discover: without a relay an address cannot be confirmed, so
+		// accounts are usable on creation and registration stops being able to hide whether an address is
+		// already taken. See auth.VerificationRequired.
+		p.println("\nNo SMTP relay: password reset is unavailable, new accounts skip address confirmation,")
+		p.println("and registration cannot hide whether an address already has an account. Add [smtp] later")
+		p.println("to turn all three on.")
 	}
 
 	printNextSteps(p, path)

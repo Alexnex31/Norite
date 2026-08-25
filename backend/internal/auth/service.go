@@ -149,11 +149,13 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}, nil
 }
 
-// errEmailRaceLost is internal: a registration that passed the address pre-check and then lost the unique
-// constraint to a simultaneous one. Never returned to a caller — Register turns it into the same silent
-// success a taken address produces, because a distinguishable answer here would reopen the enumeration
-// oracle through a window an attacker can reach on purpose by sending two requests at once.
-var errEmailRaceLost = errors.New("email taken, discovered at the constraint")
+// errEmailTakenSilently is internal: the address already has an account, discovered either by the check
+// inside the transaction or by losing the unique constraint to a simultaneous registration.
+//
+// Never returned to a caller. Register turns it into the same silent success a new address produces,
+// because a distinguishable answer — from either route — is the enumeration oracle this milestone closed.
+// It rolls the transaction back, which is what leaves a redeemed invite unspent.
+var errEmailTakenSilently = errors.New("email taken")
 
 // RegisterInput is a registration request.
 type RegisterInput struct {
@@ -213,33 +215,6 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return db.User{}, ErrUsernameTaken
 	}
 
-	// The address is not public, and this is where the account-existence oracle used to be.
-	//
-	// Until M10 a taken address answered 409, so anyone could probe any address. It answered that way
-	// because there was no way to accept the registration and sort it out by mail — which is exactly what
-	// email verification now makes possible. So both branches below return the same nil error, the handler
-	// answers 202 either way, and what differs is which message goes to the address itself: a verification
-	// link for a new account, a "somebody tried to register" notice for one that already exists.
-	//
-	// Timing does not leak it either, and that is not automatic. HashPassword above runs in both branches
-	// — 64 MiB and tens of milliseconds — which swamps the one insert the branches differ by. Moving it
-	// below this check would reintroduce the oracle in a form no response body shows.
-	taken, err = s.queries.UserExistsByEmail(ctx, email)
-	if err != nil {
-		return db.User{}, fmt.Errorf("checking email availability: %w", err)
-	}
-	if taken {
-		// Nothing is created. The notice is queued rather than sent inline, so this branch does the same
-		// amount of *blocking* work as the other one.
-		if s.mailer != nil && s.mailer.Enabled() {
-			if err := s.mailer.Enqueue(registrationNoticeMessage(s.publicBaseURL, email)); err != nil {
-				logging.FromContext(ctx).Warn().Err(err).
-					Msg("queueing a registration notice failed")
-			}
-		}
-		return db.User{}, nil
-	}
-
 	id, err := s.ids.Next()
 	if err != nil {
 		return db.User{}, fmt.Errorf("generating user ID: %w", err)
@@ -261,13 +236,37 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
+		// Redeemed *before* the address is looked at, which is the ordering a review found wrong the
+		// first time. With the address checked first, a taken one returned the silent 202 while a free
+		// one fell through to `invite_invalid` — so on a gated instance anybody could test any address
+		// with a made-up code, for free, without even spending an invite. Measured at 202 against 403.
+		//
+		// This way an unusable code is refused identically whatever the address, and the address branch
+		// below is reachable only by somebody who already holds a real invite.
 		if gated {
 			if err := redeemInvite(ctx, q, in.InviteCode); err != nil {
 				return err
 			}
 		}
 
-		var err error
+		// The address, and this is where the account-existence oracle used to be.
+		//
+		// Until M10 a taken address answered 409, so anyone could probe any address. It answered that way
+		// because there was no way to accept the registration and sort it out by mail — which is what
+		// email verification now provides. Both branches return the same nil, the handler answers 202
+		// either way, and what differs is which message goes to the address itself.
+		//
+		// Rolling back rather than returning early is what keeps the invite unspent: whoever holds it did
+		// nothing wrong, and burning a use because somebody typed an address that already exists would
+		// cost them the thing they were given.
+		taken, err := q.UserExistsByEmail(ctx, email)
+		if err != nil {
+			return fmt.Errorf("checking email availability: %w", err)
+		}
+		if taken {
+			return errEmailTakenSilently
+		}
+
 		user, err = q.CreateUser(ctx, db.CreateUserParams{
 			ID:           int64(id),
 			Username:     username,
@@ -293,7 +292,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 			// second "somebody tried to register" mail for one attempt would be noise.
 			switch conflict := registerConflict(err); {
 			case errors.Is(conflict, ErrEmailTaken):
-				return errEmailRaceLost
+				return errEmailTakenSilently
 			case conflict != nil:
 				return conflict
 			}
@@ -309,9 +308,15 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return nil
 	})
 	if err != nil {
-		// The address was taken after all, discovered at the constraint rather than at the pre-check.
-		// Answered exactly as the pre-check's branch answers, which is what keeps the window closed.
-		if errors.Is(err, errEmailRaceLost) {
+		if errors.Is(err, errEmailTakenSilently) {
+			// Nothing was created and any invite was rolled back. The notice is queued rather than sent
+			// inline, so this branch does the same amount of *blocking* work as the other one.
+			if s.mailer != nil && s.mailer.Enabled() {
+				if err := s.mailer.Enqueue(registrationNoticeMessage(s.publicBaseURL, email)); err != nil {
+					logging.FromContext(ctx).Warn().Err(err).
+						Msg("queueing a registration notice failed")
+				}
+			}
 			return db.User{}, nil
 		}
 		return db.User{}, err
@@ -355,26 +360,6 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 		return TokenPair{}, err
 	}
 
-	// An unverified account cannot sign in, and is refused with the *same* answer a wrong password gets.
-	//
-	// Reporting it distinctly is the obvious design and it reopens the oracle registration just closed,
-	// in two requests. Register an address with a password of your choosing: if the address was free an
-	// account now exists with that password, so logging in returns "unverified"; if it was taken
-	// nothing was created, so the same login returns "wrong password". Measured before this was
-	// written — 403 against 401 — which makes any address testable by whoever bothers.
-	//
-	// So the difference goes where every other difference in this milestone goes: the mailbox. Whoever
-	// controls the address gets a fresh link and an explanation, and the caller gets the same refusal
-	// either way. The mail is sent only when the password was *right*, so a wrong-password flood
-	// queues nothing, and each send supersedes the last token.
-	//
-	// A verified-by-creation account never reaches this: an instance with no relay marks accounts
-	// verified on creation, and every account predating M10 was backfilled by migration 000010.
-	if !user.EmailVerifiedAt.Valid {
-		s.remindToVerify(ctx, user)
-		return TokenPair{}, ErrInvalidCredentials
-	}
-
 	return s.startSession(ctx, snowflake.ID(user.ID), deviceID, in.DeviceName, in.IP)
 }
 
@@ -409,6 +394,28 @@ func (s *Service) verifyCredentials(ctx context.Context, rawEmail, password stri
 			return db.User{}, ErrInvalidCredentials
 		}
 		return db.User{}, err
+	}
+
+	// An unverified address is refused with the *same* answer a wrong password gets, and the check lives
+	// here rather than in Login for a reason found by review: the device verification page authenticates
+	// through this function too, and when the gate sat in Login that page handed out a full token pair on
+	// an account ordinary login refused. Anything that turns a password into a session comes through here,
+	// so this is the only place the gate cannot be walked around.
+	//
+	// Reporting it distinctly reopens the oracle registration closes, in two requests: register an address
+	// with a password of your choosing, then log in with it — if the address was free an account now
+	// exists with that password and the login says "unverified"; if it was taken nothing was created and
+	// it says "wrong password". Measured at 403 against 401 before this was written.
+	//
+	// So the difference goes where every other difference in this milestone goes: the mailbox. The person
+	// who owns the address gets a fresh link and an explanation; the caller gets the same refusal either
+	// way. The reminder follows the password check, so guessing at addresses queues nothing.
+	//
+	// A verified-by-creation account never reaches this: an instance with no relay marks accounts verified
+	// on creation, and every account predating M10 was backfilled by migration 000010.
+	if !user.EmailVerifiedAt.Valid {
+		s.remindToVerify(ctx, user)
+		return db.User{}, ErrInvalidCredentials
 	}
 	return user, nil
 }

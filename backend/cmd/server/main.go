@@ -237,6 +237,15 @@ func run() error {
 	health.MarkReady()
 	logger.Info().Msg("migrations complete — instance is ready")
 
+	// Said once, at startup, because it is a security posture rather than a missing feature and nothing
+	// else will mention it again. Without a relay an address cannot be confirmed, so accounts are
+	// usable on creation and registration cannot hide whether an address is already taken — see
+	// auth.VerificationRequired, which is the one place that decides this.
+	if !authService.VerificationRequired() {
+		logger.Warn().Msg("no SMTP relay: new accounts skip address confirmation, and registration " +
+			"cannot hide whether an address already has an account")
+	}
+
 	// Started after migrations, because it deletes from tables migrations may have just created, and after
 	// readiness, because nothing waits on it. It stops when ctx is canceled by the signal handler, so a
 	// shutdown never waits on a sweep interval; a sweep already in flight is canceled with its query and

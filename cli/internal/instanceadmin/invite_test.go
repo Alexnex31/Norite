@@ -213,3 +213,40 @@ func TestUsesAreDescribedForBothKinds(t *testing.T) {
 	assert.Equal(t, "1 of 3 used", describeUses(inviteView{Uses: 1, MaxUses: &three}))
 	assert.Equal(t, "7 used", describeUses(inviteView{Uses: 7}))
 }
+
+// A code is a value the instance chose, and it is printed on its own line — an erase-line sequence in one
+// would rewrite whatever was above it. CLAUDE.md rule 19, at the boundary every other foreign value in
+// this CLI already crosses.
+func TestAHostileInviteCodeIsSanitizedBeforePrinting(t *testing.T) {
+	f := newFakeInviteAPI(t)
+	f.reply = `{"code":"BCDF\u001b[2KGHJK","created_by":null,"max_uses":null,"uses":0,` +
+		`"expires_at":null,"created_at":"2026-08-25T10:00:00Z"}`
+
+	r, out := inviteRunner(t, f, false)
+	require.NoError(t, r.createInvite(context.Background(), 0, 0))
+	assert.NotContains(t, out.String(), "\x1b")
+	assert.Contains(t, out.String(), "BCDF")
+
+	// The list form prints codes too, and had the same hole.
+	f.status = http.StatusOK
+	f.reply = `[{"code":"BCDF\u001b[2KGHJK","created_by":null,"max_uses":null,"uses":0,` +
+		`"expires_at":null,"created_at":"2026-08-25T10:00:00Z"}]`
+	r2, out2 := inviteRunner(t, f, false)
+	require.NoError(t, r2.listInvites(context.Background()))
+	assert.NotContains(t, out2.String(), "\x1b")
+}
+
+// A negative flag used to mean "omit the field", which the server reads as unlimited — the opposite of
+// what was asked for, silently. The service-side guards cannot help, because the value is never sent.
+func TestANegativeInviteLimitIsRefused(t *testing.T) {
+	f := newFakeInviteAPI(t)
+
+	r, _ := inviteRunner(t, f, false)
+	err := r.createInvite(context.Background(), -1, 0)
+	require.ErrorContains(t, err, "--max-uses")
+	assert.Empty(t, f.body, "nothing may be sent for a value that cannot mean anything")
+
+	r2, _ := inviteRunner(t, f, false)
+	err = r2.createInvite(context.Background(), 0, -time.Hour)
+	require.ErrorContains(t, err, "--expires-in")
+}

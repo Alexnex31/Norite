@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -319,4 +320,103 @@ func timeRequest(t *testing.T, a *api, username, email string) time.Duration {
 	require.Equal(t, http.StatusAccepted, resp.Code,
 		"a timing comparison is meaningless unless both requests were accepted: %s", resp)
 	return elapsed
+}
+
+// The same probe as TestAnUnverifiedAccountIsRefusedLikeAWrongPassword, on a **gated** instance and with a
+// made-up invite code — which is where a review found the oracle still open after the first fix.
+//
+// The address used to be checked before the invite was redeemed, so a taken address returned the silent
+// 202 while a free one fell through to `invite_invalid`. Anybody could test any address on a private
+// instance with a code they invented, for free, without even holding an invite. Measured at 202 against
+// 403 before the ordering was swapped.
+func TestAGatedInstanceDoesNotLeakAddressesToABogusInvite(t *testing.T) {
+	a := newAPI(t, auth.RegistrationInvite)
+
+	invite := mintInvite(t, a, map[string]any{})
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "ada", "email": "ada@example.com", "password": testPassword,
+		"invite_code": invite.Code,
+	}).Code)
+
+	// A well-formed code that was never issued.
+	const bogus = "BBBBBBBBBBBBBBBB"
+	taken := a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "probe1", "email": "ada@example.com", "password": testPassword,
+		"invite_code": bogus,
+	})
+	free := a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "probe2", "email": "nobody@example.com", "password": testPassword,
+		"invite_code": bogus,
+	})
+
+	assert.Equal(t, http.StatusForbidden, taken.Code, taken)
+	assert.Equal(t, taken.Code, free.Code, "a bogus invite must be refused whatever the address")
+	assert.Equal(t, taken.errorBody().Code, free.errorBody().Code)
+}
+
+// And a real invite is not spent by a registration whose address turns out to be taken. Whoever holds the
+// code did nothing wrong, and burning a use for somebody else's typo would cost them the thing they were
+// given — so the transaction rolls back rather than returning early.
+func TestATakenAddressDoesNotSpendTheInvite(t *testing.T) {
+	a := newAPI(t, auth.RegistrationInvite)
+
+	first := mintInvite(t, a, map[string]any{})
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "ada", "email": "ada@example.com", "password": testPassword,
+		"invite_code": first.Code,
+	}).Code)
+
+	invite := mintInvite(t, a, map[string]any{"max_uses": 1})
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "probe", "email": "ada@example.com", "password": testPassword,
+		"invite_code": invite.Code,
+	}).Code, "a taken address is accepted silently, gated or not")
+
+	// Still usable by the person it was meant for.
+	assert.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "grace", "email": "grace@example.com", "password": testPassword,
+		"invite_code": invite.Code,
+	}).Code, "the invite must survive a registration that created nothing")
+}
+
+// The device verification page authenticates with a password too, and when the unverified gate lived in
+// Login it walked straight past it — handing a waiting CLI a full token pair on an account that ordinary
+// login refused. That is the address-squatting takeover M10's gate exists to close: register somebody
+// else's address, complete a device flow, and hold a session on it.
+//
+// Found by review. The gate moved into verifyCredentials, which is the one function every password-to-
+// session path goes through.
+func TestTheDevicePageCannotSignInAnUnverifiedAccount(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "squatter", "email": "victim@example.com", "password": testPassword,
+	}).Code)
+
+	issued := a.call(http.MethodPost, "/api/v1/auth/device/code", map[string]string{
+		"device_id": "dev-1", "device_name": "probe",
+	})
+	require.Equal(t, http.StatusOK, issued.Code, issued)
+	var dc struct {
+		DeviceCode string `json:"device_code"`
+		UserCode   string `json:"user_code"`
+	}
+	issued.decode(&dc)
+
+	entered := a.postForm("/device", url.Values{"user_code": {dc.UserCode}}.Encode())
+	require.Equal(t, http.StatusOK, entered.Code, entered)
+
+	signin := a.postForm("/device/signin", url.Values{
+		"device_token": {hiddenField(t, entered, "device_token")},
+		"email":        {"victim@example.com"},
+		"password":     {testPassword},
+	}.Encode())
+
+	// Refused, and refused the way a wrong password is — the page must not become the oracle either.
+	assert.NotContains(t, signin.String(), "Approve",
+		"an unverified account must not reach the approval step")
+
+	// And the waiting client gets nothing.
+	poll := a.call(http.MethodPost, "/api/v1/auth/device/token", map[string]string{"device_code": dc.DeviceCode})
+	assert.NotEqual(t, http.StatusOK, poll.Code, "no token pair may be issued: %s", poll)
 }

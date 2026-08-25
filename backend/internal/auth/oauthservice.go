@@ -442,12 +442,20 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		// Linking to an *existing* account stays refused above. That is the takeover direction, and no
 		// mail we send changes who controls the provider account.
 
-		if !identity.EmailVerified {
-			return s.unverifiedProviderAddress(ctx, identity, db.User{}, dest)
-		}
+		// The gate comes before the detour, which is the ordering a review found the wrong way round.
+		//
+		// With the detour first, anybody who presented an arbitrary address at a provider could make a
+		// gated instance send mail to it — an unauthenticated "finish creating your account" link, to any
+		// address, on an instance that deliberately closed registration. Following it then rendered a
+		// username form that only failed *after* a username was submitted, which is a dead end for a real
+		// person as well.
+		//
 		// Nothing is written until a username is chosen — see issueOAuthSignupToken.
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
+		}
+		if !identity.EmailVerified {
+			return s.unverifiedProviderAddress(ctx, identity, db.User{}, dest)
 		}
 		token, err := s.issueOAuthSignupToken(identity, dest)
 		if err != nil {

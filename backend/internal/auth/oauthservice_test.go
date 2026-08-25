@@ -1062,3 +1062,23 @@ func TestExpiredRowsAreSweptAndLiveOnesAreNot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), sweptCodes)
 }
+
+// A gated instance must not be turned into a way to mail an arbitrary address.
+//
+// The detour used to run before the registration-mode check, so presenting any address at a provider that
+// does not verify it made a closed instance send an unauthenticated "finish creating your account" link to
+// it — and following that link dead-ended after a username was submitted. Found by review; the gate now
+// comes first.
+func TestAGatedInstanceSendsNoMailForAnUnverifiedProviderAddress(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationInvite)
+	mailer := &fakeMailer{}
+	svc.mailer = mailer
+	svc.publicBaseURL = "https://chat.example.com"
+	stub.asGoogle("google-99", "stranger@example.com", false)
+
+	_, err := signIn(t, svc, stub, "google")
+	assert.ErrorIs(t, err, ErrOAuthRegistrationClosed)
+	assert.Zero(t, mailer.count(mail.KindEmailVerification),
+		"a closed instance must not mail a sign-up link to an address somebody typed at a provider")
+	assert.Zero(t, mailer.count(mail.KindRegistrationNotice))
+}

@@ -113,10 +113,22 @@ paths:
     post:
       summary: Create an account
       description: >
-        Creates an account and returns it. It does **not** log the new account in: registration and login
-        are separate operations with separate inputs — login needs a `device_id`, which registration has no
-        business requiring — and fusing them would force a client that only wanted an account to invent a
-        device identity.
+        Accepts a registration. It does **not** log the new account in: registration and login are separate
+        operations with separate inputs — login needs a `device_id`, which registration has no business
+        requiring — and fusing them would force a client that only wanted an account to invent a device
+        identity.
+
+
+        **Answers 202 with a fixed body whether or not the address already has an account, and never
+        returns the account.** There is no user to return when the address was taken, and any response
+        shaped around one would differ between the two cases. What differs instead is the mail: a
+        confirmation link for a new account, a "somebody tried to register with your address" notice for one
+        that already exists. The only party told which happened is whoever controls the address.
+
+
+        A taken **username** is still refused 409. A username is an `@handle` — public by construction, and
+        discoverable by any client that can look one up — so refusing it discloses nothing; an address is
+        not public. That asymmetry is deliberate.
 
 
         While the instance is configured for invite-only registration, `invite_code` is required: a request
@@ -132,9 +144,11 @@ paths:
         code through a provider redirect, so an invite-only instance is password-registration-only.
 
 
-        Unlike login, this endpoint necessarily discloses whether an email or username is already taken —
-        that is inherent to letting someone create an account at all. Password reset (M5) is the surface
-        where anti-enumeration matters, and it always answers 202.
+        Until M10 this endpoint disclosed whether an address was already taken, which made the instance
+        enumerable — it was the only endpoint here that did, and it did so because nothing could verify an
+        address, so there was no way to accept a registration and sort it out by mail. Email verification
+        removed that constraint. Timing is part of the guarantee too: the password is hashed *before* the
+        address is examined, so both branches pay the same argon2id cost.
       operationId: register
       tags: [auth]
       security: []
@@ -151,12 +165,18 @@ paths:
                   email: ada@example.com
                   password: correct horse battery staple
       responses:
-        "201":
-          description: The account was created.
+        "202":
+          description: >
+            Accepted. Identical whether or not the address already had an account — see the description.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/User"
+                type: object
+                required: [message]
+                additionalProperties: false
+                properties:
+                  message:
+                    type: string
         "400": { $ref: "#/components/responses/BadRequest" }
         "403":
           description: >
@@ -169,7 +189,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The email address or username is already in use.
+          description: >
+            The username is already in use. **Not** returned for an address — that case answers 202, which
+            is what closes the account-existence oracle.
           content:
             application/json:
               schema:
@@ -1808,19 +1830,6 @@ components:
           type: string
           format: email
           description: Unique, case-insensitively.
-        invite_code:
-          type: string
-          maxLength: 64
-          description: >
-            Required while the instance is configured for invite-only registration, ignored while it is
-            open. Sixteen characters drawn from `BCDFGHJKMNPQRSTVWXYZ` — no vowels, so a code is unlikely
-            to spell anything, and no `L`, which is the third member of the `1`/`I`/`L` group that gets
-            misread. Case, spaces and dashes are normalised away before lookup, so a code may be presented
-            however it was pasted.
-
-            The maximum here is deliberately looser than the code's own length: what a code may contain is
-            the instance's decision, and a bound that disagreed with it would refuse a valid code for the
-            wrong reason.
         display_name:
           type: string
         avatar_hash:
@@ -1828,7 +1837,9 @@ components:
         email_verified_at:
           type: [string, "null"]
           format: date-time
-          description: Null until email verification lands at Milestone M5.
+          description: Null while the address is unconfirmed. Set when a confirmation link is followed (M10), when a provider
+            vouched for the address, or on creation for an account made by `/instance/bootstrap` or on an
+            instance with no mail relay. An account with this null cannot sign in.
         created_at:
           type: string
           format: date-time
@@ -2167,6 +2178,19 @@ components:
             Length is the only rule, counted in characters rather than bytes so a passphrase in a non-Latin
             script is not penalised. No composition requirements: they push people toward predictable
             substitutions while ruling out strong passphrases. The ceiling exists to bound hashing work.
+        invite_code:
+          type: string
+          maxLength: 64
+          description: >
+            Required while the instance is configured for invite-only registration, ignored while it is
+            open. Sixteen characters drawn from `BCDFGHJKMNPQRSTVWXYZ` — no vowels, so a code is unlikely
+            to spell anything, and no `L`, which is the third member of the `1`/`I`/`L` group that gets
+            misread. Case, spaces and dashes are normalised away before lookup, so a code may be presented
+            however it was pasted.
+
+            The maximum here is deliberately looser than the code's own length: what a code may contain is
+            the instance's decision, and a bound that disagreed with it would refuse a valid code for the
+            wrong reason.
         display_name:
           type: string
           maxLength: 64
@@ -2253,6 +2277,9 @@ components:
                 - rate_limited
                 - service_unavailable
                 - internal_error
+                # Still emitted by the OAuth sign-up path, which refuses outright on a gated instance —
+                # there is nowhere to carry an invite code through a provider redirect. Registration's own
+                # use of it ended at M10.
                 - registration_closed
                 - invite_required
                 - invite_invalid
