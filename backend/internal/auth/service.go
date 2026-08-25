@@ -149,6 +149,12 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}, nil
 }
 
+// errEmailRaceLost is internal: a registration that passed the address pre-check and then lost the unique
+// constraint to a simultaneous one. Never returned to a caller — Register turns it into the same silent
+// success a taken address produces, because a distinguishable answer here would reopen the enumeration
+// oracle through a window an attacker can reach on purpose by sending two requests at once.
+var errEmailRaceLost = errors.New("email taken, discovered at the constraint")
+
 // RegisterInput is a registration request.
 type RegisterInput struct {
 	Username    string
@@ -196,18 +202,10 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return db.User{}, err
 	}
 
-	// Uniqueness is checked here for a good error message and enforced by the UNIQUE constraints for
-	// correctness. The check alone would be a race — two simultaneous registrations both see the address as
-	// free — which is why the insert's constraint violation is also mapped below rather than trusted not to
-	// happen.
-	taken, err := s.queries.UserExistsByEmail(ctx, email)
-	if err != nil {
-		return db.User{}, fmt.Errorf("checking email availability: %w", err)
-	}
-	if taken {
-		return db.User{}, ErrEmailTaken
-	}
-	taken, err = s.queries.UserExistsByUsername(ctx, username)
+	// The username is public — it is an @handle, and any client that can look one up already discloses
+	// whether it is taken — so refusing here reveals nothing. Checked *before* the address, so a taken
+	// username is reported plainly rather than swallowed by the silence the address branch requires.
+	taken, err := s.queries.UserExistsByUsername(ctx, username)
 	if err != nil {
 		return db.User{}, fmt.Errorf("checking username availability: %w", err)
 	}
@@ -215,15 +213,51 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return db.User{}, ErrUsernameTaken
 	}
 
+	// The address is not public, and this is where the account-existence oracle used to be.
+	//
+	// Until M10 a taken address answered 409, so anyone could probe any address. It answered that way
+	// because there was no way to accept the registration and sort it out by mail — which is exactly what
+	// email verification now makes possible. So both branches below return the same nil error, the handler
+	// answers 202 either way, and what differs is which message goes to the address itself: a verification
+	// link for a new account, a "somebody tried to register" notice for one that already exists.
+	//
+	// Timing does not leak it either, and that is not automatic. HashPassword above runs in both branches
+	// — 64 MiB and tens of milliseconds — which swamps the one insert the branches differ by. Moving it
+	// below this check would reintroduce the oracle in a form no response body shows.
+	taken, err = s.queries.UserExistsByEmail(ctx, email)
+	if err != nil {
+		return db.User{}, fmt.Errorf("checking email availability: %w", err)
+	}
+	if taken {
+		// Nothing is created. The notice is queued rather than sent inline, so this branch does the same
+		// amount of *blocking* work as the other one.
+		if s.mailer != nil && s.mailer.Enabled() {
+			if err := s.mailer.Enqueue(registrationNoticeMessage(s.publicBaseURL, email)); err != nil {
+				logging.FromContext(ctx).Warn().Err(err).
+					Msg("queueing a registration notice failed")
+			}
+		}
+		return db.User{}, nil
+	}
+
 	id, err := s.ids.Next()
 	if err != nil {
 		return db.User{}, fmt.Errorf("generating user ID: %w", err)
 	}
 
-	// Redemption and the insert commit together, so a registration that fails after redeeming does not
-	// burn a use of somebody else's invite. On an open instance there is nothing to redeem and the
-	// transaction holds one statement, which costs a round trip and buys one code path instead of two.
-	var user db.User
+	// An instance with no relay creates the account already verified — see the insert below.
+	verifiedOnCreation := pgtype.Timestamptz{}
+	if !s.VerificationRequired() {
+		verifiedOnCreation = timestamptz(s.now())
+	}
+
+	// Redemption, the insert and the verification token commit together, so a registration that fails
+	// part-way neither burns a use of somebody else's invite nor leaves a token behind for an account that
+	// does not exist.
+	var (
+		user db.User
+		msg  mail.Message
+	)
 	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
@@ -240,23 +274,58 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 			Email:        email,
 			PasswordHash: &hash,
 			DisplayName:  displayName,
-			// Unverified. Stated rather than left to the zero value, because the zero value being correct
-			// here is a coincidence of pgtype and not a decision anybody wrote down — and M10's next
-			// commits turn this column into the one that decides whether the account can sign in at all.
-			EmailVerifiedAt: pgtype.Timestamptz{},
+			// Unverified when this instance can send mail, verified on creation when it cannot.
+			//
+			// The second is the accepted limitation M10 ships with. An instance with no relay cannot
+			// verify an address by any route, so requiring it would mean nobody could register at all —
+			// and the enumeration hole above stays open there regardless, since there is no mail to carry
+			// the difference. See VerificationRequired.
+			EmailVerifiedAt: verifiedOnCreation,
 		})
 		if err != nil {
-			// Lost the race described above. Report it as the same conflict the pre-check would have —
-			// but only for the constraints that actually mean that; see registerConflict.
-			if conflict := registerConflict(err); conflict != nil {
+			// Lost the race the pre-checks cannot close: two registrations for the same address or name
+			// both pass their check and one loses at the constraint.
+			//
+			// The email case must come back as silence, not as a conflict. Reporting it would leave the
+			// oracle intact through a window — narrow, but reachable on purpose by firing two requests at
+			// once, which is not a hard attack to write. Reported as the taken branch is, minus the
+			// notice: the loser cannot tell whether the winner was itself or somebody else, and sending a
+			// second "somebody tried to register" mail for one attempt would be noise.
+			switch conflict := registerConflict(err); {
+			case errors.Is(conflict, ErrEmailTaken):
+				return errEmailRaceLost
+			case conflict != nil:
 				return conflict
 			}
 			return fmt.Errorf("creating user: %w", err)
 		}
+
+		if s.VerificationRequired() {
+			msg, err = s.buildVerification(ctx, q, user)
+			if err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
+		// The address was taken after all, discovered at the constraint rather than at the pre-check.
+		// Answered exactly as the pre-check's branch answers, which is what keeps the window closed.
+		if errors.Is(err, errEmailRaceLost) {
+			return db.User{}, nil
+		}
 		return db.User{}, err
+	}
+
+	// After the commit, never inside it — the ordering rule gateway dispatch follows (CLAUDE.md rule 5).
+	// A transaction that rolled back after the mail was queued would send a link to a token that does not
+	// exist, and to an account that does not either.
+	if msg.To != "" {
+		if err := s.mailer.Enqueue(msg); err != nil {
+			logging.FromContext(ctx).Warn().Err(err).
+				Str("user_id", snowflake.ID(user.ID).String()).
+				Msg("queueing a verification email failed")
+		}
 	}
 	return user, nil
 }
@@ -284,6 +353,19 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 	user, err := s.verifyCredentials(ctx, in.Email, in.Password)
 	if err != nil {
 		return TokenPair{}, err
+	}
+
+	// Checked *after* the credentials, and the order is the whole of its safety.
+	//
+	// Before them, this message would be an oracle for "that address is registered but unverified" —
+	// answerable without knowing any password, which is precisely what the rest of this endpoint goes to
+	// some trouble to avoid. After them, the caller has already proved they hold the password, so being
+	// told the address needs confirming discloses nothing they did not know.
+	//
+	// A verified-by-creation account never reaches this: an instance with no relay marks accounts verified
+	// on creation, and every account that existed before M10 was backfilled by migration 000010.
+	if !user.EmailVerifiedAt.Valid {
+		return TokenPair{}, ErrEmailNotVerified
 	}
 
 	return s.startSession(ctx, snowflake.ID(user.ID), deviceID, in.DeviceName, in.IP)

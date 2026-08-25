@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/backend/internal/mail"
 )
 
 // oauthService builds a service wired to a stub provider, so a flow can be driven end to end without
@@ -968,7 +970,7 @@ func TestAPasswordResetRevokesOutstandingExchangeCodes(t *testing.T) {
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
 	require.NoError(t, svc.ConfirmPasswordReset(t.Context(),
-		tokenFromLink(t, mailer.only(t)), "a new passphrase entirely"))
+		tokenFromLink(t, mailer.only(t, mail.KindPasswordReset)), "a new passphrase entirely"))
 
 	// Redeemed with the correct verifier, so what refuses it is the revocation and nothing else.
 	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,

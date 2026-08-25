@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/backend/internal/mail"
 )
 
 // The sweep exists because nothing else was ever going to run it: four comments in this package pointed at
@@ -72,7 +74,7 @@ func TestSweepRemovesSpentRowsToo(t *testing.T) {
 	// A spent reset token.
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
 	require.NoError(t, svc.ConfirmPasswordReset(t.Context(),
-		tokenFromLink(t, mailer.only(t)), "a new passphrase entirely"))
+		tokenFromLink(t, mailer.only(t, mail.KindPasswordReset)), "a new passphrase entirely"))
 
 	for _, table := range []string{"password_reset_tokens", "oauth_states", "oauth_exchange_codes"} {
 		_, err := svc.pool.Exec(t.Context(),

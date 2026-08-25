@@ -40,6 +40,10 @@ const (
 	// endpoint, and routing it to the Bearer verifier would be the first step toward it authenticating
 	// something else.
 	deviceCodePrefix = "nod_"
+	// emailVerificationPrefix marks the token in a verification email. Absent from LooksLikeOpaqueToken
+	// for the reason every value above it is: it authenticates exactly one endpoint, and routing it to
+	// the Bearer verifier would be the first step toward it authenticating something else.
+	emailVerificationPrefix = "nev_"
 )
 
 // ErrMalformedToken reports a token that cannot be a Norite token at all — wrong prefix, wrong length, not
@@ -86,6 +90,17 @@ func GeneratePasswordResetToken() (raw string, hash TokenHash, err error) {
 // ParsePasswordResetToken hashes a raw reset token for lookup, rejecting anything of the wrong shape.
 func ParsePasswordResetToken(raw string) (TokenHash, error) {
 	return parseOpaqueToken(raw, passwordResetPrefix)
+}
+
+// GenerateEmailVerificationToken mints the token in a verification email.
+func GenerateEmailVerificationToken() (raw string, hash TokenHash, err error) {
+	return generateOpaqueToken(emailVerificationPrefix)
+}
+
+// ParseEmailVerificationToken hashes a raw verification token for lookup, rejecting anything of the wrong
+// shape.
+func ParseEmailVerificationToken(raw string) (TokenHash, error) {
+	return parseOpaqueToken(raw, emailVerificationPrefix)
 }
 
 // GenerateOAuthState mints the state parameter for an authorization request.

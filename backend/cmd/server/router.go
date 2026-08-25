@@ -160,6 +160,9 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			// where a user code is guessed at, and /device/signin takes a password. Both are exactly the
 			// kind of endpoint that bucket exists for.
 			opts.Auth.DevicePageRoutes(r)
+			// The email-verification page, same bucket: POST /verify spends a token, and the page is
+			// reachable by anyone holding a link.
+			opts.Auth.VerifyPageRoutes(r)
 		})
 	}
 

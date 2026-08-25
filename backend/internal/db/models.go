@@ -35,6 +35,16 @@ type DeviceCode struct {
 	ExpiresAt      pgtype.Timestamptz
 }
 
+type EmailVerificationToken struct {
+	ID         int64
+	UserID     int64
+	TokenHash  []byte
+	SentTo     string
+	CreatedAt  pgtype.Timestamptz
+	ExpiresAt  pgtype.Timestamptz
+	ConsumedAt pgtype.Timestamptz
+}
+
 type InstanceAdmin struct {
 	UserID    int64
 	GrantedBy *int64

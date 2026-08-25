@@ -21,6 +21,13 @@ type Querier interface {
 	// the same device code both reach here, and exactly one matches a row. Reading, checking consumed_at in
 	// Go, then updating would issue two sessions for one authorization.
 	ConsumeDeviceCode(ctx context.Context, deviceCodeHash []byte) (DeviceCode, error)
+	// Spends a token, with single-use in the WHERE clause rather than in Go.
+	//
+	// Two confirms racing on the same link both reach this statement; the second finds consumed_at already set,
+	// matches zero rows, and is failed. Checking in the service and updating afterwards would let both win, and
+	// while a double verification is harmless in itself, the guarantee is what the address-change check below
+	// depends on.
+	ConsumeEmailVerificationToken(ctx context.Context, id int64) (EmailVerificationToken, error)
 	// Single-use and expiry in the WHERE clause, so a code seen in an address bar and replayed matches zero
 	// rows the second time rather than issuing a second token pair.
 	ConsumeOAuthExchangeCode(ctx context.Context, codeHash []byte) (OauthExchangeCode, error)
@@ -64,6 +71,12 @@ type Querier interface {
 	// device_id and device_name come from the client asking for the code, which is the client that will hold
 	// the resulting session. The browser that approves never supplies either.
 	CreateDeviceCode(ctx context.Context, arg CreateDeviceCodeParams) (DeviceCode, error)
+	// Email verification queries.
+	//
+	// The same shape as password_reset_tokens and deliberately so: two token tables with different rules about
+	// single-use or expiry would be two sets of guards to keep right, and the second one is always the one
+	// that gets it wrong.
+	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) (EmailVerificationToken, error)
 	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
 	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
@@ -117,6 +130,8 @@ type Querier interface {
 	// Called by auth.RunSweeper. Abandoned authorizations are the common case, and the endpoint that creates
 	// them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
 	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
+	// Called by auth.RunSweeper. Non-partial index behind it — see 000010, and 000005 for why.
+	DeleteExpiredEmailVerificationTokens(ctx context.Context) (int64, error)
 	// Called by auth.RunSweeper.
 	//
 	// The IS NOT NULL is redundant against SQL's own semantics — a NULL expires_at makes the comparison NULL
@@ -168,6 +183,9 @@ type Querier interface {
 	// told the authorization is over, instead of being walked through a sign-in that would then fail at the
 	// approval step for a reason nobody could see.
 	GetDeviceCodeByUserCode(ctx context.Context, userCode string) (DeviceCode, error)
+	// The confirm path's lookup. Expiry is checked here as well as in the consume below, so an expired token
+	// is refused before anything is written — the same two-step the reset path uses.
+	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
@@ -199,6 +217,10 @@ type Querier interface {
 	// that works. Without this, every request an anxious user makes leaves another live token behind, and the
 	// window a leaked one is redeemable in becomes the union of all of them.
 	InvalidateOutstandingResetTokens(ctx context.Context, userID int64) (int64, error)
+	// Requesting verification again spends every older token for that account, so the newest link is the only
+	// one that works. Without it, each resend leaves another live token behind and the window a leaked mail is
+	// redeemable in becomes the union of all of them.
+	InvalidateOutstandingVerificationTokens(ctx context.Context, userID int64) (int64, error)
 	// The tier check, on every request to an instance-administration endpoint.
 	//
 	// Joined against users for liveness, the same shape and the same reasoning as GetActiveAPITokenByHash
@@ -237,6 +259,13 @@ type Querier interface {
 	// recognizable in pg_locks. Slot 1 is the migration lock; this is slot 2. Written in decimal because
 	// sqlc parses the literal, and the value is 0x4E4F524954450002 — "NORITE" then 0x0002.
 	LockInstanceBootstrap(ctx context.Context) error
+	// Records that the address is confirmed.
+	//
+	// The WHERE guards against a race with an address change: the account's current email must still be the
+	// one the token was sent to. ConsumeEmailVerificationToken has already checked that the token is unspent,
+	// but the address can change between the two statements, and they run in one transaction precisely so this
+	// comparison is against a value that cannot move underneath it.
+	MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (User, error)
 	// Health-check queries.
 	//
 	// These exist so the readiness endpoint validates the *whole* data path — pool checkout, the

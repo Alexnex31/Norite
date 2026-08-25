@@ -313,6 +313,128 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /auth/verify/request:
+    post:
+      summary: Re-send an email verification link
+      description: >
+        Sends a fresh confirmation link, if the address belongs to an account whose address is not yet
+        verified.
+
+
+        **Always answers 202**, whatever it found. Like password reset, this endpoint has no business
+        telling a caller whether an address is registered — and here it would also disclose whether the
+        account behind it is mid-signup, which is a narrower and more useful thing for an attacker to know.
+
+
+        A no-op on an instance with no mail relay: there is nothing to send, and registration marks accounts
+        verified on creation there because nothing can verify anything.
+      operationId: requestEmailVerification
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              additionalProperties: false
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+      responses:
+        "202":
+          description: Accepted. Says nothing about what was found.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message]
+                additionalProperties: false
+                properties:
+                  message:
+                    type: string
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /verify:
+    # Served at the instance root, not under /api/v1, for the same reason /reset is: a person opens this
+    # from an email.
+    servers:
+      - url: /
+    get:
+      summary: The address-confirmation page
+      description: >
+        The page the link in a verification email opens. Carries the token into a hidden form field and does
+        **not** verify it — checking on GET would report whether a link is live before anyone submits
+        anything, which makes the page an oracle for exactly that, and would let an already-followed link be
+        told apart from one that never existed.
+
+
+        The confirmation is a form POST rather than the link doing the work on sight. That is not ceremony:
+        a GET that verified would be triggered by anything that follows links in mail — scanning gateways,
+        chat-client link previewers, some antivirus products — so an address could be confirmed by software
+        the person never saw, and the link would be spent before they clicked it. It is also this project's
+        rule 4, which requires GET to stay side-effect-free.
+      operationId: getVerifyPage
+      tags: [auth]
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: false
+          description: The verification token, carried into the form. Absent renders the page with an
+            empty field, which then fails on submit.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The confirmation page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+    post:
+      summary: Confirm an email address
+      description: >
+        Spends the token and marks the address verified, then renders the outcome. Single-use, and refused
+        if the account's address changed after the link was issued — otherwise registering with an address
+        you control, changing it to one you do not, and following your own link would mark somebody else's
+        address verified.
+
+
+        Every failure renders one message: unknown, expired, already used and address-changed are not
+        distinguished, because telling whoever holds a stolen link which it is helps only them.
+      operationId: confirmEmailVerification
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        "200":
+          description: The address is confirmed.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: The link is not valid. Renders the form again with a message.
+          content:
+            text/html:
+              schema:
+                type: string
+
   /reset:
     # Served at the instance root, not under /api/v1: this is a page a person opens from an email, not an
     # API a client codegens against, and putting it under the versioned prefix would imply it moves when

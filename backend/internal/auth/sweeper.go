@@ -47,11 +47,15 @@ type SweepResult struct {
 	// regardless, so the row affects nothing but an administrator's list — and worth naming separately so
 	// a count that looks surprising can be traced to the right table.
 	Invites int64
+	// VerificationTokens is M10's other TTL table. Unlike the invites above, these are ordinary garbage:
+	// an unfollowed verification link is dead the moment it expires.
+	VerificationTokens int64
 }
 
 // Total is how many rows the pass removed altogether.
 func (r SweepResult) Total() int64 {
-	return r.ResetTokens + r.OAuthStates + r.ExchangeCodes + r.DeviceCodes + r.Invites
+	return r.ResetTokens + r.OAuthStates + r.ExchangeCodes + r.DeviceCodes + r.Invites +
+		r.VerificationTokens
 }
 
 // SweepExpired removes every expired row this package owns.
@@ -71,6 +75,9 @@ func (s *Service) SweepExpired(ctx context.Context) (SweepResult, error) {
 	}
 	if out.ExchangeCodes, err = s.queries.DeleteExpiredOAuthExchangeCodes(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired oauth exchange codes: %w", err)
+	}
+	if out.VerificationTokens, err = s.queries.DeleteExpiredEmailVerificationTokens(ctx); err != nil {
+		return out, fmt.Errorf("sweeping expired email verification tokens: %w", err)
 	}
 	if out.Invites, err = s.queries.DeleteExpiredInstanceInvites(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired instance invites: %w", err)
@@ -122,6 +129,7 @@ func (s *Service) RunSweeper(ctx context.Context) {
 				Int64("oauth_exchange_codes", result.ExchangeCodes).
 				Int64("device_codes", result.DeviceCodes).
 				Int64("instance_invites", result.Invites).
+				Int64("verification_tokens", result.VerificationTokens).
 				Msg("swept expired auth rows")
 		}
 

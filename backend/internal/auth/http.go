@@ -42,6 +42,7 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/logout", h.logout)
 	r.Post("/password/reset/request", h.requestPasswordReset)
 	r.Post("/password/reset", h.confirmPasswordReset)
+	r.Post("/verify/request", h.requestEmailVerification)
 
 	// Authenticated.
 	r.Group(func(r chi.Router) {
@@ -104,6 +105,13 @@ type logoutRequest struct {
 }
 
 type passwordResetRequest struct {
+	Email string `json:"email" validate:"required,email,max=254"`
+}
+
+// emailVerificationRequest asks for a fresh verification link. Its own type rather than reusing
+// passwordResetRequest: two endpoints that happen to take one identical field today are not one endpoint,
+// and sharing the type would make either one's future field a silent addition to the other.
+type emailVerificationRequest struct {
 	Email string `json:"email" validate:"required,email,max=254"`
 }
 
@@ -217,7 +225,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	// start silently mis-assigning the moment either gained one.
 	//
 	//nolint:staticcheck // S1016: the coupling a conversion introduces is not wanted here
-	user, err := h.svc.Register(r.Context(), RegisterInput{
+	_, err := h.svc.Register(r.Context(), RegisterInput{
 		Username:    req.Username,
 		Email:       req.Email,
 		Password:    req.Password,
@@ -228,7 +236,26 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusCreated, newUserResponse(user))
+
+	// 202 with a fixed body, and deliberately not the account.
+	//
+	// Until M10 this answered 201 with the new user, which cannot survive the anti-enumeration rule: an
+	// address that already has an account creates nothing, so there is no user to return, and any response
+	// shaped around one would differ between the two cases. What the caller is told is that the address
+	// will hear about it — which is true either way, and is the only thing this endpoint can honestly say
+	// without disclosing whether the address was already registered.
+	//
+	// The account is not signed in either, unchanged from M4: registration and login are separate
+	// operations with separate inputs, and login needs a device_id registration has no business requiring.
+	httpx.WriteJSON(w, r, http.StatusAccepted, registrationAcceptedResponse{
+		Message: "Check your email to finish creating your account.",
+	})
+}
+
+// registrationAcceptedResponse is the one body POST /auth/register returns, identical in every case it
+// does not reject outright.
+type registrationAcceptedResponse struct {
+	Message string `json:"message"`
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +323,26 @@ func (h *Handler) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, r, http.StatusAccepted, nil)
+}
+
+// requestEmailVerification re-sends a verification link.
+//
+// Always 202, exactly as the reset request is and for the same reason: this endpoint has no business
+// telling a caller whether an address is registered, or whether the account behind it is already verified.
+// Both would be usable to enumerate, and the second would be usable to find accounts mid-signup.
+func (h *Handler) requestEmailVerification(w http.ResponseWriter, r *http.Request) {
+	var req emailVerificationRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	if err := h.svc.RequestEmailVerification(r.Context(), req.Email); err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusAccepted, registrationAcceptedResponse{
+		Message: "If that address needs verifying, a link is on its way.",
+	})
 }
 
 func (h *Handler) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
@@ -426,6 +473,16 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		// legitimate client got there first.
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid or expired refresh token"))
 
+	case errors.Is(err, ErrEmailNotVerified):
+		// 403 rather than 401: the credentials were right, so re-sending them changes nothing and a 401
+		// would put a client into a retry loop. Its own code so a client can offer to resend the link.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "email_not_verified",
+			Message: ErrEmailNotVerified.Error(),
+			Err:     err,
+		})
+
 	case errors.Is(err, ErrInviteRequired):
 		// `invite_required` rather than M4's `registration_closed`, which was accurate only while there
 		// was no way to redeem anything: registration is not closed on a gated instance, it has a
@@ -461,6 +518,9 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 			Err:     err,
 		})
 
+	// ErrEmailTaken no longer arrives from registration — that path answers 202 either way (M10) — but
+	// bootstrap still reports it, where the caller is the operator setting the instance up and there is
+	// nobody to enumerate.
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUsernameTaken):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
 

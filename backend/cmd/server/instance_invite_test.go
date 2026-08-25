@@ -46,7 +46,7 @@ func TestAGatedInstanceAdmitsAnInviteHolder(t *testing.T) {
 		"username": "ada", "email": "ada@example.com", "password": testPassword,
 		"invite_code": invite.Code,
 	})
-	assert.Equal(t, http.StatusCreated, admitted.Code, admitted)
+	assert.Equal(t, http.StatusAccepted, admitted.Code, admitted)
 }
 
 // A one-use code is spent, and the second attempt is refused with the code that says so — distinct from
@@ -59,7 +59,7 @@ func TestASpentInviteIsRefusedAsInvalid(t *testing.T) {
 		"username": "ada", "email": "ada@example.com", "password": testPassword,
 		"invite_code": invite.Code,
 	})
-	require.Equal(t, http.StatusCreated, first.Code, first)
+	require.Equal(t, http.StatusAccepted, first.Code, first)
 
 	second := a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
 		"username": "grace", "email": "grace@example.com", "password": testPassword,
@@ -75,7 +75,7 @@ func TestAnUnknownInviteIsIndistinguishableFromASpentOne(t *testing.T) {
 	a := newAPI(t, auth.RegistrationInvite)
 	invite := mintInvite(t, a, map[string]any{"max_uses": 1})
 
-	require.Equal(t, http.StatusCreated, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
 		"username": "ada", "email": "ada@example.com", "password": testPassword,
 		"invite_code": invite.Code,
 	}).Code)
@@ -187,5 +187,5 @@ func TestAnOpenInstanceAcceptsRegistrationWithAStrayCode(t *testing.T) {
 		"username": "ada", "email": "ada@example.com", "password": testPassword,
 		"invite_code": "BCDFGHJKMNPQRSTV",
 	})
-	assert.Equal(t, http.StatusCreated, resp.Code, resp)
+	assert.Equal(t, http.StatusAccepted, resp.Code, resp)
 }

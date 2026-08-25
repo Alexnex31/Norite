@@ -34,18 +34,62 @@ func (m *fakeMailer) Enqueue(msg mail.Message) error {
 	return nil
 }
 
-func (m *fakeMailer) only(t *testing.T) mail.Message {
+// only returns the single message of the given kind, and fails if there is not exactly one.
+//
+// Filtered by kind from M10 on, because registration now queues a verification mail of its own: a test
+// about password reset would otherwise be counting a message it never asked for, and the fix of loosening
+// the count to "at least one" would stop it noticing a duplicate reset link. Naming the kind also makes
+// each assertion say which mail it means.
+func (m *fakeMailer) only(t *testing.T, kind mail.Kind) mail.Message {
 	t.Helper()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	require.Len(t, m.sent, 1, "exactly one message should have been queued")
-	return m.sent[0]
+
+	var found []mail.Message
+	for _, msg := range m.sent {
+		if msg.Kind == kind {
+			found = append(found, msg)
+		}
+	}
+	require.Len(t, found, 1, "exactly one %s message should have been queued (all: %v)", kind, m.kinds())
+	return found[0]
 }
 
-func (m *fakeMailer) count() int {
+// count reports how many messages of one kind were queued.
+func (m *fakeMailer) count(kind mail.Kind) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.sent)
+
+	n := 0
+	for _, msg := range m.sent {
+		if msg.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// allOfKind returns every message of one kind, in the order they were queued.
+func (m *fakeMailer) allOfKind(kind mail.Kind) []mail.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var found []mail.Message
+	for _, msg := range m.sent {
+		if msg.Kind == kind {
+			found = append(found, msg)
+		}
+	}
+	return found
+}
+
+// kinds lists what was queued, for a failure message. Caller holds the lock.
+func (m *fakeMailer) kinds() []mail.Kind {
+	out := make([]mail.Kind, 0, len(m.sent))
+	for _, msg := range m.sent {
+		out = append(out, msg.Kind)
+	}
+	return out
 }
 
 // resetService builds a service with a mailer attached.
@@ -81,7 +125,7 @@ func TestRequestingAResetForAnUnknownAddressLooksIdentical(t *testing.T) {
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "nobody@example.com"),
 		"an unknown address must not be reported as an error")
 
-	assert.Equal(t, 1, mailer.count(), "only the real account may receive an email")
+	assert.Equal(t, 1, mailer.count(mail.KindPasswordReset), "only the real account may receive an email")
 }
 
 // An account that signs in with Google has no password to reset. Silent for the same reason: "that account
@@ -94,7 +138,7 @@ func TestRequestingAResetForAnOAuthOnlyAccountIsSilent(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
-	assert.Zero(t, mailer.count(), "there is no password to reset, and nothing to disclose")
+	assert.Zero(t, mailer.count(mail.KindPasswordReset), "there is no password to reset, and nothing to disclose")
 }
 
 // ---------- M5 done-when #1: a reset completes ----------
@@ -105,7 +149,7 @@ func TestPasswordResetCompletesEndToEnd(t *testing.T) {
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
 
-	msg := mailer.only(t)
+	msg := mailer.only(t, mail.KindPasswordReset)
 	assert.Equal(t, "ada@example.com", msg.To)
 	assert.Contains(t, msg.Body, "https://chat.example.com/reset?token=")
 	assert.Contains(t, msg.Body, "revokes any API tokens",
@@ -145,7 +189,7 @@ func TestResettingRevokesSessionsAndAPITokens(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
-	require.NoError(t, svc.ConfirmPasswordReset(t.Context(), tokenFromLink(t, mailer.only(t)), "a new passphrase entirely"))
+	require.NoError(t, svc.ConfirmPasswordReset(t.Context(), tokenFromLink(t, mailer.only(t, mail.KindPasswordReset)), "a new passphrase entirely"))
 
 	_, err = svc.Refresh(t.Context(), pair.RefreshToken)
 	assert.ErrorIs(t, err, ErrInvalidRefreshToken, "the session must not survive a password reset")
@@ -162,7 +206,7 @@ func TestAResetTokenIsSingleUse(t *testing.T) {
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
-	token := tokenFromLink(t, mailer.only(t))
+	token := tokenFromLink(t, mailer.only(t, mail.KindPasswordReset))
 
 	require.NoError(t, svc.ConfirmPasswordReset(t.Context(), token, "first new passphrase"))
 
@@ -185,10 +229,11 @@ func TestRequestingAgainInvalidatesTheEarlierToken(t *testing.T) {
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
 
-	mailer.mu.Lock()
-	require.Len(t, mailer.sent, 2)
-	first, second := mailer.sent[0], mailer.sent[1]
-	mailer.mu.Unlock()
+	// Filtered to reset mail: registering queued a verification link of its own (M10), and this test is
+	// about the two reset links superseding each other.
+	sent := mailer.allOfKind(mail.KindPasswordReset)
+	require.Len(t, sent, 2)
+	first, second := sent[0], sent[1]
 
 	err := svc.ConfirmPasswordReset(t.Context(), tokenFromLink(t, first), "new passphrase here")
 	assert.ErrorIs(t, err, ErrInvalidResetToken, "the superseded link must stop working")
@@ -205,7 +250,7 @@ func TestAnExpiredResetTokenIsRefused(t *testing.T) {
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
 	svc.now = time.Now
 
-	err := svc.ConfirmPasswordReset(t.Context(), tokenFromLink(t, mailer.only(t)), "new passphrase here")
+	err := svc.ConfirmPasswordReset(t.Context(), tokenFromLink(t, mailer.only(t, mail.KindPasswordReset)), "new passphrase here")
 	assert.ErrorIs(t, err, ErrInvalidResetToken)
 }
 
@@ -234,7 +279,7 @@ func TestATokenIsRefusedAfterTheAccountsEmailChanges(t *testing.T) {
 	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
-	token := tokenFromLink(t, mailer.only(t))
+	token := tokenFromLink(t, mailer.only(t, mail.KindPasswordReset))
 
 	_, err := svc.pool.Exec(t.Context(),
 		"UPDATE users SET email = 'moved@example.com' WHERE id = $1", user.ID)
@@ -278,7 +323,7 @@ func TestConcurrentConfirmsSpendTheTokenOnce(t *testing.T) {
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
-	token := tokenFromLink(t, mailer.only(t))
+	token := tokenFromLink(t, mailer.only(t, mail.KindPasswordReset))
 
 	const racers = 4
 	var wg sync.WaitGroup
