@@ -109,10 +109,10 @@ func inviteRevokeCommand() *cli.Command {
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			code := strings.TrimSpace(cmd.Args().First())
 			if code == "" {
-				return cli.Exit("norite: which invite? Pass the code to revoke.", 2)
+				return cli.Exit("which invite? Pass the code to revoke.", 2)
 			}
 			if cmd.Args().Len() > 1 {
-				return cli.Exit("norite: revoke takes one code.", 2)
+				return cli.Exit("revoke takes one code.", 2)
 			}
 			return runnerFrom(cmd).revokeInvite(ctx, code)
 		},

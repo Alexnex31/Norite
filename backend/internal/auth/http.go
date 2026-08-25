@@ -248,8 +248,26 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	// The account is not signed in either, unchanged from M4: registration and login are separate
 	// operations with separate inputs, and login needs a device_id registration has no business requiring.
 	httpx.WriteJSON(w, r, http.StatusAccepted, registrationAcceptedResponse{
-		Message: "Check your email to finish creating your account.",
+		Message: h.registrationMessage(),
 	})
+}
+
+// registrationMessage is what a 202 says. Fixed for a given instance, and never a function of the request.
+//
+// The distinction that matters here is *what the message varies on*. Varying it on whether the address was
+// already registered is the oracle this endpoint exists to close. Varying it on whether the instance has a
+// mail relay discloses nothing a caller cannot see anyway — no mail ever arrives, the startup log says so,
+// and both branches of the same request get the same sentence — so the two cases are not comparable.
+//
+// Worth doing because the alternative is a lie. A relay-less instance creates the account already verified
+// and usable (see Service.VerificationRequired), so "check your email" sends somebody to wait indefinitely
+// for a message that will never be sent, about an account they could already be signed in to. Found by
+// registering against a relay-less instance by hand; every automated test had a relay.
+func (h *Handler) registrationMessage() string {
+	if !h.svc.VerificationRequired() {
+		return "Your account is ready. You can sign in now."
+	}
+	return "Check your email to finish creating your account."
 }
 
 // registrationAcceptedResponse is the one body POST /auth/register returns, identical in every case it

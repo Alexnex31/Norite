@@ -195,11 +195,20 @@ whatever a caller happens to send.
 
 ## Consequences
 
-**Accepted, and stated in three places rather than discovered:** an instance with no SMTP relay creates
+**Accepted, and stated in four places rather than discovered:** an instance with no SMTP relay creates
 accounts already verified, and the enumeration oracle stays open there. It cannot verify an address by any
 route, so requiring verification would mean nobody could register at all, and there is no mail to carry the
 difference between the branches. The wizard warns when SMTP is declined, the server logs it once at
-startup, and a test pins it. The failure mode to guard against is this becoming quiet.
+startup, registration's own 202 says the account is ready rather than telling anybody to check their mail,
+and a test pins all of it. The failure mode to guard against is this becoming quiet.
+
+That last place was added after the milestone, from a manual run: every automated test had a relay, so
+nothing had ever read "Check your email to finish creating your account." on an instance that sends none —
+where it is simply false, and sends somebody to wait indefinitely for a message about an account they could
+already be signed in to. The message varies on **the instance's configuration**, never on the request, and
+the two are not comparable: a caller can observe whether mail arrives regardless, whereas varying it on
+whether the address was taken is the oracle this endpoint exists to close. Both branches on one instance
+stay byte-identical, and the test asserts that second half rather than only the wording.
 
 **An invite-only instance is password-registration-only.** There is nowhere to carry a code through a
 provider redirect, so OAuth sign-up still refuses outright while gating is on. It fails closed, so it is

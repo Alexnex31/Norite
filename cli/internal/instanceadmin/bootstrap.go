@@ -11,6 +11,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/operatortoken"
 	"github.com/Alexnex31/Norite/cli/internal/apiclient"
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 )
 
@@ -43,7 +44,11 @@ const passwordEnvVar = "NORITE_ADMIN_PASSWORD"
 const minSigningKeyLength = 32
 
 // ErrNoTerminal is returned when an answer is needed and there is nowhere to ask for one.
-var ErrNoTerminal = errors.New("this command needs an interactive terminal to ask its questions")
+//
+// The shared value rather than one of this package's own, so `main` maps it to exit code 2 and prints it
+// without the "norite:" prefix — see clierr. Declaring a second error with the same text is what left this
+// command exiting 1 and reading like a crash until a manual run caught it.
+var ErrNoTerminal = clierr.ErrNoTerminal
 
 // Options is everything the command line supplies.
 type Options struct {

@@ -385,7 +385,14 @@ And on the CLI side, from M2:
   error is justified once, in one place, rather than at every call site (and errcheck enforces this).
 - **Anything interactive must degrade**: check `term.IsTerminal` and fail with an actionable message rather
   than blocking on input that will never arrive, or reading EOF and silently accepting every default.
-  `instanceinit.ErrNotATerminal` is the shape to follow; `main` maps it to exit code 2.
+  **Return `cli/internal/clierr`'s `ErrNoTerminal`** — wrapped, so the message can name the flag or
+  environment variable that would have answered — and never a new sentinel of your own. `main` matches that
+  one value and maps it to exit code 2, printed without the `norite: ` prefix that makes a usage problem
+  read like a crash. Three packages declared their own before this was one value, `main` matched two of
+  them by name, and `norite instance bootstrap` shipped exiting 1 with the prefix.
+- **`main` adds the `norite: ` prefix, so a message must not carry one.** A `cli.Exit(...)` string that
+  includes it prints as `norite: norite: …`. `cliapp`'s `TestUsageMessagesDoNotCarryThePrefixMainAdds`
+  walks the tree and catches it.
 - **Never echo a secret.** Passwords are read with `term.ReadPassword` and summaries print
   `url.URL.Redacted()`, never the raw DSN (rule 8 applies to the CLI too). Prefer an env-var source over a
   flag for any credential — a flag value is visible in the process list to every user on the machine.

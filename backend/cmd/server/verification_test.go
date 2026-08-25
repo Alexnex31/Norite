@@ -239,6 +239,56 @@ func TestWithNoRelayRegistrationAutoVerifies(t *testing.T) {
 	a.login("ada@example.com", "laptop")
 }
 
+// …and it says so, rather than telling somebody to check a mailbox nothing will ever arrive at.
+//
+// The message varies on whether the instance has a relay, which is instance-wide configuration a caller
+// can observe anyway, and never on anything about the request. So the second subtest carries the
+// load-bearing half: within one instance both branches must still be byte-identical, because that is the
+// property the whole endpoint is shaped around and it would be easy to break while making the wording
+// honest.
+//
+// Found by hand against a real relay-less instance. Every automated test until this one had a relay, so
+// "Check your email" was never read on an instance that sends none.
+//
+// Two instances, so two subtests: dbtest names the throwaway database after the test, and a second
+// newAPI in one test collides with the first on that name.
+func TestTheRegistrationMessageFitsTheInstance(t *testing.T) {
+	register := func(a *api, username, email string) *response {
+		return a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+			"username": username, "email": email, "password": testPassword,
+		})
+	}
+
+	var withRelay, withoutRelay string
+
+	t.Run("with a relay it says to check the mail it just sent", func(t *testing.T) {
+		a := newAPI(t, auth.RegistrationOpen)
+		got := register(a, "ada", "ada@example.com")
+		require.Equal(t, http.StatusAccepted, got.Code, got)
+		withRelay = got.String()
+	})
+
+	t.Run("without one it says the account is usable", func(t *testing.T) {
+		a := newAPIWithoutMail(t, auth.RegistrationOpen)
+
+		fresh := register(a, "ada", "ada@example.com")
+		require.Equal(t, http.StatusAccepted, fresh.Code, fresh)
+
+		// The address is taken now. Same sentence, same everything — the message may depend on the
+		// instance, never on whether the address was already registered.
+		taken := register(a, "grace", "ada@example.com")
+		require.Equal(t, fresh.Code, taken.Code, taken)
+		require.Equal(t, fresh.String(), taken.String())
+
+		withoutRelay = fresh.String()
+	})
+
+	assert.Contains(t, withRelay, "Check your email")
+	assert.NotContains(t, withoutRelay, "Check your email",
+		"an instance with no relay must not send somebody to wait for mail it will never send")
+	assert.Contains(t, withoutRelay, "sign in now")
+}
+
 // The resend path, and that it says nothing about what it found.
 func TestRequestingVerificationAnswersIdenticallyForAnyAddress(t *testing.T) {
 	a := newAPI(t, auth.RegistrationOpen)

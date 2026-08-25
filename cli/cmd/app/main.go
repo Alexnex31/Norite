@@ -16,8 +16,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Alexnex31/Norite/cli/internal/cliapp"
-	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
-	"github.com/Alexnex31/Norite/cli/internal/login"
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 )
 
@@ -43,29 +42,42 @@ func main() {
 	}()
 
 	if err := cliapp.New(os.Stdout, os.Stderr).Run(ctx, os.Args); err != nil {
-		// A command that needs a terminal and hasn't got one is a usage problem, not a crash: say what to
-		// do about it without the "norite:" prefix that makes it read like an internal failure.
-		if errors.Is(err, instanceinit.ErrNotATerminal) || errors.Is(err, login.ErrNoTerminal) {
-			fmt.Fprintf(os.Stderr, "%v\n", errorText(err))
-			os.Exit(2)
+		code, message := report(err)
+		if message != "" {
+			fmt.Fprintf(os.Stderr, "%s\n", message)
 		}
-
-		// A command that reports its result through the exit code rather than through output —
-		// `norite daemon status` is the first — returns a cli.ExitCoder. cliapp disables urfave/cli's own
-		// handling of these precisely so the decision lands here. An empty message means the code *is* the
-		// message and there is nothing to print: a status that exits 1 has already said, on stdout, that
-		// the daemon is stopped, and "norite: " in front of nothing would be noise.
-		var exit cli.ExitCoder
-		if errors.As(err, &exit) {
-			if msg := errorText(exit); msg != "" {
-				fmt.Fprintf(os.Stderr, "norite: %v\n", msg)
-			}
-			os.Exit(exit.ExitCode())
-		}
-
-		fmt.Fprintf(os.Stderr, "norite: %v\n", errorText(err))
-		os.Exit(1)
+		os.Exit(code)
 	}
+}
+
+// report decides how a failed run is announced: the exit code, and the line to print on stderr (empty for
+// nothing at all).
+//
+// Split out of main so it can be tested. It could not be before, and the cost of that showed up at M10:
+// the terminal branch below was a list of the packages that declared their own sentinel, `norite instance
+// bootstrap` was missing from it, and nothing failed — the command simply exited 1 with the prefix that
+// makes a usage problem read like a crash, which only a manual run noticed.
+func report(err error) (code int, message string) {
+	// A command that needs a terminal and hasn't got one is a usage problem, not a crash: say what to do
+	// about it without the "norite:" prefix. One sentinel, matched once — see clierr for why it is one.
+	if errors.Is(err, clierr.ErrNoTerminal) {
+		return 2, errorText(err)
+	}
+
+	// A command that reports its result through the exit code rather than through output —
+	// `norite daemon status` is the first — returns a cli.ExitCoder. cliapp disables urfave/cli's own
+	// handling of these precisely so the decision lands here. An empty message means the code *is* the
+	// message and there is nothing to print: a status that exits 1 has already said, on stdout, that
+	// the daemon is stopped, and "norite: " in front of nothing would be noise.
+	var exit cli.ExitCoder
+	if errors.As(err, &exit) {
+		if msg := errorText(exit); msg != "" {
+			return exit.ExitCode(), "norite: " + msg
+		}
+		return exit.ExitCode(), ""
+	}
+
+	return 1, "norite: " + errorText(err)
 }
 
 // errorText renders an error for a terminal.

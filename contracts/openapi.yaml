@@ -177,6 +177,17 @@ paths:
                 properties:
                   message:
                     type: string
+                    description: >
+                      A sentence to show the person who registered. Do not branch on it: it is prose, it
+                      is not stable across versions, and the status code carries everything a client needs.
+
+
+                      It depends on the instance and never on the request. An instance with a mail relay
+                      says to check the mail; an instance without one cannot verify an address at all, so
+                      it creates the account usable and says so rather than pointing at a mailbox nothing
+                      will arrive at. Both branches of one request — address free, address already
+                      registered — always get the same sentence, which is the property this endpoint is
+                      shaped around.
         "400": { $ref: "#/components/responses/BadRequest" }
         "403":
           description: >
