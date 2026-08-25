@@ -74,3 +74,35 @@ WHERE user_id = $1 AND revoked_at IS NULL;
 UPDATE sessions
 SET revoked_at = now()
 WHERE user_id = $1 AND device_id <> $2 AND revoked_at IS NULL;
+
+-- name: ListSessionDevicesForUser :many
+-- The devices signed in to an account: one row per device family, not one per session row.
+--
+-- A session row is one generation of a rotating family, replaced every time the client refreshes. Listing
+-- rows would show somebody a new "session" every fifteen minutes and hand out ids that are stale before
+-- they can be acted on, so DISTINCT ON collapses each family to its newest live row — whose id is what the
+-- revoke endpoint takes.
+--
+-- first_seen is the *family's* start, which is why it is a subquery over every row including revoked ones.
+-- The newest row's created_at is the last rotation, and reporting that would tell a user they signed in
+-- fifteen minutes ago on a machine they have used for a month.
+--
+-- Sorted by last use in the outer query because DISTINCT ON dictates the inner ORDER BY, and "which of
+-- these is the one I am still using" is the question somebody scanning this list is asking.
+SELECT * FROM (
+  SELECT DISTINCT ON (s.device_id)
+    s.id,
+    s.device_id,
+    s.device_name,
+    s.ip_address,
+    s.last_used_at,
+    s.expires_at,
+    -- Cast so sqlc can type it: a bare subquery comes back as interface{}, which every caller would
+    -- then have to assert.
+    (SELECT min(f.created_at) FROM sessions f
+      WHERE f.user_id = s.user_id AND f.device_id = s.device_id)::timestamptz AS first_seen
+  FROM sessions s
+  WHERE s.user_id = $1 AND s.revoked_at IS NULL AND s.expires_at > now()
+  ORDER BY s.device_id, s.created_at DESC
+) d
+ORDER BY d.last_used_at DESC;

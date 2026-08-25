@@ -14,7 +14,7 @@ import (
 //
 // The password-reset path is covered where it lives — TestResettingRevokesSessionsAndAPITokens,
 // TestAPasswordResetRevokesOutstandingExchangeCodes, TestRevokingSessionsAlsoRevokesAnApprovedDeviceCode —
-// and those three passing unchanged is what says the M11 extraction moved code rather than behaviour.
+// and those three passing unchanged is what says the M11 extraction moved code rather than behavior.
 //
 // These test the primitive directly, which those three cannot: they exercise it through one caller, so a
 // step added to that caller and not to the primitive would still pass all three. The list of claims lives

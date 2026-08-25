@@ -1390,6 +1390,72 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /auth/logout/all:
+    post:
+      summary: Sign out everywhere else
+      description: >
+        The general-purpose revocation primitive, sparing the device that called it. It revokes **more than
+        its name suggests**, and a client should say so before and after:
+
+
+        - every session on every other device;
+
+        - **every API token on the account**, so bots and scripts stop working and must be re-minted;
+
+        - any outstanding OAuth exchange code, which a callback page left open would otherwise still trade
+          for a fresh token pair;
+
+        - any device authorization already approved but not yet collected.
+
+
+        API tokens are included deliberately. The action people reach for this with is "I think somebody
+        else has my account", and a token an intruder minted outlives a signed-out session. One action that
+        cannot under-clean beats two that have to be run in the right order — the same call a password
+        reset makes, which states the same cost.
+
+
+        The device making the request is spared as a **device**, not as a session record, so it keeps
+        working across its own rotations.
+
+
+        Requires a user's access token. An API token is refused: a delegated credential that can revoke its
+        owner's sessions, and its owner's other tokens with them, can lock its owner out.
+
+
+        **Residual window.** Access tokens are stateless and are not checked against session state, so one
+        already issued to a signed-out device keeps working until it expires — at most `AccessTokenTTL`,
+        15 minutes. It cannot be renewed, because the refresh session behind it is gone. This is the
+        accepted trade in docs/architecture.md §17.10: the alternative is a database lookup on every
+        authenticated request.
+      operationId: logoutAll
+      tags: [auth]
+      responses:
+        "200":
+          description: What was revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions_revoked, api_tokens_revoked]
+                additionalProperties: false
+                properties:
+                  sessions_revoked:
+                    type: integer
+                    description: Session records revoked, across every device but this one.
+                  api_tokens_revoked:
+                    type: integer
+                    description: >
+                      API tokens revoked. Reported separately because it is the count a person needs to see
+                      to understand why a bot stopped.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token. See the description.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /auth/tokens:
     post:
       summary: Mint a scoped API token
@@ -1737,6 +1803,88 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /users/@me/sessions:
+    get:
+      summary: List the devices signed in to this account
+      description: >
+        One entry per **device**, not per session record. A refresh token rotates: every refresh inserts a
+        new session row and revokes its predecessor, so a client on a 15-minute access token produces four
+        rows an hour. Listing rows would grow while somebody read it and hand out ids that were stale
+        before they could be used, so each device's family is collapsed to its newest live record, and
+        `id` names that record.
+
+
+        `first_seen` is when the device first signed in, across the whole family — not when it last
+        rotated. Sorted by `last_used_at`, most recent first.
+
+
+        Requires a user's access token. An API token is refused: this discloses every machine the account
+        is signed in on.
+      operationId: listSessions
+      tags: [users]
+      responses:
+        "200":
+          description: The account's devices. Empty array, never null, when nothing is signed in.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token. See the description.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /users/@me/sessions/{sessionID}:
+    delete:
+      summary: Sign one device out
+      description: >
+        Revokes every live session in that device's family, which is what makes the action mean what the
+        listing showed — revoking the single record would sign the device out only until its next refresh,
+        at most fifteen minutes away.
+
+
+        Signing out the device making the request is allowed; it is "sign out here".
+
+
+        A session belonging to another account answers **404**, not 403. The two answers together would let
+        anyone holding a list of snowflakes learn which of them name real sessions, and a snowflake carries
+        its own creation time. A malformed id answers 404 for the same reason.
+
+
+        Note the residual window: an access token already issued to the revoked device keeps working until
+        it expires, up to `AccessTokenTTL`. It cannot be renewed. See `POST /auth/logout/all`.
+      operationId: revokeSession
+      tags: [users]
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+      responses:
+        "204":
+          description: The device is signed out. Also the answer when it already was.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such session, or it belongs to another account. See the description.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1888,6 +2036,47 @@ components:
           format: date-time
           description: >
             When the **access** token expires, not the refresh token. Clients refresh on this.
+
+    Session:
+      description: >
+        One device signed in to an account. A device, not a session record: the underlying rows rotate on
+        every refresh, and `id` names whichever record is newest and live for that device right now.
+      type: object
+      required: [id, device_name, ip_address, first_seen, last_used_at, expires_at, current]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        device_name:
+          type: string
+          description: >
+            What the client called this machine at sign-in, or empty if it did not say. **Client-supplied
+            and untrusted** — sanitize before rendering it anywhere (CLAUDE.md rule 19). Sent as given
+            rather than cleaned here, because cleaning it server-side would corrupt the value for every
+            other consumer.
+        ip_address:
+          type: [string, "null"]
+          description: >
+            Where this device was last seen from. Null for a session with no recorded address; present and
+            explicitly null rather than omitted, so a caller reads the same keys either way.
+        first_seen:
+          type: string
+          format: date-time
+          description: >
+            When this device first signed in, across the whole rotation family — **not** when it last
+            rotated, which on an active device is at most fifteen minutes ago and would be useless.
+        last_used_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: When the current record expires if the device never refreshes again.
+        current:
+          type: boolean
+          description: >
+            True for the device that made this request. Determined by the access token's `sid` claim
+            resolved to its device, so it stays correct across the caller's own rotations.
 
     ApiToken:
       description: A scoped API token's metadata. Never includes the token value or its hash.

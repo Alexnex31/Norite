@@ -248,6 +248,20 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
+	// The devices signed in to an account: one row per device family, not one per session row.
+	//
+	// A session row is one generation of a rotating family, replaced every time the client refreshes. Listing
+	// rows would show somebody a new "session" every fifteen minutes and hand out ids that are stale before
+	// they can be acted on, so DISTINCT ON collapses each family to its newest live row — whose id is what the
+	// revoke endpoint takes.
+	//
+	// first_seen is the *family's* start, which is why it is a subquery over every row including revoked ones.
+	// The newest row's created_at is the last rotation, and reporting that would tell a user they signed in
+	// fifteen minutes ago on a machine they have used for a month.
+	//
+	// Sorted by last use in the outer query because DISTINCT ON dictates the inner ORDER BY, and "which of
+	// these is the one I am still using" is the question somebody scanning this list is asking.
+	ListSessionDevicesForUser(ctx context.Context, userID int64) ([]ListSessionDevicesForUserRow, error)
 	// Instance-administration queries.
 	//
 	// The Instance Admin tier, which is instance-wide and sits outside roles.Resolve entirely (ADR 0013).

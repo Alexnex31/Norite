@@ -74,6 +74,11 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(RequireUserActor).Post("/tokens", h.mintToken)
 		r.With(RequireUserActor).Get("/tokens", h.listTokens)
 		r.With(RequireUserActor).Delete("/tokens/{tokenId}", h.revokeToken)
+
+		// And so does signing out everywhere else, for a reason the three above share: a delegated
+		// credential that can revoke its owner's sessions — and, being the whole primitive, its owner's
+		// other API tokens with them — is a credential that can lock its owner out of their account.
+		r.With(RequireUserActor).Post("/logout/all", h.logoutAll)
 	})
 }
 
@@ -82,6 +87,11 @@ func (h *Handler) UserRoutes(r chi.Router) {
 	r.Group(func(r chi.Router) {
 		r.Use(RequireAuth)
 		r.With(RequireScope(ScopeIdentify)).Get("/@me", h.currentUser)
+
+		// A user actor, not a delegated one, for the reason the token endpoints give: this listing
+		// discloses every machine the account is signed in on, and the revoke acts on all of them.
+		r.With(RequireUserActor).Get("/@me/sessions", h.listSessions)
+		r.With(RequireUserActor).Delete("/@me/sessions/{sessionID}", h.revokeSession)
 	})
 }
 
@@ -160,6 +170,53 @@ type userResponse struct {
 	AvatarHash      *string      `json:"avatar_hash"`
 	EmailVerifiedAt *time.Time   `json:"email_verified_at"`
 	CreatedAt       time.Time    `json:"created_at"`
+}
+
+// sessionResponse is one device signed in to the account.
+//
+// Its own type rather than the service's, for the reason userResponse gives: a response shape that starts
+// as a copy of an internal struct is how a field nobody meant to publish reaches the wire. Nothing here
+// comes near the refresh token hash, which is the field this table exists to protect.
+type sessionResponse struct {
+	ID snowflake.ID `json:"id"`
+	// Name is client-supplied text. It is sent as the client gave it; making it safe to *render* is the
+	// renderer's job and rule 19's, and doing it here would corrupt the value for every other consumer.
+	Name string `json:"device_name"`
+	// Address is null for a session with no recorded address, never omitted — a caller reads the same keys
+	// whichever kind of session it got.
+	Address   *string   `json:"ip_address"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastUsed  time.Time `json:"last_used_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	// Current marks the device this request came from, which is the one a client must not offer to revoke
+	// without saying what it is.
+	Current bool `json:"current"`
+}
+
+func newSessionResponse(d SessionDevice) sessionResponse {
+	out := sessionResponse{
+		ID:        d.ID,
+		Name:      d.Name,
+		FirstSeen: d.FirstSeen,
+		LastUsed:  d.LastUsed,
+		ExpiresAt: d.ExpiresAt,
+		Current:   d.Current,
+	}
+	if d.Address != nil {
+		addr := d.Address.String()
+		out.Address = &addr
+	}
+	return out
+}
+
+// logoutAllResponse says what signing out everywhere else actually did.
+//
+// Counted rather than a bare 204, because this action revokes more than its name suggests — API tokens go
+// with the sessions — and a client that cannot see the number cannot tell somebody their bots just
+// stopped.
+type logoutAllResponse struct {
+	SessionsRevoked  int64 `json:"sessions_revoked"`
+	APITokensRevoked int64 `json:"api_tokens_revoked"`
 }
 
 func newUserResponse(u db.User) userResponse {
@@ -469,6 +526,55 @@ func (h *Handler) revokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, r, http.StatusNoContent, nil)
+}
+
+// ---------- sessions ----------
+
+func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	actor, _ := ActorFrom(r.Context())
+
+	devices, err := h.svc.ListSessionDevices(r.Context(), actor.UserID, actor.SessionID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	out := make([]sessionResponse, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, newSessionResponse(d))
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, out)
+}
+
+func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
+	actor, _ := ActorFrom(r.Context())
+
+	sessionID, err := snowflake.Parse(chi.URLParam(r, "sessionID"))
+	if err != nil {
+		// Same answer as a session that does not exist, for the reason revokeToken gives above.
+		h.writeErr(w, r, ErrNotFound)
+		return
+	}
+
+	if err := h.svc.RevokeSessionDevice(r.Context(), actor.UserID, sessionID); err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusNoContent, nil)
+}
+
+func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
+	actor, _ := ActorFrom(r.Context())
+
+	result, err := h.svc.RevokeOtherSessions(r.Context(), actor.UserID, actor.SessionID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, logoutAllResponse{
+		SessionsRevoked:  result.Sessions,
+		APITokensRevoked: result.APITokens,
+	})
 }
 
 // ---------- plumbing ----------
