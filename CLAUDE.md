@@ -607,7 +607,9 @@ And on the client-auth side, from M7:
   impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
   token from the only person who can deal with it. The CLI prints it, the daemon logs it.
 
-Three things this milestone deliberately leaves for the milestone that can do them properly:
+Three things this milestone deliberately leaves for the milestone that can do them properly. **All three
+are now written into that milestone's roadmap entry** — M11's single-token revoke and M19's three — because
+a deferral recorded only here is one the milestone that inherits it never reads:
 
 - **A dropped refresh token cannot be revoked yet.** When a login lands mid-refresh, the daemon discards
   the token it just obtained; it stays valid at the instance until it expires. Handing it back needs M11's
@@ -634,7 +636,8 @@ And on the device-code side, from M9 (decisions in ADR 0028):
   that would shorten those screens is reopening that decision. **With one qualification a review found**:
   the page's provider buttons carry a continuation that nothing binds to the browser it was issued to, so a
   link *can* skip the code-entry step — it cannot skip approval, which is where the defense is, and binding
-  it needs a browser session this surface has none of until Phase O.
+  it needs a browser session this surface has none of until Phase O — **M108**, whose roadmap entry
+  now carries it as a done-when rather than leaving it pointing at a phase.
 - **The user code is stored in plaintext and the device code is hashed.** The exception is deliberate and
   has two halves, both needed: a user code is not a bearer credential — whoever holds it must still
   authenticate and approve, and what that authorizes is somebody else's machine acting as *their* account —

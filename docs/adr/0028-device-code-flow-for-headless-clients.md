@@ -73,6 +73,8 @@ distinction between those two claims is the whole finding.
 
 Closing it properly means the entry continuation being unusable by a browser other than the one it was
 issued to, and there is nothing to bind it with: this surface has no sessions and no cookies until Phase O.
+Scheduled at **M108**, the BFF cookie-exchange layer, which is the milestone that first creates such a
+session — written into its roadmap entry, so the deferral names a milestone rather than a phase.
 It is left open, stated here and in §14.21, rather than papered over.
 
 ### A device flow carries no flow challenge, and this is not the binding becoming optional

@@ -216,7 +216,10 @@ safe; it is a real limitation and it is in the contract.
 
 **A device-code flow that hits an unverified provider address is left pending.** The waiting client polls
 until its code expires rather than being told, because the device grant has no vocabulary for "we have
-emailed you". Bounded by the twenty-minute TTL and worth revisiting when that vocabulary is next touched.
+emailed you". Bounded by the twenty-minute TTL. Scheduled at **M55**, which draws screen `5a`: the fix is a
+new code on `/auth/device/token` and in the `Error` enum, but twenty minutes of a progress bar that will
+never fill is a cost only visible once something is drawing the bar, so the decision belongs with the
+screen.
 
 **Migration `000010` backfills every existing account as verified.** Leaving them NULL would lock every
 user out of an instance that worked a minute earlier — an outage delivered as a hardening — and nobody

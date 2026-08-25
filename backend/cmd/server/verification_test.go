@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
+	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
 )
 
 // M10's headline done-when: registering an address that already has an account is indistinguishable, in
@@ -252,7 +253,14 @@ func TestWithNoRelayRegistrationAutoVerifies(t *testing.T) {
 //
 // Two instances, so two subtests: dbtest names the throwaway database after the test, and a second
 // newAPI in one test collides with the first on that name.
+//
+// The container check is made here rather than only inside newAPI, because the assertions that compare the
+// two instances live in the parent: with both subtests skipped by `just test-short`, they would otherwise
+// run against two empty strings and fail. A container-backed test has to *skip* without one, not fail —
+// that is the whole point of the short suite.
 func TestTheRegistrationMessageFitsTheInstance(t *testing.T) {
+	dbtest.RequireContainer(t)
+
 	register := func(a *api, username, email string) *response {
 		return a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
 			"username": username, "email": email, "password": testPassword,

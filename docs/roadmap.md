@@ -159,9 +159,18 @@ of this section.
 - **M11 — Session revocation primitive**: the general-purpose "revoke all sessions/tokens for account X"
   mechanism (force-close live gateway connections, revoke refresh plus scoped tokens), exposed now as a
   self-service "log out all other devices" account-security feature. Ban-triggered use of this same
-  primitive comes later at M72, once Instance Admin exists — the primitive itself is built now. Done when: a
-  user can log out all their other sessions from one account action, and previously-issued refresh tokens
-  immediately stop working.
+  primitive comes later at M72, once Instance Admin exists — the primitive itself is built now.
+
+  **Also build the single-token form**, not only the all-sessions one. M7 left a case that needs it: when a
+  `norite login` lands while the daemon is mid-refresh, the daemon discards the pair it just obtained
+  rather than overwrite the record the login owns, and the refresh token it drops stays valid at the
+  instance for its full TTL with nobody holding it. Handing one back requires revoking exactly that token
+  and nothing else — revoke-all would take down the session the login just created. The daemon cannot call
+  it until M19 gives it a connection, so this is the half M11 ships and M19 consumes.
+
+  Done when: a user can log out all their other sessions from one account action, previously-issued refresh
+  tokens immediately stop working, and a single named refresh token can be revoked without disturbing the
+  rest of its account's sessions.
 
 #### Phase C — Guild/channel/permission core
 
@@ -211,8 +220,29 @@ of this section.
 - **M19 — Daemon as gateway client**: the daemon holds the persistent WS connection to the backend, maintains
   in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
   and stream-decodes (`json.Decoder`) the initial sync payload rather than buffering it fully before parsing.
+
+  **Three things M7 deferred come due here, because this is the milestone whose changes make them real.**
+  None is a bug today; each becomes one the moment the daemon does what this entry describes.
+
+  - **`termsafe` has to move to a package both modules import — and must not be copied.** It lives in
+    `cli/internal/termsafe`, which the daemon module cannot reach. That is fine only while every untrusted
+    string the daemon handles was sanitized by the `norite login` that stored it, which
+    `daemon/internal/daemonproc/session.go` says in a comment beside the one log line that prints one.
+    Here the daemon fetches names of its own from DISPATCH events, and rule 19 lands on its side of the
+    line. Two copies of a sanitizer drift, and this one decides whether a stranger's display name can
+    rewrite a log or a pane.
+  - **The daemon must re-probe for a keyring that unlocks later.** The storage backend is chosen once per
+    process (`sync.Once`), so a daemon started by a systemd user unit before the session keyring is
+    unlocked reads the file path for its whole life. Correct while the daemon is short-lived and the record
+    names its own backend (ADR 0025); a long-lived, reconnecting daemon is exactly the case it was not
+    written for.
+  - **Hand back the refresh token dropped by a login landing mid-refresh**, using M11's single-token revoke.
+    Until then that token stays live at the instance with nobody holding it.
+
   Done when: the daemon alone (no CLI/TUI/GUI attached) stays connected and accumulates state correctly; a
-  deliberately skewed system clock does not cause spurious auth failures.
+  deliberately skewed system clock does not cause spurious auth failures; a display name carrying terminal
+  escapes is sanitized by the daemon rather than by whoever logged in; and a daemon started before its
+  keyring unlocks reaches the keyring afterwards.
 - **M20 — Daemon↔client local IPC**: the Unix domain socket / named pipe, 4-byte-length-prefixed JSON
   framing, reusing the gateway's op-code/DISPATCH shape and one shared client-side event parser, and the
   semver MAJOR-must-match/MINOR-window version-compatibility handshake. The daemon's write path to each
@@ -407,8 +437,19 @@ of this section.
   rather than printed text, rendered as JSON on the command line and into a pane by `M-x`; schemas
   versioned in `contracts/cli-json/` as the third source-of-truth artifact alongside `openapi.yaml` and
   `gateway-events.schema.json` (rule 15). This is load-bearing rather than cosmetic: a verb added without a
-  structured result is a verb the TUI cannot run (ADR 0026). Done when: a script can parse `--json` against
-  its documented schema, and the same call renders in a pane without a second code path.
+  structured result is a verb the TUI cannot run (ADR 0026).
+
+  **Two verbs already accept `--json` and ignore it**, and they are the ones to start from because a
+  scripted caller gets human text today with nothing to tell it apart from JSON: `norite daemon status`
+  (M3) and `norite logout` (M7). `--json` is declared at the root, so every command advertises it in its
+  own help whether or not it honours it. `norite instance invite create|list|revoke` (M10) is the shape to
+  follow — it is the only group with a schema in `contracts/cli-json/` so far. Whether a verb that prints
+  no data should emit JSON at all is the decision to make here rather than leave per-command: a fixed
+  `{"ok": true}`-shaped result and a silent no-op are both defensible, and the one thing that is not is the
+  current split, where the flag's meaning depends on which verb you typed.
+
+  Done when: a script can parse `--json` against its documented schema, the same call renders in a pane
+  without a second code path, and no verb accepts the flag while ignoring it.
 - **M49 — `M-x` command mode** (`3e`): every verb in the command tree invocable from the TUI, output into a
   pane, flag completion, destructive verbs confirming in the status bar rather than a modal. Verbs that are
   interactive by construction — `norite instance init`, which refuses to run without a TTY — run in the pty
@@ -442,8 +483,20 @@ of this section.
   the browser login of M8 shown as progress rows when a browser is available), disconnected — cached header,
   the retry banner, queued messages marked `◷` in an in-memory outbox flushed in order on reconnect — and
   the Deep Work view with its rule strip, countdown and held-message review. `5b` (empty / first join) rides
-  with invites at M57 and `5e` (whisper composer) with whispers at M61. Done when: pulling the network shows
-  the cached state with a working queue rather than an error, and reconnecting flushes it in order.
+  with invites at M57 and `5e` (whisper composer) with whispers at M61.
+
+  **`5a` is also where a device-code flow that stalls has to say so.** ADR 0029 left one case pending: a
+  device flow whose browser half signs in with a provider that will not vouch for the address gets an
+  emailed verification link, and the waiting client is told nothing — the device grant has no vocabulary
+  for "we have emailed you", so it polls `authorization_pending` until its twenty-minute TTL runs out.
+  Bounded and safe, and it is twenty minutes of a progress bar that will never fill, which is precisely
+  what this screen exists to not do. Fixing it means adding the code to `/auth/device/token` and the
+  `Error` enum in `contracts/openapi.yaml` (rule 6) as well as drawing it; the screen is where the cost is
+  felt, so the decision belongs here.
+
+  Done when: pulling the network shows the cached state with a working queue rather than an error,
+  reconnecting flushes it in order, and a device sign-in that is waiting on an emailed link says so instead
+  of counting down.
 
 #### Phase G — Profiles, DMs, invites, attachments, chat power features
 
@@ -767,8 +820,18 @@ when a constraint the terminal imposed is lifted.
 #### Phase O — Web SPA (later, third-priority client)
 
 - **M108 — BFF cookie-exchange auth layer**: the httpOnly-cookie-issuing layer in front of the token API,
-  designed earlier but built only now. Done when: the web SPA can log in and receive a session cookie without
-  ever holding a raw Bearer token in JS.
+  designed earlier but built only now.
+
+  **This is the milestone that can finally bind the device page's provider buttons**, and it is the only
+  one — which is why the loose end is written down here rather than left pointing at "Phase O". M9's
+  verification page carries a continuation token to `/authorize` that nothing ties to the browser it was
+  issued to, so a link *can* skip the code-entry step. It cannot skip approval, which is where the defense
+  actually is (ADR 0028), and binding it needed a browser session no surface in this codebase had. Once
+  this layer exists, one does. Note the page must keep working for somebody who has never touched the SPA:
+  a session established purely to bind a continuation, not a login.
+
+  Done when: the web SPA can log in and receive a session cookie without ever holding a raw Bearer token in
+  JS, and a device-verification continuation is refused by a browser other than the one it was issued to.
 - **M109 — Web SPA rebuild**: adapt the originally-planned React SPA to the current backend/contracts.
 - **M110 — Web SPA pane-splitting**: CSS grid/flex-based resizable panes, `localStorage`-based layout
   persistence, independent of the CLI/TUI/GUI layouts.
