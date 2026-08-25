@@ -184,32 +184,13 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 			return fmt.Errorf("setting new password: %w", err)
 		}
 
-		// Everything the old password could reach is revoked in the same transaction.
-		//
-		// Sessions because a reset is how someone recovers a compromised account, and leaving the
-		// intruder's refresh token live would defeat the entire exercise. API tokens for the same reason:
-		// an attacker with access could have minted one, and it outlives any password change unless it is
-		// revoked here. The cost is a user who merely forgot their password having to re-mint their bots,
-		// which the confirmation page states rather than leaving them to discover.
-		if _, err := q.RevokeAllSessionsForUser(ctx, token.UserID); err != nil {
-			return fmt.Errorf("revoking sessions: %w", err)
+		// Everything the old password could reach is revoked in the same transaction, through the one
+		// primitive every caller shares (CLAUDE.md rule 17). The reasoning for each step lives on that
+		// function rather than here: this path is one of its callers now, not its owner.
+		if _, err := revokeEverything(ctx, q, token.UserID, RevocationScope{}); err != nil {
+			return err
 		}
-		if _, err := q.RevokeAllAPITokensForUser(ctx, token.UserID); err != nil {
-			return fmt.Errorf("revoking API tokens: %w", err)
-		}
-		// And any OAuth exchange code still outstanding. It is not a session, so the two calls above miss
-		// it, and it is the one credential in this codebase that gets rendered onto a screen — leaving it
-		// redeemable would mean an intruder who had a callback page open still collects a fresh token pair
-		// minutes after the reset that was meant to lock them out (rule 17).
-		if _, err := q.RevokeOAuthExchangeCodesForUser(ctx, token.UserID); err != nil {
-			return fmt.Errorf("revoking oauth exchange codes: %w", err)
-		}
-		// And any device authorization already approved but not yet collected, which is the same kind of
-		// outstanding claim on the account for the same reason (M9). A code still waiting for approval
-		// belongs to nobody yet and is correctly untouched.
-		if _, err := q.RevokeDeviceCodesForUser(ctx, &token.UserID); err != nil {
-			return fmt.Errorf("revoking device codes: %w", err)
-		}
+
 		return nil
 	})
 }
