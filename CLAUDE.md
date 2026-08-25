@@ -685,14 +685,26 @@ And on the instance-administration and registration side, from M10 (decisions in
 - **`HashPassword` runs before the address check**, and that ordering is the timing half of the guarantee.
   Moving it below makes the taken branch ~1 ms against ~31 ms. The unique-constraint race comes back as the
   same silence, because reporting it would leave the oracle reachable by firing two requests at once.
+- **A uniform response is not enough — the two branches must leave the same *state*.** A free address
+  commits a row occupying the username; a taken one rolls back and occupies nothing, so `409 username` on a
+  second request read the address answer. The branch that creates nothing reserves the username instead
+  (`registration_reservations`, 000011). No TTL, because the unverified account it stands in for has none;
+  if either gains one, both must. This is the shape to look for whenever a response is made uniform: ask
+  what each branch *wrote*, not only what it said.
 - **Login refuses an unverified account exactly as it refuses a wrong password**, and mails a fresh link
   instead. A distinct answer reopens the closed oracle in two requests: register an address with a password
   you choose, then log in with it — 403 if the address was free, 401 if it was taken. Measured before the
   test was written. The reminder follows only a *correct* password, so guessing at addresses queues nothing.
-- **An unverified provider address takes a detour, and both cases render one page.** If an unknown address
-  showed a username form while a registered one was refused, the browser would answer the question ADR
-  0024's merged message exists to refuse. The form moved behind a mailed link; linking to an *existing*
-  account stays refused, that being the takeover direction.
+- **An unverified provider address takes a detour, and both cases render one page — in every registration
+  mode.** If an unknown address showed a username form while a registered one was refused, the browser would
+  answer the question ADR 0024's merged message exists to refuse. The form moved behind a mailed link;
+  linking to an *existing* account stays refused, that being the takeover direction. The registration-mode
+  gate lives *inside* `unverifiedProviderAddress`: ahead of it, a gated instance answered 200 for an
+  address with an account and 400 for one without, which is the same oracle by a shorter route.
+- **The mailed continuation is unbound, and says so in its signature** (`eml_only`) rather than by carrying
+  an empty challenge — the refusal for a token that merely lost its binding has to stay in force. It mints
+  no exchange code (nobody is waiting) and the account it creates is verified, opening the link being the
+  proof of mailbox control the whole detour exists to gather.
 - **Invite redemption is one `UPDATE` with every guard in its `WHERE`**, sharing the account insert's
   transaction. Rewritten as a check-then-update, four of four concurrent racers get in. Both NULLs are
   explicit `IS NULL` branches — `uses < NULL` is NULL, so "unlimited" would otherwise match nothing.

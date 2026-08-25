@@ -102,6 +102,11 @@ type PasswordResetToken struct {
 	UsedAt    pgtype.Timestamptz
 }
 
+type RegistrationReservation struct {
+	Username  string
+	CreatedAt pgtype.Timestamptz
+}
+
 type Session struct {
 	ID               int64
 	UserID           int64

@@ -272,9 +272,24 @@ func (s *Service) unverifiedProviderAddress(ctx context.Context, identity OAuthI
 	dest oauthDestination,
 ) (OAuthOutcome, error) {
 	// With no relay there is no way to send the difference and no way to verify anything, so the refusal
-	// M6 shipped is still the honest answer on such an instance.
+	// M6 shipped is still the honest answer on such an instance. Uniform for both cases, as it was.
 	if !s.VerificationRequired() {
 		return OAuthOutcome{}, ErrOAuthEmailUnverified
+	}
+
+	// A gated instance answers one way for both cases and writes to nobody.
+	//
+	// Two requirements meet here and are met by the same return. A closed instance must not become a way
+	// to send mail to an address of the caller's choosing — which is why this check exists at all. And it
+	// must not answer differently for an address that has an account, because anyone can present any
+	// address at a provider that does not verify it, so a difference here is an account-existence oracle
+	// on exactly the instances whose membership is meant to be private.
+	//
+	// It costs the account holder the warning mail below. That is the right trade: nothing was created
+	// and nothing was linked, and the alternative — mailing only when the address is known — is the
+	// difference an attacker reads.
+	if s.registrationMode != RegistrationOpen {
+		return OAuthOutcome{}, ErrOAuthRegistrationClosed
 	}
 
 	email := strings.TrimSpace(strings.ToLower(identity.Email))
@@ -296,11 +311,17 @@ func (s *Service) unverifiedProviderAddress(ctx context.Context, identity OAuthI
 	//
 	// Nothing is written yet. The signup token is signed rather than stored, exactly as it is on the
 	// verified path (ADR 0024), so an unfollowed link leaves nothing behind at all.
-	// The destination is deliberately *not* carried into the mailed token. A loopback listener is a
-	// process that is waiting right now, on this machine; by the time somebody opens their mail the CLI
-	// has timed out and the port may belong to something else entirely. The client is told to stop below,
-	// and the sign-up that resumes from the mail is an ordinary browser one.
-	token, err := s.issueOAuthSignupToken(identity, oauthDestination{})
+	// No destination is carried into the mailed token. A loopback listener is a process waiting right
+	// now, on this machine; by the time somebody opens their mail the CLI has timed out and the port may
+	// belong to something else. The client is told to stop below, and the sign-up that resumes from the
+	// mail is an ordinary browser one.
+	//
+	// Minted through the mailed variant rather than by passing an empty destination, which is what this
+	// first shipped as and which never worked: an empty destination produces an empty flow challenge,
+	// and parseOAuthSignupToken refuses one — so every completion from the mail failed with "this
+	// sign-up has expired". Fail-closed, and a feature that could not succeed for anybody. Found by a
+	// security review; the flow is now driven end to end by a test.
+	token, err := s.issueMailedOAuthSignupToken(identity)
 	if err != nil {
 		return OAuthOutcome{}, err
 	}

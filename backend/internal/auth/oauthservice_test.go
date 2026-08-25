@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -1081,4 +1082,88 @@ func TestAGatedInstanceSendsNoMailForAnUnverifiedProviderAddress(t *testing.T) {
 	assert.Zero(t, mailer.count(mail.KindEmailVerification),
 		"a closed instance must not mail a sign-up link to an address somebody typed at a provider")
 	assert.Zero(t, mailer.count(mail.KindRegistrationNotice))
+}
+
+// The detour, driven past the mail to an actual account — which is what nobody checked.
+//
+// The existing test asserted the link was queued and stopped there, on a "nothing is written *yet*"
+// assertion where "yet" never arrived. It never did: the mailed token was minted with an empty
+// destination, so its flow challenge was empty, and parseOAuthSignupToken refuses one — every completion
+// failed with "this sign-up has expired". Fail-closed, and a feature that could not succeed for anybody.
+// Found by a security review.
+func TestTheMailedSignUpLinkActuallyCreatesTheAccount(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	mailer := &fakeMailer{}
+	svc.mailer = mailer
+	svc.publicBaseURL = "https://chat.example.com"
+	stub.asGoogle("google-99", "newcomer@example.com", false)
+
+	_, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+
+	// Nothing yet, which is the property the old test stopped at.
+	var users int
+	require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
+	require.Zero(t, users)
+
+	// Pull the token out of the link exactly as a person clicking it would.
+	msg := mailer.only(t, mail.KindEmailVerification)
+	_, after, found := strings.Cut(msg.Body, "/oauth/continue?token=")
+	require.True(t, found, "the mail must carry a resumable link:\n%s", msg.Body)
+	token, _, _ := strings.Cut(strings.TrimSpace(after), "\n")
+	token, err = url.QueryUnescape(token)
+	require.NoError(t, err)
+
+	result, err := svc.CompleteOAuthSignup(t.Context(), token, "newcomer")
+	require.NoError(t, err, "the mailed link must be completable")
+	assert.NotZero(t, result.UserID)
+	assert.True(t, result.ByMail)
+	assert.Empty(t, result.ExchangeCode,
+		"nobody is waiting on a code — the flow that produced this ended at 'check your email'")
+
+	// The account and its identity both exist, so signing in with the provider now takes the
+	// already-linked path.
+	require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
+	assert.Equal(t, 1, users)
+	var identities int
+	require.NoError(t, svc.pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM oauth_identities").Scan(&identities))
+	assert.Equal(t, 1, identities)
+
+	// The address is verified, and that is the point of the whole detour: the link went to it and
+	// somebody opened it, which is control of the mailbox — the evidence the provider declined to give.
+	// Anything else creates an account nobody can use and mails a second confirmation to an address that
+	// has just confirmed itself.
+	var verified bool
+	require.NoError(t, svc.pool.QueryRow(t.Context(),
+		"SELECT email_verified_at IS NOT NULL FROM users LIMIT 1").Scan(&verified))
+	assert.True(t, verified, "opening the mailed link is the confirmation")
+
+	assert.Equal(t, 1, mailer.count(mail.KindEmailVerification),
+		"no second confirmation may be sent to an address that just confirmed itself")
+}
+
+// The waiver is for the mailed variant and nothing else. A token that merely lost its challenge must still
+// be refused, which is what the guard is for.
+func TestOnlyTheMailedVariantMayCarryNoBinding(t *testing.T) {
+	svc, _ := oauthService(t, RegistrationOpen)
+
+	identity := OAuthIdentity{
+		Provider: ProviderGoogle, UserID: "google-1",
+		Email: "someone@example.com", EmailVerified: true, DisplayName: "Someone",
+	}
+
+	// Minted the ordinary way but with no destination — the shape the mailed token used to have.
+	unbound, err := svc.issueOAuthSignupToken(identity, oauthDestination{})
+	require.NoError(t, err)
+	_, err = svc.parseOAuthSignupToken(unbound)
+	assert.ErrorIs(t, err, ErrOAuthSignupToken,
+		"a token that lost its binding must still be refused")
+
+	// The mailed variant, which declares itself unbound inside the signature.
+	mailed, err := svc.issueMailedOAuthSignupToken(identity)
+	require.NoError(t, err)
+	continuation, err := svc.parseOAuthSignupToken(mailed)
+	require.NoError(t, err)
+	assert.True(t, continuation.ByMail)
 }

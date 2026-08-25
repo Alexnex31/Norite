@@ -390,6 +390,12 @@ CREATE TABLE instance_invites (                -- distinct from per-guild invite
     uses >= 0 AND (max_uses IS NULL OR (max_uses > 0 AND uses <= max_uses)))
 );
 
+CREATE TABLE registration_reservations (       -- added at M10; see the registration notes and 000011
+  -- A username claimed by a registration that created no account, so that a registration against a taken
+  -- address and one against a free address leave the same state. Without it, two requests enumerate.
+  username citext PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE email_verification_tokens (       -- added at M10; the same shape as password_reset_tokens
   id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   token_hash bytea NOT NULL, sent_to text NOT NULL,
@@ -884,7 +890,15 @@ oracle reachable on purpose by firing two requests at once.
 
 A **taken username** is still reported (409). A username is an `@handle`, public by construction and
 discoverable by any client that can look one up, so refusing it discloses nothing; an address is not
-public. That asymmetry is the whole design.
+public.
+
+That asymmetry only holds because the two branches leave the *same state*, which took a second fix. A free
+address commits a `users` row occupying the submitted username while a taken address rolls back and
+occupies nothing — so the username namespace was a read of "did the previous request create a row?", and
+two requests answered the address question. The branch that creates nothing now reserves the username
+instead (`registration_reservations`, migration 000011). A reservation has no TTL because the unverified
+account it stands in for has none; **if either gains one, both must**, or the oracle returns after it
+lapses.
 
 **Email verification** (M10, `email_verification_tokens`): the same shape as `password_reset_tokens` —
 SHA-256 hashed, single-use in the query's `WHERE`, `sent_to` recorded so a later address change cannot

@@ -512,3 +512,40 @@ func TestARetypeableUsernameDoesNotEndTheFlow(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rejected.Code, rejected)
 	assert.Empty(t, rejected.Header.Get("Location"), "a fixable username must not end the sign-in")
 }
+
+// The loopback hop must not answer what the page will not, and on a gated instance it used to: an address
+// with an account came back `email_unverified` and one without came back `registration_closed`. That is
+// the same account-existence oracle as the rendered page and cheaper to read — a query parameter rather
+// than HTML — which is why it gets its own test rather than being assumed to follow.
+func TestTheLoopbackAnswerDoesNotReportWhetherTheAddressHasAnAccount(t *testing.T) {
+	for _, mode := range []auth.RegistrationMode{auth.RegistrationOpen, auth.RegistrationInvite} {
+		t.Run(string(mode), func(t *testing.T) {
+			api, stub := newOAuthAPI(t, mode)
+
+			if mode == auth.RegistrationInvite {
+				invite := mintInvite(t, api, map[string]any{"max_uses": 5})
+				require.Equal(t, http.StatusAccepted, api.call(http.MethodPost, "/api/v1/auth/register",
+					map[string]string{
+						"username": "ada", "email": "ada@example.com", "password": testPassword,
+						"invite_code": invite.Code,
+					}).Code)
+				api.confirmAddress("ada@example.com")
+			} else {
+				api.newAccount("ada", "ada@example.com", "laptop")
+			}
+
+			stub.as("google-1", "ada@example.com", false)
+			back, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+			registered := returnedTo(t, back)
+
+			stub.as("google-2", "newcomer@example.com", false)
+			back2, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+			unknown := returnedTo(t, back2)
+
+			assert.Equal(t, registered.Query().Get("error"), unknown.Query().Get("error"),
+				"the loopback code must not differ")
+			assert.Empty(t, registered.Query().Get("code"), "an unfinished flow carries no redeemable code")
+			assert.Empty(t, unknown.Query().Get("code"))
+		})
+	}
+}

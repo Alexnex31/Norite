@@ -420,3 +420,63 @@ func TestTheDevicePageCannotSignInAnUnverifiedAccount(t *testing.T) {
 	poll := a.call(http.MethodPost, "/api/v1/auth/device/token", map[string]string{"device_code": dc.DeviceCode})
 	assert.NotEqual(t, http.StatusOK, poll.Code, "no token pair may be issued: %s", poll)
 }
+
+// The last leg of the registration oracle, and the one that survived making the *response* uniform.
+//
+// The two branches used to leave different state: a free address commits a users row that occupies the
+// submitted username, a taken address rolls back and occupies nothing. A taken username is still reported
+// 409 — deliberately, a username is a public @handle — so the username namespace was a read of "did the
+// previous request create a row?", which is the address answer.
+//
+// Found by a security review and reproduced in both registration modes before the fix. No ordering of the
+// checks helps: whichever branch creates a row is the branch that occupies the name, so the branch that
+// creates nothing has to reserve it instead (migration 000011).
+func TestTwoRequestsCannotEnumerateAnAddressThroughTheUsername(t *testing.T) {
+	for _, mode := range []auth.RegistrationMode{auth.RegistrationOpen, auth.RegistrationInvite} {
+		t.Run(string(mode), func(t *testing.T) {
+			a := newAPI(t, mode)
+
+			// On a gated instance every registration needs a code. Generous limits so the probe itself is
+			// never what runs out — the point is what the *answers* say.
+			invite := ""
+			if mode == auth.RegistrationInvite {
+				invite = mintInvite(t, a, map[string]any{"max_uses": 10}).Code
+			}
+			register := func(username, email string) *response {
+				body := map[string]string{"username": username, "email": email, "password": testPassword}
+				if invite != "" {
+					body["invite_code"] = invite
+				}
+				return a.call(http.MethodPost, "/api/v1/auth/register", body)
+			}
+
+			require.Equal(t, http.StatusAccepted, register("ada", "ada@example.com").Code)
+			a.confirmAddress("ada@example.com")
+
+			// Probe one: a fresh username against an address that already has an account.
+			require.Equal(t, http.StatusAccepted, register("probeone", "ada@example.com").Code)
+			afterTaken := register("probeone", "attacker-one@evil.test")
+
+			// Probe two: the same shape against an address that does not.
+			require.Equal(t, http.StatusAccepted, register("probetwo", "nobody@example.com").Code)
+			afterFree := register("probetwo", "attacker-two@evil.test")
+
+			assert.Equal(t, afterFree.Code, afterTaken.Code,
+				"the second request must not report whether the first one created an account")
+			assert.Equal(t, afterFree.errorBody().Code, afterTaken.errorBody().Code)
+		})
+	}
+}
+
+// And the reservation does not cost the ordinary case its message: somebody who picks a name that is
+// genuinely taken is still told so, rather than being met with the silence the address branch needs.
+func TestATakenUsernameIsStillReported(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	a.newAccount("ada", "ada@example.com", "laptop")
+
+	resp := a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "ada", "email": "someone-else@example.com", "password": testPassword,
+	})
+	assert.Equal(t, http.StatusConflict, resp.Code, resp)
+	assert.Equal(t, "conflict", resp.errorBody().Code)
+}

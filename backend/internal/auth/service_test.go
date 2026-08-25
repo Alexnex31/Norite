@@ -162,11 +162,17 @@ func TestRegisteringATakenAddressIsAccepted(t *testing.T) {
 	require.NoError(t, err, "a taken address must not be reported to the caller")
 	assert.Zero(t, user.ID, "and no account may be created for it")
 
-	// The username was not consumed either, so whoever actually wanted it can still have it.
+	// The username *is* consumed, and this assertion is the reverse of what it first said.
+	//
+	// "The username was not consumed either, so whoever actually wanted it can still have it" was the
+	// original wording, and it was encoding the bug as a feature: a taken address leaving the username free
+	// while a fresh one occupies it is precisely the difference two requests read to enumerate addresses.
+	// The reservation costs a name that nobody had claimed, which is the price of the two branches leaving
+	// the same state. See migration 000011.
 	_, err = svc.Register(t.Context(), RegisterInput{
 		Username: "ada2", Email: "someone-else@example.com", Password: testPassword,
 	})
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, ErrUsernameTaken)
 }
 
 // citext is what makes this true in the database rather than in whichever query remembered to lower().

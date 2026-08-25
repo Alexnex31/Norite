@@ -207,6 +207,14 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// A sign-up that arrived by mail has no client waiting on a code, so there is none to show. The
+		// account exists and is linked; signing in from a client is the next step and takes the
+		// already-linked path.
+		if result.ByMail {
+			h.renderPage(w, r, oauthMailedDoneTemplate, http.StatusOK, oauthPageData{Nonce: nonce})
+			return
+		}
+
 		// Where the code goes was decided when the flow started and traveled here inside the signed
 		// continuation token, not in this form. That distinction is the point: this request body is
 		// written by whoever is looking at the page, and a hidden redirect field would let them choose
@@ -490,6 +498,24 @@ var oauthCheckEmailTemplate = template.Must(template.New("oauth-check-email").Pa
 <p>Your provider could not confirm that this address belongs to you, so we have written to it instead.</p>
 <p class="note">Follow the link in that message to continue. If nothing arrives, the address may not be one
 this provider can share — sign in with a password instead.</p>
+</body>
+</html>
+`))
+
+var oauthMailedDoneTemplate = template.Must(template.New("oauth-mailed-done").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your account is ready</title>
+<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+</head>
+<body>
+<h1>Your account is ready</h1>
+<p>Confirming this address finished creating it, and your provider is linked.</p>
+<p class="note">Sign in from your client now — in a terminal that is
+<code class="code">norite login --provider google</code> or <code class="code">--provider github</code>,
+whichever you used here.</p>
 </body>
 </html>
 `))

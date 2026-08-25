@@ -86,7 +86,27 @@ for nothing — a "was this you?" button would be a phishing template written by
 confirm.
 
 A taken **username** is still reported. A username is an `@handle`, public by construction and discoverable
-by any client that can look one up; an address is not. That asymmetry is deliberate.
+by any client that can look one up; an address is not. That asymmetry is deliberate — and it turned out to
+be the last leg of the oracle, because the *response* being uniform is not enough when the *state* is not.
+
+A free address commits a `users` row that occupies the submitted username; a taken address rolls back and
+occupies nothing. So the username namespace was a read of "did the previous request create a row?", which
+is the address answer:
+
+```
+register(U, victim@example.com)   -> 202 always
+register(U, attacker@evil.test)   -> 409 means the first call created an account (address was free)
+                                     202 means it created nothing        (address was taken)
+```
+
+Two unauthenticated requests, no race, no timing, reproduced in both registration modes. On a gated
+instance it cost nothing either, since the rollback leaves the invite unspent.
+
+No ordering of the checks fixes this — whichever branch creates a row is the branch that occupies the name
+— so the branch that creates nothing reserves it instead (`registration_reservations`, migration 000011).
+Both branches leave the username unavailable and the second request answers 409 either way. The reservation
+has no TTL because the unverified account it stands in for has none; if either ever gains one, both must,
+or the oracle returns on the far side of it.
 
 **Login had to become uniform too, and this was nearly missed.** Refusing an unverified account with its own
 message reopens the same oracle in two requests: register an address with a password of your choosing, then
@@ -116,14 +136,31 @@ a provider.
 So **both cases render one "check your email" page** and the difference travels by mail — an unknown
 address gets a link that resumes the sign-up, a registered one gets a warning and the route back (sign in
 by password, link from settings). Opening the mailed link is the proof of control the provider declined to
-give, which is why the username form moved behind it.
+give, which is why the username form moved behind it, and why the account it creates is verified rather
+than being sent a second confirmation.
+
+**On a gated instance both cases return `registration_closed` and neither mails.** Getting this wrong is
+easy and was got wrong once: putting the registration-mode gate ahead of the detour — to stop a closed
+instance mailing an arbitrary address — meant an address *with* an account reached the detour and got 200
+while one without hit the gate and got 400, and over the loopback hop `email_unverified` against
+`registration_closed`. One unauthenticated request. The gate lives inside `unverifiedProviderAddress` now,
+where it answers for both cases at once; the two requirements are the same requirement, met by returning
+before either branch.
 
 Linking to an **existing** account stays refused. That is the takeover direction and no mail we send
 changes who controls the provider account.
 
-A loopback client is told to stop with M8's existing `email_unverified` code, identical in both cases. The
-flow is not going to finish on that machine, and a client that was not told would sit out its whole
-timeout.
+A loopback client is told to stop with M8's existing `email_unverified` code, identical in both cases and
+in every registration mode. The flow is not going to finish on that machine, and a client that was not told
+would sit out its whole timeout.
+
+The mailed continuation carries **no client binding**, because there is no client: the flow that produced
+it ended at "check your email" and its listener is long gone. That is marked inside the signature
+(`eml_only`) rather than inferred from an empty challenge, so the "no usable binding" refusal stays in
+force for every other signup token. It was first shipped by passing an empty destination, which meant every
+completion from the mail failed with "this sign-up has expired" — fail-closed, and a feature that could not
+succeed for anybody, because no test followed the link past the mail queue. Completing it mints no exchange
+code, for the reason the device branch mints none.
 
 ### Invite management is admin-gated REST, logged but not yet audited
 `instance_admins` lands 61 milestones before M71, which owns it, because bootstrap and invite management

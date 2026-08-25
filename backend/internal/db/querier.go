@@ -314,6 +314,12 @@ type Querier interface {
 	// every credential lookup in this package gets, and here it also stops the endpoint from being a way to
 	// probe which codes exist.
 	RedeemInstanceInvite(ctx context.Context, code string) (InstanceInvite, error)
+	// Claims a username for a registration that created no account.
+	//
+	// ON CONFLICT DO NOTHING because the name may already be claimed by an account or by an earlier
+	// reservation, and either way the caller's answer is the same: it is not available. Nothing here needs to
+	// know which.
+	ReserveUsername(ctx context.Context, username string) error
 	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
 	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
@@ -382,7 +388,16 @@ type Querier interface {
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
 	UserExistsByEmail(ctx context.Context, email string) (bool, error)
-	UserExistsByUsername(ctx context.Context, username string) (bool, error)
+	// Is this username claimed, by an account or by a registration that created none?
+	//
+	// The second half is what closes the last leg of the registration oracle, and it is not optional: a
+	// registration against a *taken* address creates no account, so without a reservation it would leave the
+	// username free while one against a fresh address does not — and two requests read that difference. See
+	// migration 000011.
+	//
+	// One query rather than two so the two halves cannot be checked in different places, or one of them
+	// forgotten by a later caller.
+	UsernameUnavailable(ctx context.Context, username string) (bool, error)
 }
 
 var _ Querier = (*Queries)(nil)

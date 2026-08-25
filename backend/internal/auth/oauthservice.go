@@ -442,20 +442,24 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		// Linking to an *existing* account stays refused above. That is the takeover direction, and no
 		// mail we send changes who controls the provider account.
 
-		// The gate comes before the detour, which is the ordering a review found the wrong way round.
+		// The detour comes first, and the registration-mode gate lives inside it.
 		//
-		// With the detour first, anybody who presented an arbitrary address at a provider could make a
-		// gated instance send mail to it — an unauthenticated "finish creating your account" link, to any
-		// address, on an instance that deliberately closed registration. Following it then rendered a
-		// username form that only failed *after* a username was submitted, which is a dead end for a real
-		// person as well.
+		// Ordering these the other way round — gate first — looked right and reintroduced the oracle ADR
+		// 0024 merged its two refusals to avoid. On a gated instance an address that *had* an account
+		// reached the detour and got 200 "check your email", while one that did not hit the gate and got
+		// 400: one unauthenticated request, and over the loopback hop `email_unverified` against
+		// `registration_closed`, which is cheaper still. Found by a security review of this milestone.
 		//
+		// unverifiedProviderAddress answers for both cases now, and on a gated instance mails on neither —
+		// which is also what the gate-first ordering was reaching for, since a closed instance must not be
+		// usable to send mail to an address somebody typed at a provider.
+		if !identity.EmailVerified {
+			return s.unverifiedProviderAddress(ctx, identity, db.User{}, dest)
+		}
+
 		// Nothing is written until a username is chosen — see issueOAuthSignupToken.
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
-		}
-		if !identity.EmailVerified {
-			return s.unverifiedProviderAddress(ctx, identity, db.User{}, dest)
 		}
 		token, err := s.issueOAuthSignupToken(identity, dest)
 		if err != nil {
@@ -578,6 +582,9 @@ type OAuthSignupResult struct {
 	// DeviceCodeID is the authorization waiting on this sign-up, or zero. Also carried inside the
 	// signature rather than in the form.
 	DeviceCodeID int64
+	// ByMail marks a sign-up that arrived as a link in an email. No exchange code is minted — nobody is
+	// waiting on one — so the page says the account is ready rather than showing a code.
+	ByMail bool
 }
 
 // CompleteOAuthSignup creates the account a signup token stands for, once a username has been chosen.
@@ -631,7 +638,12 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 	}
 
 	// Unverified when the provider did not vouch and this instance can send mail; verified otherwise.
-	needsConfirmation := !identity.EmailVerified && s.VerificationRequired()
+	//
+	// A sign-up that arrived by mail is already verified, and that is the whole point of the detour: the
+	// link went to the address and somebody opened it, which is control of the mailbox — the evidence
+	// the provider declined to give. Treating it as unverified would create an account nobody can use
+	// and send a second confirmation to an address that just confirmed itself.
+	needsConfirmation := !identity.EmailVerified && !continuation.ByMail && s.VerificationRequired()
 	verifiedAt := timestamptz(s.now())
 	if needsConfirmation {
 		verifiedAt = pgtype.Timestamptz{}
@@ -716,6 +728,18 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 	// approve, and the waiting client already holds the credential it will redeem.
 	if dest.forDevice() {
 		return OAuthSignupResult{UserID: user.ID, DeviceCodeID: continuation.DeviceCodeID}, nil
+	}
+
+	// A sign-up that arrived by mail has nobody waiting on a code either, and for a plainer reason than
+	// the device flow's: the flow that produced it ended at "check your email" and its client is long
+	// gone. Minting one would leave a redeemable value nobody collects — and it could not be minted
+	// anyway, since issueOAuthExchangeCode binds a code to a flow challenge this token deliberately
+	// carries none of.
+	//
+	// The account and its identity exist now, so the next `norite login --provider …` takes the
+	// already-linked path and signs in normally.
+	if continuation.ByMail {
+		return OAuthSignupResult{UserID: user.ID, ByMail: true}, nil
 	}
 
 	code, err := s.issueOAuthExchangeCode(ctx, user.ID, dest.Challenge)

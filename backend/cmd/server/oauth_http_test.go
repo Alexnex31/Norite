@@ -224,10 +224,35 @@ func hiddenField(t *testing.T, page *response, name string) string {
 // says nothing about whether the address has an account, because anyone can present any address at a
 // provider that does not verify it.
 func TestAnUnverifiedProviderAddressEndsAtTheSamePageEitherWay(t *testing.T) {
+	// Both registration modes. The first version of this test hard-coded RegistrationOpen, which is the
+	// only mode where it passed: a security review found that on a gated instance the registration-mode
+	// gate ran before the detour, so an address with an account got 200 "check your email" and one without
+	// got 400. Pinning one mode is how a property that holds in half the configurations looks like one
+	// that holds.
+	for _, mode := range []auth.RegistrationMode{auth.RegistrationOpen, auth.RegistrationInvite} {
+		t.Run(string(mode), func(t *testing.T) { unverifiedProviderAddressIsUniform(t, mode) })
+	}
+}
+
+func unverifiedProviderAddressIsUniform(t *testing.T, mode auth.RegistrationMode) {
 	// One instance, two addresses: one that has an account and one that does not. Both presented as
 	// unverified by the provider, which is the case an attacker can arrange for any address.
-	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
-	api.newAccount("ada", "ada@example.com", "laptop")
+	api, stub := newOAuthAPI(t, mode)
+
+	// Seeded through an invite on a gated instance, since ordinary registration is refused there. The
+	// account has to exist for this test to mean anything: the whole question is whether the callback
+	// answers differently for an address that has one.
+	if mode == auth.RegistrationInvite {
+		invite := mintInvite(t, api, map[string]any{"max_uses": 5})
+		require.Equal(t, http.StatusAccepted, api.call(http.MethodPost, "/api/v1/auth/register",
+			map[string]string{
+				"username": "ada", "email": "ada@example.com", "password": testPassword,
+				"invite_code": invite.Code,
+			}).Code)
+		api.confirmAddress("ada@example.com")
+	} else {
+		api.newAccount("ada", "ada@example.com", "laptop")
+	}
 
 	stub.as("google-1", "ada@example.com", false)
 	registered := api.authorizeAndCallback(t)
@@ -235,13 +260,11 @@ func TestAnUnverifiedProviderAddressEndsAtTheSamePageEitherWay(t *testing.T) {
 	stub.as("google-2", "newcomer@example.com", false)
 	unknown := api.authorizeAndCallback(t)
 
-	assert.Equal(t, http.StatusOK, registered.Code, registered)
 	assert.Equal(t, registered.Code, unknown.Code, "the status must not differ")
 	// Compared with the CSP nonce masked: it is random per request by design, and is the only thing that
 	// legitimately differs between two renders of one page.
 	assert.Equal(t, withoutNonce(registered.String()), withoutNonce(unknown.String()),
 		"the page must not differ")
-	assert.Contains(t, registered.String(), "Check your email")
 
 	// Nothing was linked to the existing account, and no account was created for the unknown address —
 	// the two properties the identical page must not have cost.

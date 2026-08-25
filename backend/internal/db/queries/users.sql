@@ -31,7 +31,28 @@ SELECT EXISTS (
   SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL
 ) AS taken;
 
--- name: UserExistsByUsername :one
+-- name: UsernameUnavailable :one
+-- Is this username claimed, by an account or by a registration that created none?
+--
+-- The second half is what closes the last leg of the registration oracle, and it is not optional: a
+-- registration against a *taken* address creates no account, so without a reservation it would leave the
+-- username free while one against a fresh address does not — and two requests read that difference. See
+-- migration 000011.
+--
+-- One query rather than two so the two halves cannot be checked in different places, or one of them
+-- forgotten by a later caller.
 SELECT EXISTS (
-  SELECT 1 FROM users WHERE username = $1 AND deleted_at IS NULL
-) AS taken;
+  SELECT 1 FROM users u WHERE u.username = $1 AND u.deleted_at IS NULL
+  UNION ALL
+  SELECT 1 FROM registration_reservations r WHERE r.username = $1
+) AS unavailable;
+
+-- name: ReserveUsername :exec
+-- Claims a username for a registration that created no account.
+--
+-- ON CONFLICT DO NOTHING because the name may already be claimed by an account or by an earlier
+-- reservation, and either way the caller's answer is the same: it is not available. Nothing here needs to
+-- know which.
+INSERT INTO registration_reservations (username)
+VALUES ($1)
+ON CONFLICT (username) DO NOTHING;

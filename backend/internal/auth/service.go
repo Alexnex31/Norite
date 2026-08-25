@@ -207,11 +207,15 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 	// The username is public — it is an @handle, and any client that can look one up already discloses
 	// whether it is taken — so refusing here reveals nothing. Checked *before* the address, so a taken
 	// username is reported plainly rather than swallowed by the silence the address branch requires.
-	taken, err := s.queries.UserExistsByUsername(ctx, username)
+	//
+	// "Unavailable" rather than "taken" is load-bearing: it consults reservations as well as accounts,
+	// and without that half this check was the last leg of the oracle the rest of this function closes.
+	// See migration 000011 and the reservation below.
+	unavailable, err := s.queries.UsernameUnavailable(ctx, username)
 	if err != nil {
 		return db.User{}, fmt.Errorf("checking username availability: %w", err)
 	}
-	if taken {
+	if unavailable {
 		return db.User{}, ErrUsernameTaken
 	}
 
@@ -309,8 +313,21 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 	})
 	if err != nil {
 		if errors.Is(err, errEmailTakenSilently) {
-			// Nothing was created and any invite was rolled back. The notice is queued rather than sent
-			// inline, so this branch does the same amount of *blocking* work as the other one.
+			// Nothing was created and any invite was rolled back — so this branch has to claim the username
+			// some other way, or the two branches leave different state and two requests read the difference.
+			// That was the oracle a security review found still open after the response itself had been made
+			// uniform; migration 000011 carries the full account of it.
+			//
+			// Deliberately outside the transaction that just rolled back, and deliberately not fatal: the
+			// caller has already been answered, and a failed reservation costs one probe of exposure rather
+			// than a reason to behave differently — behaving differently is the whole thing being avoided.
+			if err := s.queries.ReserveUsername(ctx, username); err != nil {
+				logging.FromContext(ctx).Error().Err(err).
+					Msg("reserving a username for a registration that created no account failed")
+			}
+
+			// The notice is queued rather than sent inline, so this branch does the same amount of
+			// *blocking* work as the other one.
 			if s.mailer != nil && s.mailer.Enabled() {
 				if err := s.mailer.Enqueue(registrationNoticeMessage(s.publicBaseURL, email)); err != nil {
 					logging.FromContext(ctx).Warn().Err(err).
