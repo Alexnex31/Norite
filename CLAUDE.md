@@ -280,7 +280,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M9.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
+**Phase A (foundation), through M10.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -331,7 +331,13 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   `cli/internal/login`'s `headless.go` and `devicecode.go`. Decisions in ADR 0028: the completion page
   offers providers and not only a password (which is what makes the milestone worth its size), approval is
   a separate explicit step, and the user code is the one credential-shaped value stored in plaintext.
-- **M10 — `norite instance init` finish, and registration hardening**: next.
+- **M10 — `norite instance init` finish, and registration hardening**: done (tag `m10`). Migrations
+  `000008`–`000010`, `backend/operatortoken` (the first package outside `backend/internal`),
+  `internal/auth`'s `operator.go`/`instance.go`/`instancehttp.go`/`invites.go`/`verification.go`/
+  `verifypage.go`, `cli/internal/apiclient` (the transport extracted from `login`), and
+  `cli/internal/instanceadmin` (`norite instance bootstrap` and `norite instance invite`). Decisions in
+  ADR 0029, which also amends ADR 0024.
+- **M11 — Session revocation primitive**: next.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -646,6 +652,54 @@ And on the device-code side, from M9 (decisions in ADR 0028):
 One thing this milestone deliberately leaves: **screen `5a` in `docs/design/tui/` is normative and
 specifies a code box with a countdown and a progress bar.** The CLI prints the plain-text equivalent
 because it is not the TUI; M55 draws the box. The two are not in disagreement.
+
+And on the instance-administration and registration side, from M10 (decisions in ADR 0029):
+
+- **The operator is a third authority, and the only credential here minted by a client.** An unsubjected
+  JWT with `typ: "operator"`, signed with the instance's own key, two-minute life, presented to
+  `/api/v1/instance/*`. It concedes nothing new — anyone who can read `instance.toml` can already forge an
+  access token for any account — but it *states* the authority, so a bootstrap proves filesystem access
+  rather than being trusted for arriving early. There is no window in which whoever reaches a
+  freshly-migrated instance first becomes its administrator.
+- **`typ` is load-bearing against a token you would not guess.** An access token is refused by the
+  empty-subject check, not by `typ`; disabling `typ` leaves that test passing. What it defends against is a
+  **device entry token** — same issuer, same key, live expiry, no subject — which without the check would
+  turn entering a valid device code into instance-operator authority.
+- **The token format lives in `backend/operatortoken`, outside `internal/`**, because Go's `internal/` rule
+  makes `backend/internal/auth` unreachable from the CLI and a second copy of a claim shape drifts. The
+  authorization decision stays in `internal/auth` where the routes are. Same decision as `daemon/credentials`
+  at M7, and it adds the second cross-module edge, `cli` → `backend`. Two tests span it: the `iss` constant
+  matching, and a token minted the CLI's way passing the middleware's check.
+- **Routes mount unconditionally; middleware may be conditional.** `cmd/server/contract_test.go` walks the
+  router built with a nil `AuthSvc`, so a group mounted only when that field is set is invisible to rule 6's
+  check — which is how four `/instance` routes went undocumented while the test passed.
+  `AuthenticateInstanceAdmin` fails closed on a nil service instead.
+- **Bootstrap is a sibling command**, `norite instance bootstrap`, not a step inside the wizard: when `init`
+  finishes there is no running server to create an account on. It refuses unless there are zero
+  administrators, under an advisory lock — checking a count and acting on it is a read-modify-write, and
+  under READ COMMITTED two concurrent bootstraps both read zero.
+- **Registration answers 202 identically** whether or not the address is taken, and never returns the
+  account. The difference goes to the mailbox: a verification link, or a "somebody tried to register" notice
+  that carries no link and asks for nothing. A taken **username** is still 409 — an `@handle` is public,
+  an address is not.
+- **`HashPassword` runs before the address check**, and that ordering is the timing half of the guarantee.
+  Moving it below makes the taken branch ~1 ms against ~31 ms. The unique-constraint race comes back as the
+  same silence, because reporting it would leave the oracle reachable by firing two requests at once.
+- **Login refuses an unverified account only after the password verifies.** Before that the message answers
+  "is this address registered but unverified" to somebody who knows no password.
+- **An unverified provider address takes a detour, and both cases render one page.** If an unknown address
+  showed a username form while a registered one was refused, the browser would answer the question ADR
+  0024's merged message exists to refuse. The form moved behind a mailed link; linking to an *existing*
+  account stays refused, that being the takeover direction.
+- **Invite redemption is one `UPDATE` with every guard in its `WHERE`**, sharing the account insert's
+  transaction. Rewritten as a check-then-update, four of four concurrent racers get in. Both NULLs are
+  explicit `IS NULL` branches — `uses < NULL` is NULL, so "unlimited" would otherwise match nothing.
+- **An instance with no SMTP relay creates accounts already verified**, and the enumeration hole stays open
+  there. Accepted, pinned by a test, and stated in three places, because the failure mode to guard against
+  is it becoming quiet. Same absence keeps M6's outright refusal on the provider path.
+- **An invite-only instance is password-registration-only.** There is nowhere to carry a code through a
+  provider redirect. Fails closed, and it is in the contract rather than left to be discovered.
+
 
 And on the CLI OAuth side, from M8 (decisions in ADR 0027):
 

@@ -93,13 +93,24 @@ mandatory.
   two cases, because an operator investigating needs to and a log line is not an answer to the caller.
 
 
-  Note what this does *not* close: `POST /auth/register` still answers 409 on a taken address, so the
-  instance remains enumerable by a cheaper route. That is why the merge was necessary rather than
-  sufficient — an OAuth-only fix would have shut the smaller hole and left the larger one open. Registration
-  is closed at M10, which is also where this refusal stops being final: with an address this instance can
-  verify itself, an identity the provider will not vouch for takes a detour through our own verification
-  instead of being turned away. Until then it is turned away, and a GitHub account holding only unverified
-  addresses cannot sign in at all.
+  Note what this did *not* close, at the time it was written: `POST /auth/register` answered 409 on a taken
+  address, so the instance remained enumerable by a cheaper route. That is why the merge was necessary
+  rather than sufficient — an OAuth-only fix would have shut the smaller hole and left the larger one open.
+
+  **Amended by ADR 0029 (M10).** Registration now answers identically either way, so the cheaper route is
+  gone; and this refusal stopped being final. An identity the provider will not vouch for takes a detour
+  through this instance's own verification instead of being turned away, which is what makes a GitHub
+  account holding only unverified addresses usable at all.
+
+  The reasoning above survives that change intact, and one part of it became *more* load-bearing rather
+  than less. The two cases must still be indistinguishable, and the detour made that harder rather than
+  easier: if an unknown address proceeded to a username form while a registered one was refused, the
+  browser would answer the same question the two messages used to. So both now render one "check your
+  email" page and the difference travels by mail, which is the same shape M10 gave registration. What no
+  longer applies is only the final sentence: the refusal is a detour now, and it is not turned away.
+
+  An instance with no mail relay keeps the original behaviour, because it can neither verify an address nor
+  send the difference.
 - **Two GET endpoints mutate, against the letter of CLAUDE.md rule 4.** `/authorize` inserts an
   `oauth_states` row and `/callback` consumes it. Both are browser navigations that OAuth requires to be
   GETs, so the shape is not negotiable. The rule's purpose is not violated: it exists for REST hygiene on

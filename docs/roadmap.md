@@ -143,6 +143,19 @@ of this section.
   and timing, from registering a new one**; an account created by password cannot sign in until its address
   is verified; and a provider identity whose address is unverified completes through this instance's own
   verification rather than being refused.
+
+  **Done** (tag `m10`). Decisions in ADR 0029. First-administrator creation landed as a sibling command,
+  `norite instance bootstrap`, rather than a step inside the wizard — when `init` finishes there is no
+  running server to create an account on. It is authorized by an **operator token**: an unsubjected JWT
+  signed with the instance's own key, which makes filesystem access to `instance.toml` the authority, so
+  there is no window in which whoever reaches a fresh instance first becomes its administrator.
+  `instance_admins` therefore lands here rather than at M71, which keeps grant/revoke and the last-admin
+  rail.
+
+  Two limitations are accepted and recorded rather than hidden: an instance with **no SMTP relay** creates
+  accounts already verified, so the enumeration hole stays open there (it cannot verify an address by any
+  route); and an **invite-only instance is password-registration-only**, there being nowhere to carry a
+  code through a provider redirect.
 - **M11 — Session revocation primitive**: the general-purpose "revoke all sessions/tokens for account X"
   mechanism (force-close live gateway connections, revoke refresh plus scoped tokens), exposed now as a
   self-service "log out all other devices" account-security feature. Ban-triggered use of this same
@@ -541,8 +554,15 @@ of this section.
 - **M72 — Instance Admin bans, enforcement, and audit log**: `instance_bans` (full account suspension, an
   optional `expires_at`), enforcement via the M11 revoke-all-sessions primitive (force-close plus revoke
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
-  `instance_audit_log` recording every Instance Admin action. Done when: issuing a ban immediately
-  disconnects the account everywhere and blocks re-authentication, and the action is logged.
+  `instance_audit_log` recording every Instance Admin action.
+
+  **Must also cover instance-invite management**, which M10 built and logs structurally rather than
+  durably. Rule 14 enumerates bans, report resolution, entitlement changes and tier grants, so minting an
+  invite is not strictly among them — but "who opened the door onto this instance" is exactly the question
+  an audit log exists to answer, and M10 deferred it here deliberately rather than by omission (ADR 0029).
+
+  Done when: issuing a ban immediately disconnects the account everywhere and blocks re-authentication, and
+  the action is logged.
 - **M73 — Instance Admin lockout recovery**: the server-side recovery CLI command
   (`norite instance grant-admin <email>`, filesystem-access-gated). Done when: it successfully regrants the tier on a test
   instance with zero remaining admins.

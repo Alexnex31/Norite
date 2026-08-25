@@ -14,15 +14,18 @@ one command tree, so every verb is runnable from the TUI's `M-x`.
 
 ## Status
 
-Early implementation — Phase A (foundation), `M0` through `M9` done and `M10` next. What exists: the
+Early implementation — Phase A (foundation), `M0` through `M10` done and `M11` next. What exists: the
 monorepo and CI (`M0`), the backend skeleton — chi router, pgx pool, advisory-lock-guarded auto-migration,
 structured logging, rate limiting, `/healthz` (`M1`), the `norite` command tree and instance setup wizard
 (`M2`), the user-scoped background daemon's lifecycle (`M3`), accounts with argon2id, device-scoped refresh
 families and scoped API tokens (`M4`), transactional email and password reset (`M5`), OAuth sign-in with
 Google and GitHub (`M6`), `norite login` with the credential the daemon starts with (`M7`), the OAuth
 loopback login — a system browser and a localhost callback (`M8`) — and the headless fallback for a machine
-with no browser at all — a code completed in a browser on another device (`M9`). `M10` finishes
-`norite instance init` and hardens registration.
+with no browser at all — a code completed in a browser on another device (`M9`). A fresh instance is set
+up end to end: `norite instance init`, then `norite instance bootstrap` to create its first administrator,
+with invite codes gating who else may join (`M10`). Registering an address that already has an account is
+indistinguishable from registering a new one, and an address is confirmed by email before its account can
+be used. `M11` adds the revoke-all-sessions primitive.
 
 No product features exist yet — no guilds, channels, messages, or voice; those begin at `M12`. See
 `docs/architecture.md` for the full architecture and `docs/roadmap.md` for the milestone sequence (`M0`
