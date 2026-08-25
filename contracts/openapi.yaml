@@ -1918,18 +1918,43 @@ components:
     MintedApiToken:
       description: >
         A newly-created API token, including its value. This is the only response that ever contains it.
-      allOf:
-        - $ref: "#/components/schemas/ApiToken"
-        - type: object
-          required: [value]
-          properties:
-            value:
-              type: string
-              description: >
-                The credential itself, `nat_…`. Stored only as a SHA-256 hash and **not recoverable** — if
-                it is lost, mint a new token and revoke this one. The `nat_` prefix exists so a leaked
-                credential is identifiable on sight, by a human or a secret scanner.
-              examples: ["nat_9pQ2xL7vD4mZ0kR8sT1yWbGhJcNfEuAiOoPdXrVtYnM"]
+
+
+        Spelled out in full rather than composed over `ApiToken` with `allOf`, which is what it used to do
+        and which made it **unsatisfiable**: `allOf` branches are validated independently, so `ApiToken`'s
+        `additionalProperties: false` rejected the very `value` the second branch required. No real
+        response could match, and a validating client would have refused every successful mint — of a
+        credential that cannot be recovered. Nothing caught it because the contract test compares the set
+        of routes, not payloads. If a field is added to `ApiToken`, add it here too; the test named below
+        fails until you do.
+      type: object
+      required: [id, name, scopes, created_at, value]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        name:
+          type: string
+          description: Human label chosen at mint time, so a token can be recognised later in order to revoke it.
+          maxLength: 100
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scope"
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+          description: Null on a token that has just been minted. See `ApiToken`.
+        value:
+          type: string
+          description: >
+            The credential itself, `nat_…`. Stored only as a SHA-256 hash and **not recoverable** — if
+            it is lost, mint a new token and revoke this one. The `nat_` prefix exists so a leaked
+            credential is identifiable on sight, by a human or a secret scanner.
+          examples: ["nat_9pQ2xL7vD4mZ0kR8sT1yWbGhJcNfEuAiOoPdXrVtYnM"]
 
     OAuthExchangeRequest:
       type: object
@@ -2302,11 +2327,34 @@ components:
                 - invite_required
                 - invite_invalid
                 - already_bootstrapped
+                # The device-code grant's own vocabulary (RFC 8628 §3.5), from /auth/device/token. A
+                # polling client branches on the first two every few seconds, so they are the codes here
+                # that a generated client most needs to be able to name — and they were the ones missing
+                # longest. Added after a manual run compared real responses against this enum; M9 shipped
+                # them without this entry and nothing noticed, because the contract test walks the route
+                # table and never a payload.
+                - authorization_pending
+                - slow_down
+                - access_denied
+                - expired_token
+                # Configuration states, not faults. Each says a feature is switched off on this instance
+                # rather than broken: no public base URL for the device flow, no mail relay for reset.
+                - device_flow_unavailable
+                - reset_unavailable
+                # The OAuth paths, from M6.
+                - oauth_email_unverified
+                - oauth_provider_error
             message:
               type: string
               description: >
-                Human-readable summary, safe to show a user. For 5xx responses this is always a generic
-                string — server-side detail is logged, never returned.
+                Human-readable summary, safe to show a user.
+
+
+                A 5xx message is generic — *except* where a handler has explicitly marked one as safe to
+                send, which today is only the two `503`s above. Those say which feature is unconfigured,
+                because "internal server error" would report an instance that is merely missing a setting
+                as a broken one. What is never returned at any status is the underlying error: driver
+                text, query fragments and hostnames are logged and stay there.
             request_id:
               type: string
               description: >

@@ -355,8 +355,18 @@ re-derive:
   client, written to every log line, and returned in every error body. Domain routers mount in the
   rate-limited group inside `/api/v1`; `/healthz` sits outside it on purpose.
 - **Errors**: return `httpx.ErrNotFound` / `ErrForbidden` / … (or `httpx.Errorf(sentinel, …)`) from
-  services and let `httpx.WriteError` map them. 5xx detail is logged, never returned. Every response
+  services and let `httpx.WriteError` map them. 5xx detail is logged, never returned — a 5xx message is
+  replaced by a generic string unless its `StatusError` sets `MessageIsPublic`, which is how the two
+  deliberate `503`s (no mail relay, no public base URL) say *which* feature is off instead of claiming the
+  instance is broken. Set it only on a literal you wrote; the detail belongs in `Err`. Every response
   carries `X-Request-Id`; every error body carries `request_id`.
+- **A new error `code` goes in `contracts/openapi.yaml`'s `Error` enum in the same commit** (rule 6), and a
+  new field on a response goes in that response's schema. `cmd/server/contract_test.go` checks the *route
+  set* only, so payload drift is invisible to it — `contract_payload_test.go` is the half that reads real
+  responses, and it exists because eight emitted codes and one unsatisfiable schema had accumulated behind
+  that gap.
+- **Validation messages name the wire field**, because `NewHandler` registers a `json`-tag name func on the
+  validator. Without it the message quotes the Go field (`DeviceID`), which appears in no contract.
 - **Transactions**: `database.RunInTx`. Mutation + audit-log write go in one `fn` (rule 2); publish gateway
   events *after* it returns nil (rule 5).
 - **Rate limiting**: always build limiters through `internal/platform/ratelimit` — it is what enforces the

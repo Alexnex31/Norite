@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,7 +27,25 @@ type Handler struct {
 
 // NewHandler builds the auth HTTP handler.
 func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc, validate: validator.New(validator.WithRequiredStructEnabled())}
+	validate := validator.New(validator.WithRequiredStructEnabled())
+
+	// Report the name the caller sent, not the name this struct happens to use.
+	//
+	// Without this, a missing device_id comes back as `field "DeviceID" failed the "required"
+	// requirement` — a Go identifier that appears nowhere in contracts/openapi.yaml, two lines away from
+	// the decoder's own errors, which quote the wire name (`unknown field "admin"`). A caller reading it
+	// has to guess the mapping, and a generated client cannot even do that.
+	validate.RegisterTagNameFunc(func(f reflect.StructField) string {
+		name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
+		if name == "" || name == "-" {
+			// No tag, or a field that is never on the wire. The Go name is the only name there is, and it
+			// is better than an empty string.
+			return f.Name
+		}
+		return name
+	})
+
+	return &Handler{svc: svc, validate: validate}
 }
 
 // Routes mounts the auth endpoints, and reports which of them require authentication.
@@ -600,7 +620,9 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 			Status:  http.StatusServiceUnavailable,
 			Code:    "device_flow_unavailable",
 			Message: "the device sign-in flow is unavailable: this instance has no public base URL configured",
-			Err:     err,
+			// Not a fault: a setting this instance does not have. See httpx.StatusError.MessageIsPublic.
+			MessageIsPublic: true,
+			Err:             err,
 		})
 
 	case errors.Is(err, ErrResetUnavailable):
@@ -608,7 +630,9 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 			Status:  http.StatusServiceUnavailable,
 			Code:    "reset_unavailable",
 			Message: "password reset is unavailable: this instance has no email relay configured",
-			Err:     err,
+			// Not a fault: a setting this instance does not have. See httpx.StatusError.MessageIsPublic.
+			MessageIsPublic: true,
+			Err:             err,
 		})
 
 	case errors.Is(err, ErrNotFound):
