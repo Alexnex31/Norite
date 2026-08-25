@@ -41,7 +41,7 @@ func (h *Handler) InstanceRoutes(r chi.Router) {
 
 	r.Post("/invites", h.createInvite)
 	r.Get("/invites", h.listInvites)
-	r.Delete("/invites/{code}", h.revokeInvite)
+	r.Post("/invites/revoke", h.revokeInvite)
 }
 
 // bootstrap creates the instance's first administrator.
@@ -166,11 +166,19 @@ func (h *Handler) listInvites(w http.ResponseWriter, r *http.Request) {
 
 // revokeInvite deletes an invite so it can no longer be redeemed.
 func (h *Handler) revokeInvite(w http.ResponseWriter, r *http.Request) {
-	// From the path, which is the one place in this file a credential appears in a URL — and the reason
-	// it is acceptable here where it was not for the device flow's poll: this code is not spent by the
-	// request, the caller already holds administrator authority, and the alternative is a DELETE with a
-	// body, which several proxies drop.
-	if err := h.svc.DeleteInstanceInvite(r.Context(), chi.URLParam(r, "code")); err != nil {
+	// The code is in the body, not the path, and that is the whole reason this is a POST to /revoke
+	// rather than a DELETE on /invites/{code}.
+	//
+	// A request path is written to every log line by logging.RequestLogger, so a code in the path is a
+	// credential in the log — a different audience from the database it is stored in, with different
+	// access control and a longer reach. This is exactly the reasoning ADR 0028 used to move M9's poll
+	// off `GET /auth/device/code/{code}`, and the first version of this endpoint got it wrong by
+	// weighing *who may call it* instead of *where the value ends up*.
+	var req revokeInviteRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+	if err := h.svc.DeleteInstanceInvite(r.Context(), req.Code); err != nil {
 		h.writeErr(w, r, err)
 		return
 	}
@@ -180,6 +188,11 @@ func (h *Handler) revokeInvite(w http.ResponseWriter, r *http.Request) {
 		Msg("instance invite revoked")
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// revokeInviteRequest names the invite to delete. A body rather than a path segment — see revokeInvite.
+type revokeInviteRequest struct {
+	Code string `json:"code" validate:"required,max=64"`
 }
 
 // inviteActorForLog names who acted, without inventing an account id for the operator.

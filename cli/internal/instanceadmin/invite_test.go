@@ -165,22 +165,20 @@ func TestNullableFieldsArePrintedAsNull(t *testing.T) {
 	assert.Contains(t, out.String(), `"expires_at": null`)
 }
 
-// A code with a slash in it would address a different endpoint entirely. It is this client's own argument
-// rather than something the instance said, but it still has to be escaped.
-func TestARevokedCodeIsEscapedIntoThePath(t *testing.T) {
+// The code goes in the body, never the path. A request path is written to the instance's log on every
+// line, so a code in one is a credential in the log — ADR 0028's reasoning, applied to a second
+// credential. This client used to build `/invites/{code}`, escaping the value carefully into a place it
+// should not have been at all.
+func TestARevokedCodeTravelsInTheBodyNotThePath(t *testing.T) {
 	f := newFakeInviteAPI(t)
 	f.status = http.StatusNoContent
 
 	r, _ := inviteRunner(t, f, false)
-	require.NoError(t, r.revokeInvite(context.Background(), "AAAA/../../healthz"))
+	require.NoError(t, r.revokeInvite(context.Background(), "BCDFGHJKMNPQRSTV"))
 
-	assert.Equal(t, "/api/v1/instance/invites/AAAA%2F..%2F..%2Fhealthz", f.rawURI,
-		"a slash in the code must not escape the endpoint it addresses")
-
-	// And it still reached the invite handler rather than some other route, which is the property the
-	// escaping is actually for.
-	assert.Equal(t, http.MethodDelete, f.method)
-	assert.True(t, strings.HasPrefix(f.path, "/api/v1/instance/invites/"), "path: %s", f.path)
+	assert.Equal(t, "/api/v1/instance/invites/revoke", f.path)
+	assert.NotContains(t, f.rawURI, "BCDFGHJKMNPQRSTV", "the code must not reach the request line")
+	assert.Equal(t, "BCDFGHJKMNPQRSTV", f.body["code"], "it belongs in the body")
 }
 
 // Revoking something that was not there says so, and says how to find out what is.

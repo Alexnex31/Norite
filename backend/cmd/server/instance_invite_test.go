@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -105,7 +106,7 @@ func TestAnOrdinaryAccountCannotManageInvites(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/v1/instance/invites"},
 		{http.MethodGet, "/api/v1/instance/invites"},
-		{http.MethodDelete, "/api/v1/instance/invites/BCDFGHJKMNPQRSTV"},
+		{http.MethodPost, "/api/v1/instance/invites/revoke"},
 	} {
 		resp := a.call(tc.method, tc.path, nil, withToken(mallory.Tokens.AccessToken))
 		assert.Equal(t, http.StatusForbidden, resp.Code, "%s %s: %s", tc.method, tc.path, resp)
@@ -165,10 +166,12 @@ func TestRevokingAnInviteReportsWhetherThereWasOne(t *testing.T) {
 	a := newAPI(t, auth.RegistrationInvite)
 	invite := mintInvite(t, a, map[string]any{})
 
-	gone := a.call(http.MethodDelete, "/api/v1/instance/invites/"+invite.Code, nil, withToken(operatorToken(t)))
+	gone := a.call(http.MethodPost, "/api/v1/instance/invites/revoke",
+		map[string]string{"code": invite.Code}, withToken(operatorToken(t)))
 	assert.Equal(t, http.StatusNoContent, gone.Code, gone)
 
-	again := a.call(http.MethodDelete, "/api/v1/instance/invites/"+invite.Code, nil, withToken(operatorToken(t)))
+	again := a.call(http.MethodPost, "/api/v1/instance/invites/revoke",
+		map[string]string{"code": invite.Code}, withToken(operatorToken(t)))
 	assert.Equal(t, http.StatusNotFound, again.Code, again)
 
 	refused := a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
@@ -188,4 +191,22 @@ func TestAnOpenInstanceAcceptsRegistrationWithAStrayCode(t *testing.T) {
 		"invite_code": "BCDFGHJKMNPQRSTV",
 	})
 	assert.Equal(t, http.StatusAccepted, resp.Code, resp)
+}
+
+// The code must not reach the request log, and a path does: logging.RequestLogger records `path` on every
+// line. So this asserts on the *route table* rather than on one request — no instance route may carry a
+// credential-shaped path parameter, whatever a caller happens to send.
+//
+// ADR 0028's reasoning, applied to a second credential. This endpoint was first written as
+// DELETE /invites/{code}, which put every revoked code into the instance's logs.
+func TestNoInstanceRouteCarriesACredentialInItsPath(t *testing.T) {
+	handler := newTestRouterWithAuth(t)
+
+	for op := range routedOperations(t, handler) {
+		if !strings.Contains(op, "/instance/") {
+			continue
+		}
+		assert.NotContains(t, op, "{code}",
+			"an invite code in a path is a credential in every log line: %s", op)
+	}
 }

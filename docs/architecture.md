@@ -668,7 +668,7 @@ GET    /oauth/continue                     -- resume a sign-up a provider would 
 POST   /instance/bootstrap                 -- create the first administrator; operator token only (M10)
 POST   /instance/invites                   -- mint an invite; operator or Instance Admin
 GET    /instance/invites                   -- list them, codes in full
-DELETE /instance/invites/{code}            -- revoke one
+POST   /instance/invites/revoke            -- revoke one; the code is in the body, never a path (rule 8)
 POST   /auth/login                        -- email/password -> access + refresh token pair, device_id-scoped
 POST   /auth/refresh                      -- rotates the refresh token within its device_id's family
 POST   /auth/logout                       -- revokes current session

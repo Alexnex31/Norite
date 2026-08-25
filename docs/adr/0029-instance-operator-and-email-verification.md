@@ -135,6 +135,18 @@ is M72's table. Rule 14 enumerates bans, report resolution, entitlement changes 
 invite is not among them. M72's roadmap entry gains a line requiring it to cover invite management, so this
 is a deferral with a name on it rather than a gap.
 
+### Revoking an invite is a POST with a body, not a DELETE on a path
+A request path is written to every log line by `logging.RequestLogger`, so a code in a path is a credential
+in a log — a different audience from the database it is stored in, with different access control and a
+longer reach.
+
+This is the same reasoning ADR 0028 used to move M9's poll off `GET /auth/device/code/{code}`, and the
+first version of this endpoint got it wrong by weighing *who may call it* — an administrator, who can list
+every invite anyway — rather than *where the value ends up*. Caught by a security audit of this milestone.
+
+The route table is asserted rather than one request: no `/instance` route may carry a `{code}` segment,
+whatever a caller happens to send.
+
 ### Two deviations from the DDL in `architecture.md`
 - `instance_invites.created_by` is **nullable**. The document has it `NOT NULL`, which cannot hold: an
   invite may be issued by the operator, who is not an account.

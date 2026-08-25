@@ -1600,43 +1600,50 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
-  /instance/invites/{code}:
-    delete:
+  /instance/invites/revoke:
+    post:
       summary: Revoke an instance invite
       description: >
         Deletes an invite so it can no longer be redeemed. Takes effect immediately.
 
 
-        The code travels in the path, which is the one place in this API a credential-shaped value does. It
-        is acceptable here and was not for the device flow's poll: this request does not spend the code, the
-        caller already holds administrator authority over the instance, and the alternative is a DELETE
-        carrying a body, which several proxies drop.
+        **The code travels in the body, and that is why this is a POST to `/revoke` rather than a `DELETE`
+        on `/invites/{code}`.** A request path is written to every log line, so a code in the path is a
+        credential in the log — a different audience from the database it is stored in, with different
+        access control. This is the same reasoning that moved the device-code poll off
+        `GET /auth/device/code/{code}`; the first version of this endpoint got it wrong by weighing who may
+        call it rather than where the value ends up.
 
 
         Returns 404 when there was no such invite, so a successful revocation is distinguishable from a
-        mistyped code.
+        mistyped code. That discloses nothing: the caller can already list every invite on the instance.
       operationId: revokeInstanceInvite
       tags: [instance]
       security:
         - operatorToken: []
         - bearerAuth: []
-      parameters:
-        - name: code
-          in: path
-          required: true
-          description: >
-            The invite code. Case, spaces and dashes are normalised away before lookup.
-          schema:
-            type: string
-            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              additionalProperties: false
+              properties:
+                code:
+                  type: string
+                  maxLength: 64
+                  description: >
+                    The invite code. Case, spaces and dashes are normalised away before lookup.
       responses:
         "204":
           description: The invite is revoked. No body.
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: >
-            The credential is genuine but does not administer this instance. 403 rather than 401: the caller
-            is authenticated, so re-authenticating would not help.
+            The credential is genuine but does not administer this instance.
           content:
             application/json:
               schema:

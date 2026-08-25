@@ -85,7 +85,7 @@
       "properties": {
         "revoked": {
           "type": "string",
-          "description": "The code that was revoked, as it was given on the command line."
+          "description": "The code that was revoked, as it was given on the command line. Sent to the instance in a request body rather than a path, so it never reaches the instance's request log."
         }
       }
     }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -207,11 +206,11 @@ func (r *Runner) revokeInvite(ctx context.Context, code string) error {
 		return err
 	}
 
-	// The code is this client's own argument rather than something the instance said, so it goes into the
-	// path as typed — but it is still escaped, because a code with a slash in it would otherwise address a
-	// different endpoint entirely.
-	path := "/api/v1/instance/invites/" + url.PathEscape(code)
-	if err := client.Do(ctx, http.MethodDelete, path, token, nil, nil); err != nil {
+	// The code travels in a body, not a path. A request path lands in the instance's log for every
+	// request, and an invite code is a credential — see the endpoint's own comment, and ADR 0028, which
+	// moved M9's poll off a path for the same reason.
+	body := map[string]string{"code": code}
+	if err := client.Do(ctx, http.MethodPost, "/api/v1/instance/invites/revoke", token, body, nil); err != nil {
 		var apiErr *apiclient.Error
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
 			return fmt.Errorf("%w\n\nNothing was revoked. Check the code with "+
