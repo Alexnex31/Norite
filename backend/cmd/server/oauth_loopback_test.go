@@ -426,9 +426,16 @@ func TestADeclinedConsentRedirectsWithAnErrorCode(t *testing.T) {
 	assert.Empty(t, got.Query().Get("code"), "a failure must never carry a redeemable code")
 }
 
-// A refusal this instance decides — rather than one the provider reported — reaches the listener too, and
+// An outcome this instance decides — rather than one the provider reported — reaches the listener too, and
 // as a code from the same fixed vocabulary rather than as the sentence the page would show.
-func TestAnUnverifiedAddressRedirectsWithItsOwnCode(t *testing.T) {
+//
+// At M10 this stopped being a refusal and became a detour by mail, and the loopback half matters more than
+// it looks: the flow is not going to finish on this machine, so a client that was not told would sit out
+// its entire timeout waiting for a callback that continues in a mailbox instead.
+//
+// The code is unchanged and is the same for both cases — an address that has an account and one that does
+// not — so the loopback hop discloses no more than the page does.
+func TestAnUnverifiedAddressTellsAWaitingClientToStop(t *testing.T) {
 	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
 	api.newAccount("ada", "ada@example.com", "laptop")
 	stub.as("google-1", "ada@example.com", false) // the provider will not vouch for the address
@@ -437,9 +444,15 @@ func TestAnUnverifiedAddressRedirectsWithItsOwnCode(t *testing.T) {
 	got := returnedTo(t, back)
 
 	assert.Equal(t, "email_unverified", got.Query().Get("error"))
+	assert.Empty(t, got.Query().Get("code"), "an unfinished flow must never carry a redeemable code")
 	// The long, deliberately specific sentence the page carries must not travel here: a listener gets a
 	// code it can branch on, and the client writes its own prose.
 	assert.NotContains(t, got.String(), "Verify it with the provider")
+
+	// The same code for an address nobody owns, so the listener cannot be used to enumerate either.
+	stub.as("google-2", "newcomer@example.com", false)
+	back2, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	assert.Equal(t, "email_unverified", returnedTo(t, back2).Query().Get("error"))
 }
 
 // A failure before the state is consumed cannot know a listener, so it renders. Not a gap — the only way

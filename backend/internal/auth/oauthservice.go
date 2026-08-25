@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -119,6 +121,17 @@ type OAuthOutcome struct {
 	SuggestedUsername string
 	// Email is shown on the signup page so the person can see which account they are about to create.
 	Email string
+
+	// CheckYourEmail is set when the provider would not vouch for the address, whatever this instance
+	// found. The callback renders one page and the difference travels by mail.
+	//
+	// It has to be one page. If an unknown address showed a username form while a registered one showed
+	// a refusal, anybody could learn whether an address has an account here by presenting it
+	// unverified at a provider — which GitHub permits for any address. That is the oracle ADR 0024
+	// merged its two refusals to avoid, and closing it on registration while opening it here would be
+	// a net wash. So both cases end identically in the browser, and the only party told which happened
+	// is whoever controls the mailbox.
+	CheckYourEmail bool
 
 	// ClientRedirectURI is the loopback listener this flow was started with, or empty for a flow that
 	// has nowhere to return to and gets a rendered page instead.
@@ -400,7 +413,7 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 				Str("provider", string(identity.Provider)).
 				Str("user_id", snowflake.ID(user.ID).String()).
 				Msg("oauth sign-in refused: provider has not verified an address that matches an account")
-			return OAuthOutcome{}, ErrOAuthEmailUnverified
+			return s.unverifiedProviderAddress(ctx, identity, user, dest)
 		}
 
 		if err := s.linkOAuthIdentity(ctx, user.ID, identity); err != nil {
@@ -409,22 +422,29 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		return s.signedInOutcome(ctx, user.ID, dest)
 
 	case errors.Is(err, pgx.ErrNoRows):
-		// Nobody owns the address — which does not mean nobody owns the *mailbox*. Creating an account from
-		// an address the provider will not vouch for is the same takeover the branch above refuses, one step
-		// earlier: it registers someone else's address to whoever typed it, and CreateOAuthUser records it as
-		// verified, a claim this instance has no basis for.
+		// Nobody owns the address — which does not mean nobody owns the *mailbox*.
 		//
-		// Refused here rather than left to parseOAuthSignupToken, which also checks it. That check is a
-		// backstop against a future caller minting a token differently; reaching it from this path meant
-		// rendering "choose your username", accepting one, and answering "this sign-up has expired" — a
-		// dead end no amount of retrying escaped.
-		if !identity.EmailVerified {
-			log.Warn().
-				Str("provider", string(identity.Provider)).
-				Msg("oauth sign-up refused: provider has not verified the address")
-			return OAuthOutcome{}, ErrOAuthEmailUnverified
-		}
+		// Until M10 this refused, and had to: creating an account from an address the provider will not
+		// vouch for registers someone else’s address to whoever typed it, and CreateOAuthUser recorded
+		// it as verified, a claim this instance had no basis for. The refusal left accounts whose GitHub
+		// address is unverified — which GitHub permits for any address — unable to sign in at all.
+		//
+		// Now the account is created *unverified* instead and this instance sends its own confirmation.
+		// The evidence stops coming from the provider and starts coming from the mailbox, which is the
+		// only party that can settle it. Until that link is followed the account cannot be signed in to,
+		// so an address typed by somebody who does not own it buys nothing.
+		//
+		// The residual risk is real, and is the one ordinary registration already carries: whoever does
+		// own the mailbox receives a link and could confirm an account they did not create. The mail
+		// names the provider and says what confirming would do, which is the same defense M9’s approval
+		// page rests on — an informed decision, because nothing cryptographic separates the two cases.
+		//
+		// Linking to an *existing* account stays refused above. That is the takeover direction, and no
+		// mail we send changes who controls the provider account.
 
+		if !identity.EmailVerified {
+			return s.unverifiedProviderAddress(ctx, identity, db.User{}, dest)
+		}
 		// Nothing is written until a username is chosen — see issueOAuthSignupToken.
 		if s.registrationMode != RegistrationOpen {
 			return OAuthOutcome{}, ErrOAuthRegistrationClosed
@@ -602,7 +622,17 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		return fail(fmt.Errorf("generating oauth identity ID: %w", err))
 	}
 
-	var user db.User
+	// Unverified when the provider did not vouch and this instance can send mail; verified otherwise.
+	needsConfirmation := !identity.EmailVerified && s.VerificationRequired()
+	verifiedAt := timestamptz(s.now())
+	if needsConfirmation {
+		verifiedAt = pgtype.Timestamptz{}
+	}
+
+	var (
+		user db.User
+		msg  mail.Message
+	)
 	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
@@ -615,9 +645,14 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 			// The provider's display name is not used here. It is free text from a third party that would
 			// land in every client's UI, and the person has just told us what to call them.
 			DisplayName: username,
-			// The provider verified this address, which is the only reason a new account is being created
-			// from it at all — recording it as verified is the same fact, not a new claim.
-			EmailVerifiedAt: timestamptz(s.now()),
+			// Verified only when the provider actually vouched — recording that is the same fact, not a new
+			// claim. When it did not, the account starts unverified and this instance sends its own
+			// confirmation, which is the whole of the detour.
+			//
+			// An instance with no relay cannot send that confirmation, so it would be creating an account
+			// nobody could ever sign in to. It marks the address verified instead, exactly as password
+			// registration does there and for the same reason (see VerificationRequired).
+			EmailVerifiedAt: verifiedAt,
 		})
 		if err != nil {
 			if constraint := uniqueViolation(err); constraint != "" {
@@ -645,6 +680,16 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 				return ErrOAuthSignupToken
 			}
 			return fmt.Errorf("linking oauth identity: %w", err)
+		}
+
+		if needsConfirmation {
+			msg, err = s.buildVerification(ctx, q, created)
+			if err != nil {
+				return err
+			}
+			// Named, so whoever receives it can tell this apart from a password sign-up. That is the whole
+			// of what lets them decide whether it was them — see the callback branch that allows this.
+			msg.Body = providerSignupNotice(identity.Provider) + msg.Body
 		}
 		return nil
 	})

@@ -235,3 +235,125 @@ func registrationNoticeMessage(baseURL string, email string) mail.Message {
 func verificationLink(baseURL, rawToken string) string {
 	return strings.TrimSuffix(baseURL, "/") + "/verify?token=" + url.QueryEscape(rawToken)
 }
+
+// providerSignupNotice prefixes a verification mail that a provider sign-in produced.
+//
+// The recipient needs to be able to tell this apart from an ordinary registration, because the two are
+// different things to have happened and only they can judge whether either was them. Naming the provider
+// is what makes the choice informed rather than a guess — the same reasoning M9's approval page rests on,
+// and for the same reason: nothing cryptographic distinguishes a person signing up from somebody typing
+// their address at a provider that does not check.
+func providerSignupNotice(provider OAuthProviderName) string {
+	return "Someone signed in with " + providerDisplayName(provider) + " using this address, and " +
+		"that provider could not confirm the address belongs to them — so we are asking you instead.\n\n"
+}
+
+// providerDisplayName renders a provider for a person to read.
+//
+// An allow-list rather than a title-cased passthrough: the value is this instance's own configured
+// provider name, but it ends up in an email body, and a fixed vocabulary is one fewer place a stray value
+// could reach a recipient.
+func providerDisplayName(provider OAuthProviderName) string {
+	switch provider {
+	case ProviderGoogle:
+		return "Google"
+	case ProviderGitHub:
+		return "GitHub"
+	default:
+		return "an external provider"
+	}
+}
+
+// unverifiedProviderAddress is what happens when a provider will not vouch for the address.
+//
+// One outcome for both cases — the address is unknown, or it already belongs to an account — because the
+// browser must not be able to tell them apart. Anybody can present any address at a provider that does not
+// verify it (GitHub permits this for every address), so a callback that showed a username form for one and
+// a refusal for the other would answer "does this address have an account here" to anyone who asked. That
+// is the oracle ADR 0024 merged its two refusals to avoid, and M10 closing it on registration while
+// reopening it here would be a net wash.
+//
+// So both render "check your email", and the difference goes to the mailbox, which is the only party
+// entitled to it. `user` is the zero value when the address is unknown.
+func (s *Service) unverifiedProviderAddress(ctx context.Context, identity OAuthIdentity, user db.User,
+	dest oauthDestination,
+) (OAuthOutcome, error) {
+	// With no relay there is no way to send the difference and no way to verify anything, so the refusal
+	// M6 shipped is still the honest answer on such an instance.
+	if !s.VerificationRequired() {
+		return OAuthOutcome{}, ErrOAuthEmailUnverified
+	}
+
+	email := strings.TrimSpace(strings.ToLower(identity.Email))
+	log := logging.FromContext(ctx)
+
+	if user.ID != 0 {
+		// The address already has an account. Nothing is created and nothing is linked — this is the
+		// takeover direction, and no mail changes who controls the provider account. What the owner gets
+		// is a warning, and the route back: sign in with a password and link from settings.
+		if err := s.mailer.Enqueue(providerLinkNoticeMessage(s.publicBaseURL, email, identity.Provider)); err != nil {
+			log.Warn().Err(err).Msg("queueing a provider link notice failed")
+		}
+		return OAuthOutcome{CheckYourEmail: true, ClientRedirectURI: dest.Redirect}, nil
+	}
+
+	// The address is unknown, so a sign-up may proceed — but the username form is delivered by mail rather
+	// than rendered, which is what keeps this branch indistinguishable from the one above. Following the
+	// link proves control of the mailbox, which is the evidence the provider declined to give.
+	//
+	// Nothing is written yet. The signup token is signed rather than stored, exactly as it is on the
+	// verified path (ADR 0024), so an unfollowed link leaves nothing behind at all.
+	// The destination is deliberately *not* carried into the mailed token. A loopback listener is a
+	// process that is waiting right now, on this machine; by the time somebody opens their mail the CLI
+	// has timed out and the port may belong to something else entirely. The client is told to stop below,
+	// and the sign-up that resumes from the mail is an ordinary browser one.
+	token, err := s.issueOAuthSignupToken(identity, oauthDestination{})
+	if err != nil {
+		return OAuthOutcome{}, err
+	}
+	if err := s.mailer.Enqueue(providerSignupMessage(s.publicBaseURL, email, identity, token)); err != nil {
+		log.Warn().Err(err).Msg("queueing a provider sign-up link failed")
+	}
+	return OAuthOutcome{CheckYourEmail: true, ClientRedirectURI: dest.Redirect}, nil
+}
+
+// providerSignupMessage carries the link that resumes a sign-up the provider could not vouch for.
+func providerSignupMessage(baseURL, email string, identity OAuthIdentity, signupToken string) mail.Message {
+	return mail.Message{
+		Kind:    mail.KindEmailVerification,
+		To:      email,
+		Subject: "Finish creating your Norite account",
+		Body: "Someone signed in with " + providerDisplayName(identity.Provider) + " using this address " +
+			"to create a Norite account.\n\n" +
+			providerDisplayName(identity.Provider) + " could not confirm that the address belongs to " +
+			"them, so we are asking you instead.\n\n" +
+			"If it was you, open this link to choose a username and finish:\n\n" +
+			"    " + strings.TrimSuffix(baseURL, "/") + "/oauth/continue?token=" +
+			url.QueryEscape(signupToken) + "\n\n" +
+			"The link works once and expires shortly.\n\n" +
+			"If it was not you, ignore this message. No account exists yet and none will be created " +
+			"unless this link is opened.\n",
+	}
+}
+
+// providerLinkNoticeMessage warns an account holder that somebody presented their address at a provider.
+//
+// Carries no link on purpose. There is nothing to confirm — nothing was created and nothing was linked —
+// and a "was this you?" button would be a phishing template written by us. The route forward is one the
+// person can reach without trusting this mail at all.
+func providerLinkNoticeMessage(baseURL, email string, provider OAuthProviderName) mail.Message {
+	return mail.Message{
+		Kind:    mail.KindRegistrationNotice,
+		To:      email,
+		Subject: "Someone tried to sign in with " + providerDisplayName(provider),
+		Body: "Someone signed in with " + providerDisplayName(provider) + " using this address, and " +
+			"that provider could not confirm the address belongs to them.\n\n" +
+			"Nothing has changed. No account was created and nothing was linked to yours.\n\n" +
+			"If it was you, sign in with your password first and link " + providerDisplayName(provider) +
+			" from your account settings — that way the link is made by somebody who has already proved " +
+			"the account is theirs.\n\n" +
+			"If you have forgotten your password, you can reset it at:\n\n" +
+			"    " + strings.TrimSuffix(baseURL, "/") + "/reset\n\n" +
+			"If it was not you, there is nothing to do.\n",
+	}
+}

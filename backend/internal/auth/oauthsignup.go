@@ -154,12 +154,15 @@ func (s *Service) parseOAuthSignupToken(raw string) (oauthSignupContinuation, er
 	if !ValidOAuthProvider(claims.Provider) || claims.Subject == "" || claims.Email == "" {
 		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
-	// A token minted without a verified address should not exist, since resolveOAuthIdentity refuses that
-	// case before ever getting here. Checked anyway: this is the one place the linking rule could be
-	// bypassed by a future caller, and the cost of the check is a comparison.
-	if !claims.EmailVerified {
-		return oauthSignupContinuation{}, ErrOAuthSignupToken
-	}
+	// EmailVerified is carried, not required. Until M10 a token without it was refused here as a
+	// backstop on the linking rule; from M10 a sign-up with an unverified address is a legitimate flow —
+	// the account is created unverified and this instance confirms the address itself.
+	//
+	// The linking rule is unaffected, and it is worth being explicit about why: this token can only ever
+	// produce a *new* account. CompleteOAuthSignup inserts a user and an identity together and never
+	// attaches an identity to a row it did not just create. The branch that attaches one to an existing
+	// account lives in resolveOAuthIdentity, never sees this token, and still refuses an unverified
+	// address.
 
 	// A token with no usable binding cannot produce a redeemable code, so it is refused here rather than
 	// allowed to create an account whose sign-in then fails.

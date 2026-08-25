@@ -435,6 +435,46 @@ paths:
               schema:
                 type: string
 
+  /oauth/continue:
+    # Served at the instance root beside /oauth/signup, for the same reason: a person opens this from an
+    # email, and it is not an API a client codegens against.
+    servers:
+      - url: /
+    get:
+      summary: Resume a sign-up whose provider would not vouch for the address
+      description: >
+        Renders the username form for a sign-up that could not proceed in the browser. The link is delivered
+        by email, and opening it is the evidence the provider declined to give — it proves control of the
+        mailbox.
+
+
+        This exists so the OAuth callback can answer identically whether or not the address already has an
+        account. Anyone can present any address at a provider that does not verify it (GitHub permits it for
+        every address), so a callback that showed a username form for an unknown address and a refusal for a
+        registered one would answer "does this address have an account here" to whoever asked. Both cases
+        render "check your email" instead, and the difference travels to the mailbox — the only party
+        entitled to it.
+
+
+        Carries the token into the form and does **not** verify it, exactly as `/reset` and `/verify` do.
+      operationId: continueOAuthSignup
+      tags: [auth]
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: false
+          description: The signup continuation token from the email.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The username form.
+          content:
+            text/html:
+              schema:
+                type: string
+
   /reset:
     # Served at the instance root, not under /api/v1: this is a page a person opens from an email, not an
     # API a client codegens against, and putting it under the versioned prefix would imply it moves when

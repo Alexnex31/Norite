@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -215,23 +216,40 @@ func hiddenField(t *testing.T, page *response, name string) string {
 
 // ---------- the linking rule, through the router ----------
 
-// The decision the milestone turns on, at the level a user actually meets it: an unverified address
-// matching an existing account is refused, and the page says what to do instead.
-func TestOAuthRefusesAnUnverifiedAddressThatMatchesAnAccount(t *testing.T) {
+// The decision the milestone turns on, at the level a user actually meets it — and at M10 what the browser
+// meets is the same page whichever case it is.
+//
+// M6 refused here, and had to: it could not verify an address itself, so an address the provider would not
+// vouch for was a dead end. M10 turns that into a detour by mail. What must not change is that the page
+// says nothing about whether the address has an account, because anyone can present any address at a
+// provider that does not verify it.
+func TestAnUnverifiedProviderAddressEndsAtTheSamePageEitherWay(t *testing.T) {
+	// One instance, two addresses: one that has an account and one that does not. Both presented as
+	// unverified by the provider, which is the case an attacker can arrange for any address.
 	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
 	api.newAccount("ada", "ada@example.com", "laptop")
+
 	stub.as("google-1", "ada@example.com", false)
+	registered := api.authorizeAndCallback(t)
 
-	page := api.authorizeAndCallback(t)
+	stub.as("google-2", "newcomer@example.com", false)
+	unknown := api.authorizeAndCallback(t)
 
-	require.Equal(t, http.StatusBadRequest, page.Code)
-	assert.Contains(t, page.String(), "sign in with your password",
-		"the refusal must tell the person what to do, or they press the same button forever")
+	assert.Equal(t, http.StatusOK, registered.Code, registered)
+	assert.Equal(t, registered.Code, unknown.Code, "the status must not differ")
+	// Compared with the CSP nonce masked: it is random per request by design, and is the only thing that
+	// legitimately differs between two renders of one page.
+	assert.Equal(t, withoutNonce(registered.String()), withoutNonce(unknown.String()),
+		"the page must not differ")
+	assert.Contains(t, registered.String(), "Check your email")
 
-	// Nothing was linked and no account was created.
-	var links int
+	// Nothing was linked to the existing account, and no account was created for the unknown address —
+	// the two properties the identical page must not have cost.
+	var links, users int
 	require.NoError(t, api.pool.QueryRow(t.Context(), "SELECT count(*) FROM oauth_identities").Scan(&links))
-	assert.Zero(t, links)
+	assert.Zero(t, links, "an unverified address must never be linked to an existing account")
+	require.NoError(t, api.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
+	assert.Equal(t, 1, users, "no account may be created until the mailed link is followed")
 }
 
 // The login-CSRF defense, through the assembled router: the attacker's page renders and the code on it is
@@ -463,4 +481,11 @@ func TestOAuthSignupFormRerendersOnABadUsername(t *testing.T) {
 	done := api.call(http.MethodPost, "/oauth/signup", retry.Encode(),
 		withHeader("Content-Type", "application/x-www-form-urlencoded"))
 	assert.Equal(t, http.StatusOK, done.Code, done)
+}
+
+// withoutNonce masks the per-request CSP nonce so two renders of one page can be compared.
+var nonceAttr = regexp.MustCompile(`nonce="[^"]*"`)
+
+func withoutNonce(page string) string {
+	return nonceAttr.ReplaceAllString(page, `nonce="…"`)
 }

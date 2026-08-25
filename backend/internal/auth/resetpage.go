@@ -123,6 +123,9 @@ func (h *Handler) PageRoutes(r chi.Router) {
 	// The OAuth signup form's target. At the root beside /reset rather than under /api/v1, for the same
 	// reason: it is a form a person submits, not an API a client codegens against.
 	r.Post("/oauth/signup", h.oauthSignupSubmit)
+	// The mailed entry point to that same form, for a sign-up whose provider would not vouch for the
+	// address. GET, and it verifies nothing — see oauthContinue.
+	r.Get("/oauth/continue", h.oauthContinue)
 }
 
 // resetPage renders the form the emailed link opens.
