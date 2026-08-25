@@ -191,8 +191,10 @@ client_secret = "REPLACE-ME-with-the-github-client-secret"
 
 [registration]
 # "open" (anyone may create an account) or "invite" (an instance invite code is required).
-# Default "open". Enforced by the registration endpoint from Milestone M4: while set to "invite", M4
-# refuses registration outright, and M10 adds the invite-redemption path that makes the mode usable.
+# Default "open". While set to "invite", registration requires a code minted with
+# `norite instance invite create` — see Milestone M10. Note OAuth sign-up refuses outright on a gated
+# instance, there being nowhere to carry a code through a provider redirect, so an invite-only instance is
+# password-registration-only.
 mode = "invite"
 
 [auth]

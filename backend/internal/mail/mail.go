@@ -40,6 +40,16 @@ type Kind string
 const (
 	// KindPasswordReset is M5's only sender.
 	KindPasswordReset Kind = "password_reset"
+	// KindEmailVerification carries the link that makes a new account usable (M10).
+	KindEmailVerification Kind = "email_verification"
+	// KindRegistrationNotice tells somebody that their address was used to try to register an account
+	// they already have.
+	//
+	// It exists because registration answers identically whether or not the address is taken, which is
+	// what stops it being an account-existence oracle. Somebody has to be told *something* differs, and
+	// the only party entitled to know is whoever controls the address — so the difference lives in the
+	// mail rather than in the response.
+	KindRegistrationNotice Kind = "registration_notice"
 )
 
 // Message is one outbound email.

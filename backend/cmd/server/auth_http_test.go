@@ -91,6 +91,35 @@ func (m *captureMailer) last() (mail.Message, bool) {
 	return m.sent[len(m.sent)-1], true
 }
 
+// lastOfKind returns the most recent message of one kind.
+//
+// Needed from M10, where a single test can queue more than one kind: registering queues a verification
+// link, and the test may then ask for a reset. `last` alone would return whichever happened to be most
+// recent, which is a test that passes or fails on ordering nobody meant to assert.
+func (m *captureMailer) lastOfKind(kind mail.Kind) (mail.Message, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.sent) - 1; i >= 0; i-- {
+		if m.sent[i].Kind == kind {
+			return m.sent[i], true
+		}
+	}
+	return mail.Message{}, false
+}
+
+// countOfKind reports how many messages of one kind were queued.
+func (m *captureMailer) countOfKind(kind mail.Kind) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, msg := range m.sent {
+		if msg.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
 // newAPI builds the real router over a freshly-migrated database.
 //
 // The wiring mirrors run() in main.go deliberately: if the composition root starts mounting things
@@ -287,7 +316,16 @@ type account struct {
 	Tokens tokenPair
 }
 
-// newAccount registers and logs in, which is the two-request preamble most of these tests need.
+// newAccount registers, confirms the address, and logs in — the preamble most of these tests need.
+//
+// The confirmation step is M10's, and it is driven through the real page rather than by writing to the
+// column, so every test using this helper exercises the flow a person actually goes through. That is worth
+// the extra request: the alternative would leave the verification path covered only by the tests written
+// for it, and a break in it would show up as one failure rather than fifty.
+//
+// Registration no longer returns the account — it answers 202 with a fixed body whether or not the address
+// was already taken, which is what closed the enumeration oracle — so the ID comes from /users/@me after
+// signing in.
 func (a *api) newAccount(username, email, deviceID string) account {
 	a.t.Helper()
 
@@ -296,14 +334,52 @@ func (a *api) newAccount(username, email, deviceID string) account {
 		"email":    email,
 		"password": testPassword,
 	})
-	require.Equal(a.t, http.StatusCreated, created.Code, "register: %s", created)
+	require.Equal(a.t, http.StatusAccepted, created.Code, "register: %s", created)
 
+	a.confirmAddress(email)
+
+	tokens := a.login(email, deviceID)
+
+	me := a.call(http.MethodGet, "/api/v1/users/@me", nil, withToken(tokens.AccessToken))
+	require.Equal(a.t, http.StatusOK, me.Code, "me: %s", me)
 	var user struct {
 		ID string `json:"id"`
 	}
-	created.decode(&user)
+	me.decode(&user)
 
-	return account{ID: user.ID, Email: email, Tokens: a.login(email, deviceID)}
+	return account{ID: user.ID, Email: email, Tokens: tokens}
+}
+
+// confirmAddress follows the verification link the registration queued.
+//
+// A no-op on an instance with no relay: there is no mail, and registration marks such accounts verified on
+// creation because nothing there can verify anything (see auth.VerificationRequired).
+func (a *api) confirmAddress(email string) {
+	a.t.Helper()
+
+	msg, ok := a.mail.lastOfKind(mail.KindEmailVerification)
+	if !ok {
+		require.False(a.t, a.mail.Enabled(),
+			"an instance with a relay must queue a verification email for a new account")
+		return
+	}
+	require.Equal(a.t, email, msg.To)
+
+	token := tokenFromBody(a.t, msg.Body, "/verify?token=")
+	resp := a.call(http.MethodPost, "/verify", url.Values{"token": {token}}.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+	require.Equal(a.t, http.StatusOK, resp.Code, "confirming the address: %s", resp)
+}
+
+// tokenFromBody lifts a token out of a link in an email body.
+func tokenFromBody(t *testing.T, body, marker string) string {
+	t.Helper()
+
+	_, after, found := strings.Cut(body, marker)
+	require.True(t, found, "the email must carry a %s link:\n%s", marker, body)
+	token, _, _ := strings.Cut(strings.TrimSpace(after), "\n")
+	require.NotEmpty(t, token)
+	return token
 }
 
 func (a *api) login(email, deviceID string) tokenPair {
@@ -350,16 +426,17 @@ func TestAuthLifecycleOverHTTP(t *testing.T) {
 		"password":     testPassword,
 		"display_name": "Ada L.",
 	})
-	require.Equal(t, http.StatusCreated, created.Code, created)
+	// 202 with a fixed body from M10, not 201 with the account. An address that already has an account
+	// creates nothing, so there is no user to return and any response shaped around one would differ
+	// between the two cases — which is the oracle this milestone closed.
+	require.Equal(t, http.StatusAccepted, created.Code, created)
 
-	var fields map[string]any
-	created.decode(&fields)
-	assert.Equal(t, "ada", fields["username"])
-	assert.Equal(t, "Ada L.", fields["display_name"])
-	// Snowflakes cross the wire as quoted strings. A JSON number would exceed 2^53 and lose precision in
-	// any JavaScript client, so this is a contract property, not a formatting preference.
-	assert.IsType(t, "", fields["id"], "id must be a JSON string, not a number: %s", created)
+	var accepted map[string]any
+	created.decode(&accepted)
+	assert.NotContains(t, accepted, "id", "registration must not disclose an account")
+	assert.NotContains(t, accepted, "username")
 
+	api.confirmAddress("ada@example.com")
 	pair := api.login("ada@example.com", "laptop")
 	assert.Equal(t, "Bearer", pair.TokenType)
 	assert.WithinDuration(t, time.Now().Add(auth.AccessTokenTTL), pair.ExpiresAt, time.Minute)
@@ -367,6 +444,15 @@ func TestAuthLifecycleOverHTTP(t *testing.T) {
 	// The access token authenticates, and resolves to the account that logged in.
 	me := api.call(http.MethodGet, "/api/v1/users/@me", nil, withToken(pair.AccessToken))
 	require.Equal(t, http.StatusOK, me.Code, me)
+
+	// The account's own fields, asserted here now that registration does not return them.
+	var fields map[string]any
+	me.decode(&fields)
+	assert.Equal(t, "ada", fields["username"])
+	assert.Equal(t, "Ada L.", fields["display_name"])
+	// Snowflakes cross the wire as quoted strings. A JSON number would exceed 2^53 and lose precision in
+	// any JavaScript client, so this is a contract property, not a formatting preference.
+	assert.IsType(t, "", fields["id"], "id must be a JSON string, not a number: %s", me)
 	var self map[string]any
 	me.decode(&self)
 	assert.Equal(t, "ada@example.com", self["email"])
@@ -583,8 +669,9 @@ func TestNoResponseLeaksStoredCredentialMaterial(t *testing.T) {
 		"email":    "ada@example.com",
 		"password": testPassword,
 	})
-	require.Equal(t, http.StatusCreated, created.Code, created)
+	require.Equal(t, http.StatusAccepted, created.Code, created)
 
+	api.confirmAddress("ada@example.com")
 	pair := api.login("ada@example.com", "laptop")
 	me := api.call(http.MethodGet, "/api/v1/users/@me", nil, withToken(pair.AccessToken))
 	require.Equal(t, http.StatusOK, me.Code, me)
@@ -728,25 +815,42 @@ func TestRegisterRejectsBadRequestBodies(t *testing.T) {
 	}
 }
 
-func TestRegisterReportsConflicts(t *testing.T) {
+// A taken *username* is still reported, and a taken *address* is not. The asymmetry is the whole design.
+//
+// A username is an @handle — public by construction, and discoverable by any client that can look one up —
+// so refusing it discloses nothing. An address is not public, and refusing it is what made this endpoint an
+// account-existence oracle until M10.
+func TestRegisterReportsAUsernameConflictButNotAnAddressOne(t *testing.T) {
 	api := newAPI(t, auth.RegistrationOpen)
 	api.newAccount("ada", "ada@example.com", "laptop")
-
-	sameEmail := api.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
-		"username": "different", "email": "ada@example.com", "password": testPassword,
-	})
-	require.Equal(t, http.StatusConflict, sameEmail.Code, sameEmail)
-	assert.Equal(t, "conflict", sameEmail.errorBody().Code)
 
 	sameUsername := api.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
 		"username": "ada", "email": "different@example.com", "password": testPassword,
 	})
 	require.Equal(t, http.StatusConflict, sameUsername.Code, sameUsername)
+	assert.Equal(t, "conflict", sameUsername.errorBody().Code)
+
+	sameEmail := api.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "different", "email": "ada@example.com", "password": testPassword,
+	})
+	require.Equal(t, http.StatusAccepted, sameEmail.Code, sameEmail)
+
+	// The address was told about it, which is the half that makes the silence honest: somebody has to
+	// learn the two cases differ, and the only party entitled to is whoever controls the address.
+	notice, ok := api.mail.lastOfKind(mail.KindRegistrationNotice)
+	require.True(t, ok, "a taken address must be told somebody tried to register with it")
+	assert.Equal(t, "ada@example.com", notice.To)
+	assert.NotContains(t, notice.Body, "/verify?token=", "the notice must carry no link to act on")
 }
 
-// An instance in invite mode must refuse self-service registration, with its own code so a client can tell
-// this apart from a permissions failure and say something useful.
-func TestRegistrationIsRefusedInInviteMode(t *testing.T) {
+// An instance in invite mode refuses registration that brings no code, with its own error code so a client
+// can tell this apart from a permissions failure and prompt for one.
+//
+// The code changed at M10, from `registration_closed` to `invite_required`. The old name was accurate only
+// while there was nothing to redeem: registration is not closed on a gated instance, it has a precondition,
+// and a client that can tell the two apart can ask for a code instead of giving up. See the invite tests
+// for the other half — the same instance admits somebody who brings one.
+func TestRegistrationIsRefusedInInviteModeWithoutACode(t *testing.T) {
 	api := newAPI(t, auth.RegistrationInvite)
 
 	resp := api.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
@@ -754,7 +858,7 @@ func TestRegistrationIsRefusedInInviteMode(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusForbidden, resp.Code, resp)
-	assert.Equal(t, "registration_closed", resp.errorBody().Code)
+	assert.Equal(t, "invite_required", resp.errorBody().Code)
 }
 
 func TestMintingRejectsAnUnknownScope(t *testing.T) {

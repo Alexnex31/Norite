@@ -35,6 +35,31 @@ type DeviceCode struct {
 	ExpiresAt      pgtype.Timestamptz
 }
 
+type EmailVerificationToken struct {
+	ID         int64
+	UserID     int64
+	TokenHash  []byte
+	SentTo     string
+	CreatedAt  pgtype.Timestamptz
+	ExpiresAt  pgtype.Timestamptz
+	ConsumedAt pgtype.Timestamptz
+}
+
+type InstanceAdmin struct {
+	UserID    int64
+	GrantedBy *int64
+	GrantedAt pgtype.Timestamptz
+}
+
+type InstanceInvite struct {
+	Code      string
+	CreatedBy *int64
+	MaxUses   *int32
+	Uses      int32
+	ExpiresAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
 type OauthExchangeCode struct {
 	ID            int64
 	CodeHash      []byte
@@ -75,6 +100,11 @@ type PasswordResetToken struct {
 	CreatedAt pgtype.Timestamptz
 	ExpiresAt pgtype.Timestamptz
 	UsedAt    pgtype.Timestamptz
+}
+
+type RegistrationReservation struct {
+	Username  string
+	CreatedAt pgtype.Timestamptz
 }
 
 type Session struct {

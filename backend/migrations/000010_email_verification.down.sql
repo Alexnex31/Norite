@@ -1,0 +1,11 @@
+-- Drops email verification.
+--
+-- Rolling back is safe in the direction that matters: accounts keep their email_verified_at, and the code
+-- from before this migration never reads it as a login gate — so an instance that rolls back stops
+-- *requiring* verification rather than locking anybody out. Outstanding links stop working, which is the
+-- same as them expiring.
+--
+-- The backfill is deliberately not undone. It set a column that already existed to a value that is true as
+-- far as this instance can tell, and reverting it would mark accounts unverified that the rolled-back code
+-- has no way to verify.
+DROP TABLE email_verification_tokens;

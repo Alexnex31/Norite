@@ -382,9 +382,25 @@ CREATE TABLE invites (
 CREATE INDEX ON invites (guild_id);
 
 CREATE TABLE instance_invites (                -- distinct from per-guild invites: gates account creation itself
-  code varchar(16) PRIMARY KEY, created_by bigint NOT NULL REFERENCES users(id),
+  code varchar(16) PRIMARY KEY,                -- plaintext, deliberately: see migration 000009
+  created_by bigint NULL REFERENCES users(id), -- NULL when the instance operator issued it (M10)
   max_uses integer NULL, uses integer NOT NULL DEFAULT 0, expires_at timestamptz NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT instance_invites_uses_sane CHECK (
+    uses >= 0 AND (max_uses IS NULL OR (max_uses > 0 AND uses <= max_uses)))
+);
+
+CREATE TABLE registration_reservations (       -- added at M10; see the registration notes and 000011
+  -- A username claimed by a registration that created no account, so that a registration against a taken
+  -- address and one against a free address leave the same state. Without it, two requests enumerate.
+  username citext PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE email_verification_tokens (       -- added at M10; the same shape as password_reset_tokens
+  id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash bytea NOT NULL, sent_to text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL,
+  consumed_at timestamptz NULL
 );
 
 CREATE TABLE voice_states (                    -- now ACTIVE, not reserved
@@ -650,7 +666,15 @@ Base `/api/v1`. Auth endpoints issue Bearer tokens directly (JSON body), never c
 surface (a future BFF layer in front of this same API handles cookie issuance for the web SPA, §9):
 
 ```
-POST   /auth/register                     -- requires a valid instance invite code if registration is gated
+POST   /auth/register                     -- 202 always; invite_code required while gating is on (M10)
+POST   /auth/verify/request                -- re-send a verification link; always 202 (M10)
+GET    /verify                             -- the confirmation page (root, HTML)
+POST   /verify                             -- confirm; a form POST, never a GET side effect (rule 4)
+GET    /oauth/continue                     -- resume a sign-up a provider would not vouch for (root, HTML)
+POST   /instance/bootstrap                 -- create the first administrator; operator token only (M10)
+POST   /instance/invites                   -- mint an invite; operator or Instance Admin
+GET    /instance/invites                   -- list them, codes in full
+POST   /instance/invites/revoke            -- revoke one; the code is in the body, never a path (rule 8)
 POST   /auth/login                        -- email/password -> access + refresh token pair, device_id-scoped
 POST   /auth/refresh                      -- rotates the refresh token within its device_id's family
 POST   /auth/logout                       -- revokes current session
@@ -786,8 +810,15 @@ for bots/automation, minted from any attach client once logged in.
 - Refresh rotation distinguishes *replay* from *deliberate revocation* by `replaced_by_id`: only rotation
   sets it, so a logged-out or superseded token is simply invalid, while a token that was rotated away from
   and presented again revokes that device's family.
-- **Registration refuses outright while `registration_mode = invite`**, until M10 builds redemption. The
-  setting is never silently ignored; an operator who gated registration gets gating.
+- **Registration requires an invite code while `registration_mode = invite`** (M10). A request without one
+  is refused `invite_required`; one whose code is unknown, exhausted or expired is refused
+  `invite_invalid`, deliberately one answer for all three so nobody can learn which codes exist. An open
+  instance ignores a stray code rather than rejecting it, so a client works against either mode without
+  knowing which it faces. Redemption is a single `UPDATE` with every guard in its `WHERE`, sharing the
+  account insert's transaction — so a one-use code admits exactly one account under concurrency, and a
+  registration that fails does not burn somebody else's invite. **OAuth sign-up still refuses outright on a
+  gated instance**: there is nowhere to carry a code through a provider redirect, so an invite-only
+  instance is password-registration-only until that gains a design.
 - Concurrent `argon2id` operations are bounded (a gate sized from `GOMAXPROCS`): each holds 64 MiB for its
   duration, and a distributed login flood would otherwise exhaust memory well before any per-IP limit
   noticed.
@@ -843,11 +874,56 @@ and, in a third file, the per-installation `device_id` that scopes the refresh f
 precisely so a logout cannot take it: a local logout revokes nothing server-side, so a fresh ID would add a
 session-list entry while the family the old one named stayed live for its full TTL.
 
-**Registration** (M4, hardened at M10): today `POST /auth/register` answers 409 on an address that already
-has an account, which makes the instance enumerable. It is the one auth endpoint that discloses account
-existence — login, reset and the OAuth refusals are all deliberately uniform — and it does so because
-nothing here can verify an address, so there is no way to accept the registration and sort it out by mail.
-M10 adds that verification and closes it; see the milestone for the shape.
+**Registration** (M4, hardened at M10): `POST /auth/register` answers **202 with a fixed body** whether or
+not the address already has an account, and never returns the account itself. What differs is the mail: a
+verification link for a new account, a "somebody tried to register with your address" notice for one that
+already exists. The notice is what makes the silence honest rather than merely quiet — somebody has to
+learn the two cases differ, and the only party entitled to know is whoever controls the address. It carries
+no link and asks for nothing, because a "was this you?" button would be a phishing template written by us.
+
+Timing is part of the guarantee and is not automatic: `HashPassword` runs *before* the address check, so
+both branches pay argon2id's 64 MiB and tens of milliseconds, which swamps the single insert they differ
+by. Moving it below that check makes the taken branch ~1 ms against ~31 ms, and a test fails on the ratio.
+The race the pre-check cannot close — two simultaneous registrations for one address, one losing at the
+unique constraint — is answered with the same silence, because reporting that conflict would leave the
+oracle reachable on purpose by firing two requests at once.
+
+A **taken username** is still reported (409). A username is an `@handle`, public by construction and
+discoverable by any client that can look one up, so refusing it discloses nothing; an address is not
+public.
+
+That asymmetry only holds because the two branches leave the *same state*, which took a second fix. A free
+address commits a `users` row occupying the submitted username while a taken address rolls back and
+occupies nothing — so the username namespace was a read of "did the previous request create a row?", and
+two requests answered the address question. The branch that creates nothing now reserves the username
+instead (`registration_reservations`, migration 000011). A reservation has no TTL because the unverified
+account it stands in for has none; **if either gains one, both must**, or the oracle returns after it
+lapses.
+
+**Email verification** (M10, `email_verification_tokens`): the same shape as `password_reset_tokens` —
+SHA-256 hashed, single-use in the query's `WHERE`, `sent_to` recorded so a later address change cannot
+redirect a confirmation in flight — with a **24-hour** TTL against reset's one hour, because a
+verification link is followed on a person's own schedule rather than being the whole proof of identity for
+changing a password. The page confirms by **form POST, never on GET**: a GET that verified would be
+triggered by anything that follows links in mail — scanning gateways, chat-client previewers, antivirus —
+confirming an address the person never acted on and spending the link before they clicked it.
+
+An unverified account **cannot log in**, and is refused with the *same* answer a wrong password gets.
+Reporting it distinctly is the obvious design and it reopens the oracle registration just closed, in two
+requests: register an address with a password of your choosing, then log in with it — if the address was
+free an account now exists with that password and the login says "unverified", and if it was taken nothing
+was created and the same login says "wrong password". So the difference goes where every other difference
+here goes: a correct password on an unverified account queues a fresh link and an explanation to the
+address, and the caller is told nothing either way. The mail follows only a *correct* password, so guessing
+at addresses queues nothing. Migration `000010` backfills every pre-existing account as verified, because
+locking out every existing user is an outage delivered as a hardening.
+
+**An instance with no SMTP relay creates accounts already verified**, and the enumeration hole stays open
+there. This is an accepted limitation, not an oversight: such an instance cannot verify an address by any
+route, so requiring verification would mean nobody could register at all, and there is no mail to carry the
+difference between the two branches either. It is stated in three places — the wizard warns when SMTP is
+declined, the server logs it once at startup, and §14 records it — because the failure mode to guard
+against is it becoming quiet, not it existing.
 
 **Password reset** (built at M5): always-202 anti-enumeration, single-use SHA-256-hashed token with a
 one-hour TTL, sent asynchronously via the SMTP relay (§11) and never blocking the HTTP response — the
@@ -1056,8 +1132,12 @@ from a router, work equally well in both.
 — schema changes ship in the same commit as the code change causing them.
 
 **Instance setup wizard** (`norite instance init`): the self-hosted operator's first-run flow, living in the
-`norite` CLI rather than the server binary so that the step added later — creating the first admin account —
-is a normal authenticated API call from the client that already knows how to make one. Prompts are **plain
+`norite` CLI rather than the server binary so that creating the first admin account is a normal API call
+from the client that already knows how to make one. That step landed at M10 as a **sibling command**,
+`norite instance bootstrap`, rather than inside the wizard: when `init` finishes, the backend has not been
+started and the schema has not been migrated, so there is nothing to create an account on, and holding an
+administrator's password in memory across an unbounded wait is worse than a second command. The wizard
+prints the ordered next steps instead (ADR 0029). Prompts are **plain
 sequential stdin/stdout question-and-answer, not a full-screen TUI**: the wizard is a rare one-time flow
 that has to work over SSH, inside `docker exec`, and in CI, and it must degrade to an error rather than a
 hang when stdin is not a TTY. Two modes — a quick-start path that prompts only for what has no safe default,
@@ -1693,6 +1773,43 @@ E2E key-boundary violations.
     somebody who is talked all the way through those screens is signed in to an attacker's device. `Deny`
     exists so that realizing it a moment later is actionable — it revokes an approval the waiting client
     has not yet collected, so the sign-in never completes — and it says plainly when it was too late.
+
+22. **The instance operator tier** (M10, ADR 0029): a third authority beside an access token and an API
+    token, and the only credential in this system minted by a *client* rather than by the server. It is an
+    HS256 JWT signed with the instance's own `[auth].jwt_secret`, carrying `typ: "operator"` and no
+    subject, and it authorizes `/api/v1/instance/*` — bootstrap and invite management.
+
+    What it proves is possession of the instance's configuration file, which concedes nothing that was not
+    already conceded: anyone who can read that file can already forge an access token for any account here.
+    What it buys is that the authority is *stated* — a bootstrap request proves filesystem access rather
+    than being trusted for arriving early, so there is no window in which whoever reaches a freshly-migrated
+    instance first becomes its administrator.
+
+    Trust tier, per the rule that every local surface names one: **filesystem-permission-protected**, the
+    same tier as the config file, and deliberately not either token tier above it. It is **not revocable** —
+    there is no row to delete — so it lives two minutes and is minted per request. The `typ` claim is
+    load-bearing rather than decorative: a *device entry token* carries the same issuer and key, a live
+    expiry, and no subject, so without the check, entering a valid device code on the verification page
+    would hand that browser instance-operator authority.
+
+    `/instance` mounts outside the group that runs the ordinary Bearer middleware, so whether an operator
+    token can authenticate an ordinary request is answered by the router rather than by each verifier
+    remembering a check.
+
+23. **Registration on an instance with no mail relay** (M10): an accepted limitation, recorded here so it
+    stays deliberate. Such an instance cannot verify an address by any route, so registration creates
+    accounts already verified and the account-existence oracle M10 closed elsewhere **stays open there** —
+    there is no mail to carry the difference between "created" and "already exists". Refusing to register
+    instead would trade a working instance for nothing.
+
+    The same absence keeps M6's outright refusal for a provider address that cannot be vouched for, since
+    the detour that replaces it is delivered by mail.
+
+    Stated in three places on purpose — the wizard warns when SMTP is declined, the server logs it once at
+    startup, and a test pins it — because the failure mode to guard against is this becoming quiet rather
+    than it existing.
+
+---
 
 ## 15. Performance & Optimization (deep dive)
 

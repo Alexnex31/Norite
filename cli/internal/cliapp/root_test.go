@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
 )
@@ -262,18 +264,44 @@ func TestLoginFlagsCarryNoCredential(t *testing.T) {
 }
 
 // A command that needs a terminal and has not got one exits 2, so a script can tell "this needs input I
-// cannot give it" from "the credentials were wrong" without parsing a message. The wizard established the
-// code; login has to agree with it, and the two live in different packages, so nothing but a test keeps
-// them in step.
+// cannot give it" from "the credentials were wrong" without parsing a message.
+//
+// This test used to assert the opposite of what it asserts now. It required the sentinels to be *distinct*,
+// on the reasoning that main matched each by name — which was true, and was the defect: a command whose
+// package main had not been taught about got exit 1 and the "norite:" prefix that makes a usage problem
+// read like a crash. `norite instance bootstrap` shipped that way at M10 and only a manual run found it.
+// The sentinels are one value now (clierr.ErrNoTerminal); what main matches is that one value, and
+// cmd/app/main_test.go holds the mapping. Here we pin the property this package can see: every command
+// package's exported name resolves to it.
 func TestNeedingATerminalIsAlwaysExitCodeTwo(t *testing.T) {
-	// login returns the sentinel unwrapped rather than an ExitCoder, precisely so cmd/app/main.go can
-	// recognize it and print without the "norite:" prefix that would make a usage problem read like a
-	// crash. That means the contract is the error identity, not an exit code carried in the error.
-	assert.NotErrorIs(t, login.ErrNoTerminal, instanceinit.ErrNotATerminal,
-		"they are distinct sentinels; main matches both explicitly")
-
-	for _, err := range []error{login.ErrNoTerminal, instanceinit.ErrNotATerminal} {
+	for name, err := range map[string]error{
+		"login.ErrNoTerminal":          login.ErrNoTerminal,
+		"instanceinit.ErrNotATerminal": instanceinit.ErrNotATerminal,
+		"instanceadmin.ErrNoTerminal":  instanceadmin.ErrNoTerminal,
+	} {
+		assert.ErrorIs(t, err, clierr.ErrNoTerminal,
+			"%s must resolve to the one sentinel main matches, or it exits 1 and reads like a crash", name)
 		assert.Contains(t, err.Error(), "terminal",
 			"the message is what a person reads when a script hits this; it must name the problem")
+	}
+}
+
+// The "norite: " prefix is added in exactly one place — cmd/app/main.go — so a message that carries its own
+// prints as "norite: norite: which invite?".
+//
+// Both of `norite instance invite revoke`'s usage errors did, and it took running the command to notice:
+// every test that covered them compared against the message as written rather than as printed. Walking the
+// tree is the guard, because the next command to get this wrong will be one nobody thought to check.
+func TestUsageMessagesDoNotCarryThePrefixMainAdds(t *testing.T) {
+	for _, args := range [][]string{
+		{"instance", "invite", "revoke"},
+		{"instance", "invite", "revoke", "ONE", "TWO"},
+		{"login", "--provider", "google", "--email", "ada@example.com"},
+		{"login", "--no-browser"},
+	} {
+		_, _, err := runArgs(t, args...)
+		require.Error(t, err, "norite %v should be refused", args)
+		assert.NotContains(t, err.Error(), "norite:",
+			"norite %v: main prefixes this; carrying one too prints it twice", args)
 	}
 }

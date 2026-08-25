@@ -426,9 +426,16 @@ func TestADeclinedConsentRedirectsWithAnErrorCode(t *testing.T) {
 	assert.Empty(t, got.Query().Get("code"), "a failure must never carry a redeemable code")
 }
 
-// A refusal this instance decides — rather than one the provider reported — reaches the listener too, and
+// An outcome this instance decides — rather than one the provider reported — reaches the listener too, and
 // as a code from the same fixed vocabulary rather than as the sentence the page would show.
-func TestAnUnverifiedAddressRedirectsWithItsOwnCode(t *testing.T) {
+//
+// At M10 this stopped being a refusal and became a detour by mail, and the loopback half matters more than
+// it looks: the flow is not going to finish on this machine, so a client that was not told would sit out
+// its entire timeout waiting for a callback that continues in a mailbox instead.
+//
+// The code is unchanged and is the same for both cases — an address that has an account and one that does
+// not — so the loopback hop discloses no more than the page does.
+func TestAnUnverifiedAddressTellsAWaitingClientToStop(t *testing.T) {
 	api, stub := newOAuthAPI(t, auth.RegistrationOpen)
 	api.newAccount("ada", "ada@example.com", "laptop")
 	stub.as("google-1", "ada@example.com", false) // the provider will not vouch for the address
@@ -437,9 +444,15 @@ func TestAnUnverifiedAddressRedirectsWithItsOwnCode(t *testing.T) {
 	got := returnedTo(t, back)
 
 	assert.Equal(t, "email_unverified", got.Query().Get("error"))
+	assert.Empty(t, got.Query().Get("code"), "an unfinished flow must never carry a redeemable code")
 	// The long, deliberately specific sentence the page carries must not travel here: a listener gets a
 	// code it can branch on, and the client writes its own prose.
 	assert.NotContains(t, got.String(), "Verify it with the provider")
+
+	// The same code for an address nobody owns, so the listener cannot be used to enumerate either.
+	stub.as("google-2", "newcomer@example.com", false)
+	back2, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+	assert.Equal(t, "email_unverified", returnedTo(t, back2).Query().Get("error"))
 }
 
 // A failure before the state is consumed cannot know a listener, so it renders. Not a gap — the only way
@@ -498,4 +511,41 @@ func TestARetypeableUsernameDoesNotEndTheFlow(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rejected.Code, rejected)
 	assert.Empty(t, rejected.Header.Get("Location"), "a fixable username must not end the sign-in")
+}
+
+// The loopback hop must not answer what the page will not, and on a gated instance it used to: an address
+// with an account came back `email_unverified` and one without came back `registration_closed`. That is
+// the same account-existence oracle as the rendered page and cheaper to read — a query parameter rather
+// than HTML — which is why it gets its own test rather than being assumed to follow.
+func TestTheLoopbackAnswerDoesNotReportWhetherTheAddressHasAnAccount(t *testing.T) {
+	for _, mode := range []auth.RegistrationMode{auth.RegistrationOpen, auth.RegistrationInvite} {
+		t.Run(string(mode), func(t *testing.T) {
+			api, stub := newOAuthAPI(t, mode)
+
+			if mode == auth.RegistrationInvite {
+				invite := mintInvite(t, api, map[string]any{"max_uses": 5})
+				require.Equal(t, http.StatusAccepted, api.call(http.MethodPost, "/api/v1/auth/register",
+					map[string]string{
+						"username": "ada", "email": "ada@example.com", "password": testPassword,
+						"invite_code": invite.Code,
+					}).Code)
+				api.confirmAddress("ada@example.com")
+			} else {
+				api.newAccount("ada", "ada@example.com", "laptop")
+			}
+
+			stub.as("google-1", "ada@example.com", false)
+			back, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+			registered := returnedTo(t, back)
+
+			stub.as("google-2", "newcomer@example.com", false)
+			back2, _ := api.authorizeAndCallbackReturning(t, loopbackRedirect)
+			unknown := returnedTo(t, back2)
+
+			assert.Equal(t, registered.Query().Get("error"), unknown.Query().Get("error"),
+				"the loopback code must not differ")
+			assert.Empty(t, registered.Query().Get("code"), "an unfinished flow carries no redeemable code")
+			assert.Empty(t, unknown.Query().Get("code"))
+		})
+	}
 }

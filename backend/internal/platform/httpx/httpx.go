@@ -62,6 +62,23 @@ type StatusError struct {
 	Code    string
 	Message string
 	Err     error
+
+	// MessageIsPublic sends Message to the client even at 5xx. It changes nothing below 500.
+	//
+	// The default is what it should be: a 5xx message is replaced by a generic string, because an error
+	// at that level usually carries driver text, a query fragment, or an internal hostname, and the
+	// place for that is Err — logged, never rendered.
+	//
+	// The exception is a 5xx that is not a fault. This server raises two on purpose: password reset with
+	// no mail relay, and the device flow with no public base URL. Both are configuration states with a
+	// sentence worth reading, and both reached the user as "internal server error" until a manual run
+	// read them — an instance that was merely unconfigured reporting itself as broken, while the sentence
+	// that would have said what to do sat one function away.
+	//
+	// Opt-in rather than "send any non-empty Message", so the safety of the string is a claim its
+	// author makes at the call site and can be found by grepping for this field, rather than a property
+	// every future 5xx quietly inherits.
+	MessageIsPublic bool
 }
 
 func (e *StatusError) Error() string {
@@ -133,7 +150,7 @@ func classify(err error) (status int, code string, message string) {
 	var statusErr *StatusError
 	if errors.As(err, &statusErr) {
 		message := statusErr.Message
-		if statusErr.Status >= http.StatusInternalServerError {
+		if statusErr.Status >= http.StatusInternalServerError && !statusErr.MessageIsPublic {
 			message = "internal server error"
 		}
 		return statusErr.Status, statusErr.Code, message

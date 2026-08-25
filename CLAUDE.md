@@ -280,7 +280,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M9.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
+**Phase A (foundation), through M10.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -331,7 +331,13 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   `cli/internal/login`'s `headless.go` and `devicecode.go`. Decisions in ADR 0028: the completion page
   offers providers and not only a password (which is what makes the milestone worth its size), approval is
   a separate explicit step, and the user code is the one credential-shaped value stored in plaintext.
-- **M10 — `norite instance init` finish, and registration hardening**: next.
+- **M10 — `norite instance init` finish, and registration hardening**: done (tag `m10`). Migrations
+  `000008`–`000010`, `backend/operatortoken` (the first package outside `backend/internal`),
+  `internal/auth`'s `operator.go`/`instance.go`/`instancehttp.go`/`invites.go`/`verification.go`/
+  `verifypage.go`, `cli/internal/apiclient` (the transport extracted from `login`), and
+  `cli/internal/instanceadmin` (`norite instance bootstrap` and `norite instance invite`). Decisions in
+  ADR 0029, which also amends ADR 0024.
+- **M11 — Session revocation primitive**: next.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -349,8 +355,18 @@ re-derive:
   client, written to every log line, and returned in every error body. Domain routers mount in the
   rate-limited group inside `/api/v1`; `/healthz` sits outside it on purpose.
 - **Errors**: return `httpx.ErrNotFound` / `ErrForbidden` / … (or `httpx.Errorf(sentinel, …)`) from
-  services and let `httpx.WriteError` map them. 5xx detail is logged, never returned. Every response
+  services and let `httpx.WriteError` map them. 5xx detail is logged, never returned — a 5xx message is
+  replaced by a generic string unless its `StatusError` sets `MessageIsPublic`, which is how the two
+  deliberate `503`s (no mail relay, no public base URL) say *which* feature is off instead of claiming the
+  instance is broken. Set it only on a literal you wrote; the detail belongs in `Err`. Every response
   carries `X-Request-Id`; every error body carries `request_id`.
+- **A new error `code` goes in `contracts/openapi.yaml`'s `Error` enum in the same commit** (rule 6), and a
+  new field on a response goes in that response's schema. `cmd/server/contract_test.go` checks the *route
+  set* only, so payload drift is invisible to it — `contract_payload_test.go` is the half that reads real
+  responses, and it exists because eight emitted codes and one unsatisfiable schema had accumulated behind
+  that gap.
+- **Validation messages name the wire field**, because `NewHandler` registers a `json`-tag name func on the
+  validator. Without it the message quotes the Go field (`DeviceID`), which appears in no contract.
 - **Transactions**: `database.RunInTx`. Mutation + audit-log write go in one `fn` (rule 2); publish gateway
   events *after* it returns nil (rule 5).
 - **Rate limiting**: always build limiters through `internal/platform/ratelimit` — it is what enforces the
@@ -379,7 +395,14 @@ And on the CLI side, from M2:
   error is justified once, in one place, rather than at every call site (and errcheck enforces this).
 - **Anything interactive must degrade**: check `term.IsTerminal` and fail with an actionable message rather
   than blocking on input that will never arrive, or reading EOF and silently accepting every default.
-  `instanceinit.ErrNotATerminal` is the shape to follow; `main` maps it to exit code 2.
+  **Return `cli/internal/clierr`'s `ErrNoTerminal`** — wrapped, so the message can name the flag or
+  environment variable that would have answered — and never a new sentinel of your own. `main` matches that
+  one value and maps it to exit code 2, printed without the `norite: ` prefix that makes a usage problem
+  read like a crash. Three packages declared their own before this was one value, `main` matched two of
+  them by name, and `norite instance bootstrap` shipped exiting 1 with the prefix.
+- **`main` adds the `norite: ` prefix, so a message must not carry one.** A `cli.Exit(...)` string that
+  includes it prints as `norite: norite: …`. `cliapp`'s `TestUsageMessagesDoNotCarryThePrefixMainAdds`
+  walks the tree and catches it.
 - **Never echo a secret.** Passwords are read with `term.ReadPassword` and summaries print
   `url.URL.Redacted()`, never the raw DSN (rule 8 applies to the CLI too). Prefer an env-var source over a
   flag for any credential — a flag value is visible in the process list to every user on the machine.
@@ -584,7 +607,9 @@ And on the client-auth side, from M7:
   impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
   token from the only person who can deal with it. The CLI prints it, the daemon logs it.
 
-Three things this milestone deliberately leaves for the milestone that can do them properly:
+Three things this milestone deliberately leaves for the milestone that can do them properly. **All three
+are now written into that milestone's roadmap entry** — M11's single-token revoke and M19's three — because
+a deferral recorded only here is one the milestone that inherits it never reads:
 
 - **A dropped refresh token cannot be revoked yet.** When a login lands mid-refresh, the daemon discards
   the token it just obtained; it stays valid at the instance until it expires. Handing it back needs M11's
@@ -611,7 +636,8 @@ And on the device-code side, from M9 (decisions in ADR 0028):
   that would shorten those screens is reopening that decision. **With one qualification a review found**:
   the page's provider buttons carry a continuation that nothing binds to the browser it was issued to, so a
   link *can* skip the code-entry step — it cannot skip approval, which is where the defense is, and binding
-  it needs a browser session this surface has none of until Phase O.
+  it needs a browser session this surface has none of until Phase O — **M108**, whose roadmap entry
+  now carries it as a done-when rather than leaving it pointing at a phase.
 - **The user code is stored in plaintext and the device code is hashed.** The exception is deliberate and
   has two halves, both needed: a user code is not a bearer credential — whoever holds it must still
   authenticate and approve, and what that authorizes is somebody else's machine acting as *their* account —
@@ -646,6 +672,68 @@ And on the device-code side, from M9 (decisions in ADR 0028):
 One thing this milestone deliberately leaves: **screen `5a` in `docs/design/tui/` is normative and
 specifies a code box with a countdown and a progress bar.** The CLI prints the plain-text equivalent
 because it is not the TUI; M55 draws the box. The two are not in disagreement.
+
+And on the instance-administration and registration side, from M10 (decisions in ADR 0029):
+
+- **The operator is a third authority, and the only credential here minted by a client.** An unsubjected
+  JWT with `typ: "operator"`, signed with the instance's own key, two-minute life, presented to
+  `/api/v1/instance/*`. It concedes nothing new — anyone who can read `instance.toml` can already forge an
+  access token for any account — but it *states* the authority, so a bootstrap proves filesystem access
+  rather than being trusted for arriving early. There is no window in which whoever reaches a
+  freshly-migrated instance first becomes its administrator.
+- **`typ` is load-bearing against a token you would not guess.** An access token is refused by the
+  empty-subject check, not by `typ`; disabling `typ` leaves that test passing. What it defends against is a
+  **device entry token** — same issuer, same key, live expiry, no subject — which without the check would
+  turn entering a valid device code into instance-operator authority.
+- **The token format lives in `backend/operatortoken`, outside `internal/`**, because Go's `internal/` rule
+  makes `backend/internal/auth` unreachable from the CLI and a second copy of a claim shape drifts. The
+  authorization decision stays in `internal/auth` where the routes are. Same decision as `daemon/credentials`
+  at M7, and it adds the second cross-module edge, `cli` → `backend`. Two tests span it: the `iss` constant
+  matching, and a token minted the CLI's way passing the middleware's check.
+- **Routes mount unconditionally; middleware may be conditional.** `cmd/server/contract_test.go` walks the
+  router built with a nil `AuthSvc`, so a group mounted only when that field is set is invisible to rule 6's
+  check — which is how four `/instance` routes went undocumented while the test passed.
+  `AuthenticateInstanceAdmin` fails closed on a nil service instead.
+- **Bootstrap is a sibling command**, `norite instance bootstrap`, not a step inside the wizard: when `init`
+  finishes there is no running server to create an account on. It refuses unless there are zero
+  administrators, under an advisory lock — checking a count and acting on it is a read-modify-write, and
+  under READ COMMITTED two concurrent bootstraps both read zero.
+- **Registration answers 202 identically** whether or not the address is taken, and never returns the
+  account. The difference goes to the mailbox: a verification link, or a "somebody tried to register" notice
+  that carries no link and asks for nothing. A taken **username** is still 409 — an `@handle` is public,
+  an address is not.
+- **`HashPassword` runs before the address check**, and that ordering is the timing half of the guarantee.
+  Moving it below makes the taken branch ~1 ms against ~31 ms. The unique-constraint race comes back as the
+  same silence, because reporting it would leave the oracle reachable by firing two requests at once.
+- **A uniform response is not enough — the two branches must leave the same *state*.** A free address
+  commits a row occupying the username; a taken one rolls back and occupies nothing, so `409 username` on a
+  second request read the address answer. The branch that creates nothing reserves the username instead
+  (`registration_reservations`, 000011). No TTL, because the unverified account it stands in for has none;
+  if either gains one, both must. This is the shape to look for whenever a response is made uniform: ask
+  what each branch *wrote*, not only what it said.
+- **Login refuses an unverified account exactly as it refuses a wrong password**, and mails a fresh link
+  instead. A distinct answer reopens the closed oracle in two requests: register an address with a password
+  you choose, then log in with it — 403 if the address was free, 401 if it was taken. Measured before the
+  test was written. The reminder follows only a *correct* password, so guessing at addresses queues nothing.
+- **An unverified provider address takes a detour, and both cases render one page — in every registration
+  mode.** If an unknown address showed a username form while a registered one was refused, the browser would
+  answer the question ADR 0024's merged message exists to refuse. The form moved behind a mailed link;
+  linking to an *existing* account stays refused, that being the takeover direction. The registration-mode
+  gate lives *inside* `unverifiedProviderAddress`: ahead of it, a gated instance answered 200 for an
+  address with an account and 400 for one without, which is the same oracle by a shorter route.
+- **The mailed continuation is unbound, and says so in its signature** (`eml_only`) rather than by carrying
+  an empty challenge — the refusal for a token that merely lost its binding has to stay in force. It mints
+  no exchange code (nobody is waiting) and the account it creates is verified, opening the link being the
+  proof of mailbox control the whole detour exists to gather.
+- **Invite redemption is one `UPDATE` with every guard in its `WHERE`**, sharing the account insert's
+  transaction. Rewritten as a check-then-update, four of four concurrent racers get in. Both NULLs are
+  explicit `IS NULL` branches — `uses < NULL` is NULL, so "unlimited" would otherwise match nothing.
+- **An instance with no SMTP relay creates accounts already verified**, and the enumeration hole stays open
+  there. Accepted, pinned by a test, and stated in three places, because the failure mode to guard against
+  is it becoming quiet. Same absence keeps M6's outright refusal on the provider path.
+- **An invite-only instance is password-registration-only.** There is nowhere to carry a code through a
+  provider redirect. Fails closed, and it is in the contract rather than left to be discovered.
+
 
 And on the CLI OAuth side, from M8 (decisions in ADR 0027):
 

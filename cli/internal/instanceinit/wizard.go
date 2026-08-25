@@ -134,6 +134,26 @@ func gather(p *prompter, opts Options) (Document, error) {
 		if err != nil {
 			return Document{}, err
 		}
+
+		// Asked here rather than only alongside SMTP, which is where it used to live and where it was
+		// wrong. Four separate things build links from this value — reset mail (M5), OAuth callbacks (M6),
+		// the device verification URI (M9), and now `norite instance bootstrap`, which needs somewhere to
+		// send its request — and only the first of them involves SMTP. An operator running --full was
+		// never offered the question unless they also happened to enable a mail relay.
+		//
+		// Optional here, required by gatherSMTP below, which asks again only if this left it empty.
+		p.note("The origin your users reach this instance on. Leave blank if you do not know it yet.")
+		doc.PublicBaseURL, err = p.ask("Public base URL", opts.PublicBaseURL, "")
+		if err != nil {
+			return Document{}, err
+		}
+	}
+
+	// A flag supplies it whether or not anything asked. Before this, --public-base-url passed without
+	// --smtp was accepted, silently dropped, and never written — the shape of bug that is invisible until
+	// something downstream needs the value, which is exactly what happened when bootstrap arrived.
+	if doc.PublicBaseURL == "" {
+		doc.PublicBaseURL = opts.PublicBaseURL
 	}
 
 	dsn, err := gatherDatabase(p, opts)
@@ -278,8 +298,11 @@ func gatherStorage(p *prompter, opts Options, doc *Document) error {
 // not have would turn an opt-out into a hurdle.
 func gatherSMTP(p *prompter, opts Options, doc *Document) error {
 	p.section("Outbound email")
-	p.note("Norite sends password-reset emails through an SMTP relay you provide.")
-	p.note("Say no for now if you have none — the instance runs fine, and password reset is simply off.")
+	p.note("Norite sends password-reset and address-confirmation emails through an SMTP relay you provide.")
+	p.note("Say no for now if you have none — the instance runs fine, with two things turned off:")
+	p.note("  password reset, and confirming that an address belongs to whoever registered it.")
+	p.note("Without confirmation, new accounts are usable immediately and someone can tell whether an")
+	p.note("address already has an account here. Fine for a private instance; worth knowing for a public one.")
 
 	enabled, err := p.askBool("Send email through an SMTP relay", opts.SMTP, false)
 	if err != nil {
@@ -325,6 +348,12 @@ func gatherSMTP(p *prompter, opts Options, doc *Document) error {
 
 	// Required alongside SMTP, and the backend refuses to start without it: a reset link is built from
 	// this, and it cannot be derived from a request without trusting whatever Host header arrives.
+	//
+	// Asked here only if it is still unset — a --full run has already offered the question, and asking the
+	// same thing twice in one wizard reads as a bug even when the second answer would win.
+	if doc.PublicBaseURL != "" {
+		return nil
+	}
 	p.note("Reset links are built from this, so it must be the URL your users actually reach.")
 	doc.PublicBaseURL, err = p.askRequiredOr("Public base URL", opts.PublicBaseURL)
 	return err
@@ -450,9 +479,44 @@ func printSummary(p *prompter, doc Document, path string, full bool) {
 		p.println("or edit the file directly — it documents every setting it writes.")
 	}
 
-	p.println("\nStart the backend, and it will migrate its own schema on first run.")
+	if !doc.SMTPEnabled {
+		// Repeated here because the prompt above is skipped entirely on a scripted run, and this is the
+		// downgrade nobody would otherwise discover: without a relay an address cannot be confirmed, so
+		// accounts are usable on creation and registration stops being able to hide whether an address is
+		// already taken. See auth.VerificationRequired.
+		p.println("\nNo SMTP relay: password reset is unavailable, new accounts skip address confirmation,")
+		p.println("and registration cannot hide whether an address already has an account. Add [smtp] later")
+		p.println("to turn all three on.")
+	}
+
+	printNextSteps(p, path)
+}
+
+// printNextSteps spells out what has to happen before this instance can be used.
+//
+// Ordered, and numbered, because the order is not guessable and getting it wrong is the ordinary first
+// experience of self-hosting: `norite instance bootstrap` needs a running server to talk to and a migrated
+// schema to write into, so it cannot come before either. The wizard is where somebody finds that out.
+//
+// docs/roadmap.md describes first-administrator creation as a step added *to* this wizard. It is a sibling
+// command instead: at the moment this function runs, the backend has not been started, so there is nothing
+// to create an account on. Asking for an administrator's password here and holding it until a server
+// appears would mean keeping it in memory across an unbounded wait, or writing it down. ADR 0029 records
+// the deviation.
+func printNextSteps(p *prompter, path string) {
+	p.println("\nNext, to finish setting up this instance:")
+	p.println("\n  1. Start the backend. It migrates its own schema on first run.")
+	p.println("  2. Create the administrator account:")
+	p.println("       norite instance bootstrap")
+
 	if path != DefaultConfigPath() {
-		p.printf("Point it at this file with -config %s (or NORITE_CONFIG_FILE=%s).\n", path, path)
+		// Both steps need telling, and the second is the one that is easy to miss: bootstrap reads this
+		// file too — the signing key in it is what authorizes the account it creates — and it looks in the
+		// same conventional place the backend does. Without this, an instance configured somewhere else
+		// gets a bootstrap that reports no configuration found, or worse, finds an unrelated one.
+		p.printf("\nThis file is not in the usual place, so both steps need pointing at it:\n")
+		p.printf("  backend:   -config %s   (or NORITE_CONFIG_FILE=%s)\n", path, path)
+		p.printf("  bootstrap: norite instance bootstrap --config %s\n", path)
 	}
 }
 

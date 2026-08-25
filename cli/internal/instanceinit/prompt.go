@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"golang.org/x/term"
+
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
 )
 
 // ErrNotATerminal is returned when the wizard needs to ask a question but has nowhere to ask it.
@@ -19,9 +21,12 @@ import (
 // work over SSH, inside `docker exec`, and in CI, and when stdin is not a terminal it must fail with an
 // actionable message rather than hang forever waiting for input nobody is there to type — or, worse,
 // read EOF and quietly accept every default including an empty database password.
-var ErrNotATerminal = errors.New(
-	"this command needs an interactive terminal to ask its questions; pass --non-interactive with the " +
-		"flags for the values you want, or run it from a terminal")
+//
+// It wraps the shared value the other commands return bare, so `main` recognizes all of them with one
+// check (see clierr) while this one keeps the extra sentence only the wizard can offer: it is the command
+// with a --non-interactive mode to point at.
+var ErrNotATerminal = fmt.Errorf("%w; pass --non-interactive with the flags for the values you want, "+
+	"or run it from a terminal", clierr.ErrNoTerminal)
 
 // promptMode decides what happens when the wizard has a question to ask.
 type promptMode int

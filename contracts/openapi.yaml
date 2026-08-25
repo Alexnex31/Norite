@@ -113,20 +113,42 @@ paths:
     post:
       summary: Create an account
       description: >
-        Creates an account and returns it. It does **not** log the new account in: registration and login
-        are separate operations with separate inputs — login needs a `device_id`, which registration has no
-        business requiring — and fusing them would force a client that only wanted an account to invent a
-        device identity.
+        Accepts a registration. It does **not** log the new account in: registration and login are separate
+        operations with separate inputs — login needs a `device_id`, which registration has no business
+        requiring — and fusing them would force a client that only wanted an account to invent a device
+        identity.
 
 
-        Returns 403 `registration_closed` while the instance is configured for invite-only registration.
-        Invite redemption arrives at Milestone M10; until then a gated instance refuses registration
-        outright rather than silently behaving as if it were open, so the setting is never a lie.
+        **Answers 202 with a fixed body whether or not the address already has an account, and never
+        returns the account.** There is no user to return when the address was taken, and any response
+        shaped around one would differ between the two cases. What differs instead is the mail: a
+        confirmation link for a new account, a "somebody tried to register with your address" notice for one
+        that already exists. The only party told which happened is whoever controls the address.
 
 
-        Unlike login, this endpoint necessarily discloses whether an email or username is already taken —
-        that is inherent to letting someone create an account at all. Password reset (M5) is the surface
-        where anti-enumeration matters, and it always answers 202.
+        A taken **username** is still refused 409. A username is an `@handle` — public by construction, and
+        discoverable by any client that can look one up — so refusing it discloses nothing; an address is
+        not public. That asymmetry is deliberate.
+
+
+        While the instance is configured for invite-only registration, `invite_code` is required: a request
+        without one is refused 403 `invite_required`, and one whose code is unknown, exhausted or expired is
+        refused 403 `invite_invalid`. On an open instance the field is ignored rather than rejected, so a
+        client that always sends one works against either mode without knowing which it faces.
+
+
+        Between M4 and M10 a gated instance refused registration outright with `registration_closed`. That
+        code is gone: registration is not closed on a gated instance, it has a precondition, and a client
+        that can tell "you need a code" from "your code does not work" can prompt for one instead of giving
+        up. Note that OAuth sign-up still refuses outright on a gated instance — there is no way to carry a
+        code through a provider redirect, so an invite-only instance is password-registration-only.
+
+
+        Until M10 this endpoint disclosed whether an address was already taken, which made the instance
+        enumerable — it was the only endpoint here that did, and it did so because nothing could verify an
+        address, so there was no way to accept a registration and sort it out by mail. Email verification
+        removed that constraint. Timing is part of the guarantee too: the password is hashed *before* the
+        address is examined, so both branches pay the same argon2id cost.
       operationId: register
       tags: [auth]
       security: []
@@ -143,23 +165,44 @@ paths:
                   email: ada@example.com
                   password: correct horse battery staple
       responses:
-        "201":
-          description: The account was created.
+        "202":
+          description: >
+            Accepted. Identical whether or not the address already had an account — see the description.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/User"
+                type: object
+                required: [message]
+                additionalProperties: false
+                properties:
+                  message:
+                    type: string
+                    description: >
+                      A sentence to show the person who registered. Do not branch on it: it is prose, it
+                      is not stable across versions, and the status code carries everything a client needs.
+
+
+                      It depends on the instance and never on the request. An instance with a mail relay
+                      says to check the mail; an instance without one cannot verify an address at all, so
+                      it creates the account usable and says so rather than pointing at a mailbox nothing
+                      will arrive at. Both branches of one request — address free, address already
+                      registered — always get the same sentence, which is the property this endpoint is
+                      shaped around.
         "400": { $ref: "#/components/responses/BadRequest" }
         "403":
           description: >
-            Registration is closed on this instance (`registration_closed`). The instance requires an invite
-            code, which cannot yet be redeemed — see M10.
+            This instance requires an invite code and the request brought none (`invite_required`), or the
+            code it brought is not usable (`invite_invalid`). The second is deliberately one answer for
+            unknown, exhausted and expired: distinguishing them would let somebody holding no valid code
+            learn which codes exist by watching the message change.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The email address or username is already in use.
+          description: >
+            The username is already in use. **Not** returned for an address — that case answers 202, which
+            is what closes the account-existence oracle.
           content:
             application/json:
               schema:
@@ -217,7 +260,20 @@ paths:
         "401":
           description: >
             Invalid email or password. Deliberately identical for every credential failure — see the
-            description above.
+            description above — and from M10 that includes a correct password on an address that has not
+            been confirmed yet.
+
+
+            A distinct answer for the unconfirmed case would reopen the account-existence oracle
+            `/auth/register` closes, in two requests: register an address with a password of your choosing
+            and then log in with it. If the address were free an account would now exist with that password
+            and the login would say "unconfirmed"; if it were taken nothing would have been created and the
+            same login would say "wrong password".
+
+
+            A correct password on an unconfirmed address queues a fresh confirmation link to that address
+            instead, so the person who owns it learns why they could not sign in. A wrong password queues
+            nothing, so this cannot be used to send mail to an address somebody is guessing at.
           content:
             application/json:
               schema:
@@ -302,6 +358,168 @@ paths:
           description: The session is revoked, or was already not valid. No body.
         "400": { $ref: "#/components/responses/BadRequest" }
         "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/verify/request:
+    post:
+      summary: Re-send an email verification link
+      description: >
+        Sends a fresh confirmation link, if the address belongs to an account whose address is not yet
+        verified.
+
+
+        **Always answers 202**, whatever it found. Like password reset, this endpoint has no business
+        telling a caller whether an address is registered — and here it would also disclose whether the
+        account behind it is mid-signup, which is a narrower and more useful thing for an attacker to know.
+
+
+        A no-op on an instance with no mail relay: there is nothing to send, and registration marks accounts
+        verified on creation there because nothing can verify anything.
+      operationId: requestEmailVerification
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              additionalProperties: false
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+      responses:
+        "202":
+          description: Accepted. Says nothing about what was found.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message]
+                additionalProperties: false
+                properties:
+                  message:
+                    type: string
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /verify:
+    # Served at the instance root, not under /api/v1, for the same reason /reset is: a person opens this
+    # from an email.
+    servers:
+      - url: /
+    get:
+      summary: The address-confirmation page
+      description: >
+        The page the link in a verification email opens. Carries the token into a hidden form field and does
+        **not** verify it — checking on GET would report whether a link is live before anyone submits
+        anything, which makes the page an oracle for exactly that, and would let an already-followed link be
+        told apart from one that never existed.
+
+
+        The confirmation is a form POST rather than the link doing the work on sight. That is not ceremony:
+        a GET that verified would be triggered by anything that follows links in mail — scanning gateways,
+        chat-client link previewers, some antivirus products — so an address could be confirmed by software
+        the person never saw, and the link would be spent before they clicked it. It is also this project's
+        rule 4, which requires GET to stay side-effect-free.
+      operationId: getVerifyPage
+      tags: [auth]
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: false
+          description: The verification token, carried into the form. Absent renders the page with an
+            empty field, which then fails on submit.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The confirmation page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+    post:
+      summary: Confirm an email address
+      description: >
+        Spends the token and marks the address verified, then renders the outcome. Single-use, and refused
+        if the account's address changed after the link was issued — otherwise registering with an address
+        you control, changing it to one you do not, and following your own link would mark somebody else's
+        address verified.
+
+
+        Every failure renders one message: unknown, expired, already used and address-changed are not
+        distinguished, because telling whoever holds a stolen link which it is helps only them.
+      operationId: confirmEmailVerification
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        "200":
+          description: The address is confirmed.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: The link is not valid. Renders the form again with a message.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /oauth/continue:
+    # Served at the instance root beside /oauth/signup, for the same reason: a person opens this from an
+    # email, and it is not an API a client codegens against.
+    servers:
+      - url: /
+    get:
+      summary: Resume a sign-up whose provider would not vouch for the address
+      description: >
+        Renders the username form for a sign-up that could not proceed in the browser. The link is delivered
+        by email, and opening it is the evidence the provider declined to give — it proves control of the
+        mailbox.
+
+
+        This exists so the OAuth callback can answer identically whether or not the address already has an
+        account. Anyone can present any address at a provider that does not verify it (GitHub permits it for
+        every address), so a callback that showed a username form for an unknown address and a refusal for a
+        registered one would answer "does this address have an account here" to whoever asked. Both cases
+        render "check your email" instead, and the difference travels to the mailbox — the only party
+        entitled to it.
+
+
+        Carries the token into the form and does **not** verify it, exactly as `/reset` and `/verify` do.
+      operationId: continueOAuthSignup
+      tags: [auth]
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: false
+          description: The signup continuation token from the email.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The username form.
+          content:
+            text/html:
+              schema:
+                type: string
 
   /reset:
     # Served at the instance root, not under /api/v1: this is a page a person opens from an email, not an
@@ -1264,6 +1482,191 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /instance/bootstrap:
+    post:
+      summary: Create this instance's first administrator
+      description: >
+        Creates the account an instance is administered from, on an instance that has none yet. This is the
+        step `norite instance init` cannot perform: the wizard writes a configuration file before the
+        backend is running, so there is nothing to create an account on until afterwards.
+
+
+        **Authorization is an operator token**, not an account credential — there is no account yet. See the
+        `operatorToken` security scheme for what one is and how it is built. The endpoint additionally
+        requires that no administrator exists, which is what makes it disable itself on success rather than
+        needing a flag recording that it ran. A replayed operator token buys nothing.
+
+
+        The account is created with its address already verified. The caller proved they can read this
+        instance's configuration file, which is strictly stronger evidence than following a link sent to an
+        address — and requiring mail would make an instance with no SMTP relay impossible to set up.
+
+
+        No credential is returned. A session is scoped to a `device_id`, and the shell running setup is not
+        the device that will hold one; `POST /auth/login` is the next step.
+      operationId: bootstrapInstance
+      tags: [instance]
+      security:
+        - operatorToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapRequest"
+      responses:
+        "201":
+          description: The administrator account was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: >
+            This instance already has an administrator (`already_bootstrapped`), or the username or address
+            is taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /instance/invites:
+    post:
+      summary: Create an instance invite
+      description: >
+        Mints a code that admits one or more account creations while the instance is configured for
+        invite-only registration. Callable by an instance administrator's access token or by an operator
+        token; an API token is refused, because instance administration is not delegable for the same
+        reason token management is not.
+
+
+        Omitting `max_uses` means unlimited, and omitting `expires_in_seconds` means it never expires. Both
+        are real things to want — a link in a group chat that everybody in it may use — and expressing them
+        as very large numbers would be a lie a client has to interpret.
+      operationId: createInstanceInvite
+      tags: [instance]
+      security:
+        - operatorToken: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInviteRequest"
+      responses:
+        "201":
+          description: The invite was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceInvite"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The credential is genuine but does not administer this instance. 403 rather than 401: the caller
+            is authenticated, so re-authenticating would not help.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    get:
+      summary: List instance invites
+      description: >
+        Every outstanding invite, newest first, **including exhausted and expired ones**. An administrator
+        asking what invites exist is usually asking why somebody could not use one, and a list that silently
+        omits the answer is worse than one they have to read.
+
+
+        Codes are returned in full. The caller is an administrator or the operator, and an invite exists to
+        be handed to somebody — a list that cannot show its own contents is not a list.
+      operationId: listInstanceInvites
+      tags: [instance]
+      security:
+        - operatorToken: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The invites.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InstanceInvite"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The credential is genuine but does not administer this instance. 403 rather than 401: the caller
+            is authenticated, so re-authenticating would not help.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /instance/invites/revoke:
+    post:
+      summary: Revoke an instance invite
+      description: >
+        Deletes an invite so it can no longer be redeemed. Takes effect immediately.
+
+
+        **The code travels in the body, and that is why this is a POST to `/revoke` rather than a `DELETE`
+        on `/invites/{code}`.** A request path is written to every log line, so a code in the path is a
+        credential in the log — a different audience from the database it is stored in, with different
+        access control. This is the same reasoning that moved the device-code poll off
+        `GET /auth/device/code/{code}`; the first version of this endpoint got it wrong by weighing who may
+        call it rather than where the value ends up.
+
+
+        Returns 404 when there was no such invite, so a successful revocation is distinguishable from a
+        mistyped code. That discloses nothing: the caller can already list every invite on the instance.
+      operationId: revokeInstanceInvite
+      tags: [instance]
+      security:
+        - operatorToken: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              additionalProperties: false
+              properties:
+                code:
+                  type: string
+                  maxLength: 64
+                  description: >
+                    The invite code. Case, spaces and dashes are normalised away before lookup.
+      responses:
+        "204":
+          description: The invite is revoked. No body.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The credential is genuine but does not administer this instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such invite.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /auth/tokens/{tokenId}:
     delete:
       summary: Revoke an API token
@@ -1356,6 +1759,28 @@ components:
         Refresh tokens (`nrt_…`) are **not** Bearer credentials. They go in the body of `/auth/refresh` and
         `/auth/logout` and authenticate nothing else.
 
+    operatorToken:
+      type: http
+      scheme: bearer
+      description: >
+        `Authorization: Bearer <operator token>` — the credential that authorizes instance administration
+        before any account exists, and the only one in this system minted by a client rather than by the
+        server.
+
+
+        It is an HS256 JWT signed with the instance's own signing key (`[auth].jwt_secret`, or
+        `NORITE_JWT_SECRET`), carrying `iss: "norite"`, `typ: "operator"`, an `exp`, and **no subject** — an
+        operator is not an account. A token carrying a subject is refused, as is one with any other `typ`:
+        without that check a device entry token would qualify, since it also names no account and carries
+        the same issuer and key.
+
+
+        What it proves is possession of the instance's configuration file, which is why it is the right
+        authority for creating the first administrator and the wrong one for anything an account can do. It
+        is not revocable — there is no row to delete — so it lives **two minutes** and is minted per
+        request. `norite instance bootstrap` builds one; the shared definition is Go package
+        `backend/operatortoken`, which both the server and the CLI import.
+
   parameters:
     OAuthProvider:
       name: provider
@@ -1430,7 +1855,9 @@ components:
         email_verified_at:
           type: [string, "null"]
           format: date-time
-          description: Null until email verification lands at Milestone M5.
+          description: Null while the address is unconfirmed. Set when a confirmation link is followed (M10), when a provider
+            vouched for the address, or on creation for an account made by `/instance/bootstrap` or on an
+            instance with no mail relay. An account with this null cannot sign in.
         created_at:
           type: string
           format: date-time
@@ -1491,18 +1918,43 @@ components:
     MintedApiToken:
       description: >
         A newly-created API token, including its value. This is the only response that ever contains it.
-      allOf:
-        - $ref: "#/components/schemas/ApiToken"
-        - type: object
-          required: [value]
-          properties:
-            value:
-              type: string
-              description: >
-                The credential itself, `nat_…`. Stored only as a SHA-256 hash and **not recoverable** — if
-                it is lost, mint a new token and revoke this one. The `nat_` prefix exists so a leaked
-                credential is identifiable on sight, by a human or a secret scanner.
-              examples: ["nat_9pQ2xL7vD4mZ0kR8sT1yWbGhJcNfEuAiOoPdXrVtYnM"]
+
+
+        Spelled out in full rather than composed over `ApiToken` with `allOf`, which is what it used to do
+        and which made it **unsatisfiable**: `allOf` branches are validated independently, so `ApiToken`'s
+        `additionalProperties: false` rejected the very `value` the second branch required. No real
+        response could match, and a validating client would have refused every successful mint — of a
+        credential that cannot be recovered. Nothing caught it because the contract test compares the set
+        of routes, not payloads. If a field is added to `ApiToken`, add it here too; the test named below
+        fails until you do.
+      type: object
+      required: [id, name, scopes, created_at, value]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        name:
+          type: string
+          description: Human label chosen at mint time, so a token can be recognised later in order to revoke it.
+          maxLength: 100
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scope"
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+          description: Null on a token that has just been minted. See `ApiToken`.
+        value:
+          type: string
+          description: >
+            The credential itself, `nat_…`. Stored only as a SHA-256 hash and **not recoverable** — if
+            it is lost, mint a new token and revoke this one. The `nat_` prefix exists so a leaked
+            credential is identifiable on sight, by a human or a secret scanner.
+          examples: ["nat_9pQ2xL7vD4mZ0kR8sT1yWbGhJcNfEuAiOoPdXrVtYnM"]
 
     OAuthExchangeRequest:
       type: object
@@ -1654,6 +2106,88 @@ components:
           maxLength: 256
           description: Same rules as registration — length only, counted in characters.
 
+    BootstrapRequest:
+      type: object
+      required: [username, email, password]
+      additionalProperties: false
+      description: >
+        The first administrator's account. The same fields and the same bounds as RegisterRequest, and they
+        must stay the same: both create rows in one table under one set of constraints, so a value one
+        accepts and the other rejects is a difference with nothing behind it.
+      properties:
+        username:
+          type: string
+          minLength: 2
+          maxLength: 32
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 12
+          maxLength: 256
+        display_name:
+          type: string
+          maxLength: 64
+
+    CreateInviteRequest:
+      type: object
+      additionalProperties: false
+      description: Both fields are optional, and omitting either means "no limit".
+      properties:
+        max_uses:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: How many accounts may be created with this code. Omit for unlimited.
+        expires_in_seconds:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+          description: >
+            Lifetime from now. Omit for an invite that never expires. Capped at a year — a longer-lived
+            invite is almost always a mistake, and a permanent one is spelled by omitting the field rather
+            than by a number nobody meant to type.
+
+    InstanceInvite:
+      type: object
+      required: [code, uses, created_at]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: >
+            Sixteen characters from `BCDFGHJKMNPQRSTVWXYZ`, about 69 bits. Returned in full to an
+            administrator, and stored in plaintext, which is a deliberate exception to this project's
+            hash-everything rule: an invite exists to be handed to somebody, so it must be readable back,
+            and what it authorizes is bounded — presenting one lets an account be created subject to every
+            other rule registration enforces, and reaches no existing account or data.
+        created_by:
+          description: >
+            Who issued it, or `null` when the instance operator did — the operator is not an account and
+            has no id to record.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        max_uses:
+          description: How many uses it allows, or `null` for unlimited.
+          oneOf:
+            - type: integer
+            - type: "null"
+        uses:
+          type: integer
+          description: How many accounts have been created with it.
+        expires_at:
+          description: When it stops working, or `null` if it never does.
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+
     RegisterRequest:
       type: object
       required: [username, email, password]
@@ -1687,6 +2221,19 @@ components:
             Length is the only rule, counted in characters rather than bytes so a passphrase in a non-Latin
             script is not penalised. No composition requirements: they push people toward predictable
             substitutions while ruling out strong passphrases. The ceiling exists to bound hashing work.
+        invite_code:
+          type: string
+          maxLength: 64
+          description: >
+            Required while the instance is configured for invite-only registration, ignored while it is
+            open. Sixteen characters drawn from `BCDFGHJKMNPQRSTVWXYZ` — no vowels, so a code is unlikely
+            to spell anything, and no `L`, which is the third member of the `1`/`I`/`L` group that gets
+            misread. Case, spaces and dashes are normalised away before lookup, so a code may be presented
+            however it was pasted.
+
+            The maximum here is deliberately looser than the code's own length: what a code may contain is
+            the instance's decision, and a bound that disagreed with it would refuse a valid code for the
+            wrong reason.
         display_name:
           type: string
           maxLength: 64
@@ -1773,12 +2320,41 @@ components:
                 - rate_limited
                 - service_unavailable
                 - internal_error
+                # Still emitted by the OAuth sign-up path, which refuses outright on a gated instance —
+                # there is nowhere to carry an invite code through a provider redirect. Registration's own
+                # use of it ended at M10.
                 - registration_closed
+                - invite_required
+                - invite_invalid
+                - already_bootstrapped
+                # The device-code grant's own vocabulary (RFC 8628 §3.5), from /auth/device/token. A
+                # polling client branches on the first two every few seconds, so they are the codes here
+                # that a generated client most needs to be able to name — and they were the ones missing
+                # longest. Added after a manual run compared real responses against this enum; M9 shipped
+                # them without this entry and nothing noticed, because the contract test walks the route
+                # table and never a payload.
+                - authorization_pending
+                - slow_down
+                - access_denied
+                - expired_token
+                # Configuration states, not faults. Each says a feature is switched off on this instance
+                # rather than broken: no public base URL for the device flow, no mail relay for reset.
+                - device_flow_unavailable
+                - reset_unavailable
+                # The OAuth paths, from M6.
+                - oauth_email_unverified
+                - oauth_provider_error
             message:
               type: string
               description: >
-                Human-readable summary, safe to show a user. For 5xx responses this is always a generic
-                string — server-side detail is logged, never returned.
+                Human-readable summary, safe to show a user.
+
+
+                A 5xx message is generic — *except* where a handler has explicitly marked one as safe to
+                send, which today is only the two `503`s above. Those say which feature is unconfigured,
+                because "internal server error" would report an instance that is merely missing a setting
+                as a broken one. What is never returned at any status is the underlying error: driver
+                text, query fragments and hostnames are logged and stay there.
             request_id:
               type: string
               description: >

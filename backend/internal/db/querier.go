@@ -21,6 +21,13 @@ type Querier interface {
 	// the same device code both reach here, and exactly one matches a row. Reading, checking consumed_at in
 	// Go, then updating would issue two sessions for one authorization.
 	ConsumeDeviceCode(ctx context.Context, deviceCodeHash []byte) (DeviceCode, error)
+	// Spends a token, with single-use in the WHERE clause rather than in Go.
+	//
+	// Two confirms racing on the same link both reach this statement; the second finds consumed_at already set,
+	// matches zero rows, and is failed. Checking in the service and updating afterwards would let both win, and
+	// while a double verification is harmless in itself, the guarantee is what the address-change check below
+	// depends on.
+	ConsumeEmailVerificationToken(ctx context.Context, id int64) (EmailVerificationToken, error)
 	// Single-use and expiry in the WHERE clause, so a code seen in an address bar and replayed matches zero
 	// rows the second time rather than issuing a second token pair.
 	ConsumeOAuthExchangeCode(ctx context.Context, codeHash []byte) (OauthExchangeCode, error)
@@ -37,6 +44,17 @@ type Querier interface {
 	// matches zero rows, and is failed. Checking `used_at IS NULL` in the service and updating afterwards
 	// would let both win and would make the "single-use" promise a comment rather than a guarantee.
 	ConsumePasswordResetToken(ctx context.Context, id int64) (PasswordResetToken, error)
+	// The bootstrap guard, and the reason it is a count rather than an existence check.
+	//
+	// POST /instance/bootstrap is authorized by an operator token, which is minted from the instance signing
+	// key by anyone holding the config file. That is the right authority for creating the *first* admin and
+	// the wrong one for creating a second — an operator token replayed later must not be able to add an
+	// account to this table quietly. So the endpoint refuses unless this answers 0, which makes bootstrap
+	// self-disabling rather than needing a flag somewhere that says whether it already ran.
+	//
+	// Called after LockInstanceBootstrap and inside the same transaction as the insert. Both halves are
+	// required: the lock is what makes the count a decision rather than an observation.
+	CountInstanceAdmins(ctx context.Context) (int64, error)
 	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
 	// Scoped API token queries.
 	//
@@ -53,6 +71,16 @@ type Querier interface {
 	// device_id and device_name come from the client asking for the code, which is the client that will hold
 	// the resulting session. The browser that approves never supplies either.
 	CreateDeviceCode(ctx context.Context, arg CreateDeviceCodeParams) (DeviceCode, error)
+	// Email verification queries.
+	//
+	// The same shape as password_reset_tokens and deliberately so: two token tables with different rules about
+	// single-use or expiry would be two sets of guards to keep right, and the second one is always the one
+	// that gets it wrong.
+	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) (EmailVerificationToken, error)
+	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
+	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
+	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
+	CreateInstanceInvite(ctx context.Context, arg CreateInstanceInviteParams) (InstanceInvite, error)
 	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
 	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
 	// OAuth sign-in queries.
@@ -89,10 +117,32 @@ type Querier interface {
 	// Every read filters `deleted_at IS NULL`: a soft-deleted account keeps its row so authored content can
 	// still render as "Deleted User", but it must never be findable for login, registration collision, or
 	// profile lookup. Leaving that filter off is the way a deleted account quietly becomes usable again.
+	// email_verified_at is a parameter rather than a default, because the three callers disagree about it and
+	// each is right.
+	//
+	// Registration passes NULL: the address is a claim until somebody follows a link sent to it. Bootstrap
+	// passes now(), because the operator proved filesystem access to the instance's own config, which is
+	// strictly more than an emailed link proves — asking them to check their mail to finish setting up a
+	// server they are holding the keys to would be theatre, and would make bootstrap impossible on an
+	// instance with no relay. The OAuth path has its own insert (CreateOAuthUser) because it creates an
+	// account with no password at all.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// Called by auth.RunSweeper. Abandoned authorizations are the common case, and the endpoint that creates
 	// them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
 	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
+	// Called by auth.RunSweeper. Non-partial index behind it — see 000010, and 000005 for why.
+	DeleteExpiredEmailVerificationTokens(ctx context.Context) (int64, error)
+	// Called by auth.RunSweeper.
+	//
+	// The IS NOT NULL is redundant against SQL's own semantics — a NULL expires_at makes the comparison NULL
+	// rather than true, so a never-expiring invite is already skipped — and it is here anyway, because that is
+	// a fact about three-valued logic rather than about this table, and the row it would wrongly delete is one
+	// an administrator deliberately made permanent.
+	//
+	// Unlike the other swept tables, these rows are not garbage the moment they expire: this is the only sweep
+	// that removes something a person created on purpose. It is still right — an expired invite is refused by
+	// RedeemInstanceInvite regardless, so the row has no effect on anything except the administrator's list.
+	DeleteExpiredInstanceInvites(ctx context.Context) (int64, error)
 	DeleteExpiredOAuthExchangeCodes(ctx context.Context) (int64, error)
 	// Abandoned flows are the common case: opening the provider page and closing the tab leaves a row behind.
 	// Called by auth.RunSweeper. Without it the table grows for the life of the instance, and it is written
@@ -104,6 +154,9 @@ type Querier interface {
 	// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
 	// non-partial in 000005 for exactly this query.
 	DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error)
+	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
+	// never there, which is the difference between "done" and "check what you typed".
+	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
 	// The other half of the approval page, and the reason it is worth a column rather than letting the code
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
 	// the waiting client stops immediately instead of polling for another twenty minutes.
@@ -130,6 +183,9 @@ type Querier interface {
 	// told the authorization is over, instead of being walked through a sign-in that would then fail at the
 	// approval step for a reason nobody could see.
 	GetDeviceCodeByUserCode(ctx context.Context, userCode string) (DeviceCode, error)
+	// The confirm path's lookup. Expiry is checked here as well as in the consume below, so an expired token
+	// is refused before anything is written — the same two-step the reset path uses.
+	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
@@ -161,7 +217,55 @@ type Querier interface {
 	// that works. Without this, every request an anxious user makes leaves another live token behind, and the
 	// window a leaked one is redeemable in becomes the union of all of them.
 	InvalidateOutstandingResetTokens(ctx context.Context, userID int64) (int64, error)
+	// Requesting verification again spends every older token for that account, so the newest link is the only
+	// one that works. Without it, each resend leaves another live token behind and the window a leaked mail is
+	// redeemable in becomes the union of all of them.
+	InvalidateOutstandingVerificationTokens(ctx context.Context, userID int64) (int64, error)
+	// The tier check, on every request to an instance-administration endpoint.
+	//
+	// Joined against users for liveness, the same shape and the same reasoning as GetActiveAPITokenByHash
+	// and GetOAuthIdentity: a soft-deleted account keeps its rows so its authored content still renders as
+	// "Deleted User", and this row is one of them. Without the join, deleting an admin's account would leave
+	// their tier intact and usable by any credential still outstanding on it.
+	IsInstanceAdmin(ctx context.Context, userID int64) (bool, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
+	// Everything outstanding, newest first.
+	//
+	// Deliberately includes exhausted and expired rows. An administrator asking "what invites exist" is
+	// usually asking why somebody could not use one, and a list that silently omits the answer is worse than
+	// one they have to read. The sweep removes expired rows eventually; nothing removes exhausted ones, since
+	// `3 of 3 used` is the record of an invite having done its job.
+	//
+	// No index needed: an instance holds tens of these, not thousands, and this is an administrator-facing
+	// call made by hand. An index on created_at would be a write on every registration to serve a query
+	// nobody makes in a loop.
+	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
+	// Instance-administration queries.
+	//
+	// The Instance Admin tier, which is instance-wide and sits outside roles.Resolve entirely (ADR 0013).
+	// M10 creates the first row and reads it; M71 adds granting, revoking, and the last-admin safety rail.
+	// Serializes bootstrap attempts across processes, for the whole of the calling transaction.
+	//
+	// CountInstanceAdmins below is checked and then acted on, which under READ COMMITTED — Postgres's default
+	// and this pool's — is a read-modify-write with a gap in it. Two concurrent bootstraps both see zero, both
+	// insert a different user_id, and the primary key stops neither: the instance ends up with two
+	// administrators, one of whom nobody intended and no audit record explains.
+	//
+	// An advisory lock rather than row locking, because there is nothing to lock: the guard is the *absence*
+	// of rows, and SELECT ... FOR UPDATE over an empty table locks nothing at all. Taken as an xact lock so it
+	// is released by commit or rollback without any unlock call to forget.
+	//
+	// The key follows internal/platform/database's convention: "NORITE" in ASCII plus a slot number, so it is
+	// recognizable in pg_locks. Slot 1 is the migration lock; this is slot 2. Written in decimal because
+	// sqlc parses the literal, and the value is 0x4E4F524954450002 — "NORITE" then 0x0002.
+	LockInstanceBootstrap(ctx context.Context) error
+	// Records that the address is confirmed.
+	//
+	// The WHERE guards against a race with an address change: the account's current email must still be the
+	// one the token was sent to. ConsumeEmailVerificationToken has already checked that the token is unspent,
+	// but the address can change between the two statements, and they run in one transaction precisely so this
+	// comparison is against a value that cannot move underneath it.
+	MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (User, error)
 	// Health-check queries.
 	//
 	// These exist so the readiness endpoint validates the *whole* data path — pool checkout, the
@@ -189,6 +293,33 @@ type Querier interface {
 	//
 	// Expired and already-spent rows match nothing, which the service reports as one answer.
 	PollDeviceCode(ctx context.Context, arg PollDeviceCodeParams) (PollDeviceCodeRow, error)
+	// Instance invite queries.
+	//
+	// The codes that gate account creation while registration_mode = "invite". Distinct from the per-guild
+	// `invites` table, which admits an existing account to a guild.
+	// Spends one use of an invite, with every guard in the WHERE clause rather than in Go.
+	//
+	// This is the whole of the concurrency story, and it has to be: two people redeeming a one-use code at the
+	// same moment both read `uses = 0`, and a check-then-update in the service would let both through. As a
+	// single statement, Postgres serializes the two updates on the row itself — the second re-evaluates the
+	// WHERE against the first's committed value and matches nothing. Exactly the shape
+	// ConsumePasswordResetToken uses for single-use, generalized from one use to n.
+	//
+	// Both NULLs mean "unlimited" and "never expires", and both are written as explicit IS NULL branches
+	// rather than left to three-valued logic: `uses < NULL` is NULL, not true, so an unlimited invite would
+	// match nothing at all and the most permissive setting would be the most restrictive one.
+	//
+	// Zero rows is the only failure this reports, and it deliberately does not say which guard refused. An
+	// unknown code, an exhausted one and an expired one are one answer to the caller — the same treatment
+	// every credential lookup in this package gets, and here it also stops the endpoint from being a way to
+	// probe which codes exist.
+	RedeemInstanceInvite(ctx context.Context, code string) (InstanceInvite, error)
+	// Claims a username for a registration that created no account.
+	//
+	// ON CONFLICT DO NOTHING because the name may already be claimed by an account or by an earlier
+	// reservation, and either way the caller's answer is the same: it is not available. Nothing here needs to
+	// know which.
+	ReserveUsername(ctx context.Context, username string) error
 	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
 	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
@@ -257,7 +388,16 @@ type Querier interface {
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
 	UserExistsByEmail(ctx context.Context, email string) (bool, error)
-	UserExistsByUsername(ctx context.Context, username string) (bool, error)
+	// Is this username claimed, by an account or by a registration that created none?
+	//
+	// The second half is what closes the last leg of the registration oracle, and it is not optional: a
+	// registration against a *taken* address creates no account, so without a reservation it would leave the
+	// username free while one against a fresh address does not — and two requests read that difference. See
+	// migration 000011.
+	//
+	// One query rather than two so the two halves cannot be checked in different places, or one of them
+	// forgotten by a later caller.
+	UsernameUnavailable(ctx context.Context, username string) (bool, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,7 +27,25 @@ type Handler struct {
 
 // NewHandler builds the auth HTTP handler.
 func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc, validate: validator.New(validator.WithRequiredStructEnabled())}
+	validate := validator.New(validator.WithRequiredStructEnabled())
+
+	// Report the name the caller sent, not the name this struct happens to use.
+	//
+	// Without this, a missing device_id comes back as `field "DeviceID" failed the "required"
+	// requirement` — a Go identifier that appears nowhere in contracts/openapi.yaml, two lines away from
+	// the decoder's own errors, which quote the wire name (`unknown field "admin"`). A caller reading it
+	// has to guess the mapping, and a generated client cannot even do that.
+	validate.RegisterTagNameFunc(func(f reflect.StructField) string {
+		name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
+		if name == "" || name == "-" {
+			// No tag, or a field that is never on the wire. The Go name is the only name there is, and it
+			// is better than an empty string.
+			return f.Name
+		}
+		return name
+	})
+
+	return &Handler{svc: svc, validate: validate}
 }
 
 // Routes mounts the auth endpoints, and reports which of them require authentication.
@@ -42,6 +62,7 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/logout", h.logout)
 	r.Post("/password/reset/request", h.requestPasswordReset)
 	r.Post("/password/reset", h.confirmPasswordReset)
+	r.Post("/verify/request", h.requestEmailVerification)
 
 	// Authenticated.
 	r.Group(func(r chi.Router) {
@@ -79,6 +100,11 @@ type registerRequest struct {
 	Email       string `json:"email" validate:"required,email,max=254"`
 	Password    string `json:"password" validate:"required"`
 	DisplayName string `json:"display_name" validate:"omitempty,max=64"`
+	// InviteCode is required while the instance is gated and ignored while it is open, so it is optional
+	// here and the service decides. Bounded generously rather than at the exact code length: what a code
+	// may contain is ParseInviteCode's decision, and a tag that disagreed with it would refuse a valid
+	// code for the wrong reason — the mistake registerRequest's username bounds already made once.
+	InviteCode string `json:"invite_code" validate:"omitempty,max=64"`
 }
 
 type loginRequest struct {
@@ -99,6 +125,13 @@ type logoutRequest struct {
 }
 
 type passwordResetRequest struct {
+	Email string `json:"email" validate:"required,email,max=254"`
+}
+
+// emailVerificationRequest asks for a fresh verification link. Its own type rather than reusing
+// passwordResetRequest: two endpoints that happen to take one identical field today are not one endpoint,
+// and sharing the type would make either one's future field a silent addition to the other.
+type emailVerificationRequest struct {
 	Email string `json:"email" validate:"required,email,max=254"`
 }
 
@@ -212,17 +245,55 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	// start silently mis-assigning the moment either gained one.
 	//
 	//nolint:staticcheck // S1016: the coupling a conversion introduces is not wanted here
-	user, err := h.svc.Register(r.Context(), RegisterInput{
+	_, err := h.svc.Register(r.Context(), RegisterInput{
 		Username:    req.Username,
 		Email:       req.Email,
 		Password:    req.Password,
 		DisplayName: req.DisplayName,
+		InviteCode:  req.InviteCode,
 	})
 	if err != nil {
 		h.writeErr(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusCreated, newUserResponse(user))
+
+	// 202 with a fixed body, and deliberately not the account.
+	//
+	// Until M10 this answered 201 with the new user, which cannot survive the anti-enumeration rule: an
+	// address that already has an account creates nothing, so there is no user to return, and any response
+	// shaped around one would differ between the two cases. What the caller is told is that the address
+	// will hear about it — which is true either way, and is the only thing this endpoint can honestly say
+	// without disclosing whether the address was already registered.
+	//
+	// The account is not signed in either, unchanged from M4: registration and login are separate
+	// operations with separate inputs, and login needs a device_id registration has no business requiring.
+	httpx.WriteJSON(w, r, http.StatusAccepted, registrationAcceptedResponse{
+		Message: h.registrationMessage(),
+	})
+}
+
+// registrationMessage is what a 202 says. Fixed for a given instance, and never a function of the request.
+//
+// The distinction that matters here is *what the message varies on*. Varying it on whether the address was
+// already registered is the oracle this endpoint exists to close. Varying it on whether the instance has a
+// mail relay discloses nothing a caller cannot see anyway — no mail ever arrives, the startup log says so,
+// and both branches of the same request get the same sentence — so the two cases are not comparable.
+//
+// Worth doing because the alternative is a lie. A relay-less instance creates the account already verified
+// and usable (see Service.VerificationRequired), so "check your email" sends somebody to wait indefinitely
+// for a message that will never be sent, about an account they could already be signed in to. Found by
+// registering against a relay-less instance by hand; every automated test had a relay.
+func (h *Handler) registrationMessage() string {
+	if !h.svc.VerificationRequired() {
+		return "Your account is ready. You can sign in now."
+	}
+	return "Check your email to finish creating your account."
+}
+
+// registrationAcceptedResponse is the one body POST /auth/register returns, identical in every case it
+// does not reject outright.
+type registrationAcceptedResponse struct {
+	Message string `json:"message"`
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
@@ -290,6 +361,26 @@ func (h *Handler) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, r, http.StatusAccepted, nil)
+}
+
+// requestEmailVerification re-sends a verification link.
+//
+// Always 202, exactly as the reset request is and for the same reason: this endpoint has no business
+// telling a caller whether an address is registered, or whether the account behind it is already verified.
+// Both would be usable to enumerate, and the second would be usable to find accounts mid-signup.
+func (h *Handler) requestEmailVerification(w http.ResponseWriter, r *http.Request) {
+	var req emailVerificationRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	if err := h.svc.RequestEmailVerification(r.Context(), req.Email); err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusAccepted, registrationAcceptedResponse{
+		Message: "If that address needs verifying, a link is on its way.",
+	})
 }
 
 func (h *Handler) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
@@ -420,14 +511,44 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		// legitimate client got there first.
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid or expired refresh token"))
 
-	case errors.Is(err, ErrRegistrationClosed):
+	case errors.Is(err, ErrInviteRequired):
+		// `invite_required` rather than M4's `registration_closed`, which was accurate only while there
+		// was no way to redeem anything: registration is not closed on a gated instance, it has a
+		// precondition. A client that can tell the two apart can prompt for a code instead of giving up.
 		httpx.WriteError(w, r, &httpx.StatusError{
 			Status:  http.StatusForbidden,
-			Code:    "registration_closed",
-			Message: "registration on this instance requires an invite code",
+			Code:    "invite_required",
+			Message: ErrInviteRequired.Error(),
 			Err:     err,
 		})
 
+	case errors.Is(err, ErrInviteInvalid):
+		// Deliberately one code for unknown, exhausted and expired. Distinguishing them would let
+		// somebody holding no valid code learn which codes exist by watching the message change.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusForbidden,
+			Code:    "invite_invalid",
+			Message: ErrInviteInvalid.Error(),
+			Err:     err,
+		})
+
+	case errors.Is(err, ErrInviteExpiry), errors.Is(err, ErrInviteMaxUses):
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "%s", err.Error()))
+
+	case errors.Is(err, ErrAlreadyBootstrapped):
+		// 409 rather than 403: the credential was accepted and the request was well formed, but the
+		// instance is in a state where this operation no longer applies. A 403 would read as "your
+		// operator token is wrong" and send somebody hunting for a config problem that is not there.
+		httpx.WriteError(w, r, &httpx.StatusError{
+			Status:  http.StatusConflict,
+			Code:    "already_bootstrapped",
+			Message: ErrAlreadyBootstrapped.Error(),
+			Err:     err,
+		})
+
+	// ErrEmailTaken no longer arrives from registration — that path answers 202 either way (M10) — but
+	// bootstrap still reports it, where the caller is the operator setting the instance up and there is
+	// nobody to enumerate.
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUsernameTaken):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
 
@@ -499,7 +620,9 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 			Status:  http.StatusServiceUnavailable,
 			Code:    "device_flow_unavailable",
 			Message: "the device sign-in flow is unavailable: this instance has no public base URL configured",
-			Err:     err,
+			// Not a fault: a setting this instance does not have. See httpx.StatusError.MessageIsPublic.
+			MessageIsPublic: true,
+			Err:             err,
 		})
 
 	case errors.Is(err, ErrResetUnavailable):
@@ -507,7 +630,9 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 			Status:  http.StatusServiceUnavailable,
 			Code:    "reset_unavailable",
 			Message: "password reset is unavailable: this instance has no email relay configured",
-			Err:     err,
+			// Not a fault: a setting this instance does not have. See httpx.StatusError.MessageIsPublic.
+			MessageIsPublic: true,
+			Err:             err,
 		})
 
 	case errors.Is(err, ErrNotFound):

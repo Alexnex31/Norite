@@ -100,7 +100,7 @@ func TestQuickStartAsksOnlyTheEssentials(t *testing.T) {
 func TestFullRunAsksAboutEverything(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "instance.toml")
 	answers := []string{
-		"development", "127.0.0.1:9000", // env, listen addr
+		"development", "127.0.0.1:9000", "", // env, listen addr, public base URL (left blank)
 		"localhost", "5432", "norite", "norite", "disable", // database
 		"local", "/srv/attachments", // storage
 		"no",     // smtp
@@ -129,16 +129,18 @@ func TestFullRunCollectsSMTPSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "instance.toml")
 	answers := []string{
 		"production", ":8080",
+		// Answered in the Instance section now, not alongside SMTP. gatherSMTP asks only if it is still
+		// empty, so a --full run is never asked the same question twice.
+		"https://chat.example.com", // public base url
 		"localhost", "5432", "norite", "norite", "disable",
 		"local", "/srv/attachments",
 		"yes",                     // send email
 		"smtp.example.com", "587", // host, port
-		"norite@example.com",       // username -> triggers the password prompt
-		"starttls",                 // encryption
-		"no-reply@example.com",     // from address
-		"Norite",                   // from name
-		"https://chat.example.com", // public base url
-		"no",                       // acme
+		"norite@example.com",   // username -> triggers the password prompt
+		"starttls",             // encryption
+		"no-reply@example.com", // from address
+		"Norite",               // from name
+		"no",                   // acme
 		"open",
 	}
 	p, out := scripted(answers, "db-pw", "relay-pw")
@@ -211,6 +213,7 @@ func TestDecliningSMTPLeavesItDisabled(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "instance.toml")
 	answers := []string{
 		"production", ":8080",
+		"", // public base url, left blank
 		"localhost", "5432", "norite", "norite", "disable",
 		"local", "/srv/attachments",
 		"no", // smtp
@@ -235,6 +238,7 @@ func TestFullRunCollectsS3Settings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "instance.toml")
 	answers := []string{
 		"production", ":8080",
+		"", // public base url, left blank
 		"localhost", "5432", "norite", "norite", "disable",
 		"s3", "https://minio.example.com", "eu-west-1", "attachments", "minio-user", "yes",
 		"no", // smtp
@@ -501,4 +505,108 @@ func TestPipedStdinIsFineWhenNonInteractiveIsRequested(t *testing.T) {
 
 	require.NoError(t, run(Options{NonInteractive: true, Output: path, DBPassword: "pw"}, p))
 	assert.FileExists(t, path)
+}
+
+// The wizard is where somebody finds out what has to happen next, and the order is not guessable:
+// `norite instance bootstrap` needs a running server to talk to and a migrated schema to write into, so it
+// cannot come before either. Pinned because it is prose — nothing else fails if it goes stale or if the
+// command it names is renamed.
+func TestTheSummarySaysHowToFinishSettingUpTheInstance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	p, out := scripted([]string{"", "", "", "", "", ""}, "s3cret-pw")
+
+	require.NoError(t, run(Options{Output: path}, p))
+
+	transcript := out.String()
+	assert.Contains(t, transcript, "Start the backend")
+	assert.Contains(t, transcript, "norite instance bootstrap",
+		"an instance with no administrator is not finished, and this is where that is said")
+
+	// The order, not merely the presence of both: starting the backend comes first because bootstrap has
+	// nothing to talk to otherwise.
+	assert.Less(t, strings.Index(transcript, "Start the backend"),
+		strings.Index(transcript, "norite instance bootstrap"))
+}
+
+// A config file somewhere other than the conventional location has to be pointed at twice, and the second
+// is the one that is easy to miss: bootstrap reads this file too — the signing key in it is what
+// authorizes the account it creates — and it looks in the same default place the backend does.
+func TestANonDefaultConfigPathIsCalledOutForBothSteps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "elsewhere.toml")
+	p, out := scripted([]string{"", "", "", "", "", ""}, "s3cret-pw")
+
+	require.NoError(t, run(Options{Output: path}, p))
+
+	transcript := out.String()
+	assert.Contains(t, transcript, "NORITE_CONFIG_FILE="+path, "the backend needs pointing at it")
+	assert.Contains(t, transcript, "norite instance bootstrap --config "+path, "and so does bootstrap")
+}
+
+// The bug this closes: --public-base-url was only ever read inside the SMTP branch, so passing it without
+// also enabling a mail relay was accepted, silently dropped, and never written. Invisible until something
+// downstream needed the value — which is what happened when `norite instance bootstrap` arrived and had
+// nowhere to send its request.
+//
+// Four things build links from this value and only one of them is SMTP: reset mail (M5), OAuth callbacks
+// (M6), the device verification URI (M9), and bootstrap (M10).
+func TestThePublicBaseURLIsWrittenWithoutSMTP(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	p, _ := silent()
+
+	require.NoError(t, run(Options{
+		NonInteractive: true,
+		Output:         path,
+		DBPassword:     "pw",
+		PublicBaseURL:  "https://chat.example.com",
+	}, p))
+
+	http, ok := readBack(t, path)["http"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "https://chat.example.com", http["public_base_url"],
+		"a flag the command accepts must not be silently discarded")
+}
+
+// A --full run is offered the question even with no relay, which it was not before: the operator who
+// wants to be asked about everything is exactly the one who should be asked about this.
+func TestFullRunAsksForThePublicBaseURLWithoutSMTP(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	answers := []string{
+		"production", ":8080",
+		"https://chat.example.com", // public base url
+		"localhost", "5432", "norite", "norite", "disable",
+		"local", "/srv/attachments",
+		"no", // smtp
+		"no", // acme
+		"open",
+	}
+	p, out := scripted(answers, "db-pw")
+
+	require.NoError(t, run(Options{Full: true, Output: path}, p))
+
+	assert.Equal(t, 1, strings.Count(out.String(), "Public base URL"),
+		"asked once, and not again by the SMTP section")
+
+	http, ok := readBack(t, path)["http"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "https://chat.example.com", http["public_base_url"])
+}
+
+// An operator who declines SMTP is told what they are turning off, and told again in the summary — which
+// is the only one of the two a --non-interactive run ever prints.
+//
+// Both were missing when the code claiming them was written: the note mentioned only password reset, and
+// there was no summary line at all. A review caught the comment promising three warnings where one
+// existed. This is the downgrade nobody would otherwise discover, because it is a security posture rather
+// than a missing feature.
+func TestDecliningSMTPSaysWhatElseItTurnsOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.toml")
+	p, out := silent()
+
+	require.NoError(t, run(Options{NonInteractive: true, Output: path, DBPassword: "pw"}, p))
+
+	transcript := out.String()
+	assert.Contains(t, transcript, "address confirmation",
+		"the summary must say confirmation is off, not only password reset")
+	assert.Contains(t, transcript, "already has an account",
+		"and that registration can no longer hide whether an address is taken")
 }

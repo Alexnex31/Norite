@@ -179,10 +179,11 @@ func Command() *cli.Command {
 
 // GroupCommand builds the `norite instance` command group that init lives under. Later milestones hang the
 // rest of the instance-administration commands here.
-func GroupCommand() *cli.Command {
+func GroupCommand(commands ...*cli.Command) *cli.Command {
+	commands = append([]*cli.Command{Command()}, commands...)
 	return &cli.Command{
 		Name:     "instance",
 		Usage:    "Administer this Norite instance",
-		Commands: []*cli.Command{Command()},
+		Commands: commands,
 	}
 }

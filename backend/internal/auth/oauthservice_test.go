@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/backend/internal/mail"
 )
 
 // oauthService builds a service wired to a stub provider, so a flow can be driven end to end without
@@ -150,53 +153,96 @@ func TestASecondSignInUsesTheLinkNotTheEmail(t *testing.T) {
 	assert.Equal(t, user.ID, int64(actor.UserID))
 }
 
-// The linking rule's other half, and the half that was missing.
+// The linking rule's other half, reworked at M10.
 //
-// An unverified address matching *nothing* used to mint a signup token, render "choose your username", and
-// then refuse every submission — parseOAuthSignupToken rejects an unverified claim, so the form was a dead
-// end that no amount of retrying escaped. Refusing at the callback is both the honest answer and the
-// correct one: the account would have recorded the address as verified.
-func TestAnUnverifiedAddressCannotStartASignup(t *testing.T) {
-	t.Run("google", func(t *testing.T) {
+// Until M10 an unverified address was refused whether or not it matched an account, and the two refusals
+// were merged into one message precisely so the answer could not report which. That message was the only
+// thing standing between the instance and an enumeration oracle, because anyone can present any address at
+// a provider that does not verify it — GitHub permits it for every address.
+//
+// M10 turns the refusal into a detour: the sign-up proceeds, but by mail. What must not change is that the
+// browser still cannot tell the two cases apart.
+func TestAnUnverifiedProviderAddressGoesByMailWhicheverCaseItIs(t *testing.T) {
+	// The address belongs to nobody: a sign-up may proceed, and the link that resumes it is mailed rather
+	// than rendered.
+	t.Run("unknown address", func(t *testing.T) {
 		svc, stub := oauthService(t, RegistrationOpen)
+		mailer := &fakeMailer{}
+		svc.mailer = mailer
+		svc.publicBaseURL = "https://chat.example.com"
 		stub.asGoogle("google-99", "newcomer@example.com", false)
 
 		outcome, err := signIn(t, svc, stub, "google")
-		require.ErrorIs(t, err, ErrOAuthEmailUnverified)
-		assert.Empty(t, outcome.SignupToken, "a sign-up that cannot be completed must never be offered")
+		require.NoError(t, err)
+		assert.True(t, outcome.CheckYourEmail)
+		assert.Empty(t, outcome.SignupToken, "the token must travel by mail, not to the browser")
 
+		msg := mailer.only(t, mail.KindEmailVerification)
+		assert.Equal(t, "newcomer@example.com", msg.To)
+		assert.Contains(t, msg.Body, "/oauth/continue?token=")
+		assert.Contains(t, msg.Body, "Google", "the mail must name the provider")
+
+		// Nothing is written until that link is followed, exactly as on the verified path.
 		var users int
 		require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
-		assert.Zero(t, users, "a refused sign-up must not create an account")
+		assert.Zero(t, users)
 	})
 
-	// The path that makes this reachable in production: GitHub reports every address unverified, which
-	// pickGitHubEmail deliberately passes through rather than discarding.
-	t.Run("github with nothing verified", func(t *testing.T) {
+	// The address already has an account: nothing is created and nothing is linked, and the owner is
+	// warned. This is the takeover direction and no mail changes who controls the provider account.
+	t.Run("address belongs to an account", func(t *testing.T) {
 		svc, stub := oauthService(t, RegistrationOpen)
-		stub.githubUser = map[string]any{"id": 4242, "login": "ada"}
-		stub.githubEmails = []map[string]any{{"email": "ada@example.com", "primary": true, "verified": false}}
+		mailer := &fakeMailer{}
+		svc.mailer = mailer
+		svc.publicBaseURL = "https://chat.example.com"
+		registerAndLogin(t, svc, "ada@example.com", "laptop")
+		stub.asGoogle("google-1", "ada@example.com", false)
 
-		_, err := signIn(t, svc, stub, "github")
-		assert.ErrorIs(t, err, ErrOAuthEmailUnverified)
+		outcome, err := signIn(t, svc, stub, "google")
+		require.NoError(t, err)
+		assert.True(t, outcome.CheckYourEmail)
+
+		msg := mailer.only(t, mail.KindRegistrationNotice)
+		assert.Equal(t, "ada@example.com", msg.To)
+		assert.NotContains(t, msg.Body, "/oauth/continue", "there is nothing to continue, and no link to offer")
+
+		// No identity was linked, which is the property the whole branch exists for.
+		var identities int
+		require.NoError(t, svc.pool.QueryRow(t.Context(),
+			"SELECT count(*) FROM oauth_identities").Scan(&identities))
+		assert.Zero(t, identities)
 	})
 
-	// ...and it is byte-for-byte the answer an address that *does* belong to an account gets. Two messages
-	// is the obvious design and it reports whether an address is registered to anyone who can present it
-	// unverified at a provider — which GitHub permits for any address at all.
-	t.Run("indistinguishable from the refusal for a registered address", func(t *testing.T) {
+	// The property that ties the two together, and the one ADR 0024's merged message used to carry: what
+	// reaches the browser is identical, so presenting an address unverified at a provider says nothing
+	// about whether it has an account here.
+	t.Run("the browser cannot tell them apart", func(t *testing.T) {
 		svc, stub := oauthService(t, RegistrationOpen)
+		mailer := &fakeMailer{}
+		svc.mailer = mailer
+		svc.publicBaseURL = "https://chat.example.com"
+
 		stub.asGoogle("google-1", "stranger@example.com", false)
-		_, unknown := signIn(t, svc, stub, "google")
+		unknown, err := signIn(t, svc, stub, "google")
+		require.NoError(t, err)
 
 		registerAndLogin(t, svc, "ada@example.com", "laptop")
 		stub.asGoogle("google-2", "ada@example.com", false)
-		_, registered := signIn(t, svc, stub, "google")
+		registered, err := signIn(t, svc, stub, "google")
+		require.NoError(t, err)
 
-		require.ErrorIs(t, unknown, ErrOAuthEmailUnverified)
-		require.ErrorIs(t, registered, ErrOAuthEmailUnverified)
-		assert.Equal(t, unknown.Error(), registered.Error(),
-			"the answer must not report whether an address belongs to an account")
+		assert.Equal(t, unknown, registered,
+			"the outcome must not report whether the address belongs to an account")
+	})
+
+	// An instance with no relay cannot send the difference and cannot verify anything, so M6's refusal is
+	// still the honest answer there — and it is still one message for both cases.
+	t.Run("no relay keeps the refusal", func(t *testing.T) {
+		svc, stub := oauthService(t, RegistrationOpen)
+		stub.asGoogle("google-99", "newcomer@example.com", false)
+
+		_, err := signIn(t, svc, stub, "google")
+		assert.ErrorIs(t, err, ErrOAuthEmailUnverified)
 	})
 }
 
@@ -968,7 +1014,7 @@ func TestAPasswordResetRevokesOutstandingExchangeCodes(t *testing.T) {
 
 	require.NoError(t, svc.RequestPasswordReset(t.Context(), "ada@example.com"))
 	require.NoError(t, svc.ConfirmPasswordReset(t.Context(),
-		tokenFromLink(t, mailer.only(t)), "a new passphrase entirely"))
+		tokenFromLink(t, mailer.only(t, mail.KindPasswordReset)), "a new passphrase entirely"))
 
 	// Redeemed with the correct verifier, so what refuses it is the revocation and nothing else.
 	_, err = svc.ExchangeOAuthCode(t.Context(), outcome.ExchangeCode, verifier,
@@ -1016,4 +1062,108 @@ func TestExpiredRowsAreSweptAndLiveOnesAreNot(t *testing.T) {
 	sweptCodes, err := svc.queries.DeleteExpiredOAuthExchangeCodes(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), sweptCodes)
+}
+
+// A gated instance must not be turned into a way to mail an arbitrary address.
+//
+// The detour used to run before the registration-mode check, so presenting any address at a provider that
+// does not verify it made a closed instance send an unauthenticated "finish creating your account" link to
+// it — and following that link dead-ended after a username was submitted. Found by review; the gate now
+// comes first.
+func TestAGatedInstanceSendsNoMailForAnUnverifiedProviderAddress(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationInvite)
+	mailer := &fakeMailer{}
+	svc.mailer = mailer
+	svc.publicBaseURL = "https://chat.example.com"
+	stub.asGoogle("google-99", "stranger@example.com", false)
+
+	_, err := signIn(t, svc, stub, "google")
+	assert.ErrorIs(t, err, ErrOAuthRegistrationClosed)
+	assert.Zero(t, mailer.count(mail.KindEmailVerification),
+		"a closed instance must not mail a sign-up link to an address somebody typed at a provider")
+	assert.Zero(t, mailer.count(mail.KindRegistrationNotice))
+}
+
+// The detour, driven past the mail to an actual account — which is what nobody checked.
+//
+// The existing test asserted the link was queued and stopped there, on a "nothing is written *yet*"
+// assertion where "yet" never arrived. It never did: the mailed token was minted with an empty
+// destination, so its flow challenge was empty, and parseOAuthSignupToken refuses one — every completion
+// failed with "this sign-up has expired". Fail-closed, and a feature that could not succeed for anybody.
+// Found by a security review.
+func TestTheMailedSignUpLinkActuallyCreatesTheAccount(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	mailer := &fakeMailer{}
+	svc.mailer = mailer
+	svc.publicBaseURL = "https://chat.example.com"
+	stub.asGoogle("google-99", "newcomer@example.com", false)
+
+	_, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+
+	// Nothing yet, which is the property the old test stopped at.
+	var users int
+	require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
+	require.Zero(t, users)
+
+	// Pull the token out of the link exactly as a person clicking it would.
+	msg := mailer.only(t, mail.KindEmailVerification)
+	_, after, found := strings.Cut(msg.Body, "/oauth/continue?token=")
+	require.True(t, found, "the mail must carry a resumable link:\n%s", msg.Body)
+	token, _, _ := strings.Cut(strings.TrimSpace(after), "\n")
+	token, err = url.QueryUnescape(token)
+	require.NoError(t, err)
+
+	result, err := svc.CompleteOAuthSignup(t.Context(), token, "newcomer")
+	require.NoError(t, err, "the mailed link must be completable")
+	assert.NotZero(t, result.UserID)
+	assert.True(t, result.ByMail)
+	assert.Empty(t, result.ExchangeCode,
+		"nobody is waiting on a code — the flow that produced this ended at 'check your email'")
+
+	// The account and its identity both exist, so signing in with the provider now takes the
+	// already-linked path.
+	require.NoError(t, svc.pool.QueryRow(t.Context(), "SELECT count(*) FROM users").Scan(&users))
+	assert.Equal(t, 1, users)
+	var identities int
+	require.NoError(t, svc.pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM oauth_identities").Scan(&identities))
+	assert.Equal(t, 1, identities)
+
+	// The address is verified, and that is the point of the whole detour: the link went to it and
+	// somebody opened it, which is control of the mailbox — the evidence the provider declined to give.
+	// Anything else creates an account nobody can use and mails a second confirmation to an address that
+	// has just confirmed itself.
+	var verified bool
+	require.NoError(t, svc.pool.QueryRow(t.Context(),
+		"SELECT email_verified_at IS NOT NULL FROM users LIMIT 1").Scan(&verified))
+	assert.True(t, verified, "opening the mailed link is the confirmation")
+
+	assert.Equal(t, 1, mailer.count(mail.KindEmailVerification),
+		"no second confirmation may be sent to an address that just confirmed itself")
+}
+
+// The waiver is for the mailed variant and nothing else. A token that merely lost its challenge must still
+// be refused, which is what the guard is for.
+func TestOnlyTheMailedVariantMayCarryNoBinding(t *testing.T) {
+	svc, _ := oauthService(t, RegistrationOpen)
+
+	identity := OAuthIdentity{
+		Provider: ProviderGoogle, UserID: "google-1",
+		Email: "someone@example.com", EmailVerified: true, DisplayName: "Someone",
+	}
+
+	// Minted the ordinary way but with no destination — the shape the mailed token used to have.
+	unbound, err := svc.issueOAuthSignupToken(identity, oauthDestination{})
+	require.NoError(t, err)
+	_, err = svc.parseOAuthSignupToken(unbound)
+	assert.ErrorIs(t, err, ErrOAuthSignupToken,
+		"a token that lost its binding must still be refused")
+
+	// The mailed variant, which declares itself unbound inside the signature.
+	mailed, err := svc.issueMailedOAuthSignupToken(identity)
+	require.NoError(t, err)
+	continuation, err := svc.parseOAuthSignupToken(mailed)
+	require.NoError(t, err)
+	assert.True(t, continuation.ByMail)
 }

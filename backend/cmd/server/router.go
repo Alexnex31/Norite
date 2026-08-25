@@ -160,55 +160,93 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			// where a user code is guessed at, and /device/signin takes a password. Both are exactly the
 			// kind of endpoint that bucket exists for.
 			opts.Auth.DevicePageRoutes(r)
+			// The email-verification page, same bucket: POST /verify spends a token, and the page is
+			// reachable by anyone holding a link.
+			opts.Auth.VerifyPageRoutes(r)
 		})
 	}
 
 	r.Route(apiBase, func(r chi.Router) {
-		// Authenticate resolves a Bearer credential into an actor for every request below this point. It
-		// rejects nothing on its own — each route decides whether it needs one — so public and protected
-		// routes can coexist without an exemption list (see auth.Authenticate).
-		if opts.AuthSvc != nil {
-			r.Use(auth.Authenticate(opts.AuthSvc))
-		}
-
+		// Instance administration, mounted as a sibling of the group below rather than inside it.
+		//
+		// That placement is the point. Everything in the group below runs auth.Authenticate, which routes
+		// a Bearer credential by prefix to one of two account verifiers; an operator token must never be
+		// one of the things it can land on, because an operator names no account and Actor has nowhere to
+		// put it. Mounting /instance outside that chain means "can an operator token authenticate an
+		// ordinary request" is answered by the router — structurally, once — rather than by a `typ` check
+		// in each verifier remembering to be there.
+		//
+		// AuthenticateInstanceAdmin rejects on its own, unlike Authenticate. There is no public route
+		// under /instance and there is not going to be one, so the exemption-list argument that keeps
+		// Authenticate permissive does not apply here.
+		//
+		// The stricter bucket, for the reason /auth carries it: bootstrap runs argon2id, and it is the one
+		// endpoint on the instance whose success is irreversible.
 		if opts.Auth != nil {
-			// The auth routes carry the stricter bucket *in addition to* the base limiter already applied
-			// on the root chain, so a credential-guessing run is counted twice and stopped by whichever
-			// ceiling it reaches first.
-			r.Route("/auth", func(r chi.Router) {
+			r.Route("/instance", func(r chi.Router) {
 				r.Use(authLimiter)
-				opts.Auth.Routes(r)
-				// OAuth sits in the same stricter bucket: /authorize mints a database row per call and
-				// /exchange spends a credential, so both are worth counting separately from ordinary API
-				// traffic.
-				opts.Auth.OAuthRoutes(r)
+				// Mounted whether or not a service is present. AuthenticateInstanceAdmin refuses
+				// everything when it has none, which keeps these routes visible to the contract test's
+				// route walk — that test builds a router with a nil service, and a conditional mount hid
+				// this whole group from rule 6's check.
+				r.Use(auth.AuthenticateInstanceAdmin(opts.AuthSvc))
+				opts.Auth.InstanceRoutes(r)
 			})
-			// The device-code endpoints, in two buckets rather than one, because the two halves have
-			// opposite shapes. Issuing mints a database row per call and happens once per sign-in, so it
-			// carries the stricter bucket for exactly the reason /authorize does. Polling is repetitive by
-			// design — twelve requests a minute at the documented interval — and the bucket that stops
-			// repetition would throttle a well-behaved client off the instance, so it counts separately.
-			r.Route("/auth/device", func(r chi.Router) {
-				r.Group(func(r chi.Router) {
-					r.Use(authLimiter)
-					opts.Auth.DeviceIssueRoutes(r)
-				})
-				r.Group(func(r chi.Router) {
-					r.Use(devicePollLimiter)
-					opts.Auth.DevicePollRoutes(r)
-				})
-			})
-			r.Route("/users", opts.Auth.UserRoutes)
 		}
 
-		r.Get("/healthz", opts.Health.Handler)
-		// chi registers GET and HEAD separately — a GET-only route answers HEAD with 405. Health probes
-		// (curl -I, several load balancers and CDNs) do use HEAD, so it gets the same handler; net/http
-		// discards the body for HEAD on its own.
-		r.Head("/healthz", opts.Health.Handler)
+		// Everything below resolves an account credential, inside an explicit group.
+		//
+		// A group rather than a bare r.Use on this router, because /instance above is a sibling that must
+		// not inherit it — and chi requires every Use to precede every route on the same mux, so a plain
+		// Use here would panic now that a route is registered before it. The group scopes the middleware
+		// to what it is actually for, which is what the sibling arrangement was asking for anyway.
+		r.Group(func(r chi.Router) {
+			// Authenticate resolves a Bearer credential into an actor for every request below this point.
+			// It rejects nothing on its own — each route decides whether it needs one — so public and
+			// protected routes can coexist without an exemption list (see auth.Authenticate).
+			if opts.AuthSvc != nil {
+				r.Use(auth.Authenticate(opts.AuthSvc))
+			}
 
-		// Domain routers mount here from Milestone M4 (auth) onward; the root rate limiter already
-		// covers them.
+			if opts.Auth != nil {
+				// The auth routes carry the stricter bucket *in addition to* the base limiter already applied
+				// on the root chain, so a credential-guessing run is counted twice and stopped by whichever
+				// ceiling it reaches first.
+				r.Route("/auth", func(r chi.Router) {
+					r.Use(authLimiter)
+					opts.Auth.Routes(r)
+					// OAuth sits in the same stricter bucket: /authorize mints a database row per call and
+					// /exchange spends a credential, so both are worth counting separately from ordinary API
+					// traffic.
+					opts.Auth.OAuthRoutes(r)
+				})
+				// The device-code endpoints, in two buckets rather than one, because the two halves have
+				// opposite shapes. Issuing mints a database row per call and happens once per sign-in, so it
+				// carries the stricter bucket for exactly the reason /authorize does. Polling is repetitive by
+				// design — twelve requests a minute at the documented interval — and the bucket that stops
+				// repetition would throttle a well-behaved client off the instance, so it counts separately.
+				r.Route("/auth/device", func(r chi.Router) {
+					r.Group(func(r chi.Router) {
+						r.Use(authLimiter)
+						opts.Auth.DeviceIssueRoutes(r)
+					})
+					r.Group(func(r chi.Router) {
+						r.Use(devicePollLimiter)
+						opts.Auth.DevicePollRoutes(r)
+					})
+				})
+				r.Route("/users", opts.Auth.UserRoutes)
+			}
+
+			r.Get("/healthz", opts.Health.Handler)
+			// chi registers GET and HEAD separately — a GET-only route answers HEAD with 405. Health probes
+			// (curl -I, several load balancers and CDNs) do use HEAD, so it gets the same handler; net/http
+			// discards the body for HEAD on its own.
+			r.Head("/healthz", opts.Health.Handler)
+
+			// Domain routers mount here from Milestone M4 (auth) onward; the root rate limiter already
+			// covers them.
+		})
 	})
 
 	return r, nil

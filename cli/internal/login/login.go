@@ -12,6 +12,8 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/Alexnex31/Norite/cli/internal/apiclient"
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 )
@@ -38,7 +40,7 @@ import (
 // address and a password are missing for the same reason and are fixed by different flags. A script that
 // omits either gets the same exit code, which is what lets it tell "I did not supply an input" apart from
 // "the credentials were wrong".
-var ErrNoTerminal = errors.New("this command needs an interactive terminal to ask its questions")
+var ErrNoTerminal = clierr.ErrNoTerminal
 
 // passwordEnvVar is the scripted way to supply a password.
 //
@@ -226,7 +228,7 @@ func (r *Runner) prepare() (session, error) {
 	// Said before anything is typed or any browser opens, never after: the point of a warning is to let
 	// someone stop. It covers both methods deliberately — an OAuth sign-in has no password to expose, and
 	// the exchange code and the token pair cross the same cleartext hop.
-	if looksLikeHTTP(instanceURL) {
+	if apiclient.LooksLikeHTTP(instanceURL) {
 		r.printf("Warning: %s is plain HTTP, so everything this sends — including your credentials —\n"+
 			"crosses the network unencrypted.\n", instanceURL)
 	}

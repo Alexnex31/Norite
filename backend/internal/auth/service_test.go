@@ -67,10 +67,28 @@ func registerAndLogin(t *testing.T, svc *Service, email, deviceID string) (db.Us
 		Password: testPassword,
 	})
 	require.NoError(t, err)
+	require.NotZero(t, user.ID, "registration must have created an account for this helper to be usable")
+
+	// Stand in for the person following the link in their mail.
+	//
+	// Needed because a service with a relay attached creates accounts unverified from M10 on, and every
+	// test using this helper is about something else — sessions, sweeps, tokens — and wants an account
+	// that can log in. Marking the column directly rather than driving the real flow keeps this helper
+	// from depending on a mailer it was not given; the flow itself is tested in verification_test.go.
+	verifyForTest(t, svc, user.ID)
 
 	pair, err := svc.Login(ctx, LoginInput{Email: email, Password: testPassword, DeviceID: deviceID})
 	require.NoError(t, err)
 	return user, pair
+}
+
+// verifyForTest marks an account's address verified, whatever route created it.
+func verifyForTest(t *testing.T, svc *Service, userID int64) {
+	t.Helper()
+
+	_, err := svc.pool.Exec(t.Context(),
+		"UPDATE users SET email_verified_at = now() WHERE id = $1 AND email_verified_at IS NULL", userID)
+	require.NoError(t, err)
 }
 
 // ---------- M4 done-when #1: a valid password yields an access + refresh pair ----------
@@ -127,14 +145,34 @@ func TestLoginOnAnUnknownAccountFailsIdentically(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidCredentials)
 }
 
-func TestRegisterRejectsADuplicateEmail(t *testing.T) {
+// Registering a taken address is accepted rather than refused, which is M10 closing the one
+// account-existence oracle this API had.
+//
+// Until M10 this answered 409 "that email is already registered", so anyone could probe any address. It
+// did so because there was no way to accept the registration and sort it out by mail — which is what email
+// verification now provides. The full indistinguishability (status, body, timing) is asserted over HTTP in
+// cmd/server; what this pins is the service-level half: no error, and no second account.
+func TestRegisteringATakenAddressIsAccepted(t *testing.T) {
 	svc, _ := newService(t, RegistrationOpen)
 	registerAndLogin(t, svc, "ada@example.com", "laptop")
 
-	_, err := svc.Register(t.Context(), RegisterInput{
+	user, err := svc.Register(t.Context(), RegisterInput{
 		Username: "ada2", Email: "ada@example.com", Password: testPassword,
 	})
-	assert.ErrorIs(t, err, ErrEmailTaken)
+	require.NoError(t, err, "a taken address must not be reported to the caller")
+	assert.Zero(t, user.ID, "and no account may be created for it")
+
+	// The username *is* consumed, and this assertion is the reverse of what it first said.
+	//
+	// "The username was not consumed either, so whoever actually wanted it can still have it" was the
+	// original wording, and it was encoding the bug as a feature: a taken address leaving the username free
+	// while a fresh one occupies it is precisely the difference two requests read to enumerate addresses.
+	// The reservation costs a name that nobody had claimed, which is the price of the two branches leaving
+	// the same state. See migration 000011.
+	_, err = svc.Register(t.Context(), RegisterInput{
+		Username: "ada2", Email: "someone-else@example.com", Password: testPassword,
+	})
+	assert.ErrorIs(t, err, ErrUsernameTaken)
 }
 
 // citext is what makes this true in the database rather than in whichever query remembered to lower().
@@ -147,10 +185,13 @@ func TestEmailAndUsernameUniquenessAreCaseInsensitive(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, ErrUsernameTaken)
 
-	_, err = svc.Register(t.Context(), RegisterInput{
+	// The address half is case-insensitive too, but from M10 it is no longer *reported* — a taken address
+	// is accepted silently. What proves citext is still doing its job is that no second account appears.
+	user, err := svc.Register(t.Context(), RegisterInput{
 		Username: "someoneelse", Email: "ADA@Example.COM", Password: testPassword,
 	})
-	assert.ErrorIs(t, err, ErrEmailTaken)
+	require.NoError(t, err)
+	assert.Zero(t, user.ID, "a differently-cased address is the same address, so no account is created")
 }
 
 // The decision recorded for M4: an instance configured for invite-only registration refuses outright rather
@@ -161,7 +202,7 @@ func TestRegistrationIsRefusedWhenTheInstanceIsInviteOnly(t *testing.T) {
 	_, err := svc.Register(t.Context(), RegisterInput{
 		Username: "ada", Email: "ada@example.com", Password: testPassword,
 	})
-	assert.ErrorIs(t, err, ErrRegistrationClosed)
+	assert.ErrorIs(t, err, ErrInviteRequired)
 }
 
 // ---------- refresh rotation ----------

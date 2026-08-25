@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/instance-invite.schema.json",
+  "title": "norite instance invite --json",
+  "description": "The machine-readable output of `norite instance invite create`, `list` and `revoke`. Versioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit.\n\nThis shape is the CLI's, not the instance's. The REST response it is built from carries the same information, and it is deliberately re-declared here rather than passed through \u2014 a scripted caller's input must not change because an instance renamed a field.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/invite",
+      "title": "create"
+    },
+    {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/invite"
+      },
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/revoked",
+      "title": "revoke"
+    }
+  ],
+  "$defs": {
+    "invite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "created_by",
+        "max_uses",
+        "uses",
+        "expires_at",
+        "created_at"
+      ],
+      "description": "One invite. Every nullable field is present and explicitly null rather than omitted, so a caller reads the same keys whichever kind of invite it is.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 16,
+          "pattern": "^[BCDFGHJKMNPQRSTVWXYZ]{16}$",
+          "description": "The code, in the form the instance issued it. Sixteen characters with no vowels and no `L` \u2014 so a code is unlikely to spell anything and cannot be misread for `1` or `I`. Registration normalises case, spaces and dashes away, so it may be presented however is convenient."
+        },
+        "created_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Snowflake ID of the administrator who issued it, as a decimal string, or null when the instance operator did \u2014 the operator is not an account and has no ID to record."
+        },
+        "max_uses": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "How many accounts may be created with it, or null for unlimited. Null rather than 0, because 0 would read as an invite with no uses left."
+        },
+        "uses": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many accounts have been created with it so far."
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "RFC 3339 timestamp, or null if it never expires."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 timestamp."
+        }
+      }
+    },
+    "revoked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revoked"
+      ],
+      "properties": {
+        "revoked": {
+          "type": "string",
+          "description": "The code that was revoked, as it was given on the command line. Sent to the instance in a request body rather than a path, so it never reaches the instance's request log."
+        }
+      }
+    }
+  }
+}

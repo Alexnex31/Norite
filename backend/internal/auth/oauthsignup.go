@@ -56,6 +56,18 @@ type oauthSignupClaims struct {
 	// future path which mints one differently cannot silently skip the check.
 	EmailVerified bool   `json:"evf"`
 	DisplayName   string `json:"nam"`
+	// ByMail marks the one variant that carries no client binding: a sign-up whose provider would not
+	// vouch for the address, delivered as a link in an email rather than rendered to a browser that just
+	// completed a flow.
+	//
+	// It exists so the "no usable binding" refusal below stays in force for every *other* token and is
+	// waived only for one this service deliberately minted unbound. Reading emptiness as permission
+	// would waive it for any token that lost its challenge, which is the case the refusal is for.
+	//
+	// There is nothing to bind to: nobody is waiting. The flow that produced it ended at "check your
+	// email" minutes or days ago, and whoever opens the link is proving control of the mailbox, which is
+	// the evidence the provider declined to give and the only evidence this path ever had.
+	ByMail bool `json:"eml_only,omitempty"`
 	// FlowChallenge carries the client binding across the username step.
 	//
 	// The signup path is the one place a flow's binding could be lost: the callback ends on a form, and the
@@ -94,10 +106,28 @@ type oauthSignupContinuation struct {
 	ClientRedirectURI string
 	// DeviceCodeID is the authorization waiting on this sign-up, or zero.
 	DeviceCodeID int64
+	// ByMail marks the variant delivered as a link in an email, which has no client waiting on it and
+	// therefore mints no exchange code. See the claim of the same name.
+	ByMail bool
 }
 
 // issueOAuthSignupToken mints the token that stands in for an account that does not exist yet.
 func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, dest oauthDestination) (string, error) {
+	return s.signOAuthSignupToken(identity, dest, false)
+}
+
+// issueMailedOAuthSignupToken mints the variant that travels in an email, for a sign-up whose provider
+// would not vouch for the address.
+//
+// Unbound by construction: the flow that produced it ended at "check your email", and whoever opens the
+// link is proving control of the mailbox rather than continuing a session. Marked as such inside the
+// signature so parseOAuthSignupToken can waive the binding for this token and no other.
+func (s *Service) issueMailedOAuthSignupToken(identity OAuthIdentity) (string, error) {
+	return s.signOAuthSignupToken(identity, oauthDestination{}, true)
+}
+
+func (s *Service) signOAuthSignupToken(identity OAuthIdentity, dest oauthDestination, byMail bool,
+) (string, error) {
 	now := s.now()
 
 	deviceCode := ""
@@ -115,6 +145,7 @@ func (s *Service) issueOAuthSignupToken(identity OAuthIdentity, dest oauthDestin
 			ID:        newJTI(),
 		},
 		TokenType:      oauthSignupTokenType,
+		ByMail:         byMail,
 		Provider:       string(identity.Provider),
 		Email:          identity.Email,
 		EmailVerified:  identity.EmailVerified,
@@ -154,18 +185,29 @@ func (s *Service) parseOAuthSignupToken(raw string) (oauthSignupContinuation, er
 	if !ValidOAuthProvider(claims.Provider) || claims.Subject == "" || claims.Email == "" {
 		return oauthSignupContinuation{}, ErrOAuthSignupToken
 	}
-	// A token minted without a verified address should not exist, since resolveOAuthIdentity refuses that
-	// case before ever getting here. Checked anyway: this is the one place the linking rule could be
-	// bypassed by a future caller, and the cost of the check is a comparison.
-	if !claims.EmailVerified {
-		return oauthSignupContinuation{}, ErrOAuthSignupToken
-	}
+	// EmailVerified is carried, not required. Until M10 a token without it was refused here as a
+	// backstop on the linking rule; from M10 a sign-up with an unverified address is a legitimate flow —
+	// the account is created unverified and this instance confirms the address itself.
+	//
+	// The linking rule is unaffected, and it is worth being explicit about why: this token can only ever
+	// produce a *new* account. CompleteOAuthSignup inserts a user and an identity together and never
+	// attaches an identity to a row it did not just create. The branch that attaches one to an existing
+	// account lives in resolveOAuthIdentity, never sees this token, and still refuses an unverified
+	// address.
 
 	// A token with no usable binding cannot produce a redeemable code, so it is refused here rather than
 	// allowed to create an account whose sign-in then fails.
-	challenge, err := ParseOAuthFlowChallenge(claims.FlowChallenge)
-	if err != nil {
-		return oauthSignupContinuation{}, ErrOAuthSignupToken
+	//
+	// Waived for the mail-delivered variant, which has no client to bind to by construction — and only
+	// for it, on the strength of a claim inside the signature rather than on the challenge being empty.
+	// That variant mints no exchange code either; see CompleteOAuthSignup.
+	var challenge TokenHash
+	if !claims.ByMail {
+		parsed, err := ParseOAuthFlowChallenge(claims.FlowChallenge)
+		if err != nil {
+			return oauthSignupContinuation{}, ErrOAuthSignupToken
+		}
+		challenge = parsed
 	}
 
 	// Re-validated rather than trusted, exactly as the challenge above is, and for the same reason its
@@ -197,6 +239,7 @@ func (s *Service) parseOAuthSignupToken(raw string) (oauthSignupContinuation, er
 		Challenge:         challenge,
 		ClientRedirectURI: redirect,
 		DeviceCodeID:      deviceCodeID,
+		ByMail:            claims.ByMail,
 	}, nil
 }
 

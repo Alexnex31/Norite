@@ -138,11 +138,49 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The provider would not vouch for the address, so the flow continues by mail rather than here.
+	//
+	// One page for both cases — the address is unknown, or it already has an account — because a browser
+	// that could tell them apart would answer "does this address have an account here" to anyone who
+	// presented it unverified at a provider. See Service.unverifiedProviderAddress.
+	if outcome.CheckYourEmail {
+		// A loopback client is a process waiting on this machine right now, and this flow is not going to
+		// finish here — it continues in a mailbox, possibly on another device, possibly tomorrow. Telling
+		// it to stop is the difference between a CLI that says something and one that sits out its whole
+		// timeout.
+		//
+		// The code is M8's existing email_unverified, unchanged and identical for both cases, so the
+		// loopback hop discloses no more than the page does.
+		if outcome.ClientRedirectURI != "" {
+			http.Redirect(w, r,
+				oauthReturnURL(outcome.ClientRedirectURI, url.Values{"error": {oauthErrEmailUnverified}}),
+				http.StatusFound)
+			return
+		}
+		h.renderPage(w, r, oauthCheckEmailTemplate, http.StatusOK, oauthPageData{Nonce: nonce})
+		return
+	}
+
 	h.renderPage(w, r, oauthSignupTemplate, http.StatusOK, oauthPageData{
 		Nonce:       nonce,
 		SignupToken: outcome.SignupToken,
 		Username:    outcome.SuggestedUsername,
 		Email:       outcome.Email,
+	})
+}
+
+// oauthContinue renders the username form from a link delivered by email.
+//
+// The entry point for a sign-up whose provider would not vouch for the address. Opening the link is the
+// evidence the provider declined to give — it proves control of the mailbox — and it is the only way this
+// form is reached on that path, which is what keeps the callback's two cases indistinguishable.
+//
+// The token is carried, not verified, exactly as the reset and verification pages carry theirs: checking
+// it here would report whether a link is live before anything is submitted.
+func (h *Handler) oauthContinue(w http.ResponseWriter, r *http.Request) {
+	h.renderPage(w, r, oauthSignupTemplate, http.StatusOK, oauthPageData{
+		Nonce:       httpx.NonceFrom(r.Context()),
+		SignupToken: r.URL.Query().Get("token"),
 	})
 }
 
@@ -166,6 +204,14 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 		// an existing one does. Which device is waiting came out of the signed token, not this form.
 		if result.DeviceCodeID != 0 {
 			h.renderDeviceApproval(w, r, result.DeviceCodeID, result.UserID)
+			return
+		}
+
+		// A sign-up that arrived by mail has no client waiting on a code, so there is none to show. The
+		// account exists and is linked; signing in from a client is the next step and takes the
+		// already-linked path.
+		if result.ByMail {
+			h.renderPage(w, r, oauthMailedDoneTemplate, http.StatusOK, oauthPageData{Nonce: nonce})
 			return
 		}
 
@@ -435,6 +481,41 @@ var oauthErrorTemplate = template.Must(template.New("oauth-error").Parse(`<!doct
 <body>
 <h1>Sign-in did not complete</h1>
 <p class="error">{{ .Error }}</p>
+</body>
+</html>
+`))
+
+var oauthCheckEmailTemplate = template.Must(template.New("oauth-check-email").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Check your email</title>
+<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+</head>
+<body>
+<h1>Check your email</h1>
+<p>Your provider could not confirm that this address belongs to you, so we have written to it instead.</p>
+<p class="note">Follow the link in that message to continue. If nothing arrives, the address may not be one
+this provider can share — sign in with a password instead.</p>
+</body>
+</html>
+`))
+
+var oauthMailedDoneTemplate = template.Must(template.New("oauth-mailed-done").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your account is ready</title>
+<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+</head>
+<body>
+<h1>Your account is ready</h1>
+<p>Confirming this address finished creating it, and your provider is linked.</p>
+<p class="note">Sign in from your client now — in a terminal that is
+<code class="code">norite login --provider google</code> or <code class="code">--provider github</code>,
+whichever you used here.</p>
 </body>
 </html>
 `))

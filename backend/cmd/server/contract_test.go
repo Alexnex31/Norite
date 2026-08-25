@@ -197,8 +197,12 @@ func TestOperationIDsAreUniqueAndPresent(t *testing.T) {
 //
 // The auth handler is built over a nil service on purpose: this test walks the route table and never
 // invokes a handler, and requiring a live database to check that the contract matches the router would make
-// a structural test container-dependent for no benefit. The nil service is why AuthSvc is left unset too —
-// with it nil the Authenticate middleware is not mounted, which does not affect which routes exist.
+// a structural test container-dependent for no benefit. AuthSvc is left unset for the same reason.
+//
+// That places a real constraint on the router, learned the hard way at M10: a route group mounted only
+// when AuthSvc is non-nil does not exist here, so it is invisible to both directions of this check and
+// rule 6 stops applying to it silently. Middleware may be conditional; routes may not. Anything needing a
+// service to decide access must fail closed on a nil one instead of declining to mount.
 func newTestRouterWithAuth(t *testing.T) http.Handler {
 	t.Helper()
 

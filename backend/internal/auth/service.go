@@ -51,7 +51,6 @@ const MaxDeviceIDLength = 128
 var (
 	ErrEmailTaken          = errors.New("that email is already registered")
 	ErrUsernameTaken       = errors.New("that username is already taken")
-	ErrRegistrationClosed  = errors.New("registration requires an invite code")
 	ErrInvalidRefreshToken = errors.New("invalid or expired refresh token")
 	ErrSessionReuse        = errors.New("refresh token was already used")
 	ErrUnknownScope        = errors.New("unknown scope")
@@ -150,12 +149,24 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}, nil
 }
 
+// errEmailTakenSilently is internal: the address already has an account, discovered either by the check
+// inside the transaction or by losing the unique constraint to a simultaneous registration.
+//
+// Never returned to a caller. Register turns it into the same silent success a new address produces,
+// because a distinguishable answer — from either route — is the enumeration oracle this milestone closed.
+// It rolls the transaction back, which is what leaves a redeemed invite unspent.
+var errEmailTakenSilently = errors.New("email taken")
+
 // RegisterInput is a registration request.
 type RegisterInput struct {
 	Username    string
 	Email       string
 	Password    string
 	DisplayName string
+	// InviteCode is required while the instance is gated and ignored while it is open. Ignored rather
+	// than rejected: a client that always sends one is not doing anything wrong, and an open instance
+	// refusing a stray code would make the two modes differ in a way no caller can predict.
+	InviteCode string
 }
 
 // Register creates an account.
@@ -164,11 +175,16 @@ type RegisterInput struct {
 // login needs a device_id, which registration has no business requiring — and fusing them would mean a
 // client that only wanted to create an account also had to invent a device identity.
 func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, error) {
-	// The gate comes first, before any validation work or database round trip: a closed instance should
+	// The gate comes first, before any validation work or database round trip: a gated instance should
 	// cost an attacker exactly one cheap rejection, and should not reveal through timing or error detail
 	// whether the email they tried is already registered.
-	if s.registrationMode != RegistrationOpen {
-		return db.User{}, ErrRegistrationClosed
+	//
+	// Only the *presence* of a code is checked here. Whether it is redeemable is decided inside the
+	// transaction below, together with the account insert — checking it here as well would spend a use
+	// on a registration that then failed its username check, burning somebody else's invite.
+	gated := s.registrationMode != RegistrationOpen
+	if gated && strings.TrimSpace(in.InviteCode) == "" {
+		return db.User{}, ErrInviteRequired
 	}
 
 	// Normalized and validated here rather than only by the handler's struct tags, so every caller gets
@@ -188,22 +204,18 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return db.User{}, err
 	}
 
-	// Uniqueness is checked here for a good error message and enforced by the UNIQUE constraints for
-	// correctness. The check alone would be a race — two simultaneous registrations both see the address as
-	// free — which is why the insert's constraint violation is also mapped below rather than trusted not to
-	// happen.
-	taken, err := s.queries.UserExistsByEmail(ctx, email)
-	if err != nil {
-		return db.User{}, fmt.Errorf("checking email availability: %w", err)
-	}
-	if taken {
-		return db.User{}, ErrEmailTaken
-	}
-	taken, err = s.queries.UserExistsByUsername(ctx, username)
+	// The username is public — it is an @handle, and any client that can look one up already discloses
+	// whether it is taken — so refusing here reveals nothing. Checked *before* the address, so a taken
+	// username is reported plainly rather than swallowed by the silence the address branch requires.
+	//
+	// "Unavailable" rather than "taken" is load-bearing: it consults reservations as well as accounts,
+	// and without that half this check was the last leg of the oracle the rest of this function closes.
+	// See migration 000011 and the reservation below.
+	unavailable, err := s.queries.UsernameUnavailable(ctx, username)
 	if err != nil {
 		return db.User{}, fmt.Errorf("checking username availability: %w", err)
 	}
-	if taken {
+	if unavailable {
 		return db.User{}, ErrUsernameTaken
 	}
 
@@ -212,20 +224,130 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		return db.User{}, fmt.Errorf("generating user ID: %w", err)
 	}
 
-	user, err := s.queries.CreateUser(ctx, db.CreateUserParams{
-		ID:           int64(id),
-		Username:     username,
-		Email:        email,
-		PasswordHash: &hash,
-		DisplayName:  displayName,
+	// An instance with no relay creates the account already verified — see the insert below.
+	verifiedOnCreation := pgtype.Timestamptz{}
+	if !s.VerificationRequired() {
+		verifiedOnCreation = timestamptz(s.now())
+	}
+
+	// Redemption, the insert and the verification token commit together, so a registration that fails
+	// part-way neither burns a use of somebody else's invite nor leaves a token behind for an account that
+	// does not exist.
+	var (
+		user db.User
+		msg  mail.Message
+	)
+	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+
+		// Redeemed *before* the address is looked at, which is the ordering a review found wrong the
+		// first time. With the address checked first, a taken one returned the silent 202 while a free
+		// one fell through to `invite_invalid` — so on a gated instance anybody could test any address
+		// with a made-up code, for free, without even spending an invite. Measured at 202 against 403.
+		//
+		// This way an unusable code is refused identically whatever the address, and the address branch
+		// below is reachable only by somebody who already holds a real invite.
+		if gated {
+			if err := redeemInvite(ctx, q, in.InviteCode); err != nil {
+				return err
+			}
+		}
+
+		// The address, and this is where the account-existence oracle used to be.
+		//
+		// Until M10 a taken address answered 409, so anyone could probe any address. It answered that way
+		// because there was no way to accept the registration and sort it out by mail — which is what
+		// email verification now provides. Both branches return the same nil, the handler answers 202
+		// either way, and what differs is which message goes to the address itself.
+		//
+		// Rolling back rather than returning early is what keeps the invite unspent: whoever holds it did
+		// nothing wrong, and burning a use because somebody typed an address that already exists would
+		// cost them the thing they were given.
+		taken, err := q.UserExistsByEmail(ctx, email)
+		if err != nil {
+			return fmt.Errorf("checking email availability: %w", err)
+		}
+		if taken {
+			return errEmailTakenSilently
+		}
+
+		user, err = q.CreateUser(ctx, db.CreateUserParams{
+			ID:           int64(id),
+			Username:     username,
+			Email:        email,
+			PasswordHash: &hash,
+			DisplayName:  displayName,
+			// Unverified when this instance can send mail, verified on creation when it cannot.
+			//
+			// The second is the accepted limitation M10 ships with. An instance with no relay cannot
+			// verify an address by any route, so requiring it would mean nobody could register at all —
+			// and the enumeration hole above stays open there regardless, since there is no mail to carry
+			// the difference. See VerificationRequired.
+			EmailVerifiedAt: verifiedOnCreation,
+		})
+		if err != nil {
+			// Lost the race the pre-checks cannot close: two registrations for the same address or name
+			// both pass their check and one loses at the constraint.
+			//
+			// The email case must come back as silence, not as a conflict. Reporting it would leave the
+			// oracle intact through a window — narrow, but reachable on purpose by firing two requests at
+			// once, which is not a hard attack to write. Reported as the taken branch is, minus the
+			// notice: the loser cannot tell whether the winner was itself or somebody else, and sending a
+			// second "somebody tried to register" mail for one attempt would be noise.
+			switch conflict := registerConflict(err); {
+			case errors.Is(conflict, ErrEmailTaken):
+				return errEmailTakenSilently
+			case conflict != nil:
+				return conflict
+			}
+			return fmt.Errorf("creating user: %w", err)
+		}
+
+		if s.VerificationRequired() {
+			msg, err = s.buildVerification(ctx, q, user)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
-		// Lost the race described above. Report it as the same conflict the pre-check would have — but only
-		// for the constraints that actually mean that; see registerConflict.
-		if conflict := registerConflict(err); conflict != nil {
-			return db.User{}, conflict
+		if errors.Is(err, errEmailTakenSilently) {
+			// Nothing was created and any invite was rolled back — so this branch has to claim the username
+			// some other way, or the two branches leave different state and two requests read the difference.
+			// That was the oracle a security review found still open after the response itself had been made
+			// uniform; migration 000011 carries the full account of it.
+			//
+			// Deliberately outside the transaction that just rolled back, and deliberately not fatal: the
+			// caller has already been answered, and a failed reservation costs one probe of exposure rather
+			// than a reason to behave differently — behaving differently is the whole thing being avoided.
+			if err := s.queries.ReserveUsername(ctx, username); err != nil {
+				logging.FromContext(ctx).Error().Err(err).
+					Msg("reserving a username for a registration that created no account failed")
+			}
+
+			// The notice is queued rather than sent inline, so this branch does the same amount of
+			// *blocking* work as the other one.
+			if s.mailer != nil && s.mailer.Enabled() {
+				if err := s.mailer.Enqueue(registrationNoticeMessage(s.publicBaseURL, email)); err != nil {
+					logging.FromContext(ctx).Warn().Err(err).
+						Msg("queueing a registration notice failed")
+				}
+			}
+			return db.User{}, nil
 		}
-		return db.User{}, fmt.Errorf("creating user: %w", err)
+		return db.User{}, err
+	}
+
+	// After the commit, never inside it — the ordering rule gateway dispatch follows (CLAUDE.md rule 5).
+	// A transaction that rolled back after the mail was queued would send a link to a token that does not
+	// exist, and to an account that does not either.
+	if msg.To != "" {
+		if err := s.mailer.Enqueue(msg); err != nil {
+			logging.FromContext(ctx).Warn().Err(err).
+				Str("user_id", snowflake.ID(user.ID).String()).
+				Msg("queueing a verification email failed")
+		}
 	}
 	return user, nil
 }
@@ -289,6 +411,28 @@ func (s *Service) verifyCredentials(ctx context.Context, rawEmail, password stri
 			return db.User{}, ErrInvalidCredentials
 		}
 		return db.User{}, err
+	}
+
+	// An unverified address is refused with the *same* answer a wrong password gets, and the check lives
+	// here rather than in Login for a reason found by review: the device verification page authenticates
+	// through this function too, and when the gate sat in Login that page handed out a full token pair on
+	// an account ordinary login refused. Anything that turns a password into a session comes through here,
+	// so this is the only place the gate cannot be walked around.
+	//
+	// Reporting it distinctly reopens the oracle registration closes, in two requests: register an address
+	// with a password of your choosing, then log in with it — if the address was free an account now
+	// exists with that password and the login says "unverified"; if it was taken nothing was created and
+	// it says "wrong password". Measured at 403 against 401 before this was written.
+	//
+	// So the difference goes where every other difference in this milestone goes: the mailbox. The person
+	// who owns the address gets a fresh link and an explanation; the caller gets the same refusal either
+	// way. The reminder follows the password check, so guessing at addresses queues nothing.
+	//
+	// A verified-by-creation account never reaches this: an instance with no relay marks accounts verified
+	// on creation, and every account predating M10 was backfilled by migration 000010.
+	if !user.EmailVerifiedAt.Valid {
+		s.remindToVerify(ctx, user)
+		return db.User{}, ErrInvalidCredentials
 	}
 	return user, nil
 }
