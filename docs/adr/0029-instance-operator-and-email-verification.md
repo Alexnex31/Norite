@@ -88,6 +88,14 @@ confirm.
 A taken **username** is still reported. A username is an `@handle`, public by construction and discoverable
 by any client that can look one up; an address is not. That asymmetry is deliberate.
 
+**Login had to become uniform too, and this was nearly missed.** Refusing an unverified account with its own
+message reopens the same oracle in two requests: register an address with a password of your choosing, then
+log in with it — if the address was free an account now exists with that password and the login says
+"unverified"; if it was taken nothing was created and it says "wrong password". Measured at 403 against 401
+before the fix. So an unverified account is refused exactly as a wrong password is, and a *correct* password
+on one queues a fresh link and an explanation to the address instead. Guessing at addresses queues nothing,
+because the mail follows the password check.
+
 Timing is part of the guarantee and is not automatic. `HashPassword` runs *before* the address check, so
 both branches pay argon2id's 64 MiB and tens of milliseconds — which swamps the single insert they differ
 by. Moving it below makes the taken branch ~1 ms against ~31 ms; a test fails on the ratio. The race the

@@ -894,10 +894,15 @@ changing a password. The page confirms by **form POST, never on GET**: a GET tha
 triggered by anything that follows links in mail — scanning gateways, chat-client previewers, antivirus —
 confirming an address the person never acted on and spending the link before they clicked it.
 
-An unverified account **cannot log in**, and is told so only *after* its password verifies. Before that the
-message would answer "is this address registered but unverified" to somebody who knows no password; after
-it, the caller has already proved they hold one. Migration `000010` backfills every pre-existing account as
-verified, because locking out every existing user is an outage delivered as a hardening.
+An unverified account **cannot log in**, and is refused with the *same* answer a wrong password gets.
+Reporting it distinctly is the obvious design and it reopens the oracle registration just closed, in two
+requests: register an address with a password of your choosing, then log in with it — if the address was
+free an account now exists with that password and the login says "unverified", and if it was taken nothing
+was created and the same login says "wrong password". So the difference goes where every other difference
+here goes: a correct password on an unverified account queues a fresh link and an explanation to the
+address, and the caller is told nothing either way. The mail follows only a *correct* password, so guessing
+at addresses queues nothing. Migration `000010` backfills every pre-existing account as verified, because
+locking out every existing user is an outage delivered as a hardening.
 
 **An instance with no SMTP relay creates accounts already verified**, and the enumeration hole stays open
 there. This is an accepted limitation, not an oversight: such an instance cannot verify an address by any

@@ -685,8 +685,10 @@ And on the instance-administration and registration side, from M10 (decisions in
 - **`HashPassword` runs before the address check**, and that ordering is the timing half of the guarantee.
   Moving it below makes the taken branch ~1 ms against ~31 ms. The unique-constraint race comes back as the
   same silence, because reporting it would leave the oracle reachable by firing two requests at once.
-- **Login refuses an unverified account only after the password verifies.** Before that the message answers
-  "is this address registered but unverified" to somebody who knows no password.
+- **Login refuses an unverified account exactly as it refuses a wrong password**, and mails a fresh link
+  instead. A distinct answer reopens the closed oracle in two requests: register an address with a password
+  you choose, then log in with it — 403 if the address was free, 401 if it was taken. Measured before the
+  test was written. The reminder follows only a *correct* password, so guessing at addresses queues nothing.
 - **An unverified provider address takes a detour, and both cases render one page.** If an unknown address
   showed a username form while a registered one was refused, the browser would answer the question ADR
   0024's merged message exists to refuse. The form moved behind a mailed link; linking to an *existing*

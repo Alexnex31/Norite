@@ -37,14 +37,6 @@ const EmailVerificationTTL = 24 * time.Hour
 
 // Verification errors.
 var (
-	// ErrEmailNotVerified means the account exists and the password was right, but the address has not
-	// been confirmed.
-	//
-	// Reported only *after* credentials check out. Before that it would be an oracle for "this address is
-	// registered but unverified"; after it, the caller has already proved they hold the password, so it
-	// discloses nothing they did not know.
-	ErrEmailNotVerified = errors.New("this account's email address has not been verified yet")
-
 	// ErrInvalidVerificationToken covers every way a verification link can fail: unknown, expired, already
 	// used, or issued to an address the account no longer has. One error because the client is told one
 	// thing.
@@ -355,5 +347,42 @@ func providerLinkNoticeMessage(baseURL, email string, provider OAuthProviderName
 			"If you have forgotten your password, you can reset it at:\n\n" +
 			"    " + strings.TrimSuffix(baseURL, "/") + "/reset\n\n" +
 			"If it was not you, there is nothing to do.\n",
+	}
+}
+
+// remindToVerify re-sends a verification link after a correct password on an unverified account.
+//
+// This is what keeps Login's refusal uniform. The caller is told the same thing a wrong password is told,
+// so the endpoint discloses nothing — and the person who actually owns the address, who is the only one
+// entitled to know, is told what happened and given a fresh link.
+//
+// Reached only after the password verified, so a wrong-password flood queues nothing at all. Each send
+// supersedes the account's previous token, so repeated attempts leave one live link rather than a pile.
+//
+// Every failure here is swallowed to a log. The caller has already been refused and nothing about that
+// refusal may depend on whether mail could be queued — a login that failed differently because the queue
+// was full would be the same oracle by another route.
+func (s *Service) remindToVerify(ctx context.Context, user db.User) {
+	if !s.VerificationRequired() {
+		return
+	}
+	log := logging.FromContext(ctx)
+
+	var msg mail.Message
+	err := database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		msg, err = s.buildVerification(ctx, s.queries.WithTx(tx), user)
+		return err
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("user_id", snowflake.ID(user.ID).String()).
+			Msg("issuing a verification token after an unverified sign-in failed")
+		return
+	}
+
+	msg.Body = "You tried to sign in, but this address has not been confirmed yet.\n\n" + msg.Body
+	if err := s.mailer.Enqueue(msg); err != nil {
+		log.Warn().Err(err).Str("user_id", snowflake.ID(user.ID).String()).
+			Msg("queueing a verification reminder failed")
 	}
 }

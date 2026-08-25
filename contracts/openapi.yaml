@@ -227,7 +227,20 @@ paths:
         "401":
           description: >
             Invalid email or password. Deliberately identical for every credential failure — see the
-            description above.
+            description above — and from M10 that includes a correct password on an address that has not
+            been confirmed yet.
+
+
+            A distinct answer for the unconfirmed case would reopen the account-existence oracle
+            `/auth/register` closes, in two requests: register an address with a password of your choosing
+            and then log in with it. If the address were free an account would now exist with that password
+            and the login would say "unconfirmed"; if it were taken nothing would have been created and the
+            same login would say "wrong password".
+
+
+            A correct password on an unconfirmed address queues a fresh confirmation link to that address
+            instead, so the person who owns it learns why they could not sign in. A wrong password queues
+            nothing, so this cannot be used to send mail to an address somebody is guessing at.
           content:
             application/json:
               schema:

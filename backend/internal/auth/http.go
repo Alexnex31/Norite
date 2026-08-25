@@ -473,16 +473,6 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		// legitimate client got there first.
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid or expired refresh token"))
 
-	case errors.Is(err, ErrEmailNotVerified):
-		// 403 rather than 401: the credentials were right, so re-sending them changes nothing and a 401
-		// would put a client into a retry loop. Its own code so a client can offer to resend the link.
-		httpx.WriteError(w, r, &httpx.StatusError{
-			Status:  http.StatusForbidden,
-			Code:    "email_not_verified",
-			Message: ErrEmailNotVerified.Error(),
-			Err:     err,
-		})
-
 	case errors.Is(err, ErrInviteRequired):
 		// `invite_required` rather than M4's `registration_closed`, which was accurate only while there
 		// was no way to redeem anything: registration is not closed on a gated instance, it has a

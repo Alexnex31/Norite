@@ -355,17 +355,24 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 		return TokenPair{}, err
 	}
 
-	// Checked *after* the credentials, and the order is the whole of its safety.
+	// An unverified account cannot sign in, and is refused with the *same* answer a wrong password gets.
 	//
-	// Before them, this message would be an oracle for "that address is registered but unverified" —
-	// answerable without knowing any password, which is precisely what the rest of this endpoint goes to
-	// some trouble to avoid. After them, the caller has already proved they hold the password, so being
-	// told the address needs confirming discloses nothing they did not know.
+	// Reporting it distinctly is the obvious design and it reopens the oracle registration just closed,
+	// in two requests. Register an address with a password of your choosing: if the address was free an
+	// account now exists with that password, so logging in returns "unverified"; if it was taken
+	// nothing was created, so the same login returns "wrong password". Measured before this was
+	// written — 403 against 401 — which makes any address testable by whoever bothers.
 	//
-	// A verified-by-creation account never reaches this: an instance with no relay marks accounts verified
-	// on creation, and every account that existed before M10 was backfilled by migration 000010.
+	// So the difference goes where every other difference in this milestone goes: the mailbox. Whoever
+	// controls the address gets a fresh link and an explanation, and the caller gets the same refusal
+	// either way. The mail is sent only when the password was *right*, so a wrong-password flood
+	// queues nothing, and each send supersedes the last token.
+	//
+	// A verified-by-creation account never reaches this: an instance with no relay marks accounts
+	// verified on creation, and every account predating M10 was backfilled by migration 000010.
 	if !user.EmailVerifiedAt.Valid {
-		return TokenPair{}, ErrEmailNotVerified
+		s.remindToVerify(ctx, user)
+		return TokenPair{}, ErrInvalidCredentials
 	}
 
 	return s.startSession(ctx, snowflake.ID(user.ID), deviceID, in.DeviceName, in.IP)

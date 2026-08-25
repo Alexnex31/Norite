@@ -109,30 +109,72 @@ func TestBothRegistrationBranchesDoTheExpensiveWork(t *testing.T) {
 		"nor an order of magnitude more expensive: taken=%v fresh=%v", taken, fresh)
 }
 
-// An unverified account cannot sign in, and is told why — after the password checks out, never before.
-func TestAnUnverifiedAccountCannotLogIn(t *testing.T) {
+// An unverified account cannot sign in, and is refused with the *same* answer a wrong password gets.
+//
+// The distinct answer is the obvious design and it reopens the oracle registration just closed, in two
+// requests: register an address with a password of your choosing, then log in with it. If the address was
+// free an account now exists with that password and the login says "unverified"; if it was taken nothing
+// was created and the same login says "wrong password". That was measured — 403 against 401 — before this
+// test was written, which is why it compares the two rather than asserting a nice message.
+func TestAnUnverifiedAccountIsRefusedLikeAWrongPassword(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	a.newAccount("ada", "ada@example.com", "laptop")
+
+	// The probe. Both registrations are accepted identically; the question is whether the logins are.
+	const probePassword = "a-password-the-prober-chose"
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "probe1", "email": "ada@example.com", "password": probePassword,
+	}).Code)
+	taken := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": "ada@example.com", "password": probePassword, "device_id": "d",
+	})
+
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "probe2", "email": "free@example.com", "password": probePassword,
+	}).Code)
+	free := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": "free@example.com", "password": probePassword, "device_id": "d",
+	})
+
+	assert.Equal(t, http.StatusUnauthorized, taken.Code, taken)
+	assert.Equal(t, taken.Code, free.Code, "two requests must not enumerate an address")
+	// Compared field by field: request_id is unique per request by design and is the only thing that may
+	// differ between two responses.
+	assert.Equal(t, taken.errorBody().Code, free.errorBody().Code, "nor may the code differ")
+	assert.Equal(t, taken.errorBody().Message, free.errorBody().Message, "nor the message")
+
+	// The difference goes to the mailbox, as everything else in this milestone does: the person who owns
+	// the address is told why they could not sign in, and given a fresh link.
+	reminder, ok := a.mail.lastOfKind(mail.KindEmailVerification)
+	require.True(t, ok)
+	assert.Equal(t, "free@example.com", reminder.To)
+	assert.Contains(t, reminder.Body, "not been confirmed")
+
+	// And confirming makes it work.
+	a.confirmAddress("free@example.com")
+	a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": "free@example.com", "password": probePassword, "device_id": "d",
+	})
+}
+
+// A wrong password on an unverified account queues nothing, so the reminder cannot be used to mail-bomb
+// somebody by guessing at their address.
+func TestAWrongPasswordOnAnUnverifiedAccountSendsNothing(t *testing.T) {
 	a := newAPI(t, auth.RegistrationOpen)
 
 	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register", map[string]string{
 		"username": "ada", "email": "ada@example.com", "password": testPassword,
 	}).Code)
+	before := a.mail.countOfKind(mail.KindEmailVerification)
 
-	refused := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
-		"email": "ada@example.com", "password": testPassword, "device_id": "laptop",
-	})
-	require.Equal(t, http.StatusForbidden, refused.Code, refused)
-	assert.Equal(t, "email_not_verified", refused.errorBody().Code)
-
-	// A wrong password on the same unverified account gets the ordinary credential refusal instead, which
-	// is what keeps the message above from being an oracle: it is reachable only by someone who already
-	// holds the password.
-	wrong := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
-		"email": "ada@example.com", "password": "not-the-right-password", "device_id": "laptop",
-	})
-	assert.Equal(t, http.StatusUnauthorized, wrong.Code, wrong)
-
-	a.confirmAddress("ada@example.com")
-	a.login("ada@example.com", "laptop")
+	for range 3 {
+		resp := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
+			"email": "ada@example.com", "password": "not-the-right-password", "device_id": "d",
+		})
+		require.Equal(t, http.StatusUnauthorized, resp.Code)
+	}
+	assert.Equal(t, before, a.mail.countOfKind(mail.KindEmailVerification),
+		"a reminder may only follow a correct password")
 }
 
 // The link works once. A leaked mail — forwarded, backed up, read from a shared mailbox — must not be
@@ -173,11 +215,12 @@ func TestOpeningTheVerificationPageDoesNotVerify(t *testing.T) {
 	opened := a.call(http.MethodGet, "/verify?token="+token, nil)
 	require.Equal(t, http.StatusOK, opened.Code, opened)
 
-	// Still cannot log in, because nothing was confirmed.
+	// Still cannot log in, because nothing was confirmed. Refused as a wrong password would be — see
+	// TestAnUnverifiedAccountIsRefusedLikeAWrongPassword for why that answer is uniform.
 	refused := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
 		"email": "ada@example.com", "password": testPassword, "device_id": "laptop",
 	})
-	assert.Equal(t, http.StatusForbidden, refused.Code, refused)
+	assert.Equal(t, http.StatusUnauthorized, refused.Code, refused)
 }
 
 // An instance with no relay cannot verify anything, so it creates accounts verified rather than refusing
