@@ -168,14 +168,15 @@ of this section.
 - **M12 — Guilds/channels/roles schema plus CRUD**: the core guild/channel/role tables and REST endpoints.
   `oapi-codegen` against `openapi.yaml` is wired up starting here — every REST endpoint from this point on is
   generated, not just documented. **First job here is that the contract does not currently generate**, which
-  is latent rather than new: `openapi.yaml` declares `openapi: 3.1.0` and expresses its three nullable
+  is latent rather than new: `openapi.yaml` declares `openapi: 3.1.0` and expresses its four nullable
   fields as 3.1 type unions (`type: [string, "null"]`), which `oapi-codegen` v2 does not support — it warns
   that 3.1 is unimplemented and fails on the first such field. Nothing has noticed because no milestone
   generates from the document yet; `cmd/server/contract_test.go` checks routes against the router, not
-  schemas. So M12 decides the version this project targets — downgrade to 3.0.x and use `nullable: true`,
-  which is what the tool recommends, or stay on 3.1 and wait — before it can generate anything. Done when: a
-  guild, its channels, and its roles can be created, read,
-  updated, and deleted via the REST API, matching the generated types.
+  schemas — and `contract_payload_test.go`, which reads real responses, checks the two payload properties
+  that were actually being got wrong rather than validating whole schemas. So M12 decides the version this
+  project targets — downgrade to 3.0.x and use `nullable: true`, which is what the tool recommends, or stay
+  on 3.1 and wait — before it can generate anything. Done when: a guild, its channels, and its roles can be
+  created, read, updated, and deleted via the REST API, matching the generated types.
 - **M13 — Permission engine**: `roles.Resolve`, the permission bitfield, overwrite resolution
   (`@everyone` → role → member), role `position` hierarchy enforcement. Done when: the permission-resolution
   algorithm's documented test cases (owner bypass, `PermAdministrator` short-circuit, overwrite precedence,
