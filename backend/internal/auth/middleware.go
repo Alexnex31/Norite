@@ -119,6 +119,70 @@ func RequireUserActor(next http.Handler) http.Handler {
 	})
 }
 
+// RequireLiveSession rejects a request whose own session has been signed out.
+//
+// # Why this is middleware and not a check inside three handlers
+//
+// It was three handlers, briefly, and that is how it shipped wrong. M11 added the check to
+// POST /auth/logout/all and DELETE /users/@me/sessions/{id} and missed POST /auth/tokens — so a device
+// somebody had just signed out could spend its remaining minutes minting an API token, which is not
+// session-scoped and therefore outlives the sign-out for good. The endpoint whose whole purpose is
+// creating a durable credential was the one the rule forgot.
+//
+// That is the same failure this milestone's own primitive exists to prevent — a rule written as N call
+// sites is a rule with N chances to miss one — committed against the guard while writing the primitive.
+// So the rule lives in one place and the set of routes it covers is visible in the router.
+//
+// # Where the line is
+//
+// Access tokens are stateless and are not checked against session state (docs/architecture.md §17.10),
+// because doing so means a database lookup on every authenticated request. That trade buys the ability to
+// *read* inside the window. It does not extend to changing the account's security state: revoking
+// sessions, or minting and revoking the credentials that outlive them. Mount this on those, and nowhere
+// else — every route it guards costs one indexed lookup, and the point of §17.10 is that the hot path
+// pays nothing.
+//
+// A *rotated* session is live. Rotation revokes the row an access token names, so liveness is asked of the
+// device, never of the row — see Service.requireLiveDevice.
+func RequireLiveSession(svc *Service) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			actor, ok := ActorFrom(r.Context())
+			if !ok {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="norite"`)
+				httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "authentication required"))
+				return
+			}
+
+			// Only a user actor carries a session. An API token has none, and the routes this guards
+			// already refuse one through RequireUserActor — so anything else here is left alone rather
+			// than guessed at.
+			if actor.Kind != ActorUser {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Fail closed on a service-less router, exactly as AuthenticateInstanceAdmin does and for the
+			// reason M10 learned: cmd/server/contract_test.go walks a router built with a nil service, so a
+			// guard that declined to mount there would be invisible to the checks that walk the route table.
+			if svc == nil {
+				httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "authentication required"))
+				return
+			}
+
+			if err := svc.requireLiveDevice(r.Context(), actor.UserID, actor.SessionID); err != nil {
+				if errors.Is(err, ErrSessionSignedOut) {
+					httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "%s", err.Error()))
+					return
+				}
+				httpx.WriteError(w, r, err)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // bearerCredential extracts the credential from the Authorization header.
 //
 // The scheme match is case-insensitive because RFC 9110 says scheme names are, and a client sending

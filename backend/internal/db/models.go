@@ -119,6 +119,7 @@ type Session struct {
 	ExpiresAt        pgtype.Timestamptz
 	RevokedAt        pgtype.Timestamptz
 	ReplacedByID     *int64
+	FirstSeen        pgtype.Timestamptz
 }
 
 type User struct {

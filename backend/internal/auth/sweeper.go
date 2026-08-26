@@ -36,6 +36,13 @@ import (
 // this reclaims space rather than enforcing anything.
 const SweepInterval = 10 * time.Minute
 
+// sessionSweepBatch bounds one DELETE against the sessions table.
+//
+// Large enough that a steady-state pass is a single statement — ten minutes of one busy device is under a
+// hundred rows — and small enough that the first pass over years of accumulated rotations cannot hold a
+// connection from a small pool for an unbounded time, nor write one enormous WAL record.
+const sessionSweepBatch = 5000
+
 // SweepResult counts what one pass removed.
 type SweepResult struct {
 	ResetTokens   int64
@@ -91,8 +98,23 @@ func (s *Service) SweepExpired(ctx context.Context) (SweepResult, error) {
 	if out.DeviceCodes, err = s.queries.DeleteExpiredDeviceCodes(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired device codes: %w", err)
 	}
-	if out.Sessions, err = s.queries.DeleteExpiredSessions(ctx); err != nil {
-		return out, fmt.Errorf("sweeping expired sessions: %w", err)
+	// Batched, because this is the one table with a backlog rather than a trickle — see the query. The loop
+	// stops as soon as a pass comes back short, so the steady state is a single statement deleting a
+	// handful of rows and only a first run after M11 ever goes round twice.
+	for {
+		n, err := s.queries.DeleteExpiredSessions(ctx, sessionSweepBatch)
+		if err != nil {
+			return out, fmt.Errorf("sweeping expired sessions: %w", err)
+		}
+		out.Sessions += n
+		if n < sessionSweepBatch {
+			break
+		}
+		// A canceled context means shutdown. Stop rather than start another batch; what is left is the
+		// next process's to finish, exactly as a failure part-way through would be.
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return out, nil
 }

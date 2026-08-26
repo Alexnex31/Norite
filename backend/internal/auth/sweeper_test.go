@@ -128,7 +128,7 @@ func TestExpiredSessionsAreSweptAndLiveOnesAreNot(t *testing.T) {
 		"UPDATE sessions SET expires_at = now() - interval '1 day' WHERE device_id = 'old-laptop'")
 	require.NoError(t, err)
 
-	swept, err := svc.queries.DeleteExpiredSessions(ctx)
+	swept, err := svc.queries.DeleteExpiredSessions(ctx, sessionSweepBatch)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, swept, "only the expired session may be removed")
 
@@ -155,7 +155,7 @@ func TestSweepingKeepsRevokedButUnexpiredSessions(t *testing.T) {
 	second, err := svc.Refresh(ctx, first.RefreshToken)
 	require.NoError(t, err)
 
-	swept, err := svc.queries.DeleteExpiredSessions(ctx)
+	swept, err := svc.queries.DeleteExpiredSessions(ctx, sessionSweepBatch)
 	require.NoError(t, err)
 	assert.Zero(t, swept, "a revoked row is not an expired one")
 
@@ -240,4 +240,43 @@ func TestTheSessionChainForeignKeyIsIndexed(t *testing.T) {
 
 	assert.True(t, indexed,
 		"without this index the sweep spends four hundred times as long in the FK trigger as in the delete")
+}
+
+// A backlog larger than one batch is drained across several statements, not one unbounded DELETE.
+//
+// This is the table that has never been swept, so the first pass after M11 faces everything an instance
+// has accumulated since M4 — and every deleted row fires the replaced_by_id RI trigger. Unbounded, that is
+// one statement holding a connection from a deliberately small pool for as long as it takes, with no
+// deadline to cancel it.
+func TestTheSessionSweepDrainsABacklogInBatches(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	ctx := t.Context()
+
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	// More than one batch of long-dead rotations.
+	_, err := svc.pool.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, device_id, refresh_token_hash, expires_at, created_at,
+		                      last_used_at, revoked_at, first_seen)
+		SELECT 900000 + i, $1, 'old-laptop', sha256(i::text::bytea),
+		       now() - interval '1 day', now() - interval '31 days',
+		       now() - interval '31 days', now() - interval '31 days', now() - interval '31 days'
+		FROM generate_series(1, $2) AS i`, user.ID, sessionSweepBatch+250)
+	require.NoError(t, err)
+
+	result, err := svc.SweepExpired(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, sessionSweepBatch+250, result.Sessions,
+		"the loop must keep going until the backlog is gone, not stop at one batch")
+
+	var left int
+	require.NoError(t, svc.pool.QueryRow(ctx,
+		`SELECT count(*) FROM sessions WHERE expires_at < now()`).Scan(&left))
+	assert.Zero(t, left)
+
+	// And the live session is untouched, which is the assertion that matters most here.
+	var live int
+	require.NoError(t, svc.pool.QueryRow(ctx,
+		`SELECT count(*) FROM sessions WHERE revoked_at IS NULL`).Scan(&live))
+	assert.Equal(t, 1, live)
 }

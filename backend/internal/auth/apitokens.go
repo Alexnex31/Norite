@@ -192,9 +192,12 @@ func (s *Service) AuthenticateAccessToken(_ context.Context, raw string) (Actor,
 	if err != nil {
 		return Actor{}, ErrInvalidToken
 	}
-	// A missing or malformed session claim is tolerated rather than fatal: it only weakens a future
-	// per-session revocation check (M11), and rejecting the token outright would break every token issued
-	// before that claim existed.
+	// A missing or malformed session claim is tolerated here rather than fatal, and M11 changed what that
+	// costs. It is no longer "weakens a future check": a zero SessionID resolves to no device, so
+	// RequireLiveSession refuses the request with "this session has been signed out" — which is untrue of a
+	// token whose session is fine but whose claim did not parse. The direction is safe (it refuses rather
+	// than admits) and the message is wrong, so anyone debugging one should look here first. Every token
+	// this instance issues has carried the claim since M4; the tolerance is for tokens that predate it.
 	sessionID, _ := claims.Session()
 
 	return Actor{Kind: ActorUser, UserID: userID, SessionID: sessionID}, nil

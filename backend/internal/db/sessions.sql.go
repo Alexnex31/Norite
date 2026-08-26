@@ -31,9 +31,10 @@ func (q *Queries) CountLiveSessionsForDevice(ctx context.Context, arg CountLiveS
 
 const createSession = `-- name: CreateSession :one
 
-INSERT INTO sessions (id, user_id, device_id, refresh_token_hash, device_name, ip_address, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id
+INSERT INTO sessions (id, user_id, device_id, refresh_token_hash, device_name, ip_address, expires_at,
+                      first_seen)
+VALUES ($1, $2, $3, $4, $5, $6, $7, coalesce($8::timestamptz, now()))
+RETURNING id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id, first_seen
 `
 
 type CreateSessionParams struct {
@@ -44,6 +45,7 @@ type CreateSessionParams struct {
 	DeviceName       *string
 	IpAddress        *netip.Addr
 	ExpiresAt        pgtype.Timestamptz
+	FirstSeen        pgtype.Timestamptz
 }
 
 // Refresh-session queries.
@@ -52,6 +54,8 @@ type CreateSessionParams struct {
 // two; reuse detection walks that link. Every one of these queries is scoped by user_id AND device_id
 // wherever it revokes, because revoking across devices is precisely the bug this schema exists to prevent
 // (docs/architecture.md §2, ADR 0011).
+// first_seen is the family's start and is carried forward by rotation, never recomputed — see 000013. A
+// fresh sign-in passes its own created_at; a rotation passes the predecessor's value along.
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
 	row := q.db.QueryRow(ctx, createSession,
 		arg.ID,
@@ -61,6 +65,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		arg.DeviceName,
 		arg.IpAddress,
 		arg.ExpiresAt,
+		arg.FirstSeen,
 	)
 	var i Session
 	err := row.Scan(
@@ -75,17 +80,20 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ReplacedByID,
+		&i.FirstSeen,
 	)
 	return i, err
 }
 
 const deleteExpiredSessions = `-- name: DeleteExpiredSessions :execrows
 DELETE FROM sessions
-WHERE expires_at < now()
+WHERE id IN (
+  SELECT id FROM sessions WHERE expires_at < now() LIMIT $1
+)
 `
 
-// Called by auth.RunSweeper. Non-partial index behind it and an index on replaced_by_id — see 000012, and
-// 000005 for why a partial one cannot serve this.
+// Called by auth.RunSweeper, in batches. Non-partial index behind it and an index on replaced_by_id — see
+// 000012, and 000005 for why a partial one cannot serve this.
 //
 // Expired only, never merely revoked, and the distinction is load-bearing. A revoked row is still
 // evidence: replaced_by_id is what lets a presented token be told apart as *replay* rather than as merely
@@ -93,8 +101,24 @@ WHERE expires_at < now()
 // their tokens could still be presented would turn a stolen token into an unrecognized one and quietly
 // disable the detection. Past expires_at nothing can be presented, so the evidence has nothing left to
 // prove.
-func (q *Queries) DeleteExpiredSessions(ctx context.Context) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteExpiredSessions)
+//
+// One consequence worth naming, because it is a behavior change rather than a neutral cleanup. Refresh
+// tests revoked_at and replaced_by_id *before* it tests expiry, so today presenting a long-expired rotated
+// token is detected as replay and revokes that device's whole family. Once the row is swept the same
+// presentation is merely an unknown token and the family survives. No access is granted either way — the
+// token is unredeemable in both — but a detection that fires now stops firing. Accepted: acting on a
+// month-old unredeemable token means logging a legitimate user out of every device on that machine on the
+// strength of a signal that cannot lead anywhere.
+//
+// Bounded, unlike the other six sweeps, because this table is unlike them. Theirs hold rows with TTLs of
+// minutes to an hour, so a ten-minute tick keeps them small. This one has never been swept at all: the
+// first pass on an instance running since M4 faces the entire backlog, every deleted row fires the
+// replaced_by_id RI trigger, and RunSweeper passes the process context with no deadline. Unbounded, that
+// is one statement holding a connection from a deliberately small pool (§15.3) for as long as it takes,
+// uncancellable short of shutdown. The loop in SweepExpired calls this until it returns less than the
+// limit, so a large backlog is drained across several bounded statements instead of one unbounded one.
+func (q *Queries) DeleteExpiredSessions(ctx context.Context, limit int32) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredSessions, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -102,7 +126,7 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context) (int64, error) {
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
-SELECT id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id FROM sessions
+SELECT id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id, first_seen FROM sessions
 WHERE id = $1
 `
 
@@ -128,12 +152,13 @@ func (q *Queries) GetSessionByID(ctx context.Context, id int64) (Session, error)
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ReplacedByID,
+		&i.FirstSeen,
 	)
 	return i, err
 }
 
 const getSessionByRefreshTokenHash = `-- name: GetSessionByRefreshTokenHash :one
-SELECT id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id FROM sessions
+SELECT id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id, first_seen FROM sessions
 WHERE refresh_token_hash = $1
 `
 
@@ -155,6 +180,7 @@ func (q *Queries) GetSessionByRefreshTokenHash(ctx context.Context, refreshToken
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ReplacedByID,
+		&i.FirstSeen,
 	)
 	return i, err
 }
@@ -168,10 +194,7 @@ SELECT id, device_id, device_name, ip_address, last_used_at, expires_at, first_s
     s.ip_address,
     s.last_used_at,
     s.expires_at,
-    -- Cast so sqlc can type it: a bare subquery comes back as interface{}, which every caller would
-    -- then have to assert.
-    (SELECT min(f.created_at) FROM sessions f
-      WHERE f.user_id = s.user_id AND f.device_id = s.device_id)::timestamptz AS first_seen
+    s.first_seen
   FROM sessions s
   WHERE s.user_id = $1 AND s.revoked_at IS NULL AND s.expires_at > now()
   ORDER BY s.device_id, s.created_at DESC
@@ -196,12 +219,14 @@ type ListSessionDevicesForUserRow struct {
 // they can be acted on, so DISTINCT ON collapses each family to its newest live row — whose id is what the
 // revoke endpoint takes.
 //
-// first_seen is the *family's* start, which is why it is a subquery over every row including revoked ones.
-// The newest row's created_at is the last rotation, and reporting that would tell a user they signed in
-// fifteen minutes ago on a machine they have used for a month.
+// first_seen is read straight off that row rather than aggregated over the family. It used to be
+// min(created_at) across every row including revoked ones, which was correct until 000012 started deleting
+// them: after a sweep no row older than the refresh TTL survives, so the aggregate reported a rolling
+// thirty days for a device somebody had used for a year. 000013 carries the value forward instead.
 //
 // Sorted by last use in the outer query because DISTINCT ON dictates the inner ORDER BY, and "which of
 // these is the one I am still using" is the question somebody scanning this list is asking.
+// Served by sessions_live_by_device_idx (000013).
 func (q *Queries) ListSessionDevicesForUser(ctx context.Context, userID int64) ([]ListSessionDevicesForUserRow, error) {
 	rows, err := q.db.Query(ctx, listSessionDevicesForUser, userID)
 	if err != nil {
@@ -277,7 +302,7 @@ const revokeSession = `-- name: RevokeSession :one
 UPDATE sessions
 SET revoked_at = now()
 WHERE id = $1 AND revoked_at IS NULL
-RETURNING id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id
+RETURNING id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id, first_seen
 `
 
 func (q *Queries) RevokeSession(ctx context.Context, id int64) (Session, error) {
@@ -295,6 +320,7 @@ func (q *Queries) RevokeSession(ctx context.Context, id int64) (Session, error) 
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ReplacedByID,
+		&i.FirstSeen,
 	)
 	return i, err
 }
@@ -325,7 +351,7 @@ const rotateSession = `-- name: RotateSession :one
 UPDATE sessions
 SET revoked_at = now(), replaced_by_id = $2, last_used_at = now()
 WHERE id = $1 AND revoked_at IS NULL
-RETURNING id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id
+RETURNING id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id, first_seen
 `
 
 type RotateSessionParams struct {
@@ -351,6 +377,7 @@ func (q *Queries) RotateSession(ctx context.Context, arg RotateSessionParams) (S
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ReplacedByID,
+		&i.FirstSeen,
 	)
 	return i, err
 }

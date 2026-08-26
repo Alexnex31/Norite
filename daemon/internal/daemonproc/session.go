@@ -51,6 +51,11 @@ func newRefreshClient() *http.Client {
 // and it must reach "ready" either way.
 const refreshTimeout = 30 * time.Second
 
+// handBackTimeout bounds the revocation of a token the daemon could not keep. Shorter than the refresh: the
+// daemon is already late to "ready" by this point, and the request is a courtesy — one that failing costs
+// only what failing already cost before it existed.
+const handBackTimeout = 10 * time.Second
+
 // session is what the daemon holds after a successful refresh.
 //
 // The access token stays in memory and is never written down. It expires in fifteen minutes, so persisting
@@ -160,6 +165,11 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 		} else {
 			log.Warn().Msg("cleared the spent credential; run `norite login` to sign in again")
 		}
+		// And hand back the token that was just obtained, for the same reason as the branch above and with
+		// a stronger claim: after Clear there is definitively no local holder, where a colliding login at
+		// least leaves somebody signed in. This one is the plain orphan — a thirty-day credential nothing
+		// will ever present, created by a disk that was full.
+		handBackToken(ctx, log, client, record.InstanceURL, pair.RefreshToken)
 		return nil
 	}
 
@@ -187,9 +197,16 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 //
 // Not a full logout of anything the user is using: /auth/logout revokes the single session the presented
 // token belongs to, and the token presented here is the one nobody holds.
-func handBackToken(ctx context.Context, log zerolog.Logger, client *http.Client,
+func handBackToken(parent context.Context, log zerolog.Logger, client *http.Client,
 	instanceURL, refreshToken string,
 ) {
+	// Its own budget, not the refresh's leftovers. The caller's context is capped at refreshTimeout and has
+	// already paid for a network round trip and a credential-store write that can wait on a lock — on a
+	// slow link there may be milliseconds left, and the request would fail before it was sent, indistinguish-
+	// ably from an unreachable instance. That is exactly the case this function exists for.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), handBackTimeout)
+	defer cancel()
+
 	body, err := json.Marshal(map[string]string{"refresh_token": refreshToken})
 	if err != nil {
 		log.Warn().Err(err).Msg("could not build the request to revoke the token that was dropped")

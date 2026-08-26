@@ -94,20 +94,30 @@ out keeps working until it expires. That is accepted (below) — except on the t
 is revocation.
 
 Without the exception, a device signed out by "sign out everywhere else" can spend its remaining fifteen
-minutes calling the same endpoint back, signing out the device that signed it out and revoking the
-account's API tokens each time. The owner wins eventually, because only they can authenticate afresh and a
-stolen refresh token died in the first call — so this is spite rather than escalation. But the operation
-whose entire promise is "this took effect" would have quietly not, which is the thing worth refusing.
+minutes undoing it — and worse. Found in two passes, and the second corrected the first:
 
-The line is statable and narrow: **an endpoint whose purpose is revocation does not accept a credential
-whose own session has been revoked.** Reading a profile inside the window is what the trade below buys;
-undoing a revocation inside it is not. A *rotated* session is live, not signed out — rotation revokes the
-row an access token names, and conflating the two would break the endpoint for every recently-refreshed
-client, which is the milestone's other sharp edge. Liveness is therefore asked of the **device**, not the
-row.
+- **By hand, after the tests were green:** the signed-out device calls the same endpoint back, signing out
+  the device that signed it out and revoking the account's API tokens each time. This ADR first called that
+  "spite rather than escalation", on the grounds that only the owner can authenticate afresh and the stolen
+  refresh token died in the first call.
+- **By review, after that fix shipped:** the claim was wrong, because the guard was written as two
+  per-handler checks and `POST /auth/tokens` was not one of them. A signed-out device could mint an API
+  token, which is not session-scoped and therefore **outlives the sign-out permanently**. That is durable
+  persistence, on the endpoint whose whole purpose is creating a credential — the escalation the previous
+  paragraph said did not exist.
 
-Found by driving it by hand after the tests were green. It costs one indexed lookup on an endpoint called
-approximately never, and nothing on the path §17.10 is actually about.
+So the rule is one middleware, `RequireLiveSession`, and the routes under it are visible in the router.
+Writing it as N call sites was the same failure this milestone's own primitive exists to prevent —
+committed against the guard while writing the primitive.
+
+The line is statable and narrow: **a signed-out credential may not change the account's security state.**
+That is revoking sessions, and minting, listing or revoking the credentials that outlive them. Reading a
+profile inside the window is what the trade below buys; the session *listing* stays readable for the same
+reason. A *rotated* session is live, not signed out — rotation revokes the row an access token names, and
+conflating the two would break every recently-refreshed client, which is the milestone's other sharp edge.
+Liveness is therefore asked of the **device**, never the row.
+
+One indexed lookup, on routes called approximately never, and nothing on the path §17.10 is about.
 
 ### Access tokens stay stateless otherwise, and the residual window is accepted
 Not reopened here. `architecture.md` §17.10 records it: an already-issued access token is not checked
@@ -129,6 +139,18 @@ detection revokes a whole device family on. Deleting revoked rows while their to
 presented would make a stolen token unrecognized and quietly disable that detection — the table would look
 tidier and a security property would be gone. Past expiry nothing can be presented, so the evidence has
 nothing left to prove.
+
+**`first_seen` had to stop being derived.** It was `min(created_at)` over the family, which is correct
+until something deletes rows — and the sweep above, added in the same milestone, deletes every row past its
+expiry. Since a row expires `RefreshTokenTTL` after it is created, no row older than thirty days survives,
+so the aggregate could never look further back than that: a laptop signed in for a year reported a rolling
+month. Migration `000013` carries the value forward on rotation instead.
+
+The irony is the lesson. The listing query's own comment justifies its shape by refusing to report the
+newest row's `created_at`, because that "would tell a user they signed in fifteen minutes ago on a machine
+they have used for a month" — and the sweep reintroduced exactly that lie at a coarser scale, from an
+adjacent part of the same milestone. Neither part's tests could see the other: the listing test rotates
+without aging anything, and the sweep tests never read the listing.
 
 Migration `000012` carries the measurements. Two of them are worth repeating here:
 

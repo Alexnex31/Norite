@@ -1443,7 +1443,8 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [sessions_revoked, api_tokens_revoked]
+                required: [sessions_revoked, api_tokens_revoked, oauth_exchange_codes_revoked,
+                           device_authorizations_revoked]
                 additionalProperties: false
                 properties:
                   sessions_revoked:
@@ -1454,6 +1455,15 @@ paths:
                     description: >
                       API tokens revoked. Reported separately because it is the count a person needs to see
                       to understand why a bot stopped.
+                  oauth_exchange_codes_revoked:
+                    type: integer
+                    description: Outstanding OAuth exchange codes cancelled. Usually zero.
+                  device_authorizations_revoked:
+                    type: integer
+                    description: >
+                      Device sign-ins that had been approved but not yet collected. Worth surfacing:
+                      somebody who approved a sign-in on a shared machine and then reached for this has
+                      just cancelled it, and nothing else would tell them.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: The credential is an API token. See the description.

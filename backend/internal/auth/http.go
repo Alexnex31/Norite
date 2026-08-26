@@ -64,21 +64,25 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/password/reset", h.confirmPasswordReset)
 	r.Post("/verify/request", h.requestEmailVerification)
 
-	// Authenticated.
+	// Authenticated, and changing the account's own security state.
+	//
+	// Two guards together, and the set of routes under them is the point. RequireUserActor keeps a
+	// delegated credential out: minting because a token that can mint tokens can grant itself scopes it
+	// does not hold, listing because it discloses the account's other tokens to whatever holds this one,
+	// revoking and signing-out for the same reason in reverse — a credential that can revoke its owner's
+	// sessions can lock its owner out.
+	//
+	// RequireLiveSession keeps a *signed-out* credential out, which is the narrow exception to the
+	// stateless access token (§17.10) and is explained on the middleware. It belongs on exactly these
+	// routes, and having them in one group is what makes that reviewable — M11 first wrote the rule as
+	// per-handler checks and missed /tokens, which is the one that mints something outliving any session.
 	r.Group(func(r chi.Router) {
-		r.Use(RequireAuth)
+		r.Use(RequireAuth, RequireUserActor, RequireLiveSession(h.svc))
 
-		// All three require the person, not a delegated credential. Minting because a token that can
-		// mint tokens can grant itself scopes it does not hold; listing because it discloses the
-		// account's other tokens to whatever holds this one; revoking for symmetry with both.
-		r.With(RequireUserActor).Post("/tokens", h.mintToken)
-		r.With(RequireUserActor).Get("/tokens", h.listTokens)
-		r.With(RequireUserActor).Delete("/tokens/{tokenId}", h.revokeToken)
-
-		// And so does signing out everywhere else, for a reason the three above share: a delegated
-		// credential that can revoke its owner's sessions — and, being the whole primitive, its owner's
-		// other API tokens with them — is a credential that can lock its owner out of their account.
-		r.With(RequireUserActor).Post("/logout/all", h.logoutAll)
+		r.Post("/tokens", h.mintToken)
+		r.Get("/tokens", h.listTokens)
+		r.Delete("/tokens/{tokenId}", h.revokeToken)
+		r.Post("/logout/all", h.logoutAll)
 	})
 }
 
@@ -90,8 +94,13 @@ func (h *Handler) UserRoutes(r chi.Router) {
 
 		// A user actor, not a delegated one, for the reason the token endpoints give: this listing
 		// discloses every machine the account is signed in on, and the revoke acts on all of them.
+		//
+		// The revoke additionally requires a live session — the same guard Routes puts on /tokens and
+		// /logout/all, repeated here because a chi group belongs to one mux. The listing does not: reading
+		// is what §17.10's window is for, and it is the disclosure GET /users/@me already allows.
 		r.With(RequireUserActor).Get("/@me/sessions", h.listSessions)
-		r.With(RequireUserActor).Delete("/@me/sessions/{sessionID}", h.revokeSession)
+		r.With(RequireUserActor, RequireLiveSession(h.svc)).
+			Delete("/@me/sessions/{sessionID}", h.revokeSession)
 	})
 }
 
@@ -217,6 +226,11 @@ func newSessionResponse(d SessionDevice) sessionResponse {
 type logoutAllResponse struct {
 	SessionsRevoked  int64 `json:"sessions_revoked"`
 	APITokensRevoked int64 `json:"api_tokens_revoked"`
+	// The other two the primitive revokes. Reported because the primitive counts them and a caller that
+	// cannot see them cannot explain them — the case that bites is somebody who approved a sign-in on a
+	// shared machine, then reached for this, and is told nothing about the authorization it just canceled.
+	ExchangeCodesRevoked int64 `json:"oauth_exchange_codes_revoked"`
+	DeviceCodesRevoked   int64 `json:"device_authorizations_revoked"`
 }
 
 func newUserResponse(u db.User) userResponse {
@@ -556,7 +570,7 @@ func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.RevokeSessionDevice(r.Context(), actor.UserID, actor.SessionID, sessionID); err != nil {
+	if err := h.svc.RevokeSessionDevice(r.Context(), actor.UserID, sessionID); err != nil {
 		h.writeErr(w, r, err)
 		return
 	}
@@ -572,8 +586,10 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, r, http.StatusOK, logoutAllResponse{
-		SessionsRevoked:  result.Sessions,
-		APITokensRevoked: result.APITokens,
+		SessionsRevoked:      result.Sessions,
+		APITokensRevoked:     result.APITokens,
+		ExchangeCodesRevoked: result.ExchangeCodes,
+		DeviceCodesRevoked:   result.DeviceCodes,
 	})
 }
 

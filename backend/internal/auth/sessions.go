@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
 
@@ -89,12 +90,7 @@ func (s *Service) ListSessionDevices(ctx context.Context, userID, currentSession
 // Takes the id of a session row and revokes every live session sharing its device_id, which is what makes
 // the action mean what the listing showed. Revoking the caller's own device is allowed: that is "sign out
 // here", and refusing it would be a special case nobody asked for.
-func (s *Service) RevokeSessionDevice(ctx context.Context, userID, actingSessionID, sessionID snowflake.ID,
-) error {
-	if err := s.requireLiveDevice(ctx, userID, actingSessionID); err != nil {
-		return err
-	}
-
+func (s *Service) RevokeSessionDevice(ctx context.Context, userID, sessionID snowflake.ID) error {
 	session, err := s.queries.GetSessionByID(ctx, int64(sessionID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -132,11 +128,26 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID, currentSessio
 	if err != nil {
 		return RevocationResult{}, err
 	}
-	if err := s.requireLiveDeviceNamed(ctx, userID, currentDevice); err != nil {
+	// In a transaction, like every other caller of the primitive.
+	//
+	// The four statements are one action, and a partial one is worse than none: if the API-token revoke
+	// fails after the session revoke has committed, the caller gets a 500 that reads as "nothing happened"
+	// while every other device is in fact signed out and every API token — the part this endpoint exists
+	// to report — is still live. The intruder's credential would survive the action taken to kill it.
+	//
+	// revokeEverything takes a *db.Queries precisely so it can be composed like this. The reset path always
+	// did; this one shipped without, which is the sort of thing only a second reader notices.
+	var out RevocationResult
+	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		out, err = revokeEverything(ctx, s.queries.WithTx(tx), int64(userID),
+			RevocationScope{KeepDeviceID: currentDevice})
+		return err
+	})
+	if err != nil {
 		return RevocationResult{}, err
 	}
-
-	return revokeEverything(ctx, s.queries, int64(userID), RevocationScope{KeepDeviceID: currentDevice})
+	return out, nil
 }
 
 // requireLiveDevice refuses an action from a device that has already been signed out.

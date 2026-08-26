@@ -581,11 +581,18 @@ And on session revocation, from M11 (decisions in ADR 0030):
   account is signed in on, and the revoke takes the account's other API tokens with it, so a delegated
   credential holding either could lock its owner out. Same rule minting obeys.
 - **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10) —
-  **except on the two endpoints whose purpose is revocation**, which refuse a credential whose own session
-  has been signed out. Otherwise a device signed out by `logout/all` can spend its remaining minutes
-  calling it back and signing out the device that signed it out. Reading a profile inside the window is
-  what the trade buys; undoing a revocation inside it is not. Liveness is asked of the *device*, never the
-  row, because a rotated session is live and its row is revoked.
+  **except where a signed-out credential would change the account's security state**, which
+  `RequireLiveSession` refuses: revoking sessions, and minting, listing or revoking API tokens. Written
+  first as per-handler checks, it missed `POST /auth/tokens` — and an API token is not session-scoped, so
+  one minted inside the window outlives the sign-out for good. **Guards belong in middleware for the same
+  reason the revocation list belongs in one function**: a rule written as N call sites has N chances to
+  miss one, and the one it missed was the one that mints a durable credential. Liveness is asked of the
+  *device*, never the row, because a rotated session is live and its row is revoked.
+- **A value a sweep can delete must not be derived from the rows it deletes.** `first_seen` was
+  `min(created_at)` over the session family until `000012` started deleting expired rows, which silently
+  capped it at the refresh TTL — a device used for a year reporting a rolling month. `000013` carries it
+  forward on rotation. The two halves shipped in adjacent parts of one milestone and neither's tests could
+  see the other.
 - **The sweep deletes by expiry, never by revocation.** A revoked row is the evidence that tells *replay*
   apart from an unknown token, which is what reuse detection revokes a device family on. Past `expires_at`
   nothing can be presented, so there is nothing left to prove.

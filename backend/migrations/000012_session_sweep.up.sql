@@ -25,6 +25,17 @@
 -- At fifty thousand rows it is a wash, and saying otherwise would be inventing a win. The point is the
 -- second line: the scan cost grows with the table while the index cost grows with the rows actually
 -- expiring, and a sweep every ten minutes deletes a small slice of a table meant to grow for years.
+--
+-- **This rebuild blocks logins while it runs.** DROP INDEX takes ACCESS EXCLUSIVE and CREATE INDEX takes
+-- SHARE on `sessions`, so no CreateSession, RotateSession or RevokeSession commits until it finishes —
+-- every login and every refresh waits. CONCURRENTLY is not available: golang-migrate runs each file in a
+-- transaction, and migrations run blocking before readiness by design, so /healthz answers 503 throughout
+-- rather than serving a half-migrated schema.
+--
+-- Accepted here because the window is an index build over one table and this instance has no deployment
+-- with years of accumulated rows behind it. On one that did, the honest options are a maintenance window
+-- or splitting this into a non-transactional migration that can use CONCURRENTLY. Stated rather than
+-- discovered, because the next table to need this may not be small.
 DROP INDEX sessions_expires_at_idx;
 CREATE INDEX sessions_expires_at_idx ON sessions (expires_at);
 

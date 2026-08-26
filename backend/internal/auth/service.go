@@ -479,6 +479,10 @@ func (s *Service) writeSession(ctx context.Context, q *db.Queries, sessionID, us
 		return fmt.Errorf("revoking the previous session for this device: %w", err)
 	}
 
+	// FirstSeen is deliberately left unset here, which the query reads as now(): this is a sign-in, and a
+	// sign-in is when a device is first seen. Rotation is the path that carries the existing value forward
+	// (000013). Signing in again on a device that was already signed in resets it, which is right — the
+	// previous family was just revoked two statements above.
 	if _, err := q.CreateSession(ctx, db.CreateSessionParams{
 		ID:               int64(sessionID),
 		UserID:           int64(userID),
@@ -569,6 +573,9 @@ func (s *Service) Refresh(ctx context.Context, rawToken string) (TokenPair, erro
 			DeviceName:       session.DeviceName,
 			IpAddress:        session.IpAddress,
 			ExpiresAt:        timestamptz(s.now().Add(RefreshTokenTTL)),
+			// Carried forward, not recomputed: this is what the device's "signed in since" means, and a
+			// rotation is not a new sign-in. Recomputing would reset it every fifteen minutes (000013).
+			FirstSeen: session.FirstSeen,
 		}); err != nil {
 			return fmt.Errorf("creating the rotated session: %w", err)
 		}

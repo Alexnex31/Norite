@@ -384,3 +384,129 @@ func TestARotatedDeviceIsNotASignedOutOne(t *testing.T) {
 		map[string]string{"refresh_token": rotated.RefreshToken})
 	assert.Equal(t, http.StatusOK, kept.Code)
 }
+
+// The rule is "a signed-out credential may not change the account's security state", and the endpoint it
+// was first written without is the one that matters most.
+//
+// M11 shipped the check as two per-handler calls, on logout/all and the session revoke. POST /auth/tokens
+// was missed — and an API token is not session-scoped, so one minted inside the residual window outlives
+// the sign-out permanently. That turns the window from the spite ADR 0030 called it into durable
+// persistence: the thing "sign out everywhere else" is reached for precisely to prevent.
+//
+// Found by review. The guard is one middleware now, and this walks every route under it.
+func TestASignedOutDeviceCannotChangeSecurityState(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	owner := a.newAccount("ada", "ada@example.com", "laptop")
+	stolen := a.login("ada@example.com", "phone")
+
+	// Something for the revoke-token route to aim at, minted while the phone was still live.
+	minted := a.call(http.MethodPost, "/api/v1/auth/tokens",
+		map[string]any{"name": "bot", "scopes": []string{"identify"}}, withToken(stolen.AccessToken))
+	require.Equal(t, http.StatusCreated, minted.Code, minted)
+	var existing struct {
+		ID string `json:"id"`
+	}
+	minted.decode(&existing)
+
+	out := a.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, out.Code, out)
+
+	// The access token is still cryptographically valid — that is §17.10, and reading still works.
+	require.Equal(t, http.StatusOK,
+		a.call(http.MethodGet, "/api/v1/users/@me", nil, withToken(stolen.AccessToken)).Code)
+	require.Equal(t, http.StatusOK,
+		a.call(http.MethodGet, "/api/v1/users/@me/sessions", nil, withToken(stolen.AccessToken)).Code,
+		"listing is a read; the window covers it")
+
+	for name, call := range map[string]func() *response{
+		"mint an API token": func() *response {
+			return a.call(http.MethodPost, "/api/v1/auth/tokens",
+				map[string]any{"name": "persistence", "scopes": []string{"identify"}},
+				withToken(stolen.AccessToken))
+		},
+		"list API tokens": func() *response {
+			return a.call(http.MethodGet, "/api/v1/auth/tokens", nil, withToken(stolen.AccessToken))
+		},
+		"revoke an API token": func() *response {
+			return a.call(http.MethodDelete, "/api/v1/auth/tokens/"+existing.ID, nil,
+				withToken(stolen.AccessToken))
+		},
+		"sign out everywhere else": func() *response {
+			return a.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(stolen.AccessToken))
+		},
+		"revoke a session": func() *response {
+			return a.call(http.MethodDelete, "/api/v1/users/@me/sessions/350000000000000000", nil,
+				withToken(stolen.AccessToken))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := call()
+			assert.Equal(t, http.StatusUnauthorized, res.Code,
+				"a signed-out device must not be able to %s", name)
+		})
+	}
+}
+
+// And the guard must not fire on an ordinary rotation, on any route it covers — minting included.
+func TestARotatedDeviceCanStillChangeSecurityState(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	acct := a.newAccount("ada", "ada@example.com", "laptop")
+
+	res := a.call(http.MethodPost, "/api/v1/auth/refresh",
+		map[string]string{"refresh_token": acct.Tokens.RefreshToken})
+	require.Equal(t, http.StatusOK, res.Code, res)
+
+	// The pre-rotation access token names a row the rotation revoked.
+	minted := a.call(http.MethodPost, "/api/v1/auth/tokens",
+		map[string]any{"name": "bot", "scopes": []string{"identify"}}, withToken(acct.Tokens.AccessToken))
+	assert.Equal(t, http.StatusCreated, minted.Code, "a rotation is not a sign-out")
+
+	listed := a.call(http.MethodGet, "/api/v1/auth/tokens", nil, withToken(acct.Tokens.AccessToken))
+	assert.Equal(t, http.StatusOK, listed.Code)
+}
+
+// first_seen must survive the sweep, which is what 000013 exists for.
+//
+// It used to be min(created_at) across the family. That is correct until something deletes rows — and
+// 000012, one migration earlier in this same milestone, started deleting them. Every row expires
+// RefreshTokenTTL after it is created, so no row older than that survives a sweep and the aggregate could
+// never report further back than thirty days. A laptop signed in for a year reported a rolling month.
+//
+// Neither TestASessionListingShowsWhenTheDeviceFirstSignedIn nor any sweep test caught it: one rotates
+// without aging anything, the others never read the listing.
+func TestFirstSeenSurvivesTheSweep(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	acct := a.newAccount("ada", "ada@example.com", "laptop")
+
+	// Age this device's whole history: a year of rotations, every row long past its expiry.
+	_, err := a.pool.Exec(t.Context(), `
+		UPDATE sessions
+		SET first_seen = now() - interval '365 days',
+		    created_at = now() - interval '365 days',
+		    expires_at = now() - interval '335 days'`)
+	require.NoError(t, err)
+
+	// One live row, as an active device always has, carrying the family's start forward.
+	pair := acct.Tokens
+	res := a.call(http.MethodPost, "/api/v1/auth/login",
+		map[string]any{"email": "ada@example.com", "password": testPassword, "device_id": "laptop"})
+	require.Equal(t, http.StatusOK, res.Code, res)
+	res.decode(&pair)
+	_, err = a.pool.Exec(t.Context(),
+		`UPDATE sessions SET first_seen = now() - interval '365 days' WHERE revoked_at IS NULL`)
+	require.NoError(t, err)
+
+	before := listSessions(t, a, pair.AccessToken)
+	require.Len(t, before, 1)
+
+	swept, err := a.pool.Exec(t.Context(), `DELETE FROM sessions WHERE expires_at < now()`)
+	require.NoError(t, err)
+	require.Positive(t, swept.RowsAffected(), "the sweep must actually have removed the old rows")
+
+	after := listSessions(t, a, pair.AccessToken)
+	require.Len(t, after, 1)
+	assert.Equal(t, before[0].FirstSeen, after[0].FirstSeen,
+		"the sweep must not move first_seen; it is the family's start, not the oldest surviving row's")
+	assert.Less(t, after[0].FirstSeen, time.Now().Add(-300*24*time.Hour),
+		"a device used for a year must not report having been first seen this month")
+}
