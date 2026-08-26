@@ -96,8 +96,14 @@ func (h *Handler) UserRoutes(r chi.Router) {
 		// discloses every machine the account is signed in on, and the revoke acts on all of them.
 		//
 		// The revoke additionally requires a live session — the same guard Routes puts on /tokens and
-		// /logout/all, repeated here because a chi group belongs to one mux. The listing does not: reading
-		// is what §17.10's window is for, and it is the disclosure GET /users/@me already allows.
+		// /logout/all, repeated here because a chi group belongs to one mux.
+		//
+		// The listing does not, because reading is exactly what §17.10's window is for. Worth being precise
+		// about the cost rather than waving at /users/@me, which this comment used to do: a signed-out
+		// device can read this for the rest of its token's life, and what it gets is *more* than the
+		// profile endpoint gives — every other device's name, address and timestamps. It is accepted
+		// because the same credential could have read it a moment earlier, so the window adds no access
+		// that was not already had. If that ever stops being true, this is the line to revisit.
 		r.With(RequireUserActor).Get("/@me/sessions", h.listSessions)
 		r.With(RequireUserActor, RequireLiveSession(h.svc)).
 			Delete("/@me/sessions/{sessionID}", h.revokeSession)
