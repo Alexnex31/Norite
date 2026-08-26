@@ -161,16 +161,26 @@ of this section.
   self-service "log out all other devices" account-security feature. Ban-triggered use of this same
   primitive comes later at M72, once Instance Admin exists — the primitive itself is built now.
 
-  **Also build the single-token form**, not only the all-sessions one. M7 left a case that needs it: when a
-  `norite login` lands while the daemon is mid-refresh, the daemon discards the pair it just obtained
-  rather than overwrite the record the login owns, and the refresh token it drops stays valid at the
-  instance for its full TTL with nobody holding it. Handing one back requires revoking exactly that token
-  and nothing else — revoke-all would take down the session the login just created. The daemon cannot call
-  it until M19 gives it a connection, so this is the half M11 ships and M19 consumes.
+  **The single-token form turned out to exist already**, and this entry used to ask M11 to build it. `POST
+  /auth/logout` has revoked exactly the session a presented refresh token belongs to since M4. What M11
+  actually adds is `DELETE /users/@me/sessions/{id}`, which revokes a whole *device family* rather than one
+  rotating record — a different operation, and the one a person listing their devices is asking for.
 
-  Done when: a user can log out all their other sessions from one account action, previously-issued refresh
-  tokens immediately stop working, and a single named refresh token can be revoked without disturbing the
-  rest of its account's sessions.
+  So M7's dropped-token case needed no backend work at all: when a `norite login` lands while the daemon is
+  mid-refresh, the daemon discards the pair it just obtained and that token stayed live for its full TTL
+  with nobody holding it. It hands it back here, with the client it already has. The comment in
+  `daemon/internal/daemonproc/session.go` that said this needed M19's gateway connection was wrong on both
+  counts, and this paragraph repeated it.
+
+  **Also make the sessions table sweepable.** Nothing had ever deleted from it: every refresh inserts a
+  successor and revokes its predecessor, so it grows with traffic rather than sign-ins, and `RunSweeper`
+  did not know it existed. Migration `000012` measures what that costs — see the migration, particularly
+  the unindexed self-referencing FK, which spent four hundred times as long in its trigger as the delete it
+  was guarding.
+
+  Done when: a user can see the devices signed in to their account and sign out all the others from one
+  action, previously-issued refresh tokens immediately stop working, one device can be signed out without
+  disturbing the rest, and expired sessions are swept.
 
 #### Phase C — Guild/channel/permission core
 
@@ -221,8 +231,10 @@ of this section.
   in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
   and stream-decodes (`json.Decoder`) the initial sync payload rather than buffering it fully before parsing.
 
-  **Three things M7 deferred come due here, because this is the milestone whose changes make them real.**
-  None is a bug today; each becomes one the moment the daemon does what this entry describes.
+  **Two things M7 deferred come due here, because this is the milestone whose changes make them real.**
+  Neither is a bug today; each becomes one the moment the daemon does what this entry describes. (A third,
+  handing back the refresh token a colliding login makes unkeepable, was closed at M11 instead — it needed
+  no gateway connection, only the HTTP client the daemon already had.)
 
   - **`termsafe` has to move to a package both modules import — and must not be copied.** It lives in
     `cli/internal/termsafe`, which the daemon module cannot reach. That is fine only while every untrusted
@@ -236,8 +248,6 @@ of this section.
     unlocked reads the file path for its whole life. Correct while the daemon is short-lived and the record
     names its own backend (ADR 0025); a long-lived, reconnecting daemon is exactly the case it was not
     written for.
-  - **Hand back the refresh token dropped by a login landing mid-refresh**, using M11's single-token revoke.
-    Until then that token stays live at the instance with nobody holding it.
 
   Done when: the daemon alone (no CLI/TUI/GUI attached) stays connected and accumulates state correctly; a
   deliberately skewed system clock does not cause spurious auth failures; a display name carrying terminal

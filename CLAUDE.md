@@ -607,13 +607,16 @@ And on the client-auth side, from M7:
   impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
   token from the only person who can deal with it. The CLI prints it, the daemon logs it.
 
-Three things this milestone deliberately leaves for the milestone that can do them properly. **All three
-are now written into that milestone's roadmap entry** — M11's single-token revoke and M19's three — because
-a deferral recorded only here is one the milestone that inherits it never reads:
+Three things this milestone deliberately left for the milestone that could do them properly — **one of
+which turned out not to need deferring at all**. All are written into the roadmap entry that inherits
+them, because a deferral recorded only here is one that milestone never reads:
 
-- **A dropped refresh token cannot be revoked yet.** When a login lands mid-refresh, the daemon discards
-  the token it just obtained; it stays valid at the instance until it expires. Handing it back needs M11's
-  revoke-a-session primitive, and reaching for it from the daemon needs M19's gateway connection.
+- ~~**A dropped refresh token cannot be revoked yet.**~~ **Closed at M11**, and the claim was wrong twice
+  over: `POST /auth/logout` had revoked exactly one session by presenting its refresh token since M4, and
+  the daemon holds the HTTP client to call it with at the very line that dropped the token. No primitive
+  and no gateway connection were needed. Left here rather than deleted because the reasoning is the
+  cautionary part — a deferral repeated from a code comment into a roadmap entry, believed twice, and only
+  disproved by somebody reading what `/auth/logout` actually does.
 - **The daemon never re-probes for a keyring that unlocks later.** The backend is chosen once per process
   (`sync.Once`), so a daemon that started before the session keyring was unlocked keeps reading the file
   path for its whole life. Correct today because the record names the backend; worth revisiting when the
