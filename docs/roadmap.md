@@ -182,6 +182,11 @@ of this section.
   action, previously-issued refresh tokens immediately stop working, one device can be signed out without
   disturbing the rest, and expired sessions are swept.
 
+  **Done** (tag `m11`). Decisions in ADR 0030. `auth.revokeEverything` is the primitive, and it carries its
+  two unbuilt steps — M18's connection close, M101's E2E trust — as named gaps inside the function rather
+  than as interfaces nothing implements, so each is a line added in one place. A session is a *device* to a
+  person and a rotating row to the schema, which is the decision every endpoint here follows from.
+
 #### Phase C — Guild/channel/permission core
 
 - **M12 — Guilds/channels/roles schema plus CRUD**: the core guild/channel/role tables and REST endpoints.
@@ -223,10 +228,20 @@ of this section.
 - **M18 — Gateway protocol core (backend)**: op-codes, the HELLO/IDENTIFY/READY handshake (carrying the
   backend's current server time for client clock-offset calculation), heartbeat, RESUME, DISPATCH, backed by
   `coder/websocket`. The initial READY payload sends guild/channel metadata upfront but defers full member
-  lists/bulk per-guild state until a guild is actually opened (lazy per-guild loading). Done when: a raw
-  WebSocket client can complete the handshake, receive DISPATCH events for guild activity, and RESUME after a
-  disconnect without losing events; an account in many guilds gets a bounded-size initial payload rather than
-  one that scales linearly with total guild count.
+  lists/bulk per-guild state until a guild is actually opened (lazy per-guild loading).
+
+  **Also close M11's first gap: force-closing live connections when an account's sessions are revoked.**
+  `auth.revokeEverything` carries the step as a named comment because there was nothing to close; the close
+  belongs *inside* that function so every caller — reset, sign-out-everywhere-else, M72's bans, account
+  deletion — gets it without being edited. It matters more than it looks. Revoking a session stops the next
+  refresh, and an access token expires within fifteen minutes, so the REST surface is bounded by
+  construction (§17.10). A WebSocket is not: it authenticates once at IDENTIFY and stays open as long as
+  the client keeps it, so until this exists a revoked account keeps receiving events indefinitely.
+
+  Done when: a raw WebSocket client can complete the handshake, receive DISPATCH events for guild activity,
+  and RESUME after a disconnect without losing events; an account in many guilds gets a bounded-size
+  initial payload rather than one that scales linearly with total guild count; and revoking an account's
+  sessions drops its live connections rather than leaving them subscribed.
 - **M19 — Daemon as gateway client**: the daemon holds the persistent WS connection to the backend, maintains
   in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
   and stream-decodes (`json.Decoder`) the initial sync payload rather than buffering it fully before parsing.
@@ -790,8 +805,10 @@ when a constraint the terminal imposed is lifted.
   conversations without per-conversation re-verification, and the newly linked device's message history is
   confirmed empty prior to the link event.
 - **M101 — Device revocation and E2E trust linkage**: logging out/revoking a device (M11's primitive) also
-  revokes its E2E device-link trust. Done when: revoking a device's session also marks it untrusted for E2E
-  purposes.
+  revokes its E2E device-link trust. **This is M11's second named gap**, and like M18's it goes *inside*
+  `auth.revokeEverything` rather than beside its callers — the function carries the step as a comment today
+  precisely so this milestone adds a line instead of auditing four call sites. Done when: revoking a
+  device's session also marks it untrusted for E2E purposes.
 - **M102 — Ratchet and device-linking fuzz testing**: `go test -fuzz` targeting the M97 library-integration
   code and the device-linking protocol's message handling, with malformed/out-of-order/replayed inputs. Done
   when: the fuzz target runs cleanly for a defined corpus/duration with no crashes or invariant violations

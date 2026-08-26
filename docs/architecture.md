@@ -677,8 +677,9 @@ GET    /instance/invites                   -- list them, codes in full
 POST   /instance/invites/revoke            -- revoke one; the code is in the body, never a path (rule 8)
 POST   /auth/login                        -- email/password -> access + refresh token pair, device_id-scoped
 POST   /auth/refresh                      -- rotates the refresh token within its device_id's family
-POST   /auth/logout                       -- revokes current session
-POST   /auth/logout/all                   -- revoke-all-sessions primitive (§ Account lifecycle)
+POST   /auth/logout                       -- revokes the one session the presented refresh token belongs
+                                          --   to; the single-token revoke, since M4
+POST   /auth/logout/all                   -- revoke-all-sessions primitive, sparing this device (M11)
 POST   /auth/password/forgot              -- always 202 regardless of whether email exists
 POST   /auth/password/reset
 POST   /auth/email/verify
@@ -701,8 +702,9 @@ DELETE /auth/tokens/{id}
 GET    /users/@me
 PATCH  /users/@me
 GET    /users/@me/guilds
-GET    /users/@me/sessions
-DELETE /users/@me/sessions/{id}
+GET    /users/@me/sessions                 -- one entry per *device*, not per session row: the rows rotate
+                                           --   every refresh, so a listing of them is useless (M11)
+DELETE /users/@me/sessions/{id}            -- signs that device out, family and all (M11)
 POST   /users/@me/channels
 DELETE /users/@me                          -- account deletion, invokes revoke-all-sessions
 GET    /users/@me/export                   -- server-side export; see E2E export note below
@@ -945,12 +947,39 @@ overridden per-route from the JSON API's `default-src 'none'` — can forbid scr
 ### Account lifecycle: deletion & data export
 
 `DELETE /users/@me` and self-service "log out all other devices" both invoke the **general-purpose
-revoke-all-sessions primitive**: force-close live gateway connections, revoke refresh + scoped tokens
-(DB-backed, instantly revocable — an already-issued 15-minute access token simply can't be renewed and
-expires naturally), and **revoke every linked device's E2E device-link trust** (ADR 0014) — the same
-primitive an Instance Admin ban invokes (ADR 0013). Account deletion otherwise follows the original design:
-soft-delete with placeholder username/email, hard-delete `oauth_identities`/`sessions`, leave authored
-content in place rendered as "Deleted User."
+revoke-all-sessions primitive** — the same one an Instance Admin ban invokes (ADR 0013), which is what
+rule 17 requires of all three. It is `auth.revokeEverything`, built at M11.
+
+**What it revokes today**, in one transaction with whatever the caller is doing:
+
+- every refresh session, or every one but a named device's for "log out all other devices";
+- every scoped `api_token`, which is the part worth stating out loud: somebody signing out a lost laptop
+  also stops their bots. The case that decides it is the compromised account, where a token an intruder
+  minted outlives any password change unless it goes too;
+- every outstanding OAuth exchange code, which a callback page left open would otherwise still trade for a
+  fresh token pair;
+- every device authorization already approved but not yet collected.
+
+Each of those four was added separately, by somebody noticing one more outstanding claim the previous ones
+missed — M4, M5, M6 and M9 respectively. That history is the argument for the primitive existing at all,
+and for new claims being added to it rather than to a caller.
+
+**What it does not revoke yet**, written into the function as named gaps rather than left out:
+
+- **force-closing live gateway connections (M18)**. This matters more than it looks. Revoking a session
+  stops the *next* refresh, and an access token expires within 15 minutes, so the REST surface is bounded
+  by construction (§17.10). A WebSocket is not: it authenticates once at IDENTIFY and then stays open for
+  as long as the client keeps it, so without an explicit close a revoked account keeps receiving events
+  indefinitely;
+- **revoking every linked device's E2E device-link trust (M101, ADR 0014)**.
+
+Account deletion otherwise follows the original design: soft-delete with placeholder username/email,
+hard-delete `oauth_identities`/`sessions`, leave authored content in place rendered as "Deleted User."
+
+**Sessions are also swept.** The table is a rotation chain — every refresh inserts a successor and revokes
+its predecessor — so it grows with traffic rather than with sign-ins, and until M11 nothing deleted from
+it. `auth.RunSweeper` removes rows past `expires_at`, never merely revoked ones: a revoked row is still the
+evidence that distinguishes *replay* from an unknown token, which is what reuse detection acts on.
 
 `GET /users/@me/export` covers everything the server can see. **For E2E-encrypted DMs, the daemon — not the
 server, not the CLI/TUI/GUI independently — performs its own local decrypt-and-export step**, producing a

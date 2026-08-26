@@ -280,7 +280,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M10.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
+**Phase A (foundation), through M11.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
 with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
 `docs/roadmap.md`.
 
@@ -337,7 +337,12 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   `verifypage.go`, `cli/internal/apiclient` (the transport extracted from `login`), and
   `cli/internal/instanceadmin` (`norite instance bootstrap` and `norite instance invite`). Decisions in
   ADR 0029, which also amends ADR 0024.
-- **M11 — Session revocation primitive**: next.
+- **M11 — Session revocation primitive**: done (tag `m11`). `internal/auth`'s `revoke.go` (the primitive)
+  and `sessions.go` (the account-facing view), migration `000012`, `POST /auth/logout/all`,
+  `GET`/`DELETE /users/@me/sessions`, the sessions sweep, and the daemon handing back the refresh token a
+  colliding login makes unkeepable. Decisions in ADR 0030.
+- **M12 — Guilds/channels/roles schema plus CRUD**: next. Its first job is that `contracts/openapi.yaml`
+  does not currently generate — see the roadmap entry.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -550,6 +555,43 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
   A new table with a TTL adds its delete to `SweepExpired`, and **ships a non-partial index on the column
   the sweep filters by**: a partial index predicated on "not yet consumed" cannot serve a sweep that
   deletes regardless, which is the mistake made on all three of these tables and corrected in `000005`.
+
+And on session revocation, from M11 (decisions in ADR 0030):
+
+- **There is one primitive, `auth.revokeEverything`, and new claims are added to it rather than to a
+  caller** (rule 17). It revokes sessions, API tokens, outstanding OAuth exchange codes and approved device
+  authorizations, in whatever transaction the caller is already running. That list is not a design; it is
+  four milestones each noticing one more outstanding claim the previous ones missed (M4, M5, M6, M9), which
+  is exactly why it must not be reassembled per caller.
+- **Its two unbuilt steps live inside it as named gaps**, not behind interfaces nothing implements:
+  force-closing live gateway connections (M18) and dropping linked-device E2E trust (M101). Two seams whose
+  shapes are guesses would be two wrong shapes; one function is one place to add a line. Both milestones'
+  roadmap entries now say so.
+- **A session is a *device* to a person and a rotating row to the schema.** Every refresh inserts a
+  successor and revokes its predecessor, so `GET /users/@me/sessions` collapses each family to its newest
+  live record and `DELETE …/{id}` revokes the family. `first_seen` is the family's start; the newest row's
+  `created_at` is merely the last rotation. Never expose `device_id` in a path — it is client-chosen text
+  that would land in every request log line (M10's invite-code reasoning).
+- **The current device must be resolvable from a *revoked* row.** An access token names the session it was
+  minted from and lives fifteen minutes; a refresh inside that window revokes that row while the token
+  stays valid. `GetSessionByID` returns revoked rows on purpose. Filter them and `logout/all` finds no
+  current device, spares nothing, and signs the caller out of itself — the milestone's easiest bug, and it
+  has a test that fails without the fix.
+- **Session management needs a user actor, never an API token.** The listing enumerates every machine the
+  account is signed in on, and the revoke takes the account's other API tokens with it, so a delegated
+  credential holding either could lock its owner out. Same rule minting obeys.
+- **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10). Both
+  endpoints state it in the contract rather than closing it with a per-request database lookup on the
+  hottest path in the API.
+- **The sweep deletes by expiry, never by revocation.** A revoked row is the evidence that tells *replay*
+  apart from an unknown token, which is what reuse detection revokes a device family on. Past `expires_at`
+  nothing can be presented, so there is nothing left to prove.
+- **Check every new foreign key for an index, and every sweep index for a partial predicate.** Both bit
+  here. `replaced_by_id` was an unindexed `ON DELETE SET NULL` self-reference: deleting 2,000 rows spent
+  3,757 ms in its trigger against 9.4 ms in the DELETE. The `expires_at` index was partial on
+  `revoked_at IS NULL`, which is 000005's mistake on the one table where the excluded rows are the majority.
+  Neither is catchable by a behavior test — a partial index produces a scan, not wrong rows — so
+  `sweeper_test.go` asserts the index *shapes*, across every sweep table.
 
 And on the client-auth side, from M7:
 
