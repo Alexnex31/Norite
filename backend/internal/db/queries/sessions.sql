@@ -106,3 +106,16 @@ SELECT * FROM (
   ORDER BY s.device_id, s.created_at DESC
 ) d
 ORDER BY d.last_used_at DESC;
+
+-- name: DeleteExpiredSessions :execrows
+-- Called by auth.RunSweeper. Non-partial index behind it and an index on replaced_by_id — see 000012, and
+-- 000005 for why a partial one cannot serve this.
+--
+-- Expired only, never merely revoked, and the distinction is load-bearing. A revoked row is still
+-- evidence: replaced_by_id is what lets a presented token be told apart as *replay* rather than as merely
+-- unknown, and that is the signal reuse detection revokes a device family on. Deleting revoked rows while
+-- their tokens could still be presented would turn a stolen token into an unrecognized one and quietly
+-- disable the detection. Past expires_at nothing can be presented, so the evidence has nothing left to
+-- prove.
+DELETE FROM sessions
+WHERE expires_at < now();

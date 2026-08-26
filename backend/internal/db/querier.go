@@ -154,6 +154,16 @@ type Querier interface {
 	// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
 	// non-partial in 000005 for exactly this query.
 	DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error)
+	// Called by auth.RunSweeper. Non-partial index behind it and an index on replaced_by_id — see 000012, and
+	// 000005 for why a partial one cannot serve this.
+	//
+	// Expired only, never merely revoked, and the distinction is load-bearing. A revoked row is still
+	// evidence: replaced_by_id is what lets a presented token be told apart as *replay* rather than as merely
+	// unknown, and that is the signal reuse detection revokes a device family on. Deleting revoked rows while
+	// their tokens could still be presented would turn a stolen token into an unrecognized one and quietly
+	// disable the detection. Past expires_at nothing can be presented, so the evidence has nothing left to
+	// prove.
+	DeleteExpiredSessions(ctx context.Context) (int64, error)
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)

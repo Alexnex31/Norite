@@ -79,6 +79,28 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 	return i, err
 }
 
+const deleteExpiredSessions = `-- name: DeleteExpiredSessions :execrows
+DELETE FROM sessions
+WHERE expires_at < now()
+`
+
+// Called by auth.RunSweeper. Non-partial index behind it and an index on replaced_by_id — see 000012, and
+// 000005 for why a partial one cannot serve this.
+//
+// Expired only, never merely revoked, and the distinction is load-bearing. A revoked row is still
+// evidence: replaced_by_id is what lets a presented token be told apart as *replay* rather than as merely
+// unknown, and that is the signal reuse detection revokes a device family on. Deleting revoked rows while
+// their tokens could still be presented would turn a stolen token into an unrecognized one and quietly
+// disable the detection. Past expires_at nothing can be presented, so the evidence has nothing left to
+// prove.
+func (q *Queries) DeleteExpiredSessions(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getSessionByID = `-- name: GetSessionByID :one
 SELECT id, user_id, device_id, refresh_token_hash, device_name, ip_address, created_at, last_used_at, expires_at, revoked_at, replaced_by_id FROM sessions
 WHERE id = $1
