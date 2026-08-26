@@ -1,6 +1,7 @@
 package daemonproc
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -33,8 +34,18 @@ type fakeInstance struct {
 	// status and body override the response for the failure paths.
 	status int
 	body   string
-	// calls counts requests, so a test can assert the daemon did not call at all.
+	// calls counts refresh requests, so a test can assert the daemon did not call at all.
 	calls int
+	// handedBack is the token presented to /auth/logout, which is how a test sees whether the daemon gave
+	// back the credential it could not keep. Empty means it did not.
+	handedBack string
+	// logoutStatus overrides the revoke response, for the path where the instance refuses it.
+	logoutStatus int
+	// logoutBroken drops the connection instead of answering the revoke, which is what a transport
+	// failure looks like to the client. Closing the whole server from inside a handler cannot be used for
+	// this: Close waits for the in-flight request, so it deadlocks — and it would break the refresh too,
+	// which has to succeed for the token being handed back to exist at all.
+	logoutBroken bool
 	// beforeRefresh runs inside the handler, which is the one place a test can act while the daemon is
 	// between reading the record and writing it back.
 	beforeRefresh func()
@@ -45,13 +56,27 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 	f := &fakeInstance{}
 
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.calls++
-		require.Equal(t, "/api/v1/auth/refresh", r.URL.Path)
-
 		var body struct {
 			RefreshToken string `json:"refresh_token"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		// The daemon hands back a token it obtained and could not keep (M11). Handled here rather than in
+		// a second stub, so a test can see the refresh and the revocation in the order they happened.
+		if r.URL.Path == "/api/v1/auth/logout" {
+			f.handedBack = body.RefreshToken
+			if f.logoutBroken {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				require.NoError(t, err)
+				_ = conn.Close()
+				return
+			}
+			w.WriteHeader(cmp.Or(f.logoutStatus, http.StatusNoContent))
+			return
+		}
+
+		f.calls++
+		require.Equal(t, "/api/v1/auth/refresh", r.URL.Path)
 		f.received = body.RefreshToken
 
 		if f.beforeRefresh != nil {
@@ -328,4 +353,126 @@ func TestAFailedRefreshLogsNoToken(t *testing.T) {
 
 	assert.Nil(t, establishSession(t.Context(), testLogger(logs), store, &http.Client{}))
 	assert.NotContains(t, logs.String(), "nrt_from_login")
+}
+
+// The token a colliding login makes unkeepable is handed back, not abandoned (M11).
+//
+// Before this, the daemon dropped it and the instance kept it live for the full refresh TTL — thirty days
+// of a valid credential in nobody's hands. The code said handing it back needed M11's primitive and M19's
+// gateway connection; neither was true. POST /auth/logout has revoked exactly the session a presented
+// refresh token belongs to since M4, and the client to call it with is the one that just refreshed.
+func TestADroppedTokenIsHandedBack(t *testing.T) {
+	f := newFakeInstance(t)
+	store := storedSession(t, f.server.URL, "nrt_from_login")
+	logs := &strings.Builder{}
+
+	f.beforeRefresh = func() {
+		require.NoError(t, store.Save(credentials.Record{
+			InstanceURL: "https://other.example.com",
+			UserID:      "987654321",
+			Username:    "grace",
+			DeviceID:    "dev_test",
+			DeviceName:  "laptop",
+		}, "nrt_the_login_just_stored"))
+	}
+
+	sess := establishSession(t.Context(), testLogger(logs), store, f.server.Client())
+	require.Nil(t, sess)
+
+	assert.Equal(t, "nrt_rotated", f.handedBack,
+		"the token the daemon obtained and could not keep must be revoked, not left live")
+	assert.Contains(t, logs.String(), "revoked the renewed credential")
+
+	// And it revoked the right one. The login's token is what this machine is holding now; handing *that*
+	// back would sign somebody out of the session they had just created.
+	record, token, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nrt_the_login_just_stored", token, "the login's token must be untouched")
+	assert.Equal(t, "https://other.example.com", record.InstanceURL)
+	assert.NotEqual(t, token, f.handedBack)
+}
+
+// It goes to the instance the dropped token came from, not the one on disk now.
+//
+// A colliding `norite login` may have pointed the store at an entirely different instance — which is
+// exactly what TestALoginDuringTheRefreshIsNotUndone sets up. Reading the URL back off disk at this point
+// would present one instance's refresh token to another.
+func TestADroppedTokenGoesBackToItsOwnInstance(t *testing.T) {
+	f := newFakeInstance(t)
+	other := newFakeInstance(t)
+	store := storedSession(t, f.server.URL, "nrt_from_login")
+
+	f.beforeRefresh = func() {
+		require.NoError(t, store.Save(credentials.Record{
+			InstanceURL: other.server.URL,
+			UserID:      "987654321",
+			Username:    "grace",
+			DeviceID:    "dev_test",
+			DeviceName:  "laptop",
+		}, "nrt_the_login_just_stored"))
+	}
+
+	establishSession(t.Context(), testLogger(io.Discard), store, f.server.Client())
+
+	assert.Equal(t, "nrt_rotated", f.handedBack, "the issuing instance is the one told to revoke it")
+	assert.Empty(t, other.handedBack, "the instance the login switched to never saw this token")
+}
+
+// A hand-back that fails is logged and survived. The daemon is starting, and a token it could not revoke
+// leaves precisely the situation that existed before this was implemented — refusing to start over it
+// would turn a tidy-up into an outage.
+func TestAFailedHandBackDoesNotStopTheDaemon(t *testing.T) {
+	for name, arrange := range map[string]func(*fakeInstance){
+		"the instance refuses it":       func(f *fakeInstance) { f.logoutStatus = http.StatusInternalServerError },
+		"the connection drops under it": func(f *fakeInstance) { f.logoutBroken = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeInstance(t)
+			store := storedSession(t, f.server.URL, "nrt_from_login")
+			logs := &strings.Builder{}
+
+			// Arranged before the refresh runs, not inside the handler: the refresh has to succeed for
+			// there to be a token to hand back, and only the revocation may fail.
+			arrange(f)
+			f.beforeRefresh = func() {
+				require.NoError(t, store.Save(credentials.Record{
+					InstanceURL: "https://other.example.com", UserID: "987654321",
+					Username: "grace", DeviceID: "dev_test", DeviceName: "laptop",
+				}, "nrt_the_login_just_stored"))
+			}
+
+			// Reaching this line at all is the assertion: establishSession must return rather than fail.
+			sess := establishSession(t.Context(), testLogger(logs), store, f.server.Client())
+			assert.Nil(t, sess)
+			assert.Contains(t, logs.String(), "leaving it alone", "the collision is still reported")
+
+			_, token, err := store.Load()
+			require.NoError(t, err)
+			assert.Equal(t, "nrt_the_login_just_stored", token, "and the login's credential is intact")
+		})
+	}
+}
+
+// Rule 8, on the path M11 added: a revocation request carries a refresh token, and none of it may reach
+// the log — not on success, not when the instance refuses, not when it cannot be reached.
+func TestHandingBackATokenLogsNoToken(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusInternalServerError} {
+		f := newFakeInstance(t)
+		f.logoutStatus = status
+		store := storedSession(t, f.server.URL, "nrt_from_login")
+		logs := &strings.Builder{}
+
+		f.beforeRefresh = func() {
+			require.NoError(t, store.Save(credentials.Record{
+				InstanceURL: "https://other.example.com", UserID: "987654321",
+				Username: "grace", DeviceID: "dev_test", DeviceName: "laptop",
+			}, "nrt_the_login_just_stored"))
+		}
+
+		establishSession(t.Context(), testLogger(logs), store, f.server.Client())
+
+		for _, secret := range []string{"nrt_rotated", "nrt_from_login", "nrt_the_login_just_stored"} {
+			assert.NotContains(t, logs.String(), secret, "status %d leaked %s", status, secret)
+		}
+	}
 }

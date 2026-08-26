@@ -129,11 +129,23 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 
 	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
 		// Somebody signed in or out while this was in flight, so the session just renewed is not the one
-		// this machine is holding any more. Leaving their credential alone is the whole point; the token
-		// obtained here is dropped with it. It stays valid at the instance until it expires, and there is
-		// no way to hand it back — revoking one session is M11's primitive, and reaching for it from here
-		// needs the gateway connection that arrives at M19.
+		// this machine is holding any more. Leaving their credential alone is the whole point.
+		//
+		// The token obtained here is therefore dropped — but not simply abandoned. Left alone it stays
+		// valid at the instance for the full refresh TTL with nobody holding it, which is a live
+		// credential in nobody's hands, and the whole subject of M11 is not leaving those lying around.
+		// So it is handed back first.
+		//
+		// To the instance the *local* record names, not whatever is on disk now: a `norite login` that
+		// collided here may have pointed the store at an entirely different instance, and this token
+		// belongs to the one it was issued by.
+		//
+		// This comment used to say handing it back was impossible — that revoking one session was M11's
+		// primitive and reaching for it needed M19's gateway connection. Both halves were wrong.
+		// POST /auth/logout has revoked exactly one session by presenting its refresh token since M4, and
+		// the client to call it with is the one that just performed the refresh.
 		log.Info().Err(err).Msg("the stored credential changed while it was being renewed; leaving it alone")
+		handBackToken(ctx, log, client, record.InstanceURL, pair.RefreshToken)
 		return nil
 
 	case err != nil:
@@ -164,6 +176,52 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 		Msg("signed in with the stored credential")
 
 	return &session{record: record, accessToken: pair.AccessToken, expiresAt: pair.ExpiresAt}
+}
+
+// handBackToken revokes a refresh token this daemon obtained and then could not keep.
+//
+// Best-effort by construction, and never fatal. The daemon is starting; a token it failed to hand back
+// leaves exactly the situation that existed before this function did, and refusing to start over it would
+// turn a tidy-up into an outage. Both outcomes are logged, because the person reading that log is the only
+// one who can revoke it by hand.
+//
+// Not a full logout of anything the user is using: /auth/logout revokes the single session the presented
+// token belongs to, and the token presented here is the one nobody holds.
+func handBackToken(ctx context.Context, log zerolog.Logger, client *http.Client,
+	instanceURL, refreshToken string,
+) {
+	body, err := json.Marshal(map[string]string{"refresh_token": refreshToken})
+	if err != nil {
+		log.Warn().Err(err).Msg("could not build the request to revoke the token that was dropped")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		instanceURL+"/api/v1/auth/logout", bytes.NewReader(body))
+	if err != nil {
+		log.Warn().Err(err).Msg("could not build the request to revoke the token that was dropped")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// No URL and no wrapped transport error, for the reason refreshSession gives: the request body is
+		// a refresh token and a url.Error is one library change away from rendering it.
+		log.Warn().Msg("could not reach the instance to revoke the token that was dropped; " +
+			"it stays valid until it expires")
+		return
+	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)); _ = resp.Body.Close() }()
+
+	// The status code and nothing else — not resp.Status, which carries the server's own reason phrase
+	// into a log file people read in a terminal.
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		log.Warn().Int("status", resp.StatusCode).
+			Msg("the instance did not accept the revocation of the token that was dropped")
+		return
+	}
+	log.Info().Msg("revoked the renewed credential that the login superseded")
 }
 
 // tokenPair is the instance's answer to a refresh.
