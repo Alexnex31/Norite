@@ -301,3 +301,86 @@ func TestLoggingOutEverywhereElseWithNoOtherDevices(t *testing.T) {
 		map[string]string{"refresh_token": acct.Tokens.RefreshToken})
 	assert.Equal(t, http.StatusOK, ok.Code)
 }
+
+// A device that has been signed out cannot sign anybody else out.
+//
+// Found by hand. Access tokens are stateless and stay valid for up to fifteen minutes after their session
+// is revoked (§17.10), which is the accepted cost of not doing a database lookup on every authenticated
+// request. Reading a profile inside that window is what the trade buys. *Undoing a revocation* inside it is
+// not: a device signed out by "sign out everywhere else" could spend its remaining minutes calling the same
+// endpoint and signing out the device that signed it out, taking the account's API tokens with it each
+// time. The owner wins eventually — only they can authenticate afresh — but the operation whose entire
+// promise is "this took effect" would have quietly not.
+//
+// The check costs one indexed lookup on an endpoint called approximately never, and nothing at all on the
+// path §17.10 is actually about.
+func TestASignedOutDeviceCannotSignOutTheDeviceThatSignedItOut(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	laptop := a.newAccount("ada", "ada@example.com", "laptop")
+	phone := a.login("ada@example.com", "phone")
+
+	out := a.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(laptop.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, out.Code, out)
+
+	// The phone's access token is still cryptographically valid, and still reads.
+	me := a.call(http.MethodGet, "/api/v1/users/@me", nil, withToken(phone.AccessToken))
+	require.Equal(t, http.StatusOK, me.Code, "the residual window is real and accepted")
+
+	// But it may not revoke.
+	revenge := a.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(phone.AccessToken))
+	assert.Equal(t, http.StatusUnauthorized, revenge.Code,
+		"a signed-out device must not be able to undo the sign-out")
+	assert.Equal(t, "unauthorized", revenge.errorBody().Code)
+
+	kept := a.call(http.MethodPost, "/api/v1/auth/refresh",
+		map[string]string{"refresh_token": laptop.Tokens.RefreshToken})
+	assert.Equal(t, http.StatusOK, kept.Code, "and the device that did the signing out is untouched")
+}
+
+// The same rule on the single-device endpoint, which can do the same damage one device at a time.
+func TestASignedOutDeviceCannotRevokeASession(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	laptop := a.newAccount("ada", "ada@example.com", "laptop")
+	phone := a.login("ada@example.com", "phone")
+
+	var laptopID string
+	for _, s := range listSessions(t, a, laptop.Tokens.AccessToken) {
+		if s.Current {
+			laptopID = s.ID
+		}
+	}
+	require.NotEmpty(t, laptopID)
+
+	out := a.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(laptop.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, out.Code, out)
+
+	res := a.call(http.MethodDelete, "/api/v1/users/@me/sessions/"+laptopID, nil, withToken(phone.AccessToken))
+	assert.Equal(t, http.StatusUnauthorized, res.Code)
+
+	kept := a.call(http.MethodPost, "/api/v1/auth/refresh",
+		map[string]string{"refresh_token": laptop.Tokens.RefreshToken})
+	assert.Equal(t, http.StatusOK, kept.Code, "the laptop survives the attempt")
+}
+
+// The check must not fire on the ordinary case it sits next to: a caller whose session was *rotated* is
+// live, not signed out, and rotation revokes the row the access token names. Conflating the two would break
+// sign-out-everywhere-else for every recently-refreshed client — which is TestLoggingOutEverywhereElse-
+// WorksAfterARotation's territory, asserted here from the other direction.
+func TestARotatedDeviceIsNotASignedOutOne(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	acct := a.newAccount("ada", "ada@example.com", "laptop")
+
+	var rotated tokenPair
+	res := a.call(http.MethodPost, "/api/v1/auth/refresh",
+		map[string]string{"refresh_token": acct.Tokens.RefreshToken})
+	require.Equal(t, http.StatusOK, res.Code, res)
+	res.decode(&rotated)
+
+	// The pre-rotation access token names a revoked row, and must still be allowed to revoke.
+	out := a.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(acct.Tokens.AccessToken))
+	assert.Equal(t, http.StatusOK, out.Code, "a rotation is not a sign-out")
+
+	kept := a.call(http.MethodPost, "/api/v1/auth/refresh",
+		map[string]string{"refresh_token": rotated.RefreshToken})
+	assert.Equal(t, http.StatusOK, kept.Code)
+}

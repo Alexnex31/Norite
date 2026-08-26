@@ -52,11 +52,14 @@ var (
 	ErrEmailTaken          = errors.New("that email is already registered")
 	ErrUsernameTaken       = errors.New("that username is already taken")
 	ErrInvalidRefreshToken = errors.New("invalid or expired refresh token")
-	ErrSessionReuse        = errors.New("refresh token was already used")
-	ErrUnknownScope        = errors.New("unknown scope")
-	ErrNotFound            = errors.New("not found")
-	ErrInvalidUsername     = errors.New("a username may contain only letters, digits, and _ . -")
-	ErrInvalidTokenName    = errors.New("invalid token name")
+	// ErrSessionSignedOut means the credential is still cryptographically valid but the session behind it
+	// has been revoked. Only the revoking endpoints raise it — see Service.requireLiveDevice.
+	ErrSessionSignedOut = errors.New("this session has been signed out")
+	ErrSessionReuse     = errors.New("refresh token was already used")
+	ErrUnknownScope     = errors.New("unknown scope")
+	ErrNotFound         = errors.New("not found")
+	ErrInvalidUsername  = errors.New("a username may contain only letters, digits, and _ . -")
+	ErrInvalidTokenName = errors.New("invalid token name")
 )
 
 // RegistrationMode mirrors the instance's configured gating.

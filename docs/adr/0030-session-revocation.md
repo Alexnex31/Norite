@@ -88,7 +88,28 @@ treatment M5 gave the same cost on the reset page.
 revoke its owner's sessions — and, being the whole primitive, its owner's other tokens with them — is a
 credential that can lock its owner out. Same rule minting already obeys.
 
-### Access tokens stay stateless, and the residual window is accepted
+### One exception to the stateless access token, and where the line is
+Access tokens are not checked against session state, so one issued to a device that has since been signed
+out keeps working until it expires. That is accepted (below) — except on the two endpoints whose *purpose*
+is revocation.
+
+Without the exception, a device signed out by "sign out everywhere else" can spend its remaining fifteen
+minutes calling the same endpoint back, signing out the device that signed it out and revoking the
+account's API tokens each time. The owner wins eventually, because only they can authenticate afresh and a
+stolen refresh token died in the first call — so this is spite rather than escalation. But the operation
+whose entire promise is "this took effect" would have quietly not, which is the thing worth refusing.
+
+The line is statable and narrow: **an endpoint whose purpose is revocation does not accept a credential
+whose own session has been revoked.** Reading a profile inside the window is what the trade below buys;
+undoing a revocation inside it is not. A *rotated* session is live, not signed out — rotation revokes the
+row an access token names, and conflating the two would break the endpoint for every recently-refreshed
+client, which is the milestone's other sharp edge. Liveness is therefore asked of the **device**, not the
+row.
+
+Found by driving it by hand after the tests were green. It costs one indexed lookup on an endpoint called
+approximately never, and nothing on the path §17.10 is actually about.
+
+### Access tokens stay stateless otherwise, and the residual window is accepted
 Not reopened here. `architecture.md` §17.10 records it: an already-issued access token is not checked
 against session state, so it keeps working until it expires, at most fifteen minutes, and cannot be renewed
 because the session behind it is gone.

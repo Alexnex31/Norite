@@ -1427,6 +1427,13 @@ paths:
         15 minutes. It cannot be renewed, because the refresh session behind it is gone. This is the
         accepted trade in docs/architecture.md §17.10: the alternative is a database lookup on every
         authenticated request.
+
+        **A signed-out device may not call this.** Access tokens are stateless, so one issued to a device
+        that has since been signed out keeps working for up to `AccessTokenTTL` — but not *here*. Without
+        that exception a device signed out by this endpoint could spend its remaining minutes calling it
+        back, signing out the device that signed it out and taking the account's API tokens along each
+        time. The answer is **401**, and re-authenticating is exactly the right response to it. A device
+        that has merely *rotated* its token is live, not signed out, and is unaffected.
       operationId: logoutAll
       tags: [auth]
       responses:
@@ -1859,6 +1866,10 @@ paths:
 
         Note the residual window: an access token already issued to the revoked device keeps working until
         it expires, up to `AccessTokenTTL`. It cannot be renewed. See `POST /auth/logout/all`.
+
+
+        **A signed-out device may not call this either**, for the reason given there — one device at a time
+        does the same damage. The answer is 401.
       operationId: revokeSession
       tags: [users]
       parameters:

@@ -89,7 +89,12 @@ func (s *Service) ListSessionDevices(ctx context.Context, userID, currentSession
 // Takes the id of a session row and revokes every live session sharing its device_id, which is what makes
 // the action mean what the listing showed. Revoking the caller's own device is allowed: that is "sign out
 // here", and refusing it would be a special case nobody asked for.
-func (s *Service) RevokeSessionDevice(ctx context.Context, userID, sessionID snowflake.ID) error {
+func (s *Service) RevokeSessionDevice(ctx context.Context, userID, actingSessionID, sessionID snowflake.ID,
+) error {
+	if err := s.requireLiveDevice(ctx, userID, actingSessionID); err != nil {
+		return err
+	}
+
 	session, err := s.queries.GetSessionByID(ctx, int64(sessionID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -127,8 +132,56 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID, currentSessio
 	if err != nil {
 		return RevocationResult{}, err
 	}
+	if err := s.requireLiveDeviceNamed(ctx, userID, currentDevice); err != nil {
+		return RevocationResult{}, err
+	}
 
 	return revokeEverything(ctx, s.queries, int64(userID), RevocationScope{KeepDeviceID: currentDevice})
+}
+
+// requireLiveDevice refuses an action from a device that has already been signed out.
+//
+// This is the one place the stateless access token is checked against session state, and the line is drawn
+// deliberately. §17.10 accepts that an access token keeps working for up to fifteen minutes after its
+// session is revoked, because closing that window means a database lookup on every authenticated request —
+// on the hottest path in the API, against the shortest-lived credential here.
+//
+// Reading a profile inside that window is what the trade buys. *Undoing a revocation* inside it is not:
+// without this check, a device signed out by "sign out everywhere else" can spend its remaining minutes
+// calling the same endpoint and signing out the device that signed it out — taking the account's API
+// tokens with it each time. The owner wins eventually, because only they can authenticate afresh, but the
+// operation whose entire promise is "this took effect" would have quietly not.
+//
+// So the rule is narrow and statable: an endpoint whose purpose is revocation does not accept a credential
+// whose own session has been revoked. It costs one indexed lookup on an endpoint called approximately
+// never, and nothing on the path §17.10 is about.
+func (s *Service) requireLiveDevice(ctx context.Context, userID, sessionID snowflake.ID) error {
+	device, err := s.currentDeviceID(ctx, userID, sessionID)
+	if err != nil {
+		return err
+	}
+	return s.requireLiveDeviceNamed(ctx, userID, device)
+}
+
+// requireLiveDeviceNamed is requireLiveDevice for a caller that has already resolved the device.
+func (s *Service) requireLiveDeviceNamed(ctx context.Context, userID snowflake.ID, device string) error {
+	// No device at all: an access token naming a session this instance has no record of. Not reachable in
+	// ordinary use — the row outlives the token that names it by weeks — so refusing is the safe reading.
+	if device == "" {
+		return ErrSessionSignedOut
+	}
+
+	live, err := s.queries.CountLiveSessionsForDevice(ctx, db.CountLiveSessionsForDeviceParams{
+		UserID:   int64(userID),
+		DeviceID: device,
+	})
+	if err != nil {
+		return fmt.Errorf("counting live sessions for the acting device: %w", err)
+	}
+	if live == 0 {
+		return ErrSessionSignedOut
+	}
+	return nil
 }
 
 // currentDeviceID resolves the access token's session claim to the device it belongs to.

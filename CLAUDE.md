@@ -580,9 +580,12 @@ And on session revocation, from M11 (decisions in ADR 0030):
 - **Session management needs a user actor, never an API token.** The listing enumerates every machine the
   account is signed in on, and the revoke takes the account's other API tokens with it, so a delegated
   credential holding either could lock its owner out. Same rule minting obeys.
-- **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10). Both
-  endpoints state it in the contract rather than closing it with a per-request database lookup on the
-  hottest path in the API.
+- **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10) —
+  **except on the two endpoints whose purpose is revocation**, which refuse a credential whose own session
+  has been signed out. Otherwise a device signed out by `logout/all` can spend its remaining minutes
+  calling it back and signing out the device that signed it out. Reading a profile inside the window is
+  what the trade buys; undoing a revocation inside it is not. Liveness is asked of the *device*, never the
+  row, because a rotated session is live and its row is revoked.
 - **The sweep deletes by expiry, never by revocation.** A revoked row is the evidence that tells *replay*
   apart from an unknown token, which is what reuse detection revokes a device family on. Past `expires_at`
   nothing can be presented, so there is nothing left to prove.

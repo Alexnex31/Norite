@@ -556,7 +556,7 @@ func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.RevokeSessionDevice(r.Context(), actor.UserID, sessionID); err != nil {
+	if err := h.svc.RevokeSessionDevice(r.Context(), actor.UserID, actor.SessionID, sessionID); err != nil {
 		h.writeErr(w, r, err)
 		return
 	}
@@ -610,6 +610,12 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrInvalidCredentials), errors.Is(err, ErrPasswordNotSet):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid email or password"))
+
+	case errors.Is(err, ErrSessionSignedOut):
+		// 401, and it says so plainly rather than hiding behind the vague credential message: the caller
+		// holds a genuine token for a session somebody has signed out, and "re-authenticate" is exactly the
+		// right advice. Nothing is disclosed — they already knew whose account it is.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "%s", err.Error()))
 
 	case errors.Is(err, ErrInvalidRefreshToken), errors.Is(err, ErrSessionReuse):
 		// Reuse is deliberately reported the same as an ordinary invalid token. Telling the caller "that
