@@ -320,3 +320,15 @@ func TestUnmarshalJSONRejectsANegativeID(t *testing.T) {
 		}
 	}
 }
+
+// The JSON literal null is absence; the string "null" is a value somebody sent, and the two must not be
+// confused. Quote-stripping used to run first, so `"null"` became null and was accepted silently — leaving
+// the ID at zero, which is the input a permission check is least likely to notice.
+func TestUnmarshalJSONRejectsTheStringNull(t *testing.T) {
+	var id ID
+	require.NoError(t, json.Unmarshal([]byte("null"), &id), "the literal null is absence, not an error")
+	assert.Zero(t, id)
+
+	assert.Error(t, json.Unmarshal([]byte(`"null"`), &id),
+		`the string "null" is a value, and not a valid ID`)
+}

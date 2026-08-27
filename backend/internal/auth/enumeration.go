@@ -30,8 +30,8 @@ import (
 // # Why a floor rather than symmetric work
 //
 // The equalizer Register uses — do the expensive thing before the branch, so both paths pay it — has no
-// analogue here. The expensive thing is writing a row to password_reset_tokens, which has a foreign key to
-// users, so the not-found branch has nothing to write it against. Writing rows for addresses that do not
+// counterpart here. The expensive thing is writing a row to password_reset_tokens, which has a foreign key
+// to users, so the not-found branch has nothing to write it against. Writing rows for addresses that do not
 // exist would be a worse answer than the leak.
 //
 // So the endpoint takes a fixed budget and returns when the budget is spent. Crude, and it is the standard

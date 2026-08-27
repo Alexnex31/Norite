@@ -193,8 +193,26 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 	// transaction below, together with the account insert — checking it here as well would spend a use
 	// on a registration that then failed its username check, burning somebody else's invite.
 	gated := s.registrationMode != RegistrationOpen
-	if gated && strings.TrimSpace(in.InviteCode) == "" {
-		return db.User{}, ErrInviteRequired
+	if gated {
+		if strings.TrimSpace(in.InviteCode) == "" {
+			return db.User{}, ErrInviteRequired
+		}
+		// And the code has to be *shaped* like one before anything expensive happens.
+		//
+		// "One cheap rejection" above was true only of a request with no code at all. Any well-formed
+		// garbage reached HashPassword thirty lines down and spent 64 MiB and tens of milliseconds in one
+		// of maxConcurrentHashes slots — so the gate that reads as the protection against exactly this
+		// was not it. Bounded rather than unbounded, since the hash gate and the /auth rate limit still
+		// apply, but the comment claimed a property the code did not have.
+		//
+		// A shape check only. Whether the code is *redeemable* stays in the transaction below, where it
+		// shares the account insert: checking that here as well would spend a use on a registration that
+		// then failed its username check and burn somebody else's invite. A well-formed but unknown code
+		// therefore still reaches the hash, and closing that needs a pre-check that races — which is the
+		// thing this ordering exists to avoid, so it is the right place to stop.
+		if _, err := ParseInviteCode(in.InviteCode); err != nil {
+			return db.User{}, err
+		}
 	}
 
 	// Normalized and validated here rather than only by the handler's struct tags, so every caller gets

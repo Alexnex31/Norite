@@ -200,7 +200,10 @@ func TestTheASCIIFastPathAgreesWithTheUnicodeTables(t *testing.T) {
 		if r >= 0xd800 && r <= 0xdfff {
 			continue // surrogates cannot appear in a Go string decoded from UTF-8
 		}
-		byTable := unicode.Is(unicode.Cc, r) || isBidiReordering(r)
+		// U+2028/U+2029 are the one deliberate addition on top of the tables: line breaks in categories
+		// Zl and Zp that Text removes and Block keeps. Named here rather than folded into byTable so this
+		// test still fails if anything *else* starts disagreeing with the tables.
+		byTable := unicode.Is(unicode.Cc, r) || isBidiReordering(r) || r == '\u2028' || r == '\u2029'
 		if got := mustRemove(r, false); got != byTable {
 			t.Fatalf("mustRemove(%U) = %v, but the tables say %v", r, got, byTable)
 		}
@@ -259,4 +262,36 @@ func FuzzOutputIsAlwaysInert(f *testing.F) {
 			}
 		}
 	})
+}
+
+// U+2028 and U+2029 are line breaks that neither Cc nor the bidi set reaches — categories Zl and Zp — so
+// they were the last way a value Text promises is one line could be rendered as two.
+//
+// Inert on a VT-family terminal, which is why this was never a live bug for the CLI. It stops being inert
+// at the first renderer that does its own line breaking: the TUI's markdown subset (M43) and the Gio GUI
+// both will, and UAX #14 makes both characters mandatory breaks. Written as escapes rather than literals
+// because these characters are invisible in a source file, and a test asserting something about a
+// character nobody can see in the diff is a test nobody can review.
+func TestTextRemovesTheUnicodeLineSeparators(t *testing.T) {
+	for name, sep := range map[string]rune{
+		"line separator":      '\u2028',
+		"paragraph separator": '\u2029',
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := "ada" + string(sep) + "admin"
+			want := "ada" + mark + "admin"
+			if got := Text(in); got != want {
+				t.Fatalf("Text(%q) = %q, want %q", in, got, want)
+			}
+		})
+	}
+}
+
+// Block keeps them, for the reason it keeps \n: it is output meant to span lines, and removing a genuine
+// paragraph break from a message body would corrupt what somebody wrote.
+func TestBlockKeepsTheUnicodeLineSeparators(t *testing.T) {
+	in := "first\u2028second\u2029third"
+	if got := Block(in); got != in {
+		t.Errorf("Block(%q) = %q, want it unchanged", in, got)
+	}
 }

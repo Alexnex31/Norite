@@ -944,7 +944,7 @@ merged refusal message exists to withhold. `POST /auth/verify/request` had the i
 
 Both now take a fixed 50 ms budget regardless of what they find (`auth.padToEnumerationFloor`), which is
 the standard mitigation and the only one available here: the equalizer registration uses — do the expensive
-work before the branch, so both paths pay it — has no analogue, because the expensive work is writing a row
+work before the branch, so both paths pay it — has no counterpart, because the expensive work is writing a row
 with a foreign key to `users` and the not-found branch has nothing to write it against. **A slow path that
 exceeds the floor starts leaking again**, so the property degrades exactly when the instance is busiest;
 that is accepted, stated here rather than left to be discovered, and pinned by a test that measures all

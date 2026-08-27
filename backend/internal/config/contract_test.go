@@ -235,3 +235,45 @@ func TestOAuthRequiresThePublicBaseURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "redirects back to it",
 		"the message must say why, not just that it is required")
 }
+
+// The `url` struct tag accepts any parseable absolute URL, which is every scheme there is — and this value
+// exists to become a link handed to something outside the process: a verification mail, a reset mail, the
+// callback registered with an OAuth provider. A scheme a mail client will not follow produces links that
+// silently do not work, and a javascript:-shaped one produces links that are actively wrong.
+//
+// Operator-controlled, so this is a misconfiguration guard rather than an attack surface. It exists because
+// daemon/credentials.ParseInstanceURL makes the same check on the same class of value and the backend did
+// not.
+//
+// A scheme-less value ("chat.example.com") is not covered here because the `url` tag already refuses it;
+// what the tag cannot express is *which* schemes are acceptable.
+func TestPublicBaseURLMustBeHTTPOrHTTPS(t *testing.T) {
+	for name, value := range map[string]string{
+		"a javascript URL": "javascript:alert(1)",
+		"a file URL":       "file:///etc/passwd",
+		"a mailto URL":     "mailto:ada@example.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			withoutConfigFile(t)
+			t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+			t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+			t.Setenv(envPrefix+"PUBLIC_BASE_URL", value)
+
+			_, err := Load("")
+			require.Error(t, err, "%q must not be accepted", value)
+			assert.Contains(t, err.Error(), "http:// or https://",
+				"the message must say what is acceptable, not only that this is not")
+		})
+	}
+
+	t.Run("https is accepted", func(t *testing.T) {
+		withoutConfigFile(t)
+		t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+		t.Setenv(envPrefix+"PUBLIC_BASE_URL", "https://chat.example.com")
+
+		cfg, err := Load("")
+		require.NoError(t, err)
+		assert.Equal(t, "https://chat.example.com", cfg.PublicBaseURL)
+	})
+}

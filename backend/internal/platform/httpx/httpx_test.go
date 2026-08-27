@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/assert"
@@ -213,4 +215,82 @@ func writeErrorBody(t *testing.T, err error, wantStatus int) errorResponse {
 	var body errorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	return body
+}
+
+// The slow-body sibling of Slowloris, which the server's ReadHeaderTimeout does not cover.
+//
+// main sets ReadHeaderTimeout and deliberately no ReadTimeout, because M18's gateway mounts on the same
+// server and a read deadline would sever a long-lived WebSocket — and the comment there says
+// ReadHeaderTimeout "is what actually closes the Slowloris hole". It closes the header half. A client that
+// sends complete headers and then trickles the body holds a connection and a goroutine for as long as it
+// likes; at a byte a second the 1 MiB cap is reached in about eleven days.
+func TestDecodeJSONBoundsHowLongABodyMayTake(t *testing.T) {
+	previous := bodyReadTimeout
+	bodyReadTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = previous })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := DecodeJSON(w, r, &body); err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	// Headers complete, body never finished — the shape ReadHeaderTimeout lets through.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, pr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
+
+	go func() {
+		_, _ = pw.Write([]byte(`{"na`))
+		// ...and then nothing, for longer than the bound.
+		time.Sleep(2 * time.Second)
+		_, _ = pw.Write([]byte(`me":"ada"}`))
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := srv.Client().Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("a trickled body was not cut off — the read deadline is not being set")
+	}
+}
+
+// decodeError matches the stdlib's unknown-field message by string, because encoding/json returns a plain
+// errors.New for it with no typed equivalent. Every other branch in that function matches a type. The
+// coupling is therefore to a message rather than to an API, and a reword upstream would silently drop this
+// case to the generic default — plausible rather than theoretical, given the encoding/json v2 work.
+//
+// Rule 3's unknown-field rejection still holds either way; what is lost is the message naming the field.
+// So this asserts the message, and a Go upgrade that changes it fails here rather than quietly.
+func TestDecodeJSONNamesTheUnknownField(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"nikname":"ada"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	var body struct {
+		Name string `json:"name"`
+	}
+	err := DecodeJSON(rec, req, &body)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nikname",
+		"the message must name the field; if this fails after a Go upgrade, decodeError's string match "+
+			"no longer matches encoding/json's wording")
 }

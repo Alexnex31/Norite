@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 
@@ -198,6 +199,16 @@ func statusFor(sentinel error) (int, string) {
 // (Milestone M58) get their own, larger, streaming path rather than raising this.
 const maxRequestBody = 1 << 20 // 1 MiB
 
+// bodyReadTimeout bounds how long a request body may take to arrive once the handler starts reading it.
+//
+// Generous: a 1 MiB payload over a bad mobile link is well inside it, and nothing this API accepts is
+// large. What it stops is the trickle that never ends. See DecodeJSON for why the bound lives here rather
+// than on the server.
+//
+// A var rather than a const only so the test can shorten it — a test that waited out the real value would
+// take thirty seconds to prove one thing.
+var bodyReadTimeout = 30 * time.Second
+
 // DecodeJSON reads a JSON request body into dst.
 //
 // It enforces three things the standard decoder does not, all of them defensive rather than convenient:
@@ -212,6 +223,25 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
+	// A bound on how long the body may take to arrive, not only on how large it may be.
+	//
+	// The server sets ReadHeaderTimeout and deliberately no ReadTimeout — M18's gateway mounts on the same
+	// server and a read deadline would sever a long-lived WebSocket. That closes Slowloris, which is the
+	// hole the comment there names, and leaves its slow-*body* sibling open: a client that sends complete
+	// headers and then trickles a byte a second holds a connection, a goroutine, and once the handler has
+	// begun a connection from a pool that is small by design (§15.3). At a byte a second the 1 MiB cap
+	// above is reached in about eleven days.
+	//
+	// Set here rather than on the server because here is exactly the set of requests that have a JSON body
+	// to read, so the gateway is untouched by construction rather than by an exemption somebody has to
+	// remember. A failure to set it is not fatal: ResponseController reports ErrNotSupported for a
+	// ResponseWriter that cannot, which is every httptest recorder, and a bound that is merely absent
+	// leaves the behavior that existed before.
+	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		return Errorf(ErrBadRequest, "request body could not be read")
+	}
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
