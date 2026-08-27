@@ -993,6 +993,23 @@ and for new claims being added to it rather than to a caller.
 Account deletion otherwise follows the original design: soft-delete with placeholder username/email,
 hard-delete `oauth_identities`/`sessions`, leave authored content in place rendered as "Deleted User."
 
+**Two things about that placeholder rename are load-bearing, and neither is obvious until deletion exists.**
+`users.username` and `users.email` carry plain `UNIQUE` constraints, not partial indexes excluding
+soft-deleted rows, while every read filters `deleted_at IS NULL` — `UserExistsByEmail`, `GetUserByEmail`,
+`UsernameUnavailable`. Today no soft-deleted row exists, so the disagreement is unreachable and the
+*outcome* would be correct anyway: the pre-check would report a deleted account's name free, `CreateUser`
+would fail on the index, and `registerConflict` already maps that to the right error. It is a consistency
+defect rather than a bug, and the conflict-handling path is what keeps it benign.
+
+- The rename must be **guaranteed rather than best-effort**. A deletion that soft-deletes without renaming
+  leaves the constraints holding names no live account holds, and registration starts refusing them.
+  Whichever way that is resolved — a guaranteed rename, or making the constraints partial on
+  `deleted_at IS NULL` — decide it in the migration rather than discovering it from a support ticket.
+- M10's "somebody tried to register with your address" notice would currently be **mailed to a deleted
+  account's address**, which is a message to somebody who asked to be forgotten. Whatever the deletion
+  milestone decides about residual mail has to cover that path specifically, because it is the one place
+  the instance writes to an address it no longer has an account for.
+
 **Sessions are also swept.** The table is a rotation chain — every refresh inserts a successor and revokes
 its predecessor — so it grows with traffic rather than with sign-ins, and until M11 nothing deleted from
 it. `auth.RunSweeper` removes rows past `expires_at`, never merely revoked ones: a revoked row is still the
