@@ -92,6 +92,12 @@ type Service struct {
 	// pretending a provider exists.
 	oauth OAuthProviders
 
+	// enumerationFloor is how long an always-202 lookup endpoint takes regardless of what it found.
+	//
+	// A field rather than the constant directly so the tests that are not about timing can zero it; the
+	// one that is measures against it. See padToEnumerationFloor.
+	enumerationFloor time.Duration
+
 	now func() time.Time
 }
 
@@ -148,6 +154,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		ids:              opts.IDs,
 		issuer:           opts.Issuer,
 		registrationMode: mode,
+		enumerationFloor: enumerationFloor,
 		now:              time.Now,
 	}, nil
 }

@@ -930,9 +930,24 @@ against is it becoming quiet, not it existing.
 
 **Password reset** (built at M5): always-202 anti-enumeration, single-use SHA-256-hashed token with a
 one-hour TTL, sent asynchronously via the SMTP relay (§11) and never blocking the HTTP response — the
-detachment is what makes the 202 honest, since sending inline would leak through timing whatever the body
-said. Requesting again spends any earlier token, and a token is refused if the account's email changed
-after it was issued.
+detachment is necessary for the 202 to be honest, since sending inline would leak through timing whatever
+the body said. Requesting again spends any earlier token, and a token is refused if the account's email
+changed after it was issued.
+
+Necessary but **not sufficient**, which is the correction M11 made after an external review. Detaching the
+*mail* left the *database* asymmetric: a found account with a password generates a token and commits a
+transaction the not-found branch never pays for, measured at 265 µs against 47 µs — 5.65x, consistent, and
+a distribution shift rather than noise. Reset separates three states this way, not two, so the same
+measurement also told an attacker which addresses sign in only with a provider — the detail ADR 0024's
+merged refusal message exists to withhold. `POST /auth/verify/request` had the identical shape.
+
+Both now take a fixed 50 ms budget regardless of what they find (`auth.padToEnumerationFloor`), which is
+the standard mitigation and the only one available here: the equalizer registration uses — do the expensive
+work before the branch, so both paths pay it — has no analogue, because the expensive work is writing a row
+with a foreign key to `users` and the not-found branch has nothing to write it against. **A slow path that
+exceeds the floor starts leaking again**, so the property degrades exactly when the instance is busiest;
+that is accepted, stated here rather than left to be discovered, and pinned by a test that measures all
+three branches.
 
 A successful reset **revokes every session and every API token on the account**. Sessions alone would not be
 enough: a reset is how someone recovers a compromised account, and a token an intruder minted while they had

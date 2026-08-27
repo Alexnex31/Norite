@@ -48,13 +48,19 @@ var (
 // an address is registered, and doing so turns the endpoint into an account-enumeration oracle for any
 // address someone cares to try.
 //
-// Timing does not leak it either, and that falls out of the design rather than needing care here: the mail
-// is handed to a background queue, so the request does the same work whether or not it found an account.
-// The one asymmetry left is the database lookup, which is an indexed single-row read in both directions.
+// Timing does not leak it either, and that takes deliberate work rather than falling out of the design.
+// This comment used to claim the opposite — that handing the mail to a background queue left the two
+// branches doing the same work, with only an indexed single-row read between them. It was false, and being
+// false is what kept anyone from looking: a found account generates a token and commits a transaction the
+// not-found branch never pays for, measured at 265 µs against 47 µs. See padToEnumerationFloor, which is
+// what makes the sentence above true, and what it still does not cover.
 func (s *Service) RequestPasswordReset(ctx context.Context, rawEmail string) error {
 	if s.mailer == nil || !s.mailer.Enabled() {
+		// Ahead of the floor deliberately: this answers 503 for every address alike, so it discloses
+		// nothing about any of them and there is nothing to pad.
 		return ErrResetUnavailable
 	}
+	defer s.padToEnumerationFloor(ctx, time.Now())
 
 	email := strings.TrimSpace(strings.ToLower(rawEmail))
 
