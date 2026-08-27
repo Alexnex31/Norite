@@ -153,6 +153,12 @@ license-check:
 # Checked in rather than merely checkable, for the reason the sqlc output is: a change to the set of
 # licenses this project ships under should appear in a diff and be reviewed, not be a thing somebody could
 # have run.
+#
+# LC_ALL=C on the sort, and it is load-bearing rather than tidy: collation is locale-dependent, so
+# en_US.UTF-8 and the CI runner's locale order `github.com/go-sql-driver` against `github.com/godbus`
+# differently. Without it the committed file and the one CI regenerates hold the same lines in a different
+# order, and the staleness check fails on every push from a machine whose locale differs from the runner's.
+# Running the recipe twice on one machine cannot catch this.
 license-inventory:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -164,7 +170,7 @@ license-inventory:
     } > "$out"
     for m in {{go_modules}}; do
         (cd "$m" && GOWORK=off go-licenses report ./... --ignore github.com/Alexnex31/Norite 2>/dev/null) || true
-    done | sort -u >> "$out"
+    done | LC_ALL=C sort -u >> "$out"
     echo "wrote $out"
 
 # Build every binary via goreleaser, snapshot mode (no publish, no signing — that lands at Milestone M24).
