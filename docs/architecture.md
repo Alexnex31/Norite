@@ -671,6 +671,8 @@ POST   /auth/register                     -- 202 always; invite_code required wh
 POST   /auth/verify/request                -- re-send a verification link; always 202 (M10)
 GET    /verify                             -- the confirmation page (root, HTML)
 POST   /verify                             -- confirm; a form POST, never a GET side effect (rule 4)
+GET    /reset                              -- the password-reset page (root, HTML; M5)
+POST   /reset                              -- set the new password; a form POST, for the same reason
 GET    /oauth/continue                     -- resume a sign-up a provider would not vouch for (root, HTML)
 POST   /instance/bootstrap                 -- create the first administrator; operator token only (M10)
 POST   /instance/invites                   -- mint an invite; operator or Instance Admin
@@ -681,9 +683,8 @@ POST   /auth/refresh                      -- rotates the refresh token within it
 POST   /auth/logout                       -- revokes the one session the presented refresh token belongs
                                           --   to; the single-token revoke, since M4
 POST   /auth/logout/all                   -- revoke-all-sessions primitive, sparing this device (M11)
-POST   /auth/password/forgot              -- always 202 regardless of whether email exists
+POST   /auth/password/reset/request       -- always 202 regardless of whether email exists
 POST   /auth/password/reset
-POST   /auth/email/verify
 GET    /auth/oauth/{provider}/authorize
 GET    /auth/oauth/{provider}/callback
 POST   /auth/oauth/exchange              -- trade the callback's one-time code for a token pair
@@ -698,14 +699,14 @@ POST   /device                            -- ...look it up, and offer the ways t
 POST   /device/signin                     -- ...the password branch; a provider is a link to /authorize
 POST   /device/approve                    -- ...approve or deny, a separate step on purpose (§14.21)
 POST   /auth/tokens                       -- mint a scoped api_token
-DELETE /auth/tokens/{id}
+DELETE /auth/tokens/{tokenId}
 
 GET    /users/@me
 PATCH  /users/@me
 GET    /users/@me/guilds
 GET    /users/@me/sessions                 -- one entry per *device*, not per session row: the rows rotate
                                            --   every refresh, so a listing of them is useless (M11)
-DELETE /users/@me/sessions/{id}            -- signs that device out, family and all (M11)
+DELETE /users/@me/sessions/{sessionID}     -- signs that device out, family and all (M11)
 POST   /users/@me/channels
 DELETE /users/@me                          -- account deletion, invokes revoke-all-sessions
 GET    /users/@me/export                   -- server-side export; see E2E export note below
@@ -1936,6 +1937,15 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
   reappears every time a paragraph written before it is edited. Confirm every screen id in
   `docs/design/tui/SCREENS.md` is claimed by exactly one milestone and that no milestone cites an id that
   does not exist, and that every chord a screen names appears in `KEYMAP.md` with a scope.
+- **§2's endpoint list against the contract**: `contracts/openapi.yaml` is the source of truth for the REST
+  surface (rule 6), and §2's list is a second copy of it kept by hand. Confirm every path in the contract
+  appears in §2 with the same path-parameter names. It has already drifted four ways at once — two
+  endpoints that were never served (`/auth/password/forgot`, `/auth/email/verify`), one that was
+  (`/reset`, since M5) and was missing, and two parameters renamed in the contract but not here. Nothing
+  else in the doc set is a hand-maintained copy of a machine-readable file, which is the argument for
+  eventually replacing the list with a pointer plus the design commentary that genuinely belongs in prose —
+  why the callback returns a code and not a token pair, why the device poll is a POST — none of which the
+  contract carries. §13 already made exactly this move for the roadmap.
 - **Backend**: `go test ./...` clean, `govulncheck ./...` clean; manually exercise the token-based auth
   round-trip (register → login → Bearer-authenticated request) and a raw WS connection through
   Hello→Identify→READY with a real access token; confirm a request scoped to another guild/channel is
