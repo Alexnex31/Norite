@@ -1610,8 +1610,12 @@ Playwright E2E against the real docker-compose stack.
   exercised later without a compose change), backend (hot-reload via `air`).
 - `justfile`: `just dev`, `just test`, `just lint`, `just build`, `just db-migrate`, `just security-scan`
   (`govulncheck` + `pnpm audit` + `Trivy` once Dockerfiles exist).
-- CI: Go and frontend jobs gated by path filters; a dedicated `security` job runs `govulncheck`, `pnpm
-  audit`, and (once Dockerfiles exist) `Trivy` image scanning on every PR.
+- CI: `lint`, `test`, `codegen`, `security` and `build`, each a per-module matrix where that makes sense.
+  The `security` job runs `govulncheck` against every module on every push and PR — the same command
+  `just security-scan` runs locally, so the two cannot disagree — and gains `pnpm audit` and `Trivy` image
+  scanning when `frontend/` and the Dockerfiles exist. No path filters: they would be worth adding once a
+  frontend job exists that a backend-only change should not trigger, and adding them before that would
+  only risk skipping a job that should have run.
 
 ---
 

@@ -386,7 +386,14 @@ re-derive:
   versions in *two* places that must move together — `.github/workflows/ci.yml`'s `env:` block and the
   justfile's variables. `just lint` warns when your local golangci-lint differs. Also note golangci-lint
   must be built with Go >= the workspace's highest `go` directive (1.25.0), which is why the lint action
-  is v9/golangci-lint v2 rather than the v6/v1 pair M0 started with.
+  is v9/golangci-lint v2 rather than the v6/v1 pair M0 started with. **`govulncheck` is deliberately not
+  pinned**, in CI or the justfile: what pinning buys the other two is that an upstream release cannot
+  surprise an unrelated PR, and here the surprise *is* the product — the job fails on a new advisory
+  fetched from the vulnerability database at run time, which pinning the binary would not prevent.
+- **CI runs five jobs**: `lint`, `test`, `codegen`, `security` and `build`. `security` is `govulncheck`
+  per module, the same command `just security-scan` runs, and it is blocking. It exists from M11; before
+  that `architecture.md` claimed it did while `ci.yml` had four jobs and no `govulncheck` anywhere — the
+  one piece of drift found where a security control was believed to be running and was not.
 
 And on the CLI side, from M2:
 
