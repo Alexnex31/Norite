@@ -99,6 +99,24 @@ jobs:
             git --no-pager diff -- backend/internal/db
             exit 1
           fi
+      # The dependency-license inventory is committed for the same reason the sqlc output is: a change to
+      # the set of licenses this project ships under should arrive in a diff somebody reads, rather than
+      # being a thing anyone could have checked. Regenerated here and compared, so adding a dependency
+      # without recording its license cannot merge.
+      - name: install just and go-licenses
+        run: |
+          go install github.com/google/go-licenses@latest
+          curl -fsSL https://just.systems/install.sh | bash -s -- --to "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: license inventory
+        run: just license-inventory
+      - name: fail if the committed inventory is stale
+        run: |
+          if ! git diff --quiet -- contracts/dependency-licenses.txt; then
+            echo "::error::contracts/dependency-licenses.txt is out of date — run 'just license-inventory' and commit the result"
+            git --no-pager diff -- contracts/dependency-licenses.txt
+            exit 1
+          fi
 
   security:
     name: security (${{ matrix.module }})
@@ -122,6 +140,20 @@ jobs:
         # this repository already has, fetched from the vulnerability database at run time — so pinning
         # the binary would not prevent it and would only delay picking up scanner fixes.
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: install go-licenses
+        # Unpinned for the same reason as govulncheck above: what fails this step is a dependency's license,
+        # not the scanner's version.
+        run: go install github.com/google/go-licenses@latest
+      - name: dependency licenses
+        working-directory: ${{ matrix.module }}
+        # GOWORK=off because go-licenses drives the go tool with flags the workspace refuses; --ignore our
+        # own path because go-licenses stops looking for a LICENSE at the module root and this repository's
+        # is one level above it, so every first-party package would report Unknown. The allow-list and the
+        # reasoning are in docs/adr/0007-licensing-and-project-posture.md.
+        run: |
+          GOWORK=off go-licenses check ./... \
+            --ignore github.com/Alexnex31/Norite \
+            --disallowed_types=forbidden,restricted,reciprocal
       - name: govulncheck
         working-directory: ${{ matrix.module }}
         # The same command `just security-scan` runs, per module, so the local and CI answers cannot
