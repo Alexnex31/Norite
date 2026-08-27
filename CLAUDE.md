@@ -353,7 +353,8 @@ re-derive:
   that's what `just db-migrate` and, later, the flagship's Helm pre-upgrade Job use.
 - **Middleware chain** (`cmd/server/router.go`), fixed by `docs/architecture.md` §2:
   SanitizeInboundRequestID → RequestID → EchoRequestID → RealIP *(mounted only when
-  `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders → StructuredLogger → RateLimit.
+  `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders → StructuredLogger → RateLimit →
+  RefuseWhileStarting.
   `AuthenticateBearer` slots in below RateLimit at M4. SanitizeInboundRequestID and RealIP are one decision
   made twice — whether a client-supplied forwarded header may be believed — and both take it from that one
   setting, at the top, where nothing below re-opens it. A request ID is not cosmetic: it is echoed to the

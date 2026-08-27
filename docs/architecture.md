@@ -159,7 +159,8 @@ before). Services depend on narrow repository interfaces over the single `intern
 
 **Middleware chain order** (outermost first): `SanitizeInboundRequestID` → `RequestID` → `EchoRequestID` →
 `RealIP` → `Recoverer` → `SecureHeaders` → `StructuredLogger` → `RateLimit` (route-bucketed, `/64` IPv6
-grouping, §14) → `AuthenticateBearer` (populates `actor` from the JWT access token; 401 if absent on
+grouping, §14) → `RefuseWhileStarting` (503 on every route but `/healthz` until migrations finish) →
+`AuthenticateBearer` (populates `actor` from the JWT access token; 401 if absent on
 protected routes) → domain handler. No CSRF middleware exists on this surface at all — see "Auth design"
 below.
 

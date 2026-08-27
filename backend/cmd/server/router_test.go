@@ -109,7 +109,10 @@ func TestRouterHealthzAnswersHEAD(t *testing.T) {
 }
 
 func TestRouterUnknownRouteReturnsTheErrorEnvelope(t *testing.T) {
-	router := newTestRouter(t, testConfig(), newHealth(&stubPinger{}))
+	// A ready router, because a 404 is what a *serving* instance answers. A starting one answers 503 to
+	// everything but readiness, which is refuseWhileStarting's whole point — this test used an unready
+	// health only because nothing consulted it.
+	router := readyRouter(t, testConfig())
 
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/nope", nil))
@@ -125,6 +128,65 @@ func TestRouterUnknownRouteReturnsTheErrorEnvelope(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "not_found", body.Error.Code)
 	assert.NotEmpty(t, body.Error.RequestID, "even a 404 carries the correlation ID")
+}
+
+// main binds and serves before it migrates, deliberately, so a port already in use fails at the bind rather
+// than after the process has written to the production schema. That leaves a real window in which the
+// router dispatches against an unmigrated schema — and until refuseWhileStarting the only thing that knew
+// was /healthz, which makes the documented guarantee true only where something routes on a probe. Neither
+// production path architecture.md names does.
+func TestAStartingInstanceServesNothingButReadiness(t *testing.T) {
+	router := newTestRouter(t, testConfig(), newHealth(&stubPinger{}))
+
+	for _, path := range []string{"/api/v1/nope", "/api/v1/auth/login", "/reset"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "%s while starting: %s", path, rec.Body)
+
+		var body struct {
+			Error struct {
+				Code      string `json:"code"`
+				Message   string `json:"message"`
+				RequestID string `json:"request_id"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "service_unavailable", body.Error.Code)
+		assert.Contains(t, body.Error.Message, "still starting up",
+			"the message is public because this is a state, not a fault being hidden")
+		assert.NotEmpty(t, body.Error.RequestID)
+	}
+}
+
+// And readiness itself must answer, or an orchestrator waiting for the instance to come up would wait on a
+// probe the instance is refusing because it has not come up.
+func TestAStartingInstanceStillAnswersReadiness(t *testing.T) {
+	router := newTestRouter(t, testConfig(), newHealth(&stubPinger{}))
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, healthzPath, nil))
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"starting"`,
+		"readiness reports the state rather than being refused by the gate that reads it")
+}
+
+// Shutdown is the case the gate must *not* cover. lifecycleStopping exists so in-flight requests can
+// drain, and refusing them would defeat the state's entire purpose — which is why refuseWhileStarting
+// reads Starting rather than "not ready". Easy to get wrong, and invisible until a rolling restart drops
+// requests it was meant to finish.
+func TestADrainingInstanceStillServes(t *testing.T) {
+	h := newHealth(&stubPinger{})
+	h.MarkReady()
+	h.MarkStopping()
+	router := newTestRouter(t, testConfig(), h)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/nope", nil))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"a draining instance must finish the work it accepted, not refuse it: %s", rec.Body)
 }
 
 // Group-mounted rate limiting would leave unmatched paths unthrottled, letting an attacker flood 404s at
