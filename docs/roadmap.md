@@ -1,14 +1,32 @@
 # Milestone roadmap
 
-The authoritative, dependency-ordered build sequence: `M0` through `M125`, phase-grouped. This file is the
-single source of truth for milestone numbering, scope, and "done when" criteria — `docs/architecture.md`
-§13 points here rather than restating it, so a milestone only ever needs editing in one place.
+The authoritative, dependency-ordered build sequence: `M0` through `M125`, plus suffixed insertions
+(`M11a`, `M20a`, …), phase-grouped. This file is the single source of truth for milestone numbering, scope,
+and "done when" criteria — `docs/architecture.md` §13 points here rather than restating it, so a milestone
+only ever needs editing in one place.
 
 Read it alongside `docs/architecture.md` (what the system *is*) and `docs/adr/` (why the contested
 decisions went the way they did). Completion status lives in `CLAUDE.md` and `README.md`, not here: this
 file describes the plan, not the progress.
 
 ---
+
+**Numbering, and why some milestones carry a letter.** `M<N>a` means "inserted after `M<N>`", and it exists
+so a milestone can be added at its dependency position without renumbering everything below it. The
+alternative was renumbering, and the cost is not the roadmap: `M18`, `M43`, `M72`, `M101` and two dozen
+others are referenced by number throughout `CLAUDE.md`, `docs/architecture.md`, thirty ADRs and a good
+many code comments, and the tags `m0`–`m11` would go on meaning what they meant regardless — so renumbering
+buys a clean sequence and pays for it with two schemes that disagree. A suffixed milestone is an ordinary
+milestone in every other respect: same scope discipline, same "done when", same place in the dependency
+order. Letters run `a`, `b`, `c` in insertion order after the same number.
+
+**Releases.** Nothing ships as a release before the whole sequence is complete. At each phase boundary a
+**beta build** goes to a small group of testers — enough of the product to exercise what that phase added,
+not a public launch and not a support commitment. The official **v1** comes after every milestone is done
+and the whole thing has been reviewed and tested. This is what `architecture.md`'s "no scope described in
+this document is removable" means in practice: the sequence is the plan, the betas are how it gets
+exercised before the end, and there is exactly one release. Recorded because the absence of any release
+marker otherwise reads as an oversight rather than a decision — see ADR 0007.
 
 Read as a long-term, dependency-ordered critical path, not a near-term v1 promise — the accumulated scope
 (custom SFU, custom crypto, native GUI, plugin sandbox, licensing infrastructure) is realistically multi-year
@@ -187,6 +205,47 @@ of this section.
   than as interfaces nothing implements, so each is a line added in one place. A session is a *device* to a
   person and a rotating row to the schema, which is the decision every endpoint here follows from.
 
+- **M11a — Two-factor authentication**: TOTP enrolment and verification (RFC 6238), single-use recovery
+  codes, and the second factor wired into every path that establishes a session — `POST /auth/login`, the
+  OAuth exchange, and the device-code approval page. Depends on M11: changing or disabling a factor must
+  revoke sessions through the primitive rather than through a second cleanup path (rule 17).
+
+  **Placed here rather than later, and the reason is not that it is urgent.** There are no users to protect
+  yet. It is that the five paths a second factor has to be threaded through — login, refresh, device-code
+  approval, OAuth linking, password reset — took M4 through M11 to get right, and each carries an
+  anti-enumeration property a factor prompt can undo without anyone noticing. A prompt that appears only
+  for accounts that exist is a new oracle on top of the one M10 spent a milestone closing; a factor step
+  that skips `verifyCredentials` re-opens the unverified-account gate the same way the device page nearly
+  did. Building it against code that is still the newest in the repository is the cheap version of this
+  milestone. Building it at M100 is the expensive one.
+
+  **What makes it more than a checkbox is ADR 0014.** Device linking is authorized by the primary device,
+  and the primary device is reached by signing in — so an account takeover carries the E2E device-trust
+  chain with it, and E2E is the one feature in this plan whose whole promise is that the operator cannot
+  read the messages. `architecture.md` §17 already accepts that E2E's risk is compounding rather than
+  additive across two custom protocol surfaces; the factor model underneath is the third input to that
+  compounding, and until now it was "a password, or a provider's word".
+
+  **Must precede M71 (Instance Admin tier) and M100 (E2E device linking)** — see the dependency notes. An
+  Instance Admin can ban platform-wide, resolve reports, and read whisper content attached to a report;
+  that authority reachable with one factor is the gap worth closing before the tier exists rather than
+  after.
+
+  TOTP plus recovery codes rather than WebAuthn: it is the smallest thing that changes the picture, it
+  works on the headless and SSH-administered machines this CLI is built for, and it needs no browser — a
+  passkey flow needs one, which is the same constraint that produced M9's device-code fallback. WebAuthn
+  is a later addition on top, not a replacement, and nothing here forecloses it.
+
+  Recovery codes are stored as hashes, like every other credential in this package, and are the one path
+  that must work when the authenticator is lost. Enrolment, disabling, and regenerating codes are all
+  session-state changes, so they sit behind `RequireLiveSession` with the endpoints M11 put there.
+
+  Done when: an account with TOTP enabled cannot complete a password login, an OAuth exchange, or a
+  device-code approval without a valid code; a recovery code works exactly once; disabling the factor
+  revokes every other session through `revokeEverything`; and the timing and response shape of a login
+  against a 2FA-enabled account are indistinguishable from one against an account without it, measured the
+  way M10's registration parity is.
+
 #### Phase C — Guild/channel/permission core
 
 - **M12 — Guilds/channels/roles schema plus CRUD**: the core guild/channel/role tables and REST endpoints.
@@ -238,10 +297,19 @@ of this section.
   construction (§17.10). A WebSocket is not: it authenticates once at IDENTIFY and stays open as long as
   the client keeps it, so until this exists a revoked account keeps receiving events indefinitely.
 
+  **And the event-bus tests run against both backends from here on.** `EVENTS_BACKEND=inproc|redis` and the
+  Redis-backed rate-limit store are seams the flagship activates at M114 — which would make M114 their first
+  real exercise, in production, on the primary product, on the two components whose failure modes only
+  appear under concurrency across processes. `docker/docker-compose.yml` has shipped Redis since M0
+  specifically so the swap could be exercised without a compose change, and nothing has exercised it. §15.7
+  warns against building the Redis paths' *operational* surface early; a test matrix is not operational
+  surface, and this is the difference between the two.
+
   Done when: a raw WebSocket client can complete the handshake, receive DISPATCH events for guild activity,
   and RESUME after a disconnect without losing events; an account in many guilds gets a bounded-size
-  initial payload rather than one that scales linearly with total guild count; and revoking an account's
-  sessions drops its live connections rather than leaving them subscribed.
+  initial payload rather than one that scales linearly with total guild count; revoking an account's
+  sessions drops its live connections rather than leaving them subscribed; and the gateway fan-out and
+  rate-limit integration tests pass against `inproc` and `redis` both.
 - **M19 — Daemon as gateway client**: the daemon holds the persistent WS connection to the backend, maintains
   in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
   and stream-decodes (`json.Decoder`) the initial sync payload rather than buffering it fully before parsing.
@@ -276,6 +344,30 @@ of this section.
   Done when: a CLI-side test client attaches to the daemon's socket and receives the same DISPATCH events the
   daemon itself gets from the real gateway; a deliberately frozen test client gets dropped without stalling
   delivery to a second, healthy attached client.
+- **M20a — First usable client, end to end**: the smallest thing a person can actually read and send a
+  message in — one pane, a message list, a composer, and quit. No guild rail, no channel list, no panes or
+  splits, no chords beyond quit, no theming, no scrollback search. Depends on M20 (the daemon socket the
+  client attaches to) and on M15's message endpoints.
+
+  **This is a scheduling change, not a design one.** The screens are already specified in
+  `docs/design/tui/SCREENS.md` and this milestone draws a strict subset of `1a` — the reduced form the
+  "screens are drawn finished; milestones are not" rule already governs. M41–M43 then *replace* a working
+  thing rather than introducing the first one.
+
+  **Why it exists at all.** The roadmap is ordered by architectural layer, and until this entry the first
+  point at which anybody could read a message in a real interface was M43 — with Phase E's thirteen voice
+  milestones, a custom SFU and a cgo DSP chain, built entirely before it. The highest-variance work in the
+  plan was scheduled before any loop that could tell whether it was worth the cost, and `M25` is openly a
+  time-boxed spike to find out whether the phase is feasible at all. Under a layered plan partial
+  completion demonstrates nothing; this milestone is what makes partial completion a working, narrow
+  product. For a multi-year solo build that difference is not aesthetic.
+
+  It is also what the phase-boundary beta builds are for: from here on there is something to hand a tester.
+
+  Done when: with the daemon running and signed in, `norite` opens a single pane against one guild channel,
+  renders its recent messages through `termsafe`, sends a message that a second attached client receives
+  live, and quits cleanly.
+
 - **M21 — Config file**: the shared TOML config (`pelletier/go-toml` v2, document-editing mode for
   comment-preserving programmatic writes), namespaced `[shared]` / `[tui]` / `[gui]` — there is no `[cli]`
   section, because the scriptable command tree has nothing to style and the section that once carried that
@@ -533,6 +625,31 @@ of this section.
   right-anchored card over the message area for someone else. Done when: a field scoped to nobody is absent
   from the API response for every other account, verified by a test that asks as a stranger, and the
   preview in `1e` matches what `1f` renders for that stranger.
+- **M56a — Message reactions**: `message_reactions` (message, user, emoji, created_at) with a unique
+  constraint on the triple, `POST`/`DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}`,
+  a `MESSAGE_REACTION_ADD`/`MESSAGE_REACTION_REMOVE` dispatch pair, and the reaction row under a message in
+  `1a`. Unicode emoji only at this milestone; custom emoji join at M59, which is where the resolution cap
+  and format allow-list live. Depends on M15 (messages) and M18 (dispatch).
+
+  **In scope rather than absent, which is the decision this entry records.** Nothing in the design
+  mentioned reactions — no table, endpoint, event, permission bit, screen or ADR — and unlike federation
+  and mobile (ADR 0019 non-goals) or video (deferred but seamed), that was an omission and not a choice.
+  For a product this explicitly Discord-shaped, they are among the most-used features of the shape.
+
+  The cost is not the table. It is the six surfaces a same-commit rule governs: the message payload in
+  `openapi.yaml`, `gateway-events.schema.json`, the CLI's `--json` schemas, the fan-out path, the read-state
+  model, and the message-area screens in `SCREENS.md`. That is the argument for deciding it now rather
+  than discovering it after M12 wires `oapi-codegen` and four clients codegen from a payload shape that has
+  no room for it.
+
+  Two things it must not get wrong, both rules rather than preferences: the fan-out consults the `blocks`
+  table like every other dispatch (rule 20), so a blocked author's reaction does not cross the wire; and
+  the count is denormalized nowhere until there is a measurement saying it must be, since a per-message
+  aggregate is the shape that turns a channel fetch into an N+1.
+
+  Done when: two accounts can react to the same message and each sees the other's reaction live; removing
+  a reaction is idempotent; the same emoji from the same account twice is one row; and a blocked account's
+  reactions never appear in the other's stream.
 - **M57 — DMs/Group DMs/invites**: `DM`/`GROUP_DM` channel types, `channel_recipients`, guild invite codes
   (existing pattern). Carries its screens: `1b` (DM — the peer column, verified-device header, `◈` composer)
   and `1c` (group DM, which shows instance-side encryption and **no** `◈`, since E2E is `DM`-only per rule
@@ -607,6 +724,30 @@ of this section.
   Done when: a freshly-created account is blocked from joining/creating a public channel until it clears the
   age/verification threshold; a simulated burst from one IPv6 `/64` block is throttled as a single source;
   voice-side abuse in these channels is documented as having no recorded evidence to review, by design.
+- **M67a — Registration anti-automation**: a challenge on account creation — the mechanism chosen at build
+  time from proof-of-work, a hosted captcha, or both behind one interface — plus a disposable-domain policy
+  and a per-address-family account cap. Sits beside M67 because both are anti-abuse; M67 gates *joining* a
+  public channel, this gates *creating the account* that joins it.
+
+  **What exists today is not this.** Registration is defended by per-IP rate limiting and email
+  verification. Rate limiting bounds requests per source, not accounts per adversary — a residential proxy
+  pool or a cloud provider's address space defeats `/64` grouping directly — and email verification is
+  answered by any disposable-mail service. The surface this protects is already planned: M66 pairs
+  strangers with no guild between them, and M70's blocks are per-account, so bulk account creation is
+  exactly what that design rewards.
+
+  **The contract shape is reserved before the mechanism is built.** Registration gains a
+  challenge-required response state that self-hosted instances never emit, so adding a challenge later is
+  additive rather than a break across four codegen'd clients. Reserving it costs almost nothing now; rule
+  6 and rule 15 make it expensive once every client generates from the current shape. That reservation
+  lands with M12's contract work, not here.
+
+  Not urgent in the release plan's terms — nothing is publicly open before v1 — which is precisely why it
+  is scheduled rather than left as a gap somebody discovers on launch day.
+
+  Done when: a scripted client cannot create accounts faster than the challenge allows from a single
+  source or from a rotating address pool; an instance with the challenge disabled behaves exactly as today;
+  and the response shape is unchanged for a client that has never seen a challenge.
 - **M68 — Recently-met list**: server-side storage, a 7–30 day retention window, integrated into account
   export/deletion. Done when: users who shared a public channel appear on each other's recently-met list, and
   the entries expire on schedule.
@@ -653,9 +794,30 @@ of this section.
   filed-against-you excluded). Depends on M57 (DMs/Group DMs) and M61 (whispers). Carries `6c` (reports):
   the table, the expanding selected report with its defanged excerpt, the two action rows, and the standing
   note that only reporter-attached content is visible — the honest statement of ADR 0013's break-glass
-  posture. Done when: an Instance Admin
-  can review a filed report on a whisper and that specific access is itself an audit-log entry, and a report
-  filed against a plain DM or Group DM also reaches the Instance Admin triage queue.
+  posture.
+
+  **Those two action rows are `C-c C-t` (timeout 24h) and `C-c C-d` (delete subject's posts), and neither
+  had anything behind it until now** — no table, no permission bit, no endpoint, no milestone. The screen
+  and the keymap are normative and committed to both; `architecture.md` §16's consistency checks passed
+  anyway, because they verify that a chord appears in `KEYMAP.md` with a scope and that a screen id is
+  claimed by exactly one milestone, and both were true. Nothing checked the feature behind the chord. §16
+  gains that check; this entry builds the two verbs.
+
+  **A timeout is a new concept, not a narrower ban.** `instance_bans` is full account suspension and
+  invokes the revoke-all-sessions primitive; a timeout leaves the session live and restricts what the
+  account may *do*. So it needs its own table (subject, scope, expiry, the admin who applied it, the
+  reason), its own permission bit — the `MODERATE_MEMBERS` counterpart this permission system does not
+  have — and enforcement on the send path rather than the auth path. Bulk deletion needs a bounded endpoint
+  with an explicit cap, because "delete this account's posts" against an unbounded history is a statement
+  that holds a connection from a small pool for as long as the history is long (§15.3).
+
+  Both are Instance Admin actions, so both write to `instance_audit_log` in the same transaction (rule 14),
+  and both exclude E2E-encrypted DMs from anything that reads content (rule 13).
+
+  Done when: an Instance Admin
+  can review a filed report on a whisper and that specific access is itself an audit-log entry, a report
+  filed against a plain DM or Group DM also reaches the Instance Admin triage queue, a timed-out account
+  can still read but cannot post until the timeout expires, and a bulk delete is bounded and audit-logged.
 - **M75 — Instance Admin proactive intervention**: report-less intervention capability
   (legal/compliance), gated by a mandatory logged justification field distinguishing it from
   report-triggered entries. Done when: a proactive action is blocked without a justification string and
@@ -934,7 +1096,15 @@ bites hardest on E2E: M46, M55, M56, M57, M65 and M74 all carry screens with `�
 row or a local-search group on them, and all of them precede Phase M. None of that chrome appears before
 M99. A badge claiming a guarantee the build does not yet make is worse than no badge (rule 13).
 
-**Dependency notes:** M37 (voice opt-out) must exist before M66 (public matchmaking, which needs the
+**Dependency notes:** M11a (two-factor authentication) must exist before M71 (Instance Admin tier), whose
+authority is otherwise reachable with one factor, and before M100 (E2E device linking), which is authorized
+by the primary device and therefore inherits whatever protects a sign-in. M20a (first usable client) depends
+on M20 and M15 and is what makes every phase-boundary beta from Phase D onward something a tester can
+actually open. M56a (reactions) depends on M15 and M18, and wants to be decided before M12 wires
+`oapi-codegen` even though it is built much later, because the message payload it extends is codegen'd by
+four clients. M67a (registration anti-automation) protects M66/M70 and is not urgent in release terms —
+nothing is publicly open before v1 — but its *contract shape* is reserved at M12 rather than at M67a, for
+the same rule-6 reason. M37 (voice opt-out) must exist before M66 (public matchmaking, which needs the
 voice+text pair to degrade gracefully). M61 (whispers) must exist before M74 (its Instance-Admin-facing
 break-glass view) and before M99 (which excludes whispers from E2E scope). M68 (recently-met) must exist
 before M69 (friends). M57 (DMs), M68 (recently-met), and M69 (friends) must exist before M70 (blocks). M11
