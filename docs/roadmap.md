@@ -14,7 +14,7 @@ file describes the plan, not the progress.
 **Numbering, and why some milestones carry a letter.** `M<N>a` means "inserted after `M<N>`", and it exists
 so a milestone can be added at its dependency position without renumbering everything below it. The
 alternative was renumbering, and the cost is not the roadmap: `M18`, `M43`, `M72`, `M101` and two dozen
-others are referenced by number throughout `CLAUDE.md`, `docs/architecture.md`, thirty ADRs and a good
+others are referenced by number throughout `CLAUDE.md`, `docs/architecture.md`, thirty-one ADRs and a good
 many code comments, and the tags `m0`–`m11` would go on meaning what they meant regardless — so renumbering
 buys a clean sequence and pays for it with two schemes that disagree. A suffixed milestone is an ordinary
 milestone in every other respect: same scope discipline, same "done when", same place in the dependency

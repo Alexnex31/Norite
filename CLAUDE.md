@@ -161,6 +161,7 @@ gui/           The native GUI — Gio app, mirrors the TUI's screens; shares the
 daemon/        Shared background daemon — gateway client, dual IPC, plugin host, config/state files
 internal/voice/  Pion-based SFU, embedded TURN server (lives under backend/, server-side infra)
 contracts/     openapi.yaml (REST), gateway-events.schema.json (WS), CLI --json schemas — source of truth
+               (also dependency-licenses.txt, the committed license inventory — ADR 0007)
 docker/        docker-compose.yml (postgres, redis, backend hot-reload) — local dev + self-hosted prod option
 frontend/      React SPA — the later, tertiary web client (Phase O)
 ```
@@ -177,8 +178,11 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just db-migrate` — apply pending migrations (runs the server's own `-migrate-only` mode, so it takes the
   exact same advisory-lock-guarded code path a real startup does)
 - `just sqlc-generate` / `just sqlc-check` — regenerate the committed sqlc layer / fail if it's stale
-- `just security-scan` — `govulncheck ./...` (+ `pnpm audit` and `Trivy` once frontend/ and Dockerfiles
-  exist)
+- `just security-scan` — `govulncheck ./...` plus `just license-check` (+ `pnpm audit` and `Trivy` once
+  frontend/ and Dockerfiles exist)
+- `just license-check` / `just license-inventory` — fail on a dependency license outside ADR 0007's
+  allow-list / regenerate the committed `contracts/dependency-licenses.txt`. Both run in CI; the inventory
+  is committed for the reason the sqlc output is, and CI fails if it is stale.
 
 ## Git workflow
 
@@ -280,9 +284,20 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M11.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
-with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
-`docs/roadmap.md`.
+**Phase A (foundation), through M11.** Full dependency-ordered roadmap (`M0` through `M125` plus suffixed
+insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment — running as an explicitly
+parallel track) is in `docs/roadmap.md`.
+
+**`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
+dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
+reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Four exist:
+`M11a` (two-factor authentication), `M20a` (first usable client), `M56a` (message reactions), `M67a`
+(registration anti-automation).
+
+**Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
+testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed
+and tested. Recorded in ADR 0007 — the absence of any release marker otherwise reads as an oversight.
 
 - **M0 — monorepo scaffolding**: done (tag `m0`).
 - **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
@@ -341,8 +356,16 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   and `sessions.go` (the account-facing view), migration `000012`, `POST /auth/logout/all`,
   `GET`/`DELETE /users/@me/sessions`, the sessions sweep, and the daemon handing back the refresh token a
   colliding login makes unkeepable. Decisions in ADR 0030.
-- **M12 — Guilds/channels/roles schema plus CRUD**: next. Its first job is that `contracts/openapi.yaml`
-  does not currently generate — see the roadmap entry.
+- **M11a — Two-factor authentication**: next. TOTP plus single-use recovery codes, wired into every path
+  that establishes a session. Placed here rather than later not because it is urgent — nothing is exposed
+  before v1 — but because the five paths it threads through took M4 through M11 to get right and each
+  carries an anti-enumeration property a factor prompt can undo silently. Decisions in ADR 0031, which also
+  amends ADR 0014: device linking is authorized by the primary device, so whatever protects a sign-in
+  protects the E2E trust chain.
+- **M12 — Guilds/channels/roles schema plus CRUD**: after that. Its first job is that
+  `contracts/openapi.yaml` does not currently generate — see the roadmap entry. It also carries M67a's
+  contract-shape reservation, because a challenge-required registration state is nearly free to reserve now
+  and expensive once four clients codegen from the current shape.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
