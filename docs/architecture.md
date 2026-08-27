@@ -285,6 +285,21 @@ CREATE TABLE password_reset_tokens (
   expires_at timestamptz NOT NULL, used_at timestamptz NULL
 );
 
+CREATE TABLE user_totp (                        -- M11a; one enrolled authenticator per account
+  user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  secret_encrypted bytea NOT NULL,             -- at rest under the instance key, never a bare base32 string
+  confirmed_at timestamptz NULL,               -- NULL = enrolment started, first code not yet proved
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE user_recovery_codes (             -- M11a; single-use, hashed like every other credential here
+  id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash text NOT NULL UNIQUE,              -- SHA-256, same reasoning as refresh tokens
+  used_at timestamptz NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON user_recovery_codes (user_id) WHERE used_at IS NULL;
+
 CREATE TABLE guilds (
   id bigint PRIMARY KEY, name varchar(100) NOT NULL, owner_id bigint NOT NULL REFERENCES users(id),
   icon_hash text NULL, description text NULL, system_channel_id bigint NULL,
@@ -367,6 +382,18 @@ CREATE TABLE message_edit_history (
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   content text NOT NULL, edited_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE message_reactions (                -- M56a
+  id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji text NOT NULL,                         -- a Unicode sequence at M56a; custom emoji join at M59
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (message_id, user_id, emoji)          -- the same reaction twice is one row, not a Go-side check
+);
+CREATE INDEX ON message_reactions (message_id);
+-- No denormalized count column, deliberately, until something measures that it is needed: an aggregate
+-- kept in sync on every add and remove is a write amplification on the message hot path, and the reason
+-- to add one is a slow query rather than an intuition (§15.13, rule 7).
 
 CREATE TABLE attachments (
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -521,6 +548,19 @@ CREATE TABLE instance_bans (
 );
 CREATE INDEX ON instance_bans (user_id) WHERE expires_at IS NULL OR expires_at > now();
 
+CREATE TABLE instance_restrictions (            -- M74; a timeout, which is not a narrower ban
+  id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  issued_by bigint NOT NULL REFERENCES users(id), reason text NULL,
+  expires_at timestamptz NOT NULL,             -- never NULL: a permanent restriction is a ban, above
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON instance_restrictions (user_id) WHERE expires_at > now();
+-- Its own table rather than a flag on instance_bans, because the two do opposite things to a session. A
+-- ban is full suspension and invokes the revoke-all-sessions primitive (rule 17); a timeout leaves the
+-- session live and is enforced on the send path. Screen 6c has committed to `C-c C-t` since the design
+-- landed and nothing implemented it — see M74 and §16's third consistency check, which is what would
+-- have caught that.
+
 CREATE TABLE instance_audit_log (               -- separate from per-guild audit_log_entries
   id bigint PRIMARY KEY, actor_id bigint NOT NULL REFERENCES users(id),
   action varchar(64) NOT NULL, target_id bigint NULL, justification text NULL,   -- required for report-less action
@@ -603,6 +643,7 @@ const (
     PermMentionEveryone
     PermManageWebhooks  // ACTIVE
     PermManageEmojis    // ACTIVE
+    PermModerateMembers // M74 — timeout a member without suspending the account; Discord's MODERATE_MEMBERS
 )
 ```
 
@@ -700,6 +741,11 @@ POST   /device/signin                     -- ...the password branch; a provider 
 POST   /device/approve                    -- ...approve or deny, a separate step on purpose (§14.21)
 POST   /auth/tokens                       -- mint a scoped api_token
 DELETE /auth/tokens/{tokenId}
+POST   /auth/2fa/totp                     -- begin TOTP enrolment; returns the secret once, never again (M11a)
+POST   /auth/2fa/totp/confirm             -- prove a code before the factor becomes required
+DELETE /auth/2fa/totp                     -- disable it; revokes every other session through the primitive
+POST   /auth/2fa/recovery-codes           -- (re)generate single-use codes; the raw values exist once
+POST   /auth/2fa/verify                   -- step two of a login, an OAuth exchange, or a device approval
 
 GET    /users/@me
 PATCH  /users/@me
@@ -739,6 +785,8 @@ GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
 POST   /channels/{channel_id}/messages
 PATCH  /channels/{channel_id}/messages/{message_id}
 DELETE /channels/{channel_id}/messages/{message_id}
+PUT    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- react (M56a); idempotent
+DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- un-react; idempotent
 POST   /channels/{channel_id}/typing
 POST   /channels/{channel_id}/invites
 POST   /channels/{channel_id}/attachments
@@ -768,6 +816,9 @@ POST   /reports
 -- Instance Admin
 POST   /instance/bans
 DELETE /instance/bans/{user_id}
+POST   /instance/restrictions              -- a timeout: bounded, leaves the session live (M74, screen 6c)
+DELETE /instance/restrictions/{user_id}    -- lift one early
+POST   /instance/users/{user_id}/purge     -- bulk-delete a subject's posts, explicitly capped (M74, 6c)
 GET    /instance/reports
 POST   /instance/reports/{id}/resolve
 GET    /instance/audit-log
@@ -1958,6 +2009,20 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
   reappears every time a paragraph written before it is edited. Confirm every screen id in
   `docs/design/tui/SCREENS.md` is claimed by exactly one milestone and that no milestone cites an id that
   does not exist, and that every chord a screen names appears in `KEYMAP.md` with a scope.
+- **Every action a screen names resolves to something real**: for each action in
+  `docs/design/tui/SCREENS.md` or `KEYMAP.md`, confirm it maps to an endpoint or gateway event in §2 *and*
+  to a milestone in `docs/roadmap.md`. The two checks above it — chord↔`KEYMAP.md`, screen-id↔milestone —
+  both **passed** for screen `6c`'s `C-c C-t` (timeout) and `C-c C-d` (bulk delete), which had no table, no
+  permission bit, no endpoint and no milestone behind them for the life of the design. The chord had been
+  deconflicted carefully; the feature behind it had never had a reader, because no document owned that
+  question. `docs/design/tui/` is normative and is the only document through which scope can enter without
+  passing this file (which owns the data model and the REST surface) or the roadmap (which owns
+  milestones), so this is the check that closes that route. Both verbs are built at M74 now.
+- **Every CI job this document claims exists is in `.github/workflows/`**: §10 claimed a dedicated
+  `security` job running `govulncheck` on every PR from M0 until M11, while `ci.yml` had four jobs and the
+  string appeared nowhere. Cheap to check and worth checking, because it is the one drift class where a
+  *security control* is believed to be running and is not — and the belief lives in the section a reader
+  consults to learn what protections exist. Extends to `pnpm audit` and `Trivy` when those land.
 - **§2's endpoint list against the contract**: `contracts/openapi.yaml` is the source of truth for the REST
   surface (rule 6), and §2's list is a second copy of it kept by hand. Confirm every path in the contract
   appears in §2 with the same path-parameter names. It has already drifted four ways at once — two
@@ -2045,6 +2110,17 @@ during implementation, and must be documented plainly wherever the relevant subs
   documented non-goal for v1, not a silently dropped feature. GUI testing relies on golden-image/screenshot
   comparisons for the highest-value, most regression-prone surfaces (message list rendering, pane-split
   layout, voice UI states), with manual QA covering everything else.
+- **The daemon carries eight subsystems, and that is where the hardest bugs will be.** By §3 and §7–§8 it
+  owns the gateway WebSocket, two IPC surfaces at different trust tiers, in-memory scrollback and presence,
+  the WASM plugin host, the E2E keystore and ratchet with its FTS5 index, voice-worker supervision, config
+  hot-reload with file locking, and single-instance lifecycle management. No individual placement is wrong,
+  and §3's concurrency model — bounded per-connection writer goroutines, a single serialized SQLite writer,
+  a `select`-based main loop, per-invocation contexts — is one shape applied consistently, which is the
+  right instinct. But three of those subsystems are individually hard, and unlike the backend this process
+  runs on end-user machines across three operating systems, where a crash is immediately visible and poorly
+  diagnosable. The voice-worker subprocess already removes the single worst failure mode from it. Recorded
+  as a standing bias rather than a plan: anything else proposed for the daemon that could instead be a
+  supervised subprocess should have to argue for its place.
 - **Public-matchmaking voice abuse has no evidence to review, by design.** Call recording is a permanent
   non-goal across the whole platform, for privacy reasons — this holds even for public matchmaking voice
   channels, which are the one voice context with no guild owner to trust. A voice-abuse report filed against a
