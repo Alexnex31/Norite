@@ -110,14 +110,35 @@ So the rule is one middleware, `RequireLiveSession`, and the routes under it are
 Writing it as N call sites was the same failure this milestone's own primitive exists to prevent —
 committed against the guard while writing the primitive.
 
-The line is statable and narrow: **a signed-out credential may not change the account's security state.**
-That is revoking sessions, and minting, listing or revoking the credentials that outlive them. Reading a
-profile inside the window is what the trade below buys; the session *listing* stays readable for the same
-reason. A *rotated* session is live, not signed out — rotation revokes the row an access token names, and
-conflating the two would break every recently-refreshed client, which is the milestone's other sharp edge.
-Liveness is therefore asked of the **device**, never the row.
+The line is statable and narrow: **a signed-out credential may not change security state that outlives the
+session** — the account's, or the instance's. That is revoking sessions, minting, listing or revoking the
+credentials that outlive them, and instance administration. Reading a profile inside the window is what the
+trade below buys; the session *listing* stays readable for the same reason. A *rotated* session is live,
+not signed out — rotation revokes the row an access token names, and conflating the two would break every
+recently-refreshed client, which is the milestone's other sharp edge. Liveness is therefore asked of the
+**device**, never the row.
 
 One indexed lookup, on routes called approximately never, and nothing on the path §17.10 is about.
+
+**"The account's security state" was the original wording, and it is why the rule missed again.**
+`/instance` is not the account's anything, so the four instance-administration routes sat outside a
+sentence that was never meant to exclude them — and `POST /instance/invites` mints a code that can carry
+unlimited uses and no expiry. Same durable persistence, one level up: an administrator who reaches for
+"sign out everywhere else" because they think somebody has their account leaves that somebody fifteen
+minutes in which to mint one, and M72's ban will leave the same window. Found by external review; measured
+by deleting the guard, which mints a real code.
+
+The fix does **not** mount `RequireLiveSession` on the group, which is the obvious move and is wrong. That
+middleware begins with `ActorFrom`, and `AuthenticateInstanceAdmin`'s operator branch deliberately carries
+no `Actor` at all — an operator names no account. Mounting it would answer 401 to every operator request
+and take `norite instance bootstrap` with it, on the one path that must work when the instance has no
+accounts and therefore no sessions to be live. The check lives inside the account branch instead.
+
+That is twice one rule has been written too narrowly: first as per-handler checks that missed
+`POST /auth/tokens`, then as a middleware whose coverage stopped at the group it was mounted on. The lesson each time was the same one
+`revokeEverything` exists to teach, so the guard is now asserted the way the primitive is — by walking the
+router rather than by listing what to check. `TestEveryInstanceRouteRefusesASignedOutSession` enumerates
+`/instance` from the route table, so a route added there is covered the moment it is mounted.
 
 ### Access tokens stay stateless otherwise, and the residual window is accepted
 Not reopened here. `architecture.md` §17.10 records it: an already-issued access token is not checked

@@ -147,6 +147,35 @@ func AuthenticateInstanceAdmin(svc *Service) func(http.Handler) http.Handler {
 				return
 			}
 
+			// And the session behind it must still be live, which is M11's narrow exception to the
+			// stateless access token (§17.10) applied one step further out than M11 drew it.
+			//
+			// ADR 0030 stated the rule as "a signed-out credential may not change the account's security
+			// state" and mounted RequireLiveSession on the endpoints that do. An instance invite is not
+			// the *account's* security state, so /instance fell outside the wording — but
+			// POST /instance/invites mints a code that can carry unlimited uses and no expiry, which is
+			// the same durable persistence the rule was written for, one level up. The banned-admin case
+			// is the concrete one: M72's ban revokes everything, and without this the access token it
+			// could not revoke keeps minting invites for the rest of its fifteen minutes.
+			//
+			// Checked here rather than by mounting RequireLiveSession on the group, because the operator
+			// branch above carries no Actor at all — the middleware's first act is ActorFrom, so mounting
+			// it would 401 every operator request and take `norite instance bootstrap` with it, on the one
+			// path that has to work when the instance has no accounts.
+			//
+			// Before the tier lookup, so a dead credential does not get a database round trip spent on it,
+			// and reported through the same undifferentiated 401 as every other failure on this surface —
+			// naming the reason here would confirm to whoever presents a stolen token that it was genuine,
+			// which is the property unauthorizedInstance exists to protect.
+			if err := svc.requireLiveDevice(r.Context(), actor.UserID, actor.SessionID); err != nil {
+				if errors.Is(err, ErrSessionSignedOut) {
+					unauthorizedInstance(w, r)
+					return
+				}
+				httpx.WriteError(w, r, err)
+				return
+			}
+
 			admin, err := svc.queries.IsInstanceAdmin(r.Context(), int64(actor.UserID))
 			if err != nil {
 				// Passed through rather than wrapped in a sentinel: WriteError logs a 5xx itself and
