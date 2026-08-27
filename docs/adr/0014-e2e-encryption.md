@@ -1,7 +1,11 @@
 # ADR 0014: BYOK end-to-end encryption, DM-only, gated behind external audit
 
 ## Status
-Accepted
+Accepted. Amended by [ADR 0031](0031-two-factor-authentication.md), which names an input this ADR's threat
+model was assuming without stating: device linking is authorized by the primary device, the primary device
+is reached by signing in, and until M11a a sign-in was protected by one factor. Nothing in the linking flow
+below changes; what changes is that the authentication under it is now scheduled to be two-factor, and
+M11a is a hard dependency of M100.
 
 ## Context
 Real E2E encryption is valuable but carries **compounding, not merely additive**, cryptographic risk: it
