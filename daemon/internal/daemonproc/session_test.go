@@ -261,6 +261,13 @@ func TestAnUnreadableStoreDoesNotCostTheCredential(t *testing.T) {
 	assert.Equal(t, f.server.URL, record.InstanceURL, "the credential must still be there")
 	assert.Equal(t, "nrt_from_login", token)
 	assert.Contains(t, logs.String(), "may now be spent")
+
+	// And the token this refresh obtained is handed back rather than dropped. It is the third of the three
+	// branches that discard one, and the only one M11 shipped without the hand-back: what forbids clearing
+	// here is that the stored credential may be somebody else's fresh one, which says nothing about a token
+	// minted to this process moments ago that has never been written anywhere for anyone else to hold.
+	assert.Equal(t, "nrt_rotated", f.handedBackToken(),
+		"a renewed token no one can hold must be revoked, not left live for its full TTL")
 }
 
 // A writer that is merely finishing is waited out by the lock itself — that is what its five-second bound

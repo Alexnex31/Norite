@@ -125,11 +125,22 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 		//
 		// Said plainly rather than reassuringly: what is on disk is, unless somebody else replaced it, the
 		// token this refresh just spent, and presenting a spent token is what gets a device family revoked.
-		// There is nothing better to do about it from here — the one repair, clearing it, is the thing that
-		// must not happen while another writer may be mid-write.
+		// There is nothing better to do about *that* from here — the one repair, clearing it, is the thing
+		// that must not happen while another writer may be mid-write.
 		log.Warn().Err(err).
 			Msg("could not store the renewed credential; the stored one may now be spent — if the next " +
 				"start reports a refused credential, run `norite login` again")
+		// The renewed token is still handed back, and the reason clearing is forbidden here is not a reason
+		// to keep it. Clearing writes to somebody else's credential; this revokes one that was minted to
+		// this process moments ago and has never been written anywhere, so no other holder exists to be
+		// signed out. Dropping it silently is the third of the three ways this function can end up
+		// discarding a live thirty-day credential, and it was the one left behind.
+		//
+		// Whichever way the lock resolves, handing back is right or harmless. If the holder was a `norite
+		// login` for this device, the instance revoked this family when that login wrote its own session,
+		// so the request is a no-op that logs a refusal. If it was anything else, the store still holds the
+		// spent token and this one is the family's only live session with nobody holding it.
+		handBackToken(ctx, log, client, record.InstanceURL, pair.RefreshToken)
 		return nil
 
 	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
