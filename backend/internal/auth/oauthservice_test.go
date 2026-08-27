@@ -128,6 +128,42 @@ func TestOAuthLinksToAnExistingAccountOnlyWhenVerified(t *testing.T) {
 	})
 }
 
+// Linking to an account whose address was never confirmed must record that the provider confirmed it.
+//
+// The state without this was one nobody designed: OAuth sign-in worked, password sign-in did not, and
+// because verifyCredentials answers an unverified account with ErrInvalidCredentials *and* mails a fresh
+// link, every attempt with the correct password queued another verification email to somebody who was
+// already signed in.
+//
+// The account is unverified here by clearing the column rather than by attaching a relay, because that is
+// the state a relay-enabled instance produces and this service has no mailer — the same reason
+// verifyForTest sets it directly in the other direction.
+func TestLinkingAVerifiedProviderAddressConfirmsTheAccount(t *testing.T) {
+	svc, stub := oauthService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	_, err := svc.pool.Exec(t.Context(),
+		"UPDATE users SET email_verified_at = NULL WHERE id = $1", user.ID)
+	require.NoError(t, err)
+
+	stub.asGoogle("google-1", "ada@example.com", true)
+	outcome, err := signIn(t, svc, stub, "google")
+	require.NoError(t, err)
+	require.True(t, outcome.SignedIn())
+
+	after, err := svc.queries.GetUserByID(t.Context(), user.ID)
+	require.NoError(t, err)
+	assert.True(t, after.EmailVerifiedAt.Valid,
+		"the provider verified the address, which is the evidence the mailed link exists to gather")
+
+	// The consequence that makes it worth recording rather than merely inferring: the same account can now
+	// sign in the other way too, instead of being told its correct password is wrong.
+	_, err = svc.Login(t.Context(), LoginInput{
+		Email: "ada@example.com", Password: testPassword, DeviceID: "laptop",
+	})
+	assert.NoError(t, err, "an account confirmed by its provider must accept its own password")
+}
+
 // Once linked, sign-in consults only the provider's user ID — the email is not re-checked, so changing it
 // at the provider cannot detach or redirect an existing link.
 func TestASecondSignInUsesTheLinkNotTheEmail(t *testing.T) {
