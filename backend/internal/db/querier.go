@@ -111,6 +111,8 @@ type Querier interface {
 	// two; reuse detection walks that link. Every one of these queries is scoped by user_id AND device_id
 	// wherever it revokes, because revoking across devices is precisely the bug this schema exists to prevent
 	// (docs/architecture.md §2, ADR 0011).
+	// first_seen is the family's start and is carried forward by rotation, never recomputed — see 000013. A
+	// fresh sign-in passes its own created_at; a rotation passes the predecessor's value along.
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	// Account queries.
 	//
@@ -154,6 +156,32 @@ type Querier interface {
 	// reachable and the rows are only taking space. Served by password_reset_tokens_expires_at_idx, made
 	// non-partial in 000005 for exactly this query.
 	DeleteExpiredPasswordResetTokens(ctx context.Context) (int64, error)
+	// Called by auth.RunSweeper, in batches. Non-partial index behind it and an index on replaced_by_id — see
+	// 000012, and 000005 for why a partial one cannot serve this.
+	//
+	// Expired only, never merely revoked, and the distinction is load-bearing. A revoked row is still
+	// evidence: replaced_by_id is what lets a presented token be told apart as *replay* rather than as merely
+	// unknown, and that is the signal reuse detection revokes a device family on. Deleting revoked rows while
+	// their tokens could still be presented would turn a stolen token into an unrecognized one and quietly
+	// disable the detection. Past expires_at nothing can be presented, so the evidence has nothing left to
+	// prove.
+	//
+	// One consequence worth naming, because it is a behavior change rather than a neutral cleanup. Refresh
+	// tests revoked_at and replaced_by_id *before* it tests expiry, so today presenting a long-expired rotated
+	// token is detected as replay and revokes that device's whole family. Once the row is swept the same
+	// presentation is merely an unknown token and the family survives. No access is granted either way — the
+	// token is unredeemable in both — but a detection that fires now stops firing. Accepted: acting on a
+	// month-old unredeemable token means logging a legitimate user out of every device on that machine on the
+	// strength of a signal that cannot lead anywhere.
+	//
+	// Bounded, unlike the other six sweeps, because this table is unlike them. Theirs hold rows with TTLs of
+	// minutes to an hour, so a ten-minute tick keeps them small. This one has never been swept at all: the
+	// first pass on an instance running since M4 faces the entire backlog, every deleted row fires the
+	// replaced_by_id RI trigger, and RunSweeper passes the process context with no deadline. Unbounded, that
+	// is one statement holding a connection from a deliberately small pool (§15.3) for as long as it takes,
+	// uncancellable short of shutdown. The loop in SweepExpired calls this until it returns less than the
+	// limit, so a large backlog is drained across several bounded statements instead of one unbounded one.
+	DeleteExpiredSessions(ctx context.Context, limit int32) (int64, error)
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
@@ -207,6 +235,14 @@ type Querier interface {
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash []byte) (PasswordResetToken, error)
+	// Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
+	//
+	// The caller that needs this is "which device is this request coming from", answered from the sid claim in
+	// the access token. That claim names the session the token was minted from, and a rotation inside the
+	// token's fifteen-minute life revokes that row while the token stays valid. Filtering revoked rows here
+	// would make every recently-refreshed client look like it had no current device — and POST /auth/logout/all
+	// would then spare nothing and log the caller out of itself.
+	GetSessionByID(ctx context.Context, id int64) (Session, error)
 	// The hot path: every refresh looks a session up by hash. Deliberately returns revoked and rotated rows
 	// too — the caller must be able to tell "no such token" from "a token that was already used", since only
 	// the second is a replay worth revoking a family over.
@@ -240,6 +276,22 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
+	// The devices signed in to an account: one row per device family, not one per session row.
+	//
+	// A session row is one generation of a rotating family, replaced every time the client refreshes. Listing
+	// rows would show somebody a new "session" every fifteen minutes and hand out ids that are stale before
+	// they can be acted on, so DISTINCT ON collapses each family to its newest live row — whose id is what the
+	// revoke endpoint takes.
+	//
+	// first_seen is read straight off that row rather than aggregated over the family. It used to be
+	// min(created_at) across every row including revoked ones, which was correct until 000012 started deleting
+	// them: after a sweep no row older than the refresh TTL survives, so the aggregate reported a rolling
+	// thirty days for a device somebody had used for a year. 000013 carries the value forward instead.
+	//
+	// Sorted by last use in the outer query because DISTINCT ON dictates the inner ORDER BY, and "which of
+	// these is the one I am still using" is the question somebody scanning this list is asking.
+	// Served by sessions_live_by_device_idx (000013).
+	ListSessionDevicesForUser(ctx context.Context, userID int64) ([]ListSessionDevicesForUserRow, error)
 	// Instance-administration queries.
 	//
 	// The Instance Admin tier, which is instance-wide and sits outside roles.Resolve entirely (ADR 0013).
@@ -325,18 +377,21 @@ type Querier interface {
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
 	// Every API token the account holds.
 	//
-	// A password reset revokes these as well as sessions. The case that decides it is the one where the reset
-	// is happening *because* the account was compromised: an attacker who minted a token while they had
-	// access would otherwise keep it, and the reset would restore the owner's password while leaving the
-	// intruder's credential working. The cost is real and accepted — a user who simply forgot their password
-	// has to re-mint their bots — so the confirmation page says so plainly.
+	// Moved here from password_reset_tokens.sql at M11, for the reason RevokeAllSessionsForUser gives. The
+	// argument for revoking these alongside sessions moved with it, onto auth.revokeEverything.
 	RevokeAllAPITokensForUser(ctx context.Context, userID int64) (int64, error)
 	// Every live session for an account, across every device.
 	//
-	// The narrow ancestor of M11's general-purpose revoke-all-sessions primitive (CLAUDE.md rule 17). M11
-	// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
-	// this is the whole of what "log everyone out" can currently mean.
+	// Moved here from password_reset_tokens.sql at M11, where M5 had put it because reset was its only caller.
+	// It belongs to sessions now: auth.revokeEverything is what calls it, and reset is one of that primitive's
+	// callers rather than its owner (CLAUDE.md rule 17).
 	RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error)
+	// The same, sparing one device — what "sign out everywhere else" means.
+	//
+	// The spared device is named rather than the spared session, because a session is one row of a rotating
+	// family: sparing a row would leave the caller signed in only until its next refresh, which is at most
+	// fifteen minutes away.
+	RevokeAllSessionsForUserExceptDevice(ctx context.Context, arg RevokeAllSessionsForUserExceptDeviceParams) (int64, error)
 	// Takes back an approval that has not been collected yet.
 	//
 	// This is what makes Deny a real recovery path rather than a promise. Somebody who approves and realizes a

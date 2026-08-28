@@ -126,6 +126,12 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 	// limiter manufacture the outage it exists to help survive.
 	r.Use(skipPath(healthzPath, rateLimiter))
 
+	// And nothing but readiness is served until migrations have finished.
+	//
+	// Below the rate limiter deliberately, so a flood arriving during startup is still counted and
+	// throttled rather than answered 503 for free.
+	r.Use(skipPath(healthzPath, refuseWhileStarting(opts.Health)))
+
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.ErrNotFound)
 	})
@@ -262,6 +268,49 @@ func skipPath(path string, mw func(http.Handler) http.Handler) func(http.Handler
 				return
 			}
 			wrapped.ServeHTTP(w, r)
+		})
+	}
+}
+
+// refuseWhileStarting answers 503 on every route but readiness until migrations have finished.
+//
+// # Why the latch was not enough on its own
+//
+// main binds and serves *before* it migrates, on purpose: an address already in use must fail at the bind
+// rather than after the process has written to the production schema. So there is a real window in which
+// the router is dispatching requests against a schema that has not been migrated yet, and until this
+// middleware existed the only thing that knew was /healthz.
+//
+// That made the guarantee architecture.md §2 and README state — that the instance does not serve until
+// migrations complete — true only where something routes on health. Neither of the two production paths
+// architecture.md names does: a bare-metal systemd unit and docker-compose both send traffic at a port,
+// not at a probe. health.go's own comment already scoped the claim correctly ("for anything that routes on
+// health"); this is what removes the qualifier.
+//
+// # Why it matters more from M12 on
+//
+// Today the window produces ugly 500s on a fresh instance and nothing worse, because a missing table
+// fails every query alike. From the first migration that *adds* to an existing schema, the window is a new
+// binary querying an old schema: statements untouched by the migration succeed and statements naming a new
+// column fail. A partially-working API is worse than a refusing one, because it writes.
+//
+// Not engaged during shutdown. lifecycleStopping exists so in-flight requests can drain, and refusing them
+// would defeat the state's whole purpose — which is why this reads Starting rather than "not ready".
+func refuseWhileStarting(h *health) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h == nil || !h.Starting() {
+				next.ServeHTTP(w, r)
+				return
+			}
+			httpx.WriteError(w, r, &httpx.StatusError{
+				Status: http.StatusServiceUnavailable,
+				Code:   "service_unavailable",
+				// Public for the reason the other two deliberate 503s are: this is a state the instance is
+				// in, not a fault it is hiding, and "try again shortly" is the only useful thing to say.
+				Message:         "instance is still starting up (migrations may be in progress)",
+				MessageIsPublic: true,
+			})
 		})
 	}
 }

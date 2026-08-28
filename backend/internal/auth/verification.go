@@ -99,9 +99,15 @@ func (s *Service) buildVerification(ctx context.Context, q *db.Queries, user db.
 func (s *Service) RequestEmailVerification(ctx context.Context, rawEmail string) error {
 	if !s.VerificationRequired() {
 		// No relay, so nothing to send — and on such an instance every account is already verified on
-		// creation, which makes this a no-op rather than a failure.
+		// creation, which makes this a no-op rather than a failure. Ahead of the floor: the answer is the
+		// same for every address, so there is nothing to pad.
 		return nil
 	}
+
+	// Same three-state asymmetry the reset path has, and the same fix: unknown address returns after one
+	// indexed read, an already-verified account after one read and a log line, and an unverified one
+	// commits a transaction. See padToEnumerationFloor.
+	defer s.padToEnumerationFloor(ctx, time.Now())
 
 	email := strings.TrimSpace(strings.ToLower(rawEmail))
 	log := logging.FromContext(ctx)

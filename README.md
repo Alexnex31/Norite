@@ -116,7 +116,9 @@ records of the most contested individual decisions.
 
 Two independent deployments of the same codebase, no shared infrastructure between them. **The free,
 publicly open-registration flagship instance (Kubernetes/Helm, optional paid per-user subscription perks) is
-the primary product** — the one most people use. Self-hosted instances, sold via a one-time license purchase
+the primary product** — the one most people use. Open registration means at v1: it arrives with the
+anti-automation challenge (`M67a`), because rate limiting bounds requests per source and not accounts per
+adversary. Until then the flagship takes no non-developer account at all — see ADR 0007's release posture. Self-hosted instances, sold via a one-time license purchase
 (offline, cryptographically-signed license file, no phone-home), are a real secondary offering, not a
 lesser-effort one — pricing is a flat one-time purchase regardless of who's buying, though it's expected to
 be most attractive to enterprises and other private groups who want their own instance. There's no "Platform

@@ -161,6 +161,7 @@ gui/           The native GUI — Gio app, mirrors the TUI's screens; shares the
 daemon/        Shared background daemon — gateway client, dual IPC, plugin host, config/state files
 internal/voice/  Pion-based SFU, embedded TURN server (lives under backend/, server-side infra)
 contracts/     openapi.yaml (REST), gateway-events.schema.json (WS), CLI --json schemas — source of truth
+               (also dependency-licenses.txt, the committed license inventory — ADR 0007)
 docker/        docker-compose.yml (postgres, redis, backend hot-reload) — local dev + self-hosted prod option
 frontend/      React SPA — the later, tertiary web client (Phase O)
 ```
@@ -169,16 +170,21 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 
 - `just dev` — run the full local stack (docker-compose: postgres, redis, backend w/ air; frontend w/ vite
   joins at Phase O)
-- `just test` — every Go module's tests. **Needs a running container runtime**: the backend's integration
-  tests start a real Postgres via `testcontainers-go`. Frontend tests join at Phase O.
+- `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
+  differs from CI is not a gate. **Needs a running container runtime**: the backend's integration tests
+  start a real Postgres via `testcontainers-go`. Costs about 1.6x, not the 10x the race detector is
+  reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
 - `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
   substitute for `just test` before pushing.
 - `just lint` — `go vet` + `golangci-lint` per module (frontend ESLint/`tsc --noEmit` at Phase O)
 - `just db-migrate` — apply pending migrations (runs the server's own `-migrate-only` mode, so it takes the
   exact same advisory-lock-guarded code path a real startup does)
 - `just sqlc-generate` / `just sqlc-check` — regenerate the committed sqlc layer / fail if it's stale
-- `just security-scan` — `govulncheck ./...` (+ `pnpm audit` and `Trivy` once frontend/ and Dockerfiles
-  exist)
+- `just security-scan` — `govulncheck ./...` plus `just license-check` (+ `pnpm audit` and `Trivy` once
+  frontend/ and Dockerfiles exist)
+- `just license-check` / `just license-inventory` — fail on a dependency license outside ADR 0007's
+  allow-list / regenerate the committed `contracts/dependency-licenses.txt`. Both run in CI; the inventory
+  is committed for the reason the sqlc output is, and CI fails if it is stale.
 
 ## Git workflow
 
@@ -280,9 +286,20 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M10.** Full dependency-ordered roadmap (`M0` through `M125`, phase-grouped,
-with Phase P — the flagship Kubernetes deployment — running as an explicitly parallel track) is in
-`docs/roadmap.md`.
+**Phase A (foundation), through M11.** Full dependency-ordered roadmap (`M0` through `M125` plus suffixed
+insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment — running as an explicitly
+parallel track) is in `docs/roadmap.md`.
+
+**`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
+dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
+reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Four exist:
+`M11a` (two-factor authentication), `M20a` (first usable client), `M56a` (message reactions), `M67a`
+(registration anti-automation).
+
+**Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
+testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed
+and tested. Recorded in ADR 0007 — the absence of any release marker otherwise reads as an oversight.
 
 - **M0 — monorepo scaffolding**: done (tag `m0`).
 - **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
@@ -337,7 +354,20 @@ with Phase P — the flagship Kubernetes deployment — running as an explicitly
   `verifypage.go`, `cli/internal/apiclient` (the transport extracted from `login`), and
   `cli/internal/instanceadmin` (`norite instance bootstrap` and `norite instance invite`). Decisions in
   ADR 0029, which also amends ADR 0024.
-- **M11 — Session revocation primitive**: next.
+- **M11 — Session revocation primitive**: done (tag `m11`). `internal/auth`'s `revoke.go` (the primitive)
+  and `sessions.go` (the account-facing view), migration `000012`, `POST /auth/logout/all`,
+  `GET`/`DELETE /users/@me/sessions`, the sessions sweep, and the daemon handing back the refresh token a
+  colliding login makes unkeepable. Decisions in ADR 0030.
+- **M11a — Two-factor authentication**: next. TOTP plus single-use recovery codes, wired into every path
+  that establishes a session. Placed here rather than later not because it is urgent — nothing is exposed
+  before v1 — but because the five paths it threads through took M4 through M11 to get right and each
+  carries an anti-enumeration property a factor prompt can undo silently. Decisions in ADR 0031, which also
+  amends ADR 0014: device linking is authorized by the primary device, so whatever protects a sign-in
+  protects the E2E trust chain.
+- **M12 — Guilds/channels/roles schema plus CRUD**: after that. Its first job is that
+  `contracts/openapi.yaml` does not currently generate — see the roadmap entry. It also carries M67a's
+  contract-shape reservation, because a challenge-required registration state is nearly free to reserve now
+  and expensive once four clients codegen from the current shape.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -348,7 +378,8 @@ re-derive:
   that's what `just db-migrate` and, later, the flagship's Helm pre-upgrade Job use.
 - **Middleware chain** (`cmd/server/router.go`), fixed by `docs/architecture.md` §2:
   SanitizeInboundRequestID → RequestID → EchoRequestID → RealIP *(mounted only when
-  `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders → StructuredLogger → RateLimit.
+  `NORITE_TRUST_PROXY_HEADERS=true`)* → Recoverer → SecureHeaders → StructuredLogger → RateLimit →
+  RefuseWhileStarting.
   `AuthenticateBearer` slots in below RateLimit at M4. SanitizeInboundRequestID and RealIP are one decision
   made twice — whether a client-supplied forwarded header may be believed — and both take it from that one
   setting, at the top, where nothing below re-opens it. A request ID is not cosmetic: it is echoed to the
@@ -380,7 +411,14 @@ re-derive:
   versions in *two* places that must move together — `.github/workflows/ci.yml`'s `env:` block and the
   justfile's variables. `just lint` warns when your local golangci-lint differs. Also note golangci-lint
   must be built with Go >= the workspace's highest `go` directive (1.25.0), which is why the lint action
-  is v9/golangci-lint v2 rather than the v6/v1 pair M0 started with.
+  is v9/golangci-lint v2 rather than the v6/v1 pair M0 started with. **`govulncheck` is deliberately not
+  pinned**, in CI or the justfile: what pinning buys the other two is that an upstream release cannot
+  surprise an unrelated PR, and here the surprise *is* the product — the job fails on a new advisory
+  fetched from the vulnerability database at run time, which pinning the binary would not prevent.
+- **CI runs five jobs**: `lint`, `test`, `codegen`, `security` and `build`. `security` is `govulncheck`
+  per module, the same command `just security-scan` runs, and it is blocking. It exists from M11; before
+  that `architecture.md` claimed it did while `ci.yml` had four jobs and no `govulncheck` anywhere — the
+  one piece of drift found where a security control was believed to be running and was not.
 
 And on the CLI side, from M2:
 
@@ -551,6 +589,53 @@ And on the OAuth side, from M6 (decisions in ADR 0024):
   the sweep filters by**: a partial index predicated on "not yet consumed" cannot serve a sweep that
   deletes regardless, which is the mistake made on all three of these tables and corrected in `000005`.
 
+And on session revocation, from M11 (decisions in ADR 0030):
+
+- **There is one primitive, `auth.revokeEverything`, and new claims are added to it rather than to a
+  caller** (rule 17). It revokes sessions, API tokens, outstanding OAuth exchange codes and approved device
+  authorizations, in whatever transaction the caller is already running. That list is not a design; it is
+  four milestones each noticing one more outstanding claim the previous ones missed (M4, M5, M6, M9), which
+  is exactly why it must not be reassembled per caller.
+- **Its two unbuilt steps live inside it as named gaps**, not behind interfaces nothing implements:
+  force-closing live gateway connections (M18) and dropping linked-device E2E trust (M101). Two seams whose
+  shapes are guesses would be two wrong shapes; one function is one place to add a line. Both milestones'
+  roadmap entries now say so.
+- **A session is a *device* to a person and a rotating row to the schema.** Every refresh inserts a
+  successor and revokes its predecessor, so `GET /users/@me/sessions` collapses each family to its newest
+  live record and `DELETE …/{id}` revokes the family. `first_seen` is the family's start; the newest row's
+  `created_at` is merely the last rotation. Never expose `device_id` in a path — it is client-chosen text
+  that would land in every request log line (M10's invite-code reasoning).
+- **The current device must be resolvable from a *revoked* row.** An access token names the session it was
+  minted from and lives fifteen minutes; a refresh inside that window revokes that row while the token
+  stays valid. `GetSessionByID` returns revoked rows on purpose. Filter them and `logout/all` finds no
+  current device, spares nothing, and signs the caller out of itself — the milestone's easiest bug, and it
+  has a test that fails without the fix.
+- **Session management needs a user actor, never an API token.** The listing enumerates every machine the
+  account is signed in on, and the revoke takes the account's other API tokens with it, so a delegated
+  credential holding either could lock its owner out. Same rule minting obeys.
+- **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10) —
+  **except where a signed-out credential would change the account's security state**, which
+  `RequireLiveSession` refuses: revoking sessions, and minting, listing or revoking API tokens. Written
+  first as per-handler checks, it missed `POST /auth/tokens` — and an API token is not session-scoped, so
+  one minted inside the window outlives the sign-out for good. **Guards belong in middleware for the same
+  reason the revocation list belongs in one function**: a rule written as N call sites has N chances to
+  miss one, and the one it missed was the one that mints a durable credential. Liveness is asked of the
+  *device*, never the row, because a rotated session is live and its row is revoked.
+- **A value a sweep can delete must not be derived from the rows it deletes.** `first_seen` was
+  `min(created_at)` over the session family until `000012` started deleting expired rows, which silently
+  capped it at the refresh TTL — a device used for a year reporting a rolling month. `000013` carries it
+  forward on rotation. The two halves shipped in adjacent parts of one milestone and neither's tests could
+  see the other.
+- **The sweep deletes by expiry, never by revocation.** A revoked row is the evidence that tells *replay*
+  apart from an unknown token, which is what reuse detection revokes a device family on. Past `expires_at`
+  nothing can be presented, so there is nothing left to prove.
+- **Check every new foreign key for an index, and every sweep index for a partial predicate.** Both bit
+  here. `replaced_by_id` was an unindexed `ON DELETE SET NULL` self-reference: deleting 2,000 rows spent
+  3,757 ms in its trigger against 9.4 ms in the DELETE. The `expires_at` index was partial on
+  `revoked_at IS NULL`, which is 000005's mistake on the one table where the excluded rows are the majority.
+  Neither is catchable by a behavior test — a partial index produces a scan, not wrong rows — so
+  `sweeper_test.go` asserts the index *shapes*, across every sweep table.
+
 And on the client-auth side, from M7:
 
 - **The credential format lives in `daemon/credentials`, and the CLI imports it** — the repository's first
@@ -607,13 +692,16 @@ And on the client-auth side, from M7:
   impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
   token from the only person who can deal with it. The CLI prints it, the daemon logs it.
 
-Three things this milestone deliberately leaves for the milestone that can do them properly. **All three
-are now written into that milestone's roadmap entry** — M11's single-token revoke and M19's three — because
-a deferral recorded only here is one the milestone that inherits it never reads:
+Three things this milestone deliberately left for the milestone that could do them properly — **one of
+which turned out not to need deferring at all**. All are written into the roadmap entry that inherits
+them, because a deferral recorded only here is one that milestone never reads:
 
-- **A dropped refresh token cannot be revoked yet.** When a login lands mid-refresh, the daemon discards
-  the token it just obtained; it stays valid at the instance until it expires. Handing it back needs M11's
-  revoke-a-session primitive, and reaching for it from the daemon needs M19's gateway connection.
+- ~~**A dropped refresh token cannot be revoked yet.**~~ **Closed at M11**, and the claim was wrong twice
+  over: `POST /auth/logout` had revoked exactly one session by presenting its refresh token since M4, and
+  the daemon holds the HTTP client to call it with at the very line that dropped the token. No primitive
+  and no gateway connection were needed. Left here rather than deleted because the reasoning is the
+  cautionary part — a deferral repeated from a code comment into a roadmap entry, believed twice, and only
+  disproved by somebody reading what `/auth/logout` actually does.
 - **The daemon never re-probes for a keyring that unlocks later.** The backend is chosen once per process
   (`sync.Once`), so a daemon that started before the session keyring was unlocked keeps reading the file
   path for its whole life. Correct today because the record names the backend; worth revisiting when the

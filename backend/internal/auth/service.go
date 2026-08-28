@@ -52,11 +52,14 @@ var (
 	ErrEmailTaken          = errors.New("that email is already registered")
 	ErrUsernameTaken       = errors.New("that username is already taken")
 	ErrInvalidRefreshToken = errors.New("invalid or expired refresh token")
-	ErrSessionReuse        = errors.New("refresh token was already used")
-	ErrUnknownScope        = errors.New("unknown scope")
-	ErrNotFound            = errors.New("not found")
-	ErrInvalidUsername     = errors.New("a username may contain only letters, digits, and _ . -")
-	ErrInvalidTokenName    = errors.New("invalid token name")
+	// ErrSessionSignedOut means the credential is still cryptographically valid but the session behind it
+	// has been revoked. Only the revoking endpoints raise it — see Service.requireLiveDevice.
+	ErrSessionSignedOut = errors.New("this session has been signed out")
+	ErrSessionReuse     = errors.New("refresh token was already used")
+	ErrUnknownScope     = errors.New("unknown scope")
+	ErrNotFound         = errors.New("not found")
+	ErrInvalidUsername  = errors.New("a username may contain only letters, digits, and _ . -")
+	ErrInvalidTokenName = errors.New("invalid token name")
 )
 
 // RegistrationMode mirrors the instance's configured gating.
@@ -88,6 +91,12 @@ type Service struct {
 	// which is the ordinary shape — every OAuth entry point reports ErrUnknownProvider rather than
 	// pretending a provider exists.
 	oauth OAuthProviders
+
+	// enumerationFloor is how long an always-202 lookup endpoint takes regardless of what it found.
+	//
+	// A field rather than the constant directly so the tests that are not about timing can zero it; the
+	// one that is measures against it. See padToEnumerationFloor.
+	enumerationFloor time.Duration
 
 	now func() time.Time
 }
@@ -145,6 +154,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		ids:              opts.IDs,
 		issuer:           opts.Issuer,
 		registrationMode: mode,
+		enumerationFloor: enumerationFloor,
 		now:              time.Now,
 	}, nil
 }
@@ -183,8 +193,26 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 	// transaction below, together with the account insert — checking it here as well would spend a use
 	// on a registration that then failed its username check, burning somebody else's invite.
 	gated := s.registrationMode != RegistrationOpen
-	if gated && strings.TrimSpace(in.InviteCode) == "" {
-		return db.User{}, ErrInviteRequired
+	if gated {
+		if strings.TrimSpace(in.InviteCode) == "" {
+			return db.User{}, ErrInviteRequired
+		}
+		// And the code has to be *shaped* like one before anything expensive happens.
+		//
+		// "One cheap rejection" above was true only of a request with no code at all. Any well-formed
+		// garbage reached HashPassword thirty lines down and spent 64 MiB and tens of milliseconds in one
+		// of maxConcurrentHashes slots — so the gate that reads as the protection against exactly this
+		// was not it. Bounded rather than unbounded, since the hash gate and the /auth rate limit still
+		// apply, but the comment claimed a property the code did not have.
+		//
+		// A shape check only. Whether the code is *redeemable* stays in the transaction below, where it
+		// shares the account insert: checking that here as well would spend a use on a registration that
+		// then failed its username check and burn somebody else's invite. A well-formed but unknown code
+		// therefore still reaches the hash, and closing that needs a pre-check that races — which is the
+		// thing this ordering exists to avoid, so it is the right place to stop.
+		if _, err := ParseInviteCode(in.InviteCode); err != nil {
+			return db.User{}, err
+		}
 	}
 
 	// Normalized and validated here rather than only by the handler's struct tags, so every caller gets
@@ -476,6 +504,10 @@ func (s *Service) writeSession(ctx context.Context, q *db.Queries, sessionID, us
 		return fmt.Errorf("revoking the previous session for this device: %w", err)
 	}
 
+	// FirstSeen is deliberately left unset here, which the query reads as now(): this is a sign-in, and a
+	// sign-in is when a device is first seen. Rotation is the path that carries the existing value forward
+	// (000013). Signing in again on a device that was already signed in resets it, which is right — the
+	// previous family was just revoked two statements above.
 	if _, err := q.CreateSession(ctx, db.CreateSessionParams{
 		ID:               int64(sessionID),
 		UserID:           int64(userID),
@@ -566,6 +598,9 @@ func (s *Service) Refresh(ctx context.Context, rawToken string) (TokenPair, erro
 			DeviceName:       session.DeviceName,
 			IpAddress:        session.IpAddress,
 			ExpiresAt:        timestamptz(s.now().Add(RefreshTokenTTL)),
+			// Carried forward, not recomputed: this is what the device's "signed in since" means, and a
+			// rotation is not a new sign-in. Recomputing would reset it every fifteen minutes (000013).
+			FirstSeen: session.FirstSeen,
 		}); err != nil {
 			return fmt.Errorf("creating the rotated session: %w", err)
 		}

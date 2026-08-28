@@ -36,6 +36,15 @@ default for many accounts — and carries no verification flag at all; `/user/em
 flag exists. A verified address is preferred over the primary one, so an account whose primary address
 happens to be unverified is not refused while a verified one sits beside it.
 
+**Linking records the verification it acted on.** If the matched account's address was not yet confirmed,
+the link sets `email_verified_at`. This is not a new claim about the address: the branch is reached only
+because the provider reported it verified, which is the same evidence the emailed link exists to gather and
+is already the sole basis on which the sign-in was allowed. Amended after the fact — the original link path
+signed the person in and left the column NULL, producing an account that authenticated one way and not the
+other, and mailed a fresh verification link on every attempt with the *correct* password. Recorded here
+rather than in the code alone because "a provider is trusted for exactly one thing" reads, wrongly, as an
+argument for writing down as little of it as possible.
+
 **Once linked, sign-in consults the provider's immutable user ID and nothing else.** The email is not
 re-checked, so changing it at the provider neither detaches nor redirects an established link.
 

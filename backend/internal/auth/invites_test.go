@@ -302,3 +302,45 @@ func TestRedemptionRollsBackWithItsTransaction(t *testing.T) {
 	})
 	assert.NoError(t, err, "a rolled-back registration must leave the invite redeemable")
 }
+
+// The gate's own comment promised "exactly one cheap rejection" on a gated instance, and delivered it only
+// for a request carrying no code at all. Any well-formed garbage passed the presence check and reached
+// HashPassword, spending 64 MiB and tens of milliseconds in one of maxConcurrentHashes slots — so the thing
+// that reads as the protection against precisely this attack was not it.
+//
+// Measured rather than asserted, because the claim being wrong is the finding.
+func TestAMalformedInviteCodeIsRejectedBeforeHashing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing measurement is too noisy to be worth running in -short mode")
+	}
+
+	svc, _ := newService(t, RegistrationInvite)
+	good := newInvite(t, svc, CreateInviteInput{MaxUses: 1})
+
+	register := func(code, name string) error {
+		_, err := svc.Register(context.Background(), RegisterInput{
+			Username:   name,
+			Email:      name + "@example.com",
+			Password:   "a-sufficiently-long-test-password",
+			InviteCode: code,
+		})
+		return err
+	}
+
+	// A code that cannot be one: the wrong length, and characters outside the alphabet.
+	require.ErrorIs(t, register("not a code!", "mallory"), ErrInviteInvalid)
+
+	start := time.Now()
+	for i := range 4 {
+		require.ErrorIs(t, register("not a code!", fmt.Sprintf("mallory%d", i)), ErrInviteInvalid)
+	}
+	malformed := time.Since(start) / 4
+
+	start = time.Now()
+	require.NoError(t, register(good, "ada"))
+	hashed := time.Since(start)
+
+	t.Logf("malformed code %s, accepted registration %s", malformed, hashed)
+	assert.Less(t, malformed*4, hashed,
+		"a malformed code must cost a string scan, not an argon2id slot")
+}

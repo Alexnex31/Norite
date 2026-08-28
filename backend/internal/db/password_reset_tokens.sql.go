@@ -136,46 +136,6 @@ func (q *Queries) InvalidateOutstandingResetTokens(ctx context.Context, userID i
 	return result.RowsAffected(), nil
 }
 
-const revokeAllAPITokensForUser = `-- name: RevokeAllAPITokensForUser :execrows
-UPDATE api_tokens
-SET revoked_at = now()
-WHERE user_id = $1 AND revoked_at IS NULL
-`
-
-// Every API token the account holds.
-//
-// A password reset revokes these as well as sessions. The case that decides it is the one where the reset
-// is happening *because* the account was compromised: an attacker who minted a token while they had
-// access would otherwise keep it, and the reset would restore the owner's password while leaving the
-// intruder's credential working. The cost is real and accepted — a user who simply forgot their password
-// has to re-mint their bots — so the confirmation page says so plainly.
-func (q *Queries) RevokeAllAPITokensForUser(ctx context.Context, userID int64) (int64, error) {
-	result, err := q.db.Exec(ctx, revokeAllAPITokensForUser, userID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const revokeAllSessionsForUser = `-- name: RevokeAllSessionsForUser :execrows
-UPDATE sessions
-SET revoked_at = now()
-WHERE user_id = $1 AND revoked_at IS NULL
-`
-
-// Every live session for an account, across every device.
-//
-// The narrow ancestor of M11's general-purpose revoke-all-sessions primitive (CLAUDE.md rule 17). M11
-// widens it to close live gateway connections and drop linked-device E2E trust; neither exists yet, so
-// this is the whole of what "log everyone out" can currently mean.
-func (q *Queries) RevokeAllSessionsForUser(ctx context.Context, userID int64) (int64, error) {
-	result, err := q.db.Exec(ctx, revokeAllSessionsForUser, userID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const setUserPassword = `-- name: SetUserPassword :one
 UPDATE users
 SET password_hash = $2, updated_at = now()

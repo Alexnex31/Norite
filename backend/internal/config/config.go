@@ -392,6 +392,30 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: invalid configuration: %s: required when an OAuth provider is "+
 			"configured, because the provider redirects back to it", name)
 	}
+
+	// And when it is set, it has to be a scheme a browser and a mail client will follow.
+	//
+	// The `url` struct tag accepts any parseable absolute URL, which is every scheme there is. This value's
+	// entire purpose is to become a link handed to something outside this process — a verification mail, a
+	// reset mail, the OAuth callback registered with a provider — so a scheme other than http or https
+	// produces links that silently do not work, and a `javascript:`-shaped one produces links that are
+	// actively wrong in a client that renders them.
+	//
+	// An operator-controlled value, so this is a misconfiguration guard rather than an attack surface,
+	// which is why it is a startup error rather than anything cleverer. daemon/credentials.ParseInstanceURL
+	// makes exactly this check on exactly this class of value, and says why; the backend's own equivalent
+	// did not, which is the only reason to write it down twice.
+	if c.PublicBaseURL != "" {
+		if scheme, _, ok := strings.Cut(c.PublicBaseURL, ":"); !ok ||
+			(!strings.EqualFold(scheme, "http") && !strings.EqualFold(scheme, "https")) {
+			name := envVarFor("PublicBaseURL")
+			if c.SourcePath != "" {
+				name = fmt.Sprintf("%s (%s in %s)", name, fileKeyFor("PublicBaseURL"), c.SourcePath)
+			}
+			return fmt.Errorf("config: invalid configuration: %s: must be an http:// or https:// URL, "+
+				"because it becomes a link in outbound mail and the OAuth callback", name)
+		}
+	}
 	return nil
 }
 

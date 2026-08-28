@@ -36,6 +36,13 @@ import (
 // this reclaims space rather than enforcing anything.
 const SweepInterval = 10 * time.Minute
 
+// sessionSweepBatch bounds one DELETE against the sessions table.
+//
+// Large enough that a steady-state pass is a single statement — ten minutes of one busy device is under a
+// hundred rows — and small enough that the first pass over years of accumulated rotations cannot hold a
+// connection from a small pool for an unbounded time, nor write one enormous WAL record.
+const sessionSweepBatch = 5000
+
 // SweepResult counts what one pass removed.
 type SweepResult struct {
 	ResetTokens   int64
@@ -50,12 +57,18 @@ type SweepResult struct {
 	// VerificationTokens is M10's other TTL table. Unlike the invites above, these are ordinary garbage:
 	// an unfollowed verification link is dead the moment it expires.
 	VerificationTokens int64
+	// Sessions is the biggest of these by a wide margin, and the one that was missing longest — from M4
+	// until M11. Every refresh inserts a row and revokes its predecessor, so this table grows with traffic
+	// rather than with sign-ins: about ninety-six rows a day per active device, none of which anything
+	// deleted. Expired only; a revoked-but-unexpired row is still what tells replay apart from an unknown
+	// token, which is what DeleteExpiredSessions' comment explains.
+	Sessions int64
 }
 
 // Total is how many rows the pass removed altogether.
 func (r SweepResult) Total() int64 {
 	return r.ResetTokens + r.OAuthStates + r.ExchangeCodes + r.DeviceCodes + r.Invites +
-		r.VerificationTokens
+		r.VerificationTokens + r.Sessions
 }
 
 // SweepExpired removes every expired row this package owns.
@@ -84,6 +97,24 @@ func (s *Service) SweepExpired(ctx context.Context) (SweepResult, error) {
 	}
 	if out.DeviceCodes, err = s.queries.DeleteExpiredDeviceCodes(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired device codes: %w", err)
+	}
+	// Batched, because this is the one table with a backlog rather than a trickle — see the query. The loop
+	// stops as soon as a pass comes back short, so the steady state is a single statement deleting a
+	// handful of rows and only a first run after M11 ever goes round twice.
+	for {
+		n, err := s.queries.DeleteExpiredSessions(ctx, sessionSweepBatch)
+		if err != nil {
+			return out, fmt.Errorf("sweeping expired sessions: %w", err)
+		}
+		out.Sessions += n
+		if n < sessionSweepBatch {
+			break
+		}
+		// A canceled context means shutdown. Stop rather than start another batch; what is left is the
+		// next process's to finish, exactly as a failure part-way through would be.
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return out, nil
 }
@@ -130,6 +161,7 @@ func (s *Service) RunSweeper(ctx context.Context) {
 				Int64("device_codes", result.DeviceCodes).
 				Int64("instance_invites", result.Invites).
 				Int64("verification_tokens", result.VerificationTokens).
+				Int64("sessions", result.Sessions).
 				Msg("swept expired auth rows")
 		}
 

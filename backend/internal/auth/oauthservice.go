@@ -419,6 +419,9 @@ func (s *Service) resolveOAuthIdentity(ctx context.Context, identity OAuthIdenti
 		if err := s.linkOAuthIdentity(ctx, user.ID, identity); err != nil {
 			return OAuthOutcome{}, err
 		}
+		if err := s.recordProviderVerifiedAddress(ctx, user); err != nil {
+			return OAuthOutcome{}, err
+		}
 		return s.signedInOutcome(ctx, user.ID, dest)
 
 	case errors.Is(err, pgx.ErrNoRows):
@@ -526,6 +529,51 @@ func (s *Service) linkOAuthIdentity(ctx context.Context, userID int64, identity 
 	default:
 		return fmt.Errorf("linking oauth identity: %w", err)
 	}
+}
+
+// recordProviderVerifiedAddress marks an account's address confirmed on the strength of the provider's word.
+//
+// Reached only from the branch above, which has already established that the provider *verified* the
+// address — the one thing a provider is trusted for beyond the identity itself (ADR 0024). That is the same
+// evidence the emailed link exists to gather, so recording it is not a new claim about the address; it is
+// writing down a claim the sign-in already acted on.
+//
+// # What went wrong without it
+//
+// Linking left email_verified_at NULL, which put the account in a state nobody designed: OAuth sign-in
+// worked, password sign-in did not, and because verifyCredentials answers an unverified account with
+// ErrInvalidCredentials *and* mails a fresh link, every attempt with the correct password queued another
+// verification email to somebody who was already signed in and would read it as spam. GET /users/@me
+// reported email_verified_at: null for an account in daily use, and any future gate on verification —
+// matchmaking's is named in config.go — would have refused these accounts for a reason none of them could
+// see.
+//
+// # Why not a transaction with the link
+//
+// linkOAuthIdentity resolves a unique violation by reading the row back (classifyLinkConflict), and a
+// violation inside a transaction aborts it, so the read-back could not run. Sequential instead, and the
+// order is the safe one: a failure here leaves an account linked but still unverified, which is exactly the
+// state that existed before this function and is recoverable by following the mailed link.
+func (s *Service) recordProviderVerifiedAddress(ctx context.Context, user db.User) error {
+	if user.EmailVerifiedAt.Valid {
+		return nil
+	}
+
+	// The query's WHERE pins the address as well as the id, which is the guard the reset path wants and
+	// this path wants for the same reason: the provider vouched for *this* address, so an account whose
+	// email moved between the lookup and here must not be marked on the strength of it. No rows means the
+	// address moved, and the sign-in is still legitimate — the identity is keyed by the provider's user
+	// ID, never by the address — so it is not an error, only a mark not made.
+	if _, err := s.queries.MarkEmailVerified(ctx, db.MarkEmailVerifiedParams{
+		ID:    user.ID,
+		Email: user.Email,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("recording the provider-verified address: %w", err)
+	}
+	return nil
 }
 
 // classifyLinkConflict works out what a unique violation on oauth_identities actually meant.

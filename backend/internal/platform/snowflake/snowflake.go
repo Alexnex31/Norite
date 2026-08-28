@@ -109,11 +109,18 @@ func (id ID) MarshalJSON() ([]byte, error) {
 // client should not fail on something this cosmetic, while output stays strictly stringly-typed.
 func (id *ID) UnmarshalJSON(data []byte) error {
 	s := string(data)
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		s = s[1 : len(s)-1]
-	}
+
+	// The JSON literal null, before the quotes come off — never the *string* "null", which is a value
+	// somebody sent. Stripping first made `{"channel_id": "null"}` indistinguishable from an absent field
+	// and left the ID at whatever it already held, which for a fresh struct is zero. A silent zero in an
+	// ID field is the input a permission check is least likely to notice, and the comment below already
+	// gives the reason to fix this now: nothing binds an ID in a request body yet.
 	if s == "null" {
 		return nil
+	}
+
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
 	}
 
 	// Parse rather than a bare ParseInt: the two must agree on what an ID is. They did not — a negative

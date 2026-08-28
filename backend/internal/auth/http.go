@@ -64,16 +64,25 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/password/reset", h.confirmPasswordReset)
 	r.Post("/verify/request", h.requestEmailVerification)
 
-	// Authenticated.
+	// Authenticated, and changing the account's own security state.
+	//
+	// Two guards together, and the set of routes under them is the point. RequireUserActor keeps a
+	// delegated credential out: minting because a token that can mint tokens can grant itself scopes it
+	// does not hold, listing because it discloses the account's other tokens to whatever holds this one,
+	// revoking and signing-out for the same reason in reverse — a credential that can revoke its owner's
+	// sessions can lock its owner out.
+	//
+	// RequireLiveSession keeps a *signed-out* credential out, which is the narrow exception to the
+	// stateless access token (§17.10) and is explained on the middleware. It belongs on exactly these
+	// routes, and having them in one group is what makes that reviewable — M11 first wrote the rule as
+	// per-handler checks and missed /tokens, which is the one that mints something outliving any session.
 	r.Group(func(r chi.Router) {
-		r.Use(RequireAuth)
+		r.Use(RequireAuth, RequireUserActor, RequireLiveSession(h.svc))
 
-		// All three require the person, not a delegated credential. Minting because a token that can
-		// mint tokens can grant itself scopes it does not hold; listing because it discloses the
-		// account's other tokens to whatever holds this one; revoking for symmetry with both.
-		r.With(RequireUserActor).Post("/tokens", h.mintToken)
-		r.With(RequireUserActor).Get("/tokens", h.listTokens)
-		r.With(RequireUserActor).Delete("/tokens/{tokenId}", h.revokeToken)
+		r.Post("/tokens", h.mintToken)
+		r.Get("/tokens", h.listTokens)
+		r.Delete("/tokens/{tokenId}", h.revokeToken)
+		r.Post("/logout/all", h.logoutAll)
 	})
 }
 
@@ -82,6 +91,22 @@ func (h *Handler) UserRoutes(r chi.Router) {
 	r.Group(func(r chi.Router) {
 		r.Use(RequireAuth)
 		r.With(RequireScope(ScopeIdentify)).Get("/@me", h.currentUser)
+
+		// A user actor, not a delegated one, for the reason the token endpoints give: this listing
+		// discloses every machine the account is signed in on, and the revoke acts on all of them.
+		//
+		// The revoke additionally requires a live session — the same guard Routes puts on /tokens and
+		// /logout/all, repeated here because a chi group belongs to one mux.
+		//
+		// The listing does not, because reading is exactly what §17.10's window is for. Worth being precise
+		// about the cost rather than waving at /users/@me, which this comment used to do: a signed-out
+		// device can read this for the rest of its token's life, and what it gets is *more* than the
+		// profile endpoint gives — every other device's name, address and timestamps. It is accepted
+		// because the same credential could have read it a moment earlier, so the window adds no access
+		// that was not already had. If that ever stops being true, this is the line to revisit.
+		r.With(RequireUserActor).Get("/@me/sessions", h.listSessions)
+		r.With(RequireUserActor, RequireLiveSession(h.svc)).
+			Delete("/@me/sessions/{sessionID}", h.revokeSession)
 	})
 }
 
@@ -160,6 +185,58 @@ type userResponse struct {
 	AvatarHash      *string      `json:"avatar_hash"`
 	EmailVerifiedAt *time.Time   `json:"email_verified_at"`
 	CreatedAt       time.Time    `json:"created_at"`
+}
+
+// sessionResponse is one device signed in to the account.
+//
+// Its own type rather than the service's, for the reason userResponse gives: a response shape that starts
+// as a copy of an internal struct is how a field nobody meant to publish reaches the wire. Nothing here
+// comes near the refresh token hash, which is the field this table exists to protect.
+type sessionResponse struct {
+	ID snowflake.ID `json:"id"`
+	// Name is client-supplied text. It is sent as the client gave it; making it safe to *render* is the
+	// renderer's job and rule 19's, and doing it here would corrupt the value for every other consumer.
+	Name string `json:"device_name"`
+	// Address is null for a session with no recorded address, never omitted — a caller reads the same keys
+	// whichever kind of session it got.
+	Address   *string   `json:"ip_address"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastUsed  time.Time `json:"last_used_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	// Current marks the device this request came from, which is the one a client must not offer to revoke
+	// without saying what it is.
+	Current bool `json:"current"`
+}
+
+func newSessionResponse(d SessionDevice) sessionResponse {
+	out := sessionResponse{
+		ID:        d.ID,
+		Name:      d.Name,
+		FirstSeen: d.FirstSeen,
+		LastUsed:  d.LastUsed,
+		ExpiresAt: d.ExpiresAt,
+		Current:   d.Current,
+	}
+	if d.Address != nil {
+		addr := d.Address.String()
+		out.Address = &addr
+	}
+	return out
+}
+
+// logoutAllResponse says what signing out everywhere else actually did.
+//
+// Counted rather than a bare 204, because this action revokes more than its name suggests — API tokens go
+// with the sessions — and a client that cannot see the number cannot tell somebody their bots just
+// stopped.
+type logoutAllResponse struct {
+	SessionsRevoked  int64 `json:"sessions_revoked"`
+	APITokensRevoked int64 `json:"api_tokens_revoked"`
+	// The other two the primitive revokes. Reported because the primitive counts them and a caller that
+	// cannot see them cannot explain them — the case that bites is somebody who approved a sign-in on a
+	// shared machine, then reached for this, and is told nothing about the authorization it just canceled.
+	ExchangeCodesRevoked int64 `json:"oauth_exchange_codes_revoked"`
+	DeviceCodesRevoked   int64 `json:"device_authorizations_revoked"`
 }
 
 func newUserResponse(u db.User) userResponse {
@@ -471,6 +548,57 @@ func (h *Handler) revokeToken(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, r, http.StatusNoContent, nil)
 }
 
+// ---------- sessions ----------
+
+func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	actor, _ := ActorFrom(r.Context())
+
+	devices, err := h.svc.ListSessionDevices(r.Context(), actor.UserID, actor.SessionID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	out := make([]sessionResponse, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, newSessionResponse(d))
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, out)
+}
+
+func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
+	actor, _ := ActorFrom(r.Context())
+
+	sessionID, err := snowflake.Parse(chi.URLParam(r, "sessionID"))
+	if err != nil {
+		// Same answer as a session that does not exist, for the reason revokeToken gives above.
+		h.writeErr(w, r, ErrNotFound)
+		return
+	}
+
+	if err := h.svc.RevokeSessionDevice(r.Context(), actor.UserID, sessionID); err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusNoContent, nil)
+}
+
+func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
+	actor, _ := ActorFrom(r.Context())
+
+	result, err := h.svc.RevokeOtherSessions(r.Context(), actor.UserID, actor.SessionID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, logoutAllResponse{
+		SessionsRevoked:      result.Sessions,
+		APITokensRevoked:     result.APITokens,
+		ExchangeCodesRevoked: result.ExchangeCodes,
+		DeviceCodesRevoked:   result.DeviceCodes,
+	})
+}
+
 // ---------- plumbing ----------
 
 // decode reads and validates a JSON request body, writing the error response itself on failure.
@@ -504,6 +632,12 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrInvalidCredentials), errors.Is(err, ErrPasswordNotSet):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid email or password"))
+
+	case errors.Is(err, ErrSessionSignedOut):
+		// 401, and it says so plainly rather than hiding behind the vague credential message: the caller
+		// holds a genuine token for a session somebody has signed out, and "re-authenticate" is exactly the
+		// right advice. Nothing is disclosed — they already knew whose account it is.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "%s", err.Error()))
 
 	case errors.Is(err, ErrInvalidRefreshToken), errors.Is(err, ErrSessionReuse):
 		// Reuse is deliberately reported the same as an ordinary invalid token. Telling the caller "that

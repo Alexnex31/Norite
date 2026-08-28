@@ -249,3 +249,65 @@ func TestADeliberateOutageSaysWhichFeatureIsOff(t *testing.T) {
 		assert.NotEqual(t, "internal server error", body.Message)
 	})
 }
+
+// M11's two new response shapes, against what the document declares.
+//
+// Same reasoning as the minted-token test above, and the reason that one exists: contract_test.go compares
+// the set of routes and never a payload, so a field the server sends and the schema omits — or the reverse
+// — is invisible to it. Session in particular has a field that is easy to get wrong in a way no functional
+// test would notice: first_seen must be the device family's start, and a schema that did not require it
+// would let a client codegen it away.
+func TestTheSessionListingMatchesTheContract(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	acct := a.newAccount("ada", "ada@example.com", "laptop")
+
+	res := a.call(http.MethodGet, "/api/v1/users/@me/sessions", nil, withToken(acct.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, res.Code, res)
+
+	var listing []map[string]any
+	require.NoError(t, json.Unmarshal(res.Body, &listing))
+	require.Len(t, listing, 1, "one device is signed in")
+
+	var got []string
+	for k := range listing[0] {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+
+	declared, required := declaredProperties(t, contractSchemas(t)["Session"])
+	assert.Equal(t, declared, got, "GET /users/@me/sessions sent %v; Session declares %v", got, declared)
+	assert.Equal(t, declared, required,
+		"every field of a Session is always present — a nullable one is explicitly null, never omitted")
+}
+
+// And an empty listing is an array, not null.
+//
+// Go marshals a nil slice to `null`, so this is something the handler has to do on purpose — the same
+// convention contracts/cli-json/README.md fixes for the CLI, and the same trap.
+func TestAnEmptySessionListingIsAnArray(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	acct := a.newAccount("ada", "ada@example.com", "laptop")
+
+	// Sign the only device out, then read the listing with the access token it still holds — which stays
+	// valid for its full life, since access tokens are not checked against session state (§17.10).
+	res := a.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(acct.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, res.Code, res)
+	sessions := a.call(http.MethodDelete, "/api/v1/users/@me/sessions/"+currentSessionID(t, a, acct.Tokens.AccessToken),
+		nil, withToken(acct.Tokens.AccessToken))
+	require.Equal(t, http.StatusNoContent, sessions.Code, sessions)
+
+	got := a.call(http.MethodGet, "/api/v1/users/@me/sessions", nil, withToken(acct.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, got.Code, got)
+	assert.Equal(t, "[]", strings.TrimSpace(got.String()), "an empty listing is [], never null")
+}
+
+func currentSessionID(t *testing.T, a *api, accessToken string) string {
+	t.Helper()
+	for _, s := range listSessions(t, a, accessToken) {
+		if s.Current {
+			return s.ID
+		}
+	}
+	t.Fatal("no current session in the listing")
+	return ""
+}

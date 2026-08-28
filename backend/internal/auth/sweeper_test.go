@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,4 +105,178 @@ func TestTheSweeperStopsWhenItsContextIsCancelled(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunSweeper did not return after its context was canceled")
 	}
+}
+
+// ---------- sessions (M11) ----------
+
+// The sweep this table went seven milestones without.
+//
+// Worth exercising at the query level rather than only through RunSweeper: a WHERE clause one character
+// wrong here empties the table people are signed in with.
+func TestExpiredSessionsAreSweptAndLiveOnesAreNot(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	ctx := t.Context()
+
+	_, live := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	// A second device, aged past its expiry the way a year of rotations ages.
+	_, err := svc.Login(ctx, LoginInput{
+		Email: "ada@example.com", Password: testPassword, DeviceID: "old-laptop",
+	})
+	require.NoError(t, err)
+	_, err = svc.pool.Exec(ctx,
+		"UPDATE sessions SET expires_at = now() - interval '1 day' WHERE device_id = 'old-laptop'")
+	require.NoError(t, err)
+
+	swept, err := svc.queries.DeleteExpiredSessions(ctx, sessionSweepBatch)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, swept, "only the expired session may be removed")
+
+	// The live one still works, which is the assertion that matters.
+	_, err = svc.Refresh(ctx, live.RefreshToken)
+	assert.NoError(t, err, "a live session must survive the sweep")
+}
+
+// A revoked session that has not expired must stay, because it is still evidence.
+//
+// replaced_by_id is what lets a presented token be recognized as *replay* rather than as merely unknown,
+// and replay is what reuse detection revokes a whole device family on. Sweeping revoked rows early would
+// turn a stolen token into an unrecognized one and quietly disable that detection — the table would look
+// tidier and the security property would be gone. Past expires_at nothing can be presented, so the
+// evidence has nothing left to prove; that is the whole reason the WHERE clause names expiry and not
+// revocation.
+func TestSweepingKeepsRevokedButUnexpiredSessions(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	ctx := t.Context()
+
+	_, first := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	// Rotate, which revokes the first session and leaves it pointing at its successor.
+	second, err := svc.Refresh(ctx, first.RefreshToken)
+	require.NoError(t, err)
+
+	swept, err := svc.queries.DeleteExpiredSessions(ctx, sessionSweepBatch)
+	require.NoError(t, err)
+	assert.Zero(t, swept, "a revoked row is not an expired one")
+
+	// And the detection it exists for still fires: presenting the rotated-away token is replay, which
+	// revokes the family rather than merely failing.
+	_, err = svc.Refresh(ctx, first.RefreshToken)
+	require.ErrorIs(t, err, ErrSessionReuse, "the evidence the sweep spared is what makes this replay")
+
+	_, err = svc.Refresh(ctx, second.RefreshToken)
+	assert.ErrorIs(t, err, ErrInvalidRefreshToken, "and replay took the whole family with it")
+}
+
+// The sweeper's own accounting: a table added to SweepExpired has to reach SweepResult.Total, or the
+// "swept N rows" line under-reports and the debug log stays silent on a pass that did work.
+func TestTheSweepCountsSessions(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	ctx := t.Context()
+
+	registerAndLogin(t, svc, "ada@example.com", "laptop")
+	_, err := svc.pool.Exec(ctx, "UPDATE sessions SET expires_at = now() - interval '1 day'")
+	require.NoError(t, err)
+
+	result, err := svc.SweepExpired(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, result.Sessions)
+	assert.EqualValues(t, 1, result.Total(), "Total must include every table SweepExpired touches")
+}
+
+// Every index a sweep depends on must be non-partial, and this is the only kind of test that can say so.
+//
+// The behavior tests above pass either way: a partial index does not produce wrong rows, it produces a
+// sequential scan. That is exactly why the mistake 000005 corrected survived three migrations unnoticed —
+// nothing was broken, something was merely scanning a table it had an index for. So this asserts the
+// *shape*, which is the property, rather than the results, which are not affected.
+//
+// Table-wide rather than per-migration on purpose: the next table with a TTL will add its own expires_at
+// index, and the value of this test is that it is already watching when that happens.
+func TestNoSweepIndexIsPartial(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+
+	rows, err := svc.pool.Query(t.Context(), `
+		SELECT c.relname, i.indexrelid::regclass::text, pg_get_indexdef(i.indexrelid)
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indrelid
+		WHERE c.relnamespace = 'public'::regnamespace
+		  AND pg_get_indexdef(i.indexrelid) LIKE '%expires_at%'
+		  AND i.indpred IS NOT NULL
+		ORDER BY c.relname`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var offenders []string
+	for rows.Next() {
+		var table, index, def string
+		require.NoError(t, rows.Scan(&table, &index, &def))
+		offenders = append(offenders, index+" on "+table+": "+def)
+	}
+	require.NoError(t, rows.Err())
+
+	assert.Empty(t, offenders,
+		"a sweep deletes by expiry and never looks at whether a row was consumed or revoked, so a partial\n"+
+			"index cannot serve it — see migration 000005, and 000012 for the same mistake on sessions:\n  %s",
+		strings.Join(offenders, "\n  "))
+}
+
+// And the foreign key the sweep cascades through has an index.
+//
+// sessions.replaced_by_id is ON DELETE SET NULL, so every deleted row runs a referential-integrity trigger
+// that looks for children. Unindexed, that trigger scanned the table: 3,757 ms against 9.4 ms of actual
+// deleting, for two thousand rows out of fifty thousand (000012). Nothing about the FK declaration hints
+// at it, and the cost only appears once something finally deletes — which, for this table, was M11.
+func TestTheSessionChainForeignKeyIsIndexed(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+
+	var indexed bool
+	require.NoError(t, svc.pool.QueryRow(t.Context(), `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_index i
+			WHERE i.indrelid = 'sessions'::regclass
+			  AND pg_get_indexdef(i.indexrelid) LIKE '%replaced_by_id%'
+		)`).Scan(&indexed))
+
+	assert.True(t, indexed,
+		"without this index the sweep spends four hundred times as long in the FK trigger as in the delete")
+}
+
+// A backlog larger than one batch is drained across several statements, not one unbounded DELETE.
+//
+// This is the table that has never been swept, so the first pass after M11 faces everything an instance
+// has accumulated since M4 — and every deleted row fires the replaced_by_id RI trigger. Unbounded, that is
+// one statement holding a connection from a deliberately small pool for as long as it takes, with no
+// deadline to cancel it.
+func TestTheSessionSweepDrainsABacklogInBatches(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	ctx := t.Context()
+
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	// More than one batch of long-dead rotations.
+	_, err := svc.pool.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, device_id, refresh_token_hash, expires_at, created_at,
+		                      last_used_at, revoked_at, first_seen)
+		SELECT 900000 + i, $1, 'old-laptop', sha256(i::text::bytea),
+		       now() - interval '1 day', now() - interval '31 days',
+		       now() - interval '31 days', now() - interval '31 days', now() - interval '31 days'
+		FROM generate_series(1, $2) AS i`, user.ID, sessionSweepBatch+250)
+	require.NoError(t, err)
+
+	result, err := svc.SweepExpired(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, sessionSweepBatch+250, result.Sessions,
+		"the loop must keep going until the backlog is gone, not stop at one batch")
+
+	var left int
+	require.NoError(t, svc.pool.QueryRow(ctx,
+		`SELECT count(*) FROM sessions WHERE expires_at < now()`).Scan(&left))
+	assert.Zero(t, left)
+
+	// And the live session is untouched, which is the assertion that matters most here.
+	var live int
+	require.NoError(t, svc.pool.QueryRow(ctx,
+		`SELECT count(*) FROM sessions WHERE revoked_at IS NULL`).Scan(&live))
+	assert.Equal(t, 1, live)
 }

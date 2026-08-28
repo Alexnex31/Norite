@@ -51,6 +51,11 @@ func newRefreshClient() *http.Client {
 // and it must reach "ready" either way.
 const refreshTimeout = 30 * time.Second
 
+// handBackTimeout bounds the revocation of a token the daemon could not keep. Shorter than the refresh: the
+// daemon is already late to "ready" by this point, and the request is a courtesy — one that failing costs
+// only what failing already cost before it existed.
+const handBackTimeout = 10 * time.Second
+
 // session is what the daemon holds after a successful refresh.
 //
 // The access token stays in memory and is never written down. It expires in fifteen minutes, so persisting
@@ -120,20 +125,43 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 		//
 		// Said plainly rather than reassuringly: what is on disk is, unless somebody else replaced it, the
 		// token this refresh just spent, and presenting a spent token is what gets a device family revoked.
-		// There is nothing better to do about it from here — the one repair, clearing it, is the thing that
-		// must not happen while another writer may be mid-write.
+		// There is nothing better to do about *that* from here — the one repair, clearing it, is the thing
+		// that must not happen while another writer may be mid-write.
 		log.Warn().Err(err).
 			Msg("could not store the renewed credential; the stored one may now be spent — if the next " +
 				"start reports a refused credential, run `norite login` again")
+		// The renewed token is still handed back, and the reason clearing is forbidden here is not a reason
+		// to keep it. Clearing writes to somebody else's credential; this revokes one that was minted to
+		// this process moments ago and has never been written anywhere, so no other holder exists to be
+		// signed out. Dropping it silently is the third of the three ways this function can end up
+		// discarding a live thirty-day credential, and it was the one left behind.
+		//
+		// Whichever way the lock resolves, handing back is right or harmless. If the holder was a `norite
+		// login` for this device, the instance revoked this family when that login wrote its own session,
+		// so the request is a no-op that logs a refusal. If it was anything else, the store still holds the
+		// spent token and this one is the family's only live session with nobody holding it.
+		handBackToken(ctx, log, client, record.InstanceURL, pair.RefreshToken)
 		return nil
 
 	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
 		// Somebody signed in or out while this was in flight, so the session just renewed is not the one
-		// this machine is holding any more. Leaving their credential alone is the whole point; the token
-		// obtained here is dropped with it. It stays valid at the instance until it expires, and there is
-		// no way to hand it back — revoking one session is M11's primitive, and reaching for it from here
-		// needs the gateway connection that arrives at M19.
+		// this machine is holding any more. Leaving their credential alone is the whole point.
+		//
+		// The token obtained here is therefore dropped — but not simply abandoned. Left alone it stays
+		// valid at the instance for the full refresh TTL with nobody holding it, which is a live
+		// credential in nobody's hands, and the whole subject of M11 is not leaving those lying around.
+		// So it is handed back first.
+		//
+		// To the instance the *local* record names, not whatever is on disk now: a `norite login` that
+		// collided here may have pointed the store at an entirely different instance, and this token
+		// belongs to the one it was issued by.
+		//
+		// This comment used to say handing it back was impossible — that revoking one session was M11's
+		// primitive and reaching for it needed M19's gateway connection. Both halves were wrong.
+		// POST /auth/logout has revoked exactly one session by presenting its refresh token since M4, and
+		// the client to call it with is the one that just performed the refresh.
 		log.Info().Err(err).Msg("the stored credential changed while it was being renewed; leaving it alone")
+		handBackToken(ctx, log, client, record.InstanceURL, pair.RefreshToken)
 		return nil
 
 	case err != nil:
@@ -148,6 +176,11 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 		} else {
 			log.Warn().Msg("cleared the spent credential; run `norite login` to sign in again")
 		}
+		// And hand back the token that was just obtained, for the same reason as the branch above and with
+		// a stronger claim: after Clear there is definitively no local holder, where a colliding login at
+		// least leaves somebody signed in. This one is the plain orphan — a thirty-day credential nothing
+		// will ever present, created by a disk that was full.
+		handBackToken(ctx, log, client, record.InstanceURL, pair.RefreshToken)
 		return nil
 	}
 
@@ -164,6 +197,59 @@ func establishSession(ctx context.Context, log zerolog.Logger, store *credential
 		Msg("signed in with the stored credential")
 
 	return &session{record: record, accessToken: pair.AccessToken, expiresAt: pair.ExpiresAt}
+}
+
+// handBackToken revokes a refresh token this daemon obtained and then could not keep.
+//
+// Best-effort by construction, and never fatal. The daemon is starting; a token it failed to hand back
+// leaves exactly the situation that existed before this function did, and refusing to start over it would
+// turn a tidy-up into an outage. Both outcomes are logged, because the person reading that log is the only
+// one who can revoke it by hand.
+//
+// Not a full logout of anything the user is using: /auth/logout revokes the single session the presented
+// token belongs to, and the token presented here is the one nobody holds.
+func handBackToken(parent context.Context, log zerolog.Logger, client *http.Client,
+	instanceURL, refreshToken string,
+) {
+	// Its own budget, not the refresh's leftovers. The caller's context is capped at refreshTimeout and has
+	// already paid for a network round trip and a credential-store write that can wait on a lock — on a
+	// slow link there may be milliseconds left, and the request would fail before it was sent, indistinguish-
+	// ably from an unreachable instance. That is exactly the case this function exists for.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), handBackTimeout)
+	defer cancel()
+
+	body, err := json.Marshal(map[string]string{"refresh_token": refreshToken})
+	if err != nil {
+		log.Warn().Err(err).Msg("could not build the request to revoke the token that was dropped")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		instanceURL+"/api/v1/auth/logout", bytes.NewReader(body))
+	if err != nil {
+		log.Warn().Err(err).Msg("could not build the request to revoke the token that was dropped")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// No URL and no wrapped transport error, for the reason refreshSession gives: the request body is
+		// a refresh token and a url.Error is one library change away from rendering it.
+		log.Warn().Msg("could not reach the instance to revoke the token that was dropped; " +
+			"it stays valid until it expires")
+		return
+	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)); _ = resp.Body.Close() }()
+
+	// The status code and nothing else — not resp.Status, which carries the server's own reason phrase
+	// into a log file people read in a terminal.
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		log.Warn().Int("status", resp.StatusCode).
+			Msg("the instance did not accept the revocation of the token that was dropped")
+		return
+	}
+	log.Info().Msg("revoked the renewed credential that the login superseded")
 }
 
 // tokenPair is the instance's answer to a refresh.

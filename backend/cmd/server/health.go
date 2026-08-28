@@ -48,8 +48,14 @@ type pinger interface {
 //
 // Readiness is a latch, not a computation: it flips on once startup (migrations included) completes, and
 // moves to stopping when shutdown begins. Until it is ready /healthz answers 503, which is what keeps the
-// "never serves against a not-yet-migrated schema" guarantee true for anything that routes on health
-// (docs/architecture.md §2, "Cross-cutting").
+// "never serves against a not-yet-migrated schema" guarantee true (docs/architecture.md §2,
+// "Cross-cutting").
+//
+// That sentence used to end "for anything that routes on health", and the qualifier was load-bearing: this
+// latch was consulted by /healthz and by nothing else, so on the two production paths architecture.md names
+// — a systemd unit and docker-compose, neither of which gates traffic on a probe — every other route served
+// straight through the migration window. refuseWhileStarting now reads Starting on every request, which is
+// what removed the qualifier rather than merely restating it.
 type health struct {
 	queries pinger
 	state   atomic.Int32
@@ -68,6 +74,13 @@ func newHealth(queries pinger) *health {
 
 // MarkReady declares startup complete. Called once migrations have finished.
 func (h *health) MarkReady() { h.state.Store(int32(lifecycleReady)) }
+
+// Starting reports whether startup, migrations included, has not finished.
+//
+// Read by refuseWhileStarting, which is what turns the readiness latch from something only a probe
+// consults into something every route obeys. Deliberately not true during shutdown: draining in-flight
+// requests is the point of that state, and refusing them would defeat it.
+func (h *health) Starting() bool { return lifecycle(h.state.Load()) == lifecycleStarting }
 
 // MarkStopping withdraws readiness at the start of shutdown, so new work stops arriving while in-flight
 // requests drain.

@@ -59,6 +59,66 @@ license purchase.
   project's posture (this already gated the `go.mau.fi/libsignal` integration — see
   [ADR 0014](0014-e2e-encryption.md)).
 
+## Release posture: phase betas, and exactly one release
+
+Added at M11, because a review pointed out that no milestone in `M0`–`M125` was marked alpha, beta, v1 or
+first-public, while `architecture.md` states that no scope in it is removable. Together those made `M125`
+the only defined success condition — a 126-milestone feedback interval on "is this worth continuing" — and
+the absence of any release marker read as an oversight rather than a decision. It is a decision:
+
+- **Nothing ships as a release before the sequence is complete.** The roadmap is a dependency order and it
+  stays one; the answer to schedule pressure is not a smaller v1.
+- **A beta build goes to a small group of testers at each phase boundary.** Enough of the product to
+  exercise what that phase added — not a public launch, not a support commitment, and not a version anybody
+  is invited to depend on. This is what `M20a` exists to make possible: before it there was nothing a
+  tester could open, since the first readable message in a real interface was `M43`.
+- **One official v1, after every milestone is done and the whole thing has been reviewed and tested.**
+
+The commercial consequence is the one worth stating: the self-hosted license-issuance mechanism above has
+no customers until v1, and the flagship accepts no non-developer account until then either. That closes,
+by policy rather than by code, the registration-abuse exposure `M67a` exists to close properly — which is
+why `M67a` is scheduled rather than urgent, and why `README.md`'s description of the flagship must not
+promise open registration before there is one.
+
+## Dependency licensing is enforced, not remembered
+
+Added at M11 after a review observed that "watch for copyleft-incompatible dependency licenses" was the
+whole of the policy, and the only place it had ever been applied was the one-off `libsignal` gate at M97.
+`just security-scan` ran `govulncheck` and nothing else. Thirty-odd direct dependencies across four modules,
+a materially larger transitive set, and a voice-worker whose planned additions are cgo bindings to Opus,
+RNNoise and WebRTC's APM.
+
+In an open-source project a copyleft transitive dependency is an inconvenience. Here it is a legal problem
+in a binary shipped to a paying customer under a signed license file, and it surfaces at the worst possible
+moment — the customer's counsel, or the M97 review already scheduled to scrutinize exactly this.
+
+So three things, together rather than separately:
+
+- **An allow-list, enforced.** `go-licenses` runs in `just security-scan` and in CI's `security` job, and
+  fails on any identifier outside the list. This converts M97's one-off manual check into a standing
+  invariant, which is the difference between a policy and a habit.
+- **The acceptable set is stated here** rather than invented at a call site: permissive identifiers only —
+  MIT, BSD-2-Clause, BSD-3-Clause, ISC, Apache-2.0, MPL-2.0 (file-level copyleft, which a Go binary does not
+  trigger), Unlicense, and the Go project's own BSD-3-Clause. Disqualifying: GPL and LGPL in every version,
+  AGPL, SSPL, BUSL, CC-BY-SA, and anything unidentifiable. A dependency outside the list is a decision to
+  make deliberately and record here, not a build to unblock quickly.
+- **The inventory is committed.** `contracts/dependency-licenses.txt` is generated and checked in, so a
+  change to the set shows up in a diff and is reviewed like any other change — the same pattern this repo
+  already uses for the committed sqlc output, and for the same reason: a generated artifact nobody reads is
+  a generated artifact nobody notices changing.
+
+## An open question, deliberately parked
+
+The project's *own* license is settled for now and not settled forever. Publishing under something
+conventional — Apache-2.0 or MIT — before the v1 release is an idea worth returning to, and this paragraph
+exists so it is not forgotten rather than because it is due. Nothing depends on it: the decision changes no
+code, no schema and no contract, and the self-hosted license-issuance mechanism is what actually grants
+rights either way.
+
+It is **not** a question to raise again before v1. Revisiting it means writing a new ADR that supersedes
+this one, as the consequence above already says, and that is a decision to make once with the commercial
+model in front of it — not a background doubt to re-litigate on the way past.
+
 ## Alternatives considered
 - **Draft and legally review a custom BSL/SSPL-style public license** (this ADR's own earlier decision):
   rejected on reconsideration — real drafting/review cost and ongoing maintenance for a public grant nobody

@@ -28,6 +28,11 @@
 // legible is a rendering policy, and it belongs to the renderer that has the font and the width rules
 // (docs/architecture.md §4, the TUI's markdown subset), not to a filter every string passes through.
 //
+// The one exception to "merely invisible is kept" is U+2028/U+2029, which Text removes and Block keeps.
+// They are not invisible: they are line breaks, and they are inside the line this function *does* draw —
+// see mustRemove. U+0085 NEL is category Cc and was already covered, which is what made that pair the only
+// gap.
+//
 // It also does not parse escape sequences. Removing the ESC leaves the `[2K` that followed it, visible and
 // inert. Recognizing whole sequences would print more cleanly and is not worth it: a parser has to be right
 // about DCS, OSC terminated by either BEL or ST, SS2/SS3, charset designations and malformed input, and
@@ -134,6 +139,18 @@ func mustRemove(r rune, keepLayout bool) bool {
 	// prove this branch and the table below never disagree.
 	if r < utf8.RuneSelf {
 		return r < 0x20 || r == 0x7f
+	}
+	// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are categories Zl and Zp, so neither Cc nor the
+	// bidi set below reaches them — and they are the only remaining way a value Text has promised is one
+	// line can be rendered as two. Removed on exactly the same grounds as \n: a one-line value that can
+	// contain a line break can forge a line of output.
+	//
+	// Inert on a VT-family terminal, which is why this was not a live bug when Text was written and is
+	// still not one today. It becomes one at the next consumer: the TUI's markdown renderer and the Gio
+	// GUI do their own line breaking, and a renderer following UAX #14 treats both as mandatory breaks.
+	// Kept under keepLayout for the same reason \n is — Block is output that is meant to span lines.
+	if !keepLayout && (r == '\u2028' || r == '\u2029') {
+		return true
 	}
 	return unicode.Is(unicode.Cc, r) || isBidiReordering(r)
 }

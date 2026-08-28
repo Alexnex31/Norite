@@ -159,7 +159,8 @@ before). Services depend on narrow repository interfaces over the single `intern
 
 **Middleware chain order** (outermost first): `SanitizeInboundRequestID` → `RequestID` → `EchoRequestID` →
 `RealIP` → `Recoverer` → `SecureHeaders` → `StructuredLogger` → `RateLimit` (route-bucketed, `/64` IPv6
-grouping, §14) → `AuthenticateBearer` (populates `actor` from the JWT access token; 401 if absent on
+grouping, §14) → `RefuseWhileStarting` (503 on every route but `/healthz` until migrations finish) →
+`AuthenticateBearer` (populates `actor` from the JWT access token; 401 if absent on
 protected routes) → domain handler. No CSRF middleware exists on this surface at all — see "Auth design"
 below.
 
@@ -284,6 +285,21 @@ CREATE TABLE password_reset_tokens (
   expires_at timestamptz NOT NULL, used_at timestamptz NULL
 );
 
+CREATE TABLE user_totp (                        -- M11a; one enrolled authenticator per account
+  user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  secret_encrypted bytea NOT NULL,             -- at rest under the instance key, never a bare base32 string
+  confirmed_at timestamptz NULL,               -- NULL = enrolment started, first code not yet proved
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE user_recovery_codes (             -- M11a; single-use, hashed like every other credential here
+  id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash text NOT NULL UNIQUE,              -- SHA-256, same reasoning as refresh tokens
+  used_at timestamptz NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON user_recovery_codes (user_id) WHERE used_at IS NULL;
+
 CREATE TABLE guilds (
   id bigint PRIMARY KEY, name varchar(100) NOT NULL, owner_id bigint NOT NULL REFERENCES users(id),
   icon_hash text NULL, description text NULL, system_channel_id bigint NULL,
@@ -366,6 +382,18 @@ CREATE TABLE message_edit_history (
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   content text NOT NULL, edited_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE message_reactions (                -- M56a
+  id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji text NOT NULL,                         -- a Unicode sequence at M56a; custom emoji join at M59
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (message_id, user_id, emoji)          -- the same reaction twice is one row, not a Go-side check
+);
+CREATE INDEX ON message_reactions (message_id);
+-- No denormalized count column, deliberately, until something measures that it is needed: an aggregate
+-- kept in sync on every add and remove is a write amplification on the message hot path, and the reason
+-- to add one is a slow query rather than an intuition (§15.13, rule 7).
 
 CREATE TABLE attachments (
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -520,6 +548,19 @@ CREATE TABLE instance_bans (
 );
 CREATE INDEX ON instance_bans (user_id) WHERE expires_at IS NULL OR expires_at > now();
 
+CREATE TABLE instance_restrictions (            -- M74; a timeout, which is not a narrower ban
+  id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  issued_by bigint NOT NULL REFERENCES users(id), reason text NULL,
+  expires_at timestamptz NOT NULL,             -- never NULL: a permanent restriction is a ban, above
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON instance_restrictions (user_id) WHERE expires_at > now();
+-- Its own table rather than a flag on instance_bans, because the two do opposite things to a session. A
+-- ban is full suspension and invokes the revoke-all-sessions primitive (rule 17); a timeout leaves the
+-- session live and is enforced on the send path. Screen 6c has committed to `C-c C-t` since the design
+-- landed and nothing implemented it — see M74 and §16's third consistency check, which is what would
+-- have caught that.
+
 CREATE TABLE instance_audit_log (               -- separate from per-guild audit_log_entries
   id bigint PRIMARY KEY, actor_id bigint NOT NULL REFERENCES users(id),
   action varchar(64) NOT NULL, target_id bigint NULL, justification text NULL,   -- required for report-less action
@@ -602,6 +643,7 @@ const (
     PermMentionEveryone
     PermManageWebhooks  // ACTIVE
     PermManageEmojis    // ACTIVE
+    PermModerateMembers // M74 — timeout a member without suspending the account; Discord's MODERATE_MEMBERS
 )
 ```
 
@@ -670,6 +712,8 @@ POST   /auth/register                     -- 202 always; invite_code required wh
 POST   /auth/verify/request                -- re-send a verification link; always 202 (M10)
 GET    /verify                             -- the confirmation page (root, HTML)
 POST   /verify                             -- confirm; a form POST, never a GET side effect (rule 4)
+GET    /reset                              -- the password-reset page (root, HTML; M5)
+POST   /reset                              -- set the new password; a form POST, for the same reason
 GET    /oauth/continue                     -- resume a sign-up a provider would not vouch for (root, HTML)
 POST   /instance/bootstrap                 -- create the first administrator; operator token only (M10)
 POST   /instance/invites                   -- mint an invite; operator or Instance Admin
@@ -677,11 +721,11 @@ GET    /instance/invites                   -- list them, codes in full
 POST   /instance/invites/revoke            -- revoke one; the code is in the body, never a path (rule 8)
 POST   /auth/login                        -- email/password -> access + refresh token pair, device_id-scoped
 POST   /auth/refresh                      -- rotates the refresh token within its device_id's family
-POST   /auth/logout                       -- revokes current session
-POST   /auth/logout/all                   -- revoke-all-sessions primitive (§ Account lifecycle)
-POST   /auth/password/forgot              -- always 202 regardless of whether email exists
+POST   /auth/logout                       -- revokes the one session the presented refresh token belongs
+                                          --   to; the single-token revoke, since M4
+POST   /auth/logout/all                   -- revoke-all-sessions primitive, sparing this device (M11)
+POST   /auth/password/reset/request       -- always 202 regardless of whether email exists
 POST   /auth/password/reset
-POST   /auth/email/verify
 GET    /auth/oauth/{provider}/authorize
 GET    /auth/oauth/{provider}/callback
 POST   /auth/oauth/exchange              -- trade the callback's one-time code for a token pair
@@ -696,13 +740,19 @@ POST   /device                            -- ...look it up, and offer the ways t
 POST   /device/signin                     -- ...the password branch; a provider is a link to /authorize
 POST   /device/approve                    -- ...approve or deny, a separate step on purpose (§14.21)
 POST   /auth/tokens                       -- mint a scoped api_token
-DELETE /auth/tokens/{id}
+DELETE /auth/tokens/{tokenId}
+POST   /auth/2fa/totp                     -- begin TOTP enrolment; returns the secret once, never again (M11a)
+POST   /auth/2fa/totp/confirm             -- prove a code before the factor becomes required
+DELETE /auth/2fa/totp                     -- disable it; revokes every other session through the primitive
+POST   /auth/2fa/recovery-codes           -- (re)generate single-use codes; the raw values exist once
+POST   /auth/2fa/verify                   -- step two of a login, an OAuth exchange, or a device approval
 
 GET    /users/@me
 PATCH  /users/@me
 GET    /users/@me/guilds
-GET    /users/@me/sessions
-DELETE /users/@me/sessions/{id}
+GET    /users/@me/sessions                 -- one entry per *device*, not per session row: the rows rotate
+                                           --   every refresh, so a listing of them is useless (M11)
+DELETE /users/@me/sessions/{sessionID}     -- signs that device out, family and all (M11)
 POST   /users/@me/channels
 DELETE /users/@me                          -- account deletion, invokes revoke-all-sessions
 GET    /users/@me/export                   -- server-side export; see E2E export note below
@@ -735,6 +785,8 @@ GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
 POST   /channels/{channel_id}/messages
 PATCH  /channels/{channel_id}/messages/{message_id}
 DELETE /channels/{channel_id}/messages/{message_id}
+PUT    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- react (M56a); idempotent
+DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- un-react; idempotent
 POST   /channels/{channel_id}/typing
 POST   /channels/{channel_id}/invites
 POST   /channels/{channel_id}/attachments
@@ -764,6 +816,9 @@ POST   /reports
 -- Instance Admin
 POST   /instance/bans
 DELETE /instance/bans/{user_id}
+POST   /instance/restrictions              -- a timeout: bounded, leaves the session live (M74, screen 6c)
+DELETE /instance/restrictions/{user_id}    -- lift one early
+POST   /instance/users/{user_id}/purge     -- bulk-delete a subject's posts, explicitly capped (M74, 6c)
 GET    /instance/reports
 POST   /instance/reports/{id}/resolve
 GET    /instance/audit-log
@@ -927,9 +982,24 @@ against is it becoming quiet, not it existing.
 
 **Password reset** (built at M5): always-202 anti-enumeration, single-use SHA-256-hashed token with a
 one-hour TTL, sent asynchronously via the SMTP relay (§11) and never blocking the HTTP response — the
-detachment is what makes the 202 honest, since sending inline would leak through timing whatever the body
-said. Requesting again spends any earlier token, and a token is refused if the account's email changed
-after it was issued.
+detachment is necessary for the 202 to be honest, since sending inline would leak through timing whatever
+the body said. Requesting again spends any earlier token, and a token is refused if the account's email
+changed after it was issued.
+
+Necessary but **not sufficient**, which is the correction M11 made after an external review. Detaching the
+*mail* left the *database* asymmetric: a found account with a password generates a token and commits a
+transaction the not-found branch never pays for, measured at 265 µs against 47 µs — 5.65x, consistent, and
+a distribution shift rather than noise. Reset separates three states this way, not two, so the same
+measurement also told an attacker which addresses sign in only with a provider — the detail ADR 0024's
+merged refusal message exists to withhold. `POST /auth/verify/request` had the identical shape.
+
+Both now take a fixed 50 ms budget regardless of what they find (`auth.padToEnumerationFloor`), which is
+the standard mitigation and the only one available here: the equalizer registration uses — do the expensive
+work before the branch, so both paths pay it — has no counterpart, because the expensive work is writing a row
+with a foreign key to `users` and the not-found branch has nothing to write it against. **A slow path that
+exceeds the floor starts leaking again**, so the property degrades exactly when the instance is busiest;
+that is accepted, stated here rather than left to be discovered, and pinned by a test that measures all
+three branches.
 
 A successful reset **revokes every session and every API token on the account**. Sessions alone would not be
 enough: a reset is how someone recovers a compromised account, and a token an intruder minted while they had
@@ -945,12 +1015,56 @@ overridden per-route from the JSON API's `default-src 'none'` — can forbid scr
 ### Account lifecycle: deletion & data export
 
 `DELETE /users/@me` and self-service "log out all other devices" both invoke the **general-purpose
-revoke-all-sessions primitive**: force-close live gateway connections, revoke refresh + scoped tokens
-(DB-backed, instantly revocable — an already-issued 15-minute access token simply can't be renewed and
-expires naturally), and **revoke every linked device's E2E device-link trust** (ADR 0014) — the same
-primitive an Instance Admin ban invokes (ADR 0013). Account deletion otherwise follows the original design:
-soft-delete with placeholder username/email, hard-delete `oauth_identities`/`sessions`, leave authored
-content in place rendered as "Deleted User."
+revoke-all-sessions primitive** — the same one an Instance Admin ban invokes (ADR 0013), which is what
+rule 17 requires of all three. It is `auth.revokeEverything`, built at M11.
+
+**What it revokes today**, in one transaction with whatever the caller is doing:
+
+- every refresh session, or every one but a named device's for "log out all other devices";
+- every scoped `api_token`, which is the part worth stating out loud: somebody signing out a lost laptop
+  also stops their bots. The case that decides it is the compromised account, where a token an intruder
+  minted outlives any password change unless it goes too;
+- every outstanding OAuth exchange code, which a callback page left open would otherwise still trade for a
+  fresh token pair;
+- every device authorization already approved but not yet collected.
+
+Each of those four was added separately, by somebody noticing one more outstanding claim the previous ones
+missed — M4, M5, M6 and M9 respectively. That history is the argument for the primitive existing at all,
+and for new claims being added to it rather than to a caller.
+
+**What it does not revoke yet**, written into the function as named gaps rather than left out:
+
+- **force-closing live gateway connections (M18)**. This matters more than it looks. Revoking a session
+  stops the *next* refresh, and an access token expires within 15 minutes, so the REST surface is bounded
+  by construction (§17.10). A WebSocket is not: it authenticates once at IDENTIFY and then stays open for
+  as long as the client keeps it, so without an explicit close a revoked account keeps receiving events
+  indefinitely;
+- **revoking every linked device's E2E device-link trust (M101, ADR 0014)**.
+
+Account deletion otherwise follows the original design: soft-delete with placeholder username/email,
+hard-delete `oauth_identities`/`sessions`, leave authored content in place rendered as "Deleted User."
+
+**Two things about that placeholder rename are load-bearing, and neither is obvious until deletion exists.**
+`users.username` and `users.email` carry plain `UNIQUE` constraints, not partial indexes excluding
+soft-deleted rows, while every read filters `deleted_at IS NULL` — `UserExistsByEmail`, `GetUserByEmail`,
+`UsernameUnavailable`. Today no soft-deleted row exists, so the disagreement is unreachable and the
+*outcome* would be correct anyway: the pre-check would report a deleted account's name free, `CreateUser`
+would fail on the index, and `registerConflict` already maps that to the right error. It is a consistency
+defect rather than a bug, and the conflict-handling path is what keeps it benign.
+
+- The rename must be **guaranteed rather than best-effort**. A deletion that soft-deletes without renaming
+  leaves the constraints holding names no live account holds, and registration starts refusing them.
+  Whichever way that is resolved — a guaranteed rename, or making the constraints partial on
+  `deleted_at IS NULL` — decide it in the migration rather than discovering it from a support ticket.
+- M10's "somebody tried to register with your address" notice would currently be **mailed to a deleted
+  account's address**, which is a message to somebody who asked to be forgotten. Whatever the deletion
+  milestone decides about residual mail has to cover that path specifically, because it is the one place
+  the instance writes to an address it no longer has an account for.
+
+**Sessions are also swept.** The table is a rotation chain — every refresh inserts a successor and revokes
+its predecessor — so it grows with traffic rather than with sign-ins, and until M11 nothing deleted from
+it. `auth.RunSweeper` removes rows past `expires_at`, never merely revoked ones: a revoked row is still the
+evidence that distinguishes *replay* from an unknown token, which is what reuse detection acts on.
 
 `GET /users/@me/export` covers everything the server can see. **For E2E-encrypted DMs, the daemon — not the
 server, not the CLI/TUI/GUI independently — performs its own local decrypt-and-export step**, producing a
@@ -1564,8 +1678,12 @@ Playwright E2E against the real docker-compose stack.
   exercised later without a compose change), backend (hot-reload via `air`).
 - `justfile`: `just dev`, `just test`, `just lint`, `just build`, `just db-migrate`, `just security-scan`
   (`govulncheck` + `pnpm audit` + `Trivy` once Dockerfiles exist).
-- CI: Go and frontend jobs gated by path filters; a dedicated `security` job runs `govulncheck`, `pnpm
-  audit`, and (once Dockerfiles exist) `Trivy` image scanning on every PR.
+- CI: `lint`, `test`, `codegen`, `security` and `build`, each a per-module matrix where that makes sense.
+  The `security` job runs `govulncheck` against every module on every push and PR — the same command
+  `just security-scan` runs locally, so the two cannot disagree — and gains `pnpm audit` and `Trivy` image
+  scanning when `frontend/` and the Dockerfiles exist. No path filters: they would be worth adding once a
+  frontend job exists that a backend-only change should not trigger, and adding them before that would
+  only risk skipping a job that should have run.
 
 ---
 
@@ -1891,6 +2009,29 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
   reappears every time a paragraph written before it is edited. Confirm every screen id in
   `docs/design/tui/SCREENS.md` is claimed by exactly one milestone and that no milestone cites an id that
   does not exist, and that every chord a screen names appears in `KEYMAP.md` with a scope.
+- **Every action a screen names resolves to something real**: for each action in
+  `docs/design/tui/SCREENS.md` or `KEYMAP.md`, confirm it maps to an endpoint or gateway event in §2 *and*
+  to a milestone in `docs/roadmap.md`. The two checks above it — chord↔`KEYMAP.md`, screen-id↔milestone —
+  both **passed** for screen `6c`'s `C-c C-t` (timeout) and `C-c C-d` (bulk delete), which had no table, no
+  permission bit, no endpoint and no milestone behind them for the life of the design. The chord had been
+  deconflicted carefully; the feature behind it had never had a reader, because no document owned that
+  question. `docs/design/tui/` is normative and is the only document through which scope can enter without
+  passing this file (which owns the data model and the REST surface) or the roadmap (which owns
+  milestones), so this is the check that closes that route. Both verbs are built at M74 now.
+- **Every CI job this document claims exists is in `.github/workflows/`**: §10 claimed a dedicated
+  `security` job running `govulncheck` on every PR from M0 until M11, while `ci.yml` had four jobs and the
+  string appeared nowhere. Cheap to check and worth checking, because it is the one drift class where a
+  *security control* is believed to be running and is not — and the belief lives in the section a reader
+  consults to learn what protections exist. Extends to `pnpm audit` and `Trivy` when those land.
+- **§2's endpoint list against the contract**: `contracts/openapi.yaml` is the source of truth for the REST
+  surface (rule 6), and §2's list is a second copy of it kept by hand. Confirm every path in the contract
+  appears in §2 with the same path-parameter names. It has already drifted four ways at once — two
+  endpoints that were never served (`/auth/password/forgot`, `/auth/email/verify`), one that was
+  (`/reset`, since M5) and was missing, and two parameters renamed in the contract but not here. Nothing
+  else in the doc set is a hand-maintained copy of a machine-readable file, which is the argument for
+  eventually replacing the list with a pointer plus the design commentary that genuinely belongs in prose —
+  why the callback returns a code and not a token pair, why the device poll is a POST — none of which the
+  contract carries. §13 already made exactly this move for the roadmap.
 - **Backend**: `go test ./...` clean, `govulncheck ./...` clean; manually exercise the token-based auth
   round-trip (register → login → Bearer-authenticated request) and a raw WS connection through
   Hello→Identify→READY with a real access token; confirm a request scoped to another guild/channel is
@@ -1969,6 +2110,17 @@ during implementation, and must be documented plainly wherever the relevant subs
   documented non-goal for v1, not a silently dropped feature. GUI testing relies on golden-image/screenshot
   comparisons for the highest-value, most regression-prone surfaces (message list rendering, pane-split
   layout, voice UI states), with manual QA covering everything else.
+- **The daemon carries eight subsystems, and that is where the hardest bugs will be.** By §3 and §7–§8 it
+  owns the gateway WebSocket, two IPC surfaces at different trust tiers, in-memory scrollback and presence,
+  the WASM plugin host, the E2E keystore and ratchet with its FTS5 index, voice-worker supervision, config
+  hot-reload with file locking, and single-instance lifecycle management. No individual placement is wrong,
+  and §3's concurrency model — bounded per-connection writer goroutines, a single serialized SQLite writer,
+  a `select`-based main loop, per-invocation contexts — is one shape applied consistently, which is the
+  right instinct. But three of those subsystems are individually hard, and unlike the backend this process
+  runs on end-user machines across three operating systems, where a crash is immediately visible and poorly
+  diagnosable. The voice-worker subprocess already removes the single worst failure mode from it. Recorded
+  as a standing bias rather than a plan: anything else proposed for the daemon that could instead be a
+  supervised subprocess should have to argue for its place.
 - **Public-matchmaking voice abuse has no evidence to review, by design.** Call recording is a permanent
   non-goal across the whole platform, for privacy reasons — this holds even for public matchmaking voice
   channels, which are the one voice context with no guild owner to trust. A voice-abuse report filed against a

@@ -351,3 +351,56 @@ func TestConcurrentConfirmsSpendTheTokenOnce(t *testing.T) {
 	}
 	assert.Equal(t, 1, succeeded, "exactly one confirm may spend the token")
 }
+
+// The half of "identical whether or not the address exists" that was asserted rather than built.
+//
+// The response shape was always uniform. The *cost* was not: a found account with a password generates a
+// token and commits a transaction that the not-found branch never pays for, which measured at 265 µs
+// against 47 µs — a 5.65x difference, consistent, and a distribution shift rather than noise. The comment
+// on RequestPasswordReset claimed the opposite, which is why nobody looked.
+//
+// Reset separates three states, not two, so all three are measured here: an unknown address, an account
+// that signs in only with a provider (no password to reset, early return), and an account with a password.
+// The second is the one ADR 0024's merged refusal message exists to withhold — "this address signs in with
+// Google" is exactly the detail a uniform 202 is meant not to give away.
+func TestAResetRequestCostsTheSameWhateverItFinds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing measurement is too noisy to be worth running in -short mode")
+	}
+
+	svc, _ := resetService(t)
+	withPassword, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	providerOnly, _ := registerAndLogin(t, svc, "grace@example.com", "laptop")
+
+	// An OAuth-only account is one with no password hash, which is what CompleteOAuthSignup creates.
+	_, err := svc.pool.Exec(t.Context(),
+		"UPDATE users SET password_hash = NULL WHERE id = $1", providerOnly.ID)
+	require.NoError(t, err)
+	require.NotEqual(t, withPassword.ID, providerOnly.ID)
+
+	measure := func(email string) time.Duration {
+		for range 2 {
+			require.NoError(t, svc.RequestPasswordReset(t.Context(), email))
+		}
+		const runs = 6
+		start := time.Now()
+		for range runs {
+			require.NoError(t, svc.RequestPasswordReset(t.Context(), email))
+		}
+		return time.Since(start) / runs
+	}
+
+	unknown := measure("nobody@example.com")
+	provider := measure("grace@example.com")
+	known := measure("ada@example.com")
+	t.Logf("unknown %s, provider-only %s, with-password %s", unknown, provider, known)
+
+	// Generous, like the missing-user verification bound above: this asserts the floor is doing its job,
+	// not that three code paths match to the microsecond. Without it the last ratio is above 5.
+	require.Positive(t, unknown)
+	for name, d := range map[string]time.Duration{"provider-only": provider, "with-password": known} {
+		ratio := float64(d) / float64(unknown)
+		assert.Less(t, ratio, 1.5,
+			"%s takes %s against %s for an unknown address — the branch is measurable again", name, d, unknown)
+	}
+}
