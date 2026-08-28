@@ -26,13 +26,22 @@ dev:
 # tests bring up a real Postgres via testcontainers, so this needs a running container runtime — use
 # `just test-short` on a machine without one. Frontend tests join once frontend/ exists (Phase O).
 
-# Test every Go module (needs a container runtime).
+# Test every Go module with the race detector (needs a container runtime).
+#
+# -race because CI runs -race, and a gate that does not run what CI runs is not a gate. That gap cost two
+# red runs on the M11 branch: a lock-contention test in daemon/credentials had been sized for an
+# uncontended machine, passed here every time, and failed on a loaded runner where the race detector's
+# slowdown pushed a queue past its budget. Nothing in the branch had touched that package.
+#
+# It costs about 1.6x, not the 10x the race detector is reputed to: 63s to 103s on the backend, because
+# most of that suite's time is Postgres round trips rather than Go CPU. `just test-short` is still the fast
+# inner loop; this is the thing to run before pushing.
 test:
     #!/usr/bin/env bash
     set -euo pipefail
     pids=()
     for m in {{go_modules}}; do
-        (cd "$m" && go test ./... 2>&1 | sed "s/^/[$m] /") &
+        (cd "$m" && go test ./... -race 2>&1 | sed "s/^/[$m] /") &
         pids+=($!)
     done
     fail=0

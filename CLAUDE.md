@@ -170,8 +170,10 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 
 - `just dev` — run the full local stack (docker-compose: postgres, redis, backend w/ air; frontend w/ vite
   joins at Phase O)
-- `just test` — every Go module's tests. **Needs a running container runtime**: the backend's integration
-  tests start a real Postgres via `testcontainers-go`. Frontend tests join at Phase O.
+- `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
+  differs from CI is not a gate. **Needs a running container runtime**: the backend's integration tests
+  start a real Postgres via `testcontainers-go`. Costs about 1.6x, not the 10x the race detector is
+  reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
 - `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
   substitute for `just test` before pushing.
 - `just lint` — `go vet` + `golangci-lint` per module (frontend ESLint/`tsc --noEmit` at Phase O)

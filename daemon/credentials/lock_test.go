@@ -52,10 +52,10 @@ func TestConcurrentSavesDoNotInterleave(t *testing.T) {
 			second <- err
 			return
 		}
-		// This test is the one place a wait is the point rather than a nuisance: the window below is held
-		// open deliberately, and what is being proven is that the second writer blocks until it closes
-		// rather than interleaving. So it keeps production's patience, not the shortened one a test store
-		// carries for contention it does not expect.
+		// Here a wait is the point rather than a nuisance: the window below is held open deliberately, and
+		// what is being proven is that the second writer blocks until it closes rather than interleaving.
+		// So it keeps production's patience, not the shortened one a test store carries for contention it
+		// does not expect. TestLoadWaitsForAWriteInFlight below needs it for the same reason.
 		store.lockWait = lockTimeout
 		fast := sampleRecord()
 		fast.Username = "grace"
@@ -79,10 +79,28 @@ func TestConcurrentSavesDoNotInterleave(t *testing.T) {
 }
 
 // A read taken while a write is in flight must not see half of it.
+//
+// # Why every store here keeps production's patience
+//
+// This test starts eight goroutines against one lock, and each holder does a real write — read the record,
+// write a temp file, fsync, rename. OpenLocalForTest shortens lockWait to 100 ms on the stated grounds that
+// "a test that contends on the lock should find out in milliseconds", which is right for a test whose
+// holder is brief and alone, and wrong here: this test *is* the contention, and with lockRetryInterval at
+// 20 ms a contender gets five attempts inside that budget to win a queue eight deep.
+//
+// So on a fast machine it passes and on a loaded CI runner under -race it does not, which is exactly what
+// happened — `context deadline exceeded` out of withLock, on a branch that had not touched this package.
+// The mechanism was confirmed by shrinking lockWait until the same failure reproduced locally: at 5 ms it
+// fails 22 times in 6 runs, at 2 ms 27 times. A slower machine does not need a smaller number.
+//
+// The fix is the one the test above already applies for the same reason: a test that means to contend
+// waits like production does. What the shortened budget is for is a test that contends *by accident*, and
+// should be told so quickly rather than hanging.
 func TestLoadWaitsForAWriteInFlight(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenLocalForTest(dir)
 	require.NoError(t, err)
+	store.lockWait = lockTimeout
 	require.NoError(t, store.Save(sampleRecord(), "nrt_initial"))
 
 	var wg sync.WaitGroup
@@ -94,6 +112,7 @@ func TestLoadWaitsForAWriteInFlight(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
+			s.lockWait = lockTimeout
 			second := sampleRecord()
 			second.Username = "grace"
 			assert.NoError(t, s.Save(second, "nrt_second"))
@@ -105,6 +124,7 @@ func TestLoadWaitsForAWriteInFlight(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
+			s.lockWait = lockTimeout
 			record, token, err := s.Load()
 			if !assert.NoError(t, err) {
 				return
