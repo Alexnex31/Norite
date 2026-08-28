@@ -134,3 +134,18 @@ type User struct {
 	UpdatedAt       pgtype.Timestamptz
 	DeletedAt       pgtype.Timestamptz
 }
+
+type UserRecoveryCode struct {
+	ID        int64
+	UserID    int64
+	CodeHash  string
+	UsedAt    pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
+type UserTotp struct {
+	UserID          int64
+	SecretEncrypted []byte
+	ConfirmedAt     pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
+}

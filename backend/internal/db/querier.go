@@ -15,6 +15,9 @@ type Querier interface {
 	// no store of its own: replaying one matches zero rows. The remaining conditions mean an approval racing
 	// a denial or an expiry loses rather than overwriting it.
 	ApproveDeviceCode(ctx context.Context, arg ApproveDeviceCodeParams) (DeviceCode, error)
+	// The moment the factor becomes required. Guarded on still being unconfirmed so a replayed confirmation
+	// cannot move the timestamp, which is the same single-transition discipline the device flow uses.
+	ConfirmTOTP(ctx context.Context, userID int64) (UserTotp, error)
 	// Spends an approved code for the one token pair it is worth.
 	//
 	// Single-use in the WHERE clause, for the reason ConsumeOAuthExchangeCode gives: two processes holding
@@ -44,6 +47,18 @@ type Querier interface {
 	// matches zero rows, and is failed. Checking `used_at IS NULL` in the service and updating afterwards
 	// would let both win and would make the "single-use" promise a comment rather than a guarantee.
 	ConsumePasswordResetToken(ctx context.Context, id int64) (PasswordResetToken, error)
+	// Spend one code, exactly once.
+	//
+	// Every guard is in the WHERE: the code must belong to this account, and must not already be spent. Two
+	// requests presenting the same code both reach this statement and Postgres serializes them on the row, so
+	// the second re-evaluates `used_at IS NULL` against the first's committed value and matches nothing. A
+	// read-then-update in Go would let both through, which is the shape RedeemInstanceInvite was rewritten out
+	// of at M10 after four of four concurrent racers got in.
+	//
+	// Scoped by user_id as well as the hash even though the hash is unique, for the reason every revoking
+	// query in sessions.sql is scoped by device: a lookup that can only ever match this account's rows cannot
+	// be made to act on another's by a collision or a future schema change.
+	ConsumeRecoveryCode(ctx context.Context, arg ConsumeRecoveryCodeParams) (UserRecoveryCode, error)
 	// The bootstrap guard, and the reason it is a count rather than an existence check.
 	//
 	// POST /instance/bootstrap is authorized by an operator token, which is minted from the instance signing
@@ -55,6 +70,9 @@ type Querier interface {
 	// Called after LockInstanceBootstrap and inside the same transaction as the insert. Both halves are
 	// required: the lock is what makes the count a decision rather than an observation.
 	CountInstanceAdmins(ctx context.Context) (int64, error)
+	// Served by user_recovery_codes_live_idx (000014). Read by the profile response and by the regenerate
+	// path, so it scales with the codes an account has left rather than with every set it has ever had.
+	CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error)
 	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
 	// Scoped API token queries.
 	//
@@ -105,6 +123,7 @@ type Querier interface {
 	// A token is single-use and short-lived, and every one of these statements is written so that property
 	// holds in SQL rather than in whichever Go path remembered to check it.
 	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) (PasswordResetToken, error)
+	CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) (UserRecoveryCode, error)
 	// Refresh-session queries.
 	//
 	// A session is one device's refresh-token family. Rotation replaces a row with a successor and links the
@@ -185,6 +204,10 @@ type Querier interface {
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
+	// Used when the whole set is replaced or the factor is disabled. Deletes rather than marking spent: these
+	// are not evidence of anything once the factor they belonged to is gone.
+	DeleteRecoveryCodesForUser(ctx context.Context, userID int64) (int64, error)
+	DeleteTOTPForUser(ctx context.Context, userID int64) (int64, error)
 	// The other half of the approval page, and the reason it is worth a column rather than letting the code
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
 	// the waiting client stops immediately instead of polling for another twenty minutes.
@@ -247,6 +270,10 @@ type Querier interface {
 	// too — the caller must be able to tell "no such token" from "a token that was already used", since only
 	// the second is a replay worth revoking a family over.
 	GetSessionByRefreshTokenHash(ctx context.Context, refreshTokenHash []byte) (Session, error)
+	// Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrolment in progress" are
+	// different questions and the caller asks both; a query that hid unconfirmed rows would make the second
+	// unanswerable and silently let a second enrolment overwrite one in flight.
+	GetTOTPForUser(ctx context.Context, userID int64) (UserTotp, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	// Requesting a new reset spends every older one for that account, so the most recent link is the only one
@@ -442,6 +469,17 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
+	// Second-factor queries: one TOTP enrolment per account, and its recovery codes.
+	//
+	// Single-use lives in the statement here as it does everywhere else in this package — see
+	// ConsumeRecoveryCode below, and password_reset_tokens.sql for the reasoning it shares.
+	// Begin (or restart) enrolment. Unconfirmed until a code proves the authenticator works.
+	//
+	// ON CONFLICT replaces rather than refusing, because the case it serves is somebody who lost the QR code
+	// half-way and started again. Confirming is what makes a factor real, so replacing an *unconfirmed* row
+	// costs nothing — and replacing a confirmed one is prevented by the caller, which requires the current
+	// factor before it will touch an account that already has one.
+	UpsertTOTPEnrolment(ctx context.Context, arg UpsertTOTPEnrolmentParams) (UserTotp, error)
 	UserExistsByEmail(ctx context.Context, email string) (bool, error)
 	// Is this username claimed, by an account or by a registration that created none?
 	//
