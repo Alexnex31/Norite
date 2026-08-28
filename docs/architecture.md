@@ -738,10 +738,12 @@ POST   /auth/device/token                 -- poll for completion; POST because i
 GET    /device                            -- the verification page (root, HTML): enter the code
 POST   /device                            -- ...look it up, and offer the ways to sign in
 POST   /device/signin                     -- ...the password branch; a provider is a link to /authorize
+POST   /device/2fa                        -- ...the factor step, on the one flow where only a browser
+                                          --   can be asked for it (M11a)
 POST   /device/approve                    -- ...approve or deny, a separate step on purpose (§14.21)
 POST   /auth/tokens                       -- mint a scoped api_token
 DELETE /auth/tokens/{tokenId}
-POST   /auth/2fa/totp                     -- begin TOTP enrolment; returns the secret once, never again (M11a)
+POST   /auth/2fa/totp                     -- begin TOTP enrollment; the secret is returned once (M11a)
 POST   /auth/2fa/totp/confirm             -- prove a code before the factor becomes required
 DELETE /auth/2fa/totp                     -- disable it; revokes every other session through the primitive
 POST   /auth/2fa/recovery-codes           -- (re)generate single-use codes; the raw values exist once

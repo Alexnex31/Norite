@@ -4,6 +4,7 @@
 cloud.google.com/go/compute/metadata,https://github.com/googleapis/google-cloud-go/blob/compute/metadata/v0.8.0/compute/metadata/LICENSE,Apache-2.0
 dario.cat/mergo,https://github.com/imdario/mergo/blob/v1.0.2/LICENSE,BSD-3-Clause
 github.com/alexedwards/argon2id,https://github.com/alexedwards/argon2id/blob/v1.0.0/LICENSE,MIT
+github.com/boombuler/barcode,https://github.com/boombuler/barcode/blob/6c824513bacc/LICENSE,MIT
 github.com/cenkalti/backoff/v4,https://github.com/cenkalti/backoff/blob/v4.3.0/LICENSE,MIT
 github.com/cespare/xxhash/v2,https://github.com/cespare/xxhash/blob/v2.3.0/LICENSE.txt,MIT
 github.com/containerd/errdefs,https://github.com/containerd/errdefs/blob/v1.0.0/LICENSE,Apache-2.0
@@ -54,6 +55,7 @@ github.com/opencontainers/image-spec/specs-go,https://github.com/opencontainers/
 github.com/pelletier/go-toml/v2,https://github.com/pelletier/go-toml/blob/v2.4.3/LICENSE,MIT
 github.com/pkg/errors,https://github.com/pkg/errors/blob/v0.9.1/LICENSE,BSD-2-Clause
 github.com/pmezard/go-difflib/difflib,https://github.com/pmezard/go-difflib/blob/5d4384ee4fb2/LICENSE,BSD-3-Clause
+github.com/pquerna/otp,https://github.com/pquerna/otp/blob/v1.5.0/LICENSE,Apache-2.0
 github.com/rs/zerolog,https://github.com/rs/zerolog/blob/v1.35.1/LICENSE,MIT
 github.com/shirou/gopsutil/v4,https://github.com/shirou/gopsutil/blob/v4.26.6/LICENSE,BSD-3-Clause
 github.com/sirupsen/logrus,https://github.com/sirupsen/logrus/blob/v1.9.4/LICENSE,MIT

@@ -205,7 +205,7 @@ of this section.
   than as interfaces nothing implements, so each is a line added in one place. A session is a *device* to a
   person and a rotating row to the schema, which is the decision every endpoint here follows from.
 
-- **M11a — Two-factor authentication**: TOTP enrolment and verification (RFC 6238), single-use recovery
+- **M11a — Two-factor authentication**: TOTP enrollment and verification (RFC 6238), single-use recovery
   codes, and the second factor wired into every path that establishes a session — `POST /auth/login`, the
   OAuth exchange, and the device-code approval page. Depends on M11: changing or disabling a factor must
   revoke sessions through the primitive rather than through a second cleanup path (rule 17).
@@ -237,14 +237,28 @@ of this section.
   is a later addition on top, not a replacement, and nothing here forecloses it.
 
   Recovery codes are stored as hashes, like every other credential in this package, and are the one path
-  that must work when the authenticator is lost. Enrolment, disabling, and regenerating codes are all
+  that must work when the authenticator is lost. Enrollment, disabling, and regenerating codes are all
   session-state changes, so they sit behind `RequireLiveSession` with the endpoints M11 put there.
 
   Done when: an account with TOTP enabled cannot complete a password login, an OAuth exchange, or a
   device-code approval without a valid code; a recovery code works exactly once; disabling the factor
-  revokes every other session through `revokeEverything`; and the timing and response shape of a login
-  against a 2FA-enabled account are indistinguishable from one against an account without it, measured the
-  way M10's registration parity is.
+  revokes every other session through `revokeEverything`; and **every way a login can fail answers
+  identically** whether or not the account has a factor.
+
+  **That last clause is a correction.** It originally read "the timing and response shape of a login
+  against a 2FA-enabled account are indistinguishable from one against an account without it", which is
+  unachievable as written — one returns a token pair and the other returns a challenge, and that difference
+  *is* the feature. The property that is both achievable and the one worth having is the one above: the
+  factor is asked about strictly after `verifyCredentials` succeeds, so every failure path is byte-identical
+  to an instance with no second factor anywhere. Whether an account has one is observable only to somebody
+  who already holds its password, which is not a disclosure worth defending against.
+
+  **Done** (tag `m11a`). Decisions in ADR 0031. The enforcement is a type rather than a check:
+  `factorProof` is constructible only by `factorSatisfied` and `proveFactor`, and `startSession` takes one —
+  so a future third way to start a session will not compile until its author has asked the question. The
+  compiler found the OAuth exchange and the device page the moment the parameter existed. `RedeemDeviceCode`
+  is deliberately ungated, because the waiting client has nobody at it; the device flow's factor is proved
+  in the browser and enforced where the approval token is minted.
 
 #### Phase C — Guild/channel/permission core
 

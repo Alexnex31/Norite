@@ -101,13 +101,36 @@ established — medians over N requests, asserted as a ratio.
 - **A fifth thing can lock a person out of their account**, after the password, the mailbox, the provider
   and the device. Recovery codes are the answer and they are only an answer if people keep them, which is a
   product problem this ADR does not solve — it is the reason the codes are regenerable and the reason the
-  enrolment flow shows them once, prominently, rather than burying them in settings.
+  enrollment flow shows them once, prominently, rather than burying them in settings.
 - **The daemon is unaffected.** It holds a refresh token, not a password, and a factor is proved when a
   session is *established* — so a daemon that was signed in before the factor existed keeps working, and
   `norite login` is where the prompt appears. This is the same seam that makes the device-code flow work.
 - **Nothing in the E2E design changes**, but ADR 0014's threat model gains an input it was implicitly
   assuming. The linking flow was already correct; what was missing was any statement of how strong the
   authentication under it is.
+
+## What building it changed about this ADR
+
+Three things the implementation settled that the decision above had left implicit, recorded here rather
+than only in commit messages.
+
+**The enforcement is a type, and that was not a foregone conclusion.** The plan said "a proof that
+`startSession` and `ApproveDeviceAuthorization` require", and the second half turned out to be impossible:
+approving is a separate request from authenticating, so a proof obtained in the earlier one cannot cross
+into the later one. What crosses is the approval token, whose meaning is "this browser has finished proving
+who it is" — so the gate moved to where that token is *minted*. Same property, one request earlier.
+
+**The device page needed a third continuation, not a reuse of the second.** ADR 0028 argued for two rather
+than one because a token with an optional user field authorizes before authentication has happened. A
+browser that has typed a correct password on an account with a factor is at neither existing point, so
+`device_factor` is its own type. Forgetting that `parseDeviceToken` extracts a subject only for approval
+tokens was a real bug — the factor token was minted with a user and parsed without one, and no code could
+ever have passed.
+
+**Rotating the instance signing key invalidates every enrolled authenticator.** The sealing key is derived
+from it, so the two are coupled. There is no key rotation today; when there is, re-enrollment is the answer
+and the alternative — a separately configured secret — buys independence at the cost of a setting every
+operator must not lose. Named here so the first rotation is a decision rather than a discovery.
 
 ## Alternatives considered
 - **Exclude it, recorded in §17 alongside federation and call recording.** Defensible, and it was on the

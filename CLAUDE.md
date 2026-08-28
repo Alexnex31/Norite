@@ -358,13 +358,14 @@ and tested. Recorded in ADR 0007 — the absence of any release marker otherwise
   and `sessions.go` (the account-facing view), migration `000012`, `POST /auth/logout/all`,
   `GET`/`DELETE /users/@me/sessions`, the sessions sweep, and the daemon handing back the refresh token a
   colliding login makes unkeepable. Decisions in ADR 0030.
-- **M11a — Two-factor authentication**: next. TOTP plus single-use recovery codes, wired into every path
-  that establishes a session. Placed here rather than later not because it is urgent — nothing is exposed
-  before v1 — but because the five paths it threads through took M4 through M11 to get right and each
-  carries an anti-enumeration property a factor prompt can undo silently. Decisions in ADR 0031, which also
-  amends ADR 0014: device linking is authorized by the primary device, so whatever protects a sign-in
-  protects the E2E trust chain.
-- **M12 — Guilds/channels/roles schema plus CRUD**: after that. Its first job is that
+- **M11a — Two-factor authentication**: done (tag `m11a`). Migration `000014`, `internal/auth`'s
+  `twofactor.go` (the `factorProof` primitive), `twofactorchallenge.go`, `totpsecret.go`, five endpoints and
+  the device page's factor step. Decisions in ADR 0031, which also amends ADR 0014: device linking is
+  authorized by the primary device, so whatever protects a sign-in protects the E2E trust chain. Built here
+  rather than later not because it is urgent — nothing is exposed before v1 — but because the five paths it
+  threads through took M4 through M11 to get right, and each carries an anti-enumeration property a factor
+  prompt can undo silently.
+- **M12 — Guilds/channels/roles schema plus CRUD**: next. Its first job is that
   `contracts/openapi.yaml` does not currently generate — see the roadmap entry. It also carries M67a's
   contract-shape reservation, because a challenge-required registration state is nearly free to reserve now
   and expensive once four clients codegen from the current shape.
@@ -635,6 +636,49 @@ And on session revocation, from M11 (decisions in ADR 0030):
   `revoked_at IS NULL`, which is 000005's mistake on the one table where the excluded rows are the majority.
   Neither is catchable by a behavior test — a partial index produces a scan, not wrong rows — so
   `sweeper_test.go` asserts the index *shapes*, across every sweep table.
+
+And on the second factor, from M11a (decisions in ADR 0031):
+
+- **The gate is a type, not a check.** `factorProof` is unexported, has unexported fields, and is
+  constructible only by `factorSatisfied` and `proveFactor`; `startSession` takes one and refuses a zero
+  value or one naming another account. That is the third time this package has had to make a rule
+  structural — after `revokeEverything` and `RequireLiveSession` — and it is the first time the compiler
+  found the call sites instead of a reviewer. Adding the parameter located the OAuth exchange and the
+  device page immediately.
+- **The factor is asked about strictly after `verifyCredentials` succeeds**, which is what keeps every
+  failure path byte-identical to an instance with no factor anywhere. A challenge returned earlier, or a
+  different answer for an account that has one, is a fresh account-existence oracle on top of the one M10
+  spent a milestone closing. The roadmap's original done-when asked for something stronger and
+  unachievable — a 202 and a 200 are visibly different — and was corrected rather than quietly satisfied.
+- **A sign-in that owes a factor answers 202 with a challenge**, on `/auth/login` and
+  `/auth/oauth/exchange` alike. A distinct status rather than a discriminated body, so a client branches on
+  status and oapi-codegen gets one response object per status.
+- **`RedeemDeviceCode` is deliberately ungated**, and the device flow's factor is enforced where the
+  *approval token* is minted. Approving is a separate request from authenticating, so a proof cannot cross
+  that boundary; what crosses is a token whose meaning is "this browser finished proving who it is", and it
+  cannot be minted without a proof. The waiting CLI has nobody at it to type six digits.
+- **The device page gained a third continuation.** ADR 0028 argued for two because a token with an optional
+  user field authorizes before authentication has happened; a browser that has typed a correct password on
+  a 2FA account is at neither existing point. `parseDeviceToken` extracts a subject for the two types that
+  name an account and not for the entry token — forgetting the new one meant no code could ever pass, which
+  the device-flow test caught.
+- **The TOTP secret is the only credential here that is encrypted rather than hashed**, because
+  verification needs it back. AES-256-GCM under a key derived from the instance signing key by stdlib HKDF.
+  Two consequences are written down: a database compromise that also yields `instance.toml` yields every
+  secret, and rotating the signing key is a re-enrollment event.
+- **Disabling and regenerating require the factor**, not merely a live session — an access token outlives
+  its session by up to fifteen minutes (§17.10), and without the step-up a stolen session could remove the
+  control standing between an intruder and the account. Disabling revokes the rest through
+  `revokeEverything` (rule 17).
+- **A password reset does not bypass it**, because `ConfirmPasswordReset` starts no session. Closed by
+  shape rather than by a check, and given a test anyway — "closed by construction" stops being true
+  quietly.
+- **An unconfirmed enrollment is not a factor.** That is what stops a closed tab or a phone with a wrong
+  clock locking somebody out, and it is why `GetTOTPForUser` returns unconfirmed rows rather than hiding
+  them.
+- **Recovery codes are hashed in a `bytea` column**, like every other hash in this schema. It was `text`
+  on the first draft and confirming an enrollment answered 500, because a SHA-256 digest is not valid
+  UTF-8.
 
 And on the client-auth side, from M7:
 
