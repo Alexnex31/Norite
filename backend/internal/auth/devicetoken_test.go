@@ -40,7 +40,7 @@ func TestAnEntryTokenIsNotAnApprovalToken(t *testing.T) {
 func TestAnApprovalTokenIsNotAnEntryToken(t *testing.T) {
 	svc, _ := newService(t, RegistrationOpen)
 
-	approval, err := svc.issueDeviceApprovalToken(42, "BCDFGHJK", 99)
+	approval, err := svc.issueDeviceApprovalToken(42, "BCDFGHJK", 99, provedFactor(99))
 	require.NoError(t, err)
 
 	_, err = svc.parseDeviceToken(approval, deviceEntryTokenType)
@@ -92,7 +92,7 @@ func TestADeviceContinuationExpires(t *testing.T) {
 	svc, _ := newService(t, RegistrationOpen)
 
 	svc.now = func() time.Time { return time.Now().Add(-2 * deviceTokenTTL) }
-	stale, err := svc.issueDeviceApprovalToken(42, "BCDFGHJK", 99)
+	stale, err := svc.issueDeviceApprovalToken(42, "BCDFGHJK", 99, provedFactor(99))
 	require.NoError(t, err)
 	svc.now = time.Now
 

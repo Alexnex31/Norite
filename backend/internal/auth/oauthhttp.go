@@ -115,7 +115,7 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		//
 		// Which device, like every other destination here, came out of the consumed state row.
 		if outcome.DeviceCodeID != 0 {
-			h.renderDeviceApproval(w, r, outcome.DeviceCodeID, outcome.UserID)
+			h.continueToApproval(w, r, outcome.DeviceCodeID, outcome.UserID)
 			return
 		}
 
@@ -203,7 +203,7 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 		// A brand-new account signing up from the verification page lands on the approval step, exactly as
 		// an existing one does. Which device is waiting came out of the signed token, not this form.
 		if result.DeviceCodeID != 0 {
-			h.renderDeviceApproval(w, r, result.DeviceCodeID, result.UserID)
+			h.continueToApproval(w, r, result.DeviceCodeID, result.UserID)
 			return
 		}
 

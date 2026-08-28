@@ -50,6 +50,10 @@ const (
 		"showed you a code."
 	deviceBadFormMessage = "That form could not be read. Please start again."
 	deviceBadPasswordMsg = "That email address and password do not match."
+	// One message for a wrong authenticator code and a wrong recovery code alike. Saying which kind was
+	// expected would tell somebody holding a stolen password which one to go looking for.
+	deviceBadCodeMsg = "That code is not valid. Try the current code from your authenticator, or one of " +
+		"your recovery codes."
 )
 
 // devicePageData is everything the templates render.
@@ -110,6 +114,7 @@ func (h *Handler) DevicePageRoutes(r chi.Router) {
 	r.Get(devicePagePath, h.devicePage)
 	r.Post(devicePagePath, h.devicePageSubmit)
 	r.Post(devicePagePath+"/signin", h.devicePageSignIn)
+	r.Post(devicePagePath+"/2fa", h.devicePageFactor)
 	r.Post(devicePagePath+"/approve", h.devicePageApprove)
 }
 
@@ -186,7 +191,91 @@ func (h *Handler) devicePageSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.renderDeviceApproval(w, r, entry.DeviceCodeID, user.ID)
+	h.continueToApproval(w, r, entry.DeviceCodeID, user.ID)
+}
+
+// devicePageFactor is the second factor, on the one flow where it can only be asked here.
+//
+// The waiting CLI redeems its code without proving anything — there is nobody at that terminal — so this
+// browser is the only place a factor can be demanded on the device flow. A code entered here is what turns
+// a password into an approval.
+func (h *Handler) devicePageFactor(w http.ResponseWriter, r *http.Request) {
+	form, ok := h.deviceForm(w, r)
+	if !ok {
+		return
+	}
+
+	// A factor token specifically, for the reason devicePageApprove asks for an approval token: an entry
+	// token here would be a browser that knows a code proving a factor for an account it never named, and
+	// an approval token would mean the step had already been skipped.
+	pending, err := h.svc.parseDeviceToken(form.Get("device_token"), deviceFactorTokenType)
+	if err != nil {
+		h.renderDeviceExpired(w, r)
+		return
+	}
+
+	proof, err := h.svc.proveFactor(r.Context(), pending.UserID, form.Get("code"))
+	if err != nil {
+		if !errors.Is(err, ErrInvalidFactorCode) {
+			logging.FromContext(r.Context()).Error().Err(err).Msg("device page factor check failed")
+			h.renderDeviceExpired(w, r)
+			return
+		}
+		// Re-rendered with the same token, so a mistyped code costs a retry rather than the whole flow.
+		// The message is one this file owns and says nothing about which kind of code was wrong.
+		h.renderDeviceFactor(w, r, pending.DeviceCodeID, pending.UserID, http.StatusUnauthorized,
+			deviceBadCodeMsg)
+		return
+	}
+
+	h.renderDeviceApproval(w, r, pending.DeviceCodeID, pending.UserID, proof)
+}
+
+// continueToApproval takes a browser that has proved whose account this is to the approval step — or to
+// the second factor first, if the account has one.
+//
+// Every route that reaches approval goes through here: the password branch above, and both provider
+// branches in oauthhttp.go. That is deliberate and is the same reasoning startSession's proof parameter
+// carries — three call sites each remembering to check is three chances to forget, and the one that
+// forgot would hand out an approval on an account whose factor was never asked for.
+func (h *Handler) continueToApproval(w http.ResponseWriter, r *http.Request, deviceCodeID, userID int64) {
+	proof, err := h.svc.factorSatisfied(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, ErrTwoFactorRequired) {
+			h.renderDeviceFactor(w, r, deviceCodeID, userID, http.StatusOK, "")
+			return
+		}
+		logging.FromContext(r.Context()).Error().Err(err).Msg("resolving the second factor failed")
+		h.renderDeviceExpired(w, r)
+		return
+	}
+	h.renderDeviceApproval(w, r, deviceCodeID, userID, proof)
+}
+
+// renderDeviceFactor draws the code form.
+func (h *Handler) renderDeviceFactor(w http.ResponseWriter, r *http.Request, deviceCodeID, userID int64,
+	status int, message string,
+) {
+	row, err := h.svc.deviceCodeByID(r.Context(), deviceCodeID)
+	if err != nil {
+		h.renderDeviceExpired(w, r)
+		return
+	}
+
+	token, err := h.svc.issueDeviceFactorToken(deviceCodeID, row.UserCode, userID)
+	if err != nil {
+		logging.FromContext(r.Context()).Error().Err(err).Msg("issuing a device factor token failed")
+		h.renderDeviceExpired(w, r)
+		return
+	}
+
+	h.renderDevice(w, r, deviceFactorTemplate, status, devicePageData{
+		Nonce:      httpx.NonceFrom(r.Context()),
+		Token:      token,
+		UserCode:   row.UserCode,
+		DeviceName: row.DeviceName,
+		Error:      message,
+	})
 }
 
 // devicePageApprove is the last step, and the one this page exists to make deliberate.
@@ -277,8 +366,11 @@ func (h *Handler) renderDeviceSignIn(w http.ResponseWriter, r *http.Request, sta
 // The user code comes off the row rather than from the caller, which is what lets the OAuth callback reach
 // this page: it arrives back from a provider holding a state row and an account, and never saw what
 // somebody typed. That is the reason device_codes stores the code and not a hash of it.
+// It takes a factorProof so that the approval token — the thing that says this browser has finished
+// proving who it is — cannot be minted for an account whose second factor was never asked for. Callers
+// obtain one through continueToApproval.
 func (h *Handler) renderDeviceApproval(w http.ResponseWriter, r *http.Request,
-	deviceCodeID, userID int64,
+	deviceCodeID, userID int64, proof factorProof,
 ) {
 	row, err := h.svc.deviceCodeByID(r.Context(), deviceCodeID)
 	if err != nil {
@@ -286,7 +378,7 @@ func (h *Handler) renderDeviceApproval(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	token, err := h.svc.issueDeviceApprovalToken(deviceCodeID, row.UserCode, userID)
+	token, err := h.svc.issueDeviceApprovalToken(deviceCodeID, row.UserCode, userID, proof)
 	if err != nil {
 		logging.FromContext(r.Context()).Error().Err(err).Msg("issuing a device approval failed")
 		h.renderDeviceExpired(w, r)
@@ -424,6 +516,34 @@ var deviceSignInTemplate = template.Must(template.New("device-signin").Parse(`<!
   <input id="password" name="password" type="password" autocomplete="current-password" required>
   <button type="submit">Sign in</button>
 </form>
+</body>
+</html>
+`))
+
+// The second-factor step. Deliberately says nothing about *which* account it is for: the approval page one
+// step later is where the account is named, because that is the screen whose whole job is letting somebody
+// notice they are signing in as somebody they did not expect.
+var deviceFactorTemplate = template.Must(template.New("device-factor").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two-factor code</title>
+<style nonce="{{ .Nonce }}">
+` + pageStyle + `</style>
+</head>
+<body>
+<h1>Two-factor code</h1>
+{{ if .Error }}<p class="error">{{ .Error }}</p>{{ end }}
+<p>Enter the current code from your authenticator to finish signing in on
+<strong>{{ .DeviceName }}</strong>.</p>
+<form method="post" action="/device/2fa">
+  <input type="hidden" name="device_token" value="{{ .Token }}">
+  <label for="code">Code</label>
+  <input id="code" name="code" type="text" inputmode="text" autocomplete="one-time-code" required autofocus>
+  <button type="submit">Continue</button>
+</form>
+<p class="note">Lost your authenticator? Enter one of your recovery codes instead.</p>
 </body>
 </html>
 `))

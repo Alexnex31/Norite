@@ -798,6 +798,69 @@ paths:
               schema:
                 type: string
 
+  /device/2fa:
+    servers:
+      - url: /
+    post:
+      summary: Prove a second factor on the device-code page
+      description: >
+        Reached only when the account that just signed in has a second factor. The device flow is the one
+        sign-in path where the factor can *only* be asked for here: the waiting client redeems its device
+        code without proving anything, because there is nobody at that terminal to type six digits, so this
+        browser is the only place the question can be put.
+
+
+        Accepts either a current authenticator code or one of the account's recovery codes, at one entry
+        point. Somebody who has lost their phone types what they have and it works; a separate endpoint for
+        recovery would be the one nobody can find at the moment they need it.
+
+
+        Succeeding does **not** authorize anything — it produces the approval step, which is still a
+        separate request, exactly as the password branch does.
+      operationId: proveFactorOnDevicePage
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [device_token, code]
+              properties:
+                device_token:
+                  type: string
+                  description: >
+                    A continuation of its own type, distinct from the one the previous step carried and
+                    from the one the next step takes. It asserts that this browser has proved a password
+                    but not yet a factor — a state that is neither of the other two, and collapsing it into
+                    either would authorize before authentication had finished.
+                code:
+                  type: string
+                  description: An authenticator code or a recovery code.
+      responses:
+        "200":
+          description: The approval step.
+          content:
+            text/html:
+              schema:
+                type: string
+        "401":
+          description: >
+            The code did not match. The factor step is re-rendered with the same continuation, so a mistyped
+            code costs a retry rather than the whole flow. One message for a wrong authenticator code and a
+            wrong recovery code alike.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: The continuation has expired, or the authorization has since been decided.
+          content:
+            text/html:
+              schema:
+                type: string
+
   /device/approve:
     servers:
       - url: /

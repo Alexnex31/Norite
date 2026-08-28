@@ -36,6 +36,7 @@ import (
 // one that still holds when a future token type happens to carry a similar shape.
 const (
 	deviceEntryTokenType    = "device_entry"
+	deviceFactorTokenType   = "device_factor"
 	deviceApprovalTokenType = "device_approval"
 )
 
@@ -75,12 +76,33 @@ func (s *Service) issueDeviceEntryToken(deviceCodeID int64, userCode string) (st
 	return s.signDeviceToken(deviceEntryTokenType, deviceCodeID, userCode, 0)
 }
 
+// issueDeviceFactorToken records that a browser has proved a password but still owes a second factor.
+//
+// M11a's addition, and it is the same argument that produced two tokens rather than one. An entry token
+// says a browser knows a live code; an approval token says it has proved whose account this is. On an
+// account with a second factor, a browser that has typed a correct password is at neither point — it knows
+// more than an entry token asserts and less than an approval token does, and handing it the latter would
+// authorize before authentication had finished. So it gets its own type, and /device/2fa is the only
+// handler that accepts one.
+func (s *Service) issueDeviceFactorToken(deviceCodeID int64, userCode string, userID int64,
+) (string, error) {
+	return s.signDeviceToken(deviceFactorTokenType, deviceCodeID, userCode, userID)
+}
+
 // issueDeviceApprovalToken records that the same browser has since proved who it is.
 //
 // Minted at exactly one point in each sign-in branch — after a password is verified, and after a provider
 // callback resolves to an account — so the set of ways to obtain one is the set of ways to authenticate.
+// It takes a factorProof, and that is where the device flow's second factor is enforced. This token means
+// "this browser has finished proving who it is", and on an account with a factor that is not true until
+// the factor has been proved — so the token cannot be minted without one. Approval itself is a later
+// request that can only present a token this function produced.
 func (s *Service) issueDeviceApprovalToken(deviceCodeID int64, userCode string, userID int64,
+	proof factorProof,
 ) (string, error) {
+	if !proof.authorizes(userID) {
+		return "", ErrTwoFactorRequired
+	}
 	return s.signDeviceToken(deviceApprovalTokenType, deviceCodeID, userCode, userID)
 }
 

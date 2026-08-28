@@ -60,6 +60,22 @@ var (
 	ErrNotFound         = errors.New("not found")
 	ErrInvalidUsername  = errors.New("a username may contain only letters, digits, and _ . -")
 	ErrInvalidTokenName = errors.New("invalid token name")
+
+	// ErrTwoFactorRequired means the credential was good and a second factor is still owed. A branch on
+	// the sign-in paths rather than a failure — see twofactor.go.
+	ErrTwoFactorRequired = errors.New("this account requires a second factor")
+	// ErrInvalidFactorCode is the single answer to every way a code can be wrong: not a live TOTP value,
+	// not a shape a recovery code takes, already spent, or belonging to an account with no factor at all.
+	// Undifferentiated for the reason every other credential refusal here is.
+	ErrInvalidFactorCode = errors.New("that code is not valid")
+	// ErrTwoFactorAlreadyEnabled refuses a second enrolment over a live one. Replacing a factor goes
+	// through the disable path, which requires proving the current one first.
+	ErrTwoFactorAlreadyEnabled = errors.New("this account already has a second factor")
+	// ErrNoTwoFactorEnrolment means there is nothing to confirm.
+	ErrNoTwoFactorEnrolment = errors.New("no enrolment is in progress")
+	// ErrTwoFactorChallenge is the single answer to every way a challenge can fail to parse: expired,
+	// signed by another instance, the wrong `typ`, or a shape this package never mints.
+	ErrTwoFactorChallenge = errors.New("invalid or expired two-factor challenge")
 )
 
 // RegistrationMode mirrors the instance's configured gating.
@@ -405,7 +421,67 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (TokenPair, error) {
 		return TokenPair{}, err
 	}
 
-	return s.startSession(ctx, snowflake.ID(user.ID), deviceID, in.DeviceName, in.IP)
+	// The factor is asked about only after the password is right, which is what keeps every failure above
+	// byte-identical to an instance with no second factor anywhere. A challenge returned before this point
+	// — or a different answer for an account that has one — would be a fresh account-existence oracle on
+	// top of the one M10 spent a milestone closing.
+	proof, err := s.factorSatisfied(ctx, user.ID)
+	if err != nil {
+		if errors.Is(err, ErrTwoFactorRequired) {
+			in.DeviceID = deviceID
+			return TokenPair{}, s.twoFactorRequired(user.ID, in)
+		}
+		return TokenPair{}, err
+	}
+
+	return s.startSession(ctx, snowflake.ID(user.ID), deviceID, in.DeviceName, in.IP, proof)
+}
+
+// CompleteTwoFactorLogin finishes a sign-in that owed a factor.
+//
+// The device the session lands on comes out of the challenge, never from this call: a client that could
+// name a different device on the second half of a sign-in could move somebody's session onto an identity
+// of its choosing.
+func (s *Service) CompleteTwoFactorLogin(ctx context.Context, rawChallenge, code string,
+) (TokenPair, error) {
+	challenge, err := s.parseTwoFactorChallenge(rawChallenge)
+	if err != nil {
+		return TokenPair{}, err
+	}
+
+	proof, err := s.proveFactor(ctx, challenge.UserID, code)
+	if err != nil {
+		return TokenPair{}, err
+	}
+
+	return s.startSession(ctx, snowflake.ID(challenge.UserID), challenge.Login.DeviceID,
+		challenge.Login.DeviceName, challenge.Login.IP, proof)
+}
+
+// TwoFactorRequiredError is ErrTwoFactorRequired with the continuation the client needs to carry on.
+//
+// A typed error rather than a bare sentinel plus a second return value, so a handler that forgets to look
+// for it produces a refusal rather than a sign-in — the same reason OAuthCallbackError carries its
+// redirect. The challenge is minted here, in the service that holds the signing key, rather than handed to
+// a handler to assemble.
+type TwoFactorRequiredError struct {
+	Challenge string
+	ExpiresAt time.Time
+}
+
+func (e *TwoFactorRequiredError) Error() string { return ErrTwoFactorRequired.Error() }
+
+// Unwrap makes errors.Is(err, ErrTwoFactorRequired) true, so a caller that only needs to know *that* a
+// factor is owed does not have to know this type exists.
+func (e *TwoFactorRequiredError) Unwrap() error { return ErrTwoFactorRequired }
+
+// twoFactorRequired builds the error a sign-in path returns when the account owes a factor.
+func (s *Service) twoFactorRequired(userID int64, in LoginInput) error {
+	token, err := s.issueTwoFactorChallenge(userID, in)
+	if err != nil {
+		return err
+	}
+	return &TwoFactorRequiredError{Challenge: token, ExpiresAt: s.now().Add(twoFactorChallengeTTL)}
 }
 
 // verifyCredentials resolves an email address and password to an account, or refuses.
@@ -466,7 +542,20 @@ func (s *Service) verifyCredentials(ctx context.Context, rawEmail, password stri
 }
 
 // startSession revokes the device's previous family and issues a fresh pair.
-func (s *Service) startSession(ctx context.Context, userID snowflake.ID, deviceID, deviceName string, ip netip.Addr) (TokenPair, error) {
+//
+// It takes a factorProof, and that parameter is the enforcement rather than a formality: proof is a value
+// only twofactor.go can construct, so a caller cannot mint a session without having first asked whether
+// the account owes a second factor. A future third way to sign in will not compile until its author has.
+// See twofactor.go's header for why the rule is a type rather than a check.
+func (s *Service) startSession(ctx context.Context, userID snowflake.ID, deviceID, deviceName string,
+	ip netip.Addr, proof factorProof,
+) (TokenPair, error) {
+	if !proof.authorizes(int64(userID)) {
+		// Not reachable from any caller in this package, which is the point: it is here so that if one
+		// ever does become reachable it fails closed rather than issuing a pair.
+		return TokenPair{}, ErrTwoFactorRequired
+	}
+
 	raw, hash, err := GenerateRefreshToken()
 	if err != nil {
 		return TokenPair{}, err

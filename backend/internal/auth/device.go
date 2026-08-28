@@ -351,6 +351,15 @@ func (s *Service) deviceCodeByID(ctx context.Context, id int64) (db.DeviceCode, 
 // somebody pressing the button twice — matches nothing rather than re-pointing an authorization at another
 // account. That is what makes the approval token safe to be an ordinary signed value with no store of its
 // own.
+// The second factor is not checked here, and the reason is a request boundary rather than an oversight.
+// Approving is a separate POST from authenticating, so a proof obtained in the earlier request cannot be
+// carried into this one — what crosses is the approval token, whose whole meaning is "this browser has
+// finished proving who it is". The factor is therefore enforced where that token is *minted*
+// (issueDeviceApprovalToken, which does take a proof), so a token asserting finished authentication cannot
+// exist for an account whose factor was never asked for.
+//
+// RedeemDeviceCode has no gate either, deliberately: the waiting CLI has held its device code since before
+// a browser was involved and there is nobody at that terminal to type six digits.
 func (s *Service) ApproveDeviceAuthorization(ctx context.Context, deviceCodeID, userID int64) error {
 	_, err := s.queries.ApproveDeviceCode(ctx, db.ApproveDeviceCodeParams{
 		ID:     deviceCodeID,
@@ -433,6 +442,37 @@ func GenerateUserCode() (string, error) {
 // alphabet for the same reason — both are read off one screen and typed into another — and differ only in
 // how long they must resist guessing. Extracted rather than copied so the rejection sampling above is
 // implemented once; a second copy is where a modulo quietly reappears.
+// normalizeTypedCode reduces what somebody typed to the form the database stores.
+//
+// Case, spaces and dashes are things a person gets wrong or a chat client adds on its own, and none of them
+// carry meaning; what is left must be in the alphabet, because anything else cannot be a code this instance
+// issued and there is nothing to look up.
+//
+// Shared by the device flow's user code (8), M10's instance invite code (16) and M11a's recovery codes
+// (10), which want identical treatment and differ only in length — extracted for the same reason
+// randomCode below was, since three copies of a scanner is three places for the length check to drift from
+// the alphabet check.
+func normalizeTypedCode(raw string, want int) (string, bool) {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(raw) {
+		switch {
+		case r == '-' || r == ' ' || r == '\t':
+			continue
+		case strings.ContainsRune(userCodeAlphabet, r):
+			b.WriteRune(r)
+		default:
+			return "", false
+		}
+		if b.Len() > want {
+			return "", false
+		}
+	}
+	if b.Len() != want {
+		return "", false
+	}
+	return b.String(), true
+}
+
 func randomCode(length int) (string, error) {
 	const limit = 256 - (256 % len(userCodeAlphabet)) // 240: the largest whole number of buckets
 
