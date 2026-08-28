@@ -256,6 +256,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TokenPair"
+        "202":
+          description: >
+            The password was correct and the account has a second factor. No session exists yet — finish at
+            `POST /auth/2fa/verify` with the challenge below.
+
+
+            A distinct status rather than a discriminated body, so a client branches on the status and one
+            response object belongs to each. Whether an account has a factor is therefore observable, but
+            only to somebody who already holds its password, which is not a disclosure worth defending
+            against. Every *failure* above is unchanged: the factor is asked about strictly after the
+            password verifies, so an instance with second factors enumerates no better than one without.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoFactorChallenge"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401":
           description: >
@@ -1266,6 +1281,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TokenPair"
+        "202":
+          description: >
+            The account has a second factor. A provider proved control of a provider account; it did not
+            prove possession of this account's factor, which is the entire point of having one. Finish at
+            `POST /auth/2fa/verify`, exactly as a password login does.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoFactorChallenge"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401":
           description: The code is unknown, expired, already spent, or bound to another client's flow.
@@ -1452,6 +1476,258 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/2fa/verify:
+    post:
+      summary: Finish a sign-in that owed a second factor
+      description: >
+        The second half of a sign-in. Presented with the challenge a `202` from `POST /auth/login` or
+        `POST /auth/oauth/exchange` returned, plus a code.
+
+
+        Accepts either a current authenticator code or one of the account's recovery codes, at one entry
+        point — somebody who has lost their phone types what they have and it works, where a separate
+        recovery endpoint would be the one nobody can find at the moment they need it. A recovery code is
+        spent by this call and works exactly once.
+
+
+        **The device the session lands on comes out of the challenge**, never from this body. A client that
+        could name a different device on the second half of a sign-in could move somebody's session onto an
+        identity of its choosing.
+
+
+        Public, like `/auth/login`: what the caller holds is a challenge, not a session. It carries the same
+        strict rate-limit bucket as the rest of `/auth` rather than one of its own — a *shared* budget is
+        stricter than a dedicated one, and unlike the device poll, submitting a code is not repetitive.
+      operationId: verifyTwoFactor
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challenge, code]
+              properties:
+                challenge:
+                  type: string
+                  maxLength: 4096
+                  description: The continuation from the 202. Not a credential on its own.
+                code:
+                  type: string
+                  maxLength: 64
+      responses:
+        "200":
+          description: The session, as an ordinary sign-in would have returned it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "401":
+          description: >
+            The code did not match, or the challenge has expired. One answer for a wrong authenticator code
+            and a wrong recovery code alike — naming which was expected would tell somebody holding a
+            stolen password which to go looking for.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /auth/2fa/totp:
+    post:
+      summary: Begin enrolling an authenticator
+      description: >
+        Returns the secret once, in both the forms a client needs: base32 for typing by hand and the
+        `otpauth://` URI for scanning. It is never returned again.
+
+
+        **Nothing about the account changes here.** The enrollment is unconfirmed until a code proves the
+        authenticator works, which is what stops a closed tab or a phone with a wrong clock locking somebody
+        out of their own account. Starting again replaces an unconfirmed enrollment.
+
+
+        Refused with `409` on an account that already has a *confirmed* factor: replacing a live factor is a
+        change to the account's security state and goes through `DELETE` below, which asks for the current
+        one first.
+      operationId: beginTotpEnrollment
+      tags: [auth]
+      responses:
+        "200":
+          description: The secret, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secret, uri]
+                properties:
+                  secret:
+                    type: string
+                    description: Base32, for entering by hand.
+                  uri:
+                    type: string
+                    description: The otpauth:// URI an authenticator app scans.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token. Enrollment requires a logged-in session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: This account already has a confirmed second factor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Disable the second factor
+      description: >
+        **Requires the current factor**, not merely a live session. An access token outlives its session by
+        up to `AccessTokenTTL` (§17.10), so without this a session stolen inside that window could remove
+        the very control standing between an intruder and the account. An attacker must hold the factor to
+        disable the factor.
+
+
+        Revokes every other session, API token, outstanding OAuth exchange code and approved device
+        authorization through the same primitive `POST /auth/logout/all` uses (rule 17): the sessions that
+        predate this were established under different rules. The counts are reported for the reason that
+        endpoint reports them — "your bots have stopped" is not something a client can infer from a 204.
+      operationId: disableTwoFactor
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  maxLength: 64
+                  description: An authenticator code or a recovery code.
+      responses:
+        "200":
+          description: The factor is gone, and so is everything the primitive revokes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - sessions_revoked
+                  - api_tokens_revoked
+                  - oauth_exchange_codes_revoked
+                  - device_authorizations_revoked
+                properties:
+                  sessions_revoked: { type: integer, format: int64 }
+                  api_tokens_revoked: { type: integer, format: int64 }
+                  oauth_exchange_codes_revoked: { type: integer, format: int64 }
+                  device_authorizations_revoked: { type: integer, format: int64 }
+        "401":
+          description: The code did not match, or this session has been signed out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The credential is an API token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/2fa/totp/confirm:
+    post:
+      summary: Confirm an enrollment and turn the factor on
+      description: >
+        Proves the authenticator works and makes the factor required from this moment. Returns the
+        recovery codes, which exist from here and are shown exactly once.
+
+
+        Generated at confirmation rather than at enrollment deliberately: codes handed out for an enrollment
+        that was never confirmed are codes somebody wrote down for a factor they do not have. The
+        confirmation and the codes land in one transaction, so there is no state in which the factor is
+        required and no recovery exists.
+      operationId: confirmTotpEnrollment
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, maxLength: 64 }
+      responses:
+        "200":
+          description: The factor is on, and these are the recovery codes. Shown once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryCodes"
+        "401":
+          description: The code did not match.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The credential is an API token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: There is no enrollment in progress, or the factor is already on.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/2fa/recovery-codes:
+    post:
+      summary: Replace the recovery codes
+      description: >
+        Generates a fresh set and invalidates the old one, in a single transaction so there is no instant
+        in which the account has none.
+
+
+        **Requires the current factor**, for the reason disabling does: a set of codes an attacker
+        generated outlives every other thing this account can do about them.
+      operationId: regenerateRecoveryCodes
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, maxLength: 64 }
+      responses:
+        "200":
+          description: The new set. Shown once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryCodes"
+        "401":
+          description: The code did not match, or this session has been signed out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The credential is an API token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /auth/logout/all:
     post:
@@ -2091,6 +2367,52 @@ components:
             vouched for the address, or on creation for an account made by `/instance/bootstrap` or on an
             instance with no mail relay. An account with this null cannot sign in.
         created_at:
+          type: string
+          format: date-time
+        two_factor_enabled:
+          type: boolean
+          description: >
+            True only for a *confirmed* enrollment. An enrollment somebody started and abandoned is not a
+            factor and must not read as one, or the account looks protected when it is not.
+        recovery_codes_remaining:
+          type: [integer, "null"]
+          format: int64
+          description: >
+            How many unspent recovery codes the account has. Null rather than zero when there is no factor
+            at all — zero would read as "you have run out" rather than "there is nothing to run out of".
+
+    RecoveryCodes:
+      description: >
+        A fresh set of single-use recovery codes. Returned by confirmation and by regeneration, and shown
+        exactly once — they are stored only as hashes, so nothing recoverable from the database can be
+        presented as one (rule 8).
+      type: object
+      required: [recovery_codes]
+      additionalProperties: false
+      properties:
+        recovery_codes:
+          type: array
+          items:
+            type: string
+
+    TwoFactorChallenge:
+      description: >
+        The `202` a sign-in gets when the account owes a second factor. Not a credential: presenting one
+        without a valid code produces exactly the refusal a wrong password does. What it removes is the need
+        to send the password twice.
+
+
+        `two_factor_required` is constant true and is present anyway, so a client reading a body without
+        looking at the status still cannot mistake this for a token pair.
+      type: object
+      required: [two_factor_required, challenge, expires_at]
+      additionalProperties: false
+      properties:
+        two_factor_required:
+          type: boolean
+        challenge:
+          type: string
+        expires_at:
           type: string
           format: date-time
 

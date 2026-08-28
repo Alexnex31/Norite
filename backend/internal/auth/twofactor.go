@@ -51,7 +51,7 @@ import (
 //
 // Fixed rather than derived from the instance's public base URL: it is what a person reads in a list of
 // accounts on their phone, and an instance that changed its hostname would otherwise silently orphan every
-// enrolment's label while the codes kept working.
+// enrollment's label while the codes kept working.
 const totpIssuer = "Norite"
 
 // recoveryCodeLength is the length of one recovery code, in characters from userCodeAlphabet.
@@ -89,11 +89,11 @@ func (p factorProof) authorizes(userID int64) bool {
 // ErrTwoFactorRequired when one is owed — which is not an error in the usual sense, and callers on the
 // sign-in paths treat it as a branch rather than a failure.
 //
-// An *unconfirmed* enrolment is not a factor. That is what stops somebody who started enrolling and closed
+// An *unconfirmed* enrollment is not a factor. That is what stops somebody who started enrolling and closed
 // the tab from being locked out of their own account, and it is why the query returns unconfirmed rows
 // rather than hiding them.
 func (s *Service) factorSatisfied(ctx context.Context, userID int64) (factorProof, error) {
-	enrolment, err := s.queries.GetTOTPForUser(ctx, userID)
+	enrollment, err := s.queries.GetTOTPForUser(ctx, userID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return factorProof{userID: userID, proved: true}, nil
@@ -101,7 +101,7 @@ func (s *Service) factorSatisfied(ctx context.Context, userID int64) (factorProo
 		return factorProof{}, fmt.Errorf("looking up the second factor: %w", err)
 	}
 
-	if !enrolment.ConfirmedAt.Valid {
+	if !enrollment.ConfirmedAt.Valid {
 		return factorProof{userID: userID, proved: true}, nil
 	}
 	return factorProof{}, ErrTwoFactorRequired
@@ -113,14 +113,14 @@ func (s *Service) factorSatisfied(ctx context.Context, userID int64) (factorProo
 // are different questions, and answering the first through an error value would invite a caller to treat
 // the second as cosmetic.
 func (s *Service) hasConfirmedFactor(ctx context.Context, userID int64) (bool, error) {
-	enrolment, err := s.queries.GetTOTPForUser(ctx, userID)
+	enrollment, err := s.queries.GetTOTPForUser(ctx, userID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("looking up the second factor: %w", err)
 	}
-	return enrolment.ConfirmedAt.Valid, nil
+	return enrollment.ConfirmedAt.Valid, nil
 }
 
 // proveFactor verifies a code — a TOTP code, or one of the account's recovery codes.
@@ -133,21 +133,21 @@ func (s *Service) hasConfirmedFactor(ctx context.Context, userID int64) (bool, e
 // consulted when the code is not a live TOTP value, which also means a six-digit string can never
 // accidentally spend a recovery code — they are different lengths from different alphabets.
 func (s *Service) proveFactor(ctx context.Context, userID int64, code string) (factorProof, error) {
-	enrolment, err := s.queries.GetTOTPForUser(ctx, userID)
+	enrollment, err := s.queries.GetTOTPForUser(ctx, userID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		// No enrolment at all: there is nothing to prove and nothing that should be accepted as proof.
+		// No enrollment at all: there is nothing to prove and nothing that should be accepted as proof.
 		// Reported as an invalid code rather than as "no factor", because a caller that reached here with
 		// a code believed there was one, and the difference is not theirs to learn.
 		return factorProof{}, ErrInvalidFactorCode
 	case err != nil:
 		return factorProof{}, fmt.Errorf("looking up the second factor: %w", err)
 	}
-	if !enrolment.ConfirmedAt.Valid {
+	if !enrollment.ConfirmedAt.Valid {
 		return factorProof{}, ErrInvalidFactorCode
 	}
 
-	secret, err := s.issuer.openTOTPSecret(enrolment.SecretEncrypted)
+	secret, err := s.issuer.openTOTPSecret(enrollment.SecretEncrypted)
 	if err != nil {
 		return factorProof{}, err
 	}
@@ -189,13 +189,13 @@ func (s *Service) proveRecoveryCode(ctx context.Context, userID int64, raw strin
 	return factorProof{userID: userID, proved: true}, nil
 }
 
-// BeginTOTPEnrolment mints a secret and returns it, once.
+// BeginTOTPEnrollment mints a secret and returns it, once.
 //
 // The row is written unconfirmed, so nothing about the account changes until a code proves the
-// authenticator works. Starting again replaces an unconfirmed enrolment; an account that already has a
+// authenticator works. Starting again replaces an unconfirmed enrollment; an account that already has a
 // confirmed one is refused here, because replacing a live factor is a change to the account's security
 // state and goes through the disable path, which requires proving the factor first.
-func (s *Service) BeginTOTPEnrolment(ctx context.Context, userID int64, accountName string,
+func (s *Service) BeginTOTPEnrollment(ctx context.Context, userID int64, accountName string,
 ) (secret, uri string, err error) {
 	confirmed, err := s.hasConfirmedFactor(ctx, userID)
 	if err != nil {
@@ -214,34 +214,34 @@ func (s *Service) BeginTOTPEnrolment(ctx context.Context, userID int64, accountN
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := s.queries.UpsertTOTPEnrolment(ctx, db.UpsertTOTPEnrolmentParams{
+	if _, err := s.queries.UpsertTOTPEnrollment(ctx, db.UpsertTOTPEnrollmentParams{
 		UserID:          userID,
 		SecretEncrypted: sealed,
 	}); err != nil {
-		return "", "", fmt.Errorf("storing the enrolment: %w", err)
+		return "", "", fmt.Errorf("storing the enrollment: %w", err)
 	}
 
 	return key.Secret(), key.URL(), nil
 }
 
-// ConfirmTOTPEnrolment proves the authenticator works and turns the factor on.
+// ConfirmTOTPEnrollment proves the authenticator works and turns the factor on.
 //
 // Returns the recovery codes, which exist from this moment and are shown exactly once. Generating them
-// here rather than at enrolment is deliberate: codes handed out for an enrolment that was never confirmed
+// here rather than at enrollment is deliberate: codes handed out for an enrollment that was never confirmed
 // are codes somebody wrote down for a factor they do not have.
-func (s *Service) ConfirmTOTPEnrolment(ctx context.Context, userID int64, code string) ([]string, error) {
-	enrolment, err := s.queries.GetTOTPForUser(ctx, userID)
+func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID int64, code string) ([]string, error) {
+	enrollment, err := s.queries.GetTOTPForUser(ctx, userID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return nil, ErrNoTwoFactorEnrolment
+		return nil, ErrNoTwoFactorEnrollment
 	case err != nil:
-		return nil, fmt.Errorf("looking up the enrolment: %w", err)
+		return nil, fmt.Errorf("looking up the enrollment: %w", err)
 	}
-	if enrolment.ConfirmedAt.Valid {
+	if enrollment.ConfirmedAt.Valid {
 		return nil, ErrTwoFactorAlreadyEnabled
 	}
 
-	secret, err := s.issuer.openTOTPSecret(enrolment.SecretEncrypted)
+	secret, err := s.issuer.openTOTPSecret(enrollment.SecretEncrypted)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (s *Service) ConfirmTOTPEnrolment(ctx context.Context, userID int64, code s
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrTwoFactorAlreadyEnabled
 			}
-			return fmt.Errorf("confirming the enrolment: %w", err)
+			return fmt.Errorf("confirming the enrollment: %w", err)
 		}
 		return s.writeRecoveryCodes(ctx, q, userID, hashes)
 	})
@@ -302,7 +302,7 @@ func (s *Service) DisableTwoFactor(ctx context.Context, userID snowflake.ID, cur
 	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 		if _, err := q.DeleteTOTPForUser(ctx, int64(userID)); err != nil {
-			return fmt.Errorf("removing the enrolment: %w", err)
+			return fmt.Errorf("removing the enrollment: %w", err)
 		}
 		if _, err := q.DeleteRecoveryCodesForUser(ctx, int64(userID)); err != nil {
 			return fmt.Errorf("removing the recovery codes: %w", err)

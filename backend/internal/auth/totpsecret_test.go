@@ -42,7 +42,7 @@ func TestSealingTheSameSecretTwiceDiffers(t *testing.T) {
 
 // The key is derived from the instance signing key, so a secret sealed by one instance is unreadable by
 // another. That is the property that makes "a database read is not a bypass" true, and the one that makes
-// rotating the signing key a re-enrolment event.
+// rotating the signing key a re-enrollment event.
 func TestASecretSealedByAnotherInstanceIsRefused(t *testing.T) {
 	mine := testIssuer(t)
 	theirs, err := NewTokenIssuer([]byte("a-different-instance-signing-key-of-sufficient-length"))

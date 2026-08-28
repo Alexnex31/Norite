@@ -270,9 +270,9 @@ type Querier interface {
 	// too — the caller must be able to tell "no such token" from "a token that was already used", since only
 	// the second is a replay worth revoking a family over.
 	GetSessionByRefreshTokenHash(ctx context.Context, refreshTokenHash []byte) (Session, error)
-	// Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrolment in progress" are
+	// Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrollment in progress" are
 	// different questions and the caller asks both; a query that hid unconfirmed rows would make the second
-	// unanswerable and silently let a second enrolment overwrite one in flight.
+	// unanswerable and silently let a second enrollment overwrite one in flight.
 	GetTOTPForUser(ctx context.Context, userID int64) (UserTotp, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
@@ -469,17 +469,17 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
-	// Second-factor queries: one TOTP enrolment per account, and its recovery codes.
+	// Second-factor queries: one TOTP enrollment per account, and its recovery codes.
 	//
 	// Single-use lives in the statement here as it does everywhere else in this package — see
 	// ConsumeRecoveryCode below, and password_reset_tokens.sql for the reasoning it shares.
-	// Begin (or restart) enrolment. Unconfirmed until a code proves the authenticator works.
+	// Begin (or restart) enrollment. Unconfirmed until a code proves the authenticator works.
 	//
 	// ON CONFLICT replaces rather than refusing, because the case it serves is somebody who lost the QR code
 	// half-way and started again. Confirming is what makes a factor real, so replacing an *unconfirmed* row
 	// costs nothing — and replacing a confirmed one is prevented by the caller, which requires the current
 	// factor before it will touch an account that already has one.
-	UpsertTOTPEnrolment(ctx context.Context, arg UpsertTOTPEnrolmentParams) (UserTotp, error)
+	UpsertTOTPEnrollment(ctx context.Context, arg UpsertTOTPEnrollmentParams) (UserTotp, error)
 	UserExistsByEmail(ctx context.Context, email string) (bool, error)
 	// Is this username claimed, by an account or by a registration that created none?
 	//

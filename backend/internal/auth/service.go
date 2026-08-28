@@ -68,11 +68,11 @@ var (
 	// not a shape a recovery code takes, already spent, or belonging to an account with no factor at all.
 	// Undifferentiated for the reason every other credential refusal here is.
 	ErrInvalidFactorCode = errors.New("that code is not valid")
-	// ErrTwoFactorAlreadyEnabled refuses a second enrolment over a live one. Replacing a factor goes
+	// ErrTwoFactorAlreadyEnabled refuses a second enrollment over a live one. Replacing a factor goes
 	// through the disable path, which requires proving the current one first.
 	ErrTwoFactorAlreadyEnabled = errors.New("this account already has a second factor")
-	// ErrNoTwoFactorEnrolment means there is nothing to confirm.
-	ErrNoTwoFactorEnrolment = errors.New("no enrolment is in progress")
+	// ErrNoTwoFactorEnrollment means there is nothing to confirm.
+	ErrNoTwoFactorEnrollment = errors.New("no enrollment is in progress")
 	// ErrTwoFactorChallenge is the single answer to every way a challenge can fail to parse: expired,
 	// signed by another instance, the wrong `typ`, or a shape this package never mints.
 	ErrTwoFactorChallenge = errors.New("invalid or expired two-factor challenge")

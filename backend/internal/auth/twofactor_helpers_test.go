@@ -6,7 +6,7 @@ package auth
 // enforcement and it is worth being explicit about: factorProof stops a *caller in another package*, and
 // stops anyone in this one from doing it by accident, but it cannot stop somebody in this package writing
 // the literal deliberately. Everything that mints a session outside a test obtains its proof from
-// factorSatisfied or proveFactor; this exists so tests about sessions do not have to enrol a factor first.
+// factorSatisfied or proveFactor; this exists so tests about sessions do not have to enroll a factor first.
 func provedFactor(userID int64) factorProof {
 	return factorProof{userID: userID, proved: true}
 }

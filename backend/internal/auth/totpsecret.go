@@ -35,7 +35,7 @@ import (
 // configuration setting, no migration when a value that was never configured changes.
 //
 // The consequence to know about: rotating the signing key invalidates every enrolled authenticator, since
-// the derived key moves with it. There is no key rotation today; when there is, re-enrolment is the answer
+// the derived key moves with it. There is no key rotation today; when there is, re-enrollment is the answer
 // and this is the paragraph that says so.
 
 // totpSecretInfo is the HKDF info string. Fixed, and distinct from any other derivation this package might

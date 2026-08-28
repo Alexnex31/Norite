@@ -5,7 +5,7 @@
 
 CREATE TABLE user_totp (
   -- The account, and the primary key. One authenticator per account by construction rather than by a
-  -- uniqueness check somebody has to remember: a second enrolment replaces the first, and "which of my two
+  -- uniqueness check somebody has to remember: a second enrollment replaces the first, and "which of my two
   -- authenticators is live" is a question nobody should have to answer.
   user_id          bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   -- Encrypted, not hashed, and it is the only credential in this schema that is.
@@ -22,7 +22,7 @@ CREATE TABLE user_totp (
   secret_encrypted bytea NOT NULL,
   -- NULL until the first correct code proves the authenticator actually works.
   --
-  -- This is what stops an abandoned enrolment locking somebody out. Between "show me a QR code" and "here
+  -- This is what stops an abandoned enrollment locking somebody out. Between "show me a QR code" and "here
   -- is a code from it" a person can close the tab, mistype the secret, or find their phone's clock is
   -- wrong — and an account that demanded a factor from that moment would be unreachable. An unconfirmed
   -- row is not a factor; auth.factorSatisfied ignores it.

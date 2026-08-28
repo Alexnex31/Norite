@@ -63,6 +63,10 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/password/reset/request", h.requestPasswordReset)
 	r.Post("/password/reset", h.confirmPasswordReset)
 	r.Post("/verify/request", h.requestEmailVerification)
+	// The second half of a sign-in that owed a factor. Public for the same reason /login is — the caller
+	// holds a challenge, not a session — and mounted by the caller behind its own stricter bucket, because
+	// a six-digit code is the narrowest guessing surface in this API.
+	r.Post("/2fa/verify", h.verifyTwoFactor)
 
 	// Authenticated, and changing the account's own security state.
 	//
@@ -83,6 +87,15 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/tokens", h.listTokens)
 		r.Delete("/tokens/{tokenId}", h.revokeToken)
 		r.Post("/logout/all", h.logoutAll)
+
+		// Enrolling, confirming, disabling and regenerating are all changes to the account's security
+		// state, which is exactly what this group is for. Disabling and regenerating additionally require
+		// the *current* factor — see DisableTwoFactor — because a session stolen inside §17.10's window
+		// must not be able to remove the control standing between an intruder and the account.
+		r.Post("/2fa/totp", h.beginTOTPEnrollment)
+		r.Post("/2fa/totp/confirm", h.confirmTOTPEnrollment)
+		r.Delete("/2fa/totp", h.disableTwoFactor)
+		r.Post("/2fa/recovery-codes", h.regenerateRecoveryCodes)
 	})
 }
 
@@ -130,6 +143,19 @@ type registerRequest struct {
 	// may contain is ParseInviteCode's decision, and a tag that disagreed with it would refuse a valid
 	// code for the wrong reason — the mistake registerRequest's username bounds already made once.
 	InviteCode string `json:"invite_code" validate:"omitempty,max=64"`
+}
+
+// twoFactorVerifyRequest finishes a sign-in. The device the session lands on comes out of the challenge,
+// never from this body — a client that could name a different device on the second half of a sign-in could
+// move somebody's session onto an identity of its choosing.
+type twoFactorVerifyRequest struct {
+	Challenge string `json:"challenge" validate:"required,max=4096"`
+	Code      string `json:"code" validate:"required,max=64"`
+}
+
+// twoFactorCodeRequest is the step-up on the endpoints that undo the factor.
+type twoFactorCodeRequest struct {
+	Code string `json:"code" validate:"required,max=64"`
 }
 
 type loginRequest struct {
@@ -185,6 +211,12 @@ type userResponse struct {
 	AvatarHash      *string      `json:"avatar_hash"`
 	EmailVerifiedAt *time.Time   `json:"email_verified_at"`
 	CreatedAt       time.Time    `json:"created_at"`
+	// TwoFactorEnabled reports a *confirmed* enrollment. An enrollment somebody started and abandoned is
+	// not a factor and must not read as one, or the account looks protected when it is not.
+	TwoFactorEnabled bool `json:"two_factor_enabled"`
+	// RecoveryCodesRemaining is null when there is no factor, rather than zero — zero on an account with
+	// no factor would read as "you have run out" rather than "there is nothing to run out of".
+	RecoveryCodesRemaining *int64 `json:"recovery_codes_remaining"`
 }
 
 // sessionResponse is one device signed in to the account.
@@ -222,6 +254,43 @@ func newSessionResponse(d SessionDevice) sessionResponse {
 		out.Address = &addr
 	}
 	return out
+}
+
+// twoFactorChallengeResponse is the 202 a sign-in gets when the account owes a factor.
+//
+// TwoFactorRequired is constant true and is here anyway: a client reading a body without looking at the
+// status should still be unable to mistake this for a token pair, and a discriminator costs one field.
+type twoFactorChallengeResponse struct {
+	TwoFactorRequired bool   `json:"two_factor_required"`
+	Challenge         string `json:"challenge"`
+	// ExpiresAt bounds how long the half-finished sign-in stays resumable. Long enough to find a phone,
+	// short enough that a challenge left on a shared machine stops being useful.
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// twoFactorEnrollmentResponse carries the secret exactly once.
+type twoFactorEnrollmentResponse struct {
+	// Secret is the base32 value, for somebody typing it in by hand.
+	Secret string `json:"secret"`
+	// URI is the otpauth:// form an authenticator app scans. Both are the same secret in two shapes; it
+	// is returned here and never again, which is why the enrollment is not confirmed yet.
+	URI string `json:"uri"`
+}
+
+// twoFactorCodesResponse carries a fresh set of recovery codes, also exactly once.
+type twoFactorCodesResponse struct {
+	RecoveryCodes []string `json:"recovery_codes"`
+}
+
+// disableTwoFactorResponse reports what turning the factor off took with it.
+//
+// The same counts logoutAll reports, for the same reason: disabling revokes every other session through
+// the primitive, and "your bots have stopped" is not something a client can infer from a 204.
+type disableTwoFactorResponse struct {
+	SessionsRevoked      int64 `json:"sessions_revoked"`
+	APITokensRevoked     int64 `json:"api_tokens_revoked"`
+	ExchangeCodesRevoked int64 `json:"oauth_exchange_codes_revoked"`
+	DeviceCodesRevoked   int64 `json:"device_authorizations_revoked"`
 }
 
 // logoutAllResponse says what signing out everywhere else actually did.
@@ -387,10 +456,31 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		IP:         clientAddr(r),
 	})
 	if err != nil {
-		h.writeErr(w, r, err)
+		h.writeTokenPairErr(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, r, http.StatusOK, newTokenPairResponse(pair))
+}
+
+// writeTokenPairErr handles the one failure that is not a failure.
+//
+// A sign-in path that owes a second factor answers 202 with a challenge rather than 200 with a pair. The
+// client branches on the status, never on the body's shape: one response object per status is what keeps
+// this generable, and the contract has already had one schema that could not be satisfied.
+//
+// Shared by login and the OAuth exchange because both mint sessions and both owe the same step. Anything
+// else falls through to the ordinary mapping.
+func (h *Handler) writeTokenPairErr(w http.ResponseWriter, r *http.Request, err error) {
+	var owed *TwoFactorRequiredError
+	if errors.As(err, &owed) {
+		httpx.WriteJSON(w, r, http.StatusAccepted, twoFactorChallengeResponse{
+			TwoFactorRequired: true,
+			Challenge:         owed.Challenge,
+			ExpiresAt:         owed.ExpiresAt,
+		})
+		return
+	}
+	h.writeErr(w, r, err)
 }
 
 func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
@@ -483,7 +573,25 @@ func (h *Handler) currentUser(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusOK, newUserResponse(user))
+
+	enabled, err := h.svc.hasConfirmedFactor(r.Context(), int64(actor.UserID))
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	out := newUserResponse(user)
+	out.TwoFactorEnabled = enabled
+	if enabled {
+		// Only meaningful when a factor exists, and only asked for then — a count of zero on an account
+		// with no factor would read as "you have run out" rather than "there is nothing to run out of".
+		remaining, err := h.svc.RemainingRecoveryCodes(r.Context(), int64(actor.UserID))
+		if err != nil {
+			h.writeErr(w, r, err)
+			return
+		}
+		out.RecoveryCodesRemaining = &remaining
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, out)
 }
 
 func (h *Handler) mintToken(w http.ResponseWriter, r *http.Request) {
@@ -632,6 +740,20 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrInvalidCredentials), errors.Is(err, ErrPasswordNotSet):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "invalid email or password"))
+
+	case errors.Is(err, ErrInvalidFactorCode), errors.Is(err, ErrTwoFactorChallenge),
+		errors.Is(err, ErrTwoFactorRequired):
+		// 401 for all three, and one message would be wrong here — these are not the same news. A bad code
+		// is something to retype; an expired challenge means starting the sign-in again; "a factor is
+		// required" reaching this mapping at all means a caller presented a credential where a factor was
+		// owed. None of them discloses anything: everyone who can reach this point already holds the
+		// password or a live session.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrUnauthorized, "%s", err.Error()))
+
+	case errors.Is(err, ErrTwoFactorAlreadyEnabled), errors.Is(err, ErrNoTwoFactorEnrollment):
+		// 409: the request is well-formed and the account is simply not in the state it assumes. Enrolling
+		// over a live factor goes through the disable path, which asks for the current one first.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", err.Error()))
 
 	case errors.Is(err, ErrSessionSignedOut):
 		// 401, and it says so plainly rather than hiding behind the vague credential message: the caller
@@ -797,4 +919,101 @@ func clientAddr(r *http.Request) netip.Addr {
 		return netip.Addr{}
 	}
 	return addr
+}
+
+// ---------- the second factor ----------
+
+// verifyTwoFactor finishes a sign-in that owed a factor.
+//
+// Public, like login: what the caller holds is a challenge, not a session. Mounted behind its own stricter
+// bucket by the router, because six digits is the narrowest guessing surface in this API and the codes are
+// live for about ninety seconds with skew.
+func (h *Handler) verifyTwoFactor(w http.ResponseWriter, r *http.Request) {
+	var req twoFactorVerifyRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	pair, err := h.svc.CompleteTwoFactorLogin(r.Context(), req.Challenge, req.Code)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, newTokenPairResponse(pair))
+}
+
+// beginTOTPEnrollment mints a secret and returns it once.
+//
+// Nothing about the account changes here — the enrollment is unconfirmed until a code proves the
+// authenticator works, which is what stops a closed tab locking somebody out.
+func (h *Handler) beginTOTPEnrollment(w http.ResponseWriter, r *http.Request) {
+	actor, _ := ActorFrom(r.Context())
+
+	user, err := h.svc.GetUser(r.Context(), actor.UserID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	// The account name is what an authenticator app shows beside the issuer. The address rather than the
+	// username, because it is the value a person recognizes in a list of a dozen entries.
+	secret, uri, err := h.svc.BeginTOTPEnrollment(r.Context(), int64(actor.UserID), user.Email)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, twoFactorEnrollmentResponse{Secret: secret, URI: uri})
+}
+
+// confirmTOTPEnrollment proves the authenticator works and turns the factor on.
+func (h *Handler) confirmTOTPEnrollment(w http.ResponseWriter, r *http.Request) {
+	var req twoFactorCodeRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+	actor, _ := ActorFrom(r.Context())
+
+	codes, err := h.svc.ConfirmTOTPEnrollment(r.Context(), int64(actor.UserID), req.Code)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, twoFactorCodesResponse{RecoveryCodes: codes})
+}
+
+// disableTwoFactor turns the factor off, and requires the factor to do it.
+func (h *Handler) disableTwoFactor(w http.ResponseWriter, r *http.Request) {
+	var req twoFactorCodeRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+	actor, _ := ActorFrom(r.Context())
+
+	result, err := h.svc.DisableTwoFactor(r.Context(), actor.UserID, actor.SessionID, req.Code)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, disableTwoFactorResponse{
+		SessionsRevoked:      result.Sessions,
+		APITokensRevoked:     result.APITokens,
+		ExchangeCodesRevoked: result.ExchangeCodes,
+		DeviceCodesRevoked:   result.DeviceCodes,
+	})
+}
+
+// regenerateRecoveryCodes replaces the whole set, and requires the factor to do it.
+func (h *Handler) regenerateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
+	var req twoFactorCodeRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+	actor, _ := ActorFrom(r.Context())
+
+	codes, err := h.svc.RegenerateRecoveryCodes(r.Context(), int64(actor.UserID), req.Code)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, twoFactorCodesResponse{RecoveryCodes: codes})
 }

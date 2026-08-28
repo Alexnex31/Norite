@@ -134,9 +134,9 @@ const getTOTPForUser = `-- name: GetTOTPForUser :one
 SELECT user_id, secret_encrypted, confirmed_at, created_at FROM user_totp WHERE user_id = $1
 `
 
-// Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrolment in progress" are
+// Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrollment in progress" are
 // different questions and the caller asks both; a query that hid unconfirmed rows would make the second
-// unanswerable and silently let a second enrolment overwrite one in flight.
+// unanswerable and silently let a second enrollment overwrite one in flight.
 func (q *Queries) GetTOTPForUser(ctx context.Context, userID int64) (UserTotp, error) {
 	row := q.db.QueryRow(ctx, getTOTPForUser, userID)
 	var i UserTotp
@@ -149,7 +149,7 @@ func (q *Queries) GetTOTPForUser(ctx context.Context, userID int64) (UserTotp, e
 	return i, err
 }
 
-const upsertTOTPEnrolment = `-- name: UpsertTOTPEnrolment :one
+const upsertTOTPEnrollment = `-- name: UpsertTOTPEnrollment :one
 
 INSERT INTO user_totp (user_id, secret_encrypted)
 VALUES ($1, $2)
@@ -158,23 +158,23 @@ SET secret_encrypted = EXCLUDED.secret_encrypted, confirmed_at = NULL, created_a
 RETURNING user_id, secret_encrypted, confirmed_at, created_at
 `
 
-type UpsertTOTPEnrolmentParams struct {
+type UpsertTOTPEnrollmentParams struct {
 	UserID          int64
 	SecretEncrypted []byte
 }
 
-// Second-factor queries: one TOTP enrolment per account, and its recovery codes.
+// Second-factor queries: one TOTP enrollment per account, and its recovery codes.
 //
 // Single-use lives in the statement here as it does everywhere else in this package — see
 // ConsumeRecoveryCode below, and password_reset_tokens.sql for the reasoning it shares.
-// Begin (or restart) enrolment. Unconfirmed until a code proves the authenticator works.
+// Begin (or restart) enrollment. Unconfirmed until a code proves the authenticator works.
 //
 // ON CONFLICT replaces rather than refusing, because the case it serves is somebody who lost the QR code
 // half-way and started again. Confirming is what makes a factor real, so replacing an *unconfirmed* row
 // costs nothing — and replacing a confirmed one is prevented by the caller, which requires the current
 // factor before it will touch an account that already has one.
-func (q *Queries) UpsertTOTPEnrolment(ctx context.Context, arg UpsertTOTPEnrolmentParams) (UserTotp, error) {
-	row := q.db.QueryRow(ctx, upsertTOTPEnrolment, arg.UserID, arg.SecretEncrypted)
+func (q *Queries) UpsertTOTPEnrollment(ctx context.Context, arg UpsertTOTPEnrollmentParams) (UserTotp, error) {
+	row := q.db.QueryRow(ctx, upsertTOTPEnrollment, arg.UserID, arg.SecretEncrypted)
 	var i UserTotp
 	err := row.Scan(
 		&i.UserID,

@@ -301,7 +301,9 @@ func (h *Handler) oauthExchange(w http.ResponseWriter, r *http.Request) {
 		IP:         clientAddr(r),
 	})
 	if err != nil {
-		h.writeErr(w, r, err)
+		// Including the 202 a factor-owing account gets. A provider proved control of a provider account;
+		// it did not prove possession of this account's second factor.
+		h.writeTokenPairErr(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, r, http.StatusOK, newTokenPairResponse(pair))

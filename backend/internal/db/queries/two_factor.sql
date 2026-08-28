@@ -1,10 +1,10 @@
--- Second-factor queries: one TOTP enrolment per account, and its recovery codes.
+-- Second-factor queries: one TOTP enrollment per account, and its recovery codes.
 --
 -- Single-use lives in the statement here as it does everywhere else in this package — see
 -- ConsumeRecoveryCode below, and password_reset_tokens.sql for the reasoning it shares.
 
--- name: UpsertTOTPEnrolment :one
--- Begin (or restart) enrolment. Unconfirmed until a code proves the authenticator works.
+-- name: UpsertTOTPEnrollment :one
+-- Begin (or restart) enrollment. Unconfirmed until a code proves the authenticator works.
 --
 -- ON CONFLICT replaces rather than refusing, because the case it serves is somebody who lost the QR code
 -- half-way and started again. Confirming is what makes a factor real, so replacing an *unconfirmed* row
@@ -17,9 +17,9 @@ SET secret_encrypted = EXCLUDED.secret_encrypted, confirmed_at = NULL, created_a
 RETURNING *;
 
 -- name: GetTOTPForUser :one
--- Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrolment in progress" are
+-- Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrollment in progress" are
 -- different questions and the caller asks both; a query that hid unconfirmed rows would make the second
--- unanswerable and silently let a second enrolment overwrite one in flight.
+-- unanswerable and silently let a second enrollment overwrite one in flight.
 SELECT * FROM user_totp WHERE user_id = $1;
 
 -- name: ConfirmTOTP :one
