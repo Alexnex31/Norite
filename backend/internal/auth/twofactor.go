@@ -152,20 +152,71 @@ func (s *Service) proveFactor(ctx context.Context, userID int64, code string) (f
 		return factorProof{}, err
 	}
 
-	// Skew of one period either side, which is thirty seconds here. It is what makes the factor usable on
-	// a phone whose clock is a little off, and it is the standard allowance; widening it multiplies the
-	// codes that are live at once, which is the only thing bounding a guess.
-	ok, err := totp.ValidateCustom(code, secret, s.now().UTC(), totp.ValidateOpts{
-		Period:    30,
-		Skew:      1,
-		Digits:    otp.DigitsSix,
-		Algorithm: otp.AlgorithmSHA1,
-	})
-	if err == nil && ok {
+	if step, matched := matchTOTPStep(secret, code, s.now().UTC()); matched {
+		// Accepted only if this step has not been spent. RFC 6238 §5.2 makes single use a MUST, and the
+		// reason is concrete: without it a code stays good for its whole window, so a phishing page that
+		// harvests a password and a code has about ninety seconds to use both — which is the attack a
+		// second factor is otherwise good at stopping.
+		spent, err := s.queries.MarkTOTPStepUsed(ctx, db.MarkTOTPStepUsedParams{
+			UserID: userID, LastUsedStep: &step,
+		})
+		if err != nil {
+			return factorProof{}, fmt.Errorf("recording the used code: %w", err)
+		}
+		if spent == 0 {
+			// Already used, at this step or a later one. Reported as an invalid code, because to whoever
+			// is presenting it the difference between "wrong" and "already used" is not theirs to learn.
+			return factorProof{}, ErrInvalidFactorCode
+		}
 		return factorProof{userID: userID, proved: true}, nil
 	}
 
 	return s.proveRecoveryCode(ctx, userID, code)
+}
+
+// totpPeriod is the code lifetime in seconds, and totpSkew how many steps either side are accepted.
+//
+// One step of skew is thirty seconds either way, which is what makes the factor usable on a phone whose
+// clock is a little off and is the standard allowance. Widening it multiplies the codes live at once, which
+// together with the rate limit is what bounds a guess.
+const (
+	totpPeriod = 30
+	totpSkew   = 1
+)
+
+// totpOpts is the one description of this instance's TOTP parameters.
+//
+// Shared by generation and verification rather than written twice: two copies of an algorithm, a digit
+// count and a period is two chances for a code that validates nowhere.
+func totpOpts() totp.ValidateOpts {
+	return totp.ValidateOpts{
+		Period:    totpPeriod,
+		Skew:      totpSkew,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	}
+}
+
+// matchTOTPStep reports which time-step a code belongs to, if any.
+//
+// totp.ValidateCustom answers only yes or no, and single-use needs to know *which* step matched so it can
+// be recorded. So the skew window is walked here instead — the same work that function does internally,
+// with the answer kept.
+//
+// The comparison is constant-time. The code is attacker-supplied and the expected value is derived from
+// the secret, which is exactly the shape where a short-circuiting compare leaks.
+func matchTOTPStep(secret, code string, now time.Time) (int64, bool) {
+	for offset := -totpSkew; offset <= totpSkew; offset++ {
+		at := now.Add(time.Duration(offset) * totpPeriod * time.Second)
+		want, err := totp.GenerateCodeCustom(secret, at, totpOpts())
+		if err != nil {
+			continue
+		}
+		if constantTimeEquals([]byte(want), []byte(code)) {
+			return at.Unix() / totpPeriod, true
+		}
+	}
+	return 0, false
 }
 
 // proveRecoveryCode spends one of the account's recovery codes.
@@ -245,10 +296,8 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID int64, code 
 	if err != nil {
 		return nil, err
 	}
-	ok, err := totp.ValidateCustom(code, secret, s.now().UTC(), totp.ValidateOpts{
-		Period: 30, Skew: 1, Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1,
-	})
-	if err != nil || !ok {
+	step, matched := matchTOTPStep(secret, code, s.now().UTC())
+	if !matched {
 		return nil, ErrInvalidFactorCode
 	}
 
@@ -267,6 +316,14 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID int64, code 
 				return ErrTwoFactorAlreadyEnabled
 			}
 			return fmt.Errorf("confirming the enrollment: %w", err)
+		}
+		// The confirming code is spent like any other. Without this it would still be live for the rest of
+		// its window, so the code somebody typed to turn the factor on could immediately be replayed to
+		// get past it — the one moment where a code is most likely to have been seen over a shoulder.
+		if _, err := q.MarkTOTPStepUsed(ctx, db.MarkTOTPStepUsedParams{
+			UserID: userID, LastUsedStep: &step,
+		}); err != nil {
+			return fmt.Errorf("recording the used code: %w", err)
 		}
 		return s.writeRecoveryCodes(ctx, q, userID, hashes)
 	})

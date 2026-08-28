@@ -27,6 +27,17 @@ CREATE TABLE user_totp (
   -- wrong — and an account that demanded a factor from that moment would be unreachable. An unconfirmed
   -- row is not a factor; auth.factorSatisfied ignores it.
   confirmed_at     timestamptz NULL,
+  -- The last time-step accepted for this account, so a code cannot be used twice.
+  --
+  -- RFC 6238 §5.2 makes this a MUST: "The verifier MUST NOT accept the second attempt of the OTP after the
+  -- successful validation has been issued for the first OTP." Without it a code stays valid for its whole
+  -- window — thirty seconds either side of the current step with the skew this instance allows — and a
+  -- phishing page that harvests a password and a code has about ninety seconds to use both. That is the
+  -- attack replay protection exists for, and it is the one a second factor is otherwise good at stopping.
+  --
+  -- A step rather than a timestamp, because a step is exactly the granularity the comparison needs and
+  -- leaves no question about rounding. NULL until the first code is accepted.
+  last_used_step   bigint NULL,
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 

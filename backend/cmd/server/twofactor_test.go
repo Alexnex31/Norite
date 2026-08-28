@@ -34,7 +34,7 @@ func enableTwoFactor(t *testing.T, a *api, accessToken string) (secret string, c
 	require.Contains(t, enrollment.URI, "otpauth://totp/", "an app has to be able to scan this")
 
 	confirmed := a.call(http.MethodPost, "/api/v1/auth/2fa/totp/confirm",
-		map[string]string{"code": totpCode(t, enrollment.Secret)}, withToken(accessToken))
+		map[string]string{"code": confirmingCode(t, enrollment.Secret)}, withToken(accessToken))
 	require.Equal(t, http.StatusOK, confirmed.Code, "confirm: %s", confirmed)
 	var result struct {
 		RecoveryCodes []string `json:"recovery_codes"`
@@ -45,8 +45,21 @@ func enableTwoFactor(t *testing.T, a *api, accessToken string) (secret string, c
 	return enrollment.Secret, result.RecoveryCodes
 }
 
-// totpCode is what an authenticator app would be showing right now.
+// totpCode is a code for the step *after* now.
+//
+// The next step rather than the current one, because confirming an enrollment spends its own step
+// (RFC 6238 §5.2) and every test here enrolls first — asking for the current code would be asking to reuse
+// a spent one. The instance accepts one step of skew either way, which is what makes this work without
+// controlling the server's clock, and it is what a real person does by waiting for the number to change.
 func totpCode(t *testing.T, secret string) string {
+	t.Helper()
+	code, err := totp.GenerateCode(secret, time.Now().Add(30*time.Second))
+	require.NoError(t, err)
+	return code
+}
+
+// confirmingCode is the current step, used only where an enrollment is being confirmed.
+func confirmingCode(t *testing.T, secret string) string {
 	t.Helper()
 	code, err := totp.GenerateCode(secret, time.Now())
 	require.NoError(t, err)

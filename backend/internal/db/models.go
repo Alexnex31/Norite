@@ -147,5 +147,6 @@ type UserTotp struct {
 	UserID          int64
 	SecretEncrypted []byte
 	ConfirmedAt     pgtype.Timestamptz
+	LastUsedStep    *int64
 	CreatedAt       pgtype.Timestamptz
 }

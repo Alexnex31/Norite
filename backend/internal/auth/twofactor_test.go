@@ -9,6 +9,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// nextStepCode is a code for the step *after* now.
+//
+// Needed because confirming an enrollment spends its own step (RFC 6238 §5.2), so a test that enrolls and
+// then immediately proves the factor is asking to reuse a spent code. The instance's skew accepts one step
+// ahead, which is what makes this work without controlling the clock — and it is what a real person does
+// too, by waiting for the number to change.
+func nextStepCode(t *testing.T, secret string) string {
+	t.Helper()
+	code, err := totp.GenerateCode(secret, time.Now().Add(totpPeriod*time.Second))
+	require.NoError(t, err)
+	return code
+}
+
 // enableFactor turns the second factor on for an account and returns its secret and recovery codes.
 func enableFactor(t *testing.T, svc *Service, userID int64, email string) (string, []string) {
 	t.Helper()
@@ -114,9 +127,7 @@ func TestRegeneratingInvalidatesTheOldRecoveryCodes(t *testing.T) {
 	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
 	secret, old := enableFactor(t, svc, user.ID, "ada@example.com")
 
-	code, err := totp.GenerateCode(secret, time.Now())
-	require.NoError(t, err)
-	fresh, err := svc.RegenerateRecoveryCodes(t.Context(), user.ID, code)
+	fresh, err := svc.RegenerateRecoveryCodes(t.Context(), user.ID, nextStepCode(t, secret))
 	require.NoError(t, err)
 	require.Len(t, fresh, recoveryCodeCount)
 	assert.NotEqual(t, old, fresh)
@@ -141,10 +152,7 @@ func TestDisablingTheFactorRevokesTheOtherSessions(t *testing.T) {
 
 	actor, err := svc.AuthenticateAccessToken(t.Context(), keep.AccessToken)
 	require.NoError(t, err)
-	code, err := totp.GenerateCode(secret, time.Now())
-	require.NoError(t, err)
-
-	result, err := svc.DisableTwoFactor(t.Context(), actor.UserID, actor.SessionID, code)
+	result, err := svc.DisableTwoFactor(t.Context(), actor.UserID, actor.SessionID, nextStepCode(t, secret))
 	require.NoError(t, err)
 	assert.Positive(t, result.Sessions, "the other device must have been signed out")
 
@@ -153,4 +161,65 @@ func TestDisablingTheFactorRevokesTheOtherSessions(t *testing.T) {
 
 	_, err = svc.Refresh(t.Context(), keep.RefreshToken)
 	assert.NoError(t, err, "and this one must still work")
+}
+
+// RFC 6238 §5.2 makes single use a MUST: "The verifier MUST NOT accept the second attempt of the OTP after
+// the successful validation has been issued for the first OTP."
+//
+// Without it a code stays good for its whole window — ninety seconds with the skew this instance allows —
+// so a phishing page that harvests a password and a code has that long to use both, which is the attack a
+// second factor is otherwise good at stopping. Found by audit, after the tests were green.
+func TestATOTPCodeCannotBeReplayed(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	secret, _ := enableFactor(t, svc, user.ID, "ada@example.com")
+
+	code := nextStepCode(t, secret)
+
+	_, err := svc.proveFactor(t.Context(), user.ID, code)
+	require.NoError(t, err, "the first use of a code must work")
+
+	_, err = svc.proveFactor(t.Context(), user.ID, code)
+	assert.ErrorIs(t, err, ErrInvalidFactorCode, "the same code must not work twice")
+}
+
+// And the code that turned the factor on is spent too — that is the one most likely to have been seen over
+// a shoulder, and leaving it live would mean the act of enabling the factor handed somebody a way past it.
+func TestTheConfirmingCodeIsAlsoSpent(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+
+	secret, _, err := svc.BeginTOTPEnrollment(t.Context(), user.ID, "ada@example.com")
+	require.NoError(t, err)
+	code, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	_, err = svc.ConfirmTOTPEnrollment(t.Context(), user.ID, code)
+	require.NoError(t, err)
+
+	_, err = svc.proveFactor(t.Context(), user.ID, code)
+	assert.ErrorIs(t, err, ErrInvalidFactorCode,
+		"the code that enabled the factor must not also get past it")
+}
+
+// A code from an earlier step inside the skew window must not work after a later one has been accepted,
+// which is the case a naive "record the newest" would miss.
+func TestAnEarlierStepIsRefusedAfterALaterOne(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	secret, _ := enableFactor(t, svc, user.ID, "ada@example.com")
+
+	now := time.Now()
+	earlier, err := totp.GenerateCode(secret, now)
+	require.NoError(t, err)
+	later, err := totp.GenerateCode(secret, now.Add(totpPeriod*time.Second))
+	require.NoError(t, err)
+	if earlier == later {
+		t.Skip("the two steps produced the same code, which happens once in a million")
+	}
+
+	_, err = svc.proveFactor(t.Context(), user.ID, later)
+	require.NoError(t, err, "the later step is accepted first")
+
+	_, err = svc.proveFactor(t.Context(), user.ID, earlier)
+	assert.ErrorIs(t, err, ErrInvalidFactorCode, "a step behind the last accepted one is spent")
 }

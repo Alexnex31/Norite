@@ -30,6 +30,22 @@ SET confirmed_at = now()
 WHERE user_id = $1 AND confirmed_at IS NULL
 RETURNING *;
 
+-- name: MarkTOTPStepUsed :execrows
+-- Spend a time-step, exactly once.
+--
+-- The guard is in the WHERE, like every other single-use statement in this package: two requests presenting
+-- the same code both reach it and Postgres serializes them on the row, so the second re-evaluates
+-- `last_used_step < $2` against the first's committed value and matches nothing. A read-then-update in Go
+-- would let both through, which is the shape ConsumeRecoveryCode and RedeemInstanceInvite are written out
+-- of.
+--
+-- Strictly greater, so a code from an *earlier* step inside the skew window cannot be replayed after a
+-- later one has been accepted — which is the case a naive "record the newest" would miss.
+UPDATE user_totp
+SET last_used_step = $2
+WHERE user_id = $1 AND confirmed_at IS NOT NULL
+  AND (last_used_step IS NULL OR last_used_step < $2);
+
 -- name: DeleteTOTPForUser :execrows
 DELETE FROM user_totp WHERE user_id = $1;
 

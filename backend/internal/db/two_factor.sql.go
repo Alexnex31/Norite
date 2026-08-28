@@ -13,7 +13,7 @@ const confirmTOTP = `-- name: ConfirmTOTP :one
 UPDATE user_totp
 SET confirmed_at = now()
 WHERE user_id = $1 AND confirmed_at IS NULL
-RETURNING user_id, secret_encrypted, confirmed_at, created_at
+RETURNING user_id, secret_encrypted, confirmed_at, last_used_step, created_at
 `
 
 // The moment the factor becomes required. Guarded on still being unconfirmed so a replayed confirmation
@@ -25,6 +25,7 @@ func (q *Queries) ConfirmTOTP(ctx context.Context, userID int64) (UserTotp, erro
 		&i.UserID,
 		&i.SecretEncrypted,
 		&i.ConfirmedAt,
+		&i.LastUsedStep,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -131,7 +132,7 @@ func (q *Queries) DeleteTOTPForUser(ctx context.Context, userID int64) (int64, e
 }
 
 const getTOTPForUser = `-- name: GetTOTPForUser :one
-SELECT user_id, secret_encrypted, confirmed_at, created_at FROM user_totp WHERE user_id = $1
+SELECT user_id, secret_encrypted, confirmed_at, last_used_step, created_at FROM user_totp WHERE user_id = $1
 `
 
 // Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrollment in progress" are
@@ -144,9 +145,40 @@ func (q *Queries) GetTOTPForUser(ctx context.Context, userID int64) (UserTotp, e
 		&i.UserID,
 		&i.SecretEncrypted,
 		&i.ConfirmedAt,
+		&i.LastUsedStep,
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const markTOTPStepUsed = `-- name: MarkTOTPStepUsed :execrows
+UPDATE user_totp
+SET last_used_step = $2
+WHERE user_id = $1 AND confirmed_at IS NOT NULL
+  AND (last_used_step IS NULL OR last_used_step < $2)
+`
+
+type MarkTOTPStepUsedParams struct {
+	UserID       int64
+	LastUsedStep *int64
+}
+
+// Spend a time-step, exactly once.
+//
+// The guard is in the WHERE, like every other single-use statement in this package: two requests presenting
+// the same code both reach it and Postgres serializes them on the row, so the second re-evaluates
+// `last_used_step < $2` against the first's committed value and matches nothing. A read-then-update in Go
+// would let both through, which is the shape ConsumeRecoveryCode and RedeemInstanceInvite are written out
+// of.
+//
+// Strictly greater, so a code from an *earlier* step inside the skew window cannot be replayed after a
+// later one has been accepted — which is the case a naive "record the newest" would miss.
+func (q *Queries) MarkTOTPStepUsed(ctx context.Context, arg MarkTOTPStepUsedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markTOTPStepUsed, arg.UserID, arg.LastUsedStep)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertTOTPEnrollment = `-- name: UpsertTOTPEnrollment :one
@@ -155,7 +187,7 @@ INSERT INTO user_totp (user_id, secret_encrypted)
 VALUES ($1, $2)
 ON CONFLICT (user_id) DO UPDATE
 SET secret_encrypted = EXCLUDED.secret_encrypted, confirmed_at = NULL, created_at = now()
-RETURNING user_id, secret_encrypted, confirmed_at, created_at
+RETURNING user_id, secret_encrypted, confirmed_at, last_used_step, created_at
 `
 
 type UpsertTOTPEnrollmentParams struct {
@@ -180,6 +212,7 @@ func (q *Queries) UpsertTOTPEnrollment(ctx context.Context, arg UpsertTOTPEnroll
 		&i.UserID,
 		&i.SecretEncrypted,
 		&i.ConfirmedAt,
+		&i.LastUsedStep,
 		&i.CreatedAt,
 	)
 	return i, err

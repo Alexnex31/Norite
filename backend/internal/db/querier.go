@@ -345,6 +345,17 @@ type Querier interface {
 	// but the address can change between the two statements, and they run in one transaction precisely so this
 	// comparison is against a value that cannot move underneath it.
 	MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (User, error)
+	// Spend a time-step, exactly once.
+	//
+	// The guard is in the WHERE, like every other single-use statement in this package: two requests presenting
+	// the same code both reach it and Postgres serializes them on the row, so the second re-evaluates
+	// `last_used_step < $2` against the first's committed value and matches nothing. A read-then-update in Go
+	// would let both through, which is the shape ConsumeRecoveryCode and RedeemInstanceInvite are written out
+	// of.
+	//
+	// Strictly greater, so a code from an *earlier* step inside the skew window cannot be replayed after a
+	// later one has been accepted — which is the case a naive "record the newest" would miss.
+	MarkTOTPStepUsed(ctx context.Context, arg MarkTOTPStepUsedParams) (int64, error)
 	// Health-check queries.
 	//
 	// These exist so the readiness endpoint validates the *whole* data path — pool checkout, the
