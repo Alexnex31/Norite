@@ -36,9 +36,10 @@ CREATE TABLE user_recovery_codes (
   -- SHA-256 of a high-entropy code, exactly as for every other opaque credential here (rule 8). The raw
   -- values exist only in the response that generated them, printed once.
   --
-  -- UNIQUE because the hash is what a redemption looks up, and because two identical codes across two
-  -- accounts would be a generator that had stopped being random.
-  code_hash  text NOT NULL UNIQUE,
+  -- bytea, like every other hash column in this schema — a digest is bytes, and putting one in a text
+  -- column means storing values Postgres will reject as invalid UTF-8. That is not a hypothetical: it is
+  -- what this column was on its first draft, and confirming an enrollment answered 500.
+  code_hash  bytea NOT NULL,
   -- Spent rather than deleted. A used code stays as evidence, the way a revoked session row does: it is
   -- the difference between "that code was already used" and "that code never existed", and only the first
   -- is worth telling an operator reading a log.
@@ -63,6 +64,11 @@ CREATE TABLE user_recovery_codes (
 -- A hundredfold, on a read GET /users/@me makes. The lesson generalizes past this index: a per-account
 -- query benchmarked against a database containing one account measures nothing.
 CREATE INDEX user_recovery_codes_live_idx ON user_recovery_codes (user_id) WHERE used_at IS NULL;
+
+-- Redemption looks a code up by hash. Unique because two rows sharing one would make that lookup
+-- ambiguous, and a duplicate can only mean a generator failure worth failing loudly on — the same
+-- reasoning as sessions_refresh_token_hash_idx and password_reset_tokens_token_hash_idx.
+CREATE UNIQUE INDEX user_recovery_codes_code_hash_idx ON user_recovery_codes (code_hash);
 
 -- Neither table is swept, and that is deliberate rather than an omission.
 --

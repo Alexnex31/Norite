@@ -39,7 +39,7 @@ RETURNING id, user_id, code_hash, used_at, created_at
 
 type ConsumeRecoveryCodeParams struct {
 	UserID   int64
-	CodeHash string
+	CodeHash []byte
 }
 
 // Spend one code, exactly once.
@@ -88,7 +88,7 @@ RETURNING id, user_id, code_hash, used_at, created_at
 type CreateRecoveryCodeParams struct {
 	ID       int64
 	UserID   int64
-	CodeHash string
+	CodeHash []byte
 }
 
 func (q *Queries) CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) (UserRecoveryCode, error) {

@@ -179,7 +179,7 @@ func (s *Service) proveRecoveryCode(ctx context.Context, userID int64, raw strin
 	// and Postgres serializes them on the row, so exactly one matches. See ConsumeRecoveryCode.
 	if _, err := s.queries.ConsumeRecoveryCode(ctx, db.ConsumeRecoveryCodeParams{
 		UserID:   userID,
-		CodeHash: string(HashToken(normalized)),
+		CodeHash: HashToken(normalized),
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return factorProof{}, ErrInvalidFactorCode
@@ -365,7 +365,7 @@ func (s *Service) writeRecoveryCodes(ctx context.Context, q *db.Queries, userID 
 		if _, err := q.CreateRecoveryCode(ctx, db.CreateRecoveryCodeParams{
 			ID:       int64(id),
 			UserID:   userID,
-			CodeHash: string(hash),
+			CodeHash: hash,
 		}); err != nil {
 			return fmt.Errorf("storing a recovery code: %w", err)
 		}

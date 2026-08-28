@@ -1,5 +1,11 @@
 package auth
 
+import (
+	"net/netip"
+
+	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+)
+
 // provedFactor builds a satisfied proof for a test that is not about the second factor.
 //
 // Constructible here only because these tests live in the package. That is the boundary of the
@@ -10,3 +16,8 @@ package auth
 func provedFactor(userID int64) factorProof {
 	return factorProof{userID: userID, proved: true}
 }
+
+// snowflakeOf and netipNothing keep the session-level tests readable; neither carries meaning of its own.
+func snowflakeOf(id int64) snowflake.ID { return snowflake.ID(id) }
+
+func netipNothing() netip.Addr { return netip.Addr{} }

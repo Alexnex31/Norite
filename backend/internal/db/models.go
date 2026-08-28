@@ -138,7 +138,7 @@ type User struct {
 type UserRecoveryCode struct {
 	ID        int64
 	UserID    int64
-	CodeHash  string
+	CodeHash  []byte
 	UsedAt    pgtype.Timestamptz
 	CreatedAt pgtype.Timestamptz
 }

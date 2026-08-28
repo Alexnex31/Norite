@@ -134,6 +134,16 @@ func (s *Service) signDeviceToken(typ string, deviceCodeID int64, userCode strin
 	return signed, nil
 }
 
+// deviceTokenNamesAnAccount reports whether a continuation of this type carries a subject.
+//
+// M11a added the second one, and forgetting it was a real bug rather than a hypothetical: the factor token
+// was minted with a subject and parsed without, so the code form's user id came back as zero and no code
+// could ever pass. Caught by the device-flow test, which is exactly the path that would otherwise have
+// shipped a second factor nobody could get past.
+func deviceTokenNamesAnAccount(typ string) bool {
+	return typ == deviceApprovalTokenType || typ == deviceFactorTokenType
+}
+
 // parseDeviceToken validates a continuation of exactly the type asked for.
 //
 // The type is a parameter rather than something the caller checks afterwards, because "afterwards" is
@@ -169,7 +179,14 @@ func (s *Service) parseDeviceToken(raw, want string) (deviceContinuation, error)
 
 	out := deviceContinuation{DeviceCodeID: deviceCodeID, UserCode: claims.UserCode}
 
-	if want == deviceApprovalTokenType {
+	// Two of the three types name an account, and the subject is *required* on those rather than merely
+	// read: a factor or approval token without one would be a continuation asserting that some browser had
+	// authenticated as nobody in particular.
+	//
+	// An entry token deliberately carries none. That asymmetry is the whole reason these are separate
+	// types — see this file's header — and it is why the check is on the type asked for rather than on
+	// whether a subject happens to be present.
+	if deviceTokenNamesAnAccount(want) {
 		userID, err := strconv.ParseInt(claims.Subject, 10, 64)
 		if err != nil || userID == 0 {
 			return deviceContinuation{}, ErrDeviceContinuation
