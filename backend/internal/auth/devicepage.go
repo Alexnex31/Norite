@@ -269,10 +269,13 @@ func (h *Handler) renderDeviceFactor(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
+	// No UserCode: this template deliberately does not show it. Setting it anyway would leave the raw
+	// value where every other render passes it through FormatUserCode, so the first person to add
+	// {{ .UserCode }} here would get BCDFGHJK against the approval page's BCDF-GHJK — on the two screens
+	// whose whole purpose is being compared against the terminal.
 	h.renderDevice(w, r, deviceFactorTemplate, status, devicePageData{
 		Nonce:      httpx.NonceFrom(r.Context()),
 		Token:      token,
-		UserCode:   row.UserCode,
 		DeviceName: row.DeviceName,
 		Error:      message,
 	})

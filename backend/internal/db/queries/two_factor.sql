@@ -3,7 +3,7 @@
 -- Single-use lives in the statement here as it does everywhere else in this package — see
 -- ConsumeRecoveryCode below, and password_reset_tokens.sql for the reasoning it shares.
 
--- name: UpsertTOTPEnrollment :one
+-- name: UpsertTOTPEnrollment :exec
 -- Begin (or restart) enrollment. Unconfirmed until a code proves the authenticator works.
 --
 -- ON CONFLICT replaces rather than refusing, because the case it serves is somebody who lost the QR code
@@ -13,8 +13,7 @@
 INSERT INTO user_totp (user_id, secret_encrypted)
 VALUES ($1, $2)
 ON CONFLICT (user_id) DO UPDATE
-SET secret_encrypted = EXCLUDED.secret_encrypted, confirmed_at = NULL, created_at = now()
-RETURNING *;
+SET secret_encrypted = EXCLUDED.secret_encrypted, confirmed_at = NULL, created_at = now();
 
 -- name: GetTOTPForUser :one
 -- Deliberately returns unconfirmed rows. "Is a factor owed" and "is an enrollment in progress" are
@@ -49,10 +48,9 @@ WHERE user_id = $1 AND confirmed_at IS NOT NULL
 -- name: DeleteTOTPForUser :execrows
 DELETE FROM user_totp WHERE user_id = $1;
 
--- name: CreateRecoveryCode :one
+-- name: CreateRecoveryCode :exec
 INSERT INTO user_recovery_codes (id, user_id, code_hash)
-VALUES ($1, $2, $3)
-RETURNING *;
+VALUES ($1, $2, $3);
 
 -- name: ConsumeRecoveryCode :one
 -- Spend one code, exactly once.
@@ -77,6 +75,6 @@ RETURNING *;
 DELETE FROM user_recovery_codes WHERE user_id = $1;
 
 -- name: CountLiveRecoveryCodes :one
--- Served by user_recovery_codes_live_idx (000014). Read by the profile response and by the regenerate
--- path, so it scales with the codes an account has left rather than with every set it has ever had.
+-- Served by user_recovery_codes_live_idx (000014). One caller — the profile response — so it scales with
+-- the codes an account has left rather than with every set it has ever had.
 SELECT count(*) FROM user_recovery_codes WHERE user_id = $1 AND used_at IS NULL;

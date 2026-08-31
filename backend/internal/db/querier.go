@@ -70,8 +70,8 @@ type Querier interface {
 	// Called after LockInstanceBootstrap and inside the same transaction as the insert. Both halves are
 	// required: the lock is what makes the count a decision rather than an observation.
 	CountInstanceAdmins(ctx context.Context) (int64, error)
-	// Served by user_recovery_codes_live_idx (000014). Read by the profile response and by the regenerate
-	// path, so it scales with the codes an account has left rather than with every set it has ever had.
+	// Served by user_recovery_codes_live_idx (000014). One caller — the profile response — so it scales with
+	// the codes an account has left rather than with every set it has ever had.
 	CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error)
 	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
 	// Scoped API token queries.
@@ -123,7 +123,7 @@ type Querier interface {
 	// A token is single-use and short-lived, and every one of these statements is written so that property
 	// holds in SQL rather than in whichever Go path remembered to check it.
 	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) (PasswordResetToken, error)
-	CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) (UserRecoveryCode, error)
+	CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) error
 	// Refresh-session queries.
 	//
 	// A session is one device's refresh-token family. Rotation replaces a row with a successor and links the
@@ -490,7 +490,7 @@ type Querier interface {
 	// half-way and started again. Confirming is what makes a factor real, so replacing an *unconfirmed* row
 	// costs nothing — and replacing a confirmed one is prevented by the caller, which requires the current
 	// factor before it will touch an account that already has one.
-	UpsertTOTPEnrollment(ctx context.Context, arg UpsertTOTPEnrollmentParams) (UserTotp, error)
+	UpsertTOTPEnrollment(ctx context.Context, arg UpsertTOTPEnrollmentParams) error
 	UserExistsByEmail(ctx context.Context, email string) (bool, error)
 	// Is this username claimed, by an account or by a registration that created none?
 	//

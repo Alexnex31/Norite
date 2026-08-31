@@ -71,8 +71,8 @@ const countLiveRecoveryCodes = `-- name: CountLiveRecoveryCodes :one
 SELECT count(*) FROM user_recovery_codes WHERE user_id = $1 AND used_at IS NULL
 `
 
-// Served by user_recovery_codes_live_idx (000014). Read by the profile response and by the regenerate
-// path, so it scales with the codes an account has left rather than with every set it has ever had.
+// Served by user_recovery_codes_live_idx (000014). One caller — the profile response — so it scales with
+// the codes an account has left rather than with every set it has ever had.
 func (q *Queries) CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error) {
 	row := q.db.QueryRow(ctx, countLiveRecoveryCodes, userID)
 	var count int64
@@ -80,10 +80,9 @@ func (q *Queries) CountLiveRecoveryCodes(ctx context.Context, userID int64) (int
 	return count, err
 }
 
-const createRecoveryCode = `-- name: CreateRecoveryCode :one
+const createRecoveryCode = `-- name: CreateRecoveryCode :exec
 INSERT INTO user_recovery_codes (id, user_id, code_hash)
 VALUES ($1, $2, $3)
-RETURNING id, user_id, code_hash, used_at, created_at
 `
 
 type CreateRecoveryCodeParams struct {
@@ -92,17 +91,9 @@ type CreateRecoveryCodeParams struct {
 	CodeHash []byte
 }
 
-func (q *Queries) CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) (UserRecoveryCode, error) {
-	row := q.db.QueryRow(ctx, createRecoveryCode, arg.ID, arg.UserID, arg.CodeHash)
-	var i UserRecoveryCode
-	err := row.Scan(
-		&i.ID,
-		&i.UserID,
-		&i.CodeHash,
-		&i.UsedAt,
-		&i.CreatedAt,
-	)
-	return i, err
+func (q *Queries) CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) error {
+	_, err := q.db.Exec(ctx, createRecoveryCode, arg.ID, arg.UserID, arg.CodeHash)
+	return err
 }
 
 const deleteRecoveryCodesForUser = `-- name: DeleteRecoveryCodesForUser :execrows
@@ -181,13 +172,12 @@ func (q *Queries) MarkTOTPStepUsed(ctx context.Context, arg MarkTOTPStepUsedPara
 	return result.RowsAffected(), nil
 }
 
-const upsertTOTPEnrollment = `-- name: UpsertTOTPEnrollment :one
+const upsertTOTPEnrollment = `-- name: UpsertTOTPEnrollment :exec
 
 INSERT INTO user_totp (user_id, secret_encrypted)
 VALUES ($1, $2)
 ON CONFLICT (user_id) DO UPDATE
 SET secret_encrypted = EXCLUDED.secret_encrypted, confirmed_at = NULL, created_at = now()
-RETURNING user_id, secret_encrypted, confirmed_at, last_used_step, created_at
 `
 
 type UpsertTOTPEnrollmentParams struct {
@@ -205,15 +195,7 @@ type UpsertTOTPEnrollmentParams struct {
 // half-way and started again. Confirming is what makes a factor real, so replacing an *unconfirmed* row
 // costs nothing — and replacing a confirmed one is prevented by the caller, which requires the current
 // factor before it will touch an account that already has one.
-func (q *Queries) UpsertTOTPEnrollment(ctx context.Context, arg UpsertTOTPEnrollmentParams) (UserTotp, error) {
-	row := q.db.QueryRow(ctx, upsertTOTPEnrollment, arg.UserID, arg.SecretEncrypted)
-	var i UserTotp
-	err := row.Scan(
-		&i.UserID,
-		&i.SecretEncrypted,
-		&i.ConfirmedAt,
-		&i.LastUsedStep,
-		&i.CreatedAt,
-	)
-	return i, err
+func (q *Queries) UpsertTOTPEnrollment(ctx context.Context, arg UpsertTOTPEnrollmentParams) error {
+	_, err := q.db.Exec(ctx, upsertTOTPEnrollment, arg.UserID, arg.SecretEncrypted)
+	return err
 }

@@ -437,11 +437,6 @@ func GenerateUserCode() (string, error) {
 }
 
 // randomCode draws length characters from userCodeAlphabet.
-//
-// Shared by the device flow's user code (8) and M10's instance invite code (16), which want the same
-// alphabet for the same reason — both are read off one screen and typed into another — and differ only in
-// how long they must resist guessing. Extracted rather than copied so the rejection sampling above is
-// implemented once; a second copy is where a modulo quietly reappears.
 // normalizeTypedCode reduces what somebody typed to the form the database stores.
 //
 // Case, spaces and dashes are things a person gets wrong or a chat client adds on its own, and none of them
@@ -473,6 +468,12 @@ func normalizeTypedCode(raw string, want int) (string, bool) {
 	return b.String(), true
 }
 
+// randomCode draws length characters from userCodeAlphabet, without modulo bias.
+//
+// Shared by the device flow's user code (8) and M10's instance invite code (16), which want the same
+// alphabet for the same reason — both are read off one screen and typed into another — and differ only in
+// how long they must resist guessing. Extracted rather than copied so the rejection sampling is
+// implemented once; a second copy is where a modulo quietly reappears.
 func randomCode(length int) (string, error) {
 	const limit = 256 - (256 % len(userCodeAlphabet)) // 240: the largest whole number of buckets
 
@@ -502,24 +503,11 @@ func randomCode(length int) (string, error) {
 // rather than refused. Anything left that is not in the alphabet is refused, because it cannot be a code
 // this instance issued and there is nothing to look up.
 func ParseUserCode(raw string) (string, error) {
-	var b strings.Builder
-	for _, r := range strings.ToUpper(raw) {
-		switch {
-		case r == '-' || r == ' ' || r == '\t':
-			continue
-		case strings.ContainsRune(userCodeAlphabet, r):
-			b.WriteRune(r)
-		default:
-			return "", ErrDeviceUserCode
-		}
-		if b.Len() > userCodeLength {
-			return "", ErrDeviceUserCode
-		}
-	}
-	if b.Len() != userCodeLength {
+	code, ok := normalizeTypedCode(raw, userCodeLength)
+	if !ok {
 		return "", ErrDeviceUserCode
 	}
-	return b.String(), nil
+	return code, nil
 }
 
 // FormatUserCode renders a stored code for display, grouped so it can be read aloud and typed in halves.

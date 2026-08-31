@@ -129,10 +129,9 @@ func TestAChallengeAloneIsNotASession(t *testing.T) {
 // test says so, because "by construction" is a claim that stops being true when somebody moves a check.
 func TestAFailedLoginIsUnchangedByTheSecondFactor(t *testing.T) {
 	a := newAPI(t, auth.RegistrationOpen)
-	plain := a.newAccount("grace", "grace@example.com", "device-1")
+	a.newAccount("grace", "grace@example.com", "device-1")
 	guarded := a.newAccount("ada", "ada@example.com", "device-1")
 	enableTwoFactor(t, a, guarded.Tokens.AccessToken)
-	_ = plain
 
 	for name, email := range map[string]string{
 		"an account with a factor":   "ada@example.com",

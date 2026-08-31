@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/pquerna/otp"
+	"github.com/pquerna/otp/hotp"
 	"github.com/pquerna/otp/totp"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
@@ -28,16 +29,20 @@ import (
 // So the factor is not a check that session-minting code is expected to call. It is a *value that
 // session-minting code cannot proceed without*, and which nothing outside this file can construct:
 // factorProof has no exported fields, no constructor but the two below, and the zero value authorizes
-// nothing. startSession and ApproveDeviceAuthorization take one. A future third way to start a session
-// will not compile until its author has obtained a proof, which is the only form of "don't forget" that
-// actually works.
+// nothing. startSession takes one, and so does issueDeviceApprovalToken. A future third way to start a
+// session will not compile until its author has obtained a proof, which is the only form of "don't forget"
+// that actually works.
 //
 // # Where the gate is not
 //
 // RedeemDeviceCode mints a session and takes no proof, deliberately. The waiting CLI has held its device
-// code since before a browser was involved and there is nobody at that terminal to type six digits; the
-// factor was proved in the browser, at approval, which is why ApproveDeviceAuthorization is the function
-// that requires the proof. Gating redemption would demand a code from a machine with nobody at it.
+// code since before a browser was involved and there is nobody at that terminal to type six digits.
+//
+// The factor is proved in the browser instead — and because approving is a *separate request* from
+// authenticating, a proof cannot be carried into it. So the gate is not on ApproveDeviceAuthorization,
+// which is where this comment used to say it was: it is on issueDeviceApprovalToken, one request earlier.
+// That token's whole meaning is "this browser has finished proving who it is", and it cannot be minted
+// without a proof, so no token asserting that can exist for an account whose factor was never asked for.
 //
 // Refresh takes no proof either. The session it rotates proved the factor when it was established, and
 // asking again every fifteen minutes would make the factor a nuisance rather than a control.
@@ -113,14 +118,18 @@ func (s *Service) factorSatisfied(ctx context.Context, userID int64) (factorProo
 // are different questions, and answering the first through an error value would invite a caller to treat
 // the second as cosmetic.
 func (s *Service) hasConfirmedFactor(ctx context.Context, userID int64) (bool, error) {
-	enrollment, err := s.queries.GetTOTPForUser(ctx, userID)
+	// Asked of factorSatisfied rather than re-deciding it. The rule — an *unconfirmed* enrollment is not a
+	// factor — is a subtlety that two copies would each have to keep implementing identically, and the day
+	// one gains a condition the other becomes the one that decides a sign-in while this one decides what
+	// the profile shows. One predicate, two questions.
+	_, err := s.factorSatisfied(ctx, userID)
 	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return false, nil
+	case errors.Is(err, ErrTwoFactorRequired):
+		return true, nil
 	case err != nil:
-		return false, fmt.Errorf("looking up the second factor: %w", err)
+		return false, err
 	}
-	return enrollment.ConfirmedAt.Valid, nil
+	return false, nil
 }
 
 // proveFactor verifies a code — a TOTP code, or one of the account's recovery codes.
@@ -152,7 +161,11 @@ func (s *Service) proveFactor(ctx context.Context, userID int64, code string) (f
 		return factorProof{}, err
 	}
 
-	if step, matched := matchTOTPStep(secret, code, s.now().UTC()); matched {
+	step, matched, err := matchTOTPStep(secret, code, s.now().UTC())
+	if err != nil {
+		return factorProof{}, err
+	}
+	if matched {
 		// Accepted only if this step has not been spent. RFC 6238 §5.2 makes single use a MUST, and the
 		// reason is concrete: without it a code stays good for its whole window, so a phishing page that
 		// harvests a password and a code has about ninety seconds to use both — which is the attack a
@@ -184,39 +197,42 @@ const (
 	totpSkew   = 1
 )
 
-// totpOpts is the one description of this instance's TOTP parameters.
-//
-// Shared by generation and verification rather than written twice: two copies of an algorithm, a digit
-// count and a period is two chances for a code that validates nowhere.
-func totpOpts() totp.ValidateOpts {
-	return totp.ValidateOpts{
-		Period:    totpPeriod,
-		Skew:      totpSkew,
-		Digits:    otp.DigitsSix,
-		Algorithm: otp.AlgorithmSHA1,
-	}
-}
-
 // matchTOTPStep reports which time-step a code belongs to, if any.
 //
 // totp.ValidateCustom answers only yes or no, and single-use needs to know *which* step matched so it can
-// be recorded. So the skew window is walked here instead — the same work that function does internally,
-// with the answer kept.
+// be recorded. So the skew window is walked here — but each step is checked by hotp.ValidateCustom, which
+// is the library's "validate one specific counter" primitive and is what totp.ValidateCustom calls
+// internally.
 //
-// The comparison is constant-time. The code is attacker-supplied and the expected value is derived from
-// the secret, which is exactly the shape where a short-circuiting compare leaks.
-func matchTOTPStep(secret, code string, now time.Time) (int64, bool) {
+// Written by hand first, and that was a mistake worth recording. The hand-rolled version compared
+// GenerateCodeCustom's output in constant time, which is the part people worry about, and lost two things
+// the library does before it gets there: it trims surrounding whitespace, so a code pasted with a trailing
+// space fails against every step and reads as simply wrong; and it length-checks before computing, so a
+// malformed input costs nothing. Replacing a vendored, tested primitive with twenty lines is how a
+// regression like that arrives — and this one would have looked exactly like a user typing the wrong code.
+//
+// The base32 error is returned rather than swallowed. It cannot depend on which step is being tried, so
+// the hand-rolled loop's `continue` retried the same failure three times and reported it as an invalid
+// code — leaving a corrupt secret indistinguishable from a wrong clock, with nothing logged.
+func matchTOTPStep(secret, code string, now time.Time) (int64, bool, error) {
+	opts := hotp.ValidateOpts{Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1}
+
 	for offset := -totpSkew; offset <= totpSkew; offset++ {
-		at := now.Add(time.Duration(offset) * totpPeriod * time.Second)
-		want, err := totp.GenerateCodeCustom(secret, at, totpOpts())
-		if err != nil {
-			continue
-		}
-		if constantTimeEquals([]byte(want), []byte(code)) {
-			return at.Unix() / totpPeriod, true
+		step := now.Unix()/totpPeriod + int64(offset)
+
+		ok, err := hotp.ValidateCustom(code, uint64(step), secret, opts)
+		switch {
+		case errors.Is(err, otp.ErrValidateInputInvalidLength):
+			// Not a code at all — a recovery code, or a typo. Not an error about the account.
+			return 0, false, nil
+		case err != nil:
+			// The secret itself, which is the same for every step. Reported rather than retried.
+			return 0, false, fmt.Errorf("validating a totp code: %w", err)
+		case ok:
+			return step, true, nil
 		}
 	}
-	return 0, false
+	return 0, false, nil
 }
 
 // proveRecoveryCode spends one of the account's recovery codes.
@@ -265,7 +281,7 @@ func (s *Service) BeginTOTPEnrollment(ctx context.Context, userID int64, account
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := s.queries.UpsertTOTPEnrollment(ctx, db.UpsertTOTPEnrollmentParams{
+	if err := s.queries.UpsertTOTPEnrollment(ctx, db.UpsertTOTPEnrollmentParams{
 		UserID:          userID,
 		SecretEncrypted: sealed,
 	}); err != nil {
@@ -296,7 +312,10 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID int64, code 
 	if err != nil {
 		return nil, err
 	}
-	step, matched := matchTOTPStep(secret, code, s.now().UTC())
+	step, matched, err := matchTOTPStep(secret, code, s.now().UTC())
+	if err != nil {
+		return nil, err
+	}
 	if !matched {
 		return nil, ErrInvalidFactorCode
 	}
@@ -419,7 +438,7 @@ func (s *Service) writeRecoveryCodes(ctx context.Context, q *db.Queries, userID 
 		if err != nil {
 			return fmt.Errorf("generating a recovery code ID: %w", err)
 		}
-		if _, err := q.CreateRecoveryCode(ctx, db.CreateRecoveryCodeParams{
+		if err := q.CreateRecoveryCode(ctx, db.CreateRecoveryCodeParams{
 			ID:       int64(id),
 			UserID:   userID,
 			CodeHash: hash,

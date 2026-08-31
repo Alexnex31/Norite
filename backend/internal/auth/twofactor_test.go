@@ -1,12 +1,15 @@
 package auth
 
 import (
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
 
 // nextStepCode is a code for the step *after* now.
@@ -146,8 +149,8 @@ func TestDisablingTheFactorRevokesTheOtherSessions(t *testing.T) {
 	user, keep := registerAndLogin(t, svc, "ada@example.com", "laptop")
 	secret, _ := enableFactor(t, svc, user.ID, "ada@example.com")
 
-	other, err := svc.startSession(t.Context(), snowflakeOf(user.ID), "phone", "ada's phone",
-		netipNothing(), provedFactor(user.ID))
+	other, err := svc.startSession(t.Context(), snowflake.ID(user.ID), "phone", "ada's phone",
+		netip.Addr{}, provedFactor(user.ID))
 	require.NoError(t, err)
 
 	actor, err := svc.AuthenticateAccessToken(t.Context(), keep.AccessToken)
@@ -222,4 +225,43 @@ func TestAnEarlierStepIsRefusedAfterALaterOne(t *testing.T) {
 
 	_, err = svc.proveFactor(t.Context(), user.ID, earlier)
 	assert.ErrorIs(t, err, ErrInvalidFactorCode, "a step behind the last accepted one is spent")
+}
+
+// A code with whitespace around it is the code, not a wrong one.
+//
+// This regressed when matchTOTPStep was hand-rolled: comparing GenerateCodeCustom's output directly loses
+// the TrimSpace the library does first, so a code pasted with a trailing space failed against every step
+// and reported as simply wrong — indistinguishable, to the person typing it, from getting it wrong.
+func TestACodeWithWhitespaceIsStillTheCode(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	secret, _ := enableFactor(t, svc, user.ID, "ada@example.com")
+
+	code := nextStepCode(t, secret)
+	_, err := svc.proveFactor(t.Context(), user.ID, " "+code+"\n")
+	assert.NoError(t, err, "surrounding whitespace must not make a good code look wrong")
+}
+
+// A secret that decrypts but is not valid base32 is an error about the account, not about the code.
+//
+// The hand-rolled matcher swallowed it with a `continue` and retried the same failure once per step, so
+// every code the account typed answered "that code is not valid", permanently, with nothing logged — and
+// an operator had no way to tell it from a user with a wrong clock.
+func TestACorruptSecretIsReportedRatherThanReadAsAWrongCode(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
+	enableFactor(t, svc, user.ID, "ada@example.com")
+
+	// Sealed correctly, so it opens — and is nonsense inside, which is the case ErrSealedSecretInvalid
+	// cannot catch.
+	sealed, err := svc.issuer.sealTOTPSecret("not-valid-base32-!!!")
+	require.NoError(t, err)
+	_, err = svc.pool.Exec(t.Context(),
+		"UPDATE user_totp SET secret_encrypted = $1 WHERE user_id = $2", sealed, user.ID)
+	require.NoError(t, err)
+
+	_, err = svc.proveFactor(t.Context(), user.ID, "123456")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrInvalidFactorCode,
+		"a broken secret is the instance's problem to see, not the user's to retype")
 }

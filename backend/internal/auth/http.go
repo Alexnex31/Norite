@@ -63,9 +63,14 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/password/reset/request", h.requestPasswordReset)
 	r.Post("/password/reset", h.confirmPasswordReset)
 	r.Post("/verify/request", h.requestEmailVerification)
-	// The second half of a sign-in that owed a factor. Public for the same reason /login is — the caller
-	// holds a challenge, not a session — and mounted by the caller behind its own stricter bucket, because
-	// a six-digit code is the narrowest guessing surface in this API.
+	// The second half of a sign-in that owed a factor. Public for the same reason /login is: the caller
+	// holds a challenge, not a session.
+	//
+	// It shares the /auth rate-limit bucket rather than getting one of its own, which is the stricter
+	// arrangement and not the looser one. A dedicated bucket would give somebody guessing six digits a
+	// second budget alongside the one /login already gives them; sharing means the two compete. The
+	// device-poll bucket exists for the opposite case — polling is legitimately repetitive and the strict
+	// bucket would throttle a well-behaved client — and submitting a code is not.
 	r.Post("/2fa/verify", h.verifyTwoFactor)
 
 	// Authenticated, and changing the account's own security state.
@@ -282,23 +287,18 @@ type twoFactorCodesResponse struct {
 	RecoveryCodes []string `json:"recovery_codes"`
 }
 
-// disableTwoFactorResponse reports what turning the factor off took with it.
+// revocationCountsResponse is a RevocationResult rendered.
 //
-// The same counts logoutAll reports, for the same reason: disabling revokes every other session through
-// the primitive, and "your bots have stopped" is not something a client can infer from a 204.
-type disableTwoFactorResponse struct {
-	SessionsRevoked      int64 `json:"sessions_revoked"`
-	APITokensRevoked     int64 `json:"api_tokens_revoked"`
-	ExchangeCodesRevoked int64 `json:"oauth_exchange_codes_revoked"`
-	DeviceCodesRevoked   int64 `json:"device_authorizations_revoked"`
-}
-
-// logoutAllResponse says what signing out everywhere else actually did.
+// One type for one service value, shared by "sign out everywhere else" and "disable the second factor",
+// which revoke exactly the same things. It was briefly two identical structs, and the copies had already
+// drifted in the commit that made the second — which is the argument: when M18 adds force-closed gateway
+// connections to revokeEverything and M101 adds E2E device trust, the count goes in one place, not two,
+// and neither endpoint can end up reporting a smaller number than the primitive actually revoked.
 //
 // Counted rather than a bare 204, because this action revokes more than its name suggests — API tokens go
 // with the sessions — and a client that cannot see the number cannot tell somebody their bots just
 // stopped.
-type logoutAllResponse struct {
+type revocationCountsResponse struct {
 	SessionsRevoked  int64 `json:"sessions_revoked"`
 	APITokensRevoked int64 `json:"api_tokens_revoked"`
 	// The other two the primitive revokes. Reported because the primitive counts them and a caller that
@@ -699,7 +699,7 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusOK, logoutAllResponse{
+	httpx.WriteJSON(w, r, http.StatusOK, revocationCountsResponse{
 		SessionsRevoked:      result.Sessions,
 		APITokensRevoked:     result.APITokens,
 		ExchangeCodesRevoked: result.ExchangeCodes,
@@ -925,9 +925,8 @@ func clientAddr(r *http.Request) netip.Addr {
 
 // verifyTwoFactor finishes a sign-in that owed a factor.
 //
-// Public, like login: what the caller holds is a challenge, not a session. Mounted behind its own stricter
-// bucket by the router, because six digits is the narrowest guessing surface in this API and the codes are
-// live for about ninety seconds with skew.
+// Public, like login: what the caller holds is a challenge, not a session. It shares /auth's strict bucket
+// rather than having one of its own — see the route mounting for why that is the stricter choice.
 func (h *Handler) verifyTwoFactor(w http.ResponseWriter, r *http.Request) {
 	var req twoFactorVerifyRequest
 	if !h.decode(w, r, &req) {
@@ -994,7 +993,7 @@ func (h *Handler) disableTwoFactor(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusOK, disableTwoFactorResponse{
+	httpx.WriteJSON(w, r, http.StatusOK, revocationCountsResponse{
 		SessionsRevoked:      result.Sessions,
 		APITokensRevoked:     result.APITokens,
 		ExchangeCodesRevoked: result.ExchangeCodes,

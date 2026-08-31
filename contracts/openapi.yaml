@@ -1615,17 +1615,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  - sessions_revoked
-                  - api_tokens_revoked
-                  - oauth_exchange_codes_revoked
-                  - device_authorizations_revoked
-                properties:
-                  sessions_revoked: { type: integer, format: int64 }
-                  api_tokens_revoked: { type: integer, format: int64 }
-                  oauth_exchange_codes_revoked: { type: integer, format: int64 }
-                  device_authorizations_revoked: { type: integer, format: int64 }
+                $ref: "#/components/schemas/RevocationCounts"
         "401":
           description: The code did not match, or this session has been signed out.
           content:
@@ -1781,28 +1771,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [sessions_revoked, api_tokens_revoked, oauth_exchange_codes_revoked,
-                           device_authorizations_revoked]
-                additionalProperties: false
-                properties:
-                  sessions_revoked:
-                    type: integer
-                    description: Session records revoked, across every device but this one.
-                  api_tokens_revoked:
-                    type: integer
-                    description: >
-                      API tokens revoked. Reported separately because it is the count a person needs to see
-                      to understand why a bot stopped.
-                  oauth_exchange_codes_revoked:
-                    type: integer
-                    description: Outstanding OAuth exchange codes cancelled. Usually zero.
-                  device_authorizations_revoked:
-                    type: integer
-                    description: >
-                      Device sign-ins that had been approved but not yet collected. Worth surfacing:
-                      somebody who approved a sign-in on a shared machine and then reached for this has
-                      just cancelled it, and nothing else would tell them.
+                $ref: "#/components/schemas/RevocationCounts"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: The credential is an API token. See the description.
@@ -2380,6 +2349,42 @@ components:
           description: >
             How many unspent recovery codes the account has. Null rather than zero when there is no factor
             at all — zero would read as "you have run out" rather than "there is nothing to run out of".
+
+    RevocationCounts:
+      description: >
+        What one call to the revocation primitive removed. Shared by `POST /auth/logout/all` and
+        `DELETE /auth/2fa/totp`, which revoke exactly the same set — one schema for one server-side value,
+        so that when M18 adds force-closed gateway connections and M101 adds E2E device trust, the count
+        arrives in both places at once rather than in whichever was remembered.
+      type: object
+      required:
+        - sessions_revoked
+        - api_tokens_revoked
+        - oauth_exchange_codes_revoked
+        - device_authorizations_revoked
+      additionalProperties: false
+      properties:
+        sessions_revoked:
+          type: integer
+          format: int64
+          description: Session records revoked, across every device but this one.
+        api_tokens_revoked:
+          type: integer
+          format: int64
+          description: >
+            API tokens revoked. Reported separately because it is the count a person needs to see to
+            understand why a bot stopped.
+        oauth_exchange_codes_revoked:
+          type: integer
+          format: int64
+          description: Outstanding OAuth exchange codes cancelled. Usually zero.
+        device_authorizations_revoked:
+          type: integer
+          format: int64
+          description: >
+            Device sign-ins that had been approved but not yet collected. Worth surfacing: somebody who
+            approved a sign-in on a shared machine and then reached for this has just cancelled it, and
+            nothing else would tell them.
 
     RecoveryCodes:
       description: >
