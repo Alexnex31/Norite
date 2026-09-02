@@ -63,20 +63,128 @@ type account struct {
 	Username string `json:"username"`
 }
 
-// login exchanges a password for a token pair.
-func (c *client) login(ctx context.Context, req loginRequest) (tokenPair, error) {
-	var pair tokenPair
-	err := c.Do(ctx, http.MethodPost, "/api/v1/auth/login", "", req, &pair)
+// twoFactorChallenge is the 202 an account with a second factor answers a correct password with.
+//
+// Not a credential: it authorizes nothing without a code, and the instance issued it only because the
+// password was already right. It is carried back to /auth/2fa/verify unchanged.
+type twoFactorChallenge struct {
+	Challenge string    `json:"challenge"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// signIn is what a sign-in attempt resolved to: a session, or a demand for a second factor. Never both.
+type signIn struct {
+	Pair      tokenPair
+	Challenge twoFactorChallenge
+}
+
+// owesFactor reports whether this attempt stopped one step short of a session.
+func (s signIn) owesFactor() bool { return s.Challenge.Challenge != "" }
+
+// login exchanges a password for a token pair, or for a second-factor challenge.
+//
+// A 429 is deliberately left to the instance's own wording here, unlike the OAuth exchange. A password
+// login is one request against the auth bucket, so the instance's message is the informative one — and
+// TestAnErrorFromTheInstanceCannotActOnTheTerminal pins that this path surfaces it, sanitized, because
+// this is the CLI's most direct route from a stranger's server to a terminal.
+func (c *client) login(ctx context.Context, req loginRequest) (signIn, error) {
+	return c.resolveSignIn(ctx, "/api/v1/auth/login", req, ErrBadCredentials, nil)
+}
+
+// resolveSignIn performs a call that answers either 200 with a pair or 202 with a challenge.
+//
+// Shared by the password login and the OAuth exchange because both mint a session on the backend and both
+// therefore owe the same factor — and because two copies of a two-status branch is where one of them
+// quietly keeps treating 202 as success.
+//
+// refused replaces the instance's 401; tooMany replaces its 429, or is nil to pass the instance's own
+// message through. The two callers differ on the second and that difference is deliberate, so it is a
+// parameter rather than a shared behavior one of them silently inherited.
+func (c *client) resolveSignIn(ctx context.Context, path string, req any, refused, tooMany error,
+) (signIn, error) {
+	// One flat struct, and deliberately not two embedded ones. A response is one shape or the other and the
+	// status says which, so the unused fields stay zero — but tokenPair and twoFactorChallenge both carry
+	// `expires_at`, and encoding/json drops fields that conflict at equal depth rather than reporting it.
+	// Embedding would therefore have decoded neither expiry, silently, on both paths.
+	var body struct {
+		AccessToken  string    `json:"access_token"`
+		RefreshToken string    `json:"refresh_token"`
+		TokenType    string    `json:"token_type"`
+		Challenge    string    `json:"challenge"`
+		ExpiresAt    time.Time `json:"expires_at"`
+	}
+	status, err := c.DoStatus(ctx, http.MethodPost, path, "", req, &body)
 	if err != nil {
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
-			return tokenPair{}, ErrBadCredentials
+		if errors.As(err, &apiErr) {
+			switch apiErr.Status {
+			case http.StatusUnauthorized:
+				return signIn{}, refused
+			case http.StatusTooManyRequests:
+				if tooMany != nil {
+					return signIn{}, tooMany
+				}
+			}
+		}
+		return signIn{}, err
+	}
+
+	if status == http.StatusAccepted {
+		if body.Challenge == "" {
+			return signIn{}, errors.New(
+				"the instance asked for a second factor but sent no challenge to answer it with")
+		}
+		return signIn{Challenge: twoFactorChallenge{
+			Challenge: body.Challenge, ExpiresAt: body.ExpiresAt,
+		}}, nil
+	}
+
+	if body.AccessToken == "" || body.RefreshToken == "" {
+		// A 200 with a missing half means this is not the API it claims to be — a captive portal or a
+		// proxy, most likely. Better said here than as a confusing failure two steps later.
+		return signIn{}, errors.New("the instance returned an incomplete token pair")
+	}
+	return signIn{Pair: tokenPair{
+		AccessToken:  body.AccessToken,
+		RefreshToken: body.RefreshToken,
+		TokenType:    body.TokenType,
+		ExpiresAt:    body.ExpiresAt,
+	}}, nil
+}
+
+// twoFactorVerifyRequest completes a sign-in that owed a factor.
+type twoFactorVerifyRequest struct {
+	Challenge string `json:"challenge"`
+	Code      string `json:"code"`
+}
+
+// ErrBadFactorCode is the instance refusing a second-factor code.
+//
+// One message for a wrong code, an expired one, a spent one and a challenge that has run out, because the
+// instance answers all four identically and inventing a finer distinction here would report one it
+// deliberately does not make.
+var ErrBadFactorCode = errors.New("that code was not accepted")
+
+// errTooManySignIns is the shared wording for a rate-limited sign-in step.
+var errTooManySignIns = errors.New("this instance is rate-limiting sign-ins; wait a minute and try again")
+
+// verifyTwoFactor trades a challenge and a code for the token pair the login did not return.
+func (c *client) verifyTwoFactor(ctx context.Context, req twoFactorVerifyRequest) (tokenPair, error) {
+	var pair tokenPair
+	err := c.Do(ctx, http.MethodPost, "/api/v1/auth/2fa/verify", "", req, &pair)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.Status {
+			case http.StatusUnauthorized:
+				return tokenPair{}, ErrBadFactorCode
+			case http.StatusTooManyRequests:
+				return tokenPair{}, errTooManySignIns
+			}
 		}
 		return tokenPair{}, err
 	}
 	if pair.AccessToken == "" || pair.RefreshToken == "" {
-		// A 200 with a missing half means this is not the API it claims to be — a captive portal or a
-		// proxy, most likely. Better said here than as a confusing failure two steps later.
 		return tokenPair{}, errors.New("the instance returned an incomplete token pair")
 	}
 	return pair, nil
@@ -98,30 +206,14 @@ type oauthExchangeRequest struct {
 var ErrOAuthCodeRefused = errors.New(
 	"that sign-in could not be completed; run `norite login` again")
 
-// exchangeOAuthCode trades the one-time code for a token pair.
-func (c *client) exchangeOAuthCode(ctx context.Context, req oauthExchangeRequest) (tokenPair, error) {
-	var pair tokenPair
-	err := c.Do(ctx, http.MethodPost, "/api/v1/auth/oauth/exchange", "", req, &pair)
-	if err != nil {
-		var apiErr *APIError
-		if errors.As(err, &apiErr) {
-			switch apiErr.Status {
-			case http.StatusUnauthorized:
-				return tokenPair{}, ErrOAuthCodeRefused
-			case http.StatusTooManyRequests:
-				// Worth its own wording: a loopback sign-in is three requests against a bucket the browser
-				// shares, since both come from this machine's address. "The instance answered 429" tells
-				// somebody nothing they can act on.
-				return tokenPair{}, errors.New(
-					"this instance is rate-limiting sign-ins; wait a minute and try again")
-			}
-		}
-		return tokenPair{}, err
-	}
-	if pair.AccessToken == "" || pair.RefreshToken == "" {
-		return tokenPair{}, errors.New("the instance returned an incomplete token pair")
-	}
-	return pair, nil
+// exchangeOAuthCode trades the one-time code for a token pair, or for a second-factor challenge.
+//
+// A provider proves control of a provider account. It does not prove possession of this account's second
+// factor, so this call owes one exactly as a password login does — the 429 wording is worth keeping,
+// because a loopback sign-in is three requests against a bucket the browser shares (both come from this
+// machine's address) and "the instance answered 429" tells somebody nothing they can act on.
+func (c *client) exchangeOAuthCode(ctx context.Context, req oauthExchangeRequest) (signIn, error) {
+	return c.resolveSignIn(ctx, "/api/v1/auth/oauth/exchange", req, ErrOAuthCodeRefused, errTooManySignIns)
 }
 
 // deviceCodeRequest starts a device-code sign-in.

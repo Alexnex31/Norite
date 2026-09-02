@@ -147,21 +147,35 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	var pair tokenPair
+	var attempt signIn
 	var fallbackName string
 	switch {
 	case r.chooseDeviceCode():
+		// The device flow owes no factor here: it was proved in the browser before the approval, which is
+		// why RedeemDeviceCode is ungated on the backend. What comes back is already a session.
+		var pair tokenPair
 		pair, err = r.signInWithDeviceCode(ctx, s)
+		attempt = signIn{Pair: pair}
 	case r.Options.Provider != "":
-		pair, err = r.signInWithOAuth(ctx, s, r.Options.Provider)
+		attempt, err = r.signInWithOAuth(ctx, s, r.Options.Provider)
 	default:
-		pair, fallbackName, err = r.signInWithPassword(ctx, s)
+		attempt, fallbackName, err = r.signInWithPassword(ctx, s)
 	}
 	if err != nil {
 		return err
 	}
 
-	return r.finish(ctx, s, pair, fallbackName)
+	// One place, rather than once per flow. Both browser-less paths above can come back owing a factor —
+	// a password login and an OAuth exchange alike — and answering it in each would be two chances to
+	// forget, which is the shape the backend's own factorProof exists to prevent.
+	if attempt.owesFactor() {
+		attempt.Pair, err = r.completeTwoFactor(ctx, s, attempt.Challenge)
+		if err != nil {
+			return err
+		}
+	}
+
+	return r.finish(ctx, s, attempt.Pair, fallbackName)
 }
 
 // chooseDeviceCode decides between the two browser flows, and announces the decision when it is one
@@ -251,26 +265,87 @@ func (r *Runner) prepare() (session, error) {
 //
 // The second return is the address that was typed, shown if the /users/@me lookup fails. The OAuth path has
 // no equivalent — it never learns an address — and passes an empty one.
-func (r *Runner) signInWithPassword(ctx context.Context, s session) (tokenPair, string, error) {
+func (r *Runner) signInWithPassword(ctx context.Context, s session) (signIn, string, error) {
 	email, err := r.resolveEmail()
 	if err != nil {
-		return tokenPair{}, "", err
+		return signIn{}, "", err
 	}
 	password, err := r.resolvePassword()
 	if err != nil {
-		return tokenPair{}, "", err
+		return signIn{}, "", err
 	}
 
-	pair, err := s.api.login(ctx, loginRequest{
+	attempt, err := s.api.login(ctx, loginRequest{
 		Email:      email,
 		Password:   password,
 		DeviceID:   s.deviceID,
 		DeviceName: s.deviceName,
 	})
 	if err != nil {
-		return tokenPair{}, "", err
+		return signIn{}, "", err
 	}
-	return pair, email, nil
+	return attempt, email, nil
+}
+
+// maxFactorAttempts is how many codes one sign-in will ask for before giving up.
+//
+// Three rather than one, because a code that has just rolled over is the ordinary mistake and making
+// somebody retype their password for it is a poor trade. Bounded rather than unlimited because every
+// attempt spends the instance's auth rate limit, and a prompt that never gives up turns a mistyped
+// challenge into a loop nobody can read their way out of. The challenge itself lives five minutes, so
+// running out here is recoverable by running the command again.
+const maxFactorAttempts = 3
+
+// completeTwoFactor answers a challenge and returns the session it was standing in for.
+//
+// Deliberately no environment variable for the code, unlike NORITE_PASSWORD. A second factor exists to be
+// something other than a stored secret, so a static one in the environment would be a way of turning it
+// back into a password — and the honest answer for an unattended machine is --device-code, where a person
+// at a browser proves the factor once.
+func (r *Runner) completeTwoFactor(ctx context.Context, s session, challenge twoFactorChallenge,
+) (tokenPair, error) {
+	if !r.Interactive {
+		return tokenPair{}, fmt.Errorf("%w: this account asks for a second factor, and there is no "+
+			"terminal to type the code into. (--device-code completes the sign-in in a browser on "+
+			"another device.)", ErrNoTerminal)
+	}
+
+	r.printf("This account has a second factor.\n")
+	r.printf("Enter the code from your authenticator app, or one of your recovery codes.\n")
+
+	var lastErr error
+	for attempt := range maxFactorAttempts {
+		code, err := r.ReadLine("Code: ")
+		if err != nil {
+			return tokenPair{}, err
+		}
+		code = strings.TrimSpace(code)
+		if code == "" {
+			// Refused locally rather than sent, for the reason an empty password is: the instance answers
+			// a blank code with the same deliberately vague refusal it gives a wrong one, which reads as
+			// "your authenticator is wrong" to somebody who pressed Enter too early.
+			lastErr = errors.New("a code is required")
+		} else {
+			pair, err := s.api.verifyTwoFactor(ctx, twoFactorVerifyRequest{
+				Challenge: challenge.Challenge,
+				Code:      code,
+			})
+			if err == nil {
+				return pair, nil
+			}
+			// Only a refused code is worth another prompt. A rate limit, an expired challenge reported as
+			// something else, or an unreachable instance are not things retyping fixes.
+			if !errors.Is(err, ErrBadFactorCode) {
+				return tokenPair{}, err
+			}
+			lastErr = err
+		}
+
+		if attempt < maxFactorAttempts-1 {
+			r.printf("%s. Try again.\n", lastErr)
+		}
+	}
+	return tokenPair{}, lastErr
 }
 
 // finish is everything below the prompt: who the token belongs to, storing it, and saying so.

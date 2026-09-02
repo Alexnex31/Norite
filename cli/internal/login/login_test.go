@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,15 @@ type fakeInstance struct {
 	meUsername string
 	// logins counts calls to the login endpoint, so a test can assert nothing reached the instance.
 	logins int
+
+	// twoFactor makes the login answer 202 with a challenge instead of a pair, as an account with a
+	// second factor does.
+	twoFactor bool
+	// acceptCode is the only code the verify endpoint accepts. Empty means "accept any non-empty code".
+	acceptCode string
+	// lastVerify is what the verify endpoint received, and verifies counts the attempts.
+	lastVerify twoFactorVerifyRequest
+	verifies   int
 }
 
 func newFakeInstance(t *testing.T) *fakeInstance {
@@ -53,6 +63,31 @@ func newFakeInstance(t *testing.T) *fakeInstance {
 		if f.loginStatus != 0 {
 			w.WriteHeader(f.loginStatus)
 			_, _ = w.Write([]byte(f.loginBody))
+			return
+		}
+		if f.twoFactor {
+			// The shape the backend actually sends: a challenge, an expiry, and no token of any kind.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"two_factor_required": true, "challenge": "eyJ.challenge.token",
+				"expires_at": "2026-01-01T00:05:00Z",
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "eyJ.access.token", "refresh_token": "nrt_stored",
+			"token_type": "Bearer", "expires_at": "2026-01-01T00:00:00Z",
+		})
+	})
+	mux.HandleFunc("/api/v1/auth/2fa/verify", func(w http.ResponseWriter, r *http.Request) {
+		f.verifies++
+		_ = json.NewDecoder(r.Body).Decode(&f.lastVerify)
+		if f.acceptCode != "" && f.lastVerify.Code != f.acceptCode {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"that code is not valid"}}`))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -608,5 +643,131 @@ func assertInertOnATerminal(t *testing.T, s string) {
 	}
 	if !utf8.ValidString(s) {
 		t.Errorf("%q is not valid UTF-8, so a terminal decoding bytes sees whatever byte was sent", s)
+	}
+}
+
+// ---------- M11a's follow-up: a sign-in that owes a second factor ----------
+
+// The gap this closes: the backend answered 202 and the CLI decoded it into an empty token pair, reporting
+// `the instance returned an incomplete token pair` — a message meaning "this is not a Norite API", which
+// blamed the instance for the client's own missing step.
+func TestALoginThatOwesASecondFactorPromptsForACode(t *testing.T) {
+	f := newFakeInstance(t)
+	f.twoFactor = true
+	f.acceptCode = "123456"
+
+	runner, store, out := testRunner(t, f, Options{})
+	runner.ReadLine = answers("ada@example.com", "123456")
+
+	require.NoError(t, runner.Run(t.Context()))
+
+	assert.Equal(t, "eyJ.challenge.token", f.lastVerify.Challenge,
+		"the challenge must be carried back unchanged")
+	assert.Equal(t, "123456", f.lastVerify.Code)
+
+	// And the session is the one the second call returned, stored as any other.
+	record, err := store.LoadRecord()
+	require.NoError(t, err)
+	assert.Equal(t, "ada", record.Username)
+	assert.Contains(t, out.String(), "second factor")
+}
+
+// A recovery code is typed at the same prompt, because the instance accepts both at one endpoint and
+// sending somebody to a different command at the moment they have lost their phone is the one time it
+// must not happen.
+func TestARecoveryCodeIsAcceptedAtTheSamePrompt(t *testing.T) {
+	f := newFakeInstance(t)
+	f.twoFactor = true
+	f.acceptCode = "BCDFGHJKMN"
+
+	runner, _, _ := testRunner(t, f, Options{})
+	runner.ReadLine = answers("ada@example.com", "BCDFGHJKMN")
+
+	require.NoError(t, runner.Run(t.Context()))
+	assert.Equal(t, "BCDFGHJKMN", f.lastVerify.Code)
+}
+
+// A mistyped code is the ordinary mistake — the number rolls over while somebody is reading it — so it is
+// worth a second prompt rather than a re-run that asks for the password again.
+func TestAWrongCodeIsAskedForAgain(t *testing.T) {
+	f := newFakeInstance(t)
+	f.twoFactor = true
+	f.acceptCode = "654321"
+
+	runner, store, _ := testRunner(t, f, Options{})
+	runner.ReadLine = answers("ada@example.com", "000000", "654321")
+
+	require.NoError(t, runner.Run(t.Context()))
+	assert.Equal(t, 2, f.verifies, "the first code was refused and the second accepted")
+	assert.Equal(t, 1, f.logins, "and the password was not sent again")
+
+	_, err := store.LoadRecord()
+	require.NoError(t, err)
+}
+
+// Bounded, though. Every attempt spends the instance's auth rate limit, and a prompt that never gives up
+// turns a challenge nobody can answer into a loop nobody can read their way out of.
+func TestTheCodePromptGivesUpEventually(t *testing.T) {
+	f := newFakeInstance(t)
+	f.twoFactor = true
+	f.acceptCode = "654321"
+
+	runner, store, _ := testRunner(t, f, Options{})
+	runner.ReadLine = answers("ada@example.com", "000000", "111111", "222222", "654321")
+
+	err := runner.Run(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrBadFactorCode)
+	assert.Equal(t, maxFactorAttempts, f.verifies, "it must stop rather than keep asking")
+
+	_, loadErr := store.LoadRecord()
+	assert.ErrorIs(t, loadErr, credentials.ErrNoCredential, "a refused sign-in stores nothing")
+}
+
+// Nothing to type into means saying so, with the flow that needs no terminal — never blocking on input
+// that will never arrive, and never a bare failure that reads as the instance's fault.
+func TestACodeCannotBeAskedForWithoutATerminal(t *testing.T) {
+	f := newFakeInstance(t)
+	f.twoFactor = true
+
+	runner, _, _ := testRunner(t, f, Options{Email: "ada@example.com"})
+	runner.Interactive = false
+	t.Setenv(passwordEnvVar, "a correct passphrase")
+
+	err := runner.Run(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNoTerminal)
+	assert.Contains(t, err.Error(), "--device-code", "the way out has to be named")
+	assert.Zero(t, f.verifies, "and nothing was guessed at")
+}
+
+// A 202 carrying no challenge is not a sign-in the CLI can complete, and must not be reported as one.
+func TestAChallengelessAcceptedResponseIsRefused(t *testing.T) {
+	f := newFakeInstance(t)
+	f.loginStatus = http.StatusAccepted
+	f.loginBody = `{"two_factor_required":true}`
+
+	runner, _, _ := testRunner(t, f, Options{})
+	err := runner.Run(t.Context())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no challenge")
+	assert.Zero(t, f.verifies)
+}
+
+// answers replies to successive prompts in order, failing the test if one more is asked for than planned.
+//
+// The prompts are ordered rather than keyed on their text: the email prompt and the code prompt are two
+// reads from the same reader, and a test that matched on wording would keep passing if the two were
+// swapped.
+func answers(replies ...string) func(string) (string, error) {
+	i := 0
+	return func(string) (string, error) {
+		if i >= len(replies) {
+			return "", fmt.Errorf("unexpected prompt %d: only %d answers were planned", i+1, len(replies))
+		}
+		reply := replies[i]
+		i++
+		return reply, nil
 	}
 }

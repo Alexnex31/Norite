@@ -40,17 +40,20 @@ func providerLabel(provider string) string {
 	return provider
 }
 
-// signInWithOAuth runs the browser flow and returns the pair it produced.
-func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string) (tokenPair, error) {
+// signInWithOAuth runs the browser flow and returns what it resolved to.
+//
+// A pair, or a second-factor challenge: a provider proves control of a provider account and not
+// possession of this account's factor, so the exchange owes one exactly as a password login does.
+func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string) (signIn, error) {
 	listener, err := listenLoopback(r.ports())
 	if err != nil {
-		return tokenPair{}, err
+		return signIn{}, err
 	}
 	defer func() { _ = listener.Close() }()
 
 	verifier, challenge, err := mintFlowBinding()
 	if err != nil {
-		return tokenPair{}, err
+		return signIn{}, err
 	}
 
 	target := authorizeURL(s.instanceURL, provider, challenge, listener.redirectURI())
@@ -70,7 +73,7 @@ func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string
 		r.printf("Opening your browser to sign in. If it does not open, go to:\n\n  %s\n\n", target)
 		if err := r.launchBrowser(ctx, target); err != nil {
 			if failFast {
-				return tokenPair{}, fmt.Errorf(
+				return signIn{}, fmt.Errorf(
 					"could not open a browser (%s), and there is no terminal for anyone to read the "+
 						"sign-in link from; use --device-code, which needs neither",
 					termsafe.Text(err.Error()))
@@ -84,10 +87,10 @@ func (r *Runner) signInWithOAuth(ctx context.Context, s session, provider string
 
 	result, err := listener.wait(ctx)
 	if err != nil {
-		return tokenPair{}, err
+		return signIn{}, err
 	}
 	if result.code == "" {
-		return tokenPair{}, oauthFailure(result.failure)
+		return signIn{}, oauthFailure(result.failure)
 	}
 
 	return s.api.exchangeOAuthCode(ctx, oauthExchangeRequest{
