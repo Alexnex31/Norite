@@ -122,11 +122,63 @@ func TestAChallengeAloneIsNotASession(t *testing.T) {
 		"a challenge without a valid code authorizes nothing: %s", wrong)
 }
 
+// refusedLogin drives a login expected to fail, and asserts the one refusal this package ever gives.
+//
+// Returned so a caller can compare two refusals field by field: request_id is unique per request by
+// design and is the only thing that may differ between them.
+func refusedLogin(t *testing.T, a *api, email, password string) *response {
+	t.Helper()
+
+	resp := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"email": email, "password": password, "device_id": "device-9",
+	})
+	require.Equal(t, http.StatusUnauthorized, resp.Code, "%s: %s", email, resp)
+	assert.Equal(t, "unauthorized", resp.errorBody().Code)
+	assert.Equal(t, "invalid email or password", resp.errorBody().Message,
+		"one message for every failure, whatever the account has")
+	assert.NotContains(t, resp.String(), "two_factor",
+		"a refused credential must not disclose whether the account is guarded")
+	return resp
+}
+
+// newOAuthOnlyAccount creates an account that has never had a password, through the provider signup form.
+//
+// The only way to make one: registration always sets a password, so an account reaches ErrPasswordNotSet
+// solely by being created through a provider.
+func newOAuthOnlyAccount(t *testing.T, a *api, stub *oauthStub, sub, email, username string) tokenPair {
+	t.Helper()
+
+	stub.as(sub, email, true)
+	page, verifier := a.authorizeAndCallbackBound(t)
+	require.Equal(t, http.StatusOK, page.Code, page)
+	require.Contains(t, page.String(), "Choose your username", "this address must be new: %s", page)
+
+	form := url.Values{"signup_token": {hiddenField(t, page, "signup_token")}, "username": {username}}
+	done := a.call(http.MethodPost, "/oauth/signup", form.Encode(),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+	require.Equal(t, http.StatusOK, done.Code, done)
+
+	exchanged := a.call(http.MethodPost, "/api/v1/auth/oauth/exchange", map[string]string{
+		"code": exchangeCodeFromPage(t, done), "flow_verifier": verifier, "device_id": "oauth-device",
+	})
+	require.Equal(t, http.StatusOK, exchanged.Code, exchanged)
+
+	var pair tokenPair
+	exchanged.decode(&pair)
+	require.NotEmpty(t, pair.AccessToken)
+	return pair
+}
+
 // The property this milestone must not break.
 //
 // Every way a login can fail must answer identically whether or not the account has a second factor. The
 // factor is asked about strictly after verifyCredentials succeeds, so this holds by construction — and a
 // test says so, because "by construction" is a claim that stops being true when somebody moves a check.
+//
+// A wrong password is the cheapest of the three ways, and until a review said so it was the only one
+// covered. The two below it are the expensive ones — they do real work before refusing — and they are
+// separate tests rather than sub-tests of this one because the auth limiter allows twenty requests a
+// minute and one test cannot hold all three.
 func TestAFailedLoginIsUnchangedByTheSecondFactor(t *testing.T) {
 	a := newAPI(t, auth.RegistrationOpen)
 	a.newAccount("grace", "grace@example.com", "device-1")
@@ -139,15 +191,55 @@ func TestAFailedLoginIsUnchangedByTheSecondFactor(t *testing.T) {
 		"an address with no account": "nobody@example.com",
 	} {
 		t.Run(name, func(t *testing.T) {
-			resp := a.call(http.MethodPost, "/api/v1/auth/login", map[string]string{
-				"email": email, "password": "not-the-right-password-at-all", "device_id": "device-9",
-			})
-			require.Equal(t, http.StatusUnauthorized, resp.Code, "%s: %s", name, resp)
-			assert.Equal(t, "unauthorized", resp.errorBody().Code)
-			assert.Equal(t, "invalid email or password", resp.errorBody().Message,
-				"one message for every failure, whatever the account has")
+			refusedLogin(t, a, email, "not-the-right-password-at-all")
 		})
 	}
+}
+
+// An account with no password at all, which is the branch that refuses before a password can be wrong.
+//
+// This is the case that would actually catch the regression the test above is written against. Move
+// factorSatisfied up over verifyCredentials and an OAuth-only account with a factor answers 202 to *any*
+// password — disclosing both that it exists and that it is guarded, to somebody who has guessed nothing.
+// The refusal is ErrPasswordNotSet, and it must look exactly like every other one.
+func TestAnAccountWithNoPasswordIsRefusedTheSameWithAFactor(t *testing.T) {
+	a, stub := newOAuthAPI(t, auth.RegistrationOpen)
+
+	plain := newOAuthOnlyAccount(t, a, stub, "google-plain", "plain@example.com", "plain")
+	require.NotEmpty(t, plain.AccessToken, "both accounts must exist before either is probed")
+	guarded := newOAuthOnlyAccount(t, a, stub, "google-guarded", "guarded@example.com", "guarded")
+	enableTwoFactor(t, a, guarded.AccessToken)
+
+	bare := refusedLogin(t, a, "plain@example.com", testPassword)
+	gated := refusedLogin(t, a, "guarded@example.com", testPassword)
+
+	assert.Equal(t, bare.Code, gated.Code, "a factor must not change the no-password refusal")
+	assert.Equal(t, bare.errorBody().Code, gated.errorBody().Code, "nor may the code differ")
+	assert.Equal(t, bare.errorBody().Message, gated.errorBody().Message, "nor the message")
+}
+
+// An unconfirmed address, given its *correct* password — the path that queues a reminder before refusing.
+//
+// Such an account can never hold a factor: enrolling needs a live session and it cannot obtain one. So the
+// property is not a pair comparison but that the expensive branch still ends in the identical refusal on an
+// instance where a factor exists at all. M10 established that answer against a wrong password; M11a must
+// leave it exactly where it found it.
+func TestAnUnconfirmedAddressIsRefusedTheSameWhenAFactorExists(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	guarded := a.newAccount("ada", "ada@example.com", "device-1")
+	enableTwoFactor(t, a, guarded.Tokens.AccessToken)
+
+	require.Equal(t, http.StatusAccepted, a.call(http.MethodPost, "/api/v1/auth/register",
+		map[string]string{
+			"username": "unconfirmed", "email": "unconfirmed@example.com", "password": testPassword,
+		}).Code)
+
+	unverified := refusedLogin(t, a, "unconfirmed@example.com", testPassword)
+	wrongPassword := refusedLogin(t, a, "ada@example.com", "not-the-right-password-at-all")
+
+	assert.Equal(t, wrongPassword.errorBody().Code, unverified.errorBody().Code,
+		"an unconfirmed address must be refused exactly as a wrong password is")
+	assert.Equal(t, wrongPassword.errorBody().Message, unverified.errorBody().Message)
 }
 
 // A recovery code signs in, and does so exactly once.
