@@ -27,11 +27,17 @@ import (
 // chances to miss one, and this package has now missed one three times.
 //
 // So the factor is not a check that session-minting code is expected to call. It is a *value that
-// session-minting code cannot proceed without*, and which nothing outside this file can construct:
-// factorProof has no exported fields, no constructor but the two below, and the zero value authorizes
-// nothing. startSession takes one, and so does issueDeviceApprovalToken. A future third way to start a
-// session will not compile until its author has obtained a proof, which is the only form of "don't forget"
-// that actually works.
+// session-minting code cannot proceed without*: factorProof has no exported fields, no constructor but the
+// two below, and the zero value authorizes nothing. startSession takes one, and so does
+// issueDeviceApprovalToken. A caller that has not obtained a proof cannot call either, which is the only
+// form of "don't forget" that actually works.
+//
+// The boundary is the *package*, not this file. Any file in package auth can write factorProof{...} — the
+// type is package-scoped, and the two constructors below are not a compiler-enforced monopoly. What the
+// unexported fields buy is that nothing outside package auth can forge one, and that inside it the literal
+// is conspicuous: a reviewer looking for a bypass greps for the type name and finds every construction.
+// That is weaker than "impossible" and stronger than a convention, and stating it exactly is the point —
+// a comment claiming impossibility is one somebody stops checking.
 //
 // # Where the gate is not
 //
@@ -44,8 +50,17 @@ import (
 // That token's whole meaning is "this browser has finished proving who it is", and it cannot be minted
 // without a proof, so no token asserting that can exist for an account whose factor was never asked for.
 //
-// Refresh takes no proof either. The session it rotates proved the factor when it was established, and
-// asking again every fifteen minutes would make the factor a nuisance rather than a control.
+// Refresh takes no proof either, and the honest version of why is narrower than "the session it rotates
+// already proved the factor". Sessions established *before* the factor was enrolled proved nothing — a
+// person enrolls while signed in, and that sign-in predates the enrollment by definition. So enrolling
+// does not retroactively make live sessions factor-proved, and refresh does not ask them to be.
+//
+// That is a deliberate trade, not an oversight. Asking on every rotation would prompt every fifteen
+// minutes, which makes the factor a nuisance rather than a control; asking only of sessions older than the
+// enrollment would sign somebody out of the machine they are enrolling from. What closes the gap is that
+// enrolling is a step-up operation (disable and regenerate both call proveFactor) and that anything the
+// pre-enrollment sessions could do, the person doing the enrolling could already do. If a future change
+// makes enrollment reachable without a live session, this paragraph is the one that stops being true.
 //
 // ConfirmPasswordReset needs nothing because it starts no session: a reset changes the password and
 // revokes what the old one could reach, and the next login still owes the factor. That is the classic
@@ -61,9 +76,20 @@ const totpIssuer = "Norite"
 
 // recoveryCodeLength is the length of one recovery code, in characters from userCodeAlphabet.
 //
-// Ten characters of a 32-symbol alphabet is fifty bits, which is not guessable and is short enough to read
-// off a screen and type into another — the same trade the device flow's user code and M10's invite code
-// make, at the length each of those needs.
+// Ten characters of that twenty-symbol alphabet is 43.2 bits — 20^10, about 1.2e13. This comment said
+// "fifty bits from a 32-symbol alphabet" until a review did the arithmetic: the figure was carried over
+// from an assumed base32 alphabet, while the code has always drawn from device.go's twenty characters.
+// device.go gets the same sum right for the user code, which is what marks this one as a transcription
+// rather than a measurement.
+//
+// 43.2 bits is still far past guessing behind a rate limit — ten live codes among 1.2e13 values is about
+// 8e-13 a guess — and it is the margin that matters rather than the round number. It is the weakest of the
+// three codes drawn from this alphabet, deliberately: the device flow's user code (34.6 bits) dies in
+// twenty minutes, M10's invite code is sixteen characters because it is pasted rather than typed, and this
+// one has to be read off paper at the worst moment somebody has had all year.
+//
+// device.go's rule applies here too. This length and the rate limit in front of /auth/2fa/verify are one
+// decision: they move together or not at all.
 const recoveryCodeLength = 10
 
 // recoveryCodeCount is how many are issued at once.
@@ -138,9 +164,13 @@ func (s *Service) hasConfirmedFactor(ctx context.Context, userID int64) (bool, e
 // have and it works; making them choose a different endpoint first would mean the recovery path is the one
 // nobody can find at the moment they need it.
 //
-// TOTP is tried first because it is the ordinary case and costs no database write. A recovery code is only
-// consulted when the code is not a live TOTP value, which also means a six-digit string can never
-// accidentally spend a recovery code — they are different lengths from different alphabets.
+// TOTP is tried first because it is the ordinary case, and a recovery code is only consulted when the code
+// is not a live TOTP value — which also means a six-digit string can never accidentally spend a recovery
+// code, they being different lengths from different alphabets.
+//
+// It is *not* tried first because it is free. It was, until MarkTOTPStepUsed landed on this branch to make
+// single use hold (RFC 6238 §5.2), and a matched TOTP code now costs one UPDATE exactly as spending a
+// recovery code does. The ordering is about which answer is right more often, nothing else.
 func (s *Service) proveFactor(ctx context.Context, userID int64, code string) (factorProof, error) {
 	enrollment, err := s.queries.GetTOTPForUser(ctx, userID)
 	switch {

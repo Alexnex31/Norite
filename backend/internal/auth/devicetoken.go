@@ -8,7 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// The two signed continuations the verification page carries its state in.
+// The three signed continuations the verification page carries its state in.
 //
 // # Why signed tokens rather than a session
 //
@@ -21,12 +21,19 @@ import (
 // eventually authorize rather than needing a row to enforce it. ApproveDeviceCode's WHERE clause refuses a
 // second approval, so a replayed approval token buys nothing.
 //
-// # Why two of them rather than one
+// # Why three of them rather than one
 //
-// They assert different things. The first says a browser has entered a code that was live at the time; the
-// second says the same browser has also proved who it is. Collapsing them into one token with an optional
-// user field would mean a value that authorizes before authentication has happened, and the only thing
-// standing between the two would be the handler remembering to look.
+// They assert different things, and each is one step further along. An *entry* token says a browser has
+// entered a code that was live at the time. A *factor* token says the same browser has since given a
+// correct password on an account that owes a second factor — authenticated, but not finished. An
+// *approval* token says the browser has finished proving who it is, and is the only one issueDeviceApproval
+// will act on.
+//
+// Collapsing them into one token with an optional user field would mean a value that authorizes before
+// authentication has happened, with only the handler remembering to look standing between the two. M11a
+// added the middle one and immediately proved why the distinction is carried in the type rather than in a
+// field: the factor token was minted with a user and parsed without one, and no code could pass until
+// deviceTokenNamesAnAccount was taught about it (ADR 0031).
 
 // The `typ` claim values. Distinct from each other and from every other token this package signs.
 //
@@ -59,15 +66,18 @@ type deviceClaims struct {
 	// UserCode is carried only so the approval page can show it back, for comparison against what the
 	// terminal is displaying. Never used to look anything up.
 	UserCode string `json:"uc"`
-	// The account, on an approval token only. It travels in the registered `sub` claim.
+	// The account, on the two token types that name one — factor and approval, per
+	// deviceTokenNamesAnAccount. It travels in the registered `sub` claim, never here.
 }
 
 // deviceContinuation is what a valid continuation carries, once parsed.
 type deviceContinuation struct {
 	DeviceCodeID int64
 	UserCode     string
-	// UserID is set on an approval token and zero on an entry token, which is the difference between
-	// "this browser knows a code" and "this browser is somebody".
+	// UserID is set on a factor or an approval token and zero on an entry token, which is the difference
+	// between "this browser knows a code" and "this browser is somebody". Zero on an entry token is load
+	// bearing: parseDeviceToken refuses to extract a subject for that type at all, so a token issued before
+	// authentication cannot name an account even if one were signed into it.
 	UserID int64
 }
 

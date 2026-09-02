@@ -58,9 +58,9 @@ CREATE TABLE user_recovery_codes (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Serves the "how many codes has this account got left" read, which the profile response and the
--- regenerate path both make. Partial on unused, because that is the only count anybody asks for and spent
--- codes accumulate ten at a time for the life of the account.
+-- Serves the "how many codes has this account got left" read, which GET /users/@me makes.
+-- CountLiveRecoveryCodes is its only caller: regenerating deletes the whole set and inserts ten, and never
+-- counts. Partial on unused, because that is the only count anybody asks for.
 --
 -- Measured with EXPLAIN (ANALYZE, BUFFERS) on Postgres 16, and the first measurement was wrong in a way
 -- worth recording. Against one account with 10 live codes among 200 spent, the index looked pointless:
@@ -77,8 +77,25 @@ CREATE TABLE user_recovery_codes (
 CREATE INDEX user_recovery_codes_live_idx ON user_recovery_codes (user_id) WHERE used_at IS NULL;
 
 -- Redemption looks a code up by hash. Unique because two rows sharing one would make that lookup
--- ambiguous, and a duplicate can only mean a generator failure worth failing loudly on — the same
--- reasoning as sessions_refresh_token_hash_idx and password_reset_tokens_token_hash_idx.
+-- ambiguous — the same reasoning as sessions_refresh_token_hash_idx and
+-- password_reset_tokens_token_hash_idx.
+--
+-- Unlike those two, a duplicate here is not automatically a generator failure, and the difference is worth
+-- stating because it changes what firing means. A refresh-token hash is 256 bits and a collision there
+-- cannot happen; a recovery code is 43.2 bits (twenty symbols, ten characters — see recoveryCodeLength),
+-- and this index covers spent rows as well as live ones, so the population only ever grows.
+--
+-- Two numbers, both computed rather than eyeballed. Whether the table ever *contains* a duplicate is the
+-- birthday question, 1 - exp(-n^2/2N) with N = 20^10 = 1.024e13: about 0.05% at 100,000 codes, 4.8% at a
+-- million, and 99.2% at ten million. What a person actually experiences is the per-insert rate, n/N times
+-- the ten codes an operation writes: about 1e-6 at a million stored codes and 1e-5 at ten million.
+--
+-- So the constraint is a real failure mode with a real, if very rare, trigger, and one this code does not
+-- retry: the violation aborts writeRecoveryCodes' transaction and the confirm or regenerate answers 500.
+-- Acceptable at 1e-5, because the recovery is the person pressing the button again and the next draw is
+-- independent. The upgrade, if an instance ever gets large enough to care, is to retry the whole
+-- transaction rather than to lengthen the code, since the stored hashes are what collide and the length is
+-- tied to the rate limit in front of /auth/2fa/verify.
 CREATE UNIQUE INDEX user_recovery_codes_code_hash_idx ON user_recovery_codes (code_hash);
 
 -- Neither table is swept, and that is deliberate rather than an omission.

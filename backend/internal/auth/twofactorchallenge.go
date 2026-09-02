@@ -18,10 +18,21 @@ import (
 //
 // Every short-lived value in this package that is *stored* is stored because something has to be spent or
 // counted — a reset token is single-use, a device code is polled, an OAuth state carries a verifier that
-// must not travel through a browser. None of that applies here. The challenge is issued only after a
-// correct password, so holding one proves nothing an attacker did not already have, and replaying it buys
-// nothing that re-submitting the password would not. That makes it the same shape as M6's OAuth signup
-// continuation: a signature rather than a row, and no cleanup for the sweeper to own.
+// must not travel through a browser. None of that applies here: nothing about a challenge needs revoking,
+// and it authorizes nothing without a code. So it is a signature rather than a row, the same shape as M6's
+// OAuth signup continuation, with no cleanup for the sweeper to own.
+//
+// The two mints are not equally cheap to replay, and the weaker one is the one to reason from. After a
+// *password* login, holding a challenge proves nothing an attacker did not already have — they had the
+// password, and replaying the challenge buys nothing that re-submitting it would not. After an *OAuth
+// exchange* that is not true: the exchange code is single-use and spent, so a captured challenge is worth
+// more than what its holder started with — five minutes of second-factor attempts without redoing the
+// provider round trip.
+//
+// What bounds that is the rate limit on /auth/2fa/verify and the five-minute life, not the challenge being
+// unforgeable, and it is a bounded window rather than an unlimited one. Recorded because the case for
+// storing nothing was originally written from the password path alone; if a challenge ever needs a real
+// attempt counter, this is the paragraph that says which path demanded it, and a row is the upgrade.
 //
 // # What it is not
 //
