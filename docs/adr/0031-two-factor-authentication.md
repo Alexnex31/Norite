@@ -3,7 +3,9 @@
 ## Status
 Accepted. Extends [ADR 0022](0022-access-token-signing-and-scope-model.md) and
 [ADR 0011](0011-token-based-client-auth.md) without reversing either; the factor model it adds is the input
-[ADR 0014](0014-e2e-encryption.md)'s device-linking flow depends on and never named. Scheduled as `M11a`.
+[ADR 0014](0014-e2e-encryption.md)'s device-linking flow depends on and never named. Built at
+Milestone `M11a`. Revises [ADR 0028](0028-device-code-flow-for-headless-clients.md)'s "two
+continuations" into three.
 
 ## Context
 Eight milestones (M4–M11) built this project's auth core, and it is careful work. An account-existence
@@ -58,8 +60,18 @@ boxes and SSH sessions, which is the same constraint that produced M9's device-c
 that exists because M8's loopback listener binds `127.0.0.1` and the phone completing the flow cannot reach
 it. A second factor that cannot be used over SSH would be a second factor the primary client cannot use.
 
-WebAuthn is an addition on top later, not a replacement, and nothing here forecloses it: the verification
-step is one endpoint with a factor-kind discriminator, not a TOTP-shaped hole.
+WebAuthn is an addition on top later, not a replacement. This does not foreclose it, but the seam is
+thinner than the first draft of this paragraph claimed, and the correction is worth having in the file
+somebody reads before planning that work.
+
+What shipped is one endpoint, `POST /auth/2fa/verify`, taking `{challenge, code}` — and no factor-kind
+discriminator. The kind is inferred from the code's shape, six digits being a different length from a
+different alphabet than a ten-character recovery code. That is fine for two string-shaped factors and is
+not fine for a WebAuthn assertion, which is a structured object rather than a `string maxLength: 64`.
+Adding it therefore means adding a discriminator and a second payload shape to a request schema four
+clients codegen from (rules 6 and 15) — a breaking contract change, not a free extension. The seam that
+genuinely exists is `proveFactor`: it is the one place a factor kind is decided, and a second kind lands
+there without touching any session path.
 
 ### Recovery codes are credentials, and are stored like every other credential here
 SHA-256 hashes, single-use enforced in the statement's `WHERE` rather than by a Go-side check — the same
@@ -89,11 +101,29 @@ the factor protecting the account, which is the same rule that stopped it mintin
 `AuthenticateInstanceAdmin` learned the same lesson one level up when `/instance` turned out to sit outside
 the original wording.
 
-### The response shape and the timing must not distinguish a 2FA account from one without
-This is the M10 lesson applied to a new surface, and it is stated as a done-when rather than left to care:
-a login against an account with a factor and one without must be indistinguishable in status, body and
-duration to a caller who does not have the password. The measurement is the one M10 and M11 already
-established — medians over N requests, asserted as a ratio.
+### Every *failing* login must be indistinguishable, whether or not the account has a factor
+This is the M10 lesson applied to a new surface, and it is stated as a done-when rather than left to care.
+
+**This clause has been corrected, and the original is kept below because the correction is the useful
+part.** It first read: "a login against an account with a factor and one without must be indistinguishable
+in status, body and duration". That is unachievable as written and was rewritten in `docs/roadmap.md`
+during the build — a successful login against a 2FA account returns 202 and a challenge where one without
+returns 200 and a pair, which is the feature, not a leak. Anyone who can observe the difference has already
+supplied the correct password, and is therefore not learning anything they could not learn by using it.
+
+What must hold, and what shipped:
+
+- Every *failing* login answers identically — unknown address, wrong password, unconfirmed address, and an
+  account with no password at all. This holds by construction, because `factorSatisfied` is asked strictly
+  after `verifyCredentials` succeeds, and by test: `TestAFailedLoginIsUnchangedByTheSecondFactor` and the
+  two beside it, one per failure branch. All three fail if the check is moved above the password.
+- No new timing signal, for the same structural reason — no failing path performs a factor lookup at all.
+
+**There is deliberately no timing assertion for 2FA**, and the "medians over N requests" measurement this
+section once promised does not exist anywhere in the repository. It would measure nothing: the failing
+paths are byte-identical *and* execute identical code, so the ratio test M10 needs — where two branches do
+genuinely different work — has no two branches to compare here. M10's own timing test
+(`verification_test.go`) still guards the property that matters upstream of this one.
 
 ## Consequences
 - **M71 (Instance Admin tier) and M100 (E2E device linking) gain a hard dependency on M11a**, recorded in
@@ -103,8 +133,21 @@ established — medians over N requests, asserted as a ratio.
   product problem this ADR does not solve — it is the reason the codes are regenerable and the reason the
   enrollment flow shows them once, prominently, rather than burying them in settings.
 - **The daemon is unaffected.** It holds a refresh token, not a password, and a factor is proved when a
-  session is *established* — so a daemon that was signed in before the factor existed keeps working, and
-  `norite login` is where the prompt appears. This is the same seam that makes the device-code flow work.
+  session is *established* — so a daemon that was signed in before the factor existed keeps working. This
+  is the same seam that makes the device-code flow work.
+- **`norite login` is where the prompt appears**, on the password path and the provider path alike. This
+  sentence was written before it was true and was caught by a review: the first cut of M11a touched no file
+  under `cli/`, and `apiclient.Do` treated any 2xx as success — so the challenge decoded into an empty token
+  pair and surfaced as `the instance returned an incomplete token pair`, a message meaning "this is not a
+  Norite API". The client half was built rather than deferred, because an account that enrolls a factor and
+  can no longer use the primary client is not a milestone that is done.
+
+  Three things that shape fell out of. The transport gained `DoStatus`, because the contract makes 200 and
+  202 a *status* distinction and a client that can only see "some 2xx" cannot tell a session from a
+  challenge. The prompt lives in one place in `Run` rather than in each flow, for the reason `factorProof`
+  is a value rather than a check — two copies is two chances to forget. And there is deliberately **no
+  environment variable for the code**, unlike `NORITE_PASSWORD`: a static second factor in the environment
+  is a password wearing a hat, and the honest answer for an unattended machine is `--device-code`.
 - **Nothing in the E2E design changes**, but ADR 0014's threat model gains an input it was implicitly
   assuming. The linking flow was already correct; what was missing was any statement of how strong the
   authentication under it is.

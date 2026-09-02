@@ -59,7 +59,8 @@ a signed license file, not a public license text. Not AGPL, not open source. See
 ## Tech stack
 
 **Backend**: Go, `chi` (router), `sqlc` + `pgx/v5` (DB access — no ORM), `coder/websocket`,
-`alexedwards/argon2id`, `golang-jwt/jwt/v5`, `golang.org/x/oauth2`, `go-playground/validator/v10`,
+`alexedwards/argon2id`, `golang-jwt/jwt/v5`, `golang.org/x/oauth2`, `pquerna/otp` (TOTP),
+`go-playground/validator/v10`,
 `golang-migrate`, `oapi-codegen`, `ulule/limiter`, `testify` + `testcontainers-go`, Postgres (`tsvector` +
 GIN + `pg_trgm` for search), Redis (activated only for the flagship's horizontal-scale event bus/rate
 limiting; self-hosted single-process instances never touch it).
@@ -286,7 +287,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase A (foundation), through M11.** Full dependency-ordered roadmap (`M0` through `M125` plus suffixed
+**Phase B complete, through M11a.** Full dependency-ordered roadmap (`M0` through `M125` plus suffixed
 insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment — running as an explicitly
 parallel track) is in `docs/roadmap.md`.
 
@@ -358,13 +359,21 @@ and tested. Recorded in ADR 0007 — the absence of any release marker otherwise
   and `sessions.go` (the account-facing view), migration `000012`, `POST /auth/logout/all`,
   `GET`/`DELETE /users/@me/sessions`, the sessions sweep, and the daemon handing back the refresh token a
   colliding login makes unkeepable. Decisions in ADR 0030.
-- **M11a — Two-factor authentication**: done (tag `m11a`). Migration `000014`, `internal/auth`'s
-  `twofactor.go` (the `factorProof` primitive), `twofactorchallenge.go`, `totpsecret.go`, five endpoints and
-  the device page's factor step. Decisions in ADR 0031, which also amends ADR 0014: device linking is
-  authorized by the primary device, so whatever protects a sign-in protects the E2E trust chain. Built here
-  rather than later not because it is urgent — nothing is exposed before v1 — but because the five paths it
-  threads through took M4 through M11 to get right, and each carries an anti-enumeration property a factor
-  prompt can undo silently.
+- **M11a — Two-factor authentication**: done (tag `m11a`). Migration `000014`, `pquerna/otp`, and in
+  `internal/auth`: `twofactor.go` (the `factorProof` primitive), `twofactorchallenge.go`, `totpsecret.go`,
+  five endpoints, plus edits to `devicetoken.go` (a third continuation type and
+  `deviceTokenNamesAnAccount`), `devicepage.go` (the factor step), `device.go` (`normalizeTypedCode`
+  extracted, now shared by user codes, invite codes and recovery codes), `service.go`
+  (`CompleteTwoFactorLogin`) and `http.go` (`writeTokenPairErr`, the `revocationCountsResponse` rename, and
+  `two_factor_enabled`/`recovery_codes_remaining` on the user response). Decisions in ADR 0031, which also
+  amends ADR 0014: device linking is authorized by the primary device, so whatever protects a sign-in
+  protects the E2E trust chain. Built here rather than later not because it is urgent — nothing is exposed
+  before v1 — but because the five paths it threads through took M4 through M11 to get right, and each
+  carries an anti-enumeration property a factor prompt can undo silently.
+
+  The CLI half landed here too, after a review found the milestone had shipped a backend that made
+  `norite login` unusable on any account taking its advice: `apiclient.DoStatus`, and the code prompt in
+  `cli/internal/login`.
 - **M12 — Guilds/channels/roles schema plus CRUD**: next. Its first job is that
   `contracts/openapi.yaml` does not currently generate — see the roadmap entry. It also carries M67a's
   contract-shape reservation, because a challenge-required registration state is nearly free to reserve now
@@ -493,7 +502,10 @@ And on the auth side, from M4:
   New scopes are added to `auth.AllScopes` — never invented at a call site, where a typo widens access.
 - **Token management is not delegable.** Minting, listing and revoking `api_tokens` require a user actor and
   carry no scope. A credential that can create credentials can escalate itself.
-- **Every credential is stored only as a hash.** Passwords argon2id, opaque tokens SHA-256. The raw value of
+- **Every credential is stored only as a hash — with one stated exception.** Passwords argon2id, opaque
+  tokens SHA-256. The exception is M11a's TOTP secret, which verification needs back and which is
+  therefore sealed (AES-256-GCM) rather than hashed; it is the only one, and adding a second is a
+  decision to argue for, not a precedent to follow. The raw value of
   a refresh or API token exists exactly once, in the response that issued it. Token hashes are unsalted
   deliberately — they are 256-bit random values with nothing to brute-force, and a salt would make the
   indexed lookup that authenticates every request impossible.
@@ -616,7 +628,8 @@ And on session revocation, from M11 (decisions in ADR 0030):
   credential holding either could lock its owner out. Same rule minting obeys.
 - **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10) —
   **except where a signed-out credential would change the account's security state**, which
-  `RequireLiveSession` refuses: revoking sessions, and minting, listing or revoking API tokens. Written
+  `RequireLiveSession` refuses: revoking sessions, minting, listing or revoking API tokens, and — since
+  M11a — enrolling, confirming, disabling or regenerating the second factor. Written
   first as per-handler checks, it missed `POST /auth/tokens` — and an API token is not session-scoped, so
   one minted inside the window outlives the sign-out for good. **Guards belong in middleware for the same
   reason the revocation list belongs in one function**: a rule written as N call sites has N chances to
@@ -639,12 +652,21 @@ And on session revocation, from M11 (decisions in ADR 0030):
 
 And on the second factor, from M11a (decisions in ADR 0031):
 
-- **The gate is a type, not a check.** `factorProof` is unexported, has unexported fields, and is
-  constructible only by `factorSatisfied` and `proveFactor`; `startSession` takes one and refuses a zero
-  value or one naming another account. That is the third time this package has had to make a rule
-  structural — after `revokeEverything` and `RequireLiveSession` — and it is the first time the compiler
-  found the call sites instead of a reviewer. Adding the parameter located the OAuth exchange and the
-  device page immediately.
+- **The gate is a type, not a check.** `factorProof` is unexported, has unexported fields, and is built
+  only by `factorSatisfied` and `proveFactor`. **Two** functions require one — `startSession` *and*
+  `issueDeviceApprovalToken` — and both refuse a zero value or one naming another account. The second is
+  easy to drop from the summary and is the whole reason the device page is covered: that page never calls
+  `startSession`, because approving is a separate request from authenticating, so the gate sits where the
+  approval token is minted instead. That is the third time this package has had to make a rule structural —
+  after `revokeEverything` and `RequireLiveSession` — and the first time the compiler found the call sites
+  instead of a reviewer: adding the parameter located the OAuth exchange and the device page immediately.
+
+  **Two limits, because "cannot forget" decays into folklore otherwise.** The type is package-scoped, so
+  any file in `internal/auth` can write the literal — what the unexported fields buy is that nothing
+  outside the package can, and that every construction is greppable. And `startSession` is not the only
+  session mint: `RedeemDeviceCode` and `Refresh` reach `writeSession`/`issuePair` directly, taking no
+  proof. Both are deliberate, but a new sign-in path copying either shape compiles with no factor question
+  asked.
 - **The factor is asked about strictly after `verifyCredentials` succeeds**, which is what keeps every
   failure path byte-identical to an instance with no factor anywhere. A challenge returned earlier, or a
   different answer for an account that has one, is a fresh account-existence oracle on top of the one M10
@@ -731,6 +753,18 @@ And on the client-auth side, from M7:
   there rather than to whatever this process's probe picks. The probe answers "where would a new secret go
   here", which is not evidence about where an existing one is — a desktop login reaches the keyring, a
   systemd user unit starting before it unlocks does not, and an SSH session has no session bus at all.
+- **A 2xx is not one answer.** `apiclient.Do` treated every 2xx as success, which was fine until M11a made
+  `POST /auth/login` answer 202 with a second-factor challenge where it answers 200 with a pair — and the
+  challenge decoded into an empty `tokenPair`, reported as "the instance returned an incomplete token
+  pair", i.e. *this is not a Norite API*. `DoStatus` exists so a caller can branch on the status the
+  contract makes load-bearing. Any endpoint the contract gives two success statuses needs it; a body-shape
+  guess is the thing to avoid, because the two bodies here share `expires_at` and a struct embedding both
+  silently decodes neither (encoding/json drops fields that conflict at equal depth).
+- **The factor is answered in one place**, `Run`, not once per sign-in flow — the same reasoning that makes
+  the backend's `factorProof` a value rather than a check. Both browser-less flows can come back owing a
+  factor; the device-code flow cannot, because the browser already proved it. There is **no environment
+  variable for the code**, deliberately, where `NORITE_PASSWORD` exists: a static second factor is a
+  password wearing a hat, and `--device-code` is the honest answer for an unattended machine.
 - **What the store cannot finish, it says through `Notify`** — a credential left in a backend this session
   cannot reach, a previous record too broken to name one. Failing instead would make `norite login`
   impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
@@ -786,10 +820,13 @@ And on the device-code side, from M9 (decisions in ADR 0028):
 - **Which device is being authorized travels inside a signature or inside a consumed row**, never in a form
   body or a callback URL — `oauth_states.device_code_id` across the provider round trip, the `dvc` claim
   across the username form. The same discipline and the same tests M8 built for `client_redirect_uri`.
-- **Two continuations on the page, not one.** An entry token says a browser has entered a live code; an
-  approval token says it has also proved whose account this is. `parseDeviceToken` takes the type it wants
-  rather than reporting the type it found, because a single token with an optional user field would
-  authorize before authentication happened.
+- **Two continuations on the page, not one — three since M11a.** An entry token says a browser has entered
+  a live code; a `device_factor` token (M11a) says it has also given a correct password on an account owing
+  a second factor; an approval token says it has finished proving whose account this is. `parseDeviceToken`
+  takes the type it wants rather than reporting the type it found, because a single token with an optional
+  user field would authorize before authentication happened — and it extracts a subject for the *two* types
+  that name an account, not for the approval token alone. Getting that last part wrong is what made M11a's
+  factor step unpassable until a test caught it.
 - **The fallback is detected and never silent.** `SSH_CONNECTION` is checked before anything platform-
   specific, since a desktop administered over SSH looks local in every other way and macOS would open Safari
   on a screen nobody is at. Detection only ever redirects a sign-in that *already* needed a browser, so a

@@ -254,11 +254,31 @@ of this section.
   who already holds its password, which is not a disclosure worth defending against.
 
   **Done** (tag `m11a`). Decisions in ADR 0031. The enforcement is a type rather than a check:
-  `factorProof` is constructible only by `factorSatisfied` and `proveFactor`, and `startSession` takes one —
-  so a future third way to start a session will not compile until its author has asked the question. The
-  compiler found the OAuth exchange and the device page the moment the parameter existed. `RedeemDeviceCode`
-  is deliberately ungated, because the waiting client has nobody at it; the device flow's factor is proved
-  in the browser and enforced where the approval token is minted.
+  `factorProof` is constructible only through `factorSatisfied` and `proveFactor`, and the two functions
+  that finish an authentication both require one — `startSession` and `issueDeviceApprovalToken`. Adding
+  the parameter is what located the OAuth exchange and the device page; the compiler found them, not a
+  reviewer.
+
+  **Two limits on that guarantee, stated because "cannot forget" is the kind of claim that decays.** The
+  type is package-scoped, not file-scoped, so any file in `internal/auth` can write the literal — what the
+  unexported fields buy is that nothing *outside* the package can, and that every construction is greppable
+  by type name. And `startSession` is not the only way a session is minted: `RedeemDeviceCode` and
+  `Refresh` both reach `writeSession`/`issuePair` directly, neither of which takes a proof. Both are
+  deliberate (the first has nobody at the terminal, the second rotates a session that was already
+  established), but a fourth sign-in path copying either shape would compile with no factor question asked.
+  The guarantee is "callers of the two gated functions cannot forget", not "session minting cannot forget".
+
+  `RedeemDeviceCode` is ungated because the waiting client has nobody at it; the device flow's factor is
+  proved in the browser and enforced where the approval token is minted.
+
+  **The client half is built too, and nearly was not.** The first cut of this milestone was backend-only:
+  `apiclient.Do` treated every 2xx as success, so `norite login` decoded the challenge into an empty token
+  pair and reported `the instance returned an incomplete token pair` — "this is not a Norite API", blaming
+  the instance for the client's missing step. A review found it, and it was built rather than deferred,
+  because a milestone that makes the primary client unusable for anyone who takes its advice is not done.
+  `apiclient.DoStatus` exposes the status the contract makes load-bearing; the prompt sits once in `Run`
+  rather than once per flow; and there is no environment variable for the code, `--device-code` being the
+  answer for a machine with nobody at it.
 
 #### Phase C — Guild/channel/permission core
 

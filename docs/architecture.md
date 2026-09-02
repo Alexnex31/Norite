@@ -747,7 +747,8 @@ POST   /auth/2fa/totp                     -- begin TOTP enrollment; the secret i
 POST   /auth/2fa/totp/confirm             -- prove a code before the factor becomes required
 DELETE /auth/2fa/totp                     -- disable it; revokes every other session through the primitive
 POST   /auth/2fa/recovery-codes           -- (re)generate single-use codes; the raw values exist once
-POST   /auth/2fa/verify                   -- step two of a login, an OAuth exchange, or a device approval
+POST   /auth/2fa/verify                   -- step two of a login or an OAuth exchange (never the device
+                                          --   flow, whose factor step is POST /device/2fa above)
 
 GET    /users/@me
 PATCH  /users/@me
