@@ -112,6 +112,62 @@ func TestEnablingSMTPRequiresItsCompanionValues(t *testing.T) {
 	})
 }
 
+// An operator must be able to name their relay by IP, and still not by nonsense.
+//
+// `hostname` (RFC 952) forbids a leading digit in a label, so it rejected every IPv4 literal — and an
+// internal relay at 10.0.0.5 is a normal self-hosted shape, the audience this project is explicitly for.
+// The refusal was `NORITE_SMTP_HOST: failed "hostname"`, which reads as a typo rather than a policy.
+//
+// Both directions are pinned because widening a validator is exactly the change that quietly accepts
+// everything: the reject list below fails if `hostname_rfc1123|ip` is ever replaced with something lax
+// like `min=1`, and the accept list fails if it goes back to `hostname`. `::1` earns its own line — it is
+// the case `hostname_rfc1123` alone still refuses, and the only reason the `|ip` half exists.
+func TestTheSMTPHostMayBeAnAddressOrAName(t *testing.T) {
+	load := func(t *testing.T, host string) error {
+		t.Helper()
+		withoutConfigFile(t)
+		t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+		t.Setenv(envPrefix+"SMTP_ENABLED", "true")
+		t.Setenv(envPrefix+"SMTP_FROM_ADDRESS", "no-reply@example.com")
+		t.Setenv(envPrefix+"PUBLIC_BASE_URL", "https://chat.example.com")
+		t.Setenv(envPrefix+"SMTP_HOST", host)
+		_, err := Load("")
+		return err
+	}
+
+	for name, host := range map[string]string{
+		"a bare name":                  "mailpit",
+		"localhost":                    "localhost",
+		"a fully qualified name":       "smtp.example.com",
+		"a name with a hyphen":         "smtp-relay.example.com",
+		"a name starting with a digit": "1host.example.com",
+		"an IPv4 literal":              "10.0.0.5",
+		"loopback":                     "127.0.0.1",
+		"an IPv6 literal":              "::1",
+	} {
+		t.Run("accepts "+name, func(t *testing.T) {
+			require.NoError(t, load(t, host), "%q is a relay somebody really has", host)
+		})
+	}
+
+	for name, host := range map[string]string{
+		"a trailing hyphen": "host-.example.com",
+		"a leading hyphen":  "-leading.example.com",
+		"a trailing dot":    "trailing.dot.",
+		"spaces":            "not a host!",
+		// A port here would give two settings authority over the same thing, and SMTPPort already has it.
+		"a host:port pair": "smtp.example.com:587",
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			err := load(t, host)
+			require.Error(t, err, "%q is not a host", host)
+			assert.Contains(t, err.Error(), envPrefix+"SMTP_HOST",
+				"the error must name the variable an operator has to fix")
+		})
+	}
+}
+
 // Every key in the contract must be one the decoder accepts. Loading with unknown-field rejection already
 // proves that, but only for keys the contract happens to set — this asserts the contract is not silently
 // empty or truncated, which would make the check above pass vacuously.
