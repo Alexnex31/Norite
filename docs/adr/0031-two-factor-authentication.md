@@ -94,7 +94,7 @@ a database compromise that also yields the config file yields every TOTP secret.
 or a KMS, which is infrastructure this project does not have and would not have on a self-hosted instance.
 
 ### Enabling and disabling are session-state changes
-Enrolment, disabling, and regenerating recovery codes all sit behind `RequireLiveSession` alongside the
+Enrollment, disabling, and regenerating recovery codes all sit behind `RequireLiveSession` alongside the
 endpoints M11 put there, and disabling the factor revokes every other session through `revokeEverything`
 rather than through a cleanup path of its own (rule 17). A signed-out credential must not be able to remove
 the factor protecting the account, which is the same rule that stopped it minting an API token — and
@@ -174,6 +174,26 @@ ever have passed.
 from it, so the two are coupled. There is no key rotation today; when there is, re-enrollment is the answer
 and the alternative — a separately configured secret — buys independence at the cost of a setting every
 operator must not lose. Named here so the first rotation is a decision rather than a discovery.
+
+### One refusal for every way a code can be wrong — confirmed after manual testing
+
+`proveFactor` answers "that code is not valid" identically whether the code was wrong, expired, or already
+spent. Manual verification put a cost on that which the design discussion had not: the code that *confirms*
+an enrollment is spent by the confirmation, so somebody who enrolls and immediately does anything
+factor-gated is refused with no indication why, and has to wait up to thirty seconds. That happens to every
+person who ever enrolls, and it is the most confusing moment in the feature.
+
+**Reviewed on 2026-09-07 against the built behavior and kept as is.** Naming which kind of wrong a code is
+also tells whoever is holding a *stolen* one — whether it is live, whether it has been used, whether the
+window has passed — and that is worth more to an attacker than the explanation is worth to the account
+holder, who resolves it by waiting for the next code. Recorded here because a refusal that is deliberately
+unhelpful reads as an oversight to the next person who meets it, and the cheapest way to have this
+re-litigated is to leave no trace that it was decided.
+
+The exception, if this is ever revisited: the confirm-then-act sequence is the one case where the instance
+knows the caller just proved possession seconds earlier, so a message specific to *that* transition would
+leak nothing an attacker could use. It would also be a narrow special case in a function whose value is
+that it has none.
 
 ## Alternatives considered
 - **Exclude it, recorded in §17 alongside federation and call recording.** Defensible, and it was on the
