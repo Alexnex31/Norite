@@ -141,6 +141,9 @@ enabled = true
 
 # The relay. Port defaults to 587 (submission) rather than 25: 25 is server-to-server relay, blocked
 # outbound by most hosting providers, and not the port anyone wants here.
+#
+# `host` takes a name or an IP literal, v4 or v6, since an internal relay reached at 10.0.0.5 is a normal
+# self-hosted shape. It does not take a port — `port` below is the only setting with authority over that.
 host = "smtp.example.com"
 port = 587
 

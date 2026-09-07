@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -142,24 +141,11 @@ func (s *Service) DeleteInstanceInvite(ctx context.Context, rawCode string) erro
 // left must be in the alphabet, because anything else cannot be a code this instance issued and there is
 // nothing to look up.
 func ParseInviteCode(raw string) (string, error) {
-	var b strings.Builder
-	for _, r := range strings.ToUpper(raw) {
-		switch {
-		case r == '-' || r == ' ' || r == '\t':
-			continue
-		case strings.ContainsRune(userCodeAlphabet, r):
-			b.WriteRune(r)
-		default:
-			return "", ErrInviteInvalid
-		}
-		if b.Len() > inviteCodeLength {
-			return "", ErrInviteInvalid
-		}
-	}
-	if b.Len() != inviteCodeLength {
+	code, ok := normalizeTypedCode(raw, inviteCodeLength)
+	if !ok {
 		return "", ErrInviteInvalid
 	}
-	return b.String(), nil
+	return code, nil
 }
 
 // redeemInvite spends one use of a code, inside the caller's transaction.

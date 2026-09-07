@@ -205,7 +205,7 @@ of this section.
   than as interfaces nothing implements, so each is a line added in one place. A session is a *device* to a
   person and a rotating row to the schema, which is the decision every endpoint here follows from.
 
-- **M11a — Two-factor authentication**: TOTP enrolment and verification (RFC 6238), single-use recovery
+- **M11a — Two-factor authentication**: TOTP enrollment and verification (RFC 6238), single-use recovery
   codes, and the second factor wired into every path that establishes a session — `POST /auth/login`, the
   OAuth exchange, and the device-code approval page. Depends on M11: changing or disabling a factor must
   revoke sessions through the primitive rather than through a second cleanup path (rule 17).
@@ -237,14 +237,48 @@ of this section.
   is a later addition on top, not a replacement, and nothing here forecloses it.
 
   Recovery codes are stored as hashes, like every other credential in this package, and are the one path
-  that must work when the authenticator is lost. Enrolment, disabling, and regenerating codes are all
+  that must work when the authenticator is lost. Enrollment, disabling, and regenerating codes are all
   session-state changes, so they sit behind `RequireLiveSession` with the endpoints M11 put there.
 
   Done when: an account with TOTP enabled cannot complete a password login, an OAuth exchange, or a
   device-code approval without a valid code; a recovery code works exactly once; disabling the factor
-  revokes every other session through `revokeEverything`; and the timing and response shape of a login
-  against a 2FA-enabled account are indistinguishable from one against an account without it, measured the
-  way M10's registration parity is.
+  revokes every other session through `revokeEverything`; and **every way a login can fail answers
+  identically** whether or not the account has a factor.
+
+  **That last clause is a correction.** It originally read "the timing and response shape of a login
+  against a 2FA-enabled account are indistinguishable from one against an account without it", which is
+  unachievable as written — one returns a token pair and the other returns a challenge, and that difference
+  *is* the feature. The property that is both achievable and the one worth having is the one above: the
+  factor is asked about strictly after `verifyCredentials` succeeds, so every failure path is byte-identical
+  to an instance with no second factor anywhere. Whether an account has one is observable only to somebody
+  who already holds its password, which is not a disclosure worth defending against.
+
+  **Done** (tag `m11a`). Decisions in ADR 0031. The enforcement is a type rather than a check:
+  `factorProof` is constructible only through `factorSatisfied` and `proveFactor`, and the two functions
+  that finish an authentication both require one — `startSession` and `issueDeviceApprovalToken`. Adding
+  the parameter is what located the OAuth exchange and the device page; the compiler found them, not a
+  reviewer.
+
+  **Two limits on that guarantee, stated because "cannot forget" is the kind of claim that decays.** The
+  type is package-scoped, not file-scoped, so any file in `internal/auth` can write the literal — what the
+  unexported fields buy is that nothing *outside* the package can, and that every construction is greppable
+  by type name. And `startSession` is not the only way a session is minted: `RedeemDeviceCode` and
+  `Refresh` both reach `writeSession`/`issuePair` directly, neither of which takes a proof. Both are
+  deliberate (the first has nobody at the terminal, the second rotates a session that was already
+  established), but a fourth sign-in path copying either shape would compile with no factor question asked.
+  The guarantee is "callers of the two gated functions cannot forget", not "session minting cannot forget".
+
+  `RedeemDeviceCode` is ungated because the waiting client has nobody at it; the device flow's factor is
+  proved in the browser and enforced where the approval token is minted.
+
+  **The client half is built too, and nearly was not.** The first cut of this milestone was backend-only:
+  `apiclient.Do` treated every 2xx as success, so `norite login` decoded the challenge into an empty token
+  pair and reported `the instance returned an incomplete token pair` — "this is not a Norite API", blaming
+  the instance for the client's missing step. A review found it, and it was built rather than deferred,
+  because a milestone that makes the primary client unusable for anyone who takes its advice is not done.
+  `apiclient.DoStatus` exposes the status the contract makes load-bearing; the prompt sits once in `Run`
+  rather than once per flow; and there is no environment variable for the code, `--device-code` being the
+  answer for a machine with nobody at it.
 
 #### Phase C — Guild/channel/permission core
 

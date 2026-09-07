@@ -8,7 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// The two signed continuations the verification page carries its state in.
+// The three signed continuations the verification page carries its state in.
 //
 // # Why signed tokens rather than a session
 //
@@ -21,12 +21,19 @@ import (
 // eventually authorize rather than needing a row to enforce it. ApproveDeviceCode's WHERE clause refuses a
 // second approval, so a replayed approval token buys nothing.
 //
-// # Why two of them rather than one
+// # Why three of them rather than one
 //
-// They assert different things. The first says a browser has entered a code that was live at the time; the
-// second says the same browser has also proved who it is. Collapsing them into one token with an optional
-// user field would mean a value that authorizes before authentication has happened, and the only thing
-// standing between the two would be the handler remembering to look.
+// They assert different things, and each is one step further along. An *entry* token says a browser has
+// entered a code that was live at the time. A *factor* token says the same browser has since given a
+// correct password on an account that owes a second factor — authenticated, but not finished. An
+// *approval* token says the browser has finished proving who it is, and is the only one issueDeviceApproval
+// will act on.
+//
+// Collapsing them into one token with an optional user field would mean a value that authorizes before
+// authentication has happened, with only the handler remembering to look standing between the two. M11a
+// added the middle one and immediately proved why the distinction is carried in the type rather than in a
+// field: the factor token was minted with a user and parsed without one, and no code could pass until
+// deviceTokenNamesAnAccount was taught about it (ADR 0031).
 
 // The `typ` claim values. Distinct from each other and from every other token this package signs.
 //
@@ -36,6 +43,7 @@ import (
 // one that still holds when a future token type happens to carry a similar shape.
 const (
 	deviceEntryTokenType    = "device_entry"
+	deviceFactorTokenType   = "device_factor"
 	deviceApprovalTokenType = "device_approval"
 )
 
@@ -58,15 +66,18 @@ type deviceClaims struct {
 	// UserCode is carried only so the approval page can show it back, for comparison against what the
 	// terminal is displaying. Never used to look anything up.
 	UserCode string `json:"uc"`
-	// The account, on an approval token only. It travels in the registered `sub` claim.
+	// The account, on the two token types that name one — factor and approval, per
+	// deviceTokenNamesAnAccount. It travels in the registered `sub` claim, never here.
 }
 
 // deviceContinuation is what a valid continuation carries, once parsed.
 type deviceContinuation struct {
 	DeviceCodeID int64
 	UserCode     string
-	// UserID is set on an approval token and zero on an entry token, which is the difference between
-	// "this browser knows a code" and "this browser is somebody".
+	// UserID is set on a factor or an approval token and zero on an entry token, which is the difference
+	// between "this browser knows a code" and "this browser is somebody". Zero on an entry token is load
+	// bearing: parseDeviceToken refuses to extract a subject for that type at all, so a token issued before
+	// authentication cannot name an account even if one were signed into it.
 	UserID int64
 }
 
@@ -75,12 +86,33 @@ func (s *Service) issueDeviceEntryToken(deviceCodeID int64, userCode string) (st
 	return s.signDeviceToken(deviceEntryTokenType, deviceCodeID, userCode, 0)
 }
 
+// issueDeviceFactorToken records that a browser has proved a password but still owes a second factor.
+//
+// M11a's addition, and it is the same argument that produced two tokens rather than one. An entry token
+// says a browser knows a live code; an approval token says it has proved whose account this is. On an
+// account with a second factor, a browser that has typed a correct password is at neither point — it knows
+// more than an entry token asserts and less than an approval token does, and handing it the latter would
+// authorize before authentication had finished. So it gets its own type, and /device/2fa is the only
+// handler that accepts one.
+func (s *Service) issueDeviceFactorToken(deviceCodeID int64, userCode string, userID int64,
+) (string, error) {
+	return s.signDeviceToken(deviceFactorTokenType, deviceCodeID, userCode, userID)
+}
+
 // issueDeviceApprovalToken records that the same browser has since proved who it is.
 //
 // Minted at exactly one point in each sign-in branch — after a password is verified, and after a provider
 // callback resolves to an account — so the set of ways to obtain one is the set of ways to authenticate.
+// It takes a factorProof, and that is where the device flow's second factor is enforced. This token means
+// "this browser has finished proving who it is", and on an account with a factor that is not true until
+// the factor has been proved — so the token cannot be minted without one. Approval itself is a later
+// request that can only present a token this function produced.
 func (s *Service) issueDeviceApprovalToken(deviceCodeID int64, userCode string, userID int64,
+	proof factorProof,
 ) (string, error) {
+	if !proof.authorizes(userID) {
+		return "", ErrTwoFactorRequired
+	}
 	return s.signDeviceToken(deviceApprovalTokenType, deviceCodeID, userCode, userID)
 }
 
@@ -110,6 +142,16 @@ func (s *Service) signDeviceToken(typ string, deviceCodeID int64, userCode strin
 		return "", fmt.Errorf("signing device continuation: %w", err)
 	}
 	return signed, nil
+}
+
+// deviceTokenNamesAnAccount reports whether a continuation of this type carries a subject.
+//
+// M11a added the second one, and forgetting it was a real bug rather than a hypothetical: the factor token
+// was minted with a subject and parsed without, so the code form's user id came back as zero and no code
+// could ever pass. Caught by the device-flow test, which is exactly the path that would otherwise have
+// shipped a second factor nobody could get past.
+func deviceTokenNamesAnAccount(typ string) bool {
+	return typ == deviceApprovalTokenType || typ == deviceFactorTokenType
 }
 
 // parseDeviceToken validates a continuation of exactly the type asked for.
@@ -147,7 +189,14 @@ func (s *Service) parseDeviceToken(raw, want string) (deviceContinuation, error)
 
 	out := deviceContinuation{DeviceCodeID: deviceCodeID, UserCode: claims.UserCode}
 
-	if want == deviceApprovalTokenType {
+	// Two of the three types name an account, and the subject is *required* on those rather than merely
+	// read: a factor or approval token without one would be a continuation asserting that some browser had
+	// authenticated as nobody in particular.
+	//
+	// An entry token deliberately carries none. That asymmetry is the whole reason these are separate
+	// types — see this file's header — and it is why the check is on the type asked for rather than on
+	// whether a subject happens to be present.
+	if deviceTokenNamesAnAccount(want) {
 		userID, err := strconv.ParseInt(claims.Subject, 10, 64)
 		if err != nil || userID == 0 {
 			return deviceContinuation{}, ErrDeviceContinuation

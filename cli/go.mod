@@ -1,6 +1,6 @@
 module github.com/Alexnex31/Norite/cli
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/Alexnex31/Norite/backend v0.0.0

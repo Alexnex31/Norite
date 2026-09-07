@@ -165,7 +165,25 @@ type Config struct {
 	SMTPEnabled bool
 
 	// SMTPHost and SMTPPort address the relay. Required once SMTP is on; there is nothing to fall back to.
-	SMTPHost string `validate:"required_if=SMTPEnabled true,omitempty,hostname"`
+	//
+	// `hostname_rfc1123|ip` rather than `hostname`, and both halves are load-bearing. `hostname` is RFC 952,
+	// which forbids a label starting with a digit — so it rejects every IPv4 literal, and an operator whose
+	// relay is at 10.0.0.5 on their own network could not configure this at all. That is a normal
+	// self-hosted shape, and the refusal read as a typo rather than a policy: `failed "hostname"`.
+	//
+	// RFC 1123 lifted the leading-digit rule, which admits IPv4 as a side effect (dotted-decimal is four
+	// valid labels) along with genuinely legal names like 1host.example.com. It does *not* admit IPv6 —
+	// `::1` has no labels at all — so `|ip` is what covers that, and is not the redundancy it looks like.
+	//
+	// Measured rather than assumed, against go-playground/validator: `hostname` accepts localhost and
+	// smtp.example.com and rejects 127.0.0.1, 10.0.0.5 and ::1; `hostname_rfc1123` accepts the first four
+	// and still rejects ::1; the pair accepts all five. All three reject host-.example.com,
+	// -leading.example.com, trailing.dot., "not a host!" and smtp.example.com:587 — a port belongs in
+	// SMTPPort, and admitting one here would give two settings authority over the same thing.
+	//
+	// ACMEDomain keeps plain `hostname` deliberately: a certificate authority will not issue for an IP
+	// literal, so accepting one there would only defer the failure to a worse place.
+	SMTPHost string `validate:"required_if=SMTPEnabled true,omitempty,hostname_rfc1123|ip"`
 	SMTPPort int    `validate:"required_if=SMTPEnabled true,omitempty,gte=1,lte=65535"`
 
 	// SMTPUsername and SMTPPassword authenticate to the relay. Both optional: an internal relay that

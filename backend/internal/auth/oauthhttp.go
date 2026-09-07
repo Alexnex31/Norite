@@ -115,7 +115,7 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		//
 		// Which device, like every other destination here, came out of the consumed state row.
 		if outcome.DeviceCodeID != 0 {
-			h.renderDeviceApproval(w, r, outcome.DeviceCodeID, outcome.UserID)
+			h.continueToApproval(w, r, outcome.DeviceCodeID, outcome.UserID)
 			return
 		}
 
@@ -203,7 +203,7 @@ func (h *Handler) oauthSignupSubmit(w http.ResponseWriter, r *http.Request) {
 		// A brand-new account signing up from the verification page lands on the approval step, exactly as
 		// an existing one does. Which device is waiting came out of the signed token, not this form.
 		if result.DeviceCodeID != 0 {
-			h.renderDeviceApproval(w, r, result.DeviceCodeID, result.UserID)
+			h.continueToApproval(w, r, result.DeviceCodeID, result.UserID)
 			return
 		}
 
@@ -301,7 +301,9 @@ func (h *Handler) oauthExchange(w http.ResponseWriter, r *http.Request) {
 		IP:         clientAddr(r),
 	})
 	if err != nil {
-		h.writeErr(w, r, err)
+		// Including the 202 a factor-owing account gets. A provider proved control of a provider account;
+		// it did not prove possession of this account's second factor.
+		h.writeTokenPairErr(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, r, http.StatusOK, newTokenPairResponse(pair))

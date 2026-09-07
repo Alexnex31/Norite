@@ -854,7 +854,19 @@ func (s *Service) ExchangeOAuthCode(ctx context.Context, rawCode, rawVerifier st
 	// The same session machinery a password login uses, including superseding this device's previous
 	// family — an OAuth sign-in is a login, and nothing about it should produce a different kind of
 	// session.
-	return s.startSession(ctx, snowflake.ID(code.UserID), deviceID, in.DeviceName, in.IP)
+	// A provider proved control of a provider account. It did not prove possession of this account's
+	// second factor, which is the entire point of having one — so the exchange owes the same step a
+	// password login does, and answers with the same challenge.
+	proof, err := s.factorSatisfied(ctx, code.UserID)
+	if err != nil {
+		if errors.Is(err, ErrTwoFactorRequired) {
+			in.DeviceID = deviceID
+			return TokenPair{}, s.twoFactorRequired(code.UserID, in)
+		}
+		return TokenPair{}, err
+	}
+
+	return s.startSession(ctx, snowflake.ID(code.UserID), deviceID, in.DeviceName, in.IP, proof)
 }
 
 // issueOAuthExchangeCode mints the one-time code a client trades for tokens.

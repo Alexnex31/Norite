@@ -116,18 +116,33 @@ func (c *Client) BaseURL() string { return c.baseURL }
 // bearer is sent as an Authorization header when non-empty; body is JSON-encoded when non-nil; out is
 // JSON-decoded when non-nil. A non-2xx response becomes an *Error and out is left untouched.
 func (c *Client) Do(ctx context.Context, method, path, bearer string, body, out any) error {
+	_, err := c.DoStatus(ctx, method, path, bearer, body, out)
+	return err
+}
+
+// DoStatus is Do, also reporting which 2xx the instance answered with.
+//
+// Two successful statuses can mean different things on one endpoint, and POST /auth/login is the first
+// place that happens here: 200 carries a token pair, 202 carries a demand for a second factor. The
+// contract makes that a status distinction rather than a discriminated body deliberately (ADR 0031), so a
+// client that can only see "it was a 2xx" decodes the challenge into a token pair and reports two empty
+// strings as a broken instance — which is exactly what this CLI did until M11a's follow-up.
+//
+// The status is returned rather than passed to a callback because the alternative reads worse at both call
+// sites, and 0 is never returned alongside a nil error.
+func (c *Client) DoStatus(ctx context.Context, method, path, bearer string, body, out any) (int, error) {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encoding the request: %w", err)
+			return 0, fmt.Errorf("encoding the request: %w", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
 	if err != nil {
-		return fmt.Errorf("building the request: %w", err)
+		return 0, fmt.Errorf("building the request: %w", err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -142,20 +157,20 @@ func (c *Client) Do(ctx context.Context, method, path, bearer string, body, out 
 		// Unwrapped deliberately: url.Error renders the full URL, and this one carries no credential —
 		// a password or a token is in the body or a header — so the host and port a person mistyped stay
 		// visible, which is the whole diagnostic value of this failure.
-		return fmt.Errorf("could not reach %s: %w", c.baseURL, err)
+		return 0, fmt.Errorf("could not reach %s: %w", c.baseURL, err)
 	}
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody)); _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return c.errorFrom(resp)
+		return resp.StatusCode, c.errorFrom(resp)
 	}
 
 	if out != nil {
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(out); err != nil {
-			return fmt.Errorf("the instance's response could not be read: %w", err)
+			return resp.StatusCode, fmt.Errorf("the instance's response could not be read: %w", err)
 		}
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 // errorFrom turns a failure response into something worth printing.

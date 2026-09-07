@@ -2,7 +2,9 @@
 
 ## Status
 Accepted. Amends [ADR 0011](0011-token-based-client-auth.md) (which named the flow before either browser
-flow existed) and continues [ADR 0027](0027-loopback-redirect-for-the-oauth-callback.md).
+flow existed) and continues [ADR 0027](0027-loopback-redirect-for-the-oauth-callback.md). **Extended by
+[ADR 0031](0031-two-factor-authentication.md)**, which adds a third continuation to the page — read it
+before touching `parseDeviceToken` or the section below.
 
 ## Context
 M8 gave `norite login --provider` a loopback listener. That listener binds `127.0.0.1`, so the browser
@@ -97,7 +99,13 @@ signed continuation across the username form. Neither is ever read from the call
 body, because both are presented by whoever is looking at the page. Both properties have a test that was
 confirmed by making the handler read the untrusted copy.
 
-### Two continuations on the page, not one
+### Two continuations on the page, not one — three since M11a
+
+> **Extended by [ADR 0031](0031-two-factor-authentication.md).** A `device_factor` continuation now sits
+> between the two below, for a browser that has given a correct password on an account owing a second
+> factor: authenticated, but not yet finished. The reasoning in this section is what made that a third
+> *type* rather than a flag on the second, and it holds unchanged — but "two" is now the wrong count, and
+> `parseDeviceToken` extracts a subject for two of the three types, not for the approval token alone.
 An entry token says a browser has entered a live code. An approval token says the same browser has also
 proved whose account this is. One token with an optional user field would authorize before authentication
 had happened, with only the handler's memory in between — so `parseDeviceToken` takes the type it wants

@@ -9,9 +9,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 1.25 rather than M0's 1.23: testcontainers-go (backend integration tests) declares `go 1.25.0`, which
-  # raises the backend module's own directive and, through go.work, the toolchain every module builds with.
-  GO_VERSION: "1.25"
+  # Must be >= the highest `go` directive in the workspace, which is what actually pins this. The floor has
+  # been raised twice by a dependency rather than by choice: testcontainers-go took it to 1.25.0, and
+  # golang.org/x/crypto v0.56.0 — the first release fixing GO-2026-6354/6355 — took it to 1.26.0.
+  GO_VERSION: "1.26"
   # Keep in sync with `sqlc_version` in the justfile.
   SQLC_VERSION: "v1.30.0"
   # Keep in sync with `golangci_lint_version` in the justfile.
