@@ -91,6 +91,9 @@ jobs:
       # why it needs an assertion: there is nothing to see in a diff when it breaks.
       - name: the backend links no copyleft dependency
         if: matrix.module == 'backend'
+        # working-directory like every other step in this job: the matrix runs from the repository root,
+        # where there is no go.mod, so `go build ./cmd/server` cannot resolve a module without it.
+        working-directory: ${{ matrix.module }}
         env:
           GOWORK: "off"
         run: |
