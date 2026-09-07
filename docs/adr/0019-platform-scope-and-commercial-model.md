@@ -13,7 +13,7 @@ mobile client.
 ActivityPub — no cross-instance guilds, no cross-instance identity, no inter-instance protocol. This is a
 deliberate non-goal, not a silent gap. Consequently there is no cross-instance hierarchy to design (ADR
 0008): guilds are pure independent peers within one instance, and instances are pure independent peers with
-zero relationship to each other (see ADR 0007's two-deployment commercial model).
+zero relationship to each other (see ADR 0032's two independent, equally first-class deployment shapes).
 
 **Mobile clients are out of scope for v1**, with no dedicated client planned. Since the token-auth model
 (ADR 0011) is already device/OS-keychain-based rather than assuming a browser, no extra seam work is needed

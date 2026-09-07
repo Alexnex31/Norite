@@ -26,10 +26,10 @@ not a public launch and not a support commitment. The official **v1** comes afte
 and the whole thing has been reviewed and tested. This is what `architecture.md`'s "no scope described in
 this document is removable" means in practice: the sequence is the plan, the betas are how it gets
 exercised before the end, and there is exactly one release. Recorded because the absence of any release
-marker otherwise reads as an oversight rather than a decision — see ADR 0007.
+marker otherwise reads as an oversight rather than a decision — see ADR 0032.
 
 Read as a long-term, dependency-ordered critical path, not a near-term v1 promise — the accumulated scope
-(custom SFU, custom crypto, native GUI, plugin sandbox, licensing infrastructure) is realistically multi-year
+(custom SFU, custom crypto, native GUI, plugin sandbox, a Kubernetes deployment) is realistically multi-year
 work. Every milestone is scoped to one coherent deliverable, states what it depends on when that is not simply
 "the previous milestone," and ends with a concrete, checkable "done when" condition. Milestones are numbered
 continuously across the whole roadmap; Phase headers are for orientation only, not separate tracks, except
@@ -333,7 +333,7 @@ of this section.
 
   **And the event-bus tests run against both backends from here on.** `EVENTS_BACKEND=inproc|redis` and the
   Redis-backed rate-limit store are seams the flagship activates at M114 — which would make M114 their first
-  real exercise, in production, on the primary product, on the two components whose failure modes only
+  real exercise, in production, on the flagship itself, on the two components whose failure modes only
   appear under concurrency across processes. `docker/docker-compose.yml` has shipped Redis since M0
   specifically so the swap could be exercised without a compose change, and nothing has exercised it. §15.7
   warns against building the Redis paths' *operational* surface early; a test matrix is not operational
@@ -970,13 +970,18 @@ when a constraint the terminal imposed is lifted.
 
 #### Phase M — E2E encryption
 
-- **M97 — Crypto base integration**: verify `go.mau.fi/libsignal`'s license is compatible with the project's
-  restrictive custom license (a blocking prerequisite step within this same milestone, documented and passed
-  before any further work here proceeds); then integrate the library and build the device-linking protocol
-  on top of it. Done when: the license check is documented and passed; two test identities can complete a
-  key exchange and exchange messages with forward secrecy demonstrated via the library (rotating a key
-  doesn't expose prior messages); and device-linking (fully custom) links a second device without
-  per-conversation re-verification.
+- **M97 — Crypto base integration**: integrate `go.mau.fi/libsignal` and build the device-linking protocol
+  on top of it. **The license question this milestone used to open with is answered**: the library is
+  GPL-3.0, the project is `AGPL-3.0-or-later`, and GPL-3.0 §13 permits the combination (ADR 0032). What
+  replaces it is a standing constraint rather than a check — **libsignal is imported only from `daemon/`**,
+  never transitively into `backend/`, because a path into the backend would silently end its
+  relicensability (rule 22). Re-confirm the library's license against the version actually pinned in
+  `go.mod` at integration time; licenses change and forks differ from upstream. Note also that shipping a
+  binary containing GPL-3.0 code obliges offering its Corresponding Source, which publishing this
+  repository with pinned `go.mod`/`go.sum` satisfies. Done when: two test identities can complete a key
+  exchange and exchange messages with forward secrecy demonstrated via the library (rotating a key doesn't
+  expose prior messages); device-linking (fully custom) links a second device without per-conversation
+  re-verification; and a build assertion confirms the server binary does not link libsignal.
 - **M98 — E2E keystore**: the `modernc.org/sqlite` local encrypted store, exclusively daemon-owned
   (`architecture.md` §2's credential-ownership rule; no attach client holds a copy), the master key in the
   OS keychain via `zalando/go-keyring`, surviving daemon restarts. All keystore writes route through one
@@ -1067,6 +1072,12 @@ This phase is a deployment target, not a feature-development phase — it can st
 voice are usable (roughly after M37), well before every feature phase above is complete, and continues to
 absorb new features (public matchmaking, E2E, etc.) as they land. Do not read it as coming "after" M111.
 
+**Nor read its size as priority.** Fourteen milestones here against M96 plus the bare-metal/systemd
+documentation for self-hosting is **deployment complexity, not importance**: the flagship is the one
+deployment that needs real horizontal scale and HA (ADR 0021). Both deployment shapes are first-class and
+get the same product — ADR 0032 and `architecture.md` §11 say so, and this preamble exists so the roadmap
+does not appear to disagree with them.
+
 - **M112 — Helm chart skeleton and API pods**: the base chart structure, the API/gateway `Deployment` behind
   an Ingress.
 - **M113 — CloudNativePG plus backups**: the Postgres operator in-cluster, native continuous backup/
@@ -1143,9 +1154,11 @@ voice+text pair to degrade gracefully). M61 (whispers) must exist before M74 (it
 break-glass view) and before M99 (which excludes whispers from E2E scope). M68 (recently-met) must exist
 before M69 (friends). M57 (DMs), M68 (recently-met), and M69 (friends) must exist before M70 (blocks). M11
 (revoke-all-sessions) must exist before M72 (bans) and M101 (device revocation↔E2E trust). M58 (attachments)
-must exist before M59 (custom emoji). M97's license-compatibility check must pass before any further work in
-Phase M proceeds. Phase P (Kubernetes) depends on M114 requiring Phase D's Redis-fan-out design to already
-exist as a seam, and M58/M113 requiring M115 (MinIO) to be stood up first within that phase. M124 depends on
+must exist before M59 (custom emoji). M97 must land before any further work in Phase M proceeds — its
+former license-compatibility gate is answered by ADR 0032, and what it leaves behind is the standing
+constraint that libsignal is imported only from `daemon/`. Phase P (Kubernetes) depends on M114 requiring
+Phase D's Redis-fan-out design to already exist as a seam, and M58/M113 requiring M115 (MinIO) to be stood
+up first within that phase. M124 depends on
 M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14 and M72, conceptually
 belonging in Phase L despite its number — the same "numerically-late, logically-earlier" treatment already
 established for Phase P above.

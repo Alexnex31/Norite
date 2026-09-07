@@ -55,8 +55,9 @@ pipeline as any other message via the shared `messages.type` "sent via automatio
 - The account data export asymmetry pattern (your-own-action included, action-against-you excluded) recurs
   for both blocks and reports — documented once here so future similar features follow the same rule
   automatically rather than re-deriving it.
-- The flagship instance's paid "custom emoji anywhere" perk (ADR 0007's `user_entitlements` seam) is a real
-  upsell layered on top of a complete, free, per-guild base feature — never a paywall on the base feature.
+- The flagship instance's paid "custom emoji anywhere" perk (the `user_entitlements` seam, ADR 0032) is a
+  real upsell layered on top of a complete, free, per-guild base feature — never a paywall on the base
+  feature.
 
 ## Alternatives considered
 - **A lightweight "channel moderator" role for public matchmaking**: rejected — there's no owner to grant it

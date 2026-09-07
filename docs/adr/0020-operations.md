@@ -1,7 +1,12 @@
 # ADR 0020: Client auto-update, self-hosting ops (migrations, HTTPS, email, telemetry)
 
 ## Status
-Accepted
+Accepted. **Amended by [ADR 0032](0032-agpl-license.md)** in one place: the "final reviewed license text"
+named below does not exist and will not. The project is `AGPL-3.0-or-later`, a standard text needing no
+bespoke drafting or review, so what remains a tracked gap before distribution is real paid code signing
+alone. The Sigstore-versus-license-file distinction below stands unchanged — the signed self-hosted license
+file survives as an inert seam, and publishing its signatures to a public transparency log would still be
+wrong for the reason given.
 
 ## Context
 A daemon-based client architecture that self-updates, plus a self-hosting story that needs to stay
@@ -17,13 +22,14 @@ infrastructure at update-check time, both for reliability and to avoid a phone-h
 downgrade protection (refuses an older, validly-signed version without an explicit force), fail-closed on
 verify failure (current version keeps running, never falls back to unverified), and auto-rollback on
 repeated crash-loop after an update (the daemon keeps the previous binary). This Sigstore/cosign scheme is
-**deliberately separate from** the license file's own Ed25519-JWT signing scheme (ADR 0007) — publishing
+**deliberately separate from** the license file's own Ed25519-JWT signing scheme (ADR 0032) — publishing
 every issued license file's signature to Sigstore's public transparency log, as release binaries are, would
 leak customer purchase records. **The backend/server binary is explicitly not auto-updated** — unattended
 updates to a server holding other people's data is a materially bigger risk than a client updating itself;
 it surfaces a passive "update available" notice to Instance Admins instead. Code signing is self-signed/
 unsigned for now (personal/early-use phase); real paid signing is a tracked gap before commercial
-distribution, alongside the final reviewed license text (ADR 0007).
+distribution, alongside the final reviewed license text (ADR 0007) — see the amendment in Status: there is
+no such text under the AGPL, and code signing is the whole of the remaining gap.
 
 **Schema migrations auto-run on backend startup**, guarded by a Postgres advisory lock (so two accidentally-
 concurrent processes never race), and **block startup** — `/healthz` stays unavailable until complete — so a

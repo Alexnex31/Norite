@@ -1,9 +1,8 @@
 # Norite
 
-A voice-and-text chat platform. The primary way to use Norite is the free, global, publicly-hosted flagship
-instance — self-hosting your own instance is a real, fully-built feature, not the platform's core identity:
-useful for enterprises and other private groups who want their own instance, available via a one-time
-license purchase. Source is visible here but under no public license (see License, below).
+A voice-and-text chat platform, free software under the [AGPL-3.0-or-later](LICENSE). Two ways to use it
+and both are first-class: the free, global, publicly-hosted flagship instance, or self-hosting your own —
+real, fully-built, and free, useful for enterprises and other private groups who want their own instance.
 
 Four clients: a scriptable CLI (the `norite` command tree — one action, exit, pipeable), a full-screen TUI
 (the in-terminal application: panes, chords, 25 specified screens), a native GUI mirroring the TUI's
@@ -112,18 +111,24 @@ shadcn/ui, with its own BFF-style httpOnly-cookie auth exchange layer.
 See `docs/architecture.md` for the full rationale behind each choice, and `docs/adr/` for short, focused
 records of the most contested individual decisions.
 
-## Commercial model
+## How it's deployed, and what's commercial
 
-Two independent deployments of the same codebase, no shared infrastructure between them. **The free,
-publicly open-registration flagship instance (Kubernetes/Helm, optional paid per-user subscription perks) is
-the primary product** — the one most people use. Open registration means at v1: it arrives with the
-anti-automation challenge (`M67a`), because rate limiting bounds requests per source and not accounts per
-adversary. Until then the flagship takes no non-developer account at all — see ADR 0007's release posture. Self-hosted instances, sold via a one-time license purchase
-(offline, cryptographically-signed license file, no phone-home), are a real secondary offering, not a
-lesser-effort one — pricing is a flat one-time purchase regardless of who's buying, though it's expected to
-be most attractive to enterprises and other private groups who want their own instance. There's no "Platform
-Operator" tier and no federation — every instance, flagship or self-hosted, is Instance-Admin-managed and
-stands alone.
+Two independent deployments of the same codebase, no shared infrastructure between them, and **both are
+first-class**: the free, publicly open-registration flagship instance (Kubernetes/Helm, optional paid
+per-user subscription perks) that the author operates, and self-hosting — free, unrestricted, and expected
+to appeal most to enterprises and other private groups who want their own instance. Neither is the product
+and neither is the sideline; they get the same code, the same quality bar and the same support commitment.
+The roadmap looks lopsided in the flagship's favour, and that is deployment complexity rather than priority
+— it is the one deployment that needs real horizontal scale and HA (ADR 0021).
+
+Open registration means at v1: it arrives with the anti-automation challenge (`M67a`), because rate
+limiting bounds requests per source and not accounts per adversary. Until then the flagship takes no
+non-developer account at all — see ADR 0032's release posture.
+
+Nothing is sold to a self-hoster; under the AGPL there is nothing to sell them. What is commercial needs no
+license grant at all: flagship subscription perks, paid support, hosting and managed instances. There's no
+"Platform Operator" tier and no federation — every instance, flagship or self-hosted, is
+Instance-Admin-managed and stands alone.
 
 ## Documentation
 
