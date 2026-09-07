@@ -187,6 +187,49 @@ jobs:
           ./scripts/gen-third-party-notices.sh cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh daemon  ./cmd/daemond bin/norite-daemon daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+      - name: every hand-written Go file carries its SPDX header
+        # Rule 24. Nothing else enforces it: the pass that added the headers was one-off, so what this
+        # catches is the next file, written by somebody who has not read the rule — which is the only way
+        # the rule was going to decay.
+        #
+        # The same logic as `just spdx-check`, inlined for the reason the inventory generator is: no job
+        # here installs `just`, and pulling an install script over the network to run one recipe adds a
+        # supply-chain dependency to the critical path for no benefit. Safe to duplicate because both read
+        # the same tree and a disagreement shows up as this step failing, not as a silent divergence.
+        #
+        # Generated files are matched on Go's own convention rather than the loose phrase: `grep -q "Code
+        # generated"` over a whole file would also skip a hand-written file that merely mentions it, and
+        # skipping is how this fails silently instead of loudly.
+        run: |
+          fail=0
+          for f in $(git ls-files '*.go'); do
+            if head -5 "$f" | grep -qE '^// Code generated .* DO NOT EDIT\.$'; then
+              if head -2 "$f" | grep -q 'SPDX-'; then
+                echo "::error file=$f::generated file carries an SPDX header; it will be lost on regeneration"
+                fail=1
+              fi
+              continue
+            fi
+            head -2 "$f" | grep -q '^// SPDX-FileCopyrightText: ' || {
+              echo "::error file=$f::missing '// SPDX-FileCopyrightText: <year> <holder>' on line 1 (rule 24)"; fail=1; }
+            head -2 "$f" | grep -q '^// SPDX-License-Identifier: AGPL-3.0-or-later$' || {
+              echo "::error file=$f::missing '// SPDX-License-Identifier: AGPL-3.0-or-later' on line 2 (rule 24)"; fail=1; }
+            [ -z "$(sed -n '3p' "$f")" ] || {
+              echo "::error file=$f::line 3 must be blank — a package comment otherwise renders as the license, and a //go:build constraint lands inside the header's comment block"; fail=1; }
+          done
+          if git grep -n 'SPDX-License-Identifier: AGPL-3.0$' -- '*.go'; then
+            echo "::error::the bare AGPL-3.0 identifier is deprecated — use AGPL-3.0-or-later"
+            fail=1
+          fi
+          for f in $(git ls-files '*.sql' '*.md' '*.yml' '*.yaml' '*.toml'); do
+            if head -2 "$f" | grep -q '^\(#\|--\|//\) *SPDX-'; then
+              echo "::error file=$f::only .go files carry SPDX headers; LICENSE covers the rest (ADR 0032)"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] && echo "every hand-written Go file carries its SPDX header"
+          exit $fail
+
       - name: fail if the committed notices are stale
         run: |
           if ! git diff --quiet -- '*/internal/notices/THIRD-PARTY-NOTICES.txt'; then

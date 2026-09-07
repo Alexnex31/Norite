@@ -228,6 +228,63 @@ license-inventory:
 build:
     goreleaser build --snapshot --clean
 
+# Fail if any hand-written Go file is missing its two-line SPDX header (rule 24, ADR 0032).
+#
+# Nothing else enforces this. The pass that added the headers was mechanical and one-off; what this catches
+# is the *next* file, written months from now by somebody who has not read rule 24 — which is the only way
+# the rule was ever going to decay.
+#
+# Generated files are exempt, matched on Go's own convention rather than on the loose phrase: a line
+# `// Code generated ... DO NOT EDIT.` in the first five lines. `grep -q "Code generated"` over the whole
+# file would also skip any hand-written file that merely *mentions* the marker in a comment, and skipping a
+# file is how this check would fail silently rather than loudly. The two agree on today's tree (14 files
+# either way); the strict form is the one that keeps agreeing.
+#
+# `--others --exclude-standard` alongside `--cached`, so a file that exists but has not been `git add`ed
+# yet is checked too. Without it the recipe passes on exactly the case it is for — somebody has just
+# written a new .go file, runs this, sees green, commits, and CI fails on the file they were told was
+# fine. Untracked-and-ignored paths (bin/, dist/) stay excluded, which is what --exclude-standard buys.
+spdx-check:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    fail=0
+    for f in $(git -C {{justfile_directory()}} ls-files --cached --others --exclude-standard '*.go'); do
+        p={{justfile_directory()}}/$f
+        if head -5 "$p" | grep -qE '^// Code generated .* DO NOT EDIT\.$'; then
+            # A header here would be stripped by the next regeneration and the staleness check would then
+            # fail on a file nobody edited — so its presence is a mistake worth naming, not a harmless extra.
+            if head -2 "$p" | grep -q 'SPDX-'; then
+                echo "$f: generated file carries an SPDX header; it will be lost on regeneration"
+                fail=1
+            fi
+            continue
+        fi
+        head -2 "$p" | grep -q '^// SPDX-FileCopyrightText: ' \
+            || { echo "$f: missing '// SPDX-FileCopyrightText: <year> <holder>' on line 1"; fail=1; }
+        head -2 "$p" | grep -q '^// SPDX-License-Identifier: AGPL-3.0-or-later$' \
+            || { echo "$f: missing '// SPDX-License-Identifier: AGPL-3.0-or-later' on line 2"; fail=1; }
+        # The blank line is not cosmetic: without it a package comment is rendered by godoc as the license
+        # text, and a //go:build constraint sits inside the header's comment block.
+        [ -z "$(sed -n '3p' "$p")" ] \
+            || { echo "$f: line 3 must be blank, separating the header from what follows"; fail=1; }
+    done
+    # SPDX deprecated the bare identifier because it was ambiguous about the "or later" clause.
+    if git -C {{justfile_directory()}} grep --untracked -n 'SPDX-License-Identifier: AGPL-3.0$' -- '*.go'; then
+        echo "the bare AGPL-3.0 identifier is deprecated — use AGPL-3.0-or-later"
+        fail=1
+    fi
+    # Rule 24 is also a statement about what does *not* carry a header. Scoped to the first two lines
+    # because CLAUDE.md and ADR 0032 both quote the identifier while specifying the rule.
+    for f in $(git -C {{justfile_directory()}} ls-files --cached --others --exclude-standard \
+                   '*.sql' '*.md' '*.yml' '*.yaml' '*.toml'); do
+        if head -2 {{justfile_directory()}}/$f | grep -q '^\(#\|--\|//\) *SPDX-'; then
+            echo "$f: only .go files carry SPDX headers; LICENSE covers the rest (ADR 0032)"
+            fail=1
+        fi
+    done
+    [ "$fail" -eq 0 ] && echo "every hand-written Go file carries its SPDX header"
+    exit $fail
+
 # Regenerate every binary's THIRD-PARTY-NOTICES.txt. Commit the diff.
 #
 # Distinct from `license-inventory`, and deliberately not merged with it. The inventory answers a policy

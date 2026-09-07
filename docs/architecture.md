@@ -2078,20 +2078,25 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
        docs/ CLAUDE.md README.md --exclude-dir=adr
   ```
 - **Every hand-written, non-generated `.go` file carries both SPDX lines** (rule 24) as its first two
-  lines, using `AGPL-3.0-or-later` and never the bare `AGPL-3.0`:
+  lines, with a blank third line, using `AGPL-3.0-or-later` and never the bare `AGPL-3.0`. **This one is
+  automated** — `just spdx-check`, and the same checks inlined in CI's `codegen` job — because unlike the
+  greps above it has to hold for files that do not exist yet, and a rule enforced only by a checklist
+  decays at the first file written by somebody who has not read the checklist.
 
-  ```
-  for f in $(git ls-files '*.go'); do
-    grep -q "Code generated" "$f" && continue
-    head -2 "$f" | grep -q "SPDX-FileCopyrightText"                     || echo "MISSING COPYRIGHT: $f"
-    head -2 "$f" | grep -q "SPDX-License-Identifier: AGPL-3.0-or-later" || echo "MISSING LICENSE: $f"
-  done
-  ```
+  Three details in it are worth knowing rather than rediscovering, each having been an inert check before
+  it was tested:
 
-  Scoped to `.go` deliberately: nothing else in the repository carries a header and `LICENSE` covers the
-  whole work (ADR 0032). It must read the **first two lines** rather than the whole file — `CLAUDE.md`
-  rule 24 and ADR 0032 both quote the identifier while specifying it, so a whole-file grep reports two
-  prose mentions as headers they are not.
+  - It reads the **first two lines**, never the whole file. `CLAUDE.md` rule 24 and ADR 0032 both quote the
+    identifier while specifying the rule, so a whole-file grep reports two prose mentions as headers.
+  - It matches generated files on Go's own `^// Code generated … DO NOT EDIT.$` convention in the first
+    five lines, not on the loose phrase anywhere in the file — the loose form would also skip a
+    hand-written file that merely mentions the marker, and skipping is how a check fails silently.
+  - It lists `--cached --others --exclude-standard`, so a file written but not yet `git add`ed is checked.
+    Without that the recipe passes on precisely the case it exists for: a new file, green locally, red in
+    CI. That was a real gap, found by writing an unheadered file and watching the check pass.
+
+  Scoped to `.go` deliberately, and the check enforces the negative too: nothing else in the repository
+  carries a header, because `LICENSE` covers the whole work (ADR 0032).
 - **The terminal client's two vocabularies**: grep for "CLI" and confirm each use means the *command tree*
   (§4) and not the full-screen application (§4a) — that conflation is what ADR 0026 exists to undo, and it
   reappears every time a paragraph written before it is edited. Confirm every screen id in

@@ -175,6 +175,8 @@ These apply to every milestone, not just a final pass — treat a PR that violat
     `AGPL-3.0`, and never a maintained year range. Generated files are exempt, detected by their
     `Code generated … DO NOT EDIT.` marker rather than by a path list. Nothing else in the repository
     carries a header — not SQL, not Markdown, not YAML; `LICENSE` covers the whole work.
+    **`just spdx-check` enforces all of it and CI runs the same checks**, because the header pass was
+    one-off and what decays a rule like this is the next file, not the ones it converted.
 
 ## Directory layout (see `docs/architecture.md` §1 for full detail)
 
@@ -208,6 +210,9 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just sqlc-generate` / `just sqlc-check` — regenerate the committed sqlc layer / fail if it's stale
 - `just security-scan` — `govulncheck ./...` plus `just license-check` (+ `pnpm audit` and `Trivy` once
   frontend/ and Dockerfiles exist)
+- `just spdx-check` — fail if any hand-written `.go` file is missing its rule-24 header, if a generated one
+  grew a header, or if a non-Go file did. Sees untracked files too, so it answers the same as CI on a file
+  you have written but not yet staged.
 - `just build-local` — plain `go build` of all four binaries into `./bin/`, at paths that do not vary by
   platform the way `just build`'s goreleaser output does. `just notices` and CI's assertions both read them.
 - `just notices` — regenerate each binary's `internal/notices/THIRD-PARTY-NOTICES.txt` from
