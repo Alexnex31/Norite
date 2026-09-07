@@ -133,6 +133,44 @@ jobs:
             git --no-pager diff -- contracts/dependency-licenses.txt
             exit 1
           fi
+      - name: denied license identifiers
+        # The layer --disallowed_types cannot express. go-licenses classifies by type, and GPL-2.0 and
+        # GPL-3.0 both land in `restricted` — so allowing `restricted` for the clients admits both, while
+        # only GPL-2.0-or-later actually combines with AGPL-3.0. Matched on the SPDX identifier instead,
+        # anchored with -x so GPL-2.0-or-later is not caught by a GPL-2.0 prefix. Runs against the file
+        # just regenerated above, so it cannot pass on a stale inventory.
+        run: |
+          denied=$(tail -n +4 contracts/dependency-licenses.txt | cut -d, -f3 \
+            | grep -Ex 'GPL-2\.0-only|GPL-1\.0.*|SSPL.*|BUSL.*|Elastic-2\.0|CC-BY-SA.*' | sort -u || true)
+          if [ -n "$denied" ]; then
+            echo "::error::dependency license identifier outside the allow-list — see docs/adr/0032-agpl-license.md"
+            echo "$denied"
+            exit 1
+          fi
+          echo "no denied SPDX identifier in the inventory"
+      - name: third-party notices
+        # Regenerated from the built binaries, not the module graph: the linker is the only authority on
+        # what actually ships, and `./...` would sweep in testcontainers and its Docker set — test-only
+        # code that is never distributed and must not appear in a notice describing a shipped binary.
+        # Committed for the reason the inventory is, and checked here so a new dependency cannot merge
+        # without its attribution.
+        run: |
+          mkdir -p bin
+          (cd backend && GOWORK=off go build -o ../bin/norite-server ./cmd/server)
+          (cd cli     && GOWORK=off go build -o ../bin/norite        ./cmd/app)
+          (cd gui     && GOWORK=off go build -o ../bin/norite-gui    ./cmd/gui)
+          (cd daemon  && GOWORK=off go build -o ../bin/norite-daemon ./cmd/daemond)
+          ./scripts/gen-third-party-notices.sh backend ./cmd/server  bin/norite-server backend/internal/notices/THIRD-PARTY-NOTICES.txt
+          ./scripts/gen-third-party-notices.sh cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
+          ./scripts/gen-third-party-notices.sh gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt
+          ./scripts/gen-third-party-notices.sh daemon  ./cmd/daemond bin/norite-daemon daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+      - name: fail if the committed notices are stale
+        run: |
+          if ! git diff --quiet -- '*/internal/notices/THIRD-PARTY-NOTICES.txt'; then
+            echo "::error::a THIRD-PARTY-NOTICES.txt is out of date — run 'just notices' and commit the result"
+            git --no-pager diff --stat -- '*/internal/notices/THIRD-PARTY-NOTICES.txt'
+            exit 1
+          fi
 
   security:
     name: security (${{ matrix.module }})
@@ -166,10 +204,20 @@ jobs:
         # own path because go-licenses stops looking for a LICENSE at the module root and this repository's
         # is one level above it, so every first-party package would report Unknown. The allow-list and the
         # reasoning are in docs/adr/0032-agpl-license.md.
+        #
+        # The policy splits by module (ADR 0032): backend/ keeps the strict set because its value in that
+        # split is staying trivially relicensable, while the clients drop `restricted` (which admits
+        # GPL-3.0, i.e. libsignal at M97) and `reciprocal` (MPL-2.0). Kept as a case rather than a matrix
+        # input so it reads the same way as the justfile's copy; the two must not drift.
         run: |
+          case "${{ matrix.module }}" in
+            backend) types=forbidden,restricted,reciprocal ;;
+            *)       types=forbidden ;;
+          esac
+          echo "denying: $types"
           GOWORK=off go-licenses check ./... \
             --ignore github.com/Alexnex31/Norite \
-            --disallowed_types=forbidden,restricted,reciprocal
+            --disallowed_types="$types"
       - name: govulncheck
         working-directory: ${{ matrix.module }}
         # The same command `just security-scan` runs, per module, so the local and CI answers cannot

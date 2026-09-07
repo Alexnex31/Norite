@@ -140,12 +140,24 @@ license-check:
     set -uo pipefail
     fail=0
     for m in {{go_modules}}; do
+        # The policy splits by module (ADR 0032). backend/ keeps the strict set, because its whole value in
+        # that split is being trivially relicensable and every copyleft term is one more thing somebody
+        # would have to reason about first. The clients drop `restricted` — which is what admits GPL-3.0,
+        # i.e. go.mau.fi/libsignal at M97 — and `reciprocal`, which admits MPL-2.0.
+        #
+        # `forbidden` stays denied everywhere. It includes AGPL, so an AGPL-licensed *dependency* would fail
+        # the clients' check even though it is compatible with Norite's own license. Harmless: there are
+        # none, and the failure would be a prompt to think rather than a wrong answer.
+        case "$m" in
+            backend) types=forbidden,restricted,reciprocal ;;
+            *)       types=forbidden ;;
+        esac
         # Status captured before the output is filtered: go-licenses logs glog warnings about assembly it
         # cannot inspect on every run, and a pipeline that filtered those would report grep's exit code
         # instead of the check's.
         output=$(cd "$m" && GOWORK=off go-licenses check ./... \
             --ignore github.com/Alexnex31/Norite \
-            --disallowed_types=forbidden,restricted,reciprocal 2>&1)
+            --disallowed_types="$types" 2>&1)
         status=$?
         if [ "$status" -ne 0 ]; then
             echo "$output" | sed "s/^/[$m] /"
@@ -153,9 +165,27 @@ license-check:
                  "(see docs/adr/0032) or go-licenses could not run at all — the output above says which"
             fail=1
         else
-            echo "[$m] licenses ok"
+            echo "[$m] licenses ok ($types denied)"
         fi
     done
+    # The identifier layer. go-licenses classifies by *type*, and GPL-2.0 and GPL-3.0 both land in
+    # `restricted` — so allowing `restricted` for the clients above admits both indiscriminately. That is
+    # wrong in one specific way that matters: GPL-2.0-only does not combine with AGPL-3.0, while
+    # GPL-2.0-or-later does, because it can be taken up to v3. No --disallowed_types value can express the
+    # difference, so it is matched on the SPDX identifier itself.
+    #
+    # -x anchors the match so GPL-2.0-or-later is not caught by a GPL-2.0 prefix. Field 3 of the committed
+    # inventory is the identifier; field 2 is a URL, which has contained no comma in any observed row.
+    if [ -f {{justfile_directory()}}/contracts/dependency-licenses.txt ]; then
+        denied=$(tail -n +4 {{justfile_directory()}}/contracts/dependency-licenses.txt | cut -d, -f3 \
+            | grep -Ex 'GPL-2\.0-only|GPL-1\.0.*|SSPL.*|BUSL.*|Elastic-2\.0|CC-BY-SA.*' | sort -u || true)
+        if [ -n "$denied" ]; then
+            echo "license identifiers outside the allow-list (see docs/adr/0032): $denied"
+            fail=1
+        else
+            echo "[identifiers] no denied SPDX identifier in the inventory"
+        fi
+    fi
     exit $fail
 
 # Regenerate the committed dependency-license inventory. Commit the diff.
@@ -197,6 +227,43 @@ license-inventory:
 # Build every binary via goreleaser, snapshot mode (no publish, no signing — that lands at Milestone M24).
 build:
     goreleaser build --snapshot --clean
+
+# Regenerate every binary's THIRD-PARTY-NOTICES.txt. Commit the diff.
+#
+# Distinct from `license-inventory`, and deliberately not merged with it. The inventory answers a policy
+# question ("is every dependency allowed") over `./...`; this answers an attribution obligation ("what must
+# accompany this binary") over what the linker actually kept. Backend measures 75 modules the first way and
+# 29 the second, the difference being testcontainers and its Docker/containerd set — test-only code that is
+# never distributed and must not appear in a notice claiming to describe a shipped binary.
+#
+# The files live under each module's internal/notices/ because `//go:embed` cannot reach outside the package
+# directory, and cli and daemon both embed theirs. Depends on build-local: the generator reads the binaries.
+notices: build-local
+    #!/usr/bin/env bash
+    set -euo pipefail
+    gen={{justfile_directory()}}/scripts/gen-third-party-notices.sh
+    "$gen" backend ./cmd/server  bin/norite-server backend/internal/notices/THIRD-PARTY-NOTICES.txt
+    "$gen" cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
+    "$gen" gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt
+    "$gen" daemon  ./cmd/daemond bin/norite-daemon daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+
+# Build every binary to ./bin/ with plain `go build`, at paths that do not vary by platform.
+#
+# `just build` goes through goreleaser, which writes to dist/<id>_<os>_<arch>/ — correct for a release and
+# unusable anywhere a path has to be written down, which is what a CI assertion and a verification checklist
+# both need. The names match .goreleaser.yaml's `binary:` fields exactly, because a second set of names for
+# the same four programs is a thing that drifts.
+#
+# GOWORK=off for build-standalone's reason: it is what a release build and a single-module consumer both do.
+build-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{justfile_directory()}}/bin
+    build() { (cd "$1" && GOWORK=off go build -o "{{justfile_directory()}}/bin/$2" "$3"); echo "  bin/$2"; }
+    build backend norite-server ./cmd/server
+    build cli     norite        ./cmd/app
+    build gui     norite-gui    ./cmd/gui
+    build daemon  norite-daemon ./cmd/daemond
 
 # Build every module with the workspace switched off.
 #
