@@ -1,10 +1,16 @@
 <!-- ---------------------------------------------------------------------------
-     Norite is free software (AGPL-3.0-or-later) but is NOT open to outside code
-     contributions. Pull requests from anyone other than the copyright holder
-     cannot be merged — for backend/ this is a permanent licensing constraint,
-     not a preference. Please read CONTRIBUTING.md before spending time on a
-     patch; bug reports and design discussion in issues are welcome, and a
-     security issue goes to SECURITY.md rather than to a public issue.
+     Contributions are welcome. What a PR needs depends on the module it touches:
+
+       daemon/, cli/, gui/  a DCO sign-off — `git commit -s`. You keep your
+                            copyright. That is the whole ask.
+       backend/             a signed copyright assignment as well. It is the one
+                            module whose licensing is still an open question,
+                            and one patch held elsewhere would close it for
+                            good. Say so in the PR and the agreement will be
+                            provided — the text is not drafted yet.
+
+     CONTRIBUTING.md has the reasoning. For anything large, please open an issue
+     first. A security issue goes to SECURITY.md, never to a public issue.
 
      This template has exactly the three sections below. Do not add a fourth;
      anything else goes inside "What does this change?" as prose or sub-bullets.

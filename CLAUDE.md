@@ -162,11 +162,14 @@ These apply to every milestone, not just a final pass — treat a PR that violat
     it is copyleft-free, and that option costs nothing to keep. `just license-check` enforces it, but
     **CI cannot see C libraries linked via cgo** — Phase E's Opus/RNNoise/APM and Phase N's video codecs
     get checked by hand.
-23. **Never merge backend code from anyone but the copyright holder without a CLA.** CI protects the
-    dependency half of rule 22; nothing protects this half. A single un-assigned contribution to `backend/`
-    ends its relicensability permanently, and a substantial patch pasted into an issue and copied in is the
-    same contamination as a merged PR — reimplement independently rather than copy. Outside `backend/` this
-    is a review-capacity decision and is revisitable.
+23. **Never merge `backend/` code from anyone but the copyright holder without a signed copyright
+    assignment.** CI protects the dependency half of rule 22; nothing can protect this half but not
+    merging. A single un-assigned contribution ends the backend's relicensability permanently, and a
+    substantial patch pasted into an issue and copied in is the same contamination as a merged PR —
+    reimplement independently rather than copy. The client modules take contributions under a DCO
+    `Signed-off-by` instead, where the contributor keeps their copyright: the daemon is permanently
+    copyleft-locked at M97 anyway, so there is no option there left to protect. `CONTRIBUTING.md` states
+    both; the assignment instrument itself is not written yet and must be reviewed before anyone signs it.
 24. **Every hand-written `.go` file carries its two-line SPDX header** — `SPDX-FileCopyrightText` then
     `SPDX-License-Identifier: AGPL-3.0-or-later`, the first two lines, blank line after. Never the bare
     `AGPL-3.0`, and never a maintained year range. Generated files are exempt, detected by their

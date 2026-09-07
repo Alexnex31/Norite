@@ -136,9 +136,11 @@ holds, the backend remains relicensable at the copyright holder's sole discretio
 Preserving that needs two things, and CI can only enforce the first:
 
 - **No copyleft dependency in `backend/`** — enforced by the per-module split below.
-- **No un-assigned contribution to `backend/`** — a discipline, not a check. A single merged patch from
-  anyone else ends the option permanently, which is why `CLAUDE.md` carries it as a rule and
-  `CONTRIBUTING.md` states it at the point of submission.
+- **No un-assigned contribution to `backend/`** — a discipline, not a check, because nothing but a human
+  refusing to merge can enforce it. A single merged patch held by somebody else ends the option
+  permanently, which is why `CLAUDE.md` carries it as rule 23. The project takes backend contributions
+  under a signed copyright assignment and client contributions under a DCO sign-off, so the discipline is
+  a gate on one module rather than a closed door on the repository — see the Consequences below.
 
 So the question this ADR parks is not 0007's. The *daemon's* license is settled forever the moment M97
 lands. What remains open is only whether the backend's permissive-only discipline is worth keeping — a much
@@ -270,10 +272,21 @@ buckets are the right tool for the broad policy and the wrong tool for this dist
 - **What remains commercially available needs no license grant at all:** flagship subscription perks, paid
   support, hosting and managed instances, and — if the question ever returns, though it is not planned — a
   backend-only commercial exception, preserved by section 8's discipline.
-- **The project is open source but is not open to contribution**, stated in `CONTRIBUTING.md` and repeated
-  in the PR template. For `backend/` the reason is section 8; elsewhere it is review capacity on a solo
-  project and is revisitable. AGPL removes the friction an unlicensed repository created, so this needs
-  saying rather than being implied by obscurity.
+- **The project is open to contribution, on terms that differ by module** — stated in `CONTRIBUTING.md`
+  and pointed at from the PR template. The client modules take a DCO `Signed-off-by`, under which the
+  contributor keeps their copyright; there is nothing left to protect in `daemon/`, which is permanently
+  copyleft-locked once libsignal lands. `backend/` additionally requires a signed copyright assignment,
+  for section 8's reason and no other: it is the one module whose licensing is still an open question, and
+  one contribution held elsewhere closes it for good.
+
+  Two consequences worth stating rather than discovering. **An assignment is a real deterrent**, so some
+  fixes that would have arrived as a backend patch will arrive as an issue instead, or not at all — that
+  is the price of keeping the option, and it is being paid deliberately. And **the instrument itself is
+  not drafted**: `CONTRIBUTING.md` states the requirement and says the text will be provided when the
+  first backend contributor appears, rather than publishing an unreviewed legal document. Under French
+  law an assignment must satisfy CPI art. L.131-3 — each right, its scope, purpose, place and duration
+  specified — and art. L.131-1 voids a global assignment of future works, so this is the item in this ADR
+  most worth a lawyer's time before anybody signs anything.
 
 ## Alternatives considered
 - **Keep ADR 0007's all-rights-reserved posture.** Rejected. It rests on legal exclusivity being part of
