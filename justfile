@@ -259,8 +259,12 @@ build-local:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p {{justfile_directory()}}/bin
-    build() { (cd "$1" && GOWORK=off go build -o "{{justfile_directory()}}/bin/$2" "$3"); echo "  bin/$2"; }
-    build backend norite-server ./cmd/server
+    # Stamped the same way a release is, so `curl /api/v1/meta` locally reports a revision that actually
+    # exists rather than "unknown" — the AGPL section 13 offer is not verifiable otherwise.
+    rev=$(git -C {{justfile_directory()}} rev-parse HEAD 2>/dev/null || echo unknown)
+    meta=github.com/Alexnex31/Norite/backend/internal/meta.Revision
+    build() { (cd "$1" && GOWORK=off go build ${4:+-ldflags "$4"} -o "{{justfile_directory()}}/bin/$2" "$3"); echo "  bin/$2"; }
+    build backend norite-server ./cmd/server "-X $meta=$rev"
     build cli     norite        ./cmd/app
     build gui     norite-gui    ./cmd/gui
     build daemon  norite-daemon ./cmd/daemond

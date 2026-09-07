@@ -50,6 +50,10 @@ type fileConfig struct {
 		TrustedProxyHops  *int32  `toml:"trusted_proxy_hops"`
 	} `toml:"http"`
 
+	Source struct {
+		URL *string `toml:"url"`
+	} `toml:"source"`
+
 	Database struct {
 		URL                *string `toml:"url"`
 		MaxConns           *int32  `toml:"max_conns"`

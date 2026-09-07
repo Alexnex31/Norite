@@ -311,3 +311,49 @@ func currentSessionID(t *testing.T, a *api, accessToken string) string {
 	t.Fatal("no current session in the listing")
 	return ""
 }
+
+// The source offer AGPL-3.0 section 13 obliges this instance to make.
+//
+// Checked against the contract the same way the session listing is, because the failure this catches is a
+// field quietly renamed or dropped: nothing else in the codebase reads this payload, so a client written
+// against the contract is the only thing that would notice, and it would notice in production.
+func TestTheSourceOfferMatchesTheContract(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+
+	res := a.call(http.MethodGet, "/api/v1/meta", nil)
+	require.Equal(t, http.StatusOK, res.Code, res)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(res.Body, &body))
+
+	var got []string
+	for k := range body {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+
+	declared, required := declaredProperties(t, contractSchemas(t)["InstanceMeta"])
+	assert.Equal(t, declared, got, "GET /meta sent %v; InstanceMeta declares %v", got, declared)
+	assert.Equal(t, declared, required, "every field of the offer is always present; none is nullable")
+
+	assert.Equal(t, "AGPL-3.0-or-later", body["license"],
+		"the identifier is a constant — a fork that genuinely relicenses edits meta.License deliberately")
+	assert.NotEmpty(t, body["source_url"], "an empty offer is not an offer")
+}
+
+// Section 13 owes the offer to anyone interacting with the instance over a network, so a credential must
+// not be part of reaching it. Removing `security: []` from the contract, or mounting this route under
+// /instance, would break exactly this and nothing else — no other test here sends no Authorization header
+// and expects a 200.
+func TestTheSourceOfferNeedsNoCredential(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+
+	anonymous := a.call(http.MethodGet, "/api/v1/meta", nil)
+	require.Equal(t, http.StatusOK, anonymous.Code, "the section 13 offer must not require a credential")
+
+	// A garbage credential must not change the answer either: a client that happens to attach a stale
+	// token is still owed the offer, so the route must not be behind a verifier that rejects.
+	rejected := a.call(http.MethodGet, "/api/v1/meta", nil, withToken("nrt_not_a_real_token"))
+	require.Equal(t, http.StatusOK, rejected.Code, "a bad credential must not turn the offer into a 401")
+	assert.JSONEq(t, string(anonymous.Body), string(rejected.Body), "the offer is the same either way")
+}

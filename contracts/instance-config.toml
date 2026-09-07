@@ -61,6 +61,19 @@ trust_proxy_headers = false
 # 1 for a single reverse proxy or Ingress, 2 for a CDN in front of one. Default 1.
 trusted_proxy_hops = 1
 
+[source]
+# Where this instance's Corresponding Source can be obtained. Offered to anyone under AGPL-3.0 section 13
+# by GET /api/v1/meta, alongside the revision the running binary was built from.
+#
+# **If you have modified Norite, you MUST change this to point at your own source.** Section 13 obliges you
+# to offer *your users* *your* modified source; an instance running a patched build while advertising the
+# upstream repository is making an offer it cannot honour, and nothing can detect that automatically. The
+# default below is correct only for an unmodified build.
+#
+# The revision is not configurable and does not appear here: it is stamped into the binary at build time,
+# because a value an operator can type is a value that can disagree with the code that is running.
+url = "https://github.com/Alexnex31/Norite"
+
 [database]
 # Postgres connection string. No default — there is no safe guess. Carries the password: see the 0600 note
 # above. Use sslmode=require (or verify-full) for anything but a local socket or private container network.

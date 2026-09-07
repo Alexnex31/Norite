@@ -333,3 +333,55 @@ func TestPublicBaseURLMustBeHTTPOrHTTPS(t *testing.T) {
 		assert.Equal(t, "https://chat.example.com", cfg.PublicBaseURL)
 	})
 }
+
+// The AGPL section 13 offer must never be empty or malformed, and the only thing standing between an
+// operator's typo and an instance serving `"source_url": "not-a-url"` is the tag on the field.
+//
+// Worth a test rather than trust, because the default is applied in Load: anything that builds a Config
+// another way gets the zero value instead, which is exactly what the router's test harness did until this
+// endpoint caught it. That is a test-only path — this pins the production one.
+func TestTheSourceOfferIsAlwaysUsable(t *testing.T) {
+	base := func(t *testing.T) {
+		t.Helper()
+		withoutConfigFile(t)
+		t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+	}
+
+	t.Run("unset falls back to the upstream repository", func(t *testing.T) {
+		base(t)
+		cfg, err := Load("")
+		require.NoError(t, err, "an unset source URL must default, not fail — an unmodified build is the common case")
+		assert.Equal(t, DefaultSourceURL, cfg.SourceURL)
+	})
+
+	t.Run("a fork may point it at its own source", func(t *testing.T) {
+		base(t)
+		t.Setenv(envPrefix+"SOURCE_URL", "https://git.example.org/me/norite-fork")
+		cfg, err := Load("")
+		require.NoError(t, err)
+		assert.Equal(t, "https://git.example.org/me/norite-fork", cfg.SourceURL,
+			"section 13 obliges a modified instance to offer *its own* source, so this must be settable")
+	})
+
+	// An explicitly empty variable falls back to the default rather than failing, because getEnvString
+	// treats empty as unset for every setting in this package. That is the right answer here rather than
+	// merely a consistent one: the fallback is itself a correct offer for an unmodified build, so blanking
+	// the variable yields a usable §13 answer instead of a refusal to start.
+	t.Run("an empty variable is unset, not an empty offer", func(t *testing.T) {
+		base(t)
+		t.Setenv(envPrefix+"SOURCE_URL", "")
+		cfg, err := Load("")
+		require.NoError(t, err)
+		assert.Equal(t, DefaultSourceURL, cfg.SourceURL, "an empty offer must never be served")
+	})
+
+	t.Run("refuses a malformed URL", func(t *testing.T) {
+		base(t)
+		t.Setenv(envPrefix+"SOURCE_URL", "not-a-url")
+		_, err := Load("")
+		require.Error(t, err, "an unusable source offer must stop startup, not reach a user")
+		assert.Contains(t, err.Error(), envVarFor("SourceURL"),
+			"the error must name the variable an operator has to fix")
+	})
+}

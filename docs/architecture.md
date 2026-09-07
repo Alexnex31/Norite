@@ -833,6 +833,9 @@ DELETE /instance/admins/{user_id}
 -- Search
 GET    /guilds/{guild_id}/search?q=...
 
+-- Instance metadata (public, no credential)
+GET    /meta                                 -- AGPL §13 source offer: license, source_url, source_revision
+
 -- Observability (§14/§15)
 GET    /healthz
 GET    /metrics                              -- Instance Admin token or localhost-only
@@ -1724,11 +1727,22 @@ blob rather than a boolean. It is kept unbuilt rather than deleted — the treat
 seam costs nothing, a removed one costs a redesign. Anyone may patch it out and redistribute, by design.
 
 **AGPL §13 obliges the flagship to offer its Corresponding Source to network users**, corresponding to the
-*running* revision — served from a public, unauthenticated endpoint carrying the source URL, the revision
-the binary was built from, and the SPDX identifier, with the revision injected at build time. It cannot
-live under `/instance`, which has no unauthenticated route by design. The operational consequence is that
-the flagship deploys only revisions that exist in the public repository; configuration and secrets are not
-source and are not covered.
+*running* revision. `GET /api/v1/meta` serves it: the SPDX identifier, the source URL, and the revision the
+binary was built from. Unauthenticated by obligation rather than convenience — §13 owes the offer to
+whoever has *not* signed in — which is why it cannot live under `/instance`, a group whose defining
+property is having no unauthenticated route.
+
+The two fields fail in opposite directions, so they come from opposite places. **The revision is stamped in
+at link time** (`-ldflags -X …/internal/meta.Revision`), because it must describe the binary that is
+running and anything an operator can type can disagree with the code; an unstamped development build
+reports `unknown` rather than a plausible-looking placeholder. **The source URL is configuration**
+(`[source].url`, `NORITE_SOURCE_URL`), because §13 obliges an operator who *modified* Norite to offer their
+users *their* source — an instance running a patched build while advertising this repository is making an
+offer it cannot honour. The default is correct only for an unmodified build, and nothing can detect the
+difference automatically, so it is stated in the contract file, `.env.example` and the wizard's template.
+
+The operational consequence for the flagship is that it deploys only revisions that exist in the public
+repository; configuration and secrets are not source and are not covered.
 
 **Federation and mobile**: both explicit non-goals for v1 — each instance is an island, no dedicated mobile
 client planned. See [ADR 0019](adr/0019-platform-scope-and-commercial-model.md).
