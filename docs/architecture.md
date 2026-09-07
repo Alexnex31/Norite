@@ -2044,11 +2044,54 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
   terminal client looks like, screen by screen. If the same thing is described in two of them, that is
   drift — collapse it to one and leave a pointer, rather than keeping both in sync by hand. (This is not
   hypothetical: a duplicated roadmap lived in two files until M1.)
-- **Consistency**: grep this doc set for "AGPL," "cookie," "CSRF," "frontend" (outside §9's now-scoped
-  usage), and "voice"+"deferred" — confirm none read as stale (licensing/auth/voice language should all
-  match the current design, not the pre-v2 one). Confirm the daemon-holds-E2E-keys language is consistent
-  everywhere (never "the CLI/TUI/GUI hold the keys"). Confirm every milestone number referenced in prose
-  matches `docs/roadmap.md` exactly (`M0`–`M125`), and that no milestone is described in two places.
+- **Consistency**: grep this doc set for "cookie," "CSRF," "frontend" (outside §9's now-scoped usage), and
+  "voice"+"deferred" — confirm none read as stale (auth/voice language should match the current design, not
+  the pre-v2 one). Confirm the daemon-holds-E2E-keys language is consistent everywhere (never "the
+  CLI/TUI/GUI hold the keys"). Confirm every milestone number referenced in prose matches
+  `docs/roadmap.md` exactly (`M0`–`M125`), and that no milestone is described in two places.
+
+  **"AGPL" was on that grep list and its sense has reversed.** It was there to catch stale references to
+  ADR 0005's superseded posture; since ADR 0032 it is the *correct* term wherever the license is described,
+  so the check is now that such a document says it, and the stale terms to hunt are the two bullets below.
+- **No trace of the pre-0032 license posture**, in `docs/`, `CLAUDE.md` and `README.md`:
+
+  ```
+  grep -rni "all rights reserv[e]d\|no public licens[e]\|not AGP[L]" docs/ CLAUDE.md README.md \
+       --exclude-dir=adr
+  ```
+
+  The bracket around one letter of each term is not decoration: without it this bullet's own text is three
+  hits, and a check that always reports itself is one people learn to ignore. Same trick in the bullet
+  below.
+
+  **`--exclude-dir=adr` is load-bearing rather than a convenience.** ADR 0005's and ADR 0007's bodies
+  contain those phrases correctly — they are the historical record of a posture this project held, and a
+  superseded ADR's body is never rewritten. Scoped without the exclusion this check can only ever fail,
+  and a check that always fails is one nobody runs. The same scoping applies to the two below.
+- **No priority language between the two deployment shapes.** Both are first-class (§11, ADR 0032), and
+  the roadmap's asymmetry is deployment complexity — Phase P's preamble, §11 and `CLAUDE.md` each say so,
+  citing ADR 0021. Worth a standing check because that language is what anybody reaches for when
+  describing the project quickly.
+
+  ```
+  grep -rni "primary produc[t]\|secondary offerin[g]\|lesser-effor[t]\|core identit[y]" \
+       docs/ CLAUDE.md README.md --exclude-dir=adr
+  ```
+- **Every hand-written, non-generated `.go` file carries both SPDX lines** (rule 24) as its first two
+  lines, using `AGPL-3.0-or-later` and never the bare `AGPL-3.0`:
+
+  ```
+  for f in $(git ls-files '*.go'); do
+    grep -q "Code generated" "$f" && continue
+    head -2 "$f" | grep -q "SPDX-FileCopyrightText"                     || echo "MISSING COPYRIGHT: $f"
+    head -2 "$f" | grep -q "SPDX-License-Identifier: AGPL-3.0-or-later" || echo "MISSING LICENSE: $f"
+  done
+  ```
+
+  Scoped to `.go` deliberately: nothing else in the repository carries a header and `LICENSE` covers the
+  whole work (ADR 0032). It must read the **first two lines** rather than the whole file — `CLAUDE.md`
+  rule 24 and ADR 0032 both quote the identifier while specifying it, so a whole-file grep reports two
+  prose mentions as headers they are not.
 - **The terminal client's two vocabularies**: grep for "CLI" and confirm each use means the *command tree*
   (§4) and not the full-screen application (§4a) — that conflation is what ADR 0026 exists to undo, and it
   reappears every time a paragraph written before it is edited. Confirm every screen id in

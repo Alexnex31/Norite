@@ -79,6 +79,29 @@ jobs:
           GOWORK: "off"
         run: go build ./...
 
+      # The backend must never link a copyleft dependency, and go.mau.fi/libsignal (GPL-3.0) is the one
+      # the design actually calls for — in the daemon, at M97, never here. Rule 22 and ADR 0032 give the
+      # reason: the daemon is permanently copyleft-locked once it lands, while the backend stays
+      # relicensable for exactly as long as it is copyleft-free.
+      #
+      # `just license-check`'s per-module policy already denies it, but that check reads the module graph.
+      # This reads the linked binary, which is the only thing that can answer whether a *transitive* path
+      # dragged it in — and a transitive path is how it would actually happen, silently, years from now.
+      # It holds today by construction because the linker keeps only what is reachable, which is precisely
+      # why it needs an assertion: there is nothing to see in a diff when it breaks.
+      - name: the backend links no copyleft dependency
+        if: matrix.module == 'backend'
+        env:
+          GOWORK: "off"
+        run: |
+          go build -o /tmp/norite-server ./cmd/server
+          if go version -m /tmp/norite-server | grep -qi 'libsignal'; then
+            echo "::error::the server binary links libsignal — see CLAUDE.md rule 22 and docs/adr/0032-agpl-license.md"
+            go version -m /tmp/norite-server | grep -i libsignal
+            exit 1
+          fi
+          echo "no libsignal in the server binary"
+
   codegen:
     name: codegen is up to date
     runs-on: ubuntu-latest

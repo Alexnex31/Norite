@@ -89,7 +89,7 @@ area the width that makes it readable. What is dropped stays reachable by chord,
 its two rows at every width — truncating segments (counts first, then the clock) rather than wrapping.
 
 ## Screens
-25 screens, grouped into 7 sections. Each carries a stable id used throughout this package
+26 screens, grouped into 7 sections. Each carries a stable id used throughout this package
 (`1a`, `2c`, …) and shown as a badge in the mock. Full per-screen specs: **SCREENS.md**.
 
 | Section | Ids |
@@ -99,7 +99,7 @@ its two rows at every width — truncating segments (counts first, then the cloc
 | 3 · Finding & running | 3a switcher (default) · 3b switcher (minibuffer) · 3c search · 3d help overlay · 3e M-x |
 | 4 · Voice | 4a full voice view · 4b in-call strip |
 | 5 · Lifecycle & states | 5a first run · 5b empty · 5c disconnected · 5d deep work · 5e whisper |
-| 6 · Trust & admin | 6a device verify · 6b plugins · 6c admin reports |
+| 6 · Trust & admin | 6a device verify · 6b plugins · 6c admin reports · 6d about & licenses |
 | 7 · Shared components | 7a status bar |
 
 ## The three load-bearing decisions
@@ -230,7 +230,7 @@ which is the normative document anyway.
 
 ## Files in this bundle
 - `README.md` — this file
-- `SCREENS.md` — per-screen specification, all 25 screens
+- `SCREENS.md` — per-screen specification, all 26 screens
 - `TOKENS.md` — palette, grid, glyph set, component recipes
 - `KEYMAP.md` — every chord, with scope and target screen
 - `mockups.dc.html` — the visual reference (open in a browser; ids are anchors, e.g. `#2c`)

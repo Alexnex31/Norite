@@ -39,7 +39,7 @@ paths:
       summary: Instance metadata and the AGPL source offer
       description: >
         The Corresponding Source offer AGPL-3.0 section 13 requires this instance to make to anyone
-        interacting with it over a network, plus the licence identifier its own code is distributed under.
+        interacting with it over a network, plus the license identifier its own code is distributed under.
 
 
         Unauthenticated **by obligation, not by convenience**. Section 13 owes the offer to every user
@@ -68,7 +68,7 @@ paths:
       security: []
       responses:
         "200":
-          description: The instance's licence and source offer.
+          description: The instance's license and source offer.
           content:
             application/json:
               schema:

@@ -398,9 +398,19 @@ of this section.
 
   It is also what the phase-boundary beta builds are for: from here on there is something to hand a tester.
 
+  **It also carries the license notice, in its plain-text form.** This is the first milestone at which a
+  person can open a client at all, so it is the first at which AGPL §5(d)'s notice has anywhere to go —
+  and `6d`, the full About screen, does not arrive until M44's help surfaces exist. What lands here is the
+  minimum that is honest: `norite about` printing the license, the build's revision and its source URL (the
+  three values `GET /api/v1/meta` serves), with `norite licenses` already printing the third-party set
+  since the relicensing. §5(d) obliges a notice where the *original* displays one, so this is Norite
+  setting that baseline deliberately rather than satisfying a constraint imposed on it — a client that
+  showed nothing would leave every downstream fork free to show nothing too.
+
   Done when: with the daemon running and signed in, `norite` opens a single pane against one guild channel,
   renders its recent messages through `termsafe`, sends a message that a second attached client receives
-  live, and quits cleanly.
+  live, and quits cleanly — and `norite about` reports a revision that resolves in the repository it
+  names.
 
 - **M21 — Config file**: the shared TOML config (`pelletier/go-toml` v2, document-editing mode for
   comment-preserving programmatic writes), namespaced `[shared]` / `[tui]` / `[gui]` — there is no `[cli]`
@@ -555,12 +565,19 @@ of this section.
   live from the daemon with grouping and dividers, a message typed in the composer reaches the instance and
   comes back through the gateway, a disallowed markdown corpus renders inert, and a message containing
   escape sequences cannot move the cursor.
-- **M44 — TUI chord dispatcher and help** (`3d`, `1d`): the two-prefix Emacs model (`C-x` panes, `C-c` app,
-  `M-x` command mode, `M-1`…`M-9` guilds), armed-prefix feedback in the status bar, unknown chords as a
-  status-bar error rather than a modal, `[tui.keys]` in the config file with hot reload, the help overlay,
-  and the rebinding UI with its overrides panel. Depends on M21 for the config file. Done when: the
-  documented default set is wired, a remap in `[tui.keys]` takes effect without a rebuild, and `C-h` lists
-  what is actually bound rather than a hardcoded table.
+- **M44 — TUI chord dispatcher and help** (`3d`, `1d`, `6d`): the two-prefix Emacs model (`C-x` panes,
+  `C-c` app, `M-x` command mode, `M-1`…`M-9` guilds), armed-prefix feedback in the status bar, unknown
+  chords as a status-bar error rather than a modal, `[tui.keys]` in the config file with hot reload, the
+  help overlay, and the rebinding UI with its overrides panel. Depends on M21 for the config file.
+
+  `6d` (about & licenses) sits here too, on `C-c ?`: the build's version, revision and source URL — the
+  same three values `GET /api/v1/meta` serves — plus the embedded `THIRD-PARTY-NOTICES.txt` the CLI prints
+  as `norite licenses`. It lands here rather than in its own milestone because it is a help surface and
+  this is the milestone that builds them; M20a already carries the plain-text form (ADR 0032, AGPL §5(d)).
+
+  Done when: the documented default set is wired, a remap in `[tui.keys]` takes effect without a rebuild,
+  `C-h` lists what is actually bound rather than a hardcoded table, and `C-c ?` shows a revision that
+  resolves in the repository the same screen names.
 - **M45 — TUI theming and ricing**: the token roles from `docs/design/tui/TOKENS.md` mapped by default onto
   the terminal's own ANSI 0–15, so an existing palette is inherited rather than overridden; the drawn hex
   palette shipped as the named `norite-dark` theme; `~/.config/norite/themes/*.toml` selected from `[tui]`;
@@ -885,9 +902,12 @@ when a constraint the terminal imposed is lifted.
   mapped to Gio's native rendering — a theme a user wrote for one client is legible in the other. Done when:
   a theme change in the config file is reflected identically in spirit across TUI and GUI.
 - **M82 — GUI settings and voice device tab**: config read/write via the same `go-toml` v2 document-editing
-  approach the other clients use, plus the voice input/output device-selection settings tab. Done when: a
+  approach the other clients use, plus the voice input/output device-selection settings tab, plus the GUI's
+  About pane — `6d`'s content rendered natively, since the notice obligation is per interactive client and
+  the GUI is one (ADR 0032, AGPL §5(d)). Done when: a
   setting changed in the GUI is correctly reflected when the TUI next reads the config — `[gui]` overriding
-  `[shared]` for its own keys and leaving `[tui]` untouched (M21).
+  `[shared]` for its own keys and leaving `[tui]` untouched (M21) — and the About pane shows the same
+  version, revision and source URL the TUI's `6d` does.
 - **M83 — GUI voice UI**: participant list, mute/deafen controls, an active-speaker indicator (a highlight/
   ring around whoever is transmitting), and separate local-mute and report actions, wired to the same
   voice-worker control path the TUI uses (M34). Done when: joining voice from the GUI shows the same

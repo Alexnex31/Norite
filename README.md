@@ -5,7 +5,7 @@ and both are first-class: the free, global, publicly-hosted flagship instance, o
 real, fully-built, and free, useful for enterprises and other private groups who want their own instance.
 
 Four clients: a scriptable CLI (the `norite` command tree — one action, exit, pipeable), a full-screen TUI
-(the in-terminal application: panes, chords, 25 specified screens), a native GUI mirroring the TUI's
+(the in-terminal application: panes, chords, 26 specified screens), a native GUI mirroring the TUI's
 information architecture, and a lower-priority web SPA built later. The first three attach to one local
 background daemon per OS user account, which holds the real connection to whichever instance you're using
 and does the real work; the clients are thin UIs over it. The CLI and the TUI ship in one binary and share
@@ -139,7 +139,7 @@ Instance-Admin-managed and stands alone.
   tensions this design accepts.
 - `docs/roadmap.md` — the dependency-ordered milestone sequence (`M0`–`M125`), each with a checkable
   "done when" condition.
-- `docs/design/tui/` — the terminal client's normative design: 25 screens with stable ids, the keymap, the
+- `docs/design/tui/` — the terminal client's normative design: 26 screens with stable ids, the keymap, the
   design tokens, and a visual HTML mock of each screen.
 - `docs/adr/` — Architecture Decision Records for the most contested individual choices.
 - `.claude/skills/` — repo-specific workflows (`/new-endpoint`, `/new-gateway-event`, `/db-migration`,
