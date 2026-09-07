@@ -144,9 +144,21 @@ Found a security issue? See `SECURITY.md` rather than opening a public issue.
 
 ## License
 
-**No public license — all rights reserved.** The source is visible here for self-hosting trust and
-transparency, but no rights to use, copy, modify, distribute, host, or sell it are granted by default; under
-default copyright law, "all rights reserved" is what applies to unlicensed code. Self-hosted instances are
-run under an individually-issued, cryptographically-signed license file granted directly to that customer
-(see the commercial model above), not under a public license text. See
-`docs/adr/0007-licensing-and-project-posture.md` for the full reasoning.
+**[AGPL-3.0-or-later](LICENSE).** Norite is free software.
+
+```
+Copyright (C) 2026 Alexandre Duffez
+
+Norite is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+The name "Norite" and the project's branding are not licensed under the AGPL.
+Under section 7(e), no permission is granted to use them for forks or
+derivative services in a way likely to cause confusion.
+```
+
+The name reservation is a declining-to-grant under AGPL §7(e), not a trademark claim — nothing is
+registered. See `docs/adr/0032-agpl-license.md` for the full reasoning, including why a GPL-3.0 dependency
+is usable here and why the backend keeps a stricter dependency policy than the clients.

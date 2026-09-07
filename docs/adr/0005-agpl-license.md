@@ -8,8 +8,15 @@ free flagship instance plus sold self-hosted licenses — that AGPL's copyleft t
 blocked). Rather than replace it with another public license, the project now publishes **no public license
 at all**: default copyright applies (all rights reserved), and self-hosted customers receive an individually-
 granted, cryptographically-signed license file instead of relying on public license text. The `LICENSE` file
-at the repo root reflects this current policy directly — see ADR 0007. Historical rationale below is kept
-intact for why AGPL was the *original* choice.
+at the repo root reflected that policy directly. Historical rationale below is kept intact for why AGPL was
+the *original* choice.
+
+**That reversal has since itself been reversed.** [ADR 0032](0032-agpl-license.md) returns the project to
+`AGPL-3.0-or-later` and adopts this ADR's rationale wholesale — the closed-source-hosted-fork failure mode
+named below is still the thing worth guarding against, and the network-use clause is still what guards it.
+0032 does reverse one consequence of this ADR: hand-written `.go` files now carry per-file SPDX headers.
+This ADR nonetheless remains **superseded** rather than reinstated, because 0032 supersedes both it and
+0007; the chain is 0005 → 0007 → 0032 and stays linear.
 
 ## Context
 This is a self-hosted, open-source chat platform. A permissive license (MIT/Apache-2.0) maximizes
