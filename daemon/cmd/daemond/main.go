@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command daemond is the Norite background daemon.
 //
 // One process per OS user account, normally started by that user's service manager (systemd user unit,

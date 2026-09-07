@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package meta serves the instance metadata any client may read without a credential, which today is the
 // AGPL section 13 Corresponding Source offer and nothing else.
 //

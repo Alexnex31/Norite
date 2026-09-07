@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package ratelimit provides the backend's base REST/gateway rate-limiting middleware.
 //
 // The one rule this package exists to guarantee is global, not per-feature (docs/architecture.md §11

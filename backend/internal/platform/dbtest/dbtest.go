@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package dbtest provides a real Postgres for integration tests.
 //
 // Integration tests here run against actual Postgres in a container rather than a mock. The behavior under

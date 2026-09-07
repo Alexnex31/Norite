@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package instanceinit implements `norite instance init`, the self-hosted operator's first-run setup flow.
 //
 // The wizard's output is the instance config file the backend reads at startup. The two live in separate

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package logging owns the backend's structured logging: zerolog setup, context-scoped loggers, and the
 // HTTP request-logging middleware.
 //

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package migrations embeds the golang-migrate SQL migration files into the server binary.
 //
 // Embedding rather than shipping a directory alongside the binary is what makes the single-binary

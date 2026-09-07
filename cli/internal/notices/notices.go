@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package notices carries the third-party attribution text this binary must ship with.
 //
 // MIT, BSD and Apache-2.0 all require their notices to accompany a distributed binary, and a file sitting

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package auth is the account and credential core: registration, password login, device-scoped refresh
 // token families, and scoped API tokens.
 //

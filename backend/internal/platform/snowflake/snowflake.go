@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package snowflake generates the 64-bit, time-sortable identifiers every entity in Norite uses.
 //
 // Layout, Discord's, unchanged (ADR 0003):

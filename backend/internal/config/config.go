@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package config holds the backend's typed, environment-bound configuration.
 //
 // Everything the process needs to boot is read once, at startup, into a single validated Config value —

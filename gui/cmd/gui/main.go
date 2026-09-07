@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command gui is the Norite native GUI.
 //
 // M0 scope: proves the module builds. The real Gio app scaffold, attaching to the daemon over the local
