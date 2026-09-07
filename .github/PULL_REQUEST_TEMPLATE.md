@@ -1,3 +1,15 @@
+<!-- ---------------------------------------------------------------------------
+     Norite is free software (AGPL-3.0-or-later) but is NOT open to outside code
+     contributions. Pull requests from anyone other than the copyright holder
+     cannot be merged — for backend/ this is a permanent licensing constraint,
+     not a preference. Please read CONTRIBUTING.md before spending time on a
+     patch; bug reports and design discussion in issues are welcome, and a
+     security issue goes to SECURITY.md rather than to a public issue.
+
+     This template has exactly the three sections below. Do not add a fourth;
+     anything else goes inside "What does this change?" as prose or sub-bullets.
+     --------------------------------------------------------------------------- -->
+
 ## What does this change?
 
 <!-- Summary of the change and why. Link the issue/milestone it belongs to, if any. -->

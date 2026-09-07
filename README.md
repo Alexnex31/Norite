@@ -145,7 +145,9 @@ Instance-Admin-managed and stands alone.
 - `.claude/skills/` — repo-specific workflows (`/new-endpoint`, `/new-gateway-event`, `/db-migration`,
   `/security-audit`) encoding the conventions above.
 
-Found a security issue? See `SECURITY.md` rather than opening a public issue.
+Norite is not open to outside code contributions — [`CONTRIBUTING.md`](CONTRIBUTING.md) explains why, and
+what is welcome instead. Found a security issue? See [`SECURITY.md`](SECURITY.md) rather than opening a
+public issue.
 
 ## License
 

@@ -27,6 +27,35 @@ Please include:
   before any public advisory or patch release that would reveal the vulnerability.
 - Credit in the advisory/release notes, if you'd like it.
 
+## How a fix is developed and released
+
+The promise above — to coordinate disclosure timing *before any public advisory or patch release that would
+reveal the vulnerability* — is not something a public repository keeps by default. The fix commit is visible
+the moment it is pushed, self-hosters have not upgraded yet, and for most classes of bug the diff **is** the
+exploit. AGPL §13's source offer will sharpen it further once that ships: it names the exact revision the
+flagship is running, so an attacker reading a fix commit will know immediately whether the live instance is
+affected. That is a deliberate consequence of the license and is accepted as a limitation
+(`architecture.md` §17) — which is precisely what makes the workflow below load-bearing rather than a
+formality.
+
+So, for anything reported through the private channel above:
+
+- **The fix is developed privately**, in a GitHub security advisory's private fork or an equivalent private
+  branch — never as a commit pushed to the public repository ahead of the release. Private vulnerability
+  reporting is already enabled on this repository, and the private fork it creates is the intended place.
+- **The patched release, the advisory, and the public commit go out together**, not over a period of days.
+  A fix that lands publicly before the release it belongs to is the same as publishing the vulnerability.
+- **Self-hosters are notified through the advisory**, which is the only channel that reaches them; the
+  flagship is upgraded before or at the same time, never after.
+- **The commit message and the advisory describe the vulnerability plainly** once both are public. Vague
+  commit subjects to obscure a security fix are not a substitute for the timing above — they delay
+  discovery by defenders and self-hosters more than by anyone reading the diff.
+
+Nothing here is live yet: no release has shipped and the flagship accepts no non-developer account before
+v1 (ADR 0032's release posture), so there is currently nobody to coordinate with. This section is written
+now rather than at the first phase beta because that is the point at which a build first reaches somebody
+else, and it is a bad moment to be designing a disclosure process.
+
 ## Scope
 
 This is self-hosted software — each deployment/instance operator is responsible for their own operational
