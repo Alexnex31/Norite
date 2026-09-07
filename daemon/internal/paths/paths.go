@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package paths resolves the per-user directories the daemon owns.
 //
 // One process per OS user account (ADR 0010), so every path here is user-scoped — never a system-wide

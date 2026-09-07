@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package httpx holds the HTTP plumbing every domain package shares: the JSON response envelope, the
 // domain-error-to-HTTP-status mapping, JSON encode/decode helpers, and the secure-headers middleware.
 //

@@ -7,6 +7,12 @@ is reached by signing in, and until M11a a sign-in was protected by one factor. 
 below changes; what changes is that the authentication under it is now scheduled to be two-factor, and
 M11a is a hard dependency of M100.
 
+**Also amended by [ADR 0032](0032-agpl-license.md)** in one place: the "blocking prerequisite" below is
+answered and is no longer a gate. `go.mau.fi/libsignal` is GPL-3.0, the project is `AGPL-3.0-or-later`, and
+GPL-3.0 §13 permits combining the two into a single conveyable work. What replaces the gate is a standing
+constraint — libsignal is imported only from `daemon/`, never transitively into `backend/`, because a path
+into the backend would silently end its relicensability. The cryptographic design below is unchanged.
+
 ## Context
 Real E2E encryption is valuable but carries **compounding, not merely additive**, cryptographic risk: it
 depends on two independent custom protocol surfaces (a fully-custom device-linking flow, and correct

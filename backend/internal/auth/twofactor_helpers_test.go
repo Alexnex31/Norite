@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package auth
 
 // provedFactor builds a satisfied proof for a test that is not about the second factor.

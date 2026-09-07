@@ -9,10 +9,10 @@
 
 ## Context
 
-Norite is a voice-and-text chat platform. The primary way to use it is the free, global, publicly-hosted
-flagship instance (§12) — self-hosting is a real, fully-built feature, not the platform's core identity: a
-one-time-purchase-licensed offering (§11) aimed at enterprises and other private groups who want their own
-instance. Source visible but under no public license (all rights reserved, §11). Four clients: the
+Norite is a voice-and-text chat platform, licensed `AGPL-3.0-or-later` (§11). It has two deployment shapes
+and **both are first-class**: the free, global, publicly-hosted flagship instance the author operates (§12),
+and self-hosting, which is real, fully-built and free — aimed at enterprises and other private groups who
+want their own instance. Neither is the product and neither is the sideline. Four clients: the
 scriptable CLI (§4), the full-screen TUI (§4a), a native GUI (§5), and a lower-priority web SPA built later
 (§9) — the first three sharing one local background daemon per OS user account, as the Clients bullet
 below sets out. The full scope described here is realistically multi-year,
@@ -41,15 +41,16 @@ Locked-in decisions:
 - **Security and performance are first-class concerns**, not an afterthought pass at the end — §14 and §15
   below are as load-bearing as the feature sections and should be implemented alongside each milestone, not
   deferred.
-- **License**: no public license — default copyright, all rights reserved. Not AGPL, not open source, not a
-  drafted custom public license either. Self-hosted customers are granted rights individually via a signed
-  license file (§11), never a public license text. See
-  [ADR 0007](adr/0007-licensing-and-project-posture.md).
-- **Commercial model**: two independent deployments of the same codebase. **The free flagship instance
-  (Kubernetes, §12) is the primary product**; self-hosted instances sold via one-time license (flat pricing
-  regardless of buyer, expected to appeal most to enterprises and other private groups) are a real, fully-
-  built secondary offering, not a lesser-effort one. No shared multi-tenancy, no "Platform Operator" tier.
-  See [ADR 0007](adr/0007-licensing-and-project-posture.md) and
+- **License**: `AGPL-3.0-or-later` — free software, granted publicly to everyone by the license text (§11).
+  Anyone may fork, self-host, run and modify it, and must offer source to the users of any modified network
+  service they run. The name is reserved under §7(e) by declining to grant it, not by a trademark claim.
+  Dependency policy splits by module: permissive-only in `backend/`, AGPL-compatible in the clients. See
+  [ADR 0032](adr/0032-agpl-license.md).
+- **Commercial model**: two independent deployments of the same codebase, both first-class — the free
+  flagship instance the author operates (Kubernetes, §12) and free self-hosting. Nothing is sold to a
+  self-hoster; under AGPL there is nothing to sell them. What is commercial needs no license grant at all:
+  flagship subscription perks, paid support, hosting and managed instances. No shared multi-tenancy, no
+  "Platform Operator" tier. See [ADR 0032](adr/0032-agpl-license.md) and
   [ADR 0019](adr/0019-platform-scope-and-commercial-model.md).
 - **Account lifecycle (deletion/export)** is planned now, alongside auth, rather than retrofitted later.
 
@@ -579,7 +580,8 @@ CREATE TABLE reports (                          -- unified: guild, instance-leve
 CREATE INDEX ON reports (reporter_id);
 CREATE INDEX ON reports (status, routed_to);
 
--- Entitlements (ADR 0007) — inert seams, unused by any v1 code path
+-- Entitlements (ADR 0032) — inert seams, unused by any v1 code path. The per-instance seam has lost the
+-- customer it was designed for (self-hosting is free); it is kept unbuilt rather than deleted.
 CREATE TABLE entitlements (                     -- per-instance (self-hosted license)
   id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),   -- singleton
   licensed boolean NOT NULL DEFAULT false, license_key text NULL, entitlements_blob jsonb NOT NULL DEFAULT '{}'
@@ -830,6 +832,9 @@ DELETE /instance/admins/{user_id}
 
 -- Search
 GET    /guilds/{guild_id}/search?q=...
+
+-- Instance metadata (public, no credential)
+GET    /meta                                 -- AGPL §13 source offer: license, source_url, source_revision
 
 -- Observability (§14/§15)
 GET    /healthz
@@ -1565,9 +1570,12 @@ from day one (terminal clients always `false`).
 Opt-in, restricted to the `DM` channel type only. See [ADR 0014](adr/0014-e2e-encryption.md) for full
 reasoning including the pairwise-scaling limitation and the compounding-risk framing.
 
-**Cryptographic base**: `go.mau.fi/libsignal`, a mature pure-Go Signal-protocol port — license compatibility
-with the project's restrictive license (ADR 0007) is a **blocking prerequisite**, checked before any
-integration code is written.
+**Cryptographic base**: `go.mau.fi/libsignal`, a mature pure-Go Signal-protocol port. It is GPL-3.0, and
+under `AGPL-3.0-or-later` that is **settled, not a gate**: GPL-3.0 §13 permits combining a GPL-3.0 work with
+an AGPL-3.0 work into a single conveyable work (ADR 0032). Two constraints persist. It depends on the
+dependency being GPL **version 3** — `GPL-2.0-only` would not qualify. And **libsignal is imported only from
+`daemon/`**: a transitive path into `backend/` would silently end the backend's relicensability, which is a
+licensing constraint on top of the architectural one.
 
 **Key boundary — the daemon holds the keys**: the daemon owns the E2E keystore/ratchet state end to end and
 performs all decryption itself; CLI/TUI/GUI receive plaintext over the already-trusted local IPC socket (§3),
@@ -1620,7 +1628,10 @@ reads only — no UI-injection capability, no IPC bridge for painting native TUI
 what the user sees only through the data/text an already-capability-gated host function returns.
 
 **Distribution**: local files only in v1 (drop a `.wasm` in a plugins folder) — no registry/marketplace.
-TinyGo is the recommended (not required) authoring toolchain.
+TinyGo is the recommended (not required) authoring toolchain. **A third-party `.wasm` communicating only
+across the declared capability ABI is a separate work, not a derivative of the daemon**, and may carry
+whatever license its author chooses. Saying so costs nothing and is the difference between an ecosystem and
+an unanswered question — a plugin author who cannot find an answer writes no plugin (ADR 0032).
 
 **Capability manifest + hash-pinning**: each plugin ships `manifest.toml` declaring needed capabilities; the
 daemon requires explicit first-load approval (browser-extension-style). Approval also pins a SHA-256 hash of
@@ -1692,16 +1703,46 @@ Playwright E2E against the real docker-compose stack.
 
 ## 11. Business posture, platform scope, and operations
 
-**Licensing and commercial model**: no public license — default copyright, all rights reserved. Two
-independent deployments, each granted rights individually via a signed license file — an offline,
-Ed25519-signed JWT-like structure whose claims are `license_id`, `issued_to`, and an `entitlements` blob,
-with no expiry claim, verified locally with a compiled-in public key so an instance never phones home. For
-v1 the entitlements blob is a simple binary unlock (`{licensed: bool, license_key: string}`-shape); richer
-per-feature entitlements are the reason it is a blob rather than a boolean. **The free flagship
-instance is the primary product**; self-hosted instances (sold via a flat one-time license, most likely to
-appeal to enterprises and other private groups) are a real, fully-built secondary offering. No shared
-multi-tenancy, no public license text to draft or maintain. See
-[ADR 0007](adr/0007-licensing-and-project-posture.md).
+**Licensing and commercial model**: `AGPL-3.0-or-later`. Rights are granted publicly by the license text,
+to everyone, so self-hosting is free and unrestricted and there is nothing to sell a self-hoster. Two
+independent deployments — the flagship the author operates and self-hosted instances — and **both are
+first-class**: the same code, the same quality bar, the same support commitment. The roadmap's asymmetry
+(Phase P spends twelve milestones, M112–M123, on the flagship's Kubernetes track, against M96 plus the
+bare-metal/systemd documentation for self-hosting) reflects **deployment complexity, not importance** — the
+flagship is the one deployment that needs real horizontal scale and HA
+([ADR 0021](adr/0021-flagship-kubernetes-deployment.md)).
+
+What is commercially available needs no license grant at all: flagship per-user subscription perks via the
+`user_entitlements` seam, paid support, hosting and managed instances. No shared multi-tenancy, no public
+license text to draft or maintain — AGPL-3.0 is a standard text needing no bespoke review. See
+[ADR 0032](adr/0032-agpl-license.md).
+
+**The signed self-hosted license file survives as an inert seam**, not as a mechanism that grants anything:
+an offline, Ed25519-signed JWT-like structure whose claims are `license_id`, `issued_to`, and an
+`entitlements` blob, with no expiry claim, verified locally with a compiled-in public key so an instance
+never phones home; for v1 the entitlements blob would be a simple binary unlock
+(`{licensed: bool, license_key: string}`-shape), richer per-feature entitlements being the reason it is a
+blob rather than a boolean. It is kept unbuilt rather than deleted — the treatment
+[ADR 0006](adr/0006-voice-deferred-with-seams.md) gave the voice seams, and for the same reason: an unbuilt
+seam costs nothing, a removed one costs a redesign. Anyone may patch it out and redistribute, by design.
+
+**AGPL §13 obliges the flagship to offer its Corresponding Source to network users**, corresponding to the
+*running* revision. `GET /api/v1/meta` serves it: the SPDX identifier, the source URL, and the revision the
+binary was built from. Unauthenticated by obligation rather than convenience — §13 owes the offer to
+whoever has *not* signed in — which is why it cannot live under `/instance`, a group whose defining
+property is having no unauthenticated route.
+
+The two fields fail in opposite directions, so they come from opposite places. **The revision is stamped in
+at link time** (`-ldflags -X …/internal/meta.Revision`), because it must describe the binary that is
+running and anything an operator can type can disagree with the code; an unstamped development build
+reports `unknown` rather than a plausible-looking placeholder. **The source URL is configuration**
+(`[source].url`, `NORITE_SOURCE_URL`), because §13 obliges an operator who *modified* Norite to offer their
+users *their* source — an instance running a patched build while advertising this repository is making an
+offer it cannot honour. The default is correct only for an unmodified build, and nothing can detect the
+difference automatically, so it is stated in the contract file, `.env.example` and the wizard's template.
+
+The operational consequence for the flagship is that it deploys only revisions that exist in the public
+repository; configuration and secrets are not source and are not covered.
 
 **Federation and mobile**: both explicit non-goals for v1 — each instance is an island, no dedicated mobile
 client planned. See [ADR 0019](adr/0019-platform-scope-and-commercial-model.md).
@@ -1807,8 +1848,9 @@ E2E key-boundary violations.
    plus a per-invocation wall-clock timeout — no plugin path is exempt.
 
 8. **E2E threat model**: the daemon holds all key material; E2E is `DM`-channel-type-only, text-only, never
-   `GROUP_DM`/guild channels/whispers/voice. The `go.mau.fi/libsignal` integration is license-gated (ADR
-   0007) before any code is written. A hard release-gate flag keeps E2E disabled beyond the developer's own
+   `GROUP_DM`/guild channels/whispers/voice. `go.mau.fi/libsignal` is GPL-3.0 and usable under
+   `AGPL-3.0-or-later` (ADR 0032); the standing constraint is that it is imported only from `daemon/`, never
+   transitively into `backend/`. A hard release-gate flag keeps E2E disabled beyond the developer's own
    test accounts until the external audit (covering the library integration and the fully-custom
    device-linking protocol) passes. Device revocation cuts E2E device-link trust in the same action as
    session revocation.
@@ -2002,11 +2044,59 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
   terminal client looks like, screen by screen. If the same thing is described in two of them, that is
   drift — collapse it to one and leave a pointer, rather than keeping both in sync by hand. (This is not
   hypothetical: a duplicated roadmap lived in two files until M1.)
-- **Consistency**: grep this doc set for "AGPL," "cookie," "CSRF," "frontend" (outside §9's now-scoped
-  usage), and "voice"+"deferred" — confirm none read as stale (licensing/auth/voice language should all
-  match the current design, not the pre-v2 one). Confirm the daemon-holds-E2E-keys language is consistent
-  everywhere (never "the CLI/TUI/GUI hold the keys"). Confirm every milestone number referenced in prose
-  matches `docs/roadmap.md` exactly (`M0`–`M125`), and that no milestone is described in two places.
+- **Consistency**: grep this doc set for "cookie," "CSRF," "frontend" (outside §9's now-scoped usage), and
+  "voice"+"deferred" — confirm none read as stale (auth/voice language should match the current design, not
+  the pre-v2 one). Confirm the daemon-holds-E2E-keys language is consistent everywhere (never "the
+  CLI/TUI/GUI hold the keys"). Confirm every milestone number referenced in prose matches
+  `docs/roadmap.md` exactly (`M0`–`M125`), and that no milestone is described in two places.
+
+  **"AGPL" was on that grep list and its sense has reversed.** It was there to catch stale references to
+  ADR 0005's superseded posture; since ADR 0032 it is the *correct* term wherever the license is described,
+  so the check is now that such a document says it, and the stale terms to hunt are the two bullets below.
+- **No trace of the pre-0032 license posture**, in `docs/`, `CLAUDE.md` and `README.md`:
+
+  ```
+  grep -rni "all rights reserv[e]d\|no public licens[e]\|not AGP[L]" docs/ CLAUDE.md README.md \
+       --exclude-dir=adr
+  ```
+
+  The bracket around one letter of each term is not decoration: without it this bullet's own text is three
+  hits, and a check that always reports itself is one people learn to ignore. Same trick in the bullet
+  below.
+
+  **`--exclude-dir=adr` is load-bearing rather than a convenience.** ADR 0005's and ADR 0007's bodies
+  contain those phrases correctly — they are the historical record of a posture this project held, and a
+  superseded ADR's body is never rewritten. Scoped without the exclusion this check can only ever fail,
+  and a check that always fails is one nobody runs. The same scoping applies to the two below.
+- **No priority language between the two deployment shapes.** Both are first-class (§11, ADR 0032), and
+  the roadmap's asymmetry is deployment complexity — Phase P's preamble, §11 and `CLAUDE.md` each say so,
+  citing ADR 0021. Worth a standing check because that language is what anybody reaches for when
+  describing the project quickly.
+
+  ```
+  grep -rni "primary produc[t]\|secondary offerin[g]\|lesser-effor[t]\|core identit[y]" \
+       docs/ CLAUDE.md README.md --exclude-dir=adr
+  ```
+- **Every hand-written, non-generated `.go` file carries both SPDX lines** (rule 24) as its first two
+  lines, with a blank third line, using `AGPL-3.0-or-later` and never the bare `AGPL-3.0`. **This one is
+  automated** — `just spdx-check`, and the same checks inlined in CI's `codegen` job — because unlike the
+  greps above it has to hold for files that do not exist yet, and a rule enforced only by a checklist
+  decays at the first file written by somebody who has not read the checklist.
+
+  Three details in it are worth knowing rather than rediscovering, each having been an inert check before
+  it was tested:
+
+  - It reads the **first two lines**, never the whole file. `CLAUDE.md` rule 24 and ADR 0032 both quote the
+    identifier while specifying the rule, so a whole-file grep reports two prose mentions as headers.
+  - It matches generated files on Go's own `^// Code generated … DO NOT EDIT.$` convention in the first
+    five lines, not on the loose phrase anywhere in the file — the loose form would also skip a
+    hand-written file that merely mentions the marker, and skipping is how a check fails silently.
+  - It lists `--cached --others --exclude-standard`, so a file written but not yet `git add`ed is checked.
+    Without that the recipe passes on precisely the case it exists for: a new file, green locally, red in
+    CI. That was a real gap, found by writing an unheadered file and watching the check pass.
+
+  Scoped to `.go` deliberately, and the check enforces the negative too: nothing else in the repository
+  carries a header, because `LICENSE` covers the whole work (ADR 0032).
 - **The terminal client's two vocabularies**: grep for "CLI" and confirm each use means the *command tree*
   (§4) and not the full-screen application (§4a) — that conflation is what ADR 0026 exists to undo, and it
   reappears every time a paragraph written before it is edited. Confirm every screen id in
@@ -2064,6 +2154,20 @@ These are permanent, deliberate properties of the design. They must never be tre
 during implementation, and must be documented plainly wherever the relevant subsystem is described in
 `docs/architecture.md` and the relevant ADR:
 
+- **AGPL is a deliberate adoption trade-off.** Some organisations refuse to use or contribute to AGPL
+  software by blanket policy. ADR 0005 named this when the project first chose AGPL and it is still true;
+  it is accepted for the reason it was accepted then — "stays open" over "maximum adoption" — and the
+  network-use clause is the specific thing being bought (ADR 0032).
+- **The daemon's license becomes irreversible at M97.** Once `go.mau.fi/libsignal` (GPL-3.0) is linked in,
+  that binary is permanently copyleft-locked, including for the copyright holder, who does not hold
+  copyright in libsignal. Nothing undoes it short of removing the library. It also forecloses granting an
+  AGPL §7 additional permission covering the whole daemon, so **a formal plugin linking exception, if ever
+  wanted, must be drafted before M97**. The backend is deliberately not in this position: it carries no
+  copyleft dependency, rule 22 keeps it that way, and it therefore stays relicensable (ADR 0032).
+- **The flagship publicly discloses the revision it is running.** AGPL §13's source offer names the running
+  revision, which tells anyone which known vulnerabilities apply to the live instance. Accepted; the
+  mitigation is prompt upgrading, which is required regardless, plus the coordinated-disclosure workflow
+  that keeps a fix commit from becoming a public exploit ahead of the release it belongs to (`SECURITY.md`).
 - **Voice-worker isolation.** Voice/audio media (capture, encoding, the SFU connection, DSP) runs in an
   isolated voice-worker subprocess, spawned on demand by the daemon and torn down when a voice session ends —
   never inside the daemon process itself. A crash in the voice-worker must never take down messaging,

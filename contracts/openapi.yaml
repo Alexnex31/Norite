@@ -34,6 +34,52 @@ tags:
     description: Account profile surfaces.
 
 paths:
+  /meta:
+    get:
+      summary: Instance metadata and the AGPL source offer
+      description: >
+        The Corresponding Source offer AGPL-3.0 section 13 requires this instance to make to anyone
+        interacting with it over a network, plus the license identifier its own code is distributed under.
+
+
+        Unauthenticated **by obligation, not by convenience**. Section 13 owes the offer to every user
+        interacting with the software remotely, so an answer behind a credential would not discharge it —
+        which is also why this is not under `/instance`, a group whose defining property is that it has no
+        unauthenticated route in it.
+
+
+        `source_revision` is the git revision the running binary was built from, stamped in at link time.
+        A development build that was not stamped reports `unknown`, which is deliberate: a plausible-looking
+        placeholder would be worse than an admission, because the field is only useful if somebody can
+        actually fetch that source.
+
+
+        `source_url` is configurable (`[source].url` / `NORITE_SOURCE_URL`) and defaults to the upstream
+        repository. **An operator who has modified Norite must point it at their own source**, since
+        section 13 obliges them to offer their users the modified source rather than this project's.
+
+
+        The response is constant for the life of the process — it reads no database — so a client may cache
+        it for as long as it holds a connection, and it stays available under load. It does answer 503
+        while startup migrations run, like every route but `/healthz`: during that window nothing is
+        serving, so there is no remote interaction to owe an offer to.
+      operationId: getMeta
+      tags: [observability]
+      security: []
+      responses:
+        "200":
+          description: The instance's license and source offer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceMeta"
+        "503":
+          description: The instance is still starting; migrations have not finished.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /healthz:
     get:
       summary: Readiness check
@@ -2272,6 +2318,33 @@ components:
         enum: [google, github]
 
   schemas:
+    InstanceMeta:
+      type: object
+      description: >
+        The AGPL-3.0 section 13 source offer. Every field is present on every response; none is nullable.
+      required: [license, source_url, source_revision]
+      properties:
+        license:
+          type: string
+          description: >
+            The SPDX identifier this instance's own code is distributed under. Not configurable — an
+            operator may modify Norite and must then offer their modified source, but the terms they
+            received it under are not theirs to restate.
+          examples: ["AGPL-3.0-or-later"]
+        source_url:
+          type: string
+          format: uri
+          description: >
+            Where this instance's Corresponding Source can be obtained. Defaults to the upstream
+            repository; a modified instance must set it to its own.
+          examples: ["https://github.com/Alexnex31/Norite"]
+        source_revision:
+          type: string
+          description: >
+            The git revision the running binary was built from, or `unknown` for a build that was not
+            stamped at link time.
+          examples: ["v1.0.0", "9bb85f0", "unknown"]
+
     Snowflake:
       type: string
       pattern: "^[0-9]+$"

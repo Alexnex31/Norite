@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package clierr holds the error values `main` decides an exit code from.
 //
 // One value lives here, and it is here rather than in the package that returns it because `main` is what

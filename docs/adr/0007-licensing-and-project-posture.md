@@ -1,9 +1,20 @@
 # ADR 0007: No public license (default copyright, all rights reserved), individually-granted self-hosted licenses
 
 ## Status
-Accepted. Supersedes [ADR 0005](0005-agpl-license.md). Revises this ADR's own earlier "custom source-available
-license" draft posture: rather than drafting and legally reviewing a novel BSL/SSPL-style public license
-text, the project publishes no public license at all.
+**Superseded** by [ADR 0032: AGPL-3.0-or-later](0032-agpl-license.md). The project is now licensed
+`AGPL-3.0-or-later`, publicly, to everyone — reversing this ADR's central decision and returning to the
+posture [ADR 0005](0005-agpl-license.md) originally chose.
+
+**Nothing below remains authoritative**, including the two sections added at M11. 0032 absorbs and restates
+all three: the license posture, the release posture (phase betas and exactly one v1, carried across intact
+apart from its commercial consequence), and the dependency-licensing policy (carried across as machinery,
+with a rewritten rationale and an allow-list that now splits by module). The open question this ADR parked
+is answered there, and so is the premise that parked it — under AGPL the signed license file grants nothing,
+because the license text already granted it publicly. Cite 0032, not this file.
+
+The body below is kept intact as the historical record of why the all-rights-reserved posture was chosen,
+which is the reasoning 0032 had to argue against rather than merely replace. It supersedes
+[ADR 0005](0005-agpl-license.md), and is itself superseded.
 
 ## Context
 The project's audience starts as personal use (the developer, optionally a small invited circle) but the

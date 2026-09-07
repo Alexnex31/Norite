@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command norite is the Norite CLI.
 //
 // This file is deliberately thin: it owns process lifetime and nothing else. The command tree lives in

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package config holds the backend's typed, environment-bound configuration.
 //
 // Everything the process needs to boot is read once, at startup, into a single validated Config value —
@@ -159,6 +162,22 @@ type Config struct {
 	// origin is worse than no email at all (Milestone M5).
 	PublicBaseURL string `validate:"required_if=SMTPEnabled true,omitempty,url"`
 
+	// SourceURL is where this instance's Corresponding Source can be obtained, offered to network users
+	// under AGPL-3.0 section 13 by GET /api/v1/meta.
+	//
+	// Configured rather than compiled in, and the default is the one thing about it that could be wrong in
+	// a way nobody notices. AGPL §13 obliges an operator who *modified* Norite to offer users the modified
+	// source — theirs, not this project's. An instance running a patched build while pointing at the
+	// upstream repository is making a false offer, and it would be making it silently. So the default is
+	// correct for the common case (an unmodified build, where upstream genuinely is the Corresponding
+	// Source) and every modified deployment must set this. That is stated in the contract file, in
+	// .env.example, and in the wizard's own comment, because there is no way for the backend to detect it.
+	//
+	// The revision is deliberately not configurable and lives beside it as a build-time variable: it has to
+	// describe the binary that is running, and a value an operator can type is a value that can disagree
+	// with the code.
+	SourceURL string `validate:"required,url"`
+
 	// SMTPEnabled turns on outbound email. Off by default, and a deployment-time opt-out by design
 	// (docs/adr/0020-operations.md): an instance with no relay still runs, and the features that need one
 	// — password reset today, matchmaking's email gate later — are simply unavailable rather than broken.
@@ -241,6 +260,12 @@ type Config struct {
 // envPrefix namespaces every variable this package reads.
 const envPrefix = "NORITE_"
 
+// DefaultSourceURL is the Corresponding Source offer an unmodified build makes under AGPL-3.0 section 13.
+//
+// Correct for an unmodified instance and wrong for a modified one, which is why it is a default rather
+// than a constant: see Config.SourceURL.
+const DefaultSourceURL = "https://github.com/Alexnex31/Norite"
+
 // Load reads configuration, applies defaults, and validates the result.
 //
 // Values are layered, highest precedence first: NORITE_* environment variables, then the instance config
@@ -288,6 +313,7 @@ func Load(configPath string) (Config, error) {
 		ACMEEmail:  getEnvString("ACME_EMAIL", fileString(file.ACME.Email, "")),
 
 		PublicBaseURL: getEnvString("PUBLIC_BASE_URL", fileString(file.HTTP.PublicBaseURL, "")),
+		SourceURL:     getEnvString("SOURCE_URL", fileString(file.Source.URL, DefaultSourceURL)),
 
 		SMTPHost: getEnvString("SMTP_HOST", fileString(file.SMTP.Host, "")),
 		// starttls rather than none: the default has to be the safe one, and submission relays
@@ -490,6 +516,8 @@ func fileKeyFor(field string) string {
 		return "[http].listen_addr"
 	case "PublicBaseURL":
 		return "[http].public_base_url"
+	case "SourceURL":
+		return "[source].url"
 	case "ShutdownTimeout":
 		return "[http].shutdown_timeout"
 	case "TrustProxyHeaders":
@@ -620,6 +648,8 @@ func envVarFor(field string) string {
 		return envPrefix + "ACME_EMAIL"
 	case "PublicBaseURL":
 		return envPrefix + "PUBLIC_BASE_URL"
+	case "SourceURL":
+		return envPrefix + "SOURCE_URL"
 	case "SMTPEnabled":
 		return envPrefix + "SMTP_ENABLED"
 	case "SMTPHost":

@@ -32,7 +32,7 @@ screen `6c` — read whisper content attached to a report. That authority is rea
 ## Decision
 
 ### It is built in Phase B, before M12, and the reason is not urgency
-There are no users. Nothing is exposed: ADR 0007's release posture means the flagship accepts no
+There are no users. Nothing is exposed: ADR 0032's release posture means the flagship accepts no
 non-developer account before v1. So this is not a response to risk in the present tense.
 
 It is scheduled here because of what a second factor has to be threaded through: `POST /auth/login`, the

@@ -1,6 +1,6 @@
 # Screens
 
-25 screens. Ids match the badges in `mockups.dc.html` (open it and jump to `#1a`, `#2c`, …).
+26 screens. Ids match the badges in `mockups.dc.html` (open it and jump to `#1a`, `#2c`, …).
 Every screen shares: 120×40 cells, the 4-column chrome (rail 8 / channels 25 / message flex / members 22,
 1 blank cell between), and the 2-row status bar (`7a`). Only deviations are noted per screen.
 
@@ -298,6 +298,38 @@ conversations with `▲`.
 - Footer: `C-n/C-p move · M-x report export` + `actions are signed & logged`.
 - Right column **SUBJECT**: joined, invited by, message count, priors, devices (`▲ 1 unverified`), then
   **RECENT ACTIONS** (audit trail). Footer `C-c b ban subject` (danger) / `C-c C-a audit log`.
+
+### 6d — About & licenses
+**Purpose** what this build is, and the license terms it and its dependencies carry. Reached with
+`C-c ?` or `M-x about`.
+
+**Deviations** settings nav with `about` active; no right column — the pane runs full width from the
+channel column, because a license text wraps badly at 40 cells.
+- Header: `norite <version>` + `AGPL-3.0-or-later` in `ok`, and the build's revision in `text.dim`.
+- **This build** block: the version, the git revision, and `source: <url>` — the same three values
+  `GET /api/v1/meta` serves. The revision is selectable and copyable, since its whole use is fetching that
+  exact source.
+- **Your rights** block, three lines in `text` rather than a legal wall: you may use, study, modify and
+  share this program; if you run a modified version as a network service you must offer its source to the
+  people using it; the full terms are in `LICENSE`.
+- **Third-party** block: the module count for *this* binary — the TUI ships inside `norite`, so it is the
+  CLI's set, not the server's — and `RET read` opening the embedded
+  `THIRD-PARTY-NOTICES.txt` in a scrollable pane — the same bytes `norite licenses` prints. It is long and
+  a reader is usually after one module, so the pane takes the ordinary `C-n`/`C-p` list movement
+  (`KEYMAP.md → Conventions`) and nothing screen-specific.
+- Footer: `RET third-party notices · C-c y copy revision · ESC close`.
+
+`C-c y` is the existing yank chord widened to this screen rather than a new one — it is the same verb, and
+`KEYMAP.md` already scopes it per screen. `ESC` closes, per the shared conventions; no chord here is new
+except `C-c ?`, which opens it.
+
+A fork that has modified Norite shows **its own** source URL here, because the value comes from the
+instance's `[source].url` rather than from a constant — see `architecture.md` §11.
+
+**On the obligation.** AGPL §5(d) requires an interactive program to display Appropriate Legal Notices
+*where the original already does*, so the baseline is Norite's to set rather than something already forced
+on it. This screen sets it deliberately: a client that shows nothing would leave a downstream fork free to
+show nothing either, and the notice costs one screen.
 
 ---
 

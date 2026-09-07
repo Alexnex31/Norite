@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package main
 
 import (
@@ -10,6 +13,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
+	"github.com/Alexnex31/Norite/backend/internal/meta"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
@@ -243,6 +247,20 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 				})
 				r.Route("/users", opts.Auth.UserRoutes)
 			}
+
+			// The AGPL section 13 source offer. Public and unauthenticated by obligation rather than by
+			// convenience: section 13 owes the offer to anyone interacting with the instance over a
+			// network, so an answer that requires a credential does not discharge it. That is also why it
+			// cannot live under /instance, whose whole property is having no unauthenticated route.
+			//
+			// Left inside the group, so it is rate-limited like everything else and answers 503 while
+			// migrations run. The second part looks wrong for a compliance endpoint and is not: during
+			// startup every other route is 503 too, so there is nobody interacting with the software to
+			// owe an offer to. Exempting it would mean widening skipPath, which takes exactly one path on
+			// purpose.
+			//
+			// Reads no database and holds no state, so it needs neither the auth service nor Health.
+			r.Get("/meta", meta.Handler{SourceURL: opts.Config.SourceURL}.ServeHTTP)
 
 			r.Get("/healthz", opts.Health.Handler)
 			// chi registers GET and HEAD separately — a GET-only route answers HEAD with 405. Health probes

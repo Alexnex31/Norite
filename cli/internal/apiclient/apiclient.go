@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package apiclient is the CLI's transport to a Norite instance's REST API.
 //
 // # What is here and what is not

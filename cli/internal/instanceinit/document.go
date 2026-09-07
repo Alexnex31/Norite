@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package instanceinit implements `norite instance init`, the self-hosted operator's first-run setup flow.
 //
 // The wizard's output is the instance config file the backend reads at startup. The two live in separate
@@ -121,6 +124,15 @@ listen_addr = {{ .ListenAddr | toml }}
 # point wherever a request was aimed.
 public_base_url = {{ .PublicBaseURL | toml }}
 {{- end }}
+
+[source]
+# Where this instance's source can be obtained, offered to anyone under AGPL-3.0 section 13 by
+# GET /api/v1/meta. Left commented out because the built-in default — this project's own repository — is
+# correct for an unmodified build, which is what you have unless you changed the code.
+#
+# If you MODIFY Norite, section 13 obliges you to offer your users *your* source, so uncomment this and
+# point it at yours. Nothing can detect that for you.
+# url = "https://git.example.org/you/norite"
 
 [database]
 # Postgres connection string. Carries the password — see the 0600 note above.

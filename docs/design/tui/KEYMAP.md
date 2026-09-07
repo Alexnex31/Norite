@@ -87,6 +87,7 @@ filter, `C-c z` reverting an unsaved settings section — it keeps the global ch
 | `C-c s` | save (settings, profile) | global |
 | `C-c z` | revert unsaved | global |
 | `C-c B` | block user (`1f`) | global |
+| `C-c ?` | about & licenses (`6d`) — the build, its source, third-party notices | global |
 
 ## Moderation (`6c`, maintainer role only)
 | Chord | Action | Scope |
@@ -110,7 +111,7 @@ because they are the same verb applied to what is focused.
 | `C-c C-p` | preview your profile as a stranger (was `C-c p`, which sends a file) | `1e` |
 | `C-c z` | revert the unsaved section — the global revert, applied here | `1d` |
 | `C-c s` | save the search as a filter — the global save, applied here | `3c` |
-| `C-c y` | yank: copy `M-x` output, and paste a token on first run | `3e`, `5a` |
+| `C-c y` | yank: copy `M-x` output, paste a token on first run, copy the build revision | `3e`, `5a`, `6d` |
 | `C-c >` | write `M-x` output to a file | `3e` |
 | `C-c c` | cancel the first-run flow | `5a` |
 | `M-g` | restrict the switcher to guilds | `3a` |

@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-The flagship instance (ADR 0007) is the one deployment that needs real horizontal scale and HA; every
+The flagship instance (ADR 0032) is the one deployment that needs real horizontal scale and HA; every
 self-hosted instance stays single-process by design (ADR 0020's whole self-hosting simplicity story depends
 on this). These are genuinely different operational shapes and need their own architecture rather than
 forcing one deployment story to serve both.

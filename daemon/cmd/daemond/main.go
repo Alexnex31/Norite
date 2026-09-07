@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command daemond is the Norite background daemon.
 //
 // One process per OS user account, normally started by that user's service manager (systemd user unit,
@@ -21,6 +24,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/daemon/internal/daemonproc"
+	"github.com/Alexnex31/Norite/daemon/internal/notices"
 )
 
 // Version is the build's version string, overridden at link time by goreleaser.
@@ -40,6 +44,7 @@ func main() {
 	var (
 		debug       = flag.Bool("debug", false, "log at debug level")
 		showVersion = flag.Bool("version", false, "print the version and exit")
+		showLicense = flag.Bool("licenses", false, "print the third-party licenses in this binary and exit")
 		logFile     = flag.String("log-file", "", "write the rotating log here instead of the default in the state directory")
 		// On by default: run in a terminal and you expect to see output, and journald captures stderr, which
 		// is what makes `systemctl --user status` useful. The launchd backend turns it off, because there the
@@ -53,6 +58,14 @@ func main() {
 		// The write error is unreportable — there is nowhere left to report it to — and irrelevant: the
 		// caller who closed the pipe already stopped reading.
 		_, _ = fmt.Fprintln(os.Stdout, Version)
+		return
+	}
+
+	// The daemon is distributed as its own binary with its own dependency set, so it carries its own
+	// attribution rather than relying on the CLI's. A flag rather than a subcommand because this binary has
+	// no command tree to hang one on — it takes flags and then runs until it is stopped.
+	if *showLicense {
+		_, _ = fmt.Fprint(os.Stdout, notices.Text)
 		return
 	}
 

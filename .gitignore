@@ -70,3 +70,6 @@ Thumbs.db
 
 # Claude config
 .claude/*
+
+# just build-local output — plain go build, stable paths (see justfile)
+/bin/

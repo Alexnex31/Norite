@@ -19,6 +19,12 @@ builds:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    # AGPL section 13 obliges this instance to offer the Corresponding Source *of the running version*, and
+    # GET /api/v1/meta answers with this value. The full commit rather than the tag: a commit always
+    # resolves in the repository, while goreleaser strips the leading "v" from a tag, so a release tagged
+    # v1.0.0 would advertise "1.0.0" and send anyone fetching it to a ref that does not exist.
+    ldflags:
+      - -s -w -X github.com/Alexnex31/Norite/backend/internal/meta.Revision={{ .FullCommit }}
 
   - id: cli
     dir: cli
@@ -56,14 +62,67 @@ builds:
     ldflags:
       - -s -w -X main.Version={{ .Version }}
 
+# One archive per binary rather than one shared block, because each carries a different
+# THIRD-PARTY-NOTICES.txt: the four binaries link different dependency sets, and a notice file listing
+# modules a binary does not contain is as wrong as one omitting modules it does. Naming `files` at all
+# replaces goreleaser's default set, so LICENSE and README are listed explicitly — dropping LICENSE from a
+# release archive of AGPL software is the one omission that would actually matter.
 archives:
-  - id: default
+  - id: backend
+    ids: [backend]
     formats: [tar.gz]
     name_template: >-
       {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
         formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - src: backend/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: THIRD-PARTY-NOTICES.txt
+
+  - id: cli
+    ids: [cli]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - src: cli/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: THIRD-PARTY-NOTICES.txt
+
+  - id: gui
+    ids: [gui]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - src: gui/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: THIRD-PARTY-NOTICES.txt
+
+  - id: daemon
+    ids: [daemon]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - src: daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: THIRD-PARTY-NOTICES.txt
 
 checksum:
   name_template: "checksums.txt"

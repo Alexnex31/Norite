@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command server is the Norite backend composition root.
 //
 // It owns process lifetime and wiring, and nothing else: every piece of behavior lives in an internal

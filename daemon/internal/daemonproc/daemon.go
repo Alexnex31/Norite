@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package daemonproc is the Norite background daemon's lifecycle.
 //
 // Milestone M3 scope is deliberately narrow: start cleanly, prove there is exactly one daemon per OS user,

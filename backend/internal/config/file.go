@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package config
 
 import (
@@ -49,6 +52,10 @@ type fileConfig struct {
 		TrustProxyHeaders *bool   `toml:"trust_proxy_headers"`
 		TrustedProxyHops  *int32  `toml:"trusted_proxy_hops"`
 	} `toml:"http"`
+
+	Source struct {
+		URL *string `toml:"url"`
+	} `toml:"source"`
 
 	Database struct {
 		URL                *string `toml:"url"`

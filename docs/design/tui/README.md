@@ -89,7 +89,7 @@ area the width that makes it readable. What is dropped stays reachable by chord,
 its two rows at every width — truncating segments (counts first, then the clock) rather than wrapping.
 
 ## Screens
-25 screens, grouped into 7 sections. Each carries a stable id used throughout this package
+26 screens, grouped into 7 sections. Each carries a stable id used throughout this package
 (`1a`, `2c`, …) and shown as a badge in the mock. Full per-screen specs: **SCREENS.md**.
 
 | Section | Ids |
@@ -99,7 +99,7 @@ its two rows at every width — truncating segments (counts first, then the cloc
 | 3 · Finding & running | 3a switcher (default) · 3b switcher (minibuffer) · 3c search · 3d help overlay · 3e M-x |
 | 4 · Voice | 4a full voice view · 4b in-call strip |
 | 5 · Lifecycle & states | 5a first run · 5b empty · 5c disconnected · 5d deep work · 5e whisper |
-| 6 · Trust & admin | 6a device verify · 6b plugins · 6c admin reports |
+| 6 · Trust & admin | 6a device verify · 6b plugins · 6c admin reports · 6d about & licenses |
 | 7 · Shared components | 7a status bar |
 
 ## The three load-bearing decisions
@@ -230,7 +230,7 @@ which is the normative document anyway.
 
 ## Files in this bundle
 - `README.md` — this file
-- `SCREENS.md` — per-screen specification, all 25 screens
+- `SCREENS.md` — per-screen specification, all 26 screens
 - `TOKENS.md` — palette, grid, glyph set, component recipes
 - `KEYMAP.md` — every chord, with scope and target screen
 - `mockups.dc.html` — the visual reference (open in a browser; ids are anchors, e.g. `#2c`)
@@ -270,7 +270,7 @@ render (see Assets), so the markdown is the only offline-readable source.
 | 5 | `1e` "profile is signed, then synced" | "synced". Every other field on that screen — pronouns, timezone, links, accent, per-field visibility — is adopted as-is | No ADR covers profile signing; adopting the fields costs nothing, adopting the cryptography is a separate decision |
 | 6 | `1d` CONFLICTS panel counting **plugin** chord conflicts; `3d` plugin-conflict tally; `6b` "1 chord conflict" | Plugins register **`M-x` commands**, never chords, so a plugin chord conflict cannot exist. The panel counts *your* overrides against defaults | ADR 0015 has no keybinding capability; a plugin that could bind `C-c` anything is a phishing surface |
 | 7 | `6b` "cpu budget 2ms/frame" | Per-invocation wall-clock timeout plus a memory cap, as specified | Rule 12; plugins do not run inside the render loop |
-| 8 | Overview: "sovereign, zero-bloat chat architecture" | The flagship-instance-first framing `CLAUDE.md` uses | `CLAUDE.md`, "What this is"; ADR 0007 |
+| 8 | Overview: "sovereign, zero-bloat chat architecture" | Two first-class deployment shapes, flagship and self-hosted, as `CLAUDE.md` frames them | `CLAUDE.md`, "What this is"; ADR 0032 |
 | 9 | `5a` implied device-code is *the* first run | Loopback-browser login is primary (M8); `5a` is what a headless or SSH first run looks like (M9) | Roadmap M8/M9 ordering |
 | 10 | `2c`/`C-x c` `peers` pane, undefined | `peers` = file-transfer sessions (ADR 0016) | Follows from #3 — there are no routing peers to show |
 | 11 | Responsive pass "not mocked — an implementation decision" | Specified: the drop order, the minimum, and what happens below it (see Grid) | 80 columns is the most common terminal width; leaving it open invites the worst version |

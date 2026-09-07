@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package database owns the backend's Postgres access plumbing: the pgx connection pool, the
 // transaction helper every service writes through, and the advisory-lock-guarded migration runner that
 // gates startup.

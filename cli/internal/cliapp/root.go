@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package cliapp assembles the `norite` command tree.
 //
 // Every command the CLI will grow mounts here. Keeping the tree in its own package, rather than in
@@ -88,6 +91,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			login.LogoutCommand(),
 			daemonctl.GroupCommand(),
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
+			licensesCommand(),
 		},
 	}
 }

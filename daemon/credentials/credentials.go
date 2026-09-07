@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package credentials stores the one session a Norite client account has on this machine.
 //
 // # Why this lives in the daemon module, and is exported

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package mail sends transactional email, always off the request path.
 //
 // # The one rule this package exists to enforce

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package cliapp
 
 import (
@@ -7,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,6 +21,8 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
+
+	"github.com/Alexnex31/Norite/cli/internal/notices"
 )
 
 // runArgs exercises the command tree exactly as a real invocation would, minus the process.
@@ -304,4 +310,26 @@ func TestUsageMessagesDoNotCarryThePrefixMainAdds(t *testing.T) {
 		assert.NotContains(t, err.Error(), "norite:",
 			"norite %v: main prefixes this; carrying one too prints it twice", args)
 	}
+}
+
+func TestLicensesPrintsTheEmbeddedNotices(t *testing.T) {
+	out, _, err := runArgs(t, "licenses")
+	require.NoError(t, err)
+	// The header the generator writes. Asserting on that rather than on any dependency's name keeps this
+	// from failing every time the dependency set legitimately changes.
+	require.Contains(t, out, "THIRD-PARTY NOTICES for norite")
+}
+
+// A go:embed of a file that exists but is empty compiles and runs, printing nothing. Nothing else here
+// would notice: the command would exit 0 and the release archive would carry the same empty file, so the
+// attribution obligation would be unmet in exactly the way that looks fine. Hence a length floor and a
+// check for a real license body rather than only the generated header.
+func TestEmbeddedNoticesAreNotEmpty(t *testing.T) {
+	require.Greater(t, len(notices.Text), 1000, "implausibly short — did the generator write a stub?")
+	require.Contains(t, notices.Text, "SPDX-License-Identifier:",
+		"no SPDX identifier, so no module was actually recorded")
+	require.True(t,
+		strings.Contains(notices.Text, "Permission is hereby granted") ||
+			strings.Contains(notices.Text, "Redistribution and use"),
+		"no license body — only the generated header survived")
 }

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package daemonctl installs and controls the Norite daemon as an OS-level service.
 //
 // The daemon runs as a real service of the user's own session — a systemd *user* unit, a launchd *agent*, a

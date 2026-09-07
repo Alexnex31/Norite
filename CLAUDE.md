@@ -8,22 +8,26 @@ contested individual decisions — read the relevant one before proposing to cha
 
 ## What this is
 
-Norite is a voice-and-text chat platform. The primary way to use it is the free, global, publicly-hosted
-flagship instance — self-hosting is a real, fully-built, one-time-purchase-licensed feature (aimed at
-enterprises and other private groups who want their own instance), not the platform's core identity. Source
-visible but under no public license (all rights reserved). **Four clients**: a scriptable CLI (the
-command tree — one action, exit, pipeable), a full-screen **TUI** (the in-terminal application: panes,
-chords, 25 specified screens), a native GUI mirroring the TUI's information architecture, and a
-lower-priority web SPA built later. The CLI, TUI and GUI share one local background
-daemon per OS user account; the CLI and TUI share one command tree, so `M-x` in the TUI runs every verb
-(ADR 0026). "CLI" here means the command tree only; where it once meant both, that conflation
-is what left the roadmap with six milestones of TUI capabilities and none that drew a screen.
-Servers ("guilds"), channels, roles/permissions, real-time text and voice
-messaging, DMs, presence, invites, public matchmaking, BYOK end-to-end encryption, client-side plugins, and
-more all ship as real v1 scope — see `docs/architecture.md` Section 7 for the full list. **No public
-license** — default copyright, all rights reserved; self-hosted customers are granted rights individually via
-a signed license file, not a public license text. Not AGPL, not open source. See
-`docs/adr/0007-licensing-and-project-posture.md`.
+Norite is a voice-and-text chat platform, licensed `AGPL-3.0-or-later`. It has two deployment shapes and
+**both are first-class**: the free, global, publicly-hosted flagship instance the author operates, and
+self-hosting, which is real, fully-built and free — aimed at enterprises and other private groups who want
+their own instance. Neither is the product and neither is the sideline; they get the same code, the same
+quality bar and the same support commitment. The roadmap looks lopsided (Phase P spends twelve milestones
+on the flagship's Kubernetes track against M96 plus documentation for self-hosting) and that is deployment
+complexity, not priority — the flagship is the one deployment needing real horizontal scale and HA
+(ADR 0021). **Four clients**: a scriptable CLI (the command tree — one action, exit, pipeable), a
+full-screen **TUI** (the in-terminal application: panes, chords, 26 specified screens), a native GUI
+mirroring the TUI's information architecture, and a lower-priority web SPA built later. The CLI, TUI and
+GUI share one local background daemon per OS user account; the CLI and TUI share one command tree, so
+`M-x` in the TUI runs every verb (ADR 0026). "CLI" here means the command tree only; where it once meant
+both, that conflation is what left the roadmap with six milestones of TUI capabilities and none that drew a
+screen. Servers ("guilds"), channels, roles/permissions, real-time text and voice messaging, DMs, presence,
+invites, public matchmaking, BYOK end-to-end encryption, client-side plugins, and more all ship as real v1
+scope — see `docs/architecture.md` Section 7 for the full list. **Licensed
+[AGPL-3.0-or-later](LICENSE)** — free software, publicly, to everyone: anyone may fork, self-host, run and
+modify it, and must offer source to the users of any modified network service they run. The name is
+reserved under §7(e) by declining to grant it, not by a trademark claim. See
+`docs/adr/0032-agpl-license.md`.
 
 ## Architecture at a glance
 
@@ -150,6 +154,29 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 21. **Any new REST endpoint or gateway event affecting CLI-observable or browser-observable state must be
     sanity-checked against real browser constraints** (CORS, request chattiness, BFF-auth-compatibility) at
     the time it's added — never deferred silently to Phase O just because the web client isn't built yet.
+22. **Copyleft is allowed in the clients, never in the backend.** `daemon/`, `cli/` and `gui/` may take
+    AGPL-compatible dependencies including GPL-3.0 and MPL-2.0 — that is what makes `go.mau.fi/libsignal`
+    usable at M97. `backend/` takes permissive dependencies only: MIT, BSD-2-Clause, BSD-3-Clause, ISC,
+    Apache-2.0, Unlicense — **and not MPL**. ADR 0032 gives the reason: the daemon is permanently
+    copyleft-locked the moment libsignal lands, while the backend stays relicensable for exactly as long as
+    it is copyleft-free, and that option costs nothing to keep. `just license-check` enforces it, but
+    **CI cannot see C libraries linked via cgo** — Phase E's Opus/RNNoise/APM and Phase N's video codecs
+    get checked by hand.
+23. **Never merge `backend/` code from anyone but the copyright holder without a signed copyright
+    assignment.** CI protects the dependency half of rule 22; nothing can protect this half but not
+    merging. A single un-assigned contribution ends the backend's relicensability permanently, and a
+    substantial patch pasted into an issue and copied in is the same contamination as a merged PR —
+    reimplement independently rather than copy. The client modules take contributions under a DCO
+    `Signed-off-by` instead, where the contributor keeps their copyright: the daemon is permanently
+    copyleft-locked at M97 anyway, so there is no option there left to protect. `CONTRIBUTING.md` states
+    both; the assignment instrument itself is not written yet and must be reviewed before anyone signs it.
+24. **Every hand-written `.go` file carries its two-line SPDX header** — `SPDX-FileCopyrightText` then
+    `SPDX-License-Identifier: AGPL-3.0-or-later`, the first two lines, blank line after. Never the bare
+    `AGPL-3.0`, and never a maintained year range. Generated files are exempt, detected by their
+    `Code generated … DO NOT EDIT.` marker rather than by a path list. Nothing else in the repository
+    carries a header — not SQL, not Markdown, not YAML; `LICENSE` covers the whole work.
+    **`just spdx-check` enforces all of it and CI runs the same checks**, because the header pass was
+    one-off and what decays a rule like this is the next file, not the ones it converted.
 
 ## Directory layout (see `docs/architecture.md` §1 for full detail)
 
@@ -162,7 +189,7 @@ gui/           The native GUI — Gio app, mirrors the TUI's screens; shares the
 daemon/        Shared background daemon — gateway client, dual IPC, plugin host, config/state files
 internal/voice/  Pion-based SFU, embedded TURN server (lives under backend/, server-side infra)
 contracts/     openapi.yaml (REST), gateway-events.schema.json (WS), CLI --json schemas — source of truth
-               (also dependency-licenses.txt, the committed license inventory — ADR 0007)
+               (also dependency-licenses.txt, the committed license inventory — ADR 0032)
 docker/        docker-compose.yml (postgres, redis, backend hot-reload) — local dev + self-hosted prod option
 frontend/      React SPA — the later, tertiary web client (Phase O)
 ```
@@ -183,8 +210,19 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just sqlc-generate` / `just sqlc-check` — regenerate the committed sqlc layer / fail if it's stale
 - `just security-scan` — `govulncheck ./...` plus `just license-check` (+ `pnpm audit` and `Trivy` once
   frontend/ and Dockerfiles exist)
-- `just license-check` / `just license-inventory` — fail on a dependency license outside ADR 0007's
-  allow-list / regenerate the committed `contracts/dependency-licenses.txt`. Both run in CI; the inventory
+- `just spdx-check` — fail if any hand-written `.go` file is missing its rule-24 header, if a generated one
+  grew a header, or if a non-Go file did. Sees untracked files too, so it answers the same as CI on a file
+  you have written but not yet staged.
+- `just build-local` — plain `go build` of all four binaries into `./bin/`, at paths that do not vary by
+  platform the way `just build`'s goreleaser output does. `just notices` and CI's assertions both read them.
+- `just notices` — regenerate each binary's `internal/notices/THIRD-PARTY-NOTICES.txt` from
+  `go version -m` on the built binary, and commit the diff. **Not the same artifact as the inventory
+  below**: this is the attribution obligation over what actually ships (backend: 29 modules), the inventory
+  is the allow-list policy question over all code including tests (backend: 75, the difference being
+  testcontainers and its Docker set). CI regenerates both and fails on a diff.
+- `just license-check` / `just license-inventory` — fail on a dependency license outside ADR 0032's
+  allow-list, which is **per-module**: permissive-only in `backend/`, AGPL-compatible in `daemon/`, `cli/`
+  and `gui/` / regenerate the committed `contracts/dependency-licenses.txt`. Both run in CI; the inventory
   is committed for the reason the sqlc output is, and CI fails if it is stale.
 
 ## Git workflow
@@ -300,7 +338,7 @@ tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagr
 
 **Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
 testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed
-and tested. Recorded in ADR 0007 — the absence of any release marker otherwise reads as an oversight.
+and tested. Recorded in ADR 0032 — the absence of any release marker otherwise reads as an oversight.
 
 - **M0 — monorepo scaffolding**: done (tag `m0`).
 - **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
@@ -374,10 +412,12 @@ and tested. Recorded in ADR 0007 — the absence of any release marker otherwise
   The CLI half landed here too, after a review found the milestone had shipped a backend that made
   `norite login` unusable on any account taking its advice: `apiclient.DoStatus`, and the code prompt in
   `cli/internal/login`.
-- **M12 — Guilds/channels/roles schema plus CRUD**: next. Its first job is that
-  `contracts/openapi.yaml` does not currently generate — see the roadmap entry. It also carries M67a's
-  contract-shape reservation, because a challenge-required registration state is nearly free to reserve now
-  and expensive once four clients codegen from the current shape.
+- **M12 — Guilds/channels/roles schema plus CRUD**: next. It wires `oapi-codegen` against
+  `contracts/openapi.yaml`, so every REST endpoint from there on is generated rather than only documented.
+  The roadmap entry used to open by saying that contract does not generate; measured against v2.8.0 it
+  does, in all four modes with no warnings, so that blocker and the 3.0-versus-3.1 decision behind it are
+  both gone. It also carries M67a's contract-shape reservation, because a challenge-required registration
+  state is nearly free to reserve now and expensive once four clients codegen from the current shape.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -974,7 +1014,7 @@ Where they exist, invoke with `/<name>`:
 The doc set has one authority per topic — if two files seem to cover the same ground, that is drift and
 should be fixed, not tolerated:
 
-- `docs/design/tui/` — **what the terminal client looks like and does.** `SCREENS.md` (25 screens with
+- `docs/design/tui/` — **what the terminal client looks like and does.** `SCREENS.md` (26 screens with
   stable ids `1a`…`7a`), `KEYMAP.md`, `TOKENS.md`, and `README.md` (the grid, the responsive rules, and the
   corrections applied to the original handoff). Normative: milestones cite screen ids rather than restating
   them, and `mockups.dc.html` is an illustrative rendering, not authoritative where it disagrees.
