@@ -312,7 +312,8 @@ channel column, because a license text wraps badly at 40 cells.
 - **Your rights** block, three lines in `text` rather than a legal wall: you may use, study, modify and
   share this program; if you run a modified version as a network service you must offer its source to the
   people using it; the full terms are in `LICENSE`.
-- **Third-party** block: a count (`29 modules`) and `RET read` opening the embedded
+- **Third-party** block: the module count for *this* binary — the TUI ships inside `norite`, so it is the
+  CLI's set, not the server's — and `RET read` opening the embedded
   `THIRD-PARTY-NOTICES.txt` in a scrollable pane — the same bytes `norite licenses` prints. It is long and
   a reader is usually after one module, so the pane takes the ordinary `C-n`/`C-p` list movement
   (`KEYMAP.md → Conventions`) and nothing screen-specific.

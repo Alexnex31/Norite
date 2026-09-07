@@ -284,16 +284,26 @@ of this section.
 
 - **M12 — Guilds/channels/roles schema plus CRUD**: the core guild/channel/role tables and REST endpoints.
   `oapi-codegen` against `openapi.yaml` is wired up starting here — every REST endpoint from this point on is
-  generated, not just documented. **First job here is that the contract does not currently generate**, which
-  is latent rather than new: `openapi.yaml` declares `openapi: 3.1.0` and expresses its four nullable
-  fields as 3.1 type unions (`type: [string, "null"]`), which `oapi-codegen` v2 does not support — it warns
-  that 3.1 is unimplemented and fails on the first such field. Nothing has noticed because no milestone
-  generates from the document yet; `cmd/server/contract_test.go` checks routes against the router, not
-  schemas — and `contract_payload_test.go`, which reads real responses, checks the two payload properties
-  that were actually being got wrong rather than validating whole schemas. So M12 decides the version this
-  project targets — downgrade to 3.0.x and use `nullable: true`, which is what the tool recommends, or stay
-  on 3.1 and wait — before it can generate anything. Done when: a guild, its channels, and its roles can be
-  created, read, updated, and deleted via the REST API, matching the generated types.
+  generated, not just documented.
+
+  **This entry used to open by saying the contract does not generate, and that is no longer true.** The
+  claim was that `openapi.yaml`'s 3.1 type unions (`type: [string, "null"]`) would make `oapi-codegen` v2
+  warn that 3.1 is unimplemented and fail on the first one, so M12 would first have to choose between
+  downgrading the document to 3.0.x with `nullable: true` and staying on 3.1 and waiting. Measured against
+  `oapi-codegen` v2.8.0 the document generates in all four modes — `types`, `chi-server`, `client`, `spec`
+  — with no warnings on stderr, and each of the **six** unions (not four; the original count was wrong too)
+  comes out as a correct pointer. `ip_address` even keeps its missing `omitempty`, which is what its schema
+  asks for. So there is no version decision to make and no blocker to clear: the project stays on 3.1 and
+  M12 starts by wiring the generator up.
+
+  Two things that were true and remain worth knowing. Nothing had noticed either way, because no milestone
+  generates from the document yet — `cmd/server/contract_test.go` checks routes against the router rather
+  than schemas, and `contract_payload_test.go` reads real responses for the two payload properties that
+  were actually being got wrong rather than validating whole schemas. And the moment M12 generates, that
+  gap closes on its own.
+
+  Done when: a guild, its channels, and its roles can be created, read, updated, and deleted via the REST
+  API, matching the generated types.
 - **M13 — Permission engine**: `roles.Resolve`, the permission bitfield, overwrite resolution
   (`@everyone` → role → member), role `position` hierarchy enforcement. Done when: the permission-resolution
   algorithm's documented test cases (owner bypass, `PermAdministrator` short-circuit, overwrite precedence,
@@ -1092,7 +1102,7 @@ This phase is a deployment target, not a feature-development phase — it can st
 voice are usable (roughly after M37), well before every feature phase above is complete, and continues to
 absorb new features (public matchmaking, E2E, etc.) as they land. Do not read it as coming "after" M111.
 
-**Nor read its size as priority.** Fourteen milestones here against M96 plus the bare-metal/systemd
+**Nor read its size as priority.** Twelve milestones here (M112–M123) against M96 plus the bare-metal/systemd
 documentation for self-hosting is **deployment complexity, not importance**: the flagship is the one
 deployment that needs real horizontal scale and HA (ADR 0021). Both deployment shapes are first-class and
 get the same product — ADR 0032 and `architecture.md` §11 say so, and this preamble exists so the roadmap

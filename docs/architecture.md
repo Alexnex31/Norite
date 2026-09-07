@@ -1707,7 +1707,7 @@ Playwright E2E against the real docker-compose stack.
 to everyone, so self-hosting is free and unrestricted and there is nothing to sell a self-hoster. Two
 independent deployments — the flagship the author operates and self-hosted instances — and **both are
 first-class**: the same code, the same quality bar, the same support commitment. The roadmap's asymmetry
-(Phase P spends fourteen milestones on the flagship's Kubernetes track, against M96 plus the
+(Phase P spends twelve milestones, M112–M123, on the flagship's Kubernetes track, against M96 plus the
 bare-metal/systemd documentation for self-hosting) reflects **deployment complexity, not importance** — the
 flagship is the one deployment that needs real horizontal scale and HA
 ([ADR 0021](adr/0021-flagship-kubernetes-deployment.md)).

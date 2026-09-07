@@ -12,7 +12,7 @@ Norite is a voice-and-text chat platform, licensed `AGPL-3.0-or-later`. It has t
 **both are first-class**: the free, global, publicly-hosted flagship instance the author operates, and
 self-hosting, which is real, fully-built and free — aimed at enterprises and other private groups who want
 their own instance. Neither is the product and neither is the sideline; they get the same code, the same
-quality bar and the same support commitment. The roadmap looks lopsided (Phase P spends fourteen milestones
+quality bar and the same support commitment. The roadmap looks lopsided (Phase P spends twelve milestones
 on the flagship's Kubernetes track against M96 plus documentation for self-hosting) and that is deployment
 complexity, not priority — the flagship is the one deployment needing real horizontal scale and HA
 (ADR 0021). **Four clients**: a scriptable CLI (the command tree — one action, exit, pipeable), a
@@ -407,10 +407,12 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   The CLI half landed here too, after a review found the milestone had shipped a backend that made
   `norite login` unusable on any account taking its advice: `apiclient.DoStatus`, and the code prompt in
   `cli/internal/login`.
-- **M12 — Guilds/channels/roles schema plus CRUD**: next. Its first job is that
-  `contracts/openapi.yaml` does not currently generate — see the roadmap entry. It also carries M67a's
-  contract-shape reservation, because a challenge-required registration state is nearly free to reserve now
-  and expensive once four clients codegen from the current shape.
+- **M12 — Guilds/channels/roles schema plus CRUD**: next. It wires `oapi-codegen` against
+  `contracts/openapi.yaml`, so every REST endpoint from there on is generated rather than only documented.
+  The roadmap entry used to open by saying that contract does not generate; measured against v2.8.0 it
+  does, in all four modes with no warnings, so that blocker and the 3.0-versus-3.1 decision behind it are
+  both gone. It also carries M67a's contract-shape reservation, because a challenge-required registration
+  state is nearly free to reserve now and expensive once four clients codegen from the current shape.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
