@@ -9,6 +9,27 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for CreateChannelRequestType.
+const (
+	N0 CreateChannelRequestType = 0
+	N2 CreateChannelRequestType = 2
+	N4 CreateChannelRequestType = 4
+)
+
+// Valid indicates whether the value is a known member of the CreateChannelRequestType enum.
+func (e CreateChannelRequestType) Valid() bool {
+	switch e {
+	case N0:
+		return true
+	case N2:
+		return true
+	case N4:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ErrorErrorCode.
 const (
 	ErrorErrorCodeAccessDenied          ErrorErrorCode = "access_denied"
@@ -239,6 +260,66 @@ type BootstrapRequest struct {
 	Username    string              `json:"username"`
 }
 
+// Channel defines model for Channel.
+type Channel struct {
+	// Bitrate Voice channels only; null on every other type.
+	Bitrate   *int      `json:"bitrate"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// GuildId Null for a DM or group DM, which belong to no guild.
+	GuildId *Snowflake `json:"guild_id"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+
+	// LastMessageId Reserved until messages exist. Always null at this version.
+	LastMessageId *Snowflake `json:"last_message_id"`
+	Name          *string    `json:"name"`
+	Nsfw          bool       `json:"nsfw"`
+
+	// ParentId The category this channel sits under. Deleting a category sets this to null on its children rather than deleting them — losing a category must not lose the conversations in it.
+	ParentId *Snowflake `json:"parent_id"`
+	Position int        `json:"position"`
+	Topic    *string    `json:"topic"`
+
+	// Type `0` text, `1` DM, `2` voice, `3` group DM, `4` category, `5` announcement (reserved), `6` stage voice (reserved), `7` public matchmaking.
+	//
+	// Only `0`, `2` and `4` can be created through the guild-channel endpoint. The reserved values are part of the schema and stay there; voice is active v1 functionality, video and stage voice are the deferred-but-seamed parts.
+	Type      int       `json:"type"`
+	UpdatedAt time.Time `json:"updated_at"`
+
+	// UserLimit Voice channels only; null on every other type.
+	UserLimit *int `json:"user_limit"`
+}
+
+// CreateChannelRequest defines model for CreateChannelRequest.
+type CreateChannelRequest struct {
+	Bitrate *int   `json:"bitrate,omitempty"`
+	Name    string `json:"name"`
+	Nsfw    *bool  `json:"nsfw,omitempty"`
+
+	// ParentId A category **in this guild**. Verified rather than trusted: nesting under a category elsewhere would place this channel behind another guild's overwrites.
+	ParentId *Snowflake `json:"parent_id,omitempty"`
+	Position *int       `json:"position,omitempty"`
+	Topic    *string    `json:"topic,omitempty"`
+
+	// Type Text, voice, or category. See `Channel.type` for the values a guild cannot contain.
+	Type      CreateChannelRequestType `json:"type"`
+	UserLimit *int                     `json:"user_limit,omitempty"`
+}
+
+// CreateChannelRequestType Text, voice, or category. See `Channel.type` for the values a guild cannot contain.
+type CreateChannelRequestType int
+
+// CreateGuildRequest defines model for CreateGuildRequest.
+type CreateGuildRequest struct {
+	Description *string `json:"description,omitempty"`
+	Name        string  `json:"name"`
+}
+
 // CreateInviteRequest Both fields are optional, and omitting either means "no limit".
 type CreateInviteRequest struct {
 	// ExpiresInSeconds Lifetime from now. Omit for an invite that never expires. Capped at a year — a longer-lived invite is almost always a mistake, and a permanent one is spelled by omitting the field rather than by a number nobody meant to type.
@@ -246,6 +327,17 @@ type CreateInviteRequest struct {
 
 	// MaxUses How many accounts may be created with this code. Omit for unlimited.
 	MaxUses *int `json:"max_uses,omitempty"`
+}
+
+// CreateRoleRequest defines model for CreateRoleRequest.
+type CreateRoleRequest struct {
+	Color       *int   `json:"color,omitempty"`
+	Hoist       *bool  `json:"hoist,omitempty"`
+	Mentionable *bool  `json:"mentionable,omitempty"`
+	Name        string `json:"name"`
+
+	// Permissions Defaults to none. **Cannot exceed what the caller holds** — see the endpoint description for why that check is what stops `MANAGE_ROLES` from being every permission.
+	Permissions *Permissions `json:"permissions,omitempty"`
 }
 
 // DeviceCodeRequest defines model for DeviceCodeRequest.
@@ -301,6 +393,26 @@ type Error struct {
 
 // ErrorErrorCode Stable, machine-readable error identifier.
 type ErrorErrorCode string
+
+// Guild defines model for Guild.
+type Guild struct {
+	CreatedAt   time.Time `json:"created_at"`
+	Description *string   `json:"description"`
+
+	// IconHash Reserved. No upload endpoint exists yet, so this is always null.
+	IconHash *string `json:"icon_hash"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id   Snowflake `json:"id"`
+	Name string    `json:"name"`
+
+	// OwnerId The account that bypasses every permission check within this guild (authority layer 2). Cannot be removed from the guild, and transferring it is not yet possible.
+	OwnerId   Snowflake `json:"owner_id"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
 
 // HealthResponse defines model for HealthResponse.
 type HealthResponse struct {
@@ -368,6 +480,34 @@ type LoginRequest struct {
 // LogoutRequest defines model for LogoutRequest.
 type LogoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
+}
+
+// Member defines model for Member.
+type Member struct {
+	// Deaf Server-side deafen, set by a moderator. Distinct from the self-deafen a client sets on itself, which lives in voice state.
+	Deaf bool `json:"deaf"`
+
+	// GuildId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	GuildId  Snowflake `json:"guild_id"`
+	JoinedAt time.Time `json:"joined_at"`
+
+	// Mute Server-side mute, set by a moderator. See `deaf`.
+	Mute bool `json:"mute"`
+
+	// Nickname A per-guild display name. Null means the account's own display name is used.
+	Nickname *string `json:"nickname"`
+
+	// Roles The roles this member holds, excluding `@everyone` — which every member holds and which appears in no grant. An empty array rather than null when there are none: a client that has to handle both writes the check once per field and forgets it somewhere.
+	Roles []Snowflake `json:"roles"`
+
+	// UserId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	UserId Snowflake `json:"user_id"`
 }
 
 // MintApiTokenRequest defines model for MintApiTokenRequest.
@@ -450,6 +590,17 @@ type PasswordResetRequest struct {
 	Email openapi_types.Email `json:"email"`
 }
 
+// Permissions A permission bitfield, as a **decimal string** rather than a number.
+//
+// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+//
+// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`.
+//
+// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
+//
+// Examples: 3075, 0
+type Permissions = string
+
 // RecoveryCodes A fresh set of single-use recovery codes. Returned by confirmation and by regeneration, and shown exactly once — they are stored only as hashes, so nothing recoverable from the database can be presented as one (rule 8).
 type RecoveryCodes struct {
 	RecoveryCodes []string `json:"recovery_codes"`
@@ -524,6 +675,49 @@ type RevocationCounts struct {
 	SessionsRevoked int64 `json:"sessions_revoked"`
 }
 
+// Role defines model for Role.
+type Role struct {
+	// Color 24-bit RGB. `0` means no colour, which renders as inherited rather than as black.
+	Color     int       `json:"color"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// GuildId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	GuildId Snowflake `json:"guild_id"`
+
+	// Hoist Whether members holding this role are shown in their own section of the member list.
+	Hoist bool `json:"hoist"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+
+	// IsDefault True for exactly one role per guild, `@everyone`. It is the floor every other role stacks on, it cannot be deleted or renamed, and every member holds it without appearing in any grant.
+	IsDefault   bool   `json:"is_default"`
+	Mentionable bool   `json:"mentionable"`
+	Name        string `json:"name"`
+
+	// Permissions A permission bitfield, as a **decimal string** rather than a number.
+	//
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	//
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`.
+	//
+	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
+	//
+	//
+	// Examples: 3075, 0
+	Permissions Permissions `json:"permissions"`
+
+	// Position Higher is higher in the hierarchy. `@everyone` is always 0. Not settable through these endpoints — reordering is a multi-row operation, and role hierarchy arrives with the permission-overwrite endpoints.
+	Position  int       `json:"position"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // Scope A capability an API token may be granted. Scopes only restrict a delegated credential below its owner's reach; they never grant. The vocabulary grows with the surface it guards.
 //
 // There is deliberately no scope for managing API tokens: minting, listing and revoking all require a logged-in user, because a credential that can create credentials can escalate itself.
@@ -587,6 +781,49 @@ type TwoFactorChallenge struct {
 	TwoFactorRequired bool      `json:"two_factor_required"`
 }
 
+// UpdateChannelRequest defines model for UpdateChannelRequest.
+type UpdateChannelRequest struct {
+	Bitrate *int `json:"bitrate,omitempty"`
+
+	// ClearTopic Removes the topic. See `clear_description` on a guild for why this is a flag.
+	ClearTopic *bool   `json:"clear_topic,omitempty"`
+	Name       *string `json:"name,omitempty"`
+	Nsfw       *bool   `json:"nsfw,omitempty"`
+	Position   *int    `json:"position,omitempty"`
+	Topic      *string `json:"topic,omitempty"`
+	UserLimit  *int    `json:"user_limit,omitempty"`
+}
+
+// UpdateGuildRequest Every field optional; an absent one is left alone. At least conceptually a caller sends only what it means to change.
+type UpdateGuildRequest struct {
+	// ClearDescription Removes the description. A separate flag rather than a null `description`, because a JSON decoder cannot tell an explicit null from an absent field — and if absent meant "clear", every partial update would erase what it did not mention.
+	ClearDescription *bool   `json:"clear_description,omitempty"`
+	Description      *string `json:"description,omitempty"`
+	Name             *string `json:"name,omitempty"`
+}
+
+// UpdateMemberRequest The permission required depends on which fields are present — see the endpoint description.
+type UpdateMemberRequest struct {
+	// ClearNickname Removes the nickname. See `clear_description` on a guild for why this is a flag.
+	ClearNickname *bool   `json:"clear_nickname,omitempty"`
+	Deaf          *bool   `json:"deaf,omitempty"`
+	Mute          *bool   `json:"mute,omitempty"`
+	Nickname      *string `json:"nickname,omitempty"`
+}
+
+// UpdateRoleRequest defines model for UpdateRoleRequest.
+type UpdateRoleRequest struct {
+	Color       *int  `json:"color,omitempty"`
+	Hoist       *bool `json:"hoist,omitempty"`
+	Mentionable *bool `json:"mentionable,omitempty"`
+
+	// Name Refused for `@everyone`.
+	Name *string `json:"name,omitempty"`
+
+	// Permissions Cannot exceed what the caller holds. Permitted on `@everyone`, unlike the name.
+	Permissions *Permissions `json:"permissions,omitempty"`
+}
+
 // User An account. Never carries `password_hash` or any other credential material — this shape is built field-by-field from the database row rather than serialised from it, so a column added later cannot leak onto the wire by default.
 type User struct {
 	AvatarHash  *string   `json:"avatar_hash,omitempty"`
@@ -620,6 +857,9 @@ type OAuthProvider string
 
 // BadRequest The envelope every non-2xx JSON response uses. Clients key off `code`, which is stable, never off `message`, which is human-readable and may change.
 type BadRequest = Error
+
+// Forbidden The envelope every non-2xx JSON response uses. Clients key off `code`, which is stable, never off `message`, which is human-readable and may change.
+type Forbidden = Error
 
 // NotFound The envelope every non-2xx JSON response uses. Clients key off `code`, which is stable, never off `message`, which is human-readable and may change.
 type NotFound = Error
@@ -736,6 +976,15 @@ type SignInOnDevicePageFormdataBody struct {
 	Password    string              `form:"password" json:"password"`
 }
 
+// ListGuildMembersParams defines parameters for ListGuildMembers.
+type ListGuildMembersParams struct {
+	// After Resume after this user id, exclusive. Omit for the first page.
+	After *Snowflake `form:"after,omitempty" json:"after,omitempty"`
+
+	// Limit Page size. Defaults to 50, and values above 100 are **clamped rather than refused** — a client asking for more than the ceiling is not making an error worth failing a request over, and returning the ceiling communicates it more clearly than a 400 it has to parse.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
 // RevokeInstanceInviteJSONBody defines parameters for RevokeInstanceInvite.
 type RevokeInstanceInviteJSONBody struct {
 	// Code The invite code. Case, spaces and dashes are normalised away before lookup.
@@ -825,6 +1074,9 @@ type MintApiTokenJSONRequestBody = MintApiTokenRequest
 // RequestEmailVerificationJSONRequestBody defines body for RequestEmailVerification for application/json ContentType.
 type RequestEmailVerificationJSONRequestBody RequestEmailVerificationJSONBody
 
+// UpdateChannelJSONRequestBody defines body for UpdateChannel for application/json ContentType.
+type UpdateChannelJSONRequestBody = UpdateChannelRequest
+
 // SubmitDevicePageFormdataRequestBody defines body for SubmitDevicePage for application/x-www-form-urlencoded ContentType.
 type SubmitDevicePageFormdataRequestBody SubmitDevicePageFormdataBody
 
@@ -836,6 +1088,24 @@ type DecideDeviceAuthorizationFormdataRequestBody DecideDeviceAuthorizationFormd
 
 // SignInOnDevicePageFormdataRequestBody defines body for SignInOnDevicePage for application/x-www-form-urlencoded ContentType.
 type SignInOnDevicePageFormdataRequestBody SignInOnDevicePageFormdataBody
+
+// CreateGuildJSONRequestBody defines body for CreateGuild for application/json ContentType.
+type CreateGuildJSONRequestBody = CreateGuildRequest
+
+// UpdateGuildJSONRequestBody defines body for UpdateGuild for application/json ContentType.
+type UpdateGuildJSONRequestBody = UpdateGuildRequest
+
+// CreateGuildChannelJSONRequestBody defines body for CreateGuildChannel for application/json ContentType.
+type CreateGuildChannelJSONRequestBody = CreateChannelRequest
+
+// UpdateGuildMemberJSONRequestBody defines body for UpdateGuildMember for application/json ContentType.
+type UpdateGuildMemberJSONRequestBody = UpdateMemberRequest
+
+// CreateGuildRoleJSONRequestBody defines body for CreateGuildRole for application/json ContentType.
+type CreateGuildRoleJSONRequestBody = CreateRoleRequest
+
+// UpdateGuildRoleJSONRequestBody defines body for UpdateGuildRole for application/json ContentType.
+type UpdateGuildRoleJSONRequestBody = UpdateRoleRequest
 
 // BootstrapInstanceJSONRequestBody defines body for BootstrapInstance for application/json ContentType.
 type BootstrapInstanceJSONRequestBody = BootstrapRequest

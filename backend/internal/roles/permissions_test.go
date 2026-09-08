@@ -3,7 +3,10 @@
 
 package roles
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // TestTheBitOrderIsWhatTheDatabaseAlreadyStores pins every constant to its literal value.
 //
@@ -122,4 +125,55 @@ func TestAddAndRemove(t *testing.T) {
 	if !p.Has(PermViewChannel) {
 		t.Errorf("Remove cleared a bit it was not asked to: %d", p)
 	}
+}
+
+// TestPermissionsCrossTheWireAsAString pins the wire representation.
+//
+// A bitfield 63 bits wide and a JavaScript number that is a float64 do not mix: anything above 2^53 is
+// silently rounded. Nineteen bits are defined, so the hazard is years off — which is why the representation
+// is fixed now, while changing it costs nothing, rather than after four clients generate from it.
+func TestPermissionsCrossTheWireAsAString(t *testing.T) {
+	t.Run("marshals quoted", func(t *testing.T) {
+		got, err := json.Marshal(PermViewChannel | PermSendMessages)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if string(got) != `"3"` {
+			t.Errorf("got %s, want %q", got, `"3"`)
+		}
+	})
+
+	t.Run("round-trips a value above 2^53", func(t *testing.T) {
+		// Not reachable from a defined bit today, and precisely the value a float64 would mangle.
+		const big = Permission(1) << 60
+
+		encoded, err := json.Marshal(big)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+
+		var back Permission
+		if err := json.Unmarshal(encoded, &back); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if back != big {
+			t.Errorf("round trip = %d, want %d", back, big)
+		}
+	})
+
+	// A bare number is refused rather than accepted leniently, because leniency here fails silently and
+	// years later: a client sending a number works until a bit above 2^53 exists, and then arrives rounded.
+	t.Run("refuses a bare number", func(t *testing.T) {
+		var p Permission
+		if err := json.Unmarshal([]byte("3"), &p); err == nil {
+			t.Error("a bare JSON number must be refused")
+		}
+	})
+
+	t.Run("refuses a non-numeric string", func(t *testing.T) {
+		var p Permission
+		if err := json.Unmarshal([]byte(`"MANAGE_GUILD"`), &p); err == nil {
+			t.Error("a permission name must be refused; the wire format is a decimal bitfield")
+		}
+	})
 }

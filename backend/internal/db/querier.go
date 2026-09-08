@@ -9,6 +9,10 @@ import (
 )
 
 type Querier interface {
+	// ON CONFLICT DO NOTHING would make a second join silently succeed and return no row, which the caller
+	// cannot distinguish from a failed insert. Left to conflict instead, so the unique violation is the
+	// answer.
+	AddGuildMember(ctx context.Context, arg AddGuildMemberParams) (GuildMember, error)
 	// Records who authorized this device.
 	//
 	// `user_id IS NULL` is what makes an approval single-use, and it is the reason the approval token needs
@@ -80,6 +84,7 @@ type Querier interface {
 	// 15-minute access tokens a logged-in client holds. They are stored only as a SHA-256 hash, so the raw
 	// value is recoverable exactly once — in the response that created it.
 	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
+	CreateChannel(ctx context.Context, arg CreateChannelParams) (Channel, error)
 	// Device-code flow queries (Milestone M9).
 	//
 	// One table with a short life and a small state machine: issued, then approved or denied by a browser
@@ -95,6 +100,10 @@ type Querier interface {
 	// single-use or expiry would be two sets of guards to keep right, and the second one is always the one
 	// that gets it wrong.
 	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) (EmailVerificationToken, error)
+	// Guild, channel, role and membership queries (Milestone M12).
+	// The guild row. Its @everyone role and the owner's membership are written in the same transaction — see
+	// guilds.Service.Create, which is the only caller and does all three in one RunInTx.
+	CreateGuild(ctx context.Context, arg CreateGuildParams) (Guild, error)
 	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
 	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
@@ -124,6 +133,7 @@ type Querier interface {
 	// holds in SQL rather than in whichever Go path remembered to check it.
 	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) (PasswordResetToken, error)
 	CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) error
+	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	// Refresh-session queries.
 	//
 	// A session is one device's refresh-token family. Rotation replaces a row with a successor and links the
@@ -148,6 +158,7 @@ type Querier interface {
 	// instance with no relay. The OAuth path has its own insert (CreateOAuthUser) because it creates an
 	// account with no password at all.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	DeleteChannel(ctx context.Context, arg DeleteChannelParams) (int64, error)
 	// Called by auth.RunSweeper. Abandoned authorizations are the common case, and the endpoint that creates
 	// them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
 	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
@@ -201,12 +212,26 @@ type Querier interface {
 	// uncancellable short of shutdown. The loop in SweepExpired calls this until it returns less than the
 	// limit, so a large backlog is drained across several bounded statements instead of one unbounded one.
 	DeleteExpiredSessions(ctx context.Context, limit int32) (int64, error)
+	// Everything below a guild is ON DELETE CASCADE, so this one statement takes the channels, roles,
+	// memberships, role grants, overwrites and audit entries with it.
+	//
+	// :execrows rather than :exec because the handler needs to tell "deleted" from "was not there" — not to
+	// report the difference, which would be the membership oracle authorize exists to close, but to avoid
+	// answering 204 for a guild that never existed.
+	DeleteGuild(ctx context.Context, id int64) (int64, error)
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
 	// Used when the whole set is replaced or the factor is disabled. Deletes rather than marking spent: these
 	// are not evidence of anything once the factor they belonged to is gone.
 	DeleteRecoveryCodesForUser(ctx context.Context, userID int64) (int64, error)
+	// The is_default guard is in the WHERE rather than in Go, so a concurrent request cannot slip between a
+	// check and a delete. Same discipline as ConsumePasswordResetToken and RedeemInstanceInvite: a guard that
+	// lives in the statement cannot be raced, and one that lives in a Go `if` can.
+	//
+	// A guild without @everyone has no permission floor for resolution to start from, so this is not a policy
+	// nicety — it is the invariant guild creation establishes in its transaction.
+	DeleteRole(ctx context.Context, arg DeleteRoleParams) (int64, error)
 	DeleteTOTPForUser(ctx context.Context, userID int64) (int64, error)
 	// The other half of the approval page, and the reason it is worth a column rather than letting the code
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
@@ -219,6 +244,13 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// By id alone, with no guild parameter, and that is deliberate rather than an oversight.
+	//
+	// PATCH /channels/{id} and DELETE /channels/{id} carry no guild in their path, so there is no guild id to
+	// scope by that did not come from the caller. The handler loads the channel, reads *its* guild_id, and
+	// authorizes against that — which is the only ordering rule 1 permits, since scoping the read by a
+	// caller-supplied guild would be trusting the value the check exists to verify.
+	GetChannel(ctx context.Context, id int64) (Channel, error)
 	// The verification page's re-read between steps.
 	//
 	// By id because that is what the signed continuation carries: the device code never reaches the browser at
@@ -237,6 +269,8 @@ type Querier interface {
 	// The confirm path's lookup. Expiry is checked here as well as in the consume below, so an expired token
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
+	GetGuild(ctx context.Context, id int64) (Guild, error)
+	GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
@@ -258,6 +292,10 @@ type Querier interface {
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash []byte) (PasswordResetToken, error)
+	// Scoped by guild as well as by id, so a role id from another guild resolves to nothing rather than to
+	// somebody else's role. Rule 1: never trust a client-supplied ID without verifying it belongs to the
+	// actor's claimed context — enforced in the statement, not in a check a handler has to remember.
+	GetRole(ctx context.Context, arg GetRoleParams) (Role, error)
 	// Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
 	//
 	// The caller that needs this is "which device is this request coming from", answered from the sid claim in
@@ -313,6 +351,19 @@ type Querier interface {
 	// The primary key (channel_id, target_type, target_id) serves the lookup on its leading column: measured
 	// at 0.092 ms and 6 buffers, Index Scan.
 	ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]ListChannelPermissionOverwritesRow, error)
+	// Columns enumerated rather than `SELECT *`, and topic_search is the reason.
+	//
+	// It is a generated tsvector that nothing in this codebase reads until M63's channel search, and pgx
+	// decodes it into a full pgtype.TSVector — a parsed lexeme list with positions and weights — on every row.
+	// Confirmed by probe: `SELECT *` scans fine, so this is not a correctness fix. It is that the channel list
+	// is one of rule 7's three named hot paths, and paying to transfer and parse a search index nobody reads,
+	// once per channel per listing, is exactly the over-fetching §15 asks not to ship.
+	//
+	// The three single-row channel queries keep `SELECT *`, deliberately. One row's tsvector costs nothing,
+	// and enumerating there too would give sqlc four near-identical row structs where one db.Channel does —
+	// four conversions to keep in step for no measurable gain. The cost this avoids is the one that multiplies
+	// by the number of channels, and that is this query alone.
+	ListGuildChannels(ctx context.Context, guildID *int64) ([]ListGuildChannelsRow, error)
 	// Permission resolution queries (ADR 0008 layers 2 through 5).
 	// The guild, whether this account is in it, and every role whose permissions apply to them — in one round
 	// trip rather than three.
@@ -348,6 +399,16 @@ type Querier interface {
 	// owner_id and is_member repeat on every row. That is two columns times a handful of roles, and the
 	// alternative is the extra round trip this query exists to avoid.
 	ListGuildMemberAuthority(ctx context.Context, arg ListGuildMemberAuthorityParams) ([]ListGuildMemberAuthorityRow, error)
+	// Cursor pagination on user_id, never offset.
+	//
+	// §2 specifies cursor-only everywhere, and the member list is one of rule 7's named hot paths. An OFFSET
+	// makes page N cost N pages of scanning and shifts every row when somebody joins or leaves mid-read; a
+	// cursor costs one index descent regardless of depth and is stable under concurrent writes. The primary
+	// key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
+	// 15,000-member guild.
+	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]GuildMember, error)
+	// Ordered by position, which the (guild_id, position) index serves.
+	ListGuildRoles(ctx context.Context, guildID int64) ([]Role, error)
 	// Everything outstanding, newest first.
 	//
 	// Deliberately includes exhausted and expired rows. An administrator asking "what invites exist" is
@@ -359,6 +420,12 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
+	// The role ids held by each of a set of members, in one query rather than one per member.
+	//
+	// The member listing returns up to 100 members and each carries its roles, so the obvious shape — a query
+	// per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
+	// whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
+	ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsParams) ([]GuildMemberRole, error)
 	// The devices signed in to an account: one row per device family, not one per session row.
 	//
 	// A session row is one generation of a rotating family, replaced every time the client refreshes. Listing
@@ -460,6 +527,7 @@ type Querier interface {
 	// every credential lookup in this package gets, and here it also stops the endpoint from being a way to
 	// probe which codes exist.
 	RedeemInstanceInvite(ctx context.Context, code string) (InstanceInvite, error)
+	RemoveGuildMember(ctx context.Context, arg RemoveGuildMemberParams) (int64, error)
 	// Claims a username for a registration that created no account.
 	//
 	// ON CONFLICT DO NOTHING because the name may already be claimed by an account or by an earlier
@@ -536,6 +604,24 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
+	// Scoped by guild, because by the time this runs the handler has resolved the channel's own guild from
+	// GetChannel and authorized against it. Passing it back in is a second assertion that the row being
+	// written is the row that was checked.
+	UpdateChannel(ctx context.Context, arg UpdateChannelParams) (Channel, error)
+	// Partial update through COALESCE, so a caller sends only the fields it means to change.
+	//
+	// The alternative — one statement per field, or a query builder — is what rule 3 forbids and what sqlc
+	// exists to avoid. NULL means "leave alone" rather than "set to NULL", which is why description clears
+	// through a separate flag: without it there would be no way to remove a description at all, since the
+	// value that means "clear this" and the value that means "do not touch this" would be the same.
+	UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild, error)
+	UpdateGuildMember(ctx context.Context, arg UpdateGuildMemberParams) (GuildMember, error)
+	// Same COALESCE shape as UpdateGuild, and the same guild scoping as GetRole.
+	//
+	// position is not updatable here. Reordering roles is a multi-row swap and role *hierarchy* — who may
+	// manage whom — is M13's, so this milestone stores the column, orders by it, and does not let a single-row
+	// update reshuffle it.
+	UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, error)
 	// Second-factor queries: one TOTP enrollment per account, and its recovery codes.
 	//
 	// Single-use lives in the statement here as it does everywhere else in this package — see
@@ -558,6 +644,13 @@ type Querier interface {
 	// One query rather than two so the two halves cannot be checked in different places, or one of them
 	// forgotten by a later caller.
 	UsernameUnavailable(ctx context.Context, username string) (bool, error)
+	// Rule 2, and it takes a querier rather than a pool for the reason the rule states: the entry is written
+	// in the same transaction as the mutation it records, so a mutation that commits without its entry is not
+	// a state this schema can reach.
+	//
+	// Nothing reads this until M14. `changes` is jsonb and M12 writes either NULL or a flat object of changed
+	// fields; M14 owns the diffing that produces a richer one.
+	WriteAuditLogEntry(ctx context.Context, arg WriteAuditLogEntryParams) error
 }
 
 var _ Querier = (*Queries)(nil)

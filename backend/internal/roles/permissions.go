@@ -31,6 +31,11 @@
 // path. One indexed read per check until M18 can invalidate it.
 package roles
 
+import (
+	"fmt"
+	"strconv"
+)
+
 // Permission is the bitfield stored in roles.permissions and in the allow/deny columns of
 // permission_overwrites.
 //
@@ -111,3 +116,42 @@ func (p Permission) Int64() int64 { return int64(p) }
 // schema and read by an older binary keeps its unknown grants intact instead of having them silently
 // stripped on the next write — the same reasoning that makes Remove explicit about what it clears.
 func PermissionFromInt64(v int64) Permission { return Permission(v) }
+
+// MarshalJSON renders the bitfield as a quoted decimal string.
+//
+// The same decision ADR 0003 makes for snowflakes, for the same reason: this is a 63-bit value and
+// JavaScript's number type is a float64, so anything above 2^53 loses precision silently on the way
+// through a browser. Nineteen bits are defined today and the hazard is years away — which is exactly when
+// it is cheap to fix, because changing the wire type later is a breaking change across four codegen'd
+// clients. Discord made this change under load rather than ahead of it.
+//
+// Decimal rather than hex, matching how the value appears in Postgres and in every log line.
+func (p Permission) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + strconv.FormatUint(uint64(p), 10) + `"`), nil
+}
+
+// UnmarshalJSON accepts the quoted decimal string MarshalJSON produces.
+//
+// A bare JSON number is refused rather than accepted leniently. Accepting both would mean a client that
+// sends a number works until the day a permission bit above 2^53 is defined and its values start arriving
+// silently rounded — a bug that appears years after the code that caused it, in a different client, as a
+// wrong permission rather than as an error.
+func (p *Permission) UnmarshalJSON(data []byte) error {
+	if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+		return fmt.Errorf("roles: permissions must be a quoted decimal string, got %s", data)
+	}
+
+	v, err := strconv.ParseUint(string(data[1:len(data)-1]), 10, 64)
+	if err != nil {
+		return fmt.Errorf("roles: invalid permissions value: %w", err)
+	}
+
+	// The sign bit is unavailable because Postgres stores this as a signed bigint, so a value that would
+	// round-trip as negative is refused here rather than at the INSERT.
+	if v > uint64(permAll) && v>>63 != 0 {
+		return fmt.Errorf("roles: permissions value %d does not fit a signed bigint", v)
+	}
+
+	*p = Permission(v)
+	return nil
+}

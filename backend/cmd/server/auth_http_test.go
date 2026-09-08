@@ -23,6 +23,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
@@ -205,12 +206,20 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	health := newHealth(db.New(pool))
 	health.MarkReady()
 
+	// The guild service joins the harness at M12 so the guild routes are exercised through the real
+	// router — the same middleware chain, the same limiter, the same Authenticate — rather than by calling
+	// handlers directly. Wired here rather than in a second constructor for the reason the comment above
+	// gives: every HTTP test drives the assembly the composition root builds.
+	guildsSvc, err := guilds.NewService(guilds.ServiceOptions{Pool: pool, IDs: ids})
+	require.NoError(t, err)
+
 	handler, err := newRouter(routerOptions{
 		Config:  testConfig(),
 		Logger:  zerolog.New(io.Discard),
 		Health:  health,
 		Auth:    auth.NewHandler(svc),
 		AuthSvc: svc,
+		Guilds:  guilds.NewHandler(guildsSvc),
 	})
 	require.NoError(t, err)
 
