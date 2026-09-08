@@ -2496,7 +2496,7 @@ paths:
         another: the channel list is flat with one level of nesting.
 
 
-        **An account owns at most 100 guilds**, and a guild holds at most 500 channels. The ceiling is here rather than on the listing because a
+        **An account owns at most 50 guilds**, and a guild holds at most 500 channels. The ceiling is here rather than on the listing because a
         client needs the whole tree to render a sidebar — paginating it would make every client fetch in a
         loop. Bounding creation is what keeps the list response from growing without limit.
       operationId: createGuildChannel

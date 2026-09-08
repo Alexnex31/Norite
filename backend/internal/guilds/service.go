@@ -190,5 +190,12 @@ const (
 	// The contract's answer was that instance-wide abuse controls belong at account creation rather than
 	// here, which is true and defers to a milestone that does not exist. A count on guilds_owner_id_idx,
 	// an index 000015 already added, costs one indexed read on an operation nobody performs in a loop.
-	maxGuildsOwnedPerAccount = 100
+	//
+	// Fifty rather than the hundred this shipped with, set deliberately rather than as a round number:
+	// M72a adds a guild discovery directory, which makes owning many guilds *useful* to a spammer in a way
+	// it was not when nothing listed them. That milestone also makes this limit read from
+	// user_entitlements — the per-user seam ADR 0007 reserved and no v1 code path has used — so a
+	// subscriber or an Instance Admin resolves higher. The constant is what an ordinary account gets, and
+	// it stops being a constant there.
+	maxGuildsOwnedPerAccount = 50
 )

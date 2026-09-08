@@ -1130,6 +1130,30 @@ func TestAGuildIsBoundedInChannelsAndRoles(t *testing.T) {
 		require.Contains(t, string(resp.Body), "at most 250 roles", resp)
 	})
 
+	// The outermost object, which shipped capped and untested — a limit nothing exercises is a limit that
+	// can be removed without a red build. Fifty, lowered from the hundred M12 first shipped because M72a's
+	// discovery directory makes owning many guilds useful to a spammer in a way nothing did before.
+	t.Run("guilds per account", func(t *testing.T) {
+		acct := f.api.newAccount("hoarder", "hoarder@example.com", "hoarder-device")
+
+		// 49 seeded plus the one every account gets from the fixture is not the shape here: this account
+		// owns nothing yet, so 50 seeded takes it exactly to the ceiling.
+		f.api.mustExec(t, `INSERT INTO guilds (id, name, owner_id)
+		                   SELECT $1::bigint + g, 'seeded-' || g, $2 FROM generate_series(1, 50) g`,
+			int64(920000000000000000), mustID(t, acct.ID))
+
+		resp := f.api.call(http.MethodPost, "/api/v1/guilds",
+			map[string]any{"name": "one-too-many"}, withToken(acct.Tokens.AccessToken))
+		require.Equal(t, http.StatusConflict, resp.Code,
+			"an account at its guild ceiling must be refused: %s", resp)
+		require.Contains(t, string(resp.Body), "at most 50 guilds", resp)
+
+		// The ceiling is per account, not instance-wide: somebody else is unaffected.
+		other := f.api.call(http.MethodPost, "/api/v1/guilds",
+			map[string]any{"name": "unaffected"}, withToken(f.strangerToken))
+		require.Equal(t, http.StatusCreated, other.Code, other)
+	})
+
 	// The ceiling is checked after authorization, so a stranger cannot use it to learn how full a guild is.
 	t.Run("a non-member still gets 404, not the ceiling", func(t *testing.T) {
 		resp := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
