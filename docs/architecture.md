@@ -762,6 +762,9 @@ POST   /users/@me/channels
 DELETE /users/@me                          -- account deletion, invokes revoke-all-sessions
 GET    /users/@me/export                   -- server-side export; see E2E export note below
 
+-- Guild routes additionally require an API token to hold `guilds.read` (reads) or `guilds.write`
+-- (everything else). A user's own access token passes both: a scope bounds a *delegated* credential and
+-- never a person. Permission resolution still runs underneath, so a scope narrows and never grants.
 POST   /guilds                             -- M12; writes guild + @everyone + owner membership in one tx
 GET    /guilds/{guild_id}                  -- M12
 PATCH  /guilds/{guild_id}                  -- M12; PermManageGuild

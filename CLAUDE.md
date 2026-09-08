@@ -1003,6 +1003,13 @@ And on guilds, permissions and the audit log, from M12:
   *first*: resolving first and checking the tier as a fallback answers "not found" for every guild on the
   instance and never reaches the check. ADR 0008 rejects the synthetic "super role" by name, and this is
   the fourth time a rule here has had to be structural rather than remembered.
+- **Every guild route carries a scope, and M12 shipped without them.** `auth` guards even the read-only
+  `GET /users/@me` with `RequireScope`; the fifteen guild routes were mounted bare, so an `identify`-only
+  API token deleted a guild and answered 204. Reproduced before it was fixed. This is the first milestone
+  to put a *mutating* surface within reach of a delegated credential, which is exactly when "scopes only
+  ever restrict" stops being free. `guilds.read` and `guilds.write` are separate because the blast radii
+  differ and the common bot wants only the first, and **write does not imply read** — a scope bounds a
+  credential, and holding one is not a reason to be granted another.
 - **`authorize` is the only thing that decides authority, and it exists before the call sites do.**
   `revokeEverything`, `RequireLiveSession` and `factorProof` were each built after finding the one caller
   that forgot. M12 is the first milestone writing its handlers from scratch, so the chokepoint went in
@@ -1049,6 +1056,18 @@ And on guilds, permissions and the audit log, from M12:
   Rule 2 holds — the entry is written in the transaction — and nothing can read it afterwards. The durable
   record of an instance-level action is rule 14's `instance_audit_log` (M69), not this table. Asserted by a
   test as the state it is, rather than left to look like a bug.
+- **A polymorphic column cannot cascade, so something has to clean up after it.**
+  `permission_overwrites.target_id` names a role or a user depending on `target_type` and therefore cannot
+  be a foreign key. Deleting a role or removing a member has to delete their overwrites explicitly — a
+  leftover member row is not clutter, because rejoining silently restores a channel-level deny nothing in
+  the UI or the audit log explains.
+- **A new role's position is `max(position) + 1`, never the role count.** The count collides the moment
+  anything has been deleted, and there is deliberately no unique constraint to catch it, so the corruption
+  is silent until M13 enforces a hierarchy over it.
+- **A permission that is only ever OR'd into a base is not a grantable permission.** `UpdateMember` began
+  with `PermManageGuild` and added the moderation bits, which made `PermMuteMembers` and
+  `PermDeafenMembers` undeliverable on their own: the only way to let somebody mute was to also let them
+  rename the guild. Build `need` from the fields actually present, starting empty.
 - **Guards that can be raced live in the statement.** `@everyone` is undeletable by `AND NOT is_default` in
   the `DELETE`, not by an `if` before it — the same discipline as `ConsumePasswordResetToken` and
   `RedeemInstanceInvite`. The Go check exists only to produce a better message.
@@ -1065,6 +1084,13 @@ And on guilds, permissions and the audit log, from M12:
   contract-check` and a CI step. `chi-server` cannot reproduce this router — the fixed middleware order,
   `/instance` as a sibling, three limiter buckets, one exempt path — and a generated router that had to be
   fought is a worse contract than a hand-written one that matches the document.
+- **The generated types are imported by no handler, and that is a limit rather than an unfinished step.**
+  Handlers declare their own request structs to carry `validate:` tags and their own response types so ids
+  marshal as snowflakes. So "a drifted field is a compile error" is *not* what this setup delivers; what it
+  delivers is a checked artifact of the contract. Payload drift is caught by a test comparing real
+  responses against the declared schemas in both directions, which `additionalProperties: false` plus a
+  full `required` list makes exact. Claiming the compile-time version and not having it is how eight
+  unlisted error codes accumulated before.
 - **The codegen staleness check is inert on a file that has never been committed.** `git diff --quiet`
   compares the working tree to the index and ignores untracked files, so it passed against a deliberately
   drifted contract until the generated file was staged. True of `sqlc-check` too; CI is unaffected because
