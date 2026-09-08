@@ -302,15 +302,59 @@ of this section.
   were actually being got wrong rather than validating whole schemas. And the moment M12 generates, that
   gap closes on its own.
 
-  Done when: a guild, its channels, and its roles can be created, read, updated, and deleted via the REST
-  API, matching the generated types.
-- **M13 — Permission engine**: `roles.Resolve`, the permission bitfield, overwrite resolution
-  (`@everyone` → role → member), role `position` hierarchy enforcement. Done when: the permission-resolution
-  algorithm's documented test cases (owner bypass, `PermAdministrator` short-circuit, overwrite precedence,
-  position-based role-management limits) all pass.
-- **M14 — Guild audit log**: `audit_log_entries`, written in the same transaction as every guild-scoped
-  mutation, `GET /guilds/{id}/audit-log`. Done when: every guild mutation type produces exactly one audit
-  entry, atomically.
+  **It took scope from M13 and M14, and both of their entries below are rewritten to say so.** Neither was
+  visible from this entry when it was written; both are ordering problems that only appear once you try to
+  satisfy rules 1 and 2 on the first guild-scoped mutation that exists.
+
+  Rule 2 requires every guild-scoped mutation to write an audit entry in the mutation's transaction, and
+  `audit_log_entries` was M14's. Reordering the two milestones was not available — the table references
+  `guilds(id)` — so M12 creates it. The alternative was two milestones during which rule 2 was false,
+  followed by a retrofit across every handler written in between.
+
+  Rule 1 requires resolution through `roles.Resolve`, which was M13's. Four of ADR 0008's six layers have
+  data at M12 and the fifth reads a table M12 creates, so a `Resolve` written here is not a placeholder: it
+  is complete, and the overwrite layer runs against an empty table and correctly contributes nothing. M13's
+  endpoints fill that table and this code does not change.
+
+  Done when: a guild, its channels, its roles and its membership can be created, read, updated and deleted
+  via the REST API; every mutating route resolves permissions through one chokepoint; and every mutation
+  writes exactly one audit entry in its own transaction.
+- **M13 — Permission overwrites and role hierarchy**: the `permission_overwrites` endpoints, and
+  position-based hierarchy enforcement — who may manage whom.
+
+  **M12 built the resolution engine, so this entry is smaller than it was.** `roles.Resolve` exists with
+  ADR 0008's layers 2 through 5: owner bypass, `PermAdministrator` short-circuit, the OR of role bits, and
+  overwrite precedence (`@everyone` → the union of role overwrites → member). The permission bitfield
+  exists and its bit order is pinned by a test. What M13 adds is the half M12 could not: endpoints that
+  write an overwrite, so layer 5 has rows to resolve against, and role `position` hierarchy, which is a
+  different question from permission resolution and is genuinely untouched.
+
+  M12 tests layer 5 by inserting overwrite rows directly, which is what stops it shipping unexercised —
+  but "an overwrite created through the API behaves as documented" is still M13's to demonstrate.
+
+  Two items M12 deferred here explicitly: the channel listing does not yet hide channels the caller cannot
+  view, because nothing can write an overwrite to hide one with; and role `position` is not settable
+  through the role endpoints, because reordering is a multi-row swap that belongs with the hierarchy rules
+  that give it meaning.
+
+  Done when: an overwrite can be created, updated and deleted through the API and changes what
+  `roles.Resolve` returns; a member cannot manage a role positioned above their own highest; and the
+  channel listing reflects per-channel view permission.
+- **M14 — Guild audit log**: `GET /guilds/{guild_id}/audit-log`, and the `changes` diffing behind it.
+
+  **M12 created the table and writes to it, so this entry no longer introduces either.** Every mutation in
+  M12 already writes an entry in its own transaction, with the actor, the action and the target, and a
+  table-driven test asserts exactly one entry per mutation type. What M14 adds is the read surface, the
+  before/after diff that fills `changes` with more than the flat map M12 writes, and the pagination the
+  listing needs.
+
+  One state M12 recorded rather than fixed: `audit_log_entries.guild_id` cascades from `guilds`, so a
+  guild's own deletion entry is removed by the cascade it records. Rule 2 is satisfied and nothing can read
+  the entry afterwards. The durable record of an instance-level action is rule 14's `instance_audit_log`,
+  at M69 — M14 should not try to solve it here.
+
+  Done when: a guild's audit log can be read back, cursor-paginated, with a `changes` diff naming what
+  actually changed; and the coverage test extends M12's to assert the diff rather than only the entry.
 - **M15 — Core messaging CRUD**: send/edit/delete REST endpoints for channel messages, permission-checked via
   the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14. Done when: a
   permitted member can send/edit/delete a message via the REST API, an unpermitted one is rejected, and each
