@@ -1054,7 +1054,7 @@ And on guilds, permissions and the audit log, from M12:
   code can reach.
 - **A guild's own deletion entry does not survive**, because `audit_log_entries` cascades from `guilds`.
   Rule 2 holds — the entry is written in the transaction — and nothing can read it afterwards. The durable
-  record of an instance-level action is rule 14's `instance_audit_log` (M69), not this table. Asserted by a
+  record of an instance-level action is rule 14's `instance_audit_log` (M72), not this table. Asserted by a
   test as the state it is, rather than left to look like a bug.
 - **Refuse before explaining.** Two endpoints answered a non-member with something other than 404 because
   a public error was evaluated *before* `authorizeWith`: removing the owner returned a 409 naming the

@@ -17,7 +17,7 @@
 CREATE TABLE audit_log_entries (
   id         bigint PRIMARY KEY,                            -- snowflake (ADR 0003), so entries sort by time
   -- Nullable, and that is what makes this table usable for more than guilds later: an instance-scoped
-  -- action has no guild. Rule 14 gives those their own table (instance_audit_log, M69) rather than sharing
+  -- action has no guild. Rule 14 gives those their own table (instance_audit_log, M72) rather than sharing
   -- this one, so today every row written here carries a guild — but the column stays nullable because §2
   -- specifies it and because narrowing it later is a rewrite of the table.
   guild_id   bigint NULL REFERENCES guilds(id) ON DELETE CASCADE,

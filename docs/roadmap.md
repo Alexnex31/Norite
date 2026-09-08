@@ -365,7 +365,7 @@ of this section.
   One state M12 recorded rather than fixed: `audit_log_entries.guild_id` cascades from `guilds`, so a
   guild's own deletion entry is removed by the cascade it records. Rule 2 is satisfied and nothing can read
   the entry afterwards. The durable record of an instance-level action is rule 14's `instance_audit_log`,
-  at M69 — M14 should not try to solve it here.
+  at M72 — M14 should not try to solve it here.
 
   Done when: a guild's audit log can be read back, cursor-paginated, with a `changes` diff naming what
   actually changed; and the coverage test extends M12's to assert the diff rather than only the entry.
@@ -902,6 +902,14 @@ of this section.
   optional `expires_at`), enforcement via the M11 revoke-all-sessions primitive (force-close plus revoke
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
   `instance_audit_log` recording every Instance Admin action.
+
+  **It inherits one case from M12 that is easy to miss, because the code that creates it destroys its own
+  evidence.** An Instance Admin passes ADR 0008's layer 1 and can therefore delete a guild they are not a
+  member of. That deletion writes a guild-scoped audit entry in its own transaction, satisfying rule 2 —
+  and `audit_log_entries.guild_id` cascades from `guilds`, so the entry is removed by the very cascade it
+  records. Every other admin action on a guild leaves a surviving guild-scoped entry; deletion is the one
+  that does not, and it is the most consequential of them. `instance_audit_log` is where it belongs, and
+  M12's `Service.Delete` is the call site to add the write to.
 
   **Must also cover instance-invite management**, which M10 built and logs structurally rather than
   durably. Rule 14 enumerates bans, report resolution, entitlement changes and tier grants, so minting an

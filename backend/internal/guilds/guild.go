@@ -250,7 +250,7 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 		// So this row does not survive, and that is a real gap rather than a subtlety being glossed. Rule
 		// 2 is satisfied — the entry is written in the mutation's transaction — but nothing can read it
 		// afterwards, because M14's audit log is per-guild and this guild is gone. The instance-scoped
-		// record of a guild deletion belongs in instance_audit_log, which is rule 14's table and M69's
+		// record of a guild deletion belongs in instance_audit_log, which is rule 14's table and M72's
 		// milestone. Written down here rather than discovered there.
 		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionGuildDelete, &guildID, nil); err != nil {
 			return err
