@@ -49,22 +49,28 @@ func channelFromRow(row db.Channel) Channel {
 	}
 }
 
+// channelFromListRow adapts the list query's own row struct.
+//
+// ListGuildChannels enumerates its columns to leave topic_search behind, so sqlc gives it a row type of
+// its own rather than db.Channel. Both are converted through channelFromRow rather than by a second copy
+// of the same thirteen assignments: two copies drift, and the failure mode is a field that is populated on
+// create and silently null on the listing, which a test exercising one path cannot see.
 func channelFromListRow(row db.ListGuildChannelsRow) Channel {
-	return Channel{
-		ID:            snowflake.ID(row.ID),
-		GuildID:       idPtr(row.GuildID),
+	return channelFromRow(db.Channel{
+		ID:            row.ID,
+		GuildID:       row.GuildID,
 		Type:          row.Type,
-		ParentID:      idPtr(row.ParentID),
+		ParentID:      row.ParentID,
 		Name:          row.Name,
 		Topic:         row.Topic,
 		Position:      row.Position,
-		NSFW:          row.Nsfw,
-		LastMessageID: idPtr(row.LastMessageID),
+		Nsfw:          row.Nsfw,
+		LastMessageID: row.LastMessageID,
 		Bitrate:       row.Bitrate,
 		UserLimit:     row.UserLimit,
-		CreatedAt:     row.CreatedAt.Time,
-		UpdatedAt:     row.UpdatedAt.Time,
-	}
+		CreatedAt:     row.CreatedAt,
+		UpdatedAt:     row.UpdatedAt,
+	})
 }
 
 // ListChannels returns a guild's channels in position order.
@@ -114,6 +120,17 @@ func (s *Service) CreateChannel(
 			"channel type %d cannot be created in a guild", in.Type)
 	}
 
+	// bitrate and user_limit belong to voice and to nothing else. The schema says "NULL for every other
+	// type" and the contract says "Voice channels only" — without this, a text channel created with a
+	// bitrate keeps it, and the response contradicts both documents.
+	//
+	// Refused rather than silently dropped: a client sending them on a text channel has misunderstood
+	// something, and quietly ignoring the field would leave it believing the value took.
+	if in.Type != ChannelGuildVoice && (in.Bitrate != nil || in.UserLimit != nil) {
+		return Channel{}, httpx.Errorf(httpx.ErrBadRequest,
+			"bitrate and user_limit apply only to voice channels")
+	}
+
 	channelID, err := s.ids.Next()
 	if err != nil {
 		return Channel{}, fmt.Errorf("guilds: mint channel id: %w", err)
@@ -122,7 +139,7 @@ func (s *Service) CreateChannel(
 	var out Channel
 
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageChannels); err != nil {
+		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageChannels); err != nil {
 			return err
 		}
 
@@ -140,6 +157,12 @@ func (s *Service) CreateChannel(
 				return httpx.Errorf(httpx.ErrBadRequest, "parent_id does not name a channel in this guild")
 			case parent.Type != ChannelGuildCategory:
 				return httpx.Errorf(httpx.ErrBadRequest, "parent_id must name a category channel")
+			case in.Type == ChannelGuildCategory:
+				// A category inside a category. The reciprocal of the check above and easy to omit,
+				// because the parent is valid — it is the *child* that is wrong. The channel list is a
+				// flat position-ordered list with one level of nesting, and the TUI's channel pane has no
+				// shape for a deeper tree, so this would produce data no client can render.
+				return httpx.Errorf(httpx.ErrBadRequest, "a category cannot be nested inside another")
 			}
 		}
 
@@ -226,7 +249,14 @@ func (s *Service) UpdateChannel(
 			return err
 		}
 
-		if err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
+		// The same voice-only rule as creation, checked against the type the channel actually has rather
+		// than one the request could claim.
+		if existing.Type != ChannelGuildVoice && (in.Bitrate != nil || in.UserLimit != nil) {
+			return httpx.Errorf(httpx.ErrBadRequest,
+				"bitrate and user_limit apply only to voice channels")
+		}
+
+		if _, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
 			return err
 		}
 
@@ -264,6 +294,12 @@ func (s *Service) UpdateChannel(
 		if in.NSFW != nil {
 			changes["nsfw"] = *in.NSFW
 		}
+		if in.Bitrate != nil {
+			changes["bitrate"] = *in.Bitrate
+		}
+		if in.UserLimit != nil {
+			changes["user_limit"] = *in.UserLimit
+		}
 
 		if err := s.writeAudit(
 			ctx, q, guildID, actor.UserID, ActionChannelUpdate, &channelID, changes,
@@ -298,7 +334,7 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 			return err
 		}
 
-		if err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
+		if _, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
 			return err
 		}
 

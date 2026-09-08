@@ -113,7 +113,20 @@ func (s *Service) UpdateMember(
 	var out Member
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		need := roles.PermManageGuild
+		// Each field brings its own permission, and only its own.
+		//
+		// The first version started `need` at PermManageGuild and added the moderation bits to it, which
+		// made both of them undeliverable as standalone grants: a "voice moderator" role holding exactly
+		// PermMuteMembers was refused, because Has requires every bit and PermManageGuild was always in the
+		// set. The only way to grant muting was to also grant the ability to rename the guild and edit its
+		// settings — the opposite of what splitting the bits was for.
+		//
+		// So the base is empty and each present field contributes. A request that sends nothing needs
+		// nothing beyond membership, which authorizeWith establishes anyway by resolving at all.
+		var need roles.Permission
+		if in.Nickname != nil || in.ClearNickname {
+			need = need.Add(roles.PermManageGuild)
+		}
 		if in.Mute != nil {
 			need = need.Add(roles.PermMuteMembers)
 		}
@@ -121,7 +134,7 @@ func (s *Service) UpdateMember(
 			need = need.Add(roles.PermDeafenMembers)
 		}
 
-		if err := authorizeWith(ctx, q, actor, guildID, 0, need); err != nil {
+		if _, err := authorizeWith(ctx, q, actor, guildID, 0, need); err != nil {
 			return err
 		}
 
@@ -195,15 +208,29 @@ func (s *Service) RemoveMember(
 		if userID == actor.UserID {
 			// Leaving. Still needs to be a member, which PermViewChannel establishes, and still writes an
 			// audit entry — "who left" is exactly what an operator reads this log for.
-			if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel); err != nil {
+			if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel); err != nil {
 				return err
 			}
-		} else if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermKickMembers); err != nil {
+		} else if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermKickMembers); err != nil {
 			return err
 		}
 
 		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionMemberRemove, &userID, nil); err != nil {
 			return err
+		}
+
+		// Their per-member overwrites go too. Nothing cascades, because target_id is polymorphic and so
+		// cannot be a foreign key — and a leftover row is not merely clutter: rejoin the guild later and
+		// applyOverwrites matches the member tier again, silently restoring a channel-level deny that
+		// nothing in the UI or the audit log explains.
+		//
+		// Their role grants do cascade, through guild_member_roles' composite FK to guild_members.
+		if err := q.DeleteOverwritesForTarget(ctx, db.DeleteOverwritesForTargetParams{
+			GuildID:    int64(guildID),
+			TargetType: roles.OverwriteTargetMember,
+			TargetID:   int64(userID),
+		}); err != nil {
+			return fmt.Errorf("guilds: delete member overwrites: %w", err)
 		}
 
 		affected, err := q.RemoveGuildMember(ctx, db.RemoveGuildMemberParams{

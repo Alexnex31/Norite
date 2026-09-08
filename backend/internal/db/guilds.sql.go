@@ -212,6 +212,37 @@ func (q *Queries) DeleteGuild(ctx context.Context, id int64) (int64, error) {
 	return result.RowsAffected(), nil
 }
 
+const deleteOverwritesForTarget = `-- name: DeleteOverwritesForTarget :exec
+DELETE FROM permission_overwrites po
+USING channels c
+WHERE po.channel_id = c.id
+  AND c.guild_id = $1::bigint
+  AND po.target_type = $2
+  AND po.target_id = $3
+`
+
+type DeleteOverwritesForTargetParams struct {
+	GuildID    int64
+	TargetType int16
+	TargetID   int64
+}
+
+// Removes the permission overwrites that named a role or a member, across the whole guild.
+//
+// target_id is polymorphic — it names a role or a user depending on target_type — so it cannot be a
+// foreign key, and nothing cascades. Without this, deleting a role leaves its overwrites behind forever on
+// every channel that had one, and removing a member leaves theirs: rejoin the guild later and
+// roles.applyOverwrites matches the member tier again and silently reapplies a deny nobody can see in the
+// UI or explain from the audit log.
+//
+// Scoped through channels to the guild, so this cannot reach another guild's rows even though target_id
+// alone would match them — a snowflake is unique in practice, but "in practice" is not the guarantee
+// rule 1 asks for.
+func (q *Queries) DeleteOverwritesForTarget(ctx context.Context, arg DeleteOverwritesForTargetParams) error {
+	_, err := q.db.Exec(ctx, deleteOverwritesForTarget, arg.GuildID, arg.TargetType, arg.TargetID)
+	return err
+}
+
 const deleteRole = `-- name: DeleteRole :execrows
 DELETE FROM roles WHERE id = $1 AND guild_id = $2 AND NOT is_default
 `
@@ -527,6 +558,31 @@ func (q *Queries) ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const nextRolePosition = `-- name: NextRolePosition :one
+SELECT coalesce(max(position), -1) + 1 FROM roles WHERE guild_id = $1
+`
+
+// The position a new role goes in: one above the highest that exists.
+//
+// `max(position) + 1`, not `count(*)`, and the difference is a correctness bug rather than a style
+// preference. Deleting a role leaves a gap, so after removing the middle of @everyone(0)/mods(1)/admins(2)
+// the count is 2 and the next role would be created *at* position 2 — a tie with admins, which nothing
+// prevents since there is deliberately no unique constraint on (guild_id, position). Delete more and the
+// new role lands below existing ones, contradicting "positioned above every existing role" in the contract
+// and silently corrupting the ordering M13's hierarchy rules will be enforcing.
+//
+// coalesce for the empty case, which cannot happen through the API — guild creation writes @everyone in
+// the same transaction — but which would otherwise make a NULL the caller has to handle.
+//
+// Reads one value out of roles_guild_id_position_idx rather than the whole role list. The previous
+// implementation selected every column of every role in the guild to take len() of the slice.
+func (q *Queries) NextRolePosition(ctx context.Context, guildID int64) (int32, error) {
+	row := q.db.QueryRow(ctx, nextRolePosition, guildID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const removeGuildMember = `-- name: RemoveGuildMember :execrows

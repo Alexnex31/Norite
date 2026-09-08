@@ -222,8 +222,9 @@ func TestAuthorizeCanRunInsideACallersTransaction(t *testing.T) {
 		roles.PermManageGuild.Int64(), int64(guildID))
 	require.NoError(t, err)
 
-	require.NoError(t,
-		authorizeWith(ctx, f.svc.queries.WithTx(tx), userActor(member), guildID, 0, roles.PermManageGuild),
+	_, err = authorizeWith(ctx, f.svc.queries.WithTx(tx), userActor(member), guildID, 0,
+		roles.PermManageGuild)
+	require.NoError(t, err,
 		"a check on the caller's transaction must see the caller's own uncommitted grant")
 
 	require.ErrorIs(t, f.svc.authorize(ctx, userActor(member), guildID, 0, roles.PermManageGuild),

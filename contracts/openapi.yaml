@@ -39,6 +39,12 @@ tags:
       in the request path — see `docs/adr/0008-guild-authority-hierarchy.md` for the six-layer authority
       model these endpoints implement.
 
+
+      **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for
+      the rest. A user's own access token passes both by design, since a scope bounds a *delegated*
+      credential and never a person. Permission resolution still runs underneath, so a token holding
+      `guilds.write` can do exactly what its owner could and no more.
+
 paths:
   /meta:
     get:
@@ -2331,6 +2337,12 @@ paths:
                 $ref: "#/components/schemas/Guild"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /guilds/{guild_id}:
@@ -2907,7 +2919,14 @@ components:
 
         There is deliberately no scope for managing API tokens: minting, listing and revoking all require a
         logged-in user, because a credential that can create credentials can escalate itself.
-      enum: [identify]
+
+
+        `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have
+        very different blast radii and the common bot wants only the first — a status bot that lists
+        channels should not be one compromise away from deleting the guild. **Write does not imply read**:
+        a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a
+        token that needs both asks for both.
+      enum: [identify, guilds.read, guilds.write]
 
     HealthResponse:
       type: object

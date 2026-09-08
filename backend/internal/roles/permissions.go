@@ -148,7 +148,13 @@ func (p *Permission) UnmarshalJSON(data []byte) error {
 
 	// The sign bit is unavailable because Postgres stores this as a signed bigint, so a value that would
 	// round-trip as negative is refused here rather than at the INSERT.
-	if v > uint64(permAll) && v>>63 != 0 {
+	//
+	// This is the *only* condition. An earlier version read `v > uint64(permAll) && v>>63 != 0`, whose
+	// first clause is implied by the second — v >= 2^63 is unconditionally greater than 2^19-1 — so it
+	// changed nothing while reading as a second rule. Left as it was, the obvious "fix" is to make it an
+	// `||`, which would start rejecting exactly the unknown high bits PermissionFromInt64 promises to
+	// preserve across a round trip.
+	if v>>63 != 0 {
 		return fmt.Errorf("roles: permissions value %d does not fit a signed bigint", v)
 	}
 

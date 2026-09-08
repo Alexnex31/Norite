@@ -15,9 +15,22 @@
 # HandlerFromMux reproduces none of that, and a generated router that had to be fought would be a worse
 # contract than a hand-written one that matches the document.
 #
-# Types are where the contract actually bites: a handler decoding a request into a generated struct, or
-# writing a generated response struct, turns a drifted field into a compile error rather than into a test
-# nobody wrote.
+# What the types deliver today, stated accurately rather than aspirationally: they are a *checked artifact*
+# of the contract, not a participant in the handlers. `just contract-check` and CI regenerate them and fail
+# on a diff, so a contract edit that nobody regenerated cannot merge, and the generated file is a readable
+# statement of what the document actually means once parsed.
+#
+# They are imported by no handler, and that is a deliberate limit rather than an unfinished step. A handler
+# decoding into a generated struct would give compile-time drift detection — the obvious argument for this
+# setup — but the generated structs carry no `validate:` tags, so the request types would need wrapping
+# anyway, and the response types marshal ids as plain strings rather than through snowflake.ID. The value
+# is real and smaller than "a drifted field is a compile error".
+#
+# Payload drift is therefore caught by a test rather than by the compiler: cmd/server's contract tests
+# compare real responses against these schemas in both directions, since `additionalProperties: false` plus
+# a full `required` list makes both an extra key and a missing one a defect. That is the gap that
+# previously hid an unsatisfiable MintedApiToken schema and eight unlisted error codes, and it is closed
+# for every shape M12 added.
 package: apicontract
 
 # Committed, exactly as the sqlc output is, and for the reason stated in sqlc.yaml: generated code is

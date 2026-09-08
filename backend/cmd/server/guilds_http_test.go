@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
@@ -583,9 +585,9 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 
 // TestTheAuditEntryAndTheMutationShareATransaction is the other half of rule 2.
 //
-// Writing an entry is not enough if the two can come apart. The audit insert is broken by dropping the
-// NOT NULL off nothing and instead making the insert fail — the action column is varchar(64), so an
-// oversized action is refused by Postgres inside the transaction, and the mutation must go with it.
+// Writing an entry is not enough if the two can come apart. A BEFORE INSERT trigger on
+// audit_log_entries raises, so the audit write fails inside the transaction the mutation is running in,
+// and the mutation must go with it.
 //
 // A trigger rather than a Go-side stub, because the property under test is transactional and a fake would
 // only assert that the test author's model of transactions matches itself.
@@ -638,4 +640,357 @@ func TestDeletingAGuildTakesItsAuditTrailWithIt(t *testing.T) {
 	require.Zero(t, after,
 		"audit_log_entries cascades from guilds, so a deleted guild's trail goes with it — the durable "+
 			"record of an instance-level action belongs in instance_audit_log (rule 14)")
+}
+
+// TestAScopedTokenIsBoundedOnTheGuildSurface is the check M12 shipped without.
+//
+// M12 is the first milestone to put a mutating surface within reach of a delegated credential, and its
+// routes were mounted bare — auth guards even the read-only GET /users/@me with RequireScope, while every
+// guild route had none. An `identify`-only token deleted a guild and answered 204; reproduced before the
+// scopes were added, which is why this test asserts the guild survives rather than only the status.
+//
+// Confirmed by removal: drop the `write` middleware from the delete route and this fails.
+func TestAScopedTokenIsBoundedOnTheGuildSurface(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+
+	mint := func(t *testing.T, scopes ...string) string {
+		t.Helper()
+		res := f.api.call(http.MethodPost, "/api/v1/auth/tokens",
+			map[string]any{"name": "bot", "scopes": scopes}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusCreated, res.Code, res)
+		return res.field(t, "value")
+	}
+
+	t.Run("an identify-only token reaches nothing here", func(t *testing.T) {
+		token := mint(t, "identify")
+
+		read := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID, nil, withToken(token))
+		require.Equal(t, http.StatusForbidden, read.Code, read)
+
+		del := f.api.call(http.MethodDelete, "/api/v1/guilds/"+f.guildID, nil, withToken(token))
+		require.Equal(t, http.StatusForbidden, del.Code, del)
+
+		var n int
+		f.api.mustQueryRow(t, `SELECT count(*) FROM guilds WHERE id = $1`,
+			[]any{mustID(t, f.guildID)}, &n)
+		require.Equal(t, 1, n, "the guild must survive a token that was never granted guilds.write")
+	})
+
+	// Read does not imply write, and the reverse holds too — a scope bounds a credential, and holding one
+	// is not a reason to be granted another.
+	t.Run("guilds.read reads but does not write", func(t *testing.T) {
+		token := mint(t, "guilds.read")
+
+		read := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID, nil, withToken(token))
+		require.Equal(t, http.StatusOK, read.Code, read)
+
+		write := f.api.call(http.MethodPatch, "/api/v1/guilds/"+f.guildID,
+			map[string]any{"name": "Renamed"}, withToken(token))
+		require.Equal(t, http.StatusForbidden, write.Code, write)
+	})
+
+	t.Run("guilds.write writes but does not read", func(t *testing.T) {
+		token := mint(t, "guilds.write")
+
+		write := f.api.call(http.MethodPatch, "/api/v1/guilds/"+f.guildID,
+			map[string]any{"name": "Renamed"}, withToken(token))
+		require.Equal(t, http.StatusOK, write.Code, write)
+
+		read := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID, nil, withToken(token))
+		require.Equal(t, http.StatusForbidden, read.Code, read)
+	})
+
+	// A user's own access token is unrestricted, which is what makes scopes a restriction on delegation
+	// rather than a permission system of their own.
+	t.Run("a user token needs no scope", func(t *testing.T) {
+		read := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID, nil, withToken(f.ownerToken))
+		require.Equal(t, http.StatusOK, read.Code, read)
+	})
+}
+
+// TestANewRolesPositionSurvivesADeletion covers the count-versus-max bug.
+//
+// Position came from the role count, so deleting a role left a gap and the next creation collided with an
+// existing position — or landed below one. There is no unique constraint to catch it (deliberately: see
+// migration 000015), so the corruption is silent until M13 enforces a hierarchy over it.
+func TestANewRolesPositionSurvivesADeletion(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	rolesPath := fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID)
+
+	create := func(t *testing.T, name string) (id string, position float64) {
+		t.Helper()
+		res := f.api.call(http.MethodPost, rolesPath, map[string]any{"name": name},
+			withToken(f.ownerToken))
+		require.Equal(t, http.StatusCreated, res.Code, res)
+
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(res.Body, &body))
+		return body["id"].(string), body["position"].(float64)
+	}
+
+	mods, modsPos := create(t, "mods")
+	_, adminsPos := create(t, "admins")
+	require.Greater(t, adminsPos, modsPos, "each new role goes above the last")
+
+	// Remove the middle one, leaving a gap the count no longer reflects.
+	del := f.api.call(http.MethodDelete, rolesPath+"/"+mods, nil, withToken(f.ownerToken))
+	require.Equal(t, http.StatusNoContent, del.Code, del)
+
+	_, newPos := create(t, "after-the-gap")
+	require.Greater(t, newPos, adminsPos,
+		"a new role must go above every existing one, not into the gap a deletion left")
+
+	// And no two roles share a position, which is what the collision would have produced.
+	var dupes int
+	f.api.mustQueryRow(t,
+		`SELECT count(*) FROM (SELECT position FROM roles WHERE guild_id = $1
+		                       GROUP BY position HAVING count(*) > 1) d`,
+		[]any{mustID(t, f.guildID)}, &dupes)
+	require.Zero(t, dupes, "two roles must not share a position")
+}
+
+// TestVoiceOnlyFieldsAreRefusedElsewhere keeps bitrate and user_limit where the schema says they live.
+func TestVoiceOnlyFieldsAreRefusedElsewhere(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	path := fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID)
+
+	text := f.api.call(http.MethodPost, path,
+		map[string]any{"name": "general", "type": 0, "bitrate": 96000}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusBadRequest, text.Code,
+		"a text channel must not accept a bitrate: %s", text)
+
+	voice := f.api.call(http.MethodPost, path,
+		map[string]any{"name": "lounge", "type": 2, "bitrate": 96000, "user_limit": 10},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, voice.Code, voice)
+
+	plain := f.api.call(http.MethodPost, path,
+		map[string]any{"name": "plain", "type": 0}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, plain.Code, plain)
+
+	patched := f.api.call(http.MethodPatch, "/api/v1/channels/"+plain.field(t, "id"),
+		map[string]any{"user_limit": 5}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusBadRequest, patched.Code,
+		"nor may an update add one: %s", patched)
+}
+
+// TestACategoryCannotNestInsideACategory is the reciprocal of the parent check.
+//
+// The parent was verified to be a category; the child never was. The channel list is flat with one level
+// of nesting, so a deeper tree is data no client can render.
+func TestACategoryCannotNestInsideACategory(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	path := fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID)
+
+	parent := f.api.call(http.MethodPost, path,
+		map[string]any{"name": "top", "type": 4}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, parent.Code, parent)
+
+	nested := f.api.call(http.MethodPost, path,
+		map[string]any{"name": "inner", "type": 4, "parent_id": parent.field(t, "id")},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusBadRequest, nested.Code, nested)
+
+	// A text channel under the same category is fine.
+	child := f.api.call(http.MethodPost, path,
+		map[string]any{"name": "chat", "type": 0, "parent_id": parent.field(t, "id")},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, child.Code, child)
+}
+
+// TestAModeratorCanMuteWithoutManagingTheGuild is finding 15.
+//
+// `need` started at PermManageGuild and the moderation bits were added to it, so mute and deafen were
+// undeliverable as standalone grants: the only way to let somebody mute was to also let them rename the
+// guild. Two of nineteen defined permission bits were unreachable.
+func TestAModeratorCanMuteWithoutManagingTheGuild(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+
+	role := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+		map[string]any{"name": "voice-mod", "permissions": roles.PermMuteMembers},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, role.Code, role)
+	f.api.mustExec(t, `INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1, $2, $3)`,
+		mustID(t, f.guildID), mustID(t, f.memberID), mustID(t, role.field(t, "id")))
+
+	f.api.mustExec(t, `INSERT INTO guild_members (guild_id, user_id) VALUES ($1, $2)`,
+		mustID(t, f.guildID), mustID(t, f.strangerID))
+	target := fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.strangerID)
+
+	muted := f.api.call(http.MethodPatch, target, map[string]any{"mute": true}, withToken(f.memberToken))
+	require.Equal(t, http.StatusOK, muted.Code,
+		"PermMuteMembers alone must be enough to mute: %s", muted)
+
+	// And it still grants nothing else.
+	nick := f.api.call(http.MethodPatch, target, map[string]any{"nickname": "Renamed"},
+		withToken(f.memberToken))
+	require.Equal(t, http.StatusForbidden, nick.Code,
+		"muting must not carry the right to rename: %s", nick)
+
+	deaf := f.api.call(http.MethodPatch, target, map[string]any{"deaf": true}, withToken(f.memberToken))
+	require.Equal(t, http.StatusForbidden, deaf.Code, deaf)
+}
+
+// TestOverwritesAreCleanedUpWithTheirTarget covers the orphan rows.
+//
+// target_id is polymorphic and so cannot be a foreign key, which means nothing cascades. A leftover member
+// overwrite is not clutter: rejoin the guild and applyOverwrites matches it again, silently restoring a
+// deny that nothing in the UI or the audit log explains.
+func TestOverwritesAreCleanedUpWithTheirTarget(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	guildID := mustID(t, f.guildID)
+
+	channel := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+		map[string]any{"name": "general", "type": 0}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, channel.Code, channel)
+	channelID := mustID(t, channel.field(t, "id"))
+
+	role := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+		map[string]any{"name": "mods"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, role.Code, role)
+	roleID := mustID(t, role.field(t, "id"))
+
+	// Inserted directly: the overwrite endpoints are M13's.
+	f.api.mustExec(t, `INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+	                   VALUES ($1, 0, $2, 0, 2), ($1, 1, $3, 0, 2)`,
+		channelID, roleID, mustID(t, f.memberID))
+
+	countOverwrites := func(t *testing.T) int {
+		t.Helper()
+		var n int
+		f.api.mustQueryRow(t, `SELECT count(*) FROM permission_overwrites WHERE channel_id = $1`,
+			[]any{channelID}, &n)
+		return n
+	}
+	require.Equal(t, 2, countOverwrites(t))
+
+	del := f.api.call(http.MethodDelete,
+		fmt.Sprintf("/api/v1/guilds/%s/roles/%s", f.guildID, role.field(t, "id")), nil,
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusNoContent, del.Code, del)
+	require.Equal(t, 1, countOverwrites(t), "a deleted role must take its overwrites with it")
+
+	kick := f.api.call(http.MethodDelete,
+		fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.memberID), nil,
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusNoContent, kick.Code, kick)
+	require.Zero(t, countOverwrites(t), "a removed member must take theirs too")
+
+	// Nothing else in the guild was touched.
+	var channels int
+	f.api.mustQueryRow(t, `SELECT count(*) FROM channels WHERE guild_id = $1`, []any{guildID}, &channels)
+	require.Equal(t, 1, channels)
+}
+
+// TestGuildPayloadsMatchTheContract closes the gap the generated types do not.
+//
+// backend/oapi-codegen.yaml argues that generated types make drift a compile error — and that only holds
+// for a handler that actually decodes into one. These handlers do not: they declare their own request
+// structs so they can carry `validate:` tags, and their own response types so ids marshal as snowflakes.
+// So the generated package is a checked artifact of the contract rather than a participant in the
+// handlers, and nothing was comparing M12's four response shapes against what the document declares.
+//
+// That is the gap that previously hid an unsatisfiable MintedApiToken schema and eight missing error
+// codes. Guild, Channel, Role and Member all carry `additionalProperties: false` and a full `required`
+// list, so a key the server sends and the document does not declare is a client that silently drops it,
+// and a key the document requires and the server omits is a client that generates a field it never
+// receives. Both directions are checked here.
+func TestGuildPayloadsMatchTheContract(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	schemas := contractSchemas(t)
+
+	channel := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+		map[string]any{"name": "general", "type": 0}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, channel.Code, channel)
+
+	role := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+		map[string]any{"name": "mods"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, role.Code, role)
+
+	member := f.api.call(http.MethodPatch,
+		fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.memberID),
+		map[string]any{"nickname": "Nick"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, member.Code, member)
+
+	guild := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID, nil, withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, guild.Code, guild)
+
+	for _, tc := range []struct {
+		schema string
+		body   []byte
+	}{
+		{"Guild", guild.Body},
+		{"Channel", channel.Body},
+		{"Role", role.Body},
+		{"Member", member.Body},
+	} {
+		t.Run(tc.schema, func(t *testing.T) {
+			declared, required := declaredProperties(t, schemas[tc.schema])
+
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(tc.body, &body), "decoding: %s", tc.body)
+
+			var got []string
+			for k := range body {
+				got = append(got, k)
+			}
+			sort.Strings(got)
+
+			assert.Equal(t, declared, got,
+				"%s sent %v; the contract declares %v", tc.schema, got, declared)
+
+			for _, name := range required {
+				_, present := body[name]
+				assert.Truef(t, present, "%s declares %q required and the server omitted it", tc.schema, name)
+			}
+		})
+	}
+
+	// The listing endpoints return the same shapes inside an array, and an empty one must be `[]` rather
+	// than null — a client that has to handle both writes the check once and forgets it somewhere.
+	t.Run("listings are arrays", func(t *testing.T) {
+		empty := f.api.call(http.MethodPost, "/api/v1/guilds",
+			map[string]any{"name": "Empty"}, withToken(f.strangerToken))
+		require.Equal(t, http.StatusCreated, empty.Code, empty)
+
+		list := f.api.call(http.MethodGet,
+			fmt.Sprintf("/api/v1/guilds/%s/channels", empty.field(t, "id")), nil,
+			withToken(f.strangerToken))
+		require.Equal(t, http.StatusOK, list.Code, list)
+		require.JSONEq(t, "[]", string(list.Body), "a guild with no channels must answer with an empty array")
+	})
+}
+
+// TestPermissionsAreAStringOnTheWire pins the representation end to end, not only in the marshaler's unit
+// test — a handler that took an int would produce a number here and nothing else would notice.
+func TestPermissionsAreAStringOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+
+	res := f.api.call(http.MethodGet, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID), nil,
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, res.Code, res)
+
+	var list []map[string]any
+	require.NoError(t, json.Unmarshal(res.Body, &list))
+	require.NotEmpty(t, list)
+
+	_, ok := list[0]["permissions"].(string)
+	require.Truef(t, ok, "permissions must be a quoted decimal string, got %T: %s",
+		list[0]["permissions"], res.Body)
 }

@@ -74,6 +74,42 @@ RETURNING *;
 -- nicety — it is the invariant guild creation establishes in its transaction.
 DELETE FROM roles WHERE id = $1 AND guild_id = $2 AND NOT is_default;
 
+-- name: NextRolePosition :one
+-- The position a new role goes in: one above the highest that exists.
+--
+-- `max(position) + 1`, not `count(*)`, and the difference is a correctness bug rather than a style
+-- preference. Deleting a role leaves a gap, so after removing the middle of @everyone(0)/mods(1)/admins(2)
+-- the count is 2 and the next role would be created *at* position 2 — a tie with admins, which nothing
+-- prevents since there is deliberately no unique constraint on (guild_id, position). Delete more and the
+-- new role lands below existing ones, contradicting "positioned above every existing role" in the contract
+-- and silently corrupting the ordering M13's hierarchy rules will be enforcing.
+--
+-- coalesce for the empty case, which cannot happen through the API — guild creation writes @everyone in
+-- the same transaction — but which would otherwise make a NULL the caller has to handle.
+--
+-- Reads one value out of roles_guild_id_position_idx rather than the whole role list. The previous
+-- implementation selected every column of every role in the guild to take len() of the slice.
+SELECT coalesce(max(position), -1) + 1 FROM roles WHERE guild_id = $1;
+
+-- name: DeleteOverwritesForTarget :exec
+-- Removes the permission overwrites that named a role or a member, across the whole guild.
+--
+-- target_id is polymorphic — it names a role or a user depending on target_type — so it cannot be a
+-- foreign key, and nothing cascades. Without this, deleting a role leaves its overwrites behind forever on
+-- every channel that had one, and removing a member leaves theirs: rejoin the guild later and
+-- roles.applyOverwrites matches the member tier again and silently reapplies a deny nobody can see in the
+-- UI or explain from the audit log.
+--
+-- Scoped through channels to the guild, so this cannot reach another guild's rows even though target_id
+-- alone would match them — a snowflake is unique in practice, but "in practice" is not the guarantee
+-- rule 1 asks for.
+DELETE FROM permission_overwrites po
+USING channels c
+WHERE po.channel_id = c.id
+  AND c.guild_id = sqlc.arg(guild_id)::bigint
+  AND po.target_type = sqlc.arg(target_type)
+  AND po.target_id = sqlc.arg(target_id);
+
 -- name: CreateChannel :one
 INSERT INTO channels (id, guild_id, type, parent_id, name, topic, position, nsfw, bitrate, user_limit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)

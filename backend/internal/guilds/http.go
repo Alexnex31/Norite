@@ -48,32 +48,44 @@ func NewHandler(svc *Service) *Handler {
 // Routes there is no public half to keep separate, and a guild endpoint that did not require a caller
 // would be a bug rather than a design.
 func (h *Handler) Routes(r chi.Router) {
-	r.Post("/guilds", h.createGuild)
+	// Every route carries a scope, and the split between read and write is the point.
+	//
+	// A scope bounds a *delegated* credential below its owner's reach; a user actor passes every check by
+	// design, so this changes nothing for a person at the CLI. What it changes is what an API token can
+	// do — and M12 is the first milestone to put a mutating surface within reach of one. Shipped without
+	// this, an `identify`-only token deleted a guild, which was reproduced before it was fixed.
+	//
+	// Permission resolution still runs underneath (rule 1). A token holding guilds.write can do exactly
+	// what its owner could and no more.
+	read := auth.RequireScope(auth.ScopeGuildsRead)
+	write := auth.RequireScope(auth.ScopeGuildsWrite)
+
+	r.With(write).Post("/guilds", h.createGuild)
 
 	r.Route("/guilds/{guild_id}", func(r chi.Router) {
-		r.Get("/", h.getGuild)
-		r.Patch("/", h.updateGuild)
-		r.Delete("/", h.deleteGuild)
+		r.With(read).Get("/", h.getGuild)
+		r.With(write).Patch("/", h.updateGuild)
+		r.With(write).Delete("/", h.deleteGuild)
 
-		r.Get("/channels", h.listChannels)
-		r.Post("/channels", h.createChannel)
+		r.With(read).Get("/channels", h.listChannels)
+		r.With(write).Post("/channels", h.createChannel)
 
-		r.Get("/roles", h.listRoles)
-		r.Post("/roles", h.createRole)
-		r.Patch("/roles/{role_id}", h.updateRole)
-		r.Delete("/roles/{role_id}", h.deleteRole)
+		r.With(read).Get("/roles", h.listRoles)
+		r.With(write).Post("/roles", h.createRole)
+		r.With(write).Patch("/roles/{role_id}", h.updateRole)
+		r.With(write).Delete("/roles/{role_id}", h.deleteRole)
 
-		r.Get("/members", h.listMembers)
-		r.Patch("/members/{user_id}", h.updateMember)
-		r.Delete("/members/{user_id}", h.removeMember)
+		r.With(read).Get("/members", h.listMembers)
+		r.With(write).Patch("/members/{user_id}", h.updateMember)
+		r.With(write).Delete("/members/{user_id}", h.removeMember)
 	})
 
 	// Mounted outside the guild group because these paths carry no guild. That is not a routing
 	// convenience: it is why UpdateChannel loads the channel and reads its own guild_id rather than
 	// trusting one from the caller (rule 1).
 	r.Route("/channels/{channel_id}", func(r chi.Router) {
-		r.Patch("/", h.updateChannel)
-		r.Delete("/", h.deleteChannel)
+		r.With(write).Patch("/", h.updateChannel)
+		r.With(write).Delete("/", h.deleteChannel)
 	})
 }
 

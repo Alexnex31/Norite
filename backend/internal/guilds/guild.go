@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
@@ -90,6 +92,16 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 			GuildID: int64(guildID),
 			UserID:  int64(actor.UserID),
 		}); err != nil {
+			// AddGuildMember deliberately carries no ON CONFLICT clause, so a duplicate membership arrives
+			// as a unique violation rather than as a silent no-op — see its comment. Translating it here is
+			// what makes ErrAlreadyAMember reachable: without this the sentinel is declared, mapped to a
+			// 400 in writeErr, and returned by nothing, so a collision would answer 500 with a shape the
+			// contract does not declare. Unreachable through this path, since the guild id is freshly
+			// minted; wired up because M13's join endpoint is the caller that will meet it.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+				return ErrAlreadyAMember
+			}
 			return fmt.Errorf("guilds: add owner membership: %w", err)
 		}
 
@@ -152,7 +164,7 @@ func (s *Service) Update(
 	err := s.inTx(ctx, func(q *db.Queries) error {
 		// Authorized on the transaction's querier, not the pool, so the permissions that allow the write
 		// are read in the same snapshot the write happens in (rule 1). See authorizeWith.
-		if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
+		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
 			return err
 		}
 
@@ -214,18 +226,19 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 
 		if snowflake.ID(row.OwnerID) != actor.UserID {
 			// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
-			// PermManageGuild is not — so this cannot be a plain authorize call, and the tier check is
-			// made explicitly rather than by passing a permission nobody can hold.
-			admin, err := q.IsInstanceAdmin(ctx, int64(actor.UserID))
+			// PermManageGuild is not — so this cannot be a plain permission check.
+			//
+			// One pass rather than two: asking IsInstanceAdmin here and then calling authorizeWith, which
+			// asks it again, ran the same query twice on every non-owner delete. The tier is read off the
+			// decision authorizeWith already reached.
+			//
+			// PermViewChannel is what a non-member fails, so a stranger gets the ordinary 404 rather than
+			// "you are not the owner" — which would tell them the guild exists.
+			allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel)
 			if err != nil {
-				return fmt.Errorf("guilds: check instance admin: %w", err)
+				return err
 			}
-			if !admin {
-				// A non-member must not learn that the guild exists, so fall back to the ordinary
-				// membership refusal rather than reporting "you are not the owner" to everybody.
-				if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel); err != nil {
-					return err
-				}
+			if !allowed.instanceAdmin {
 				return httpx.ErrForbidden
 			}
 		}

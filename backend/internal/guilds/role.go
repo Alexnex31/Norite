@@ -70,19 +70,20 @@ func (s *Service) CreateRole(
 	var out Role
 
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles); err != nil {
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		if err != nil {
 			return err
 		}
-		if err := s.refuseEscalation(ctx, q, actor, guildID, in.Permissions); err != nil {
+		if err := refuseEscalation(allowed, in.Permissions); err != nil {
 			return err
 		}
 
 		// Appended above every existing role. Position is the hierarchy M13 enforces, and a new role
-		// landing at the bottom — below @everyone — would be a role that grants nothing extra and reads as
-		// broken. ListGuildRoles orders by (position, id), so the count is a stable next slot.
-		existing, err := q.ListGuildRoles(ctx, int64(guildID))
+		// landing at or below an existing one reads as broken — see NextRolePosition for why this is
+		// max(position)+1 and not the role count, which collides as soon as anything has been deleted.
+		position, err := q.NextRolePosition(ctx, int64(guildID))
 		if err != nil {
-			return fmt.Errorf("guilds: list roles: %w", err)
+			return fmt.Errorf("guilds: next role position: %w", err)
 		}
 
 		row, err := q.CreateRole(ctx, db.CreateRoleParams{
@@ -91,7 +92,7 @@ func (s *Service) CreateRole(
 			Name:        in.Name,
 			Color:       in.Color,
 			Permissions: in.Permissions.Int64(),
-			Position:    int32(len(existing)), //nolint:gosec // a guild's role count cannot overflow int32
+			Position:    position,
 			Hoist:       in.Hoist,
 			Mentionable: in.Mentionable,
 			IsDefault:   false,
@@ -136,7 +137,8 @@ func (s *Service) UpdateRole(
 	var out Role
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles); err != nil {
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		if err != nil {
 			return err
 		}
 
@@ -149,7 +151,7 @@ func (s *Service) UpdateRole(
 		}
 
 		if in.Permissions != nil {
-			if err := s.refuseEscalation(ctx, q, actor, guildID, *in.Permissions); err != nil {
+			if err := refuseEscalation(allowed, *in.Permissions); err != nil {
 				return err
 			}
 		}
@@ -208,7 +210,7 @@ func (s *Service) UpdateRole(
 // DeleteRole removes a role. @everyone is refused, in SQL — see DeleteRole in guilds.sql.
 func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, roleID snowflake.ID) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		if err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles); err != nil {
+		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles); err != nil {
 			return err
 		}
 
@@ -229,6 +231,17 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 			return err
 		}
 
+		// The overwrites naming this role go with it. target_id is polymorphic and so cannot be a foreign
+		// key, which means nothing cascades — without this the rows outlive the role permanently, on every
+		// channel that had one, and ListChannelPermissionOverwrites keeps scanning them on every check.
+		if err := q.DeleteOverwritesForTarget(ctx, db.DeleteOverwritesForTargetParams{
+			GuildID:    int64(guildID),
+			TargetType: roles.OverwriteTargetRole,
+			TargetID:   int64(roleID),
+		}); err != nil {
+			return fmt.Errorf("guilds: delete role overwrites: %w", err)
+		}
+
 		affected, err := q.DeleteRole(ctx, db.DeleteRoleParams{ID: int64(roleID), GuildID: int64(guildID)})
 		if err != nil {
 			return fmt.Errorf("guilds: delete role: %w", err)
@@ -243,35 +256,23 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 
 // refuseEscalation refuses granting permissions the actor does not hold.
 //
-// See CreateRole's comment for why this is the most important check in the file. An Instance Admin is
-// exempt by layer 1, which is checked first and separately — they are not a guild member and would
-// otherwise resolve to zero permissions and be unable to grant anything.
-func (s *Service) refuseEscalation(
-	ctx context.Context, q *db.Queries, actor auth.Actor, guildID snowflake.ID, want roles.Permission,
-) error {
-	admin, err := q.IsInstanceAdmin(ctx, int64(actor.UserID))
-	if err != nil {
-		return fmt.Errorf("guilds: check instance admin: %w", err)
-	}
-	if admin {
+// See CreateRole's comment for why this is the most important check in the file.
+//
+// Pure, and takes the decision authorizeWith already reached rather than re-deriving it. It used to run
+// its own IsInstanceAdmin and its own full roles.Resolve immediately after authorizeWith had run both,
+// inside the same transaction — five round trips for one INSERT. The facts cannot change between the two
+// calls; only the question does.
+//
+// An Instance Admin passes through decision.allows, because layer 1 sits outside the guild: they are not
+// a member, resolve to zero permissions, and would otherwise be unable to grant anything at all.
+func refuseEscalation(allowed decision, want roles.Permission) error {
+	if allowed.allows(want) {
 		return nil
 	}
 
-	held, err := roles.Resolve(ctx, q, guildID, actor.UserID, 0)
-	if err != nil {
-		if errors.Is(err, roles.ErrNotAMember) {
-			return httpx.ErrNotFound
-		}
-		return err
-	}
-
-	if !held.Has(want) {
-		// Deliberately does not name the bits. Reporting which permission was refused tells a caller
-		// probing the boundary exactly where it is, and they can already read their own permissions from
-		// the role listing.
-		return httpx.Errorf(httpx.ErrForbidden,
-			"a role cannot be given permissions you do not hold yourself")
-	}
-
-	return nil
+	// Deliberately does not name the bits. Reporting which permission was refused tells a caller probing
+	// the boundary exactly where it is, and they can already read their own permissions from the role
+	// listing.
+	return httpx.Errorf(httpx.ErrForbidden,
+		"a role cannot be given permissions you do not hold yourself")
 }

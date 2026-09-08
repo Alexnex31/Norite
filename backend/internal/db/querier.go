@@ -222,6 +222,18 @@ type Querier interface {
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
+	// Removes the permission overwrites that named a role or a member, across the whole guild.
+	//
+	// target_id is polymorphic — it names a role or a user depending on target_type — so it cannot be a
+	// foreign key, and nothing cascades. Without this, deleting a role leaves its overwrites behind forever on
+	// every channel that had one, and removing a member leaves theirs: rejoin the guild later and
+	// roles.applyOverwrites matches the member tier again and silently reapplies a deny nobody can see in the
+	// UI or explain from the audit log.
+	//
+	// Scoped through channels to the guild, so this cannot reach another guild's rows even though target_id
+	// alone would match them — a snowflake is unique in practice, but "in practice" is not the guarantee
+	// rule 1 asks for.
+	DeleteOverwritesForTarget(ctx context.Context, arg DeleteOverwritesForTargetParams) error
 	// Used when the whole set is replaced or the factor is disabled. Deletes rather than marking spent: these
 	// are not evidence of anything once the factor they belonged to is gone.
 	DeleteRecoveryCodesForUser(ctx context.Context, userID int64) (int64, error)
@@ -479,6 +491,21 @@ type Querier interface {
 	// Strictly greater, so a code from an *earlier* step inside the skew window cannot be replayed after a
 	// later one has been accepted — which is the case a naive "record the newest" would miss.
 	MarkTOTPStepUsed(ctx context.Context, arg MarkTOTPStepUsedParams) (int64, error)
+	// The position a new role goes in: one above the highest that exists.
+	//
+	// `max(position) + 1`, not `count(*)`, and the difference is a correctness bug rather than a style
+	// preference. Deleting a role leaves a gap, so after removing the middle of @everyone(0)/mods(1)/admins(2)
+	// the count is 2 and the next role would be created *at* position 2 — a tie with admins, which nothing
+	// prevents since there is deliberately no unique constraint on (guild_id, position). Delete more and the
+	// new role lands below existing ones, contradicting "positioned above every existing role" in the contract
+	// and silently corrupting the ordering M13's hierarchy rules will be enforcing.
+	//
+	// coalesce for the empty case, which cannot happen through the API — guild creation writes @everyone in
+	// the same transaction — but which would otherwise make a NULL the caller has to handle.
+	//
+	// Reads one value out of roles_guild_id_position_idx rather than the whole role list. The previous
+	// implementation selected every column of every role in the guild to take len() of the slice.
+	NextRolePosition(ctx context.Context, guildID int64) (int32, error)
 	// Health-check queries.
 	//
 	// These exist so the readiness endpoint validates the *whole* data path — pool checkout, the

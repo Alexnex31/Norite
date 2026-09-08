@@ -134,12 +134,18 @@ func (e HealthResponseStatus) Valid() bool {
 
 // Defines values for Scope.
 const (
-	Identify Scope = "identify"
+	GuildsRead  Scope = "guilds.read"
+	GuildsWrite Scope = "guilds.write"
+	Identify    Scope = "identify"
 )
 
 // Valid indicates whether the value is a known member of the Scope enum.
 func (e Scope) Valid() bool {
 	switch e {
+	case GuildsRead:
+		return true
+	case GuildsWrite:
+		return true
 	case Identify:
 		return true
 	default:
@@ -721,6 +727,8 @@ type Role struct {
 // Scope A capability an API token may be granted. Scopes only restrict a delegated credential below its owner's reach; they never grant. The vocabulary grows with the surface it guards.
 //
 // There is deliberately no scope for managing API tokens: minting, listing and revoking all require a logged-in user, because a credential that can create credentials can escalate itself.
+//
+// `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both.
 type Scope string
 
 // Session One device signed in to an account. A device, not a session record: the underlying rows rotate on every refresh, and `id` names whichever record is newest and live for that device right now.
