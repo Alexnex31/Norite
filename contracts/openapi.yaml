@@ -253,6 +253,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "428":
+          description: >
+            **Reserved for M67a and emitted by nothing today.** This instance requires a challenge to be
+            solved before it will accept a registration; the body carries what to solve, and the solution
+            comes back in `challenge_response`.
+
+
+            A distinct status rather than a field on the 403, for the reason M11a gave when a login that
+            owes a second factor answered 202 rather than a discriminated body: a client branches on
+            status, and oapi-codegen gets exactly one response object per status. This contract has already
+            carried one schema that no response could satisfy, and does not need a second.
+
+
+            428 is chosen with a caveat worth stating rather than glossing. RFC 6585 §3 introduces it for
+            *conditional* requests — `If-Match`, avoiding the lost-update problem — and this is not that.
+            It is used here because it is the only unused code on this operation whose plain meaning
+            ("there is a precondition you have not met") matches, 403 is already spoken for by the invite
+            states and carries `Error`, and 202 means success. Widespread practice has moved 428 toward
+            "do something else first"; the alternative was overloading 400.
+
+
+            **Self-hosted instances never emit this**, and neither does the flagship today. A client that
+            has never seen it is not broken, and one that handles it works unchanged when M67a lands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistrationChallenge"
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /auth/login:
@@ -2894,6 +2921,24 @@ components:
             Length is the only rule, counted in characters rather than bytes so a passphrase in a non-Latin
             script is not penalised. No composition requirements: they push people toward predictable
             substitutions while ruling out strong passphrases. The ceiling exists to bound hashing work.
+        challenge_response:
+          type: string
+          maxLength: 4096
+          description: >
+            **Reserved for M67a and ignored by every instance today.** Nothing emits a challenge yet, so
+            sending this changes nothing and omitting it is correct.
+
+
+            When M67a lands this carries the solved challenge — a proof-of-work solution, a hosted-captcha
+            token, or whatever the mechanism chosen at build time produces. Opaque to this contract on
+            purpose: the field is a carrier, and pinning its internal shape here would make swapping the
+            mechanism a contract change across four clients, which is exactly what reserving it is meant to
+            avoid.
+
+
+            The ceiling is generous because a captcha provider's token is the largest plausible value and
+            they are not small. It exists so an unbounded body cannot be posted at an unauthenticated
+            endpoint, not because 4096 means anything.
         invite_code:
           type: string
           maxLength: 64
@@ -2967,6 +3012,53 @@ components:
             Must be non-empty and every entry must be recognised. A token with no scopes could do nothing,
             and an unrecognised scope is rejected rather than dropped.
 
+    RegistrationChallenge:
+      description: >
+        **Reserved for M67a (registration anti-automation). Nothing produces one of these today.**
+
+
+        The shape is reserved now rather than with the mechanism because rule 6 and rule 15 make it
+        expensive once four clients generate from the current contract: adding a response state later is a
+        coordinated regeneration across the CLI, the TUI, the GUI and the web SPA, where adding it now is
+        three dozen lines nobody has to act on. The roadmap entry for M67a says the reservation lands with
+        M12's contract work, and this is it.
+
+
+        What is deliberately *not* fixed here is the mechanism. M67a chooses between proof-of-work, a
+        hosted captcha, or both behind one interface at build time, and `parameters` is an open object so
+        that choice does not become a contract change.
+      type: object
+      required: [mechanism, parameters]
+      additionalProperties: false
+      properties:
+        mechanism:
+          type: string
+          description: >
+            Which challenge this instance is asking for, so a client knows what to render or compute.
+
+
+            Deliberately not an enum. An enum would make adding a mechanism a breaking regeneration for
+            every client, which is the cost this whole reservation exists to avoid — and a client that does
+            not recognise the value should tell the person to use a client that does, not fail closed on a
+            list this document froze years earlier.
+          examples: [proof_of_work, hcaptcha]
+        parameters:
+          type: object
+          additionalProperties: true
+          description: >
+            Everything the client needs to produce a solution, in a shape the mechanism defines: a
+            difficulty and a seed for proof-of-work, a site key for a hosted captcha.
+
+
+            The one open object in this contract, and it is open on purpose rather than by omission —
+            pinning it would tie the document to whichever mechanism was chosen first.
+        expires_at:
+          type: string
+          format: date-time
+          description: >
+            When this challenge stops being accepted, so a client can offer a fresh one rather than submit
+            a solution that will be refused. Optional: a stateless proof-of-work challenge need not expire.
+
     Error:
       description: >
         The envelope every non-2xx JSON response uses. Clients key off `code`, which is stable, never off
@@ -3017,6 +3109,19 @@ components:
                 # The OAuth paths, from M6.
                 - oauth_email_unverified
                 - oauth_provider_error
+                # Reserved for M67a (registration anti-automation) and emitted by nothing today.
+                #
+                # Reserved rather than added later because a client generating a Go or TypeScript enum from
+                # this list and switching on it needs regenerating when a value appears — which is a
+                # coordinated change across four codegen'd clients for what should be an additive one. The
+                # cost of reserving is these three lines; the cost of not reserving lands once every client
+                # generates from the current shape (rules 6 and 15).
+                #
+                # `challenge_invalid` answers a submitted solution that does not verify. There is
+                # deliberately no separate code for "expired" or "already used": those distinctions tell an
+                # automated caller how close it got, which is the one audience this whole mechanism exists
+                # to frustrate.
+                - challenge_invalid
             message:
               type: string
               description: >

@@ -15,6 +15,7 @@ const (
 	ErrorErrorCodeAlreadyBootstrapped   ErrorErrorCode = "already_bootstrapped"
 	ErrorErrorCodeAuthorizationPending  ErrorErrorCode = "authorization_pending"
 	ErrorErrorCodeBadRequest            ErrorErrorCode = "bad_request"
+	ErrorErrorCodeChallengeInvalid      ErrorErrorCode = "challenge_invalid"
 	ErrorErrorCodeConflict              ErrorErrorCode = "conflict"
 	ErrorErrorCodeDeviceFlowUnavailable ErrorErrorCode = "device_flow_unavailable"
 	ErrorErrorCodeExpiredToken          ErrorErrorCode = "expired_token"
@@ -44,6 +45,8 @@ func (e ErrorErrorCode) Valid() bool {
 	case ErrorErrorCodeAuthorizationPending:
 		return true
 	case ErrorErrorCodeBadRequest:
+		return true
+	case ErrorErrorCodeChallengeInvalid:
 		return true
 	case ErrorErrorCodeConflict:
 		return true
@@ -459,6 +462,13 @@ type RefreshRequest struct {
 
 // RegisterRequest defines model for RegisterRequest.
 type RegisterRequest struct {
+	// ChallengeResponse **Reserved for M67a and ignored by every instance today.** Nothing emits a challenge yet, so sending this changes nothing and omitting it is correct.
+	//
+	// When M67a lands this carries the solved challenge — a proof-of-work solution, a hosted-captcha token, or whatever the mechanism chosen at build time produces. Opaque to this contract on purpose: the field is a carrier, and pinning its internal shape here would make swapping the mechanism a contract change across four clients, which is exactly what reserving it is meant to avoid.
+	//
+	// The ceiling is generous because a captcha provider's token is the largest plausible value and they are not small. It exists so an unbounded body cannot be posted at an unauthenticated endpoint, not because 4096 means anything.
+	ChallengeResponse *string `json:"challenge_response,omitempty"`
+
 	// DisplayName Defaults to the username when omitted.
 	DisplayName *string             `json:"display_name,omitempty"`
 	Email       openapi_types.Email `json:"email"`
@@ -474,6 +484,29 @@ type RegisterRequest struct {
 	// Length is counted in characters, not bytes, so a name in a non-Latin script is not penalised.
 	// Normalised to NFKC before the uniqueness check, so two names that render identically cannot become two accounts: `ﬁnn` and `finn` are the same username. Unique case-insensitively. Normalisation happens before the length check, which a client submitting compatibility characters may notice — a 32-character name can normalise to something longer and be rejected.
 	Username string `json:"username"`
+}
+
+// RegistrationChallenge **Reserved for M67a (registration anti-automation). Nothing produces one of these today.**
+//
+// The shape is reserved now rather than with the mechanism because rule 6 and rule 15 make it expensive once four clients generate from the current contract: adding a response state later is a coordinated regeneration across the CLI, the TUI, the GUI and the web SPA, where adding it now is three dozen lines nobody has to act on. The roadmap entry for M67a says the reservation lands with M12's contract work, and this is it.
+//
+// What is deliberately *not* fixed here is the mechanism. M67a chooses between proof-of-work, a hosted captcha, or both behind one interface at build time, and `parameters` is an open object so that choice does not become a contract change.
+type RegistrationChallenge struct {
+	// ExpiresAt When this challenge stops being accepted, so a client can offer a fresh one rather than submit a solution that will be refused. Optional: a stateless proof-of-work challenge need not expire.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+
+	// Mechanism Which challenge this instance is asking for, so a client knows what to render or compute.
+	//
+	// Deliberately not an enum. An enum would make adding a mechanism a breaking regeneration for every client, which is the cost this whole reservation exists to avoid — and a client that does not recognise the value should tell the person to use a client that does, not fail closed on a list this document froze years earlier.
+	//
+	//
+	// Examples: proof_of_work, hcaptcha
+	Mechanism string `json:"mechanism"`
+
+	// Parameters Everything the client needs to produce a solution, in a shape the mechanism defines: a difficulty and a seed for proof-of-work, a site key for a hosted captcha.
+	//
+	// The one open object in this contract, and it is open on purpose rather than by omission — pinning it would tie the document to whichever mechanism was chosen first.
+	Parameters map[string]interface{} `json:"parameters"`
 }
 
 // RevocationCounts What one call to the revocation primitive removed. Shared by `POST /auth/logout/all` and `DELETE /auth/2fa/totp`, which revoke exactly the same set — one schema for one server-side value, so that when M18 adds force-closed gateway connections and M101 adds E2E device trust, the count arrives in both places at once rather than in whichever was remembered.

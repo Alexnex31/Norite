@@ -797,11 +797,19 @@ of this section.
   strangers with no guild between them, and M70's blocks are per-account, so bulk account creation is
   exactly what that design rewards.
 
-  **The contract shape is reserved before the mechanism is built.** Registration gains a
-  challenge-required response state that self-hosted instances never emit, so adding a challenge later is
-  additive rather than a break across four codegen'd clients. Reserving it costs almost nothing now; rule
-  6 and rule 15 make it expensive once every client generates from the current shape. That reservation
-  lands with M12's contract work, not here.
+  **The contract shape is reserved before the mechanism is built, and that reservation has landed** — it
+  shipped with M12's contract work, as planned. `contracts/openapi.yaml` carries a `RegistrationChallenge`
+  schema, a `428` response state on `POST /auth/register`, an optional `challenge_response` on
+  `RegisterRequest`, and a `challenge_invalid` error code. Nothing emits any of it; self-hosted instances
+  never will. What M67a adds is the mechanism behind them, not a change to the shape — so it is additive
+  rather than a break across four codegen'd clients.
+
+  Two things about the reservation constrain M67a rather than merely describing it. `parameters` is an
+  open object and `mechanism` is deliberately not an enum, so choosing between proof-of-work and a hosted
+  captcha at build time is not a contract change. And the reservation could not add a *path*:
+  `contract_test.go` fails on a documented endpoint that does not exist, which is why the challenge is
+  delivered as a response state on the existing registration call rather than as a `GET .../challenge`
+  a client would fetch first. M67a inherits that shape.
 
   Not urgent in the release plan's terms — nothing is publicly open before v1 — which is precisely why it
   is scheduled rather than left as a gap somebody discovers on launch day.
