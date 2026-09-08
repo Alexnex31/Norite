@@ -63,6 +63,21 @@ type Querier interface {
 	// query in sessions.sql is scoped by device: a lookup that can only ever match this account's rows cannot
 	// be made to act on another's by a collision or a future schema change.
 	ConsumeRecoveryCode(ctx context.Context, arg ConsumeRecoveryCodeParams) (UserRecoveryCode, error)
+	// How many channels a guild has, for the creation cap.
+	//
+	// Served by the leading column of channels_guild_id_position_idx: a bitmap index scan into the heap, 15
+	// buffers on a 50,000-channel instance, rather than a sequential scan of every channel on it. Not an
+	// *index-only* scan — the plan visits the heap for visibility — which is worth saying because the obvious
+	// shorthand for "an index serves this" is the wrong one here.
+	CountGuildChannels(ctx context.Context, guildID *int64) (int64, error)
+	// How many roles a guild has, for the creation cap.
+	//
+	// A count, not NextRolePosition's max(position)+1 — deleting a role leaves a gap, so the highest position
+	// and the number of roles are different numbers and only one of them is the thing being capped.
+	//
+	// Same access path as the channel count above: bitmap index scan on roles_guild_id_position_idx, 10
+	// buffers on a 25,000-role instance.
+	CountGuildRoles(ctx context.Context, guildID int64) (int64, error)
 	// The bootstrap guard, and the reason it is a count rather than an existence check.
 	//
 	// POST /instance/bootstrap is authorized by an operator token, which is minted from the instance signing

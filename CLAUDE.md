@@ -1067,6 +1067,13 @@ And on guilds, permissions and the audit log, from M12:
   throughout, because it targets an ordinary member and always sends `{"name": "hijacked"}` — never the
   owner, never a voice-only field. The route table was covered; the branches inside the handlers were not.
   When a test's value is "it cannot miss a route", ask what it cannot miss *within* one.
+- **A list that cannot be paginated is bounded at creation instead.** The member list is a cursor capped at
+  100; the channel and role lists return everything, because a client needs the whole tree to render a
+  sidebar and paginating would make it fetch in a loop (rule 21's chattiness). So the ceiling lives in
+  `CreateChannel`/`CreateRole` — 500 and 250 — and it is checked *after* authorization, or "is this guild
+  full" becomes one more thing a non-member can measure. Unbounded, the channel list was 782 kB of row data
+  and a 740 kB sort at 5,010 channels, against 8 buffers for the capped member list on a 15,000-member
+  guild.
 - **A polymorphic column cannot cascade, so something has to clean up after it.**
   `permission_overwrites.target_id` names a role or a user depending on `target_type` and therefore cannot
   be a foreign key. Deleting a role or removing a member has to delete their overwrites explicitly — a

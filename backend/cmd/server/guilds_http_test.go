@@ -1075,3 +1075,65 @@ func TestANonMemberLearnsNothingFromARefusal(t *testing.T) {
 		require.Equal(t, http.StatusBadRequest, resp.Code, resp)
 	})
 }
+
+// TestAGuildIsBoundedInChannelsAndRoles pins the ceilings an optimization review asked for.
+//
+// The member listing is cursor-paginated and clamped at 100; the channel and role listings return
+// everything, because a client needs the whole tree to render a sidebar and paginating would make it fetch
+// in a loop. So the bound has to live where the rows are created. Measured at 5,010 channels, an unbounded
+// listing is 782 kB of row data and a 740 kB sort against 8 buffers for the capped member list on a
+// 15,000-member guild — the ceiling is what makes "the channel list is a hot path" a statement with a
+// number behind it.
+//
+// Seeded directly rather than through 500 API calls, which would take minutes and test the rate limiter.
+func TestAGuildIsBoundedInChannelsAndRoles(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	guildID := mustID(t, f.guildID)
+
+	t.Run("channels", func(t *testing.T) {
+		f.api.mustExec(t, `INSERT INTO channels (id, guild_id, type, name, position)
+		                   SELECT $1::bigint + g, $2, 0, 'seeded-' || g, g FROM generate_series(1, 500) g`,
+			int64(900000000000000000), guildID)
+
+		resp := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+			map[string]any{"name": "one-too-many", "type": 0}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusConflict, resp.Code,
+			"a guild at its channel ceiling must refuse another: %s", resp)
+		require.Contains(t, string(resp.Body), "at most 500 channels", resp)
+
+		// Deleting one makes room again — the ceiling is on the count, not on ids ever issued.
+		f.api.mustExec(t, `DELETE FROM channels WHERE id = $1`, int64(900000000000000001))
+
+		ok := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+			map[string]any{"name": "room-again", "type": 0}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusCreated, ok.Code, ok)
+	})
+
+	t.Run("roles", func(t *testing.T) {
+		g2 := f.api.call(http.MethodPost, "/api/v1/guilds",
+			map[string]any{"name": "Roles"}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusCreated, g2.Code, g2)
+		id := g2.field(t, "id")
+
+		// 249 seeded plus the @everyone guild creation wrote = 250.
+		f.api.mustExec(t, `INSERT INTO roles (id, guild_id, name, position, permissions)
+		                   SELECT $1::bigint + g, $2, 'seeded-' || g, g, 0 FROM generate_series(1, 249) g`,
+			int64(910000000000000000), mustID(t, id))
+
+		resp := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", id),
+			map[string]any{"name": "one-too-many"}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusConflict, resp.Code,
+			"a guild at its role ceiling must refuse another: %s", resp)
+		require.Contains(t, string(resp.Body), "at most 250 roles", resp)
+	})
+
+	// The ceiling is checked after authorization, so a stranger cannot use it to learn how full a guild is.
+	t.Run("a non-member still gets 404, not the ceiling", func(t *testing.T) {
+		resp := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+			map[string]any{"name": "probe", "type": 0}, withToken(f.strangerToken))
+		require.Equal(t, http.StatusNotFound, resp.Code,
+			"the ceiling must not become another oracle: %s", resp)
+	})
+}

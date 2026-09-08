@@ -2437,6 +2437,11 @@ paths:
         In position order. Requires membership.
 
 
+        **Returns every channel, with no pagination**, deliberately: a client needs the whole tree to render
+        a sidebar, so paginating would make it fetch in a loop. The response is bounded by the 500-channel
+        ceiling enforced when a channel is created, not by a `limit` the caller passes.
+
+
         **Not filtered by per-channel permission overwrites at this version.** Nothing can write an
         overwrite until the overwrite endpoints exist, so every channel resolves identically today; once
         they do, this listing hides channels the caller cannot view.
@@ -2467,7 +2472,13 @@ paths:
 
         `parent_id`, if given, must name a **category in this guild**. That is checked rather than trusted:
         without it a channel could be nested under a category in a guild the caller has no permissions in,
-        which would put its children behind that guild's overwrites.
+        which would put its children behind that guild's overwrites. A category cannot be nested inside
+        another: the channel list is flat with one level of nesting.
+
+
+        **A guild holds at most 500 channels.** The ceiling is here rather than on the listing because a
+        client needs the whole tree to render a sidebar — paginating it would make every client fetch in a
+        loop. Bounding creation is what keeps the list response from growing without limit.
       operationId: createGuildChannel
       tags: [guilds]
       requestBody:
@@ -2487,6 +2498,12 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The guild already holds the maximum number of channels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /channels/{channel_id}:
@@ -2557,7 +2574,12 @@ paths:
           $ref: "#/components/schemas/Snowflake"
     get:
       summary: List a guild's roles
-      description: In position order, `@everyone` first. Requires membership.
+      description: >
+        In position order, `@everyone` first. Requires membership.
+
+
+        Unpaginated for the reason the channel listing is, and bounded the same way — by the 250-role
+        ceiling enforced at creation.
       operationId: listGuildRoles
       tags: [guilds]
       responses:
@@ -2584,9 +2606,13 @@ paths:
         guild entirely.
 
 
-        The new role is positioned above every existing role. Position is not settable here — reordering is
-        a multi-row operation and role hierarchy, which governs who may manage whom, arrives with the
-        permission-overwrite endpoints.
+        The new role is positioned above every existing role — one above the highest that exists, not the
+        role count, which would collide as soon as anything had been deleted. Position is not settable here:
+        reordering is a multi-row operation and role hierarchy, which governs who may manage whom, arrives
+        with the permission-overwrite endpoints.
+
+
+        **A guild holds at most 250 roles**, bounded at creation for the reason the channel ceiling is.
       operationId: createGuildRole
       tags: [guilds]
       requestBody:
@@ -2615,6 +2641,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The guild already holds the maximum number of roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /guilds/{guild_id}/roles/{role_id}:

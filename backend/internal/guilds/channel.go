@@ -143,6 +143,17 @@ func (s *Service) CreateChannel(
 			return err
 		}
 
+		// The ceiling, checked after authorization so a non-member cannot learn how full a guild is.
+		guildForCount := int64(guildID)
+		count, err := q.CountGuildChannels(ctx, &guildForCount)
+		if err != nil {
+			return fmt.Errorf("guilds: count channels: %w", err)
+		}
+		if count >= maxChannelsPerGuild {
+			return httpx.Errorf(ErrGuildFull,
+				"a guild may hold at most %d channels", maxChannelsPerGuild)
+		}
+
 		// A parent must be a category *in this guild*. Checked rather than trusted, because parent_id
 		// arrives from the caller and a channel is otherwise free to nest under one in a guild the caller
 		// has no permissions in — which would put its children behind that guild's overwrites (rule 1).

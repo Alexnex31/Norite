@@ -40,6 +40,41 @@ func (q *Queries) AddGuildMember(ctx context.Context, arg AddGuildMemberParams) 
 	return i, err
 }
 
+const countGuildChannels = `-- name: CountGuildChannels :one
+SELECT count(*) FROM channels WHERE guild_id = $1
+`
+
+// How many channels a guild has, for the creation cap.
+//
+// Served by the leading column of channels_guild_id_position_idx: a bitmap index scan into the heap, 15
+// buffers on a 50,000-channel instance, rather than a sequential scan of every channel on it. Not an
+// *index-only* scan — the plan visits the heap for visibility — which is worth saying because the obvious
+// shorthand for "an index serves this" is the wrong one here.
+func (q *Queries) CountGuildChannels(ctx context.Context, guildID *int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countGuildChannels, guildID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countGuildRoles = `-- name: CountGuildRoles :one
+SELECT count(*) FROM roles WHERE guild_id = $1
+`
+
+// How many roles a guild has, for the creation cap.
+//
+// A count, not NextRolePosition's max(position)+1 — deleting a role leaves a gap, so the highest position
+// and the number of roles are different numbers and only one of them is the thing being capped.
+//
+// Same access path as the channel count above: bitmap index scan on roles_guild_id_position_idx, 10
+// buffers on a 25,000-role instance.
+func (q *Queries) CountGuildRoles(ctx context.Context, guildID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countGuildRoles, guildID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createChannel = `-- name: CreateChannel :one
 INSERT INTO channels (id, guild_id, type, parent_id, name, topic, position, nsfw, bitrate, user_limit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)

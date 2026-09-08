@@ -590,7 +590,8 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 // enumeration split between 404 and 403 is decided in one place and cannot be softened here.
 func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, ErrDefaultRoleImmutable), errors.Is(err, ErrCannotRemoveOwner):
+	case errors.Is(err, ErrDefaultRoleImmutable), errors.Is(err, ErrCannotRemoveOwner),
+		errors.Is(err, ErrGuildFull):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", messageOf(err)))
 
 	case errors.Is(err, ErrUnsupportedChannelType), errors.Is(err, ErrAlreadyAMember):

@@ -46,6 +46,22 @@ var (
 	// ErrAlreadyAMember reports a join that collides with an existing membership.
 	ErrAlreadyAMember = errors.New("guilds: already a member of this guild")
 
+	// ErrGuildFull reports a create refused because the guild is at its channel or role ceiling.
+	//
+	// # Why a ceiling exists at all
+	//
+	// The member list is cursor-paginated and clamped at 100. The channel and role lists are neither —
+	// they return everything, because a client needs the whole tree to render a sidebar, and paginating
+	// them would make every client call in a loop, which is the chattiness rule 21 asks to be checked when
+	// an endpoint is added. So the bound has to live where the rows are *created* rather than where they
+	// are read.
+	//
+	// Without it the channel list is a response that scales with nothing in particular: measured at 5,010
+	// channels it is 782 kB of row data and a 740 kB sort, against 8 buffers for the capped member list on
+	// a 15,000-member guild. The ceiling is what makes "the channel list is a hot path" a statement with a
+	// number behind it.
+	ErrGuildFull = errors.New("guilds: the guild is at its limit for this kind of object")
+
 	// ErrCannotRemoveOwner reports an attempt to remove the guild owner from their own guild.
 	//
 	// Not a permission question: nothing in ADR 0008 grants the authority, because the owner *is* layer 2
@@ -143,3 +159,22 @@ func (s *Service) writeAudit(
 
 	return nil
 }
+
+// Per-guild ceilings, enforced at creation.
+//
+// The values match what comparable platforms settled on after operating at scale, which is better evidence
+// than anything this project can generate before it has users. They are deliberately generous: a guild
+// hitting either is organizing something unusual, not being punished for growth.
+//
+// # The race, stated rather than locked against
+//
+// Counting and then inserting is a read-modify-write, and under READ COMMITTED two concurrent creates can
+// both read the same count and both insert. M10's bootstrap takes an advisory lock for exactly this shape
+// — but there the consequence is a second instance administrator nobody intended, and here it is one
+// channel over a soft ceiling. The bound exists to keep a response payload from growing without limit, and
+// it does that whether the number is 500 or 502. A lock on every channel creation would cost more than the
+// property is worth.
+const (
+	maxChannelsPerGuild = 500
+	maxRolesPerGuild    = 250
+)

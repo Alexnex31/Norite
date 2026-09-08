@@ -78,6 +78,15 @@ func (s *Service) CreateRole(
 			return err
 		}
 
+		// The ceiling, checked after authorization so a non-member cannot learn how full a guild is.
+		count, err := q.CountGuildRoles(ctx, int64(guildID))
+		if err != nil {
+			return fmt.Errorf("guilds: count roles: %w", err)
+		}
+		if count >= maxRolesPerGuild {
+			return httpx.Errorf(ErrGuildFull, "a guild may hold at most %d roles", maxRolesPerGuild)
+		}
+
 		// Appended above every existing role. Position is the hierarchy M13 enforces, and a new role
 		// landing at or below an existing one reads as broken — see NextRolePosition for why this is
 		// max(position)+1 and not the role count, which collides as soon as anything has been deleted.
