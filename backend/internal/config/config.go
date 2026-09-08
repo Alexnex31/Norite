@@ -61,7 +61,14 @@ type Config struct {
 	// user runs a daemon on. Self-hosters who outgrow a small direct pool are pointed at PgBouncer
 	// rather than the backend holding a large direct pool itself.
 	DBMaxConns int32 `validate:"required,gte=1,lte=100"`
-	DBMinConns int32 `validate:"gte=0,ltefield=DBMaxConns"`
+
+	// The creation ceilings M12 enforces. Bounded above as well as below: a channel list is returned
+	// unpaginated because a client needs the whole tree, so an instance that sets 100,000 has not raised a
+	// limit, it has removed the thing the limit was protecting.
+	MaxChannelsPerGuild int32 `validate:"required,gte=1,lte=10000"`
+	MaxRolesPerGuild    int32 `validate:"required,gte=1,lte=10000"`
+	MaxGuildsPerAccount int32 `validate:"required,gte=1,lte=10000"`
+	DBMinConns          int32 `validate:"gte=0,ltefield=DBMaxConns"`
 
 	// DBConnectTimeout bounds how long startup waits for the very first successful connection.
 	DBConnectTimeout time.Duration `validate:"required,gt=0"`
@@ -266,6 +273,24 @@ const envPrefix = "NORITE_"
 // than a constant: see Config.SourceURL.
 const DefaultSourceURL = "https://github.com/Alexnex31/Norite"
 
+// The default creation ceilings (M12), overridable per instance.
+//
+// The numbers match what comparable platforms settled on after operating at scale, which is better
+// evidence than anything this project can generate before it has users. They are deliberately generous:
+// an instance hitting one is organizing something unusual, not being punished for growth.
+//
+// Configurable because a self-hosted instance for a large organization may legitimately want more channels
+// than the flagship's default, and the alternative to a setting is that they fork to change a constant —
+// which AGPL makes easy and which is still a worse answer than a TOML key.
+//
+// M72a layers per-account entitlements on top of these: this is the floor every account on the instance
+// gets, and a flagship subscriber or an Instance Admin resolves higher.
+const (
+	defaultMaxChannelsPerGuild = 500
+	defaultMaxRolesPerGuild    = 250
+	defaultMaxGuildsPerAccount = 50
+)
+
 // Load reads configuration, applies defaults, and validates the result.
 //
 // Values are layered, highest precedence first: NORITE_* environment variables, then the instance config
@@ -342,6 +367,29 @@ func Load(configPath string) (Config, error) {
 			errs = append(errs, err)
 		}
 	}
+
+	// The creation ceilings. Defaults match what comparable platforms settled on after operating at scale,
+	// which is better evidence than anything this project can generate before it has users.
+	channelsPerGuild, err := getEnvInt32("MAX_CHANNELS_PER_GUILD",
+		fileInt32(file.Limits.ChannelsPerGuild, defaultMaxChannelsPerGuild))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxChannelsPerGuild = channelsPerGuild
+
+	rolesPerGuild, err := getEnvInt32("MAX_ROLES_PER_GUILD",
+		fileInt32(file.Limits.RolesPerGuild, defaultMaxRolesPerGuild))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxRolesPerGuild = rolesPerGuild
+
+	guildsPerAccount, err := getEnvInt32("MAX_GUILDS_PER_ACCOUNT",
+		fileInt32(file.Limits.GuildsPerAccount, defaultMaxGuildsPerAccount))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxGuildsPerAccount = guildsPerAccount
 
 	maxConns, err := getEnvInt32("DB_MAX_CONNS", fileInt32(file.Database.MaxConns, defaultDBMaxConns()))
 	collect(err)
@@ -526,6 +574,12 @@ func fileKeyFor(field string) string {
 		return "[http].trusted_proxy_hops"
 	case "DatabaseURL":
 		return "[database].url"
+	case "MaxChannelsPerGuild":
+		return "[limits].channels_per_guild"
+	case "MaxRolesPerGuild":
+		return "[limits].roles_per_guild"
+	case "MaxGuildsPerAccount":
+		return "[limits].guilds_per_account"
 	case "DBMaxConns":
 		return "[database].max_conns"
 	case "DBMinConns":
@@ -602,6 +656,12 @@ func envVarFor(field string) string {
 		return envPrefix + "ENV"
 	case "ListenAddr":
 		return envPrefix + "LISTEN_ADDR"
+	case "MaxChannelsPerGuild":
+		return envPrefix + "MAX_CHANNELS_PER_GUILD"
+	case "MaxRolesPerGuild":
+		return envPrefix + "MAX_ROLES_PER_GUILD"
+	case "MaxGuildsPerAccount":
+		return envPrefix + "MAX_GUILDS_PER_ACCOUNT"
 	case "DatabaseURL":
 		return envPrefix + "DATABASE_URL"
 	case "DBMaxConns":

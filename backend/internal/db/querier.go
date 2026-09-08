@@ -9,6 +9,10 @@ import (
 )
 
 type Querier interface {
+	// ON CONFLICT DO NOTHING would make a second join silently succeed and return no row, which the caller
+	// cannot distinguish from a failed insert. Left to conflict instead, so the unique violation is the
+	// answer.
+	AddGuildMember(ctx context.Context, arg AddGuildMemberParams) (GuildMember, error)
 	// Records who authorized this device.
 	//
 	// `user_id IS NULL` is what makes an approval single-use, and it is the reason the approval token needs
@@ -59,6 +63,26 @@ type Querier interface {
 	// query in sessions.sql is scoped by device: a lookup that can only ever match this account's rows cannot
 	// be made to act on another's by a collision or a future schema change.
 	ConsumeRecoveryCode(ctx context.Context, arg ConsumeRecoveryCodeParams) (UserRecoveryCode, error)
+	// How many channels a guild has, for the creation cap.
+	//
+	// Served by the leading column of channels_guild_id_position_idx: a bitmap index scan into the heap, 15
+	// buffers on a 50,000-channel instance, rather than a sequential scan of every channel on it. Not an
+	// *index-only* scan — the plan visits the heap for visibility — which is worth saying because the obvious
+	// shorthand for "an index serves this" is the wrong one here.
+	CountGuildChannels(ctx context.Context, guildID *int64) (int64, error)
+	// How many roles a guild has, for the creation cap.
+	//
+	// A count, not NextRolePosition's max(position)+1 — deleting a role leaves a gap, so the highest position
+	// and the number of roles are different numbers and only one of them is the thing being capped.
+	//
+	// Same access path as the channel count above: bitmap index scan on roles_guild_id_position_idx, 10
+	// buffers on a 25,000-role instance.
+	CountGuildRoles(ctx context.Context, guildID int64) (int64, error)
+	// How many guilds an account owns, for the creation cap.
+	//
+	// Served by guilds_owner_id_idx, which 000015 added for the account-deletion FK check and which answers
+	// this for free.
+	CountGuildsOwnedBy(ctx context.Context, ownerID int64) (int64, error)
 	// The bootstrap guard, and the reason it is a count rather than an existence check.
 	//
 	// POST /instance/bootstrap is authorized by an operator token, which is minted from the instance signing
@@ -80,6 +104,7 @@ type Querier interface {
 	// 15-minute access tokens a logged-in client holds. They are stored only as a SHA-256 hash, so the raw
 	// value is recoverable exactly once — in the response that created it.
 	CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error)
+	CreateChannel(ctx context.Context, arg CreateChannelParams) (Channel, error)
 	// Device-code flow queries (Milestone M9).
 	//
 	// One table with a short life and a small state machine: issued, then approved or denied by a browser
@@ -95,6 +120,10 @@ type Querier interface {
 	// single-use or expiry would be two sets of guards to keep right, and the second one is always the one
 	// that gets it wrong.
 	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) (EmailVerificationToken, error)
+	// Guild, channel, role and membership queries (Milestone M12).
+	// The guild row. Its @everyone role and the owner's membership are written in the same transaction — see
+	// guilds.Service.Create, which is the only caller and does all three in one RunInTx.
+	CreateGuild(ctx context.Context, arg CreateGuildParams) (Guild, error)
 	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
 	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
@@ -124,6 +153,7 @@ type Querier interface {
 	// holds in SQL rather than in whichever Go path remembered to check it.
 	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) (PasswordResetToken, error)
 	CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) error
+	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	// Refresh-session queries.
 	//
 	// A session is one device's refresh-token family. Rotation replaces a row with a successor and links the
@@ -148,6 +178,7 @@ type Querier interface {
 	// instance with no relay. The OAuth path has its own insert (CreateOAuthUser) because it creates an
 	// account with no password at all.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	DeleteChannel(ctx context.Context, arg DeleteChannelParams) (int64, error)
 	// Called by auth.RunSweeper. Abandoned authorizations are the common case, and the endpoint that creates
 	// them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
 	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
@@ -201,12 +232,38 @@ type Querier interface {
 	// uncancellable short of shutdown. The loop in SweepExpired calls this until it returns less than the
 	// limit, so a large backlog is drained across several bounded statements instead of one unbounded one.
 	DeleteExpiredSessions(ctx context.Context, limit int32) (int64, error)
+	// Everything below a guild is ON DELETE CASCADE, so this one statement takes the channels, roles,
+	// memberships, role grants, overwrites and audit entries with it.
+	//
+	// :execrows rather than :exec because the handler needs to tell "deleted" from "was not there" — not to
+	// report the difference, which would be the membership oracle authorize exists to close, but to avoid
+	// answering 204 for a guild that never existed.
+	DeleteGuild(ctx context.Context, id int64) (int64, error)
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
+	// Removes the permission overwrites that named a role or a member, across the whole guild.
+	//
+	// target_id is polymorphic — it names a role or a user depending on target_type — so it cannot be a
+	// foreign key, and nothing cascades. Without this, deleting a role leaves its overwrites behind forever on
+	// every channel that had one, and removing a member leaves theirs: rejoin the guild later and
+	// roles.applyOverwrites matches the member tier again and silently reapplies a deny nobody can see in the
+	// UI or explain from the audit log.
+	//
+	// Scoped through channels to the guild, so this cannot reach another guild's rows even though target_id
+	// alone would match them — a snowflake is unique in practice, but "in practice" is not the guarantee
+	// rule 1 asks for.
+	DeleteOverwritesForTarget(ctx context.Context, arg DeleteOverwritesForTargetParams) error
 	// Used when the whole set is replaced or the factor is disabled. Deletes rather than marking spent: these
 	// are not evidence of anything once the factor they belonged to is gone.
 	DeleteRecoveryCodesForUser(ctx context.Context, userID int64) (int64, error)
+	// The is_default guard is in the WHERE rather than in Go, so a concurrent request cannot slip between a
+	// check and a delete. Same discipline as ConsumePasswordResetToken and RedeemInstanceInvite: a guard that
+	// lives in the statement cannot be raced, and one that lives in a Go `if` can.
+	//
+	// A guild without @everyone has no permission floor for resolution to start from, so this is not a policy
+	// nicety — it is the invariant guild creation establishes in its transaction.
+	DeleteRole(ctx context.Context, arg DeleteRoleParams) (int64, error)
 	DeleteTOTPForUser(ctx context.Context, userID int64) (int64, error)
 	// The other half of the approval page, and the reason it is worth a column rather than letting the code
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
@@ -219,6 +276,13 @@ type Querier interface {
 	// returns no rows whatever the reason — which is also what the client is told, so nothing is lost by not
 	// distinguishing them.
 	GetActiveAPITokenByHash(ctx context.Context, tokenHash []byte) (ApiToken, error)
+	// By id alone, with no guild parameter, and that is deliberate rather than an oversight.
+	//
+	// PATCH /channels/{id} and DELETE /channels/{id} carry no guild in their path, so there is no guild id to
+	// scope by that did not come from the caller. The handler loads the channel, reads *its* guild_id, and
+	// authorizes against that — which is the only ordering rule 1 permits, since scoping the read by a
+	// caller-supplied guild would be trusting the value the check exists to verify.
+	GetChannel(ctx context.Context, id int64) (Channel, error)
 	// The verification page's re-read between steps.
 	//
 	// By id because that is what the signed continuation carries: the device code never reaches the browser at
@@ -237,6 +301,8 @@ type Querier interface {
 	// The confirm path's lookup. Expiry is checked here as well as in the consume below, so an expired token
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
+	GetGuild(ctx context.Context, id int64) (Guild, error)
+	GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
@@ -258,6 +324,10 @@ type Querier interface {
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash []byte) (PasswordResetToken, error)
+	// Scoped by guild as well as by id, so a role id from another guild resolves to nothing rather than to
+	// somebody else's role. Rule 1: never trust a client-supplied ID without verifying it belongs to the
+	// actor's claimed context — enforced in the statement, not in a check a handler has to remember.
+	GetRole(ctx context.Context, arg GetRoleParams) (Role, error)
 	// Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
 	//
 	// The caller that needs this is "which device is this request coming from", answered from the sid claim in
@@ -292,6 +362,85 @@ type Querier interface {
 	// their tier intact and usable by any credential still outstanding on it.
 	IsInstanceAdmin(ctx context.Context, userID int64) (bool, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
+	// Every overwrite on one channel: ADR 0008 layer 5, in one lookup, ordered in Go by the precedence the ADR
+	// fixes rather than by SQL.
+	//
+	// Sorting here is tempting and wrong. The precedence is @everyone, then the union of the member's role
+	// overwrites, then the member's own — and the middle tier is an accumulation across roles rather than an
+	// ordering among them, because two roles' overwrites are OR'd together and neither wins. An ORDER BY
+	// would express a ranking that does not exist and invite a reader to apply the rows in sequence.
+	//
+	// The join to channels is not decoration. It scopes the read to overwrites on a channel that actually
+	// belongs to the guild being resolved, so an overwrite from another guild's channel cannot be applied even
+	// if a caller passes a mismatched pair — rule 1's "never trust a client-supplied ID without verifying it
+	// belongs to the actor's claimed context", enforced in the statement rather than in a check somebody has
+	// to remember to write. The handler checks it too; this makes the resolution safe on its own.
+	//
+	// channels.guild_id is nullable in the schema, because a DM belongs to no guild — so without the explicit
+	// ::bigint the generated parameter is a *int64 and every caller has to take the address of a value it
+	// knows is never nil. The cast keeps the Go signature honest about what this query actually accepts.
+	//
+	// The primary key (channel_id, target_type, target_id) serves the lookup on its leading column: measured
+	// at 0.092 ms and 6 buffers, Index Scan.
+	ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]ListChannelPermissionOverwritesRow, error)
+	// Columns enumerated rather than `SELECT *`, and topic_search is the reason.
+	//
+	// It is a generated tsvector that nothing in this codebase reads until M63's channel search, and pgx
+	// decodes it into a full pgtype.TSVector — a parsed lexeme list with positions and weights — on every row.
+	// Confirmed by probe: `SELECT *` scans fine, so this is not a correctness fix. It is that the channel list
+	// is one of rule 7's three named hot paths, and paying to transfer and parse a search index nobody reads,
+	// once per channel per listing, is exactly the over-fetching §15 asks not to ship.
+	//
+	// The three single-row channel queries keep `SELECT *`, deliberately. One row's tsvector costs nothing,
+	// and enumerating there too would give sqlc four near-identical row structs where one db.Channel does —
+	// four conversions to keep in step for no measurable gain. The cost this avoids is the one that multiplies
+	// by the number of channels, and that is this query alone.
+	ListGuildChannels(ctx context.Context, guildID *int64) ([]ListGuildChannelsRow, error)
+	// Permission resolution queries (ADR 0008 layers 2 through 5).
+	// The guild, whether this account is in it, and every role whose permissions apply to them — in one round
+	// trip rather than three.
+	//
+	// Both queries here run before every mutating handler (rule 1) and neither result is cached: the cache
+	// architecture.md describes is invalidated by a gateway dispatch, and the gateway is M18. A cache with
+	// nothing to invalidate it is a demotion that takes effect five minutes late, so this runs live on every
+	// check and has to be cheap. That is the constraint the shape below is chosen against.
+	//
+	// The obvious decomposition is a guild lookup, then a membership lookup, then a role list, and it is three
+	// network round trips on a path that runs before every mutation. This is the shape
+	// GetActiveAPITokenByHash already established for the authentication path: resolve the whole context in
+	// one indexed query rather than in a sequence of them.
+	//
+	// The joins are both LEFT, and each one is load-bearing:
+	//
+	//   * on guild_members, because a non-member must be distinguishable from a missing guild. An INNER join
+	//     collapses both to zero rows, and the handler needs to tell "no such guild" from "not permitted" —
+	//     not to report the difference to the caller, which would be a membership oracle, but to know that a
+	//     guild exists at all before deciding what to write.
+	//   * on roles, because a member holding no roles at all still gets @everyone, and a guild whose rows are
+	//     mid-creation must not produce an empty result that reads as "not a member".
+	//
+	// The role predicate is `is_default OR held`, so @everyone is included without the caller having to
+	// remember it. That is ADR 0008 layer 4's floor: every member has it, it is never in guild_member_roles,
+	// and a resolution that forgot it would silently deny permissions the guild grants to everyone.
+	//
+	// is_default comes back because layer 5 needs it, not layer 4. An overwrite targeting @everyone is keyed
+	// by that role's id like any other role overwrite, so applying the tiers in the ADR's order means knowing
+	// which of the returned roles is the default one. Deriving it any other way — a second query, or assuming
+	// the lowest position — is a lookup this query has already paid for.
+	//
+	// owner_id and is_member repeat on every row. That is two columns times a handful of roles, and the
+	// alternative is the extra round trip this query exists to avoid.
+	ListGuildMemberAuthority(ctx context.Context, arg ListGuildMemberAuthorityParams) ([]ListGuildMemberAuthorityRow, error)
+	// Cursor pagination on user_id, never offset.
+	//
+	// §2 specifies cursor-only everywhere, and the member list is one of rule 7's named hot paths. An OFFSET
+	// makes page N cost N pages of scanning and shifts every row when somebody joins or leaves mid-read; a
+	// cursor costs one index descent regardless of depth and is stable under concurrent writes. The primary
+	// key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
+	// 15,000-member guild.
+	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]GuildMember, error)
+	// Ordered by position, which the (guild_id, position) index serves.
+	ListGuildRoles(ctx context.Context, guildID int64) ([]Role, error)
 	// Everything outstanding, newest first.
 	//
 	// Deliberately includes exhausted and expired rows. An administrator asking "what invites exist" is
@@ -303,6 +452,12 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
+	// The role ids held by each of a set of members, in one query rather than one per member.
+	//
+	// The member listing returns up to 100 members and each carries its roles, so the obvious shape — a query
+	// per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
+	// whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
+	ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsParams) ([]GuildMemberRole, error)
 	// The devices signed in to an account: one row per device family, not one per session row.
 	//
 	// A session row is one generation of a rotating family, replaced every time the client refreshes. Listing
@@ -319,6 +474,25 @@ type Querier interface {
 	// these is the one I am still using" is the question somebody scanning this list is asking.
 	// Served by sessions_live_by_device_idx (000013).
 	ListSessionDevicesForUser(ctx context.Context, userID int64) ([]ListSessionDevicesForUserRow, error)
+	// Serializes role creation within one guild, for the whole of the calling transaction.
+	//
+	// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and
+	// this pool's, since RunInTx sets no isolation level — is a read-modify-write with a gap in it. Two
+	// concurrent creates both read the same max, neither sees the other's uncommitted INSERT, and both land on
+	// the same position. Migration 000015 deliberately declines a unique constraint on (guild_id, position),
+	// because reordering is a multi-row swap, so nothing downstream catches it.
+	//
+	// The consequence is not cosmetic: position is the hierarchy M13 enforces over, and two roles at the same
+	// position are neither above nor below each other. NextRolePosition's own comment calls a collision "a
+	// correctness bug rather than a style preference" — that comment was written about the count-versus-max
+	// cause and this is the other one.
+	//
+	// An advisory lock rather than row locking, and the two-argument form so it lives in its own namespace:
+	// the first key is "NOR" plus a slot number (slot 1 is the migration lock, slot 2 the instance bootstrap,
+	// this is slot 3), the second is the guild. Two guilds whose low 31 bits collide serialize against each
+	// other unnecessarily and stay correct, which is the right direction for an operation that happens a
+	// handful of times in a guild's life.
+	LockGuildRolePositions(ctx context.Context, guildID int64) error
 	// Instance-administration queries.
 	//
 	// The Instance Admin tier, which is instance-wide and sits outside roles.Resolve entirely (ADR 0013).
@@ -356,6 +530,21 @@ type Querier interface {
 	// Strictly greater, so a code from an *earlier* step inside the skew window cannot be replayed after a
 	// later one has been accepted — which is the case a naive "record the newest" would miss.
 	MarkTOTPStepUsed(ctx context.Context, arg MarkTOTPStepUsedParams) (int64, error)
+	// The position a new role goes in: one above the highest that exists.
+	//
+	// `max(position) + 1`, not `count(*)`, and the difference is a correctness bug rather than a style
+	// preference. Deleting a role leaves a gap, so after removing the middle of @everyone(0)/mods(1)/admins(2)
+	// the count is 2 and the next role would be created *at* position 2 — a tie with admins, which nothing
+	// prevents since there is deliberately no unique constraint on (guild_id, position). Delete more and the
+	// new role lands below existing ones, contradicting "positioned above every existing role" in the contract
+	// and silently corrupting the ordering M13's hierarchy rules will be enforcing.
+	//
+	// coalesce for the empty case, which cannot happen through the API — guild creation writes @everyone in
+	// the same transaction — but which would otherwise make a NULL the caller has to handle.
+	//
+	// Reads one value out of roles_guild_id_position_idx rather than the whole role list. The previous
+	// implementation selected every column of every role in the guild to take len() of the slice.
+	NextRolePosition(ctx context.Context, guildID int64) (int32, error)
 	// Health-check queries.
 	//
 	// These exist so the readiness endpoint validates the *whole* data path — pool checkout, the
@@ -404,6 +593,7 @@ type Querier interface {
 	// every credential lookup in this package gets, and here it also stops the endpoint from being a way to
 	// probe which codes exist.
 	RedeemInstanceInvite(ctx context.Context, code string) (InstanceInvite, error)
+	RemoveGuildMember(ctx context.Context, arg RemoveGuildMemberParams) (int64, error)
 	// Claims a username for a registration that created no account.
 	//
 	// ON CONFLICT DO NOTHING because the name may already be claimed by an account or by an earlier
@@ -480,6 +670,24 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
+	// Scoped by guild, because by the time this runs the handler has resolved the channel's own guild from
+	// GetChannel and authorized against it. Passing it back in is a second assertion that the row being
+	// written is the row that was checked.
+	UpdateChannel(ctx context.Context, arg UpdateChannelParams) (Channel, error)
+	// Partial update through COALESCE, so a caller sends only the fields it means to change.
+	//
+	// The alternative — one statement per field, or a query builder — is what rule 3 forbids and what sqlc
+	// exists to avoid. NULL means "leave alone" rather than "set to NULL", which is why description clears
+	// through a separate flag: without it there would be no way to remove a description at all, since the
+	// value that means "clear this" and the value that means "do not touch this" would be the same.
+	UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild, error)
+	UpdateGuildMember(ctx context.Context, arg UpdateGuildMemberParams) (GuildMember, error)
+	// Same COALESCE shape as UpdateGuild, and the same guild scoping as GetRole.
+	//
+	// position is not updatable here. Reordering roles is a multi-row swap and role *hierarchy* — who may
+	// manage whom — is M13's, so this milestone stores the column, orders by it, and does not let a single-row
+	// update reshuffle it.
+	UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, error)
 	// Second-factor queries: one TOTP enrollment per account, and its recovery codes.
 	//
 	// Single-use lives in the statement here as it does everywhere else in this package — see
@@ -502,6 +710,13 @@ type Querier interface {
 	// One query rather than two so the two halves cannot be checked in different places, or one of them
 	// forgotten by a later caller.
 	UsernameUnavailable(ctx context.Context, username string) (bool, error)
+	// Rule 2, and it takes a querier rather than a pool for the reason the rule states: the entry is written
+	// in the same transaction as the mutation it records, so a mutation that commits without its entry is not
+	// a state this schema can reach.
+	//
+	// Nothing reads this until M14. `changes` is jsonb and M12 writes either NULL or a flat object of changed
+	// fields; M14 owns the diffing that produces a richer one.
+	WriteAuditLogEntry(ctx context.Context, arg WriteAuditLogEntryParams) error
 }
 
 var _ Querier = (*Queries)(nil)

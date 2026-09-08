@@ -13,6 +13,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
+	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/meta"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
@@ -32,6 +33,7 @@ type routerOptions struct {
 	Health  *health
 	Auth    *auth.Handler
 	AuthSvc *auth.Service
+	Guilds  *guilds.Handler
 }
 
 // authRateLimit is the stricter bucket the unauthenticated auth routes sit behind.
@@ -246,6 +248,17 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 					})
 				})
 				r.Route("/users", opts.Auth.UserRoutes)
+			}
+
+			// Guilds, channels, roles and membership (M12). Inside the authenticated group and in the base
+			// rate-limit bucket: every route here needs an actor, and none of them is a credential-guessing
+			// surface the way /auth is, so the stricter bucket would only throttle ordinary use.
+			//
+			// Mounted on the handler being non-nil rather than on the service, which is what keeps these
+			// routes visible to the contract test's route walk — it builds a router over nil services, and
+			// a group mounted on a service would vanish from rule 6's check exactly as /instance did.
+			if opts.Guilds != nil {
+				opts.Guilds.Routes(r)
 			}
 
 			// The AGPL section 13 source offer. Public and unauthenticated by obligation rather than by

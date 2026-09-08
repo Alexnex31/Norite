@@ -10,6 +10,8 @@
 package httpx
 
 import (
+	"github.com/go-playground/validator/v10"
+
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -211,6 +213,38 @@ const maxRequestBody = 1 << 20 // 1 MiB
 // A var rather than a const only so the test can shorten it — a test that waited out the real value would
 // take thirty seconds to prove one thing.
 var bodyReadTimeout = 30 * time.Second
+
+// DecodeAndValidate decodes a JSON body and runs struct validation, writing the error response itself.
+//
+// One implementation, because there were two. auth and guilds each carried a line-for-line copy of the
+// same decode-then-validate-then-map-the-first-error sequence, and only one of them carried the reason the
+// message is shaped the way it is — that it must never echo the submitted value back, because on two auth
+// routes that value is a password. A change made in one copy would have applied to half the API.
+//
+// The caller supplies the validator so each handler keeps its own json-tag name registration; what is
+// shared is the sequence and the error shape, which is the part that must not drift.
+func DecodeAndValidate(w http.ResponseWriter, r *http.Request, v *validator.Validate, dst any) bool {
+	if err := DecodeJSON(w, r, dst); err != nil {
+		WriteError(w, r, err)
+		return false
+	}
+
+	if err := v.Struct(dst); err != nil {
+		var verrs validator.ValidationErrors
+		if errors.As(err, &verrs) && len(verrs) > 0 {
+			fe := verrs[0]
+			// Names the offending field and the rule it broke, and nothing else. A validation message must
+			// never echo the submitted value back — that value is a password on two of these routes.
+			WriteError(w, r, Errorf(ErrBadRequest,
+				"field %q failed the %q requirement", fe.Field(), fe.Tag()))
+			return false
+		}
+		WriteError(w, r, Errorf(ErrBadRequest, "invalid request body"))
+		return false
+	}
+
+	return true
+}
 
 // DecodeJSON reads a JSON request body into dst.
 //

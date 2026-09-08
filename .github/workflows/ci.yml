@@ -15,6 +15,9 @@ env:
   GO_VERSION: "1.26"
   # Keep in sync with `sqlc_version` in the justfile.
   SQLC_VERSION: "v1.30.0"
+  # Keep in sync with `oapi_codegen_version` in the justfile. Pinned for the same reason as the other two:
+  # an unpinned generator turns an upstream release into a surprise failure on an unrelated PR.
+  OAPI_CODEGEN_VERSION: "v2.8.0"
   # Keep in sync with `golangci_lint_version` in the justfile.
   #
   # Pinned, not `latest`: an unpinned linter turns an upstream release into a surprise CI failure on an
@@ -124,6 +127,21 @@ jobs:
           if ! git diff --quiet -- backend/internal/db; then
             echo "::error::backend/internal/db is out of date — run 'just sqlc-generate' and commit the result"
             git --no-pager diff -- backend/internal/db
+            exit 1
+          fi
+      # The contract types are committed for the reason the sqlc output is, and checked here for the same
+      # reason: rule 6 requires a new endpoint to update contracts/openapi.yaml in the same commit, and
+      # this is what makes "the backend agrees with the document" a build failure rather than a habit.
+      - name: oapi-codegen generate
+        working-directory: backend
+        run: |
+          go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@${{ env.OAPI_CODEGEN_VERSION }} \
+            -config oapi-codegen.yaml ../contracts/openapi.yaml
+      - name: fail if the committed contract types are stale
+        run: |
+          if ! git diff --quiet -- backend/internal/apicontract; then
+            echo "::error::backend/internal/apicontract is out of date — run 'just contract-generate' and commit the result"
+            git --no-pager diff -- backend/internal/apicontract
             exit 1
           fi
       # The dependency-license inventory is committed for the same reason the sqlc output is: a change to

@@ -142,10 +142,22 @@ type registerRequest struct {
 	// while ValidUsername enforced 32, so a 40-character name passed the tag and came back rejected for
 	// its *characters* — a message that was simply untrue of the input and left no way to fix it. "Bounds
 	// only" is what let the two drift, since it reads as though the tag's numbers do not matter.
-	Username    string `json:"username" validate:"required,min=2,max=32"`
-	Email       string `json:"email" validate:"required,email,max=254"`
-	Password    string `json:"password" validate:"required"`
-	DisplayName string `json:"display_name" validate:"omitempty,max=64"`
+	Username string `json:"username" validate:"required,min=2,max=32"`
+	Email    string `json:"email" validate:"required,email,max=254"`
+	// ChallengeResponse is M67a's reserved field, accepted and ignored.
+	//
+	// It has to be *present* here, not merely documented, because httpx.DecodeJSON calls
+	// DisallowUnknownFields: a field the contract describes as ignorable is a hard 400 unless the struct
+	// names it. M12 reserved it in contracts/openapi.yaml saying "sending this changes nothing and
+	// omitting it is correct", which was false in the only direction that matters — a generated client
+	// populating the reserved field could not register at all.
+	//
+	// That is the exact rule-6 drift this milestone's codegen work exists to prevent, and neither contract
+	// test could see it: one compares the route set and the other reads responses. Request-shape drift has
+	// no check, which is worth knowing before the next field is reserved.
+	ChallengeResponse string `json:"challenge_response" validate:"omitempty,max=4096"`
+	Password          string `json:"password" validate:"required"`
+	DisplayName       string `json:"display_name" validate:"omitempty,max=64"`
 	// InviteCode is required while the instance is gated and ignored while it is open, so it is optional
 	// here and the service decides. Bounded generously rather than at the exact code length: what a code
 	// may contain is ParseInviteCode's decision, and a tag that disagreed with it would refuse a valid
@@ -714,24 +726,7 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 
 // decode reads and validates a JSON request body, writing the error response itself on failure.
 func (h *Handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
-	if err := httpx.DecodeJSON(w, r, dst); err != nil {
-		httpx.WriteError(w, r, err)
-		return false
-	}
-	if err := h.validate.Struct(dst); err != nil {
-		var verrs validator.ValidationErrors
-		if errors.As(err, &verrs) && len(verrs) > 0 {
-			fe := verrs[0]
-			// Names the offending field and the rule it broke, and nothing else. A validation message must
-			// never echo the submitted value back — that value is a password on two of these routes.
-			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest,
-				"field %q failed the %q requirement", fe.Field(), fe.Tag()))
-			return false
-		}
-		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "invalid request body"))
-		return false
-	}
-	return true
+	return httpx.DecodeAndValidate(w, r, h.validate, dst)
 }
 
 // writeErr maps a service error to its HTTP response.

@@ -32,6 +32,18 @@ tags:
       this same API, not from these endpoints.
   - name: users
     description: Account profile surfaces.
+  - name: guilds
+    description: >
+      Guilds, their channels, their roles and their membership. Every route here requires an authenticated
+      caller, and every mutation resolves permissions against data loaded for the specific guild or channel
+      in the request path — see `docs/adr/0008-guild-authority-hierarchy.md` for the six-layer authority
+      model these endpoints implement.
+
+
+      **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for
+      the rest. A user's own access token passes both by design, since a scope bounds a *delegated*
+      credential and never a person. Permission resolution still runs underneath, so a token holding
+      `guilds.write` can do exactly what its owner could and no more.
 
 paths:
   /meta:
@@ -253,6 +265,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "428":
+          description: >
+            **Reserved for M67a and emitted by nothing today.** This instance requires a challenge to be
+            solved before it will accept a registration; the body carries what to solve, and the solution
+            comes back in `challenge_response`.
+
+
+            A distinct status rather than a field on the 403, for the reason M11a gave when a login that
+            owes a second factor answered 202 rather than a discriminated body: a client branches on
+            status, and oapi-codegen gets exactly one response object per status. This contract has already
+            carried one schema that no response could satisfy, and does not need a second.
+
+
+            428 is chosen with a caveat worth stating rather than glossing. RFC 6585 §3 introduces it for
+            *conditional* requests — `If-Match`, avoiding the lost-update problem — and this is not that.
+            It is used here because it is the only unused code on this operation whose plain meaning
+            ("there is a precondition you have not met") matches, 403 is already spoken for by the invite
+            states and carries `Error`, and 202 means success. Widespread practice has moved 428 toward
+            "do something else first"; the alternative was overloading 400.
+
+
+            **Self-hosted instances never emit this**, and neither does the flagship today. A client that
+            has never seen it is not broken, and one that handles it works unchanged when M67a lands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistrationChallenge"
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /auth/login:
@@ -2260,6 +2299,588 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /guilds:
+    post:
+      summary: Create a guild
+      description: >
+        Creates a guild, its `@everyone` role and the creator's membership, in one transaction.
+
+
+        **The only mutation in this group that checks no permission**, because there is no guild yet to
+        resolve one against — anyone who can authenticate may create one. Instance-wide abuse controls
+        belong at account creation (see `challenge_response` on `/auth/register`), not here.
+
+
+        The three rows are written together deliberately. A guild without `@everyone` has no permission
+        floor, so every member would resolve to no permissions at all; a guild without the owner's
+        membership still works, because the owner bypasses permission checks by being the owner, and would
+        simply be missing from its own member list. Neither is a state a client could repair.
+
+
+        `@everyone` is created with viewing, sending, and voice connect and speak. Deliberately **not**
+        invite creation: who may bring others in is the first decision an owner should make on purpose
+        rather than discover.
+      operationId: createGuild
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGuildRequest"
+      responses:
+        "201":
+          description: The guild, as created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Guild"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >
+            The account already owns the maximum number of guilds. An instance-wide bound on the one
+            mutation that checks no permission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: Fetch a guild
+      description: >
+        Requires membership. A caller who is not a member gets **404, not 403** — the same answer a guild
+        that does not exist gets, and deliberately so: guild ids are snowflakes, sequential and carrying
+        their own creation time, so answering differently would turn a list of plausible ids into a map of
+        which guilds exist on the instance. The same reasoning `DELETE /users/@me/sessions/{id}` uses.
+
+
+        A member who lacks a *permission* is a different case and gets 403. They already know the guild
+        exists, so telling them why discloses nothing.
+      operationId: getGuild
+      tags: [guilds]
+      responses:
+        "200":
+          description: The guild.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Guild"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    patch:
+      summary: Update a guild
+      description: >
+        Partial. An absent field is left alone, which is why removing a description needs
+        `clear_description` rather than a null — a decoder cannot tell an explicit null from an absent
+        field, and if absent meant "clear" every partial update would erase what it did not mention.
+
+
+        Requires `MANAGE_GUILD`.
+      operationId: updateGuild
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGuildRequest"
+      responses:
+        "200":
+          description: The guild, as updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Guild"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Delete a guild
+      description: >
+        **Owner only**, or an Instance Admin. Not `MANAGE_GUILD`, which is the bit for renaming a guild and
+        editing its settings and one an owner reasonably delegates. Deleting destroys every channel,
+        message and membership in it, cascading, with no undo — that is an ownership decision, and ADR 0008
+        makes the owner the tier for exactly this class of action.
+
+
+        A member who holds `MANAGE_GUILD` and is not the owner gets 403. A non-member still gets 404.
+      operationId: deleteGuild
+      tags: [guilds]
+      responses:
+        "204":
+          description: The guild and everything under it are gone.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/channels:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: List a guild's channels
+      description: >
+        In position order. Requires membership.
+
+
+        **Returns every channel, with no pagination**, deliberately: a client needs the whole tree to render
+        a sidebar, so paginating would make it fetch in a loop. The response is bounded by the 500-channel
+        ceiling enforced when a channel is created, not by a `limit` the caller passes.
+
+
+        **Not filtered by per-channel permission overwrites at this version.** Nothing can write an
+        overwrite until the overwrite endpoints exist, so every channel resolves identically today; once
+        they do, this listing hides channels the caller cannot view.
+      operationId: listGuildChannels
+      tags: [guilds]
+      responses:
+        "200":
+          description: The guild's channels, in position order. An empty guild answers with an empty array.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Channel"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      summary: Create a channel
+      description: >
+        Requires `MANAGE_CHANNELS`.
+
+
+        `type` accepts only the three a guild can contain: `0` text, `2` voice, `4` category. The DM types
+        belong to no guild, and the announcement and stage-voice values are reserved in the schema but not
+        yet buildable.
+
+
+        `parent_id`, if given, must name a **category in this guild**. That is checked rather than trusted:
+        without it a channel could be nested under a category in a guild the caller has no permissions in,
+        which would put its children behind that guild's overwrites. A category cannot be nested inside
+        another: the channel list is flat with one level of nesting.
+
+
+        **An account owns at most 50 guilds**, and a guild holds at most 500 channels. The ceiling is here rather than on the listing because a
+        client needs the whole tree to render a sidebar — paginating it would make every client fetch in a
+        loop. Bounding creation is what keeps the list response from growing without limit.
+      operationId: createGuildChannel
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateChannelRequest"
+      responses:
+        "201":
+          description: The channel, as created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Channel"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The guild already holds the maximum number of channels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /channels/{channel_id}:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    patch:
+      summary: Update a channel
+      description: >
+        Partial, with `clear_topic` playing the role `clear_description` plays on a guild.
+
+
+        **This path carries no guild, and that is the point.** The server loads the channel, reads *its*
+        `guild_id`, and resolves permissions against that — never against a guild the caller supplied.
+        Accepting one in the body and trusting it would let a member holding `MANAGE_CHANNELS` in guild A
+        rename a channel in guild B by naming A.
+
+
+        Requires `MANAGE_CHANNELS` in the channel's own guild. A DM answers 404: these routes are
+        guild-channel routes, and a DM has no guild to resolve against.
+      operationId: updateChannel
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateChannelRequest"
+      responses:
+        "200":
+          description: The channel, as updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Channel"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Delete a channel
+      description: >
+        Requires `MANAGE_CHANNELS` in the channel's own guild, resolved the same way `PATCH` resolves it.
+
+
+        Deleting a **category** orphans its children to the top level rather than deleting them: losing a
+        category must not lose the conversations inside it.
+      operationId: deleteChannel
+      tags: [guilds]
+      responses:
+        "204":
+          description: The channel is gone.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/roles:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: List a guild's roles
+      description: >
+        In position order, `@everyone` first. Requires membership.
+
+
+        Unpaginated for the reason the channel listing is, and bounded the same way — by the 250-role
+        ceiling enforced at creation.
+      operationId: listGuildRoles
+      tags: [guilds]
+      responses:
+        "200":
+          description: The guild's roles, in position order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Role"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      summary: Create a role
+      description: >
+        Requires `MANAGE_ROLES`, **and refuses to grant a permission the caller does not hold**.
+
+
+        That second half is not a nicety. Without it `MANAGE_ROLES` is every permission: create a role
+        carrying `ADMINISTRATOR`, assign it to yourself, and the hierarchy is gone. An owner and an
+        administrator pass it trivially because they hold everything; an Instance Admin passes above the
+        guild entirely.
+
+
+        The new role is positioned above every existing role — one above the highest that exists, not the
+        role count, which would collide as soon as anything had been deleted. Position is not settable here:
+        reordering is a multi-row operation and role hierarchy, which governs who may manage whom, arrives
+        with the permission-overwrite endpoints.
+
+
+        **A guild holds at most 250 roles**, bounded at creation for the reason the channel ceiling is.
+      operationId: createGuildRole
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRoleRequest"
+      responses:
+        "201":
+          description: The role, as created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller lacks `MANAGE_ROLES`, or asked for permissions they do not themselves hold. One
+            answer for both, and it names no permission bit: reporting which one was refused tells a caller
+            probing the boundary exactly where it is, and they can already read their own from the role
+            listing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The guild already holds the maximum number of roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/roles/{role_id}:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: role_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    patch:
+      summary: Update a role
+      description: >
+        Partial. Requires `MANAGE_ROLES`, and the same refusal to grant permissions the caller does not
+        hold.
+
+
+        `@everyone` may have its **permissions** edited — that is how a guild sets its floor — but not its
+        name. Renaming it would leave every client's `@everyone` label pointing at a role that no longer
+        says so, and the mention syntax is keyed off the name.
+
+
+        `position` is absent from the request body on purpose; see `POST` above.
+      operationId: updateGuildRole
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRoleRequest"
+      responses:
+        "200":
+          description: The role, as updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >
+            An attempt to rename `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Delete a role
+      description: >
+        Requires `MANAGE_ROLES`. Members holding the role simply stop holding it.
+
+
+        `@everyone` cannot be deleted: a guild without a default role has no permission floor for
+        resolution to start from. The refusal lives in the `DELETE` statement itself rather than in a check
+        before it, so two concurrent requests cannot slip past it.
+      operationId: deleteGuildRole
+      tags: [guilds]
+      responses:
+        "204":
+          description: The role is gone.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: An attempt to delete `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/members:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: List a guild's members
+      description: >
+        Cursor-paginated on `user_id`, never offset. An offset makes page N cost N pages of scanning and
+        shifts every row when somebody joins or leaves mid-read; a cursor costs one index descent whatever
+        the depth and is stable under concurrent writes.
+
+
+        Page through by passing the last `user_id` you received as `after`. The response is a bare array —
+        a page is exhausted when it comes back shorter than `limit`.
+      operationId: listGuildMembers
+      tags: [guilds]
+      parameters:
+        - name: after
+          in: query
+          required: false
+          description: Resume after this user id, exclusive. Omit for the first page.
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Page size. Defaults to 50, and values above 100 are **clamped rather than refused** — a client
+            asking for more than the ceiling is not making an error worth failing a request over, and
+            returning the ceiling communicates it more clearly than a 400 it has to parse.
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+      responses:
+        "200":
+          description: A page of members, ascending by user id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Member"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/members/{user_id}:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    patch:
+      summary: Update a member
+      description: >
+        **The required permission depends on which fields are sent.** `nickname` needs `MANAGE_GUILD`;
+        `mute` additionally needs `MUTE_MEMBERS` and `deaf` additionally needs `DEAFEN_MEMBERS`. Collapsing
+        them into one permission would let anybody who can rename people also silence them.
+
+
+        `mute` and `deaf` are the server-side, moderator-set values. They are distinct from the self-mute
+        and self-deafen a client sets on itself, which live in voice state rather than here.
+      operationId: updateGuildMember
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateMemberRequest"
+      responses:
+        "200":
+          description: >
+            The member, as updated. `roles` is empty here rather than populated — this response reports the
+            row that was written, and role membership is not among the fields it writes. Read the member
+            listing for a member's roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Remove a member, or leave
+      description: >
+        Removing somebody else requires `KICK_MEMBERS`. Removing **yourself** is leaving, and requires no
+        permission beyond being a member — nobody should need a moderation bit to walk out of a room. Both
+        write an audit entry, because "who left" is exactly what that log is read for.
+
+
+        The **owner cannot be removed by either route**, including by themselves: the owner is the tier
+        that bypasses permission checks within a guild, and a guild whose owner is not a member has no such
+        tier at all. Transferring ownership is what makes this reachable, and it does not exist yet.
+      operationId: removeGuildMember
+      tags: [guilds]
+      responses:
+        "204":
+          description: The member is no longer in the guild.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: An attempt to remove the guild owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2362,7 +2983,14 @@ components:
 
         There is deliberately no scope for managing API tokens: minting, listing and revoking all require a
         logged-in user, because a credential that can create credentials can escalate itself.
-      enum: [identify]
+
+
+        `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have
+        very different blast radii and the common bot wants only the first — a status bot that lists
+        channels should not be one compromise away from deleting the guild. **Write does not imply read**:
+        a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a
+        token that needs both asks for both.
+      enum: [identify, guilds.read, guilds.write]
 
     HealthResponse:
       type: object
@@ -2894,6 +3522,26 @@ components:
             Length is the only rule, counted in characters rather than bytes so a passphrase in a non-Latin
             script is not penalised. No composition requirements: they push people toward predictable
             substitutions while ruling out strong passphrases. The ceiling exists to bound hashing work.
+        challenge_response:
+          type: string
+          maxLength: 4096
+          description: >
+            **Reserved for M67a and ignored by every instance today.** Nothing emits a challenge yet, so
+            sending this changes nothing and omitting it is correct — and it is *accepted*: the request
+            decoder rejects unknown fields, so a reserved field the server does not name is a 400 rather
+            than a no-op. It was exactly that until a review sent one.
+
+
+            When M67a lands this carries the solved challenge — a proof-of-work solution, a hosted-captcha
+            token, or whatever the mechanism chosen at build time produces. Opaque to this contract on
+            purpose: the field is a carrier, and pinning its internal shape here would make swapping the
+            mechanism a contract change across four clients, which is exactly what reserving it is meant to
+            avoid.
+
+
+            The ceiling is generous because a captcha provider's token is the largest plausible value and
+            they are not small. It exists so an unbounded body cannot be posted at an unauthenticated
+            endpoint, not because 4096 means anything.
         invite_code:
           type: string
           maxLength: 64
@@ -2967,6 +3615,404 @@ components:
             Must be non-empty and every entry must be recognised. A token with no scopes could do nothing,
             and an unrecognised scope is rejected rather than dropped.
 
+    Permissions:
+      type: string
+      pattern: "^[0-9]+$"
+      description: >
+        A permission bitfield, as a **decimal string** rather than a number.
+
+
+        The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's
+        number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen
+        bits are defined today, so the hazard is years away — which is exactly why the representation is
+        fixed now, while changing it costs nothing.
+
+
+        Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`,
+        `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`,
+        `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`,
+        `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`.
+
+
+        **The order is data, not documentation.** What the database stores is bit positions, so
+        renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved
+        and granted by nothing; it is listed because removing it would renumber the six bits above it.
+      examples: ["3075", "0"]
+
+    Guild:
+      type: object
+      required: [id, name, owner_id, icon_hash, description, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        name:
+          type: string
+        owner_id:
+          allOf:
+            - $ref: "#/components/schemas/Snowflake"
+          description: >
+            The account that bypasses every permission check within this guild (authority layer 2). Cannot
+            be removed from the guild, and transferring it is not yet possible.
+        icon_hash:
+          type: [string, "null"]
+          description: Reserved. No upload endpoint exists yet, so this is always null.
+        description:
+          type: [string, "null"]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateGuildRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1024
+
+    UpdateGuildRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        Every field optional; an absent one is left alone. At least conceptually a caller sends only what
+        it means to change.
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1024
+        clear_description:
+          type: boolean
+          default: false
+          description: >
+            Removes the description. A separate flag rather than a null `description`, because a JSON
+            decoder cannot tell an explicit null from an absent field — and if absent meant "clear", every
+            partial update would erase what it did not mention.
+
+    Channel:
+      type: object
+      required:
+        [id, guild_id, type, parent_id, name, topic, position, nsfw, last_message_id, bitrate, user_limit,
+         created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+          description: Null for a DM or group DM, which belong to no guild.
+        type:
+          type: integer
+          description: >
+            `0` text, `1` DM, `2` voice, `3` group DM, `4` category, `5` announcement (reserved), `6` stage
+            voice (reserved), `7` public matchmaking.
+
+
+            Only `0`, `2` and `4` can be created through the guild-channel endpoint. The reserved values
+            are part of the schema and stay there; voice is active v1 functionality, video and stage voice
+            are the deferred-but-seamed parts.
+        parent_id:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+          description: >
+            The category this channel sits under. Deleting a category sets this to null on its children
+            rather than deleting them — losing a category must not lose the conversations in it.
+        name:
+          type: [string, "null"]
+        topic:
+          type: [string, "null"]
+        position:
+          type: integer
+        nsfw:
+          type: boolean
+        last_message_id:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+          description: Reserved until messages exist. Always null at this version.
+        bitrate:
+          type: [integer, "null"]
+          description: Voice channels only; null on every other type.
+        user_limit:
+          type: [integer, "null"]
+          description: Voice channels only; null on every other type.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateChannelRequest:
+      type: object
+      required: [name, type]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        type:
+          type: integer
+          enum: [0, 2, 4]
+          description: Text, voice, or category. See `Channel.type` for the values a guild cannot contain.
+        topic:
+          type: string
+          maxLength: 1024
+        parent_id:
+          allOf:
+            - $ref: "#/components/schemas/Snowflake"
+          description: >
+            A category **in this guild**. Verified rather than trusted: nesting under a category elsewhere
+            would place this channel behind another guild's overwrites.
+        position:
+          type: integer
+          default: 0
+        nsfw:
+          type: boolean
+          default: false
+        bitrate:
+          type: integer
+          minimum: 8000
+          maximum: 384000
+        user_limit:
+          type: integer
+          minimum: 0
+          maximum: 99
+
+    UpdateChannelRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        topic:
+          type: string
+          maxLength: 1024
+        clear_topic:
+          type: boolean
+          default: false
+          description: Removes the topic. See `clear_description` on a guild for why this is a flag.
+        position:
+          type: integer
+        nsfw:
+          type: boolean
+        bitrate:
+          type: integer
+          minimum: 8000
+          maximum: 384000
+        user_limit:
+          type: integer
+          minimum: 0
+          maximum: 99
+
+    Role:
+      type: object
+      required:
+        [id, guild_id, name, color, permissions, position, hoist, mentionable, is_default, created_at,
+         updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          $ref: "#/components/schemas/Snowflake"
+        name:
+          type: string
+        color:
+          type: integer
+          minimum: 0
+          maximum: 16777215
+          description: 24-bit RGB. `0` means no colour, which renders as inherited rather than as black.
+        permissions:
+          $ref: "#/components/schemas/Permissions"
+        position:
+          type: integer
+          description: >
+            Higher is higher in the hierarchy. `@everyone` is always 0. Not settable through these
+            endpoints — reordering is a multi-row operation, and role hierarchy arrives with the
+            permission-overwrite endpoints.
+        hoist:
+          type: boolean
+          description: Whether members holding this role are shown in their own section of the member list.
+        mentionable:
+          type: boolean
+        is_default:
+          type: boolean
+          description: >
+            True for exactly one role per guild, `@everyone`. It is the floor every other role stacks on,
+            it cannot be deleted or renamed, and every member holds it without appearing in any grant.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateRoleRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        color:
+          type: integer
+          minimum: 0
+          maximum: 16777215
+          default: 0
+        permissions:
+          allOf:
+            - $ref: "#/components/schemas/Permissions"
+          description: >
+            Defaults to none. **Cannot exceed what the caller holds** — see the endpoint description for
+            why that check is what stops `MANAGE_ROLES` from being every permission.
+        hoist:
+          type: boolean
+          default: false
+        mentionable:
+          type: boolean
+          default: false
+
+    UpdateRoleRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Refused for `@everyone`.
+        color:
+          type: integer
+          minimum: 0
+          maximum: 16777215
+        permissions:
+          allOf:
+            - $ref: "#/components/schemas/Permissions"
+          description: Cannot exceed what the caller holds. Permitted on `@everyone`, unlike the name.
+        hoist:
+          type: boolean
+        mentionable:
+          type: boolean
+
+    Member:
+      type: object
+      required: [guild_id, user_id, nickname, joined_at, deaf, mute, roles]
+      additionalProperties: false
+      properties:
+        guild_id:
+          $ref: "#/components/schemas/Snowflake"
+        user_id:
+          $ref: "#/components/schemas/Snowflake"
+        nickname:
+          type: [string, "null"]
+          description: A per-guild display name. Null means the account's own display name is used.
+        joined_at:
+          type: string
+          format: date-time
+        deaf:
+          type: boolean
+          description: >
+            Server-side deafen, set by a moderator. Distinct from the self-deafen a client sets on itself,
+            which lives in voice state.
+        mute:
+          type: boolean
+          description: Server-side mute, set by a moderator. See `deaf`.
+        roles:
+          type: array
+          description: >
+            The roles this member holds, excluding `@everyone` — which every member holds and which appears
+            in no grant. An empty array rather than null when there are none: a client that has to handle
+            both writes the check once per field and forgets it somewhere.
+          items:
+            $ref: "#/components/schemas/Snowflake"
+
+    UpdateMemberRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        The permission required depends on which fields are present — see the endpoint description.
+      properties:
+        nickname:
+          type: string
+          minLength: 1
+          maxLength: 32
+        clear_nickname:
+          type: boolean
+          default: false
+          description: Removes the nickname. See `clear_description` on a guild for why this is a flag.
+        deaf:
+          type: boolean
+        mute:
+          type: boolean
+
+    RegistrationChallenge:
+      description: >
+        **Reserved for M67a (registration anti-automation). Nothing produces one of these today.**
+
+
+        The shape is reserved now rather than with the mechanism because rule 6 and rule 15 make it
+        expensive once four clients generate from the current contract: adding a response state later is a
+        coordinated regeneration across the CLI, the TUI, the GUI and the web SPA, where adding it now is
+        three dozen lines nobody has to act on. The roadmap entry for M67a says the reservation lands with
+        M12's contract work, and this is it.
+
+
+        What is deliberately *not* fixed here is the mechanism. M67a chooses between proof-of-work, a
+        hosted captcha, or both behind one interface at build time, and `parameters` is an open object so
+        that choice does not become a contract change.
+      type: object
+      required: [mechanism, parameters]
+      additionalProperties: false
+      properties:
+        mechanism:
+          type: string
+          description: >
+            Which challenge this instance is asking for, so a client knows what to render or compute.
+
+
+            Deliberately not an enum. An enum would make adding a mechanism a breaking regeneration for
+            every client, which is the cost this whole reservation exists to avoid — and a client that does
+            not recognise the value should tell the person to use a client that does, not fail closed on a
+            list this document froze years earlier.
+          examples: [proof_of_work, hcaptcha]
+        parameters:
+          type: object
+          additionalProperties: true
+          description: >
+            Everything the client needs to produce a solution, in a shape the mechanism defines: a
+            difficulty and a seed for proof-of-work, a site key for a hosted captcha.
+
+
+            The one open object in this contract, and it is open on purpose rather than by omission —
+            pinning it would tie the document to whichever mechanism was chosen first.
+        expires_at:
+          type: string
+          format: date-time
+          description: >
+            When this challenge stops being accepted, so a client can offer a fresh one rather than submit
+            a solution that will be refused. Optional: a stateless proof-of-work challenge need not expire.
+
     Error:
       description: >
         The envelope every non-2xx JSON response uses. Clients key off `code`, which is stable, never off
@@ -3017,6 +4063,19 @@ components:
                 # The OAuth paths, from M6.
                 - oauth_email_unverified
                 - oauth_provider_error
+                # Reserved for M67a (registration anti-automation) and emitted by nothing today.
+                #
+                # Reserved rather than added later because a client generating a Go or TypeScript enum from
+                # this list and switching on it needs regenerating when a value appears — which is a
+                # coordinated change across four codegen'd clients for what should be an additive one. The
+                # cost of reserving is these three lines; the cost of not reserving lands once every client
+                # generates from the current shape (rules 6 and 15).
+                #
+                # `challenge_invalid` answers a submitted solution that does not verify. There is
+                # deliberately no separate code for "expired" or "already used": those distinctions tell an
+                # automated caller how close it got, which is the one audience this whole mechanism exists
+                # to frustrate.
+                - challenge_invalid
             message:
               type: string
               description: >
@@ -3051,6 +4110,24 @@ components:
         No such resource. Also the answer for a provider this instance has not configured, and for an
         object that exists but belongs to someone else — the two are deliberately indistinguishable, so
         the endpoint cannot be used to probe for what exists.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Forbidden:
+      description: >
+        The caller is known and is inside the resource's scope, but lacks the permission the action needs.
+
+
+        Distinct from `404` on purpose. A caller who is not a member of a guild gets 404 — the same answer
+        a guild that does not exist gets — because guild ids are snowflakes and answering differently would
+        turn a list of plausible ids into a map of what exists. A caller who *is* a member already knows
+        the guild exists, so refusing them plainly discloses nothing.
+
+
+        The message never names the missing permission bit. That would tell a caller probing the boundary
+        exactly where it is, and a member can already read their own permissions from the role listing.
       content:
         application/json:
           schema:

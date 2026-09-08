@@ -65,6 +65,18 @@ type fileConfig struct {
 		MigrateLockTimeout *string `toml:"migrate_lock_timeout"`
 	} `toml:"database"`
 
+	// Limits are the per-guild and per-account ceilings M12 enforces at creation. Configurable because a
+	// self-hosted instance for a large organization may legitimately want more channels than the flagship's
+	// default, and the alternative to a setting is that they fork to change a constant.
+	//
+	// M72a layers per-account entitlements on top: this is the floor every account gets, and a flagship
+	// subscriber or an Instance Admin resolves higher.
+	Limits struct {
+		ChannelsPerGuild *int32 `toml:"channels_per_guild"`
+		RolesPerGuild    *int32 `toml:"roles_per_guild"`
+		GuildsPerAccount *int32 `toml:"guilds_per_account"`
+	} `toml:"limits"`
+
 	Log struct {
 		Level  *string `toml:"level"`
 		Format *string `toml:"format"`

@@ -40,6 +40,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
@@ -190,12 +191,24 @@ func run() error {
 		return err
 	}
 
+	guildService, err := guilds.NewService(guilds.ServiceOptions{
+		Pool:                pool,
+		IDs:                 ids,
+		MaxChannelsPerGuild: cfg.MaxChannelsPerGuild,
+		MaxRolesPerGuild:    cfg.MaxRolesPerGuild,
+		MaxGuildsPerAccount: cfg.MaxGuildsPerAccount,
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := newRouter(routerOptions{
 		Config:  cfg,
 		Logger:  logger,
 		Health:  health,
 		Auth:    auth.NewHandler(authService),
 		AuthSvc: authService,
+		Guilds:  guilds.NewHandler(guildService),
 	})
 	if err != nil {
 		return err

@@ -325,16 +325,16 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete, through M11a.** Full dependency-ordered roadmap (`M0` through `M125` plus suffixed
-insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment — running as an explicitly
-parallel track) is in `docs/roadmap.md`.
+**Phase B complete through M11a; Phase C open, M12 done.** Full dependency-ordered roadmap (`M0` through
+`M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
+running as an explicitly parallel track) is in `docs/roadmap.md`.
 
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Four exist:
-`M11a` (two-factor authentication), `M20a` (first usable client), `M56a` (message reactions), `M67a`
-(registration anti-automation).
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Five exist:
+`M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M20a` (first usable client),
+`M56a` (message reactions), `M67a` (registration anti-automation).
 
 **Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
 testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed
@@ -412,12 +412,24 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   The CLI half landed here too, after a review found the milestone had shipped a backend that made
   `norite login` unusable on any account taking its advice: `apiclient.DoStatus`, and the code prompt in
   `cli/internal/login`.
-- **M12 — Guilds/channels/roles schema plus CRUD**: next. It wires `oapi-codegen` against
-  `contracts/openapi.yaml`, so every REST endpoint from there on is generated rather than only documented.
-  The roadmap entry used to open by saying that contract does not generate; measured against v2.8.0 it
-  does, in all four modes with no warnings, so that blocker and the 3.0-versus-3.1 decision behind it are
-  both gone. It also carries M67a's contract-shape reservation, because a challenge-required registration
-  state is nearly free to reserve now and expensive once four clients codegen from the current shape.
+- **M12 — Guilds/channels/roles schema plus CRUD**: done (tag `m12`). Migrations `000015`/`000016` (seven
+  tables), `internal/roles` (the permission bitfield and `Resolve`), `internal/guilds` (the service, the
+  `authorize` chokepoint, and fifteen REST routes), `backend/oapi-codegen.yaml` plus
+  `internal/apicontract` (the contract's Go types, committed with a staleness check), and M67a's
+  contract-shape reservation. Decisions are in the roadmap entry and in the migrations rather than in a new
+  ADR — nothing here contradicts ADR 0008, which is the test for whether one is owed.
+
+  **It took scope from two later milestones, and both entries were rewritten in the same PR.** Rule 2
+  needs `audit_log_entries` at the first guild-scoped mutation and the table was M14's; the table
+  references `guilds(id)`, so reordering was impossible and M12 creates it. Rule 1 needs `roles.Resolve`
+  and it was M13's; four of ADR 0008's six layers have data at M12, so what is built here is complete
+  rather than a placeholder. M13 keeps the overwrite endpoints and position hierarchy; M14 keeps the read
+  surface and the `changes` diffing.
+- **M13 — Permission overwrites and role hierarchy**: next, and smaller than its original entry. The
+  resolution engine exists; what M13 adds is the endpoints that write an overwrite — so layer 5 finally has
+  rows to resolve against — plus position-based hierarchy, and the per-channel view filtering M12's channel
+  listing deliberately does not do yet.
+
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -982,6 +994,142 @@ And on the CLI OAuth side, from M8 (decisions in ADR 0027):
   the ordinary case, not the rare one.
 - **`--no-browser` prints and keeps listening; it does not mean headless.** A machine with no browser at
   all is M9's device code. This refines ADR 0011's sentence rather than reversing it.
+
+And on guilds, permissions and the audit log, from M12:
+
+- **`roles.Resolve` implements ADR 0008's layers 2–5 and deliberately not layer 1.** An Instance Admin is
+  not a guild member, holds no roles, and resolves to exactly zero permissions — which is the correct
+  answer to the question that package asks. The tier check lives in `guilds.authorize`, which asks it
+  *first*: resolving first and checking the tier as a fallback answers "not found" for every guild on the
+  instance and never reaches the check. ADR 0008 rejects the synthetic "super role" by name, and this is
+  the fourth time a rule here has had to be structural rather than remembered.
+- **Every guild route carries a scope, and M12 shipped without them.** `auth` guards even the read-only
+  `GET /users/@me` with `RequireScope`; the fifteen guild routes were mounted bare, so an `identify`-only
+  API token deleted a guild and answered 204. Reproduced before it was fixed. This is the first milestone
+  to put a *mutating* surface within reach of a delegated credential, which is exactly when "scopes only
+  ever restrict" stops being free. `guilds.read` and `guilds.write` are separate because the blast radii
+  differ and the common bot wants only the first, and **write does not imply read** — a scope bounds a
+  credential, and holding one is not a reason to be granted another.
+- **`authorize` is the only thing that decides authority, and it exists before the call sites do.**
+  `revokeEverything`, `RequireLiveSession` and `factorProof` were each built after finding the one caller
+  that forgot. M12 is the first milestone writing its handlers from scratch, so the chokepoint went in
+  first — and a table-driven test walks every non-GET route with a non-member and requires 404, which is a
+  property no single-endpoint test can assert.
+- **`authorizeWith` takes a querier so the check runs on the caller's transaction.** Rule 1 asks for data
+  freshly loaded for the request; authorizing on the pool and then opening a transaction to write reads a
+  snapshot from before its own `BEGIN`, which is exactly the window a demotion committed in between is
+  missed in. Costs a parameter.
+- **Two refusals, and the split is anti-enumeration.** A non-member and a guild that does not exist both
+  get 404, because guild ids are snowflakes and a 404/403 split turns a list of plausible ids into a map of
+  what exists (M11 settled it for session ids). A member lacking a permission gets 403 — they already know
+  the guild exists. Neither names the missing bit. **A malformed id in a path answers 404 too**, through
+  the same parser, or the oracle comes back through the 400.
+- **A role cannot be given permissions the caller does not hold.** Without it `PermManageRoles` is every
+  permission: mint a role with `PermAdministrator`, take it, done. It binds creating *and* editing —
+  bounding one is the same hole in two steps.
+- **A channel is authorized against its own guild, read off the row.** `PATCH /channels/{id}` carries no
+  guild, which is why `GetChannel` takes no guild parameter: scoping that read by a caller-supplied guild
+  would be trusting the value the check exists to verify. Same shape for a `parent_id`, which must be a
+  category *in this guild* or it puts a channel behind another guild's overwrites.
+- **The permission bit order is data, not style.** `roles.permissions` stores bit positions, so inserting a
+  constant in the middle reassigns every permission every guild has already granted — no migration, no
+  compile error, no symptom. A test pins each constant to its literal value. `PermVideoVoice` stays for the
+  same reason (rule 10): removing it renumbers the six bits above it.
+- **`permAll` stops at the last defined bit** rather than being `^Permission(0)`, so a future bit is not
+  already granted to every owner on every instance — and so the value stays positive as a signed `bigint`.
+- **Permissions cross the wire as a quoted decimal string**, the decision ADR 0003 makes for snowflakes: a
+  63-bit field and a float64 do not mix above 2^53. Fixed now, while nineteen bits are defined and changing
+  it is free.
+- **Nothing is cached.** `architecture.md` describes `Resolve` as cached per `(guild_id, user_id,
+  channel_id)` and invalidated on dispatch — the invalidation signal is a gateway dispatch, and that is
+  M18. A cache with nothing to invalidate it is a demotion that takes effect five minutes late.
+- **Guild creation writes three rows in one transaction**: the guild, `@everyone`, and the owner's
+  membership. A guild without a default role has no permission floor; one without the owner's membership
+  looks fine until the member list omits them. Neither is repairable by a client.
+- **Deleting a guild is the owner's, not `PermManageGuild`'s.** That bit renames a guild and is one an
+  owner delegates; deleting cascades everything with no undo, which ADR 0008 makes layer 2's call. Same
+  reasoning refuses removing the owner from their own guild by any route, themselves included.
+- **Rule 2 is satisfied by there being no other way to write.** Every mutation goes through `inTx`, and
+  `writeAudit` takes that transaction's querier. A mutation committing without its entry is not a state the
+  code can reach.
+- **A guild's own deletion entry does not survive**, because `audit_log_entries` cascades from `guilds`.
+  Rule 2 holds — the entry is written in the transaction — and nothing can read it afterwards. The durable
+  record of an instance-level action is rule 14's `instance_audit_log` (M72), not this table. Asserted by a
+  test as the state it is, rather than left to look like a bug.
+- **Refuse before explaining.** Two endpoints answered a non-member with something other than 404 because
+  a public error was evaluated *before* `authorizeWith`: removing the owner returned a 409 naming the
+  reason, and a voice-only field on `PATCH /channels/{id}` returned a 400 that reported the row's type.
+  Each disclosed the existence of an object the caller could not see, and the owner one disclosed who owned
+  it. Validation that reads a loaded row is an authorization question, not an input question — it belongs
+  below the check, and nothing in it ever needs to run first.
+- **A structural test is only structural over the inputs it sends.**
+  `TestEveryMutatingGuildRouteRefusesANonMember` walks every mutating route with a stranger and passed
+  throughout, because it targets an ordinary member and always sends `{"name": "hijacked"}` — never the
+  owner, never a voice-only field. The route table was covered; the branches inside the handlers were not.
+  When a test's value is "it cannot miss a route", ask what it cannot miss *within* one.
+- **A reserved contract field must exist in the Go struct, not just the document.** `httpx.DecodeJSON`
+  calls `DisallowUnknownFields`, so a field the contract calls ignorable is a hard 400 unless the request
+  struct names it — M12 reserved `challenge_response` for M67a saying "sending this changes nothing" and
+  shipped exactly that. Neither contract test can see it: one compares the route set, the other reads
+  responses. **Request-shape drift has no automated check**, which is the thing to know before reserving
+  the next field.
+- **A read-modify-write needs a lock even when the value looks monotonic.** `max(position) + 1` fixed the
+  count-versus-max cause of role-position collisions and left the race: `RunInTx` sets no isolation level,
+  so under READ COMMITTED two concurrent creates read the same max and both take it. There is deliberately
+  no unique constraint to catch it, and position is the hierarchy M13 enforces over. Slot 3 of the advisory
+  lock namespace, keyed per guild.
+- **Preserving an unknown bit on read and accepting one on write are different decisions.**
+  `PermissionFromInt64` keeps unknown high bits so a row from a newer schema survives an older binary;
+  storing one from a *request* means a later milestone defining that bit finds it already granted. The
+  escalation check masks it incidentally for a non-admin and not at all for an Instance Admin, whose tier
+  short-circuits before any bitfield is consulted — so `roles.Known()` is checked first, on the input.
+- **A list that cannot be paginated is bounded at creation instead.** The member list is a cursor capped at
+  100; the channel and role lists return everything, because a client needs the whole tree to render a
+  sidebar and paginating would make it fetch in a loop (rule 21's chattiness). So the ceiling lives in
+  `CreateChannel`/`CreateRole` — 500 and 250 — and it is checked *after* authorization, or "is this guild
+  full" becomes one more thing a non-member can measure. Unbounded, the channel list was 782 kB of row data
+  and a 740 kB sort at 5,010 channels, against 8 buffers for the capped member list on a 15,000-member
+  guild.
+- **A polymorphic column cannot cascade, so something has to clean up after it.**
+  `permission_overwrites.target_id` names a role or a user depending on `target_type` and therefore cannot
+  be a foreign key. Deleting a role or removing a member has to delete their overwrites explicitly — a
+  leftover member row is not clutter, because rejoining silently restores a channel-level deny nothing in
+  the UI or the audit log explains.
+- **A new role's position is `max(position) + 1`, never the role count.** The count collides the moment
+  anything has been deleted, and there is deliberately no unique constraint to catch it, so the corruption
+  is silent until M13 enforces a hierarchy over it.
+- **A permission that is only ever OR'd into a base is not a grantable permission.** `UpdateMember` began
+  with `PermManageGuild` and added the moderation bits, which made `PermMuteMembers` and
+  `PermDeafenMembers` undeliverable on their own: the only way to let somebody mute was to also let them
+  rename the guild. Build `need` from the fields actually present, starting empty.
+- **Guards that can be raced live in the statement.** `@everyone` is undeletable by `AND NOT is_default` in
+  the `DELETE`, not by an `if` before it — the same discipline as `ConsumePasswordResetToken` and
+  `RedeemInstanceInvite`. The Go check exists only to produce a better message.
+- **Check every new foreign key for an index, again.** Three in `000015` had the shape M11 found on
+  `replaced_by_id`, and the worst — `guild_member_roles.role_id`, which is the *third* primary-key column
+  and so serves no lookup alone — cost 4566 ms against 8 ms on 500 role deletions. Nothing in an FK
+  declaration hints at it and it only appears once something deletes.
+- **A composite index's second column pays on the paginated read, not the unbounded one.** "The index
+  answers the `WHERE` and the `ORDER BY` together" is false without a `LIMIT`: Postgres prefers a bitmap
+  heap scan and a quicksort, because reading the heap in physical order beats an ordered index scan's
+  random access. Add the `LIMIT` a real list endpoint carries and the sort node disappears. Measured, after
+  being asserted wrongly first.
+- **`oapi-codegen` generates types only**, into `internal/apicontract`, committed with `just
+  contract-check` and a CI step. `chi-server` cannot reproduce this router — the fixed middleware order,
+  `/instance` as a sibling, three limiter buckets, one exempt path — and a generated router that had to be
+  fought is a worse contract than a hand-written one that matches the document.
+- **The generated types are imported by no handler, and that is a limit rather than an unfinished step.**
+  Handlers declare their own request structs to carry `validate:` tags and their own response types so ids
+  marshal as snowflakes. So "a drifted field is a compile error" is *not* what this setup delivers; what it
+  delivers is a checked artifact of the contract. Payload drift is caught by a test comparing real
+  responses against the declared schemas in both directions, which `additionalProperties: false` plus a
+  full `required` list makes exact. Claiming the compile-time version and not having it is how eight
+  unlisted error codes accumulated before.
+- **The codegen staleness check is inert on a file that has never been committed.** `git diff --quiet`
+  compares the working tree to the index and ignores untracked files, so it passed against a deliberately
+  drifted contract until the generated file was staged. True of `sqlc-check` too; CI is unaffected because
+  it runs against a checkout where the file is tracked. Verify a new check of this shape by drifting its
+  input *after* staging its output.
 
 ## Project-specific skills
 

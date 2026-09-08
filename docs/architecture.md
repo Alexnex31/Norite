@@ -650,8 +650,11 @@ const (
 ```
 
 `roles.Resolve` is unchanged in shape from the original design (owner bypass → `PermAdministrator`
-short-circuit → `@everyone` overwrite → role overwrites → member overwrite), cached per
-`(guild_id, user_id, channel_id)`, invalidated on role/overwrite/membership change dispatch. See
+short-circuit → `@everyone` overwrite → role overwrites → member overwrite). **It is not cached, and will
+not be until M18.** The cache this paragraph used to describe is invalidated by a gateway dispatch, and
+there is no gateway until M18 — a cache with nothing to invalidate it is a demotion that takes effect five
+minutes late, which is a security failure rather than a slow path. M12 built it as one indexed read per
+check; the cache lands with the signal that can clear it. See
 [ADR 0008](adr/0008-guild-authority-hierarchy.md) for the full consolidated authority hierarchy, including
 the parts that deliberately sit **outside** `roles.Resolve` entirely:
 
@@ -762,20 +765,33 @@ POST   /users/@me/channels
 DELETE /users/@me                          -- account deletion, invokes revoke-all-sessions
 GET    /users/@me/export                   -- server-side export; see E2E export note below
 
-POST   /guilds
-GET    /guilds/{guild_id}
-PATCH  /guilds/{guild_id}
-DELETE /guilds/{guild_id}
-GET    /guilds/{guild_id}/channels
-POST   /guilds/{guild_id}/channels
+-- Guild routes additionally require an API token to hold `guilds.read` (reads) or `guilds.write`
+-- (everything else). A user's own access token passes both: a scope bounds a *delegated* credential and
+-- never a person. Permission resolution still runs underneath, so a scope narrows and never grants.
+POST   /guilds                             -- M12; writes guild + @everyone + owner membership in one tx
+GET    /guilds/{guild_id}                  -- M12
+PATCH  /guilds/{guild_id}                  -- M12; PermManageGuild
+DELETE /guilds/{guild_id}                  -- M12; *owner or Instance Admin only*, not PermManageGuild —
+                                           --   a cascading destroy is not a delegable permission
+GET    /guilds/{guild_id}/channels         -- M12; per-channel view filtering arrives with overwrites (M13)
+POST   /guilds/{guild_id}/channels         -- M12; PermManageChannels
 GET    /guilds/{guild_id}/members?after={id}&limit=100
+                                           -- M12; cursor-only, limit clamped to 100 rather than refused
 PATCH  /guilds/{guild_id}/members/{user_id}
+                                           -- M12; required permission depends on the field sent —
+                                           --   nickname is PermManageGuild, mute/deaf add their own bits
 DELETE /guilds/{guild_id}/members/{user_id}
-GET    /guilds/{guild_id}/roles
-POST   /guilds/{guild_id}/roles
-PATCH  /guilds/{guild_id}/roles/{role_id}
+                                           -- M12; PermKickMembers, or none when removing yourself.
+                                           --   The owner cannot be removed by anyone, themselves included
+GET    /guilds/{guild_id}/roles            -- M12
+POST   /guilds/{guild_id}/roles            -- M12; PermManageRoles, and refuses to grant a permission the
+                                           --   caller does not hold — without that, PermManageRoles *is*
+                                           --   every permission
+PATCH  /guilds/{guild_id}/roles/{role_id}  -- M12; same escalation refusal. @everyone's permissions are
+                                           --   editable, its name is not
+DELETE /guilds/{guild_id}/roles/{role_id}  -- M12; @everyone refused in the statement's WHERE, not in Go
 GET    /guilds/{guild_id}/invites
-GET    /guilds/{guild_id}/audit-log
+GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it
 GET    /guilds/{guild_id}/emojis
 POST   /guilds/{guild_id}/emojis
 DELETE /guilds/{guild_id}/emojis/{id}
@@ -783,9 +799,13 @@ GET    /guilds/{guild_id}/tags
 POST   /guilds/{guild_id}/tags
 POST   /guilds/{guild_id}/tags/{tag_id}/messages/{message_id}
 
-PATCH  /channels/{channel_id}
-DELETE /channels/{channel_id}
+PATCH  /channels/{channel_id}              -- M12; carries no guild, so the guild is read off the channel
+                                           --   row and never from the caller (rule 1)
+DELETE /channels/{channel_id}              -- M12; same resolution. Deleting a category orphans its
+                                           --   children rather than deleting them
 PUT    /channels/{channel_id}/permissions/{overwrite_id}
+                                           -- M13; the endpoint that finally writes what roles.Resolve
+                                           --   has read since M12
 GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
 POST   /channels/{channel_id}/messages
 PATCH  /channels/{channel_id}/messages/{message_id}

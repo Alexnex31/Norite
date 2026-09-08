@@ -26,6 +26,24 @@ const (
 	// ScopeIdentify reads the actor's own account. The narrowest useful scope, and the one a bot needs to
 	// confirm which account it is running as.
 	ScopeIdentify Scope = "identify"
+
+	// ScopeGuildsRead reads guilds, their channels, their roles and their membership (M12).
+	ScopeGuildsRead Scope = "guilds.read"
+
+	// ScopeGuildsWrite creates, updates and deletes them.
+	//
+	// Separate from the read scope rather than one "guilds" scope, because the two have very different
+	// blast radii and the common bot wants only the first: a status bot that lists channels should not be
+	// one compromise away from deleting the guild. Write does *not* imply read — a scope bounds a
+	// delegated credential and nothing about holding one justifies granting another, so a token that needs
+	// both asks for both.
+	//
+	// Neither grants anything on its own. Permission resolution still runs on top (rule 1), so a token
+	// holding ScopeGuildsWrite can do exactly what its owner could and no more; the scope only ever
+	// narrows that. Adding these was the missing half — M12 shipped the first mutating surface a delegated
+	// credential can reach, and reached it with no scope gate at all, so an `identify`-only token deleted
+	// a guild. Reproduced before it was fixed.
+	ScopeGuildsWrite Scope = "guilds.write"
 )
 
 // Token management — minting, listing and revoking — has no scope at all: every one of those operations
@@ -42,7 +60,7 @@ const (
 // An unknown scope is rejected rather than ignored: silently dropping a scope the caller asked for would
 // hand them a token they believe is more capable than it is, and silently *keeping* one this build does not
 // understand would mean a future release could widen an existing token's reach.
-var AllScopes = []Scope{ScopeIdentify}
+var AllScopes = []Scope{ScopeIdentify, ScopeGuildsRead, ScopeGuildsWrite}
 
 // ValidScope reports whether s is a scope this build understands.
 func ValidScope(s Scope) bool { return slices.Contains(AllScopes, s) }

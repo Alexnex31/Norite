@@ -6,6 +6,10 @@ go_modules := "backend cli gui daemon"
 # `just sqlc-generate` and commit the diff.
 sqlc_version := "v1.30.0"
 
+# Pinned for the same reason, and it is now the third generator whose version has to move deliberately.
+# Must match .github/workflows/ci.yml's OAPI_CODEGEN_VERSION.
+oapi_codegen_version := "v2.8.0"
+
 # Must match .github/workflows/ci.yml's GOLANGCI_LINT_VERSION. golangci-lint has to be built with a Go
 # version at least as new as the highest `go` directive in the workspace, or it refuses to run at all.
 golangci_lint_version := "2.12.2"
@@ -111,6 +115,29 @@ sqlc-check: sqlc-generate
         exit 1
     fi
     echo "sqlc output is up to date"
+
+# Regenerate the Go view of contracts/openapi.yaml into backend/internal/apicontract.
+#
+# Types only — see backend/oapi-codegen.yaml for why this project does not generate a server. Run this and
+# commit the diff whenever the contract changes, which rule 6 requires to be the same commit as the
+# endpoint it describes.
+contract-generate:
+    cd backend && go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@{{oapi_codegen_version}} \
+        -config oapi-codegen.yaml ../contracts/openapi.yaml
+
+# Fail if the committed contract types are stale.
+#
+# The sqlc-check arrangement exactly: generated code is committed so a plain `go build` needs no extra
+# tooling, and that only stays true if a contract change cannot merge without its regenerated code.
+contract-check: contract-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git diff --quiet -- backend/internal/apicontract; then
+        echo "backend/internal/apicontract is out of date — run 'just contract-generate' and commit the result:" >&2
+        git --no-pager diff --stat -- backend/internal/apicontract >&2
+        exit 1
+    fi
+    echo "contract types are up to date"
 
 # pnpm audit and Trivy join once frontend/ and a Dockerfile exist.
 

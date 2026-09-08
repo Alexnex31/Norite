@@ -302,15 +302,100 @@ of this section.
   were actually being got wrong rather than validating whole schemas. And the moment M12 generates, that
   gap closes on its own.
 
-  Done when: a guild, its channels, and its roles can be created, read, updated, and deleted via the REST
-  API, matching the generated types.
-- **M13 — Permission engine**: `roles.Resolve`, the permission bitfield, overwrite resolution
-  (`@everyone` → role → member), role `position` hierarchy enforcement. Done when: the permission-resolution
-  algorithm's documented test cases (owner bypass, `PermAdministrator` short-circuit, overwrite precedence,
-  position-based role-management limits) all pass.
-- **M14 — Guild audit log**: `audit_log_entries`, written in the same transaction as every guild-scoped
-  mutation, `GET /guilds/{id}/audit-log`. Done when: every guild mutation type produces exactly one audit
-  entry, atomically.
+  **It took scope from M13 and M14, and both of their entries below are rewritten to say so.** Neither was
+  visible from this entry when it was written; both are ordering problems that only appear once you try to
+  satisfy rules 1 and 2 on the first guild-scoped mutation that exists.
+
+  Rule 2 requires every guild-scoped mutation to write an audit entry in the mutation's transaction, and
+  `audit_log_entries` was M14's. Reordering the two milestones was not available — the table references
+  `guilds(id)` — so M12 creates it. The alternative was two milestones during which rule 2 was false,
+  followed by a retrofit across every handler written in between.
+
+  Rule 1 requires resolution through `roles.Resolve`, which was M13's. Four of ADR 0008's six layers have
+  data at M12 and the fifth reads a table M12 creates, so a `Resolve` written here is not a placeholder: it
+  is complete, and the overwrite layer runs against an empty table and correctly contributes nothing. M13's
+  endpoints fill that table and this code does not change.
+
+  **Two dead ends it leaves, closed at M13a.** Deletion is owner-only and the owner cannot be removed from
+  their own guild by any route — both deliberate, and together they mean an inactive owner leaves a guild
+  nobody but an Instance Admin can delete and which its owner cannot leave. Ownership transfer is the fix
+  and it is scheduled rather than assumed.
+
+  Done when: a guild, its channels, its roles and its membership can be created, read, updated and deleted
+  via the REST API; every mutating route resolves permissions through one chokepoint; and every mutation
+  writes exactly one audit entry in its own transaction.
+- **M13 — Permission overwrites and role hierarchy**: the `permission_overwrites` endpoints, and
+  position-based hierarchy enforcement — who may manage whom.
+
+  **M12 built the resolution engine, so this entry is smaller than it was.** `roles.Resolve` exists with
+  ADR 0008's layers 2 through 5: owner bypass, `PermAdministrator` short-circuit, the OR of role bits, and
+  overwrite precedence (`@everyone` → the union of role overwrites → member). The permission bitfield
+  exists and its bit order is pinned by a test. What M13 adds is the half M12 could not: endpoints that
+  write an overwrite, so layer 5 has rows to resolve against, and role `position` hierarchy, which is a
+  different question from permission resolution and is genuinely untouched.
+
+  M12 tests layer 5 by inserting overwrite rows directly, which is what stops it shipping unexercised —
+  but "an overwrite created through the API behaves as documented" is still M13's to demonstrate.
+
+  Two items M12 deferred here explicitly: the channel listing does not yet hide channels the caller cannot
+  view, because nothing can write an overwrite to hide one with; and role `position` is not settable
+  through the role endpoints, because reordering is a multi-row swap that belongs with the hierarchy rules
+  that give it meaning.
+
+  **The hierarchy gap is wider than roles, and that is the part this entry used to miss.** A security
+  review of M12 found the same missing check on two member operations, neither of which is about roles at
+  all: `RemoveMember` lets a `PermKickMembers` holder kick an administrator, and `UpdateMember` lets a
+  `PermMuteMembers` holder server-mute one. The shape is identical in all three places — the permission is
+  checked and the *relative standing* of actor and target never is — so a milestone that lands the role
+  check alone produces the worse outcome of the two: a hierarchy that holds for roles and silently does
+  not for people. M12 left all three open together and they close together.
+
+  What "standing" means needs deciding once, here, rather than three times: the natural rule is the target's
+  highest role position against the actor's, with the guild owner and an Instance Admin above everyone. Note
+  that `@everyone` is position 0, so a member holding no role at all is at the floor and can be acted on by
+  anybody with the permission — which is correct, and worth stating so it is not later mistaken for a bug.
+
+  Done when: an overwrite can be created, updated and deleted through the API and changes what
+  `roles.Resolve` returns; a member cannot manage a role positioned above their own highest, **nor kick,
+  mute or deafen a member whose highest role is above their own**; and the channel listing reflects
+  per-channel view permission.
+- **M13a — Guild ownership transfer**: `POST /guilds/{guild_id}/owner`, moving ownership to another
+  member. Small, and scheduled here because M12 left two dead ends that only this closes.
+
+  **A guild whose owner is gone is stuck.** M12 makes deletion owner-only — deliberately, because it
+  cascades with no undo and is not a permission an owner should be able to delegate — and refuses to
+  remove the owner from their own guild by any route, because ADR 0008's layer 2 is the tier that bypasses
+  permission checks and a guild without one has no layer 2 at all. Both are right, and together they mean
+  an inactive or departed owner leaves a guild nobody but an Instance Admin can delete, and which its owner
+  cannot leave. On a self-hosted instance with no active admin there is no path at all.
+
+  Owner-only and undelegable stay: this milestone does not widen who may delete, it gives the owner
+  somewhere to hand the guild to. The transfer is the owner's own action, to an existing member, and it is
+  guild-scoped so it writes an audit entry like every other mutation (rule 2).
+
+  Placed after M13 rather than inside M12 because it is a new endpoint rather than a correction, and after
+  the hierarchy work because "who may become owner" reads naturally alongside "who may manage whom" — but
+  it depends on neither, and could move earlier if the dead end starts to matter.
+
+  Done when: an owner can transfer to another member of the same guild and not to a non-member; the former
+  owner becomes an ordinary member and can then leave; the new owner passes ADR 0008 layer 2; and an
+  Instance Admin can perform the transfer for a guild whose owner is gone, which is the case that motivates
+  the milestone.
+- **M14 — Guild audit log**: `GET /guilds/{guild_id}/audit-log`, and the `changes` diffing behind it.
+
+  **M12 created the table and writes to it, so this entry no longer introduces either.** Every mutation in
+  M12 already writes an entry in its own transaction, with the actor, the action and the target, and a
+  table-driven test asserts exactly one entry per mutation type. What M14 adds is the read surface, the
+  before/after diff that fills `changes` with more than the flat map M12 writes, and the pagination the
+  listing needs.
+
+  One state M12 recorded rather than fixed: `audit_log_entries.guild_id` cascades from `guilds`, so a
+  guild's own deletion entry is removed by the cascade it records. Rule 2 is satisfied and nothing can read
+  the entry afterwards. The durable record of an instance-level action is rule 14's `instance_audit_log`,
+  at M72 — M14 should not try to solve it here.
+
+  Done when: a guild's audit log can be read back, cursor-paginated, with a `changes` diff naming what
+  actually changed; and the coverage test extends M12's to assert the diff rather than only the entry.
 - **M15 — Core messaging CRUD**: send/edit/delete REST endpoints for channel messages, permission-checked via
   the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14. Done when: a
   permitted member can send/edit/delete a message via the REST API, an unpermitted one is rejected, and each
@@ -797,11 +882,19 @@ of this section.
   strangers with no guild between them, and M70's blocks are per-account, so bulk account creation is
   exactly what that design rewards.
 
-  **The contract shape is reserved before the mechanism is built.** Registration gains a
-  challenge-required response state that self-hosted instances never emit, so adding a challenge later is
-  additive rather than a break across four codegen'd clients. Reserving it costs almost nothing now; rule
-  6 and rule 15 make it expensive once every client generates from the current shape. That reservation
-  lands with M12's contract work, not here.
+  **The contract shape is reserved before the mechanism is built, and that reservation has landed** — it
+  shipped with M12's contract work, as planned. `contracts/openapi.yaml` carries a `RegistrationChallenge`
+  schema, a `428` response state on `POST /auth/register`, an optional `challenge_response` on
+  `RegisterRequest`, and a `challenge_invalid` error code. Nothing emits any of it; self-hosted instances
+  never will. What M67a adds is the mechanism behind them, not a change to the shape — so it is additive
+  rather than a break across four codegen'd clients.
+
+  Two things about the reservation constrain M67a rather than merely describing it. `parameters` is an
+  open object and `mechanism` is deliberately not an enum, so choosing between proof-of-work and a hosted
+  captcha at build time is not a contract change. And the reservation could not add a *path*:
+  `contract_test.go` fails on a documented endpoint that does not exist, which is why the challenge is
+  delivered as a response state on the existing registration call rather than as a `GET .../challenge`
+  a client would fetch first. M67a inherits that shape.
 
   Not urgent in the release plan's terms — nothing is publicly open before v1 — which is precisely why it
   is scheduled rather than left as a gap somebody discovers on launch day.
@@ -836,6 +929,14 @@ of this section.
   optional `expires_at`), enforcement via the M11 revoke-all-sessions primitive (force-close plus revoke
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
   `instance_audit_log` recording every Instance Admin action.
+
+  **It inherits one case from M12 that is easy to miss, because the code that creates it destroys its own
+  evidence.** An Instance Admin passes ADR 0008's layer 1 and can therefore delete a guild they are not a
+  member of. That deletion writes a guild-scoped audit entry in its own transaction, satisfying rule 2 —
+  and `audit_log_entries.guild_id` cascades from `guilds`, so the entry is removed by the very cascade it
+  records. Every other admin action on a guild leaves a surviving guild-scoped entry; deletion is the one
+  that does not, and it is the most consequential of them. `instance_audit_log` is where it belongs, and
+  M12's `Service.Delete` is the call site to add the write to.
 
   **Must also cover instance-invite management**, which M10 built and logs structurally rather than
   durably. Rule 14 enumerates bans, report resolution, entitlement changes and tier grants, so minting an

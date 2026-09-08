@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
+	"github.com/Alexnex31/Norite/backend/internal/guilds"
 )
 
 // CLAUDE.md rule 6 says every REST endpoint added or changed updates contracts/openapi.yaml in the same
@@ -214,6 +215,7 @@ func newTestRouterWithAuth(t *testing.T) http.Handler {
 		Logger: zerolog.New(io.Discard),
 		Health: newHealth(&stubPinger{}),
 		Auth:   auth.NewHandler(nil),
+		Guilds: guilds.NewHandler(nil),
 	})
 	require.NoError(t, err)
 	return router
