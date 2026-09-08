@@ -316,6 +316,11 @@ of this section.
   is complete, and the overwrite layer runs against an empty table and correctly contributes nothing. M13's
   endpoints fill that table and this code does not change.
 
+  **Two dead ends it leaves, closed at M13a.** Deletion is owner-only and the owner cannot be removed from
+  their own guild by any route — both deliberate, and together they mean an inactive owner leaves a guild
+  nobody but an Instance Admin can delete and which its owner cannot leave. Ownership transfer is the fix
+  and it is scheduled rather than assumed.
+
   Done when: a guild, its channels, its roles and its membership can be created, read, updated and deleted
   via the REST API; every mutating route resolves permissions through one chokepoint; and every mutation
   writes exactly one audit entry in its own transaction.
@@ -354,6 +359,28 @@ of this section.
   `roles.Resolve` returns; a member cannot manage a role positioned above their own highest, **nor kick,
   mute or deafen a member whose highest role is above their own**; and the channel listing reflects
   per-channel view permission.
+- **M13a — Guild ownership transfer**: `POST /guilds/{guild_id}/owner`, moving ownership to another
+  member. Small, and scheduled here because M12 left two dead ends that only this closes.
+
+  **A guild whose owner is gone is stuck.** M12 makes deletion owner-only — deliberately, because it
+  cascades with no undo and is not a permission an owner should be able to delegate — and refuses to
+  remove the owner from their own guild by any route, because ADR 0008's layer 2 is the tier that bypasses
+  permission checks and a guild without one has no layer 2 at all. Both are right, and together they mean
+  an inactive or departed owner leaves a guild nobody but an Instance Admin can delete, and which its owner
+  cannot leave. On a self-hosted instance with no active admin there is no path at all.
+
+  Owner-only and undelegable stay: this milestone does not widen who may delete, it gives the owner
+  somewhere to hand the guild to. The transfer is the owner's own action, to an existing member, and it is
+  guild-scoped so it writes an audit entry like every other mutation (rule 2).
+
+  Placed after M13 rather than inside M12 because it is a new endpoint rather than a correction, and after
+  the hierarchy work because "who may become owner" reads naturally alongside "who may manage whom" — but
+  it depends on neither, and could move earlier if the dead end starts to matter.
+
+  Done when: an owner can transfer to another member of the same guild and not to a non-member; the former
+  owner becomes an ordinary member and can then leave; the new owner passes ADR 0008 layer 2; and an
+  Instance Admin can perform the transfer for a guild whose owner is gone, which is the case that motivates
+  the milestone.
 - **M14 — Guild audit log**: `GET /guilds/{guild_id}/audit-log`, and the `changes` diffing behind it.
 
   **M12 created the table and writes to it, so this entry no longer introduces either.** Every mutation in
