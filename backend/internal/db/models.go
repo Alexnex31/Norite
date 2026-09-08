@@ -21,6 +21,16 @@ type ApiToken struct {
 	RevokedAt  pgtype.Timestamptz
 }
 
+type AuditLogEntry struct {
+	ID        int64
+	GuildID   *int64
+	ActorID   int64
+	Action    string
+	TargetID  *int64
+	Changes   []byte
+	CreatedAt pgtype.Timestamptz
+}
+
 type Channel struct {
 	ID            int64
 	GuildID       *int64
