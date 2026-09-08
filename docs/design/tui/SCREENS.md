@@ -161,6 +161,24 @@ again opens the manual; `/` filters.
   (keys `presence`, strings `ok`, numbers `warn`, punctuation dim); footer
   `piped to pane · C-c y yank · C-c > write to file`.
 
+### 3f — Guild directory
+**Layout** full-width single pane; the channel column becomes **Sort** and **Filter**.
+- Header is the sort row: `▾ SORT` (members ▾ / newest / a–z, and — only once M72b lands — most active /
+  friends in it), `▾ SEARCH` name substring, right `312 public guilds`.
+- Rows carry name, member count, a one-line truncated description, and `JOIN` / `JOINED`. Untrusted text,
+  all of it: name and description are written by a stranger and read by everyone on the instance, so both
+  go through `termsafe` (rule 19) — this is the first screen where that text has never been filtered by
+  membership.
+- A guild the account already belongs to shows `JOINED` in `dim` and is not actionable; joining is a single
+  keystroke with no confirm, since it is reversible and rate-limited.
+- Footer `RET join · TAB sort · / search · C-c ? report` — the report verb is **M74's**, not M72a's, and the
+  binding is reserved here so it does not move once reports route.
+- Empty state: `no public guilds yet` plus the invite-redeem box from `5b`. **This screen exists because of
+  that one**: `5b` is a new account with no guilds whose only affordance is pasting a code somebody must
+  have sent them, which is a dead end for anyone who has not been invited anywhere.
+- Instance-level toggle. On an instance with discovery off, this screen and its `M-x` verb are absent
+  rather than empty — a self-hosted guild of twelve people has no directory to browse.
+
 ---
 
 ## 4 · Voice
