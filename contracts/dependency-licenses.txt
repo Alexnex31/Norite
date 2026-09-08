@@ -50,6 +50,7 @@ github.com/moby/sys/sequential,https://github.com/moby/sys/blob/sequential/v0.7.
 github.com/moby/sys/user,https://github.com/moby/sys/blob/user/v0.4.1/user/LICENSE,Apache-2.0
 github.com/moby/sys/userns,https://github.com/moby/sys/blob/userns/v0.1.0/userns/LICENSE,Apache-2.0
 github.com/moby/term,https://github.com/moby/term/blob/v0.5.2/LICENSE,Apache-2.0
+github.com/oapi-codegen/runtime/types,https://github.com/oapi-codegen/runtime/blob/v1.7.0/LICENSE,Apache-2.0
 github.com/opencontainers/go-digest,https://github.com/opencontainers/go-digest/blob/v1.0.0/LICENSE,Apache-2.0
 github.com/opencontainers/image-spec/specs-go,https://github.com/opencontainers/image-spec/blob/v1.1.1/LICENSE,Apache-2.0
 github.com/pelletier/go-toml/v2,https://github.com/pelletier/go-toml/blob/v2.4.3/LICENSE,MIT

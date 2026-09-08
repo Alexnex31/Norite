@@ -1,0 +1,39 @@
+# oapi-codegen configuration — generates the Go view of contracts/openapi.yaml.
+#
+# CLAUDE.md rule 6 makes contracts/openapi.yaml the source of truth every client codegens from, and until
+# M12 the backend was the one consumer that did not: the contract was documented and the handlers were
+# hand-written, so the two could disagree and only a test comparing them would notice. Two already had —
+# eight emitted error codes and one unsatisfiable schema accumulated behind that gap, which is why
+# contract_payload_test.go exists.
+#
+# What is generated is *types only*, and that is a decision rather than a first step.
+#
+# oapi-codegen can emit a chi server, and this project's router is exactly the kind it cannot emit.
+# cmd/server/router.go fixes a middleware order that docs/architecture.md §2 makes normative, mounts
+# /instance as a sibling of the authenticated group so an operator token can never reach Authenticate,
+# builds three separate limiter buckets, and exempts precisely one path from RefuseWhileStarting.
+# HandlerFromMux reproduces none of that, and a generated router that had to be fought would be a worse
+# contract than a hand-written one that matches the document.
+#
+# Types are where the contract actually bites: a handler decoding a request into a generated struct, or
+# writing a generated response struct, turns a drifted field into a compile error rather than into a test
+# nobody wrote.
+package: apicontract
+
+# Committed, exactly as the sqlc output is, and for the reason stated in sqlc.yaml: generated code is
+# checked in so a plain `go build` needs no extra tooling. `just contract-check` and CI's codegen job fail
+# on a stale file, which is what keeps that arrangement honest.
+output: internal/apicontract/types.gen.go
+
+generate:
+  models: true
+
+output-options:
+  # Keep every schema, including ones no path references yet.
+  #
+  # Pruning is the sensible default for a client generator and the wrong one here, because this contract
+  # deliberately carries shapes ahead of their implementation — M67a's challenge-required registration
+  # state is reserved in this milestone precisely so that four codegen consumers do not take a breaking
+  # change later. A pruned schema would be reserved in the document and absent from the code, which is the
+  # drift this whole arrangement exists to prevent.
+  skip-prune: true
