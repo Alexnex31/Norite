@@ -164,13 +164,16 @@ again opens the manual; `/` filters.
 ### 3f — Guild directory
 **Layout** full-width single pane; the channel column becomes **Sort** and **Filter**.
 - Header is the sort row: `▾ SORT` (members ▾ / newest / a–z, and — only once M72b lands — most active /
-  friends in it), `▾ SEARCH` name substring, right `312 public guilds`.
+  friends in it), `▾ SEARCH` name **prefix**, right `312 public guilds`. Prefix rather than substring: it
+  is a b-tree lookup and needs no `pg_trgm`, so this screen does not wait on M65.
 - Rows carry name, member count, a one-line truncated description, and `JOIN` / `JOINED`. Untrusted text,
   all of it: name and description are written by a stranger and read by everyone on the instance, so both
   go through `termsafe` (rule 19) — this is the first screen where that text has never been filtered by
   membership.
 - A guild the account already belongs to shows `JOINED` in `dim` and is not actionable; joining is a single
-  keystroke with no confirm, since it is reversible and rate-limited.
+  keystroke with no confirm, since it is direct (no invite, no approval), reversible and rate-limited. An
+  account at its joined-guild ceiling sees `JOIN` in `dim` with the reason in the footer rather than a
+  failure after the keystroke.
 - Footer `RET join · TAB sort · / search · C-c ? report` — the report verb is **M74's**, not M72a's, and the
   binding is reserved here so it does not move once reports route.
 - Empty state: `no public guilds yet` plus the invite-redeem box from `5b`. **This screen exists because of

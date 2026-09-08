@@ -972,11 +972,28 @@ of this section.
   are time-ordered, so this is `id DESC`), and alphabetical. Most-active and friends-in-it are M72b's,
   because both need data from outside the guild row.
 
-  **Opt-in is the only gate.** No minimum member count, no admin approval queue: a brand-new guild is
-  exactly what somebody browsing might want to join, and an approval queue does not scale on the flagship.
-  Moderation is therefore reactive and this milestone depends on M72's `instance_audit_log` and takedown
-  for it. **The directory adds no report affordance** — that is M74's, which routes reports properly;
-  `3f` reserves the keybinding and nothing more.
+  **Opt-in is the only gate, and joining is direct.** No minimum member count, no admin approval queue, no
+  request-to-join: a brand-new guild is exactly what somebody browsing might want to join, and an approval
+  queue does not scale on the flagship. `POST /guilds/{guild_id}/join` refuses unless the guild is
+  discoverable, so this is not a second way into a private one — it is the first join path that needs no
+  invite code, which is the whole point of a directory. Request-to-join is a real feature and a separate
+  milestone if it is ever wanted; it needs a pending-requests table, an owner-facing queue and
+  notifications, which is most of a milestone on its own.
+
+  **Moderation is reactive, in two tiers, and reuses what M72 already built.** Routine: an Instance Admin
+  force-unpublishes, which sets `guilds.discoverable_locked_at` — without the lock the owner flips the
+  boolean back and "takedown" lasted ten seconds. Repeat abuse: M72's `instance_bans`, which already
+  revokes sessions through M11's primitive. **Nothing here deletes a guild** — M12 makes deletion the
+  owner's decision precisely because it cascades with no undo, and destroying every channel and message in
+  a guild over its description punishes its members for its owner's text. Both discoverability writes are
+  rule-14 actions in `instance_audit_log`.
+
+  **The directory adds no report affordance** — that is M74's, which routes reports properly; `3f` reserves
+  the keybinding and nothing more.
+
+  **Search is prefix-only and adds no dependency.** `name ILIKE $1 || '%'` on a partial b-tree over
+  `(name) WHERE discoverable`. Fuzzy matching would need `pg_trgm` and therefore M65; prefix is enough for
+  "I half-remember what it was called", which is the search a directory actually gets.
 
   **Limits stop being constants here.** M12 caps an account at 50 owned guilds with a constant; this
   milestone makes that limit, and a new joined-guild limit of 100, resolve from `user_entitlements` — the
@@ -990,10 +1007,21 @@ of this section.
   ADR 0007 and ADR 0032 both describe `user_entitlements` as inert and unused by any v1 code path. This is
   the milestone that stops being true, and both say so.
 
+  **It opens with a migration**, which is worth saying because the columns are already in §2's DDL and a
+  reader could take them for built: `discoverable`, `discoverable_locked_at` and `member_count` are three
+  `ALTER TABLE`s on `guilds`, plus the two partial indexes. They are deliberately absent from M12's
+  `000015` — a `member_count` shipped there would read `0` on every guild for sixty milestones, and a
+  column that looks authoritative and is not is worse than no column. It arrives with the code that keeps
+  it true. The migration also backfills the counter from `guild_members`, which is the same statement the
+  reconciliation sweep runs.
+
   Done when: an owner can publish a guild and unpublish it; the directory lists only published guilds and
-  never leaks the existence of an unpublished one; the three sorts work; member counts stay correct across
-  joins, leaves, kicks and guild deletion; a non-subscriber is held to 50 owned and 100 joined; and
-  discovery can be switched off instance-wide, which removes the screen rather than emptying it.
+  never leaks the existence of an unpublished one; the three sorts and prefix search work; a guild can be
+  joined directly from the listing and not at all when it is unpublished; member counts stay correct across
+  joins, leaves, kicks, guild deletion and account soft-deletion, and the reconciliation sweep finds no
+  drift; an Instance Admin can force-unpublish and the owner cannot undo it; a non-subscriber is held to 50
+  owned and 100 joined; and discovery can be switched off instance-wide, which removes the screen rather
+  than emptying it.
 - **M72b — Guild directory, richer sorts** *(optional)*: most-active and friends-in-it, the two sorts M72a
   left out because neither is a column.
 
