@@ -1056,6 +1056,17 @@ And on guilds, permissions and the audit log, from M12:
   Rule 2 holds — the entry is written in the transaction — and nothing can read it afterwards. The durable
   record of an instance-level action is rule 14's `instance_audit_log` (M69), not this table. Asserted by a
   test as the state it is, rather than left to look like a bug.
+- **Refuse before explaining.** Two endpoints answered a non-member with something other than 404 because
+  a public error was evaluated *before* `authorizeWith`: removing the owner returned a 409 naming the
+  reason, and a voice-only field on `PATCH /channels/{id}` returned a 400 that reported the row's type.
+  Each disclosed the existence of an object the caller could not see, and the owner one disclosed who owned
+  it. Validation that reads a loaded row is an authorization question, not an input question — it belongs
+  below the check, and nothing in it ever needs to run first.
+- **A structural test is only structural over the inputs it sends.**
+  `TestEveryMutatingGuildRouteRefusesANonMember` walks every mutating route with a stranger and passed
+  throughout, because it targets an ordinary member and always sends `{"name": "hijacked"}` — never the
+  owner, never a voice-only field. The route table was covered; the branches inside the handlers were not.
+  When a test's value is "it cannot miss a route", ask what it cannot miss *within* one.
 - **A polymorphic column cannot cascade, so something has to clean up after it.**
   `permission_overwrites.target_id` names a role or a user depending on `target_type` and therefore cannot
   be a foreign key. Deleting a role or removing a member has to delete their overwrites explicitly — a
