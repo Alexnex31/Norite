@@ -21,6 +21,23 @@ type ApiToken struct {
 	RevokedAt  pgtype.Timestamptz
 }
 
+type Channel struct {
+	ID            int64
+	GuildID       *int64
+	Type          int16
+	ParentID      *int64
+	Name          *string
+	Topic         *string
+	Position      int32
+	Nsfw          bool
+	LastMessageID *int64
+	Bitrate       *int32
+	UserLimit     *int32
+	TopicSearch   interface{}
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
 type DeviceCode struct {
 	ID             int64
 	DeviceCodeHash []byte
@@ -43,6 +60,32 @@ type EmailVerificationToken struct {
 	CreatedAt  pgtype.Timestamptz
 	ExpiresAt  pgtype.Timestamptz
 	ConsumedAt pgtype.Timestamptz
+}
+
+type Guild struct {
+	ID              int64
+	Name            string
+	OwnerID         int64
+	IconHash        *string
+	Description     *string
+	SystemChannelID *int64
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
+type GuildMember struct {
+	GuildID  int64
+	UserID   int64
+	Nickname *string
+	JoinedAt pgtype.Timestamptz
+	Deaf     bool
+	Mute     bool
+}
+
+type GuildMemberRole struct {
+	GuildID int64
+	UserID  int64
+	RoleID  int64
 }
 
 type InstanceAdmin struct {
@@ -102,9 +145,31 @@ type PasswordResetToken struct {
 	UsedAt    pgtype.Timestamptz
 }
 
+type PermissionOverwrite struct {
+	ChannelID  int64
+	TargetType int16
+	TargetID   int64
+	Allow      int64
+	Deny       int64
+}
+
 type RegistrationReservation struct {
 	Username  string
 	CreatedAt pgtype.Timestamptz
+}
+
+type Role struct {
+	ID          int64
+	GuildID     int64
+	Name        string
+	Color       int32
+	Permissions int64
+	Position    int32
+	Hoist       bool
+	Mentionable bool
+	IsDefault   bool
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
 }
 
 type Session struct {
