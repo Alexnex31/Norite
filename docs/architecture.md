@@ -650,8 +650,11 @@ const (
 ```
 
 `roles.Resolve` is unchanged in shape from the original design (owner bypass → `PermAdministrator`
-short-circuit → `@everyone` overwrite → role overwrites → member overwrite), cached per
-`(guild_id, user_id, channel_id)`, invalidated on role/overwrite/membership change dispatch. See
+short-circuit → `@everyone` overwrite → role overwrites → member overwrite). **It is not cached, and will
+not be until M18.** The cache this paragraph used to describe is invalidated by a gateway dispatch, and
+there is no gateway until M18 — a cache with nothing to invalidate it is a demotion that takes effect five
+minutes late, which is a security failure rather than a slow path. M12 built it as one indexed read per
+check; the cache lands with the signal that can clear it. See
 [ADR 0008](adr/0008-guild-authority-hierarchy.md) for the full consolidated authority hierarchy, including
 the parts that deliberately sit **outside** `roles.Resolve` entirely:
 

@@ -1067,6 +1067,22 @@ And on guilds, permissions and the audit log, from M12:
   throughout, because it targets an ordinary member and always sends `{"name": "hijacked"}` — never the
   owner, never a voice-only field. The route table was covered; the branches inside the handlers were not.
   When a test's value is "it cannot miss a route", ask what it cannot miss *within* one.
+- **A reserved contract field must exist in the Go struct, not just the document.** `httpx.DecodeJSON`
+  calls `DisallowUnknownFields`, so a field the contract calls ignorable is a hard 400 unless the request
+  struct names it — M12 reserved `challenge_response` for M67a saying "sending this changes nothing" and
+  shipped exactly that. Neither contract test can see it: one compares the route set, the other reads
+  responses. **Request-shape drift has no automated check**, which is the thing to know before reserving
+  the next field.
+- **A read-modify-write needs a lock even when the value looks monotonic.** `max(position) + 1` fixed the
+  count-versus-max cause of role-position collisions and left the race: `RunInTx` sets no isolation level,
+  so under READ COMMITTED two concurrent creates read the same max and both take it. There is deliberately
+  no unique constraint to catch it, and position is the hierarchy M13 enforces over. Slot 3 of the advisory
+  lock namespace, keyed per guild.
+- **Preserving an unknown bit on read and accepting one on write are different decisions.**
+  `PermissionFromInt64` keeps unknown high bits so a row from a newer schema survives an older binary;
+  storing one from a *request* means a later milestone defining that bit finds it already granted. The
+  escalation check masks it incidentally for a non-admin and not at all for an Instance Admin, whose tier
+  short-circuits before any bitfield is consulted — so `roles.Known()` is checked first, on the input.
 - **A list that cannot be paginated is bounded at creation instead.** The member list is a cursor capped at
   100; the channel and role lists return everything, because a client needs the whole tree to render a
   sidebar and paginating would make it fetch in a loop (rule 21's chattiness). So the ceiling lives in

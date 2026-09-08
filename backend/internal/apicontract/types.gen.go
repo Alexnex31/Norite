@@ -619,7 +619,7 @@ type RefreshRequest struct {
 
 // RegisterRequest defines model for RegisterRequest.
 type RegisterRequest struct {
-	// ChallengeResponse **Reserved for M67a and ignored by every instance today.** Nothing emits a challenge yet, so sending this changes nothing and omitting it is correct.
+	// ChallengeResponse **Reserved for M67a and ignored by every instance today.** Nothing emits a challenge yet, so sending this changes nothing and omitting it is correct — and it is *accepted*: the request decoder rejects unknown fields, so a reserved field the server does not name is a 400 rather than a no-op. It was exactly that until a review sent one.
 	//
 	// When M67a lands this carries the solved challenge — a proof-of-work solution, a hosted-captcha token, or whatever the mechanism chosen at build time produces. Opaque to this contract on purpose: the field is a carrier, and pinning its internal shape here would make swapping the mechanism a contract change across four clients, which is exactly what reserving it is meant to avoid.
 	//

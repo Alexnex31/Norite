@@ -17,18 +17,24 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/roles"
 )
 
-// guildChannelTypes is what a guild may contain, and the check that a caller cannot create anything else.
+// isGuildChannelType reports whether a guild may contain a channel of this type.
 //
 // DM and GROUP_DM belong to no guild and are M57's. GUILD_ANNOUNCEMENT and GUILD_STAGE_VOICE are reserved
 // values that must stay in the schema (rule 10) and are not yet buildable. PUBLIC_MATCHMAKING is created
 // by the matchmaking service, not by a guild owner.
 //
-// A map rather than a range check, because the values are a vocabulary rather than an interval — the
-// permitted set is not contiguous and never will be.
-var guildChannelTypes = map[int16]struct{}{
-	ChannelGuildText:     {},
-	ChannelGuildVoice:    {},
-	ChannelGuildCategory: {},
+// A switch rather than a range check, because the values are a vocabulary rather than an interval — the
+// permitted set is not contiguous and never will be. And a switch rather than a package-level map, which
+// is what this was: a map at package scope is writable from anywhere in the package, so
+// `delete(guildChannelTypes, ChannelGuildVoice)` compiles and would silently disable voice channels
+// instance-wide. A switch is immutable by construction and compiles to a jump table.
+func isGuildChannelType(t int16) bool {
+	switch t {
+	case ChannelGuildText, ChannelGuildVoice, ChannelGuildCategory:
+		return true
+	default:
+		return false
+	}
 }
 
 func channelFromRow(row db.Channel) Channel {
@@ -115,7 +121,7 @@ type CreateChannelInput struct {
 func (s *Service) CreateChannel(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in CreateChannelInput,
 ) (Channel, error) {
-	if _, ok := guildChannelTypes[in.Type]; !ok {
+	if !isGuildChannelType(in.Type) {
 		return Channel{}, httpx.Errorf(ErrUnsupportedChannelType,
 			"channel type %d cannot be created in a guild", in.Type)
 	}

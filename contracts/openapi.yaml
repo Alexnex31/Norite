@@ -2343,6 +2343,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          description: >
+            The account already owns the maximum number of guilds. An instance-wide bound on the one
+            mutation that checks no permission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
   /guilds/{guild_id}:
@@ -2373,6 +2381,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Guild"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
     patch:
@@ -2457,6 +2471,12 @@ paths:
                 items:
                   $ref: "#/components/schemas/Channel"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
     post:
@@ -2476,7 +2496,7 @@ paths:
         another: the channel list is flat with one level of nesting.
 
 
-        **A guild holds at most 500 channels.** The ceiling is here rather than on the listing because a
+        **An account owns at most 100 guilds**, and a guild holds at most 500 channels. The ceiling is here rather than on the listing because a
         client needs the whole tree to render a sidebar — paginating it would make every client fetch in a
         loop. Bounding creation is what keeps the list response from growing without limit.
       operationId: createGuildChannel
@@ -2592,6 +2612,12 @@ paths:
                 items:
                   $ref: "#/components/schemas/Role"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
     post:
@@ -2774,6 +2800,12 @@ paths:
                   $ref: "#/components/schemas/Member"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
@@ -3495,7 +3527,9 @@ components:
           maxLength: 4096
           description: >
             **Reserved for M67a and ignored by every instance today.** Nothing emits a challenge yet, so
-            sending this changes nothing and omitting it is correct.
+            sending this changes nothing and omitting it is correct — and it is *accepted*: the request
+            decoder rejects unknown fields, so a reserved field the server does not name is a 400 rather
+            than a no-op. It was exactly that until a review sent one.
 
 
             When M67a lands this carries the solved challenge — a proof-of-work solution, a hosted-captcha

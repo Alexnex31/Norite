@@ -78,6 +78,11 @@ type Querier interface {
 	// Same access path as the channel count above: bitmap index scan on roles_guild_id_position_idx, 10
 	// buffers on a 25,000-role instance.
 	CountGuildRoles(ctx context.Context, guildID int64) (int64, error)
+	// How many guilds an account owns, for the creation cap.
+	//
+	// Served by guilds_owner_id_idx, which 000015 added for the account-deletion FK check and which answers
+	// this for free.
+	CountGuildsOwnedBy(ctx context.Context, ownerID int64) (int64, error)
 	// The bootstrap guard, and the reason it is a count rather than an existence check.
 	//
 	// POST /instance/bootstrap is authorized by an operator token, which is minted from the instance signing
@@ -469,6 +474,25 @@ type Querier interface {
 	// these is the one I am still using" is the question somebody scanning this list is asking.
 	// Served by sessions_live_by_device_idx (000013).
 	ListSessionDevicesForUser(ctx context.Context, userID int64) ([]ListSessionDevicesForUserRow, error)
+	// Serializes role creation within one guild, for the whole of the calling transaction.
+	//
+	// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and
+	// this pool's, since RunInTx sets no isolation level — is a read-modify-write with a gap in it. Two
+	// concurrent creates both read the same max, neither sees the other's uncommitted INSERT, and both land on
+	// the same position. Migration 000015 deliberately declines a unique constraint on (guild_id, position),
+	// because reordering is a multi-row swap, so nothing downstream catches it.
+	//
+	// The consequence is not cosmetic: position is the hierarchy M13 enforces over, and two roles at the same
+	// position are neither above nor below each other. NextRolePosition's own comment calls a collision "a
+	// correctness bug rather than a style preference" — that comment was written about the count-versus-max
+	// cause and this is the other one.
+	//
+	// An advisory lock rather than row locking, and the two-argument form so it lives in its own namespace:
+	// the first key is "NOR" plus a slot number (slot 1 is the migration lock, slot 2 the instance bootstrap,
+	// this is slot 3), the second is the guild. Two guilds whose low 31 bits collide serialize against each
+	// other unnecessarily and stay correct, which is the right direction for an operation that happens a
+	// handful of times in a guild's life.
+	LockGuildRolePositions(ctx context.Context, guildID int64) error
 	// Instance-administration queries.
 	//
 	// The Instance Admin tier, which is instance-wide and sits outside roles.Resolve entirely (ADR 0013).

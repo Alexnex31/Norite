@@ -134,6 +134,14 @@ func (s *Service) UpdateMember(
 			need = need.Add(roles.PermDeafenMembers)
 		}
 
+		// A request that changes nothing needs nothing, and Permission.Has(0) is true by design — so
+		// without this any member could PATCH any other member with an empty body, hold no permission at
+		// all, and still append a row to a table migration 000016 says must never be swept. Refused as a
+		// bad request, which it is: there is no such thing as a meaningful empty update here.
+		if need == 0 {
+			return httpx.Errorf(httpx.ErrBadRequest, "no fields to update")
+		}
+
 		if _, err := authorizeWith(ctx, q, actor, guildID, 0, need); err != nil {
 			return err
 		}
@@ -170,7 +178,25 @@ func (s *Service) UpdateMember(
 			return err
 		}
 
-		out = memberFromRow(row, nil)
+		// The member's real roles, not an empty array. Returning nil made one schema mean two things
+		// depending on which route produced it — and a client refreshing its cache from this 200, which is
+		// the ordinary REST pattern the required `roles` field invites, would drop every role the member
+		// holds. Unobservable at M12 only because nothing can grant a role yet; live the moment M13 can,
+		// in an endpoint M13 does not touch.
+		grants, err := q.ListMemberRoleIDs(ctx, db.ListMemberRoleIDsParams{
+			GuildID: int64(guildID),
+			UserIds: []int64{int64(userID)},
+		})
+		if err != nil {
+			return fmt.Errorf("guilds: list member roles: %w", err)
+		}
+
+		held := make([]snowflake.ID, 0, len(grants))
+		for _, g := range grants {
+			held = append(held, snowflake.ID(g.RoleID))
+		}
+
+		out = memberFromRow(row, held)
 		return nil
 	})
 	if err != nil {

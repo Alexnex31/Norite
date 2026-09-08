@@ -1302,3 +1302,36 @@ func TestOAuthRoutesCarryTheStricterRateLimit(t *testing.T) {
 	require.NotNil(t, throttled, "OAuth must be throttled by the auth bucket (%s)", authRateLimit)
 	assert.NotEmpty(t, throttled.Header.Get("Retry-After"))
 }
+
+// TestTheReservedRegistrationFieldIsAccepted covers a shape no contract test can see.
+//
+// contract_test.go compares the route set; contract_payload_test.go reads responses. Neither looks at a
+// *request* body, so a field reserved in contracts/openapi.yaml and absent from the Go struct is invisible
+// to both — and httpx.DecodeJSON calls DisallowUnknownFields, which turns "ignored by every instance
+// today" into a hard 400. M12 reserved challenge_response for M67a and shipped exactly that until a review
+// sent the field and watched it fail.
+//
+// Confirmed by removal: delete ChallengeResponse from registerRequest and this returns 400.
+func TestTheReservedRegistrationFieldIsAccepted(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+
+	resp := a.call(http.MethodPost, "/api/v1/auth/register", map[string]any{
+		"username":           "reserved",
+		"email":              "reserved@example.com",
+		"password":           testPassword,
+		"challenge_response": "a solved challenge no instance asks for yet",
+	})
+	require.Equal(t, http.StatusAccepted, resp.Code,
+		"a field the contract says is ignorable must not be a 400: %s", resp)
+
+	// And it really is ignored: the account exists and is usable.
+	a.confirmAddress("reserved@example.com")
+	require.NotEmpty(t, a.login("reserved@example.com", "device").AccessToken)
+
+	// An unknown field is still refused, so the decoder has not been loosened generally.
+	unknown := a.call(http.MethodPost, "/api/v1/auth/register", map[string]any{
+		"username": "other", "email": "other@example.com", "password": testPassword,
+		"not_a_field": "x",
+	})
+	require.Equal(t, http.StatusBadRequest, unknown.Code, unknown)
+}

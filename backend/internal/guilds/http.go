@@ -566,22 +566,7 @@ func (h *Handler) actorAndID(
 }
 
 func (h *Handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
-	if err := httpx.DecodeJSON(w, r, dst); err != nil {
-		httpx.WriteError(w, r, err)
-		return false
-	}
-	if err := h.validate.Struct(dst); err != nil {
-		var verrs validator.ValidationErrors
-		if errors.As(err, &verrs) && len(verrs) > 0 {
-			fe := verrs[0]
-			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest,
-				"field %q failed the %q requirement", fe.Field(), fe.Tag()))
-			return false
-		}
-		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "invalid request body"))
-		return false
-	}
-	return true
+	return httpx.DecodeAndValidate(w, r, h.validate, dst)
 }
 
 // writeErr maps a service error to its response.

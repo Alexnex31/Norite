@@ -177,4 +177,18 @@ func (s *Service) writeAudit(
 const (
 	maxChannelsPerGuild = 500
 	maxRolesPerGuild    = 250
+
+	// maxGuildsOwnedPerAccount bounds the outermost object, which had no ceiling while the two inside it
+	// got one.
+	//
+	// POST /guilds checks no permission by design — anyone authenticated may create a guild — and each one
+	// writes four rows, including an audit entry in the table migration 000016 says must never be swept.
+	// On the flagship, which is publicly open and whose registration anti-automation is M67a, that is
+	// unbounded permanent growth from a single account, and guild_members_user_id_idx — "the first query
+	// every client makes after READY" — grows with it.
+	//
+	// The contract's answer was that instance-wide abuse controls belong at account creation rather than
+	// here, which is true and defers to a milestone that does not exist. A count on guilds_owner_id_idx,
+	// an index 000015 already added, costs one indexed read on an operation nobody performs in a loop.
+	maxGuildsOwnedPerAccount = 100
 )

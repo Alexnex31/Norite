@@ -91,6 +91,19 @@ const (
 // adding one at the end extends it and adding one in the middle is still the renumbering hazard above.
 const permAll = Permission(PermModerateMembers<<1 - 1)
 
+// Known reports whether p sets only bits this build defines.
+//
+// permAll is unexported because nothing outside this package should be able to name "everything"; this is
+// the question a caller legitimately has, asked on the *input* path. An owner or an administrator resolving
+// to permAll is fine — it stops at the last defined bit by construction — but a value arriving from a
+// request has not been through that, and UnmarshalJSON deliberately preserves unknown high bits so a row
+// written by a newer schema survives a round trip through an older binary.
+//
+// Preserving an unknown bit on read and *accepting* one on write are different decisions. Storing one
+// means a later milestone defining that bit finds it already granted, in a way no code says out loud —
+// verbatim the failure permAll's comment rejects `^Permission(0)` to prevent.
+func (p Permission) Known() bool { return p&^permAll == 0 }
+
 // Has reports whether every bit in need is present in p.
 //
 // Every bit, not any: a call site asking for two permissions means both. Has(0) is true, which is what

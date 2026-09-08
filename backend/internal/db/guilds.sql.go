@@ -75,6 +75,21 @@ func (q *Queries) CountGuildRoles(ctx context.Context, guildID int64) (int64, er
 	return count, err
 }
 
+const countGuildsOwnedBy = `-- name: CountGuildsOwnedBy :one
+SELECT count(*) FROM guilds WHERE owner_id = $1
+`
+
+// How many guilds an account owns, for the creation cap.
+//
+// Served by guilds_owner_id_idx, which 000015 added for the account-deletion FK check and which answers
+// this for free.
+func (q *Queries) CountGuildsOwnedBy(ctx context.Context, ownerID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countGuildsOwnedBy, ownerID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createChannel = `-- name: CreateChannel :one
 INSERT INTO channels (id, guild_id, type, parent_id, name, topic, position, nsfw, bitrate, user_limit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -593,6 +608,33 @@ func (q *Queries) ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockGuildRolePositions = `-- name: LockGuildRolePositions :exec
+SELECT pg_advisory_xact_lock(1313033475, ($1::bigint & 2147483647)::int)
+`
+
+// Serializes role creation within one guild, for the whole of the calling transaction.
+//
+// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and
+// this pool's, since RunInTx sets no isolation level — is a read-modify-write with a gap in it. Two
+// concurrent creates both read the same max, neither sees the other's uncommitted INSERT, and both land on
+// the same position. Migration 000015 deliberately declines a unique constraint on (guild_id, position),
+// because reordering is a multi-row swap, so nothing downstream catches it.
+//
+// The consequence is not cosmetic: position is the hierarchy M13 enforces over, and two roles at the same
+// position are neither above nor below each other. NextRolePosition's own comment calls a collision "a
+// correctness bug rather than a style preference" — that comment was written about the count-versus-max
+// cause and this is the other one.
+//
+// An advisory lock rather than row locking, and the two-argument form so it lives in its own namespace:
+// the first key is "NOR" plus a slot number (slot 1 is the migration lock, slot 2 the instance bootstrap,
+// this is slot 3), the second is the guild. Two guilds whose low 31 bits collide serialize against each
+// other unnecessarily and stay correct, which is the right direction for an operation that happens a
+// handful of times in a guild's life.
+func (q *Queries) LockGuildRolePositions(ctx context.Context, guildID int64) error {
+	_, err := q.db.Exec(ctx, lockGuildRolePositions, guildID)
+	return err
 }
 
 const nextRolePosition = `-- name: NextRolePosition :one

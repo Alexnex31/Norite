@@ -73,6 +73,18 @@ type decision struct {
 	permissions roles.Permission
 }
 
+// A note on a round trip that was considered and kept.
+//
+// RemoveMember and Delete each call GetGuild and then authorizeWith, which runs ListGuildMemberAuthority —
+// a query returning owner_id as its first column. So both pay a redundant read for the one fact they need,
+// inside an open write transaction against a deliberately small pool (§15.3).
+//
+// Removing it means roles.Resolve handing the owner id back to its caller, which changes the signature of
+// the function this package's whole authority model rests on so that two non-hot paths — a kick and a
+// guild delete — save one indexed lookup each. That is the trade /optimization-review names explicitly:
+// a small win that makes a security-critical function carry a field it does not need. Kept, and written
+// down so the next reviewer does not re-derive it.
+
 // allows reports whether the decision covers a permission, from either authority.
 func (d decision) allows(need roles.Permission) bool {
 	return d.instanceAdmin || d.permissions.Has(need)

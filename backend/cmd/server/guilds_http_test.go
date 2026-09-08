@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1136,4 +1137,135 @@ func TestAGuildIsBoundedInChannelsAndRoles(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, resp.Code,
 			"the ceiling must not become another oracle: %s", resp)
 	})
+}
+
+// TestConcurrentRoleCreationsDoNotShareAPosition covers the race the max()-vs-count() fix left open.
+//
+// Reading a max and then inserting is a read-modify-write, and RunInTx sets no isolation level, so under
+// READ COMMITTED neither transaction sees the other's uncommitted row and both take the same position.
+// Migration 000015 declines a unique constraint on (guild_id, position) deliberately, so nothing
+// downstream catches it — and position is the hierarchy M13 enforces over, where two roles at the same
+// position are neither above nor below each other.
+//
+// Confirmed by removal: drop LockGuildRolePositions from CreateRole and this fails.
+func TestConcurrentRoleCreationsDoNotShareAPosition(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	path := fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID)
+
+	const n = 8
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp := f.api.call(http.MethodPost, path,
+				map[string]any{"name": fmt.Sprintf("race-%d", i)}, withToken(f.ownerToken))
+			codes[i] = resp.Code
+		}()
+	}
+	wg.Wait()
+
+	for i, c := range codes {
+		require.Equal(t, http.StatusCreated, c, "creation %d", i)
+	}
+
+	var dupes int
+	f.api.mustQueryRow(t,
+		`SELECT count(*) FROM (SELECT position FROM roles WHERE guild_id = $1
+		                       GROUP BY position HAVING count(*) > 1) d`,
+		[]any{mustID(t, f.guildID)}, &dupes)
+	require.Zero(t, dupes,
+		"concurrent creations must not land on the same position — it is the hierarchy M13 enforces over")
+}
+
+// TestUndefinedPermissionBitsAreRefused closes the input path permAll only guards on the output path.
+//
+// UnmarshalJSON deliberately preserves unknown high bits so a row written by a newer schema survives a
+// round trip through an older binary. Accepting one from a *request* is a different decision: it means a
+// later milestone defining that bit finds it already granted, which is verbatim the failure permAll's
+// comment rejects ^Permission(0) to prevent. An Instance Admin reaches it because the tier short-circuits
+// without consulting any bitfield.
+func TestUndefinedPermissionBitsAreRefused(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	const bit62 = "4611686018427387904"
+
+	t.Run("from an owner", func(t *testing.T) {
+		resp := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+			map[string]any{"name": "future", "permissions": bit62}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusBadRequest, resp.Code, resp)
+	})
+
+	t.Run("from an instance admin", func(t *testing.T) {
+		f.api.mustExec(t, `INSERT INTO instance_admins (user_id) VALUES ($1)`, mustID(t, f.strangerID))
+		resp := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+			map[string]any{"name": "future", "permissions": bit62}, withToken(f.strangerToken))
+		require.Equal(t, http.StatusBadRequest, resp.Code,
+			"the tier short-circuits the escalation check, so the bit check must precede it: %s", resp)
+	})
+
+	t.Run("a defined bit still works", func(t *testing.T) {
+		resp := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+			map[string]any{"name": "ok", "permissions": roles.PermManageMessages}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusCreated, resp.Code, resp)
+	})
+}
+
+// TestAnEmptyMemberUpdateIsRefused covers the case where `need` is zero and Has(0) is true by design.
+//
+// Without it any member could PATCH any other member with an empty body, hold no permission at all, and
+// append a row to a table migration 000016 says must never be swept.
+func TestAnEmptyMemberUpdateIsRefused(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	target := fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.memberID)
+
+	before := f.auditCount(t)
+
+	resp := f.api.call(http.MethodPatch, target, map[string]any{}, withToken(f.memberToken))
+	require.Equal(t, http.StatusBadRequest, resp.Code,
+		"a request that changes nothing must not pass a permission check that asks for nothing: %s", resp)
+
+	require.Equal(t, before, f.auditCount(t), "and must write no audit row")
+}
+
+// TestUpdatingAMemberReportsTheirRoles pins the response shape against the schema's promise.
+func TestUpdatingAMemberReportsTheirRoles(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+
+	role := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+		map[string]any{"name": "mods"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, role.Code, role)
+	roleID := role.field(t, "id")
+
+	f.api.mustExec(t, `INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1, $2, $3)`,
+		mustID(t, f.guildID), mustID(t, f.memberID), mustID(t, roleID))
+
+	resp := f.api.call(http.MethodPatch,
+		fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.memberID),
+		map[string]any{"nickname": "Nick"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, resp.Code, resp)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(resp.Body, &body))
+	held, _ := body["roles"].([]any)
+	require.Len(t, held, 1,
+		"a client refreshing its cache from this body must not lose the member's roles: %s", resp)
+	require.Equal(t, roleID, held[0])
+}
+
+func (f *guildFixture) auditCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	f.api.mustQueryRow(t, `SELECT count(*) FROM audit_log_entries WHERE guild_id = $1`,
+		[]any{mustID(t, f.guildID)}, &n)
+	return n
 }

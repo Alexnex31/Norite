@@ -90,6 +90,15 @@ func (s *Service) CreateRole(
 		// Appended above every existing role. Position is the hierarchy M13 enforces, and a new role
 		// landing at or below an existing one reads as broken — see NextRolePosition for why this is
 		// max(position)+1 and not the role count, which collides as soon as anything has been deleted.
+		//
+		// The lock is the other half of the same guarantee. Reading a max and then inserting is a
+		// read-modify-write, and under READ COMMITTED two concurrent creates both read the same value and
+		// both take it. Fixing only the count-versus-max cause left the race, which produces the identical
+		// corruption by a different route.
+		if err := q.LockGuildRolePositions(ctx, int64(guildID)); err != nil {
+			return fmt.Errorf("guilds: lock role positions: %w", err)
+		}
+
 		position, err := q.NextRolePosition(ctx, int64(guildID))
 		if err != nil {
 			return fmt.Errorf("guilds: next role position: %w", err)
@@ -275,6 +284,15 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 // An Instance Admin passes through decision.allows, because layer 1 sits outside the guild: they are not
 // a member, resolve to zero permissions, and would otherwise be unable to grant anything at all.
 func refuseEscalation(allowed decision, want roles.Permission) error {
+	// Bits no constant defines are refused before authority is consulted at all, because the Instance Admin
+	// short-circuit below does not consult the bitfield — so without this an admin could store bit 62, and
+	// a later milestone defining it would find it already granted. For a non-admin the escalation check
+	// masks unknown bits incidentally, since permAll.Has(unknownBit) is false; incidental is not a rule.
+	if !want.Known() {
+		return httpx.Errorf(httpx.ErrBadRequest,
+			"permissions contains bits this instance does not define")
+	}
+
 	if allowed.allows(want) {
 		return nil
 	}
