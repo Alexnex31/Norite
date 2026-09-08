@@ -10,7 +10,7 @@ import "testing"
 // This is the only test in the package that will look like busywork and the only one whose failure is a
 // data-loss bug. roles.permissions stores bit positions, so inserting a constant in the middle of the
 // block reassigns every permission below it on every guild of every instance already running — with no
-// migration to review, no compile error, and no behavioural symptom until somebody notices they can ban
+// migration to review, no compile error, and no behavioral symptom until somebody notices they can ban
 // people. A test asserting "PermBanMembers is bit 6" is the only thing that turns that into a red build.
 //
 // The values come from docs/architecture.md's "Permission system" block, which is the source of truth.
