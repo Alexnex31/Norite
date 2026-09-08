@@ -197,14 +197,6 @@ func (s *Service) RemoveMember(
 			return fmt.Errorf("guilds: get guild: %w", err)
 		}
 
-		if snowflake.ID(guild.OwnerID) == userID {
-			// Checked before the permission, so an owner trying to leave gets the real reason rather than
-			// a 403 that suggests a permission would help. Nothing grants this: ownership transfer is the
-			// operation that makes it reachable and it is not this milestone.
-			return httpx.Errorf(ErrCannotRemoveOwner,
-				"transfer ownership before leaving a guild you own")
-		}
-
 		if userID == actor.UserID {
 			// Leaving. Still needs to be a member, which PermViewChannel establishes, and still writes an
 			// audit entry — "who left" is exactly what an operator reads this log for.
@@ -213,6 +205,25 @@ func (s *Service) RemoveMember(
 			}
 		} else if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermKickMembers); err != nil {
 			return err
+		}
+
+		// The owner check comes *after* authorization, and the ordering is the whole point.
+		//
+		// It used to come first, so that an owner trying to leave got the real reason rather than a 403
+		// suggesting a permission would help. That reasoning still holds and costs nothing here: an owner
+		// passes PermViewChannel through the layer-2 short-circuit and reaches this line anyway.
+		//
+		// What the old order also did was answer 409 — a distinct status, with a public message — to a
+		// caller who was not in the guild at all, where every other path answers 404. That made the pair
+		// (guild exists, this account owns it) readable by anyone holding one guild id and a list of
+		// candidate users, which is precisely the oracle roles.ErrNotAMember, authorize's two refusals and
+		// even pathID's 404-on-unparseable exist to close. Found by a security review of this milestone.
+		//
+		// Nothing grants this: ownership transfer is the operation that makes removing an owner reachable,
+		// and it is not this milestone.
+		if snowflake.ID(guild.OwnerID) == userID {
+			return httpx.Errorf(ErrCannotRemoveOwner,
+				"transfer ownership before leaving a guild you own")
 		}
 
 		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionMemberRemove, &userID, nil); err != nil {

@@ -497,6 +497,16 @@ func (a *api) mustQueryRow(t *testing.T, sql string, args []any, dest ...any) {
 	require.NoError(t, a.pool.QueryRow(t.Context(), sql, args...).Scan(dest...))
 }
 
+// next mints an id that names nothing, for the "no such object" reference answer.
+func (f *guildFixture) next(t *testing.T) string {
+	t.Helper()
+	ids, err := snowflake.NewGenerator(3)
+	require.NoError(t, err)
+	id, err := ids.Next()
+	require.NoError(t, err)
+	return id.String()
+}
+
 // mustID converts a snowflake string from a response into the bigint the database stores.
 func mustID(t *testing.T, s string) int64 {
 	t.Helper()
@@ -993,4 +1003,75 @@ func TestPermissionsAreAStringOnTheWire(t *testing.T) {
 	_, ok := list[0]["permissions"].(string)
 	require.Truef(t, ok, "permissions must be a quoted decimal string, got %T: %s",
 		list[0]["permissions"], res.Body)
+}
+
+// TestANonMemberLearnsNothingFromARefusal covers the two paths a security review found answering a
+// non-member with something other than 404.
+//
+// Both were the same defect: a public error evaluated *before* the authorization call, on a path whose
+// entire design is that an unauthorized caller cannot tell "does not exist" from "not yours". The branch's
+// own non-member sweep missed both because it targets an ordinary member and always sends
+// `{"name": "hijacked"}` — never the owner, and never a voice-only field.
+//
+// Confirmed by removal: move either check back above its authorizeWith and the matching subtest fails.
+func TestANonMemberLearnsNothingFromARefusal(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+
+	text := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+		map[string]any{"name": "general", "type": 0}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, text.Code, text)
+
+	voice := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+		map[string]any{"name": "lounge", "type": 2}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, voice.Code, voice)
+
+	// The reference answer: a guild id that names nothing at all.
+	absent := f.api.call(http.MethodDelete,
+		fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.next(t), f.strangerID), nil,
+		withToken(f.strangerToken))
+	require.Equal(t, http.StatusNotFound, absent.Code, absent)
+
+	// Targeting the *owner* used to answer 409 with a public message, which told a stranger both that the
+	// guild was real and who owned it — for any private guild, given one id and a candidate user list.
+	t.Run("removing the owner", func(t *testing.T) {
+		resp := f.api.call(http.MethodDelete,
+			fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.ownerID), nil,
+			withToken(f.strangerToken))
+		require.Equal(t, http.StatusNotFound, resp.Code,
+			"a non-member must not learn who owns a guild they cannot see: %s", resp)
+	})
+
+	// The owner themselves still gets the real reason rather than a bare refusal — the property the
+	// original ordering was protecting, which survives the fix.
+	t.Run("the owner still gets a usable message", func(t *testing.T) {
+		resp := f.api.call(http.MethodDelete,
+			fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.ownerID), nil,
+			withToken(f.ownerToken))
+		require.Equal(t, http.StatusConflict, resp.Code, resp)
+		require.Contains(t, string(resp.Body), "transfer ownership", resp)
+	})
+
+	// A voice-only field on a channel the caller cannot see used to answer 400 for a text channel and 404
+	// for a voice one, disclosing both that the id was live and what type it carried.
+	t.Run("a voice-only field on a text channel", func(t *testing.T) {
+		resp := f.api.call(http.MethodPatch, "/api/v1/channels/"+text.field(t, "id"),
+			map[string]any{"bitrate": 64000}, withToken(f.strangerToken))
+		require.Equal(t, http.StatusNotFound, resp.Code,
+			"a non-member must not learn a channel exists or what type it is: %s", resp)
+	})
+
+	t.Run("a voice-only field on a voice channel", func(t *testing.T) {
+		resp := f.api.call(http.MethodPatch, "/api/v1/channels/"+voice.field(t, "id"),
+			map[string]any{"bitrate": 64000}, withToken(f.strangerToken))
+		require.Equal(t, http.StatusNotFound, resp.Code, resp)
+	})
+
+	// And a member with the permission still gets the validation error, which is what makes it useful.
+	t.Run("a permitted caller still gets the validation error", func(t *testing.T) {
+		resp := f.api.call(http.MethodPatch, "/api/v1/channels/"+text.field(t, "id"),
+			map[string]any{"bitrate": 64000}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusBadRequest, resp.Code, resp)
+	})
 }

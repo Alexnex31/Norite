@@ -249,15 +249,22 @@ func (s *Service) UpdateChannel(
 			return err
 		}
 
+		if _, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
+			return err
+		}
+
 		// The same voice-only rule as creation, checked against the type the channel actually has rather
-		// than one the request could claim.
+		// than one the request could claim — and checked *after* authorization, which is the ordering that
+		// matters.
+		//
+		// It ran before, and that made this 400 a report about a row the caller had no permission to see:
+		// a text channel in somebody else's guild answered "bitrate and user_limit apply only to voice
+		// channels" while a voice channel in the same guild answered 404, so the pair disclosed both that
+		// a channel id was live and whether it carried voice. Found by a security review of this
+		// milestone. Nothing in the check depends on running early; it reads the loaded row and the body.
 		if existing.Type != ChannelGuildVoice && (in.Bitrate != nil || in.UserLimit != nil) {
 			return httpx.Errorf(httpx.ErrBadRequest,
 				"bitrate and user_limit apply only to voice channels")
-		}
-
-		if _, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
-			return err
 		}
 
 		guild := int64(guildID)
