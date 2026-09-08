@@ -935,6 +935,11 @@ of this section.
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
   `instance_audit_log` recording every Instance Admin action.
 
+  **Its ban transaction gains one statement at M72a**: unpublishing every guild the banned account owns.
+  Noted here rather than only in M72a's entry, because it is this milestone's code that changes — a ban
+  that leaves a spammer's guilds on the instance's front page is two actions where an admin will reliably
+  perform one.
+
   **It inherits one case from M12 that is easy to miss, because the code that creates it destroys its own
   evidence.** An Instance Admin passes ADR 0008's layer 1 and can therefore delete a guild they are not a
   member of. That deletion writes a guild-scoped audit entry in its own transaction, satisfying rule 2 —
@@ -988,8 +993,36 @@ of this section.
   a guild over its description punishes its members for its owner's text. Both discoverability writes are
   rule-14 actions in `instance_audit_log`.
 
+  **Banning an owner unpublishes their guilds, and does not lock them.** M72's ban transaction gains one
+  statement: every guild the banned account owns gets `discoverable = false`, with
+  `discoverable_locked_at` left NULL. The guild survives for its members — only the public shopfront
+  closes — and if the ban is ever lifted the owner republishes deliberately rather than finding their
+  listing back without asking. That is the difference from a force-unpublish, which locks precisely because
+  the owner is still able to act.
+
   **The directory adds no report affordance** — that is M74's, which routes reports properly; `3f` reserves
   the keybinding and nothing more.
+
+  **No dedicated rate-limit bucket.** Joining sits in the base limiter, because the 100-guild ceiling is
+  what actually bounds the damage and a second bucket would be a knob with nothing behind it. One residual
+  is accepted rather than unnoticed: the ceiling bounds how many guilds an account is *in*, not how often
+  it joins and leaves, so join-leave churn can append audit rows and move counters without ever exceeding
+  it. If that becomes real, the answer is a bucket built through `internal/platform/ratelimit` like every
+  other one, not a special case here.
+
+  **The instance toggle defaults ON**, matching ADR 0013's public-matchmaking toggle rather than inventing
+  a second posture. It is harmless on a small instance because nothing is listed until an owner opts a
+  guild in — the directory is simply empty. It extends `norite instance init` the way M5's SMTP prompt,
+  M37's voice opt-out and M66's matchmaking toggle each did, which means the four files a setting always
+  touches: `contracts/instance-config.toml`, `backend/internal/config`, the wizard template and
+  `.env.example`.
+
+  **Paging is a cursor on `(member_count, id)` and is not stable, deliberately.** The tiebreak on `id`
+  makes the ordering total, which a cursor needs; what it cannot do is stop a guild whose count changes
+  mid-browse from appearing twice or being skipped. That is accepted — a directory is a browse surface,
+  not a ledger, and the alternative is a materialized ranking refreshed on a schedule, which is real
+  machinery for a problem nobody experiences. **M72b builds that machinery anyway** for most-active, so if
+  stable paging is ever wanted it arrives there rather than being built twice.
 
   **Search is prefix-only and adds no dependency.** `name ILIKE $1 || '%'` on a partial b-tree over
   `(name) WHERE discoverable`. Fuzzy matching would need `pg_trgm` and therefore M65; prefix is enough for

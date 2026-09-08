@@ -311,6 +311,11 @@ CREATE TABLE guilds (
   -- M72a. Set by an Instance Admin taking a listing down; while it is non-NULL the owner's own toggle is
   -- refused. Without it "force-unpublish" lasts until the owner notices and flips the boolean back, which
   -- is not a moderation action. Clearing it is an admin action too, and both writes are rule 14's.
+  --
+  -- Deliberately *not* set when M72's ban unpublishes an owner's guilds. A ban already stops them acting;
+  -- locking as well would mean a lifted ban leaves the listing frozen with no obvious way back. The
+  -- distinction is whether the person can still act: a force-unpublish locks because they can, a ban does
+  -- not need to because they cannot.
   discoverable_locked_at timestamptz NULL,
   -- M72a. A counter maintained in the same transaction as the join or leave that changes it, not an
   -- aggregate: count(*) per listed guild is the N+1 §15.2 names, on a paginated directory over the
@@ -800,8 +805,11 @@ GET    /users/@me/export                   -- server-side export; see E2E export
 -- never a person. Permission resolution still runs underneath, so a scope narrows and never grants.
 GET    /guilds/discover?sort=&q=&after=&limit=
                                            -- M72a; the public directory. Reads only discoverable=true,
-                                           --   so it discloses nothing M12 protects. Cursor-paginated
-                                           --   like every listing here; `q` is a name prefix
+                                           --   so it discloses nothing M12 protects. `q` is a name prefix.
+                                           --   Cursor on (member_count, id) — the tiebreak makes the
+                                           --   ordering total, and a guild whose count changes mid-browse
+                                           --   may repeat or be skipped, which is accepted for a browse
+                                           --   surface
 POST   /guilds/{guild_id}/join             -- M72a; direct join, no invite. Refuses unless the guild is
                                            --   discoverable, so this is not a second way into a private
                                            --   one. Writes the membership, the counter and an audit entry
