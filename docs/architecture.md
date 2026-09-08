@@ -312,10 +312,10 @@ CREATE TABLE guilds (
   -- refused. Without it "force-unpublish" lasts until the owner notices and flips the boolean back, which
   -- is not a moderation action. Clearing it is an admin action too, and both writes are rule 14's.
   --
-  -- Deliberately *not* set when M72's ban unpublishes an owner's guilds. A ban already stops them acting;
-  -- locking as well would mean a lifted ban leaves the listing frozen with no obvious way back. The
-  -- distinction is whether the person can still act: a force-unpublish locks because they can, a ban does
-  -- not need to because they cannot.
+  -- Banning the owner does not touch this column, or `discoverable`, at all. The two are orthogonal levers
+  -- an admin composes: a guild with a thousand members is not abusive for having had one bad owner, and
+  -- unpublishing it would punish the members for that. Locking a listing and banning a person are answers
+  -- to two different facts, and which of them is true is the admin's judgement to make.
   discoverable_locked_at timestamptz NULL,
   -- M72a. A counter maintained in the same transaction as the join or leave that changes it, not an
   -- aggregate: count(*) per listed guild is the N+1 §15.2 names, on a paginated directory over the

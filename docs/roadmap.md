@@ -935,10 +935,8 @@ of this section.
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
   `instance_audit_log` recording every Instance Admin action.
 
-  **Its ban transaction gains one statement at M72a**: unpublishing every guild the banned account owns.
-  Noted here rather than only in M72a's entry, because it is this milestone's code that changes — a ban
-  that leaves a spammer's guilds on the instance's front page is two actions where an admin will reliably
-  perform one.
+  **M72a adds no statement to this transaction.** A ban and a guild's discoverability are independent
+  actions an admin composes — see M72a, where that is decided and why.
 
   **It inherits one case from M12 that is easy to miss, because the code that creates it destroys its own
   evidence.** An Instance Admin passes ADR 0008's layer 1 and can therefore delete a guild they are not a
@@ -985,20 +983,26 @@ of this section.
   milestone if it is ever wanted; it needs a pending-requests table, an owner-facing queue and
   notifications, which is most of a milestone on its own.
 
-  **Moderation is reactive, in two tiers, and reuses what M72 already built.** Routine: an Instance Admin
-  force-unpublishes, which sets `guilds.discoverable_locked_at` — without the lock the owner flips the
-  boolean back and "takedown" lasted ten seconds. Repeat abuse: M72's `instance_bans`, which already
-  revokes sessions through M11's primitive. **Nothing here deletes a guild** — M12 makes deletion the
-  owner's decision precisely because it cascades with no undo, and destroying every channel and message in
-  a guild over its description punishes its members for its owner's text. Both discoverability writes are
-  rule-14 actions in `instance_audit_log`.
+  **Moderation is reactive, and the admin's actions are orthogonal rather than tiered.** There are two
+  levers and an admin picks either or both, because the guild and its owner are different objects and the
+  problem is often only one of them:
 
-  **Banning an owner unpublishes their guilds, and does not lock them.** M72's ban transaction gains one
-  statement: every guild the banned account owns gets `discoverable = false`, with
-  `discoverable_locked_at` left NULL. The guild survives for its members — only the public shopfront
-  closes — and if the ban is ever lifted the owner republishes deliberately rather than finding their
-  listing back without asking. That is the difference from a force-unpublish, which locks precisely because
-  the owner is still able to act.
+  - **Lock the guild private** — `discoverable = false` plus `discoverable_locked_at`, so the owner cannot
+    simply flip the boolean back and end the takedown ten seconds later. The guild keeps working for its
+    members; only the public shopfront closes.
+  - **Ban the owner** — M72's `instance_bans`, which already revokes sessions through M11's primitive.
+    **This does not touch discoverability**: a guild whose owner is banned stays listed, because a guild
+    with a thousand members is not abusive for having had one bad owner, and unpublishing it would punish
+    the members for that.
+  - **Both**, when the guild is the problem too.
+
+  An earlier draft had the ban cascade automatically into unpublishing every guild the account owned. That
+  is wrong for the reason above, and it also removed a judgement the admin should be making: the two facts
+  a directory can go wrong on — this listing is abusive, this person is abusive — are not the same fact.
+
+  **Nothing here deletes a guild.** M12 makes deletion the owner's decision precisely because it cascades
+  with no undo, and destroying every channel and message over a description punishes members for their
+  owner's text. All discoverability writes are rule-14 actions in `instance_audit_log`.
 
   **The directory adds no report affordance** — that is M74's, which routes reports properly; `3f` reserves
   the keybinding and nothing more.

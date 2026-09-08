@@ -12,9 +12,13 @@ Every screen shares: 120×40 cells, the 4-column chrome (rail 8 / channels 25 / 
 **Purpose** the default view: read and post in a guild channel.
 **Layout** all four columns, one pane, full chrome.
 - **Rail (8 cells)**: `@` direct-messages entry, divider, guild initials (2 letters, active = `accent.fill`
-  + `accent`), divider, `◎` discover (matchmaking `M66`, guilds `M72a`), spacer, then pinned status
-  glyphs at the bottom
+  + `accent`), then `+` at the **foot of the guild list** (`M72a`, the guild directory), divider, `◎`
+  discover/matchmaking, spacer, then pinned status glyphs at the bottom
   (`●` daemon health, `♪` voice). Guilds are numbered implicitly for `M-1…M-9`.
+- The `+` sits below the last guild rather than in its own rail section, so reaching the end of the guilds
+  you have *is* the affordance for finding more. On an account with none the list above it is empty and the
+  `+` is the only thing in that region, which is what makes `5b`'s dead end resolve without a second
+  screen explaining itself.
 - **Channel list (25)**: header `Norite` + `M-1`; sections `▾ TEXT`, `▾ VOICE`, `▾ DIRECT`;
   active channel `accent.fill`; unread channel `text.bright` + count in `danger`; footer row
   `● alex` + presence (`deep work` in `warn`).
@@ -180,13 +184,16 @@ again opens the manual; `/` filters.
 - Empty state: `no public guilds yet` plus the invite-redeem box from `5b`. **This screen exists because of
   that one**: `5b` is a new account with no guilds whose only affordance is pasting a code somebody must
   have sent them, which is a dead end for anyone who has not been invited anywhere.
-- Reached from the rail's existing `◎` **discover** entry, which M66 lights up for public matchmaking.
-  One entry, two sections — channels and guilds — rather than a second glyph: "where do I find new things"
-  is one question to the person asking it, and two rail entries would be a distinction that serves the
-  implementation. M66 gets there first and M72a extends it.
-- Instance-level toggle, defaulting **on**, matching ADR 0013's matchmaking toggle. On an instance with
-  discovery off the guild section is absent rather than empty — but `◎` itself stays, since matchmaking has
-  its own toggle and the two are independent.
+- Reached from `+` at the foot of the rail's guild list — scrolling past the last guild you are in is the
+  gesture for finding one you are not. **Not** the `◎` discover entry, which is public matchmaking's
+  (`M66`) and a different thing: matchmaking is guild-less channels, this is guilds. Sharing one entry
+  would merge two concepts that only sound alike.
+- On an account with no guilds the list above `+` is empty, so `+` is the whole rail region. That is the
+  screen's reason for existing: `5b` currently offers a new account nothing but a box to paste a code
+  somebody must have sent them.
+- Instance-level toggle, defaulting **on**, matching ADR 0013's matchmaking toggle. With discovery off the
+  `+` is absent and the rail ends at the last guild; `◎` is unaffected, since matchmaking has its own
+  toggle and the two are independent.
 
 ---
 
