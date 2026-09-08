@@ -337,9 +337,23 @@ of this section.
   through the role endpoints, because reordering is a multi-row swap that belongs with the hierarchy rules
   that give it meaning.
 
+  **The hierarchy gap is wider than roles, and that is the part this entry used to miss.** A security
+  review of M12 found the same missing check on two member operations, neither of which is about roles at
+  all: `RemoveMember` lets a `PermKickMembers` holder kick an administrator, and `UpdateMember` lets a
+  `PermMuteMembers` holder server-mute one. The shape is identical in all three places — the permission is
+  checked and the *relative standing* of actor and target never is — so a milestone that lands the role
+  check alone produces the worse outcome of the two: a hierarchy that holds for roles and silently does
+  not for people. M12 left all three open together and they close together.
+
+  What "standing" means needs deciding once, here, rather than three times: the natural rule is the target's
+  highest role position against the actor's, with the guild owner and an Instance Admin above everyone. Note
+  that `@everyone` is position 0, so a member holding no role at all is at the floor and can be acted on by
+  anybody with the permission — which is correct, and worth stating so it is not later mistaken for a bug.
+
   Done when: an overwrite can be created, updated and deleted through the API and changes what
-  `roles.Resolve` returns; a member cannot manage a role positioned above their own highest; and the
-  channel listing reflects per-channel view permission.
+  `roles.Resolve` returns; a member cannot manage a role positioned above their own highest, **nor kick,
+  mute or deafen a member whose highest role is above their own**; and the channel listing reflects
+  per-channel view permission.
 - **M14 — Guild audit log**: `GET /guilds/{guild_id}/audit-log`, and the `changes` diffing behind it.
 
   **M12 created the table and writes to it, so this entry no longer introduces either.** Every mutation in
