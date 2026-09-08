@@ -155,9 +155,9 @@ func (s *Service) CreateChannel(
 		if err != nil {
 			return fmt.Errorf("guilds: count channels: %w", err)
 		}
-		if count >= maxChannelsPerGuild {
+		if count >= int64(s.maxChannelsPerGuild) {
 			return httpx.Errorf(ErrGuildFull,
-				"a guild may hold at most %d channels", maxChannelsPerGuild)
+				"a guild may hold at most %d channels", s.maxChannelsPerGuild)
 		}
 
 		// A parent must be a category *in this guild*. Checked rather than trusted, because parent_id

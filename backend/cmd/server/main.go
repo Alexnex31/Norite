@@ -191,7 +191,13 @@ func run() error {
 		return err
 	}
 
-	guildService, err := guilds.NewService(guilds.ServiceOptions{Pool: pool, IDs: ids})
+	guildService, err := guilds.NewService(guilds.ServiceOptions{
+		Pool:                pool,
+		IDs:                 ids,
+		MaxChannelsPerGuild: cfg.MaxChannelsPerGuild,
+		MaxRolesPerGuild:    cfg.MaxRolesPerGuild,
+		MaxGuildsPerAccount: cfg.MaxGuildsPerAccount,
+	})
 	if err != nil {
 		return err
 	}

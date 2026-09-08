@@ -75,12 +75,38 @@ type Service struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
 	ids     *snowflake.Generator
+
+	// The creation ceilings, from instance config rather than constants.
+	//
+	// Configurable because a self-hosted instance for a large organization may legitimately want more
+	// channels than the flagship's default, and the alternative to a setting is forking to change a
+	// constant. M72a layers per-account entitlements on top: these are the floor every account on the
+	// instance gets, and a subscriber or an Instance Admin resolves higher.
+	//
+	// # The race, stated rather than locked against
+	//
+	// Counting and then inserting is a read-modify-write, and under READ COMMITTED two concurrent creates
+	// can both read the same count and both insert. M10's bootstrap takes an advisory lock for exactly this
+	// shape — but there the consequence is a second instance administrator nobody intended, and here it is
+	// one channel over a soft ceiling. The bound exists to keep a response payload from growing without
+	// limit, and it does that whether the number is 500 or 502. A lock on every channel creation would cost
+	// more than the property is worth. Role *position* is the opposite case and does take one, because a
+	// collision there corrupts an ordering rather than overshooting a limit.
+	maxChannelsPerGuild int32
+	maxRolesPerGuild    int32
+	maxGuildsPerAccount int32
 }
 
 // ServiceOptions configures NewService.
 type ServiceOptions struct {
 	Pool *pgxpool.Pool
 	IDs  *snowflake.Generator
+
+	// The creation ceilings. Required — a zero would mean no guild could hold a channel, which is a
+	// misconfiguration that should fail at startup rather than at the first POST.
+	MaxChannelsPerGuild int32
+	MaxRolesPerGuild    int32
+	MaxGuildsPerAccount int32
 }
 
 // NewService builds the guild service.
@@ -90,12 +116,19 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		return nil, errors.New("guilds: a database pool is required")
 	case opts.IDs == nil:
 		return nil, errors.New("guilds: an ID generator is required")
+	case opts.MaxChannelsPerGuild < 1, opts.MaxRolesPerGuild < 1, opts.MaxGuildsPerAccount < 1:
+		// Fails here rather than at the first create. A zero ceiling refuses every creation with a
+		// conflict, which reads as a bug in the endpoint rather than as an unset setting.
+		return nil, errors.New("guilds: every creation ceiling must be at least 1")
 	}
 
 	return &Service{
-		pool:    opts.Pool,
-		queries: db.New(opts.Pool),
-		ids:     opts.IDs,
+		pool:                opts.Pool,
+		queries:             db.New(opts.Pool),
+		ids:                 opts.IDs,
+		maxChannelsPerGuild: opts.MaxChannelsPerGuild,
+		maxRolesPerGuild:    opts.MaxRolesPerGuild,
+		maxGuildsPerAccount: opts.MaxGuildsPerAccount,
 	}, nil
 }
 
@@ -159,43 +192,3 @@ func (s *Service) writeAudit(
 
 	return nil
 }
-
-// Per-guild ceilings, enforced at creation.
-//
-// The values match what comparable platforms settled on after operating at scale, which is better evidence
-// than anything this project can generate before it has users. They are deliberately generous: a guild
-// hitting either is organizing something unusual, not being punished for growth.
-//
-// # The race, stated rather than locked against
-//
-// Counting and then inserting is a read-modify-write, and under READ COMMITTED two concurrent creates can
-// both read the same count and both insert. M10's bootstrap takes an advisory lock for exactly this shape
-// — but there the consequence is a second instance administrator nobody intended, and here it is one
-// channel over a soft ceiling. The bound exists to keep a response payload from growing without limit, and
-// it does that whether the number is 500 or 502. A lock on every channel creation would cost more than the
-// property is worth.
-const (
-	maxChannelsPerGuild = 500
-	maxRolesPerGuild    = 250
-
-	// maxGuildsOwnedPerAccount bounds the outermost object, which had no ceiling while the two inside it
-	// got one.
-	//
-	// POST /guilds checks no permission by design — anyone authenticated may create a guild — and each one
-	// writes four rows, including an audit entry in the table migration 000016 says must never be swept.
-	// On the flagship, which is publicly open and whose registration anti-automation is M67a, that is
-	// unbounded permanent growth from a single account, and guild_members_user_id_idx — "the first query
-	// every client makes after READY" — grows with it.
-	//
-	// The contract's answer was that instance-wide abuse controls belong at account creation rather than
-	// here, which is true and defers to a milestone that does not exist. A count on guilds_owner_id_idx,
-	// an index 000015 already added, costs one indexed read on an operation nobody performs in a loop.
-	//
-	// Fifty rather than the hundred this shipped with, set deliberately rather than as a round number:
-	// M72a adds a guild discovery directory, which makes owning many guilds *useful* to a spammer in a way
-	// it was not when nothing listed them. That milestone also makes this limit read from
-	// user_entitlements — the per-user seam ADR 0007 reserved and no v1 code path has used — so a
-	// subscriber or an Instance Admin resolves higher. The constant is what an ordinary account gets, and
-	// it stops being a constant there.
-	maxGuildsOwnedPerAccount = 50
-)

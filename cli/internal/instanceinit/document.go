@@ -134,6 +134,15 @@ public_base_url = {{ .PublicBaseURL | toml }}
 # point it at yours. Nothing can detect that for you.
 # url = "https://git.example.org/you/norite"
 
+[limits]
+# Creation ceilings. Enforced when a channel, role or guild is created, not when a list is read — the
+# channel and role lists are returned whole, so the bound has to live at creation. Raise them if a large
+# organization genuinely needs more; a very large value does not raise a limit so much as remove the thing
+# it was protecting.
+channels_per_guild = 500
+roles_per_guild = 250
+guilds_per_account = 50
+
 [database]
 # Postgres connection string. Carries the password — see the 0600 note above.
 url = {{ .DatabaseURL | toml }}

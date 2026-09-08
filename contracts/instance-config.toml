@@ -74,6 +74,23 @@ trusted_proxy_hops = 1
 # because a value an operator can type is a value that can disagree with the code that is running.
 url = "https://github.com/Alexnex31/Norite"
 
+# Creation ceilings, enforced when a channel, role or guild is created rather than when a list is read.
+#
+# The channel and role lists are returned whole — a client needs the full tree to render a sidebar, and
+# paginating would make it fetch in a loop — so the bound has to live at creation. These are what stops a
+# list response growing without limit.
+#
+# Defaults match what comparable platforms settled on after operating at scale. Raise them if a large
+# organization genuinely needs more; setting something like 100000 does not raise a limit so much as remove
+# the thing it was protecting.
+#
+# Milestone M72a layers per-account entitlements on top: these become the floor every account on the
+# instance gets, and a flagship subscriber or an Instance Admin resolves higher.
+[limits]
+channels_per_guild = 500
+roles_per_guild = 250
+guilds_per_account = 50
+
 [database]
 # Postgres connection string. No default — there is no safe guess. Carries the password: see the 0600 note
 # above. Use sslmode=require (or verify-full) for anything but a local socket or private container network.

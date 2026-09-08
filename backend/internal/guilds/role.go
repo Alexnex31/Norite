@@ -83,8 +83,8 @@ func (s *Service) CreateRole(
 		if err != nil {
 			return fmt.Errorf("guilds: count roles: %w", err)
 		}
-		if count >= maxRolesPerGuild {
-			return httpx.Errorf(ErrGuildFull, "a guild may hold at most %d roles", maxRolesPerGuild)
+		if count >= int64(s.maxRolesPerGuild) {
+			return httpx.Errorf(ErrGuildFull, "a guild may hold at most %d roles", s.maxRolesPerGuild)
 		}
 
 		// Appended above every existing role. Position is the hierarchy M13 enforces, and a new role

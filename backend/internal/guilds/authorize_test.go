@@ -54,7 +54,10 @@ func newFixture(t *testing.T) *fixture {
 	ids, err := snowflake.NewGenerator(0)
 	require.NoError(t, err)
 
-	svc, err := NewService(ServiceOptions{Pool: pool, IDs: ids})
+	svc, err := NewService(ServiceOptions{
+		Pool: pool, IDs: ids,
+		MaxChannelsPerGuild: 500, MaxRolesPerGuild: 250, MaxGuildsPerAccount: 50,
+	})
 	require.NoError(t, err)
 
 	return &fixture{t: t, svc: svc, pool: pool}
@@ -230,4 +233,61 @@ func TestAuthorizeCanRunInsideACallersTransaction(t *testing.T) {
 	require.ErrorIs(t, f.svc.authorize(ctx, userActor(member), guildID, 0, roles.PermManageGuild),
 		httpx.ErrForbidden,
 		"and a check on the pool must not")
+}
+
+// TestTheCeilingsComeFromConfiguration pins that the creation limits are settings, not constants.
+//
+// They were constants until a review asked whether a self-hoster could change them. The failure this
+// guards is somebody reintroducing a package-level constant "for clarity": the test builds a service with
+// a ceiling of one and requires it to bite, which no hardcoded 500 can satisfy.
+func TestTheCeilingsComeFromConfiguration(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := t.Context()
+
+	// A service whose ceilings are 1, rather than the shipped 500/250/50.
+	tiny, err := NewService(ServiceOptions{
+		Pool: f.pool, IDs: f.svc.ids,
+		MaxChannelsPerGuild: 1, MaxRolesPerGuild: 1, MaxGuildsPerAccount: 1,
+	})
+	require.NoError(t, err)
+
+	owner := f.newUser(ctx, "owner")
+	actor := userActor(owner)
+
+	first, err := tiny.Create(ctx, actor, CreateGuildInput{Name: "first"})
+	require.NoError(t, err)
+
+	_, err = tiny.Create(ctx, actor, CreateGuildInput{Name: "second"})
+	require.ErrorIs(t, err, ErrGuildFull, "a ceiling of one guild must refuse the second")
+
+	// The guild it did create already holds its @everyone role, so the role ceiling is reached too.
+	_, err = tiny.CreateRole(ctx, actor, first.ID, CreateRoleInput{Name: "extra"})
+	require.ErrorIs(t, err, ErrGuildFull, "a ceiling of one role must refuse the second")
+
+	_, err = tiny.CreateChannel(ctx, actor, first.ID,
+		CreateChannelInput{Name: "general", Type: ChannelGuildText})
+	require.NoError(t, err, "the first channel is within a ceiling of one")
+
+	_, err = tiny.CreateChannel(ctx, actor, first.ID,
+		CreateChannelInput{Name: "second", Type: ChannelGuildText})
+	require.ErrorIs(t, err, ErrGuildFull, "a ceiling of one channel must refuse the second")
+}
+
+// TestAZeroCeilingIsRefusedAtConstruction fails at startup rather than at the first create.
+//
+// A zero ceiling refuses every creation with a conflict, which reads as a bug in the endpoint rather than
+// as an unset setting — and an unset setting is exactly what it would be.
+func TestAZeroCeilingIsRefusedAtConstruction(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	_, err := NewService(ServiceOptions{
+		Pool: f.pool, IDs: f.svc.ids,
+		MaxChannelsPerGuild: 0, MaxRolesPerGuild: 250, MaxGuildsPerAccount: 50,
+	})
+	require.Error(t, err, "a zero ceiling must be refused before the service exists")
+	require.Contains(t, err.Error(), "ceiling")
 }

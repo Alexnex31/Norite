@@ -210,7 +210,15 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	// router — the same middleware chain, the same limiter, the same Authenticate — rather than by calling
 	// handlers directly. Wired here rather than in a second constructor for the reason the comment above
 	// gives: every HTTP test drives the assembly the composition root builds.
-	guildsSvc, err := guilds.NewService(guilds.ServiceOptions{Pool: pool, IDs: ids})
+	// The ceilings come from config in production; the harness takes them from the same testConfig() the
+	// router does, so a test never disagrees with the instance it is running against.
+	guildsSvc, err := guilds.NewService(guilds.ServiceOptions{
+		Pool:                pool,
+		IDs:                 ids,
+		MaxChannelsPerGuild: testConfig().MaxChannelsPerGuild,
+		MaxRolesPerGuild:    testConfig().MaxRolesPerGuild,
+		MaxGuildsPerAccount: testConfig().MaxGuildsPerAccount,
+	})
 	require.NoError(t, err)
 
 	handler, err := newRouter(routerOptions{

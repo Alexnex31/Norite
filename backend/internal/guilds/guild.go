@@ -65,16 +65,16 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 	err = s.inTx(ctx, func(q *db.Queries) error {
 		// The ceiling. No permission is checked on this path, so this is the only bound on it — see
-		// maxGuildsOwnedPerAccount. Racy under READ COMMITTED in the same way and for the same reason the
+		// Service.maxGuildsPerAccount. Racy under READ COMMITTED in the same way and for the same reason the
 		// channel and role ceilings are, and acceptable for the same reason: the consequence is one guild
 		// over a soft limit, not a corrupted ordering.
 		owned, err := q.CountGuildsOwnedBy(ctx, int64(actor.UserID))
 		if err != nil {
 			return fmt.Errorf("guilds: count owned guilds: %w", err)
 		}
-		if owned >= maxGuildsOwnedPerAccount {
+		if owned >= int64(s.maxGuildsPerAccount) {
 			return httpx.Errorf(ErrGuildFull,
-				"an account may own at most %d guilds", maxGuildsOwnedPerAccount)
+				"an account may own at most %d guilds", s.maxGuildsPerAccount)
 		}
 
 		row, err := q.CreateGuild(ctx, db.CreateGuildParams{
