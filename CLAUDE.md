@@ -332,9 +332,11 @@ running as an explicitly parallel track) is in `docs/roadmap.md`.
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Five exist:
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Seven exist:
 `M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M20a` (first usable client),
-`M56a` (message reactions), `M67a` (registration anti-automation).
+`M56a` (message reactions), `M67a` (registration anti-automation), `M72a` (guild discovery directory) and
+`M72b` (its richer sorts, optional). `M72b` is the first `b`, which the convention already allowed —
+letters run `a`, `b`, `c` in insertion order after the same number.
 
 **Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
 testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed

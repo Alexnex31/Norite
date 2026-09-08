@@ -45,8 +45,19 @@ at all — the developer/company runs their own copyrighted code directly.
 
 The commercial model itself is unchanged: two independent deployments of the same codebase, no shared
 multi-tenant architecture, no "Platform Operator" tier — a free flagship instance (optional per-user
-subscription perks via the inert `user_entitlements` seam) and self-hosted instances sold via one-time
+subscription perks via the `user_entitlements` seam) and self-hosted instances sold via one-time
 license purchase.
+
+**Amended by M72a: that seam is no longer inert.** This ADR and ADR 0032 both described
+`user_entitlements` as reserved and unused by any v1 code path, which was true until a guild discovery
+directory needed per-account limits that a subscription could raise. M72a makes the owned-guild and
+joined-guild caps resolve from it — 50 and 100 for an ordinary account, more for a subscriber, the maximum
+for an Instance Admin. Two constraints come with it and are recorded in the roadmap entry: only an Instance
+Admin may write the table, and that write is a rule-14 action in `instance_audit_log`.
+
+This does not reintroduce a Platform Operator tier (ADR 0019). The table exists on every instance and only
+the flagship populates it, which is the same shape as the Redis event bus — a seam any instance could use
+and one deployment does, not a code path that asks "am I the flagship".
 
 ## Consequences
 - **The "pending legal review" gap this ADR previously carried is closed.** A short, standard

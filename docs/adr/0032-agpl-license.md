@@ -262,7 +262,9 @@ buckets are the right tool for the broad policy and the wrong tool for this dist
   not a derivative of the daemon. Stating this costs nothing and is the difference between an ecosystem and
   an unanswered question — a plugin author who cannot find an answer writes no plugin. The formal version
   of this has a deadline; see section 8.
-- **`entitlements`, `user_entitlements` and `internal/license/` survive as inert seams.** AGPL does not
+- **`entitlements`, `user_entitlements` and `internal/license/` survive as seams.** `user_entitlements`
+  stops being inert at M72a, which resolves per-account guild limits from it; the other two remain unbuilt.
+  AGPL does not
   restrict charging for a service you host, and one cannot infringe one's own copyright, so flagship
   subscription perks are unaffected and ADR 0013's paid custom-emoji perk still rests on a real seam. The
   self-hosted signed-license machinery has lost the customer 0007 designed it for and is kept unbuilt

@@ -899,6 +899,11 @@ of this section.
   Not urgent in the release plan's terms — nothing is publicly open before v1 — which is precisely why it
   is scheduled rather than left as a gap somebody discovers on launch day.
 
+  **M72a raises the stakes and the dependency runs backwards.** A guild discovery directory makes bulk
+  account creation *profitable* in a way nothing before it does: an account exists to own guilds, and
+  guilds exist to be listed in front of everyone on the instance. M67a should land before M72a, or the
+  directory's first page is what a scripted signup can put there.
+
   Done when: a scripted client cannot create accounts faster than the challenge allows from a single
   source or from a rotating address pool; an instance with the challenge disabled behaves exactly as today;
   and the response shape is unchanged for a client that has never seen a challenge.
@@ -930,6 +935,9 @@ of this section.
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
   `instance_audit_log` recording every Instance Admin action.
 
+  **M72a adds no statement to this transaction.** A ban and a guild's discoverability are independent
+  actions an admin composes — see M72a, where that is decided and why.
+
   **It inherits one case from M12 that is easy to miss, because the code that creates it destroys its own
   evidence.** An Instance Admin passes ADR 0008's layer 1 and can therefore delete a guild they are not a
   member of. That deletion writes a guild-scoped audit entry in its own transaction, satisfying rule 2 —
@@ -945,6 +953,126 @@ of this section.
 
   Done when: issuing a ban immediately disconnects the account everywhere and blocks re-authentication, and
   the action is logged.
+- **M72a — Guild discovery directory**: a browsable list of the instance's public guilds, so somebody with
+  no invite has somewhere to go. Carries screen `3f`.
+
+  **It deliberately reverses the property M12 spent a milestone establishing, for opted-in guilds only.**
+  M12 made guild existence unlearnable — a non-member and a nonexistent guild both answer 404, a malformed
+  id answers 404 through the same line, and a security review found and closed two places where a public
+  error leaked existence. That is what makes a private guild private. A directory publishes exactly that,
+  so it is gated on a `guilds.discoverable` column **defaulting to false**, set by the owner at creation or
+  in guild settings. The invariant becomes "a guild is unlistable unless its owner opted in", and every
+  path outside the directory keeps M12's behaviour untouched. A reader who finds a listing endpoint and
+  concludes the 404/403 discipline was abandoned has read it wrong; this paragraph is why.
+
+  **Member count is a denormalized counter, not an aggregate.** `count(*)` per listed guild is the N+1
+  §15.2 names, on a paginated directory over the instance's hottest table. `guilds.member_count` is
+  maintained in the same transaction as the join or leave that changes it — the discipline rule 2 already
+  imposes on audit writes — with a reconciliation sweep, because a counter that can drift and never be
+  checked is a number nobody can trust. The sort index is `(discoverable, member_count DESC)`.
+
+  **Three sorts, all one indexed read**: member count descending (default), newest first (free — snowflakes
+  are time-ordered, so this is `id DESC`), and alphabetical. Most-active and friends-in-it are M72b's,
+  because both need data from outside the guild row.
+
+  **Opt-in is the only gate, and joining is direct.** No minimum member count, no admin approval queue, no
+  request-to-join: a brand-new guild is exactly what somebody browsing might want to join, and an approval
+  queue does not scale on the flagship. `POST /guilds/{guild_id}/join` refuses unless the guild is
+  discoverable, so this is not a second way into a private one — it is the first join path that needs no
+  invite code, which is the whole point of a directory. Request-to-join is a real feature and a separate
+  milestone if it is ever wanted; it needs a pending-requests table, an owner-facing queue and
+  notifications, which is most of a milestone on its own.
+
+  **Moderation is reactive, and the admin's actions are orthogonal rather than tiered.** There are two
+  levers and an admin picks either or both, because the guild and its owner are different objects and the
+  problem is often only one of them:
+
+  - **Lock the guild private** — `discoverable = false` plus `discoverable_locked_at`, so the owner cannot
+    simply flip the boolean back and end the takedown ten seconds later. The guild keeps working for its
+    members; only the public shopfront closes.
+  - **Ban the owner** — M72's `instance_bans`, which already revokes sessions through M11's primitive.
+    **This does not touch discoverability**: a guild whose owner is banned stays listed, because a guild
+    with a thousand members is not abusive for having had one bad owner, and unpublishing it would punish
+    the members for that.
+  - **Both**, when the guild is the problem too.
+
+  An earlier draft had the ban cascade automatically into unpublishing every guild the account owned. That
+  is wrong for the reason above, and it also removed a judgement the admin should be making: the two facts
+  a directory can go wrong on — this listing is abusive, this person is abusive — are not the same fact.
+
+  **Nothing here deletes a guild.** M12 makes deletion the owner's decision precisely because it cascades
+  with no undo, and destroying every channel and message over a description punishes members for their
+  owner's text. All discoverability writes are rule-14 actions in `instance_audit_log`.
+
+  **The directory adds no report affordance** — that is M74's, which routes reports properly; `3f` reserves
+  the keybinding and nothing more.
+
+  **No dedicated rate-limit bucket.** Joining sits in the base limiter, because the 100-guild ceiling is
+  what actually bounds the damage and a second bucket would be a knob with nothing behind it. One residual
+  is accepted rather than unnoticed: the ceiling bounds how many guilds an account is *in*, not how often
+  it joins and leaves, so join-leave churn can append audit rows and move counters without ever exceeding
+  it. If that becomes real, the answer is a bucket built through `internal/platform/ratelimit` like every
+  other one, not a special case here.
+
+  **The instance toggle defaults ON**, matching ADR 0013's public-matchmaking toggle rather than inventing
+  a second posture. It is harmless on a small instance because nothing is listed until an owner opts a
+  guild in — the directory is simply empty. It extends `norite instance init` the way M5's SMTP prompt,
+  M37's voice opt-out and M66's matchmaking toggle each did, which means the four files a setting always
+  touches: `contracts/instance-config.toml`, `backend/internal/config`, the wizard template and
+  `.env.example`.
+
+  **Paging is a cursor on `(member_count, id)` and is not stable, deliberately.** The tiebreak on `id`
+  makes the ordering total, which a cursor needs; what it cannot do is stop a guild whose count changes
+  mid-browse from appearing twice or being skipped. That is accepted — a directory is a browse surface,
+  not a ledger, and the alternative is a materialized ranking refreshed on a schedule, which is real
+  machinery for a problem nobody experiences. **M72b builds that machinery anyway** for most-active, so if
+  stable paging is ever wanted it arrives there rather than being built twice.
+
+  **Search is prefix-only and adds no dependency.** `name ILIKE $1 || '%'` on a partial b-tree over
+  `(name) WHERE discoverable`. Fuzzy matching would need `pg_trgm` and therefore M65; prefix is enough for
+  "I half-remember what it was called", which is the search a directory actually gets.
+
+  **Limits stop being constants here.** M12 caps an account at 50 owned guilds with a constant; this
+  milestone makes that limit, and a new joined-guild limit of 100, resolve from `user_entitlements` — the
+  per-user seam ADR 0007 reserved and no v1 code path has used. An ordinary account gets 50/100, a flagship
+  subscriber more, an Instance Admin the maximum. Two consequences: **only an Instance Admin may write
+  `user_entitlements`**, and that write is a rule-14 action in `instance_audit_log`, or a subscriber grants
+  themselves 5,000 guilds. And **the joined cap is the READY payload bound** (§15.2) — that payload carries
+  guild and channel metadata upfront, so this number is what stops it scaling without limit, which is why
+  it is 100 rather than a larger round number.
+
+  ADR 0007 and ADR 0032 both describe `user_entitlements` as inert and unused by any v1 code path. This is
+  the milestone that stops being true, and both say so.
+
+  **It opens with a migration**, which is worth saying because the columns are already in §2's DDL and a
+  reader could take them for built: `discoverable`, `discoverable_locked_at` and `member_count` are three
+  `ALTER TABLE`s on `guilds`, plus the two partial indexes. They are deliberately absent from M12's
+  `000015` — a `member_count` shipped there would read `0` on every guild for sixty milestones, and a
+  column that looks authoritative and is not is worse than no column. It arrives with the code that keeps
+  it true. The migration also backfills the counter from `guild_members`, which is the same statement the
+  reconciliation sweep runs.
+
+  Done when: an owner can publish a guild and unpublish it; the directory lists only published guilds and
+  never leaks the existence of an unpublished one; the three sorts and prefix search work; a guild can be
+  joined directly from the listing and not at all when it is unpublished; member counts stay correct across
+  joins, leaves, kicks, guild deletion and account soft-deletion, and the reconciliation sweep finds no
+  drift; an Instance Admin can force-unpublish and the owner cannot undo it; a non-subscriber is held to 50
+  owned and 100 joined; and discovery can be switched off instance-wide, which removes the screen rather
+  than emptying it.
+- **M72b — Guild directory, richer sorts** *(optional)*: most-active and friends-in-it, the two sorts M72a
+  left out because neither is a column.
+
+  **Optional in the release sense**: v1 ships without it if the directory is doing its job, and nothing
+  else depends on it. Grouped rather than split because both are the same shape — a sort key that lives
+  outside the guild row and has to be materialized.
+
+  Most-active needs rolling message-volume aggregates per guild over a defined window, which is a
+  background job and a table, not a column. Friends-in-it needs M69's `friendships` and is the cheaper of
+  the two, being a join rather than an aggregate; it is also the more useful, since "three people you know
+  are in here" is a better reason to join a guild than "it is busy".
+
+  Done when: both sorts are selectable in `3f`, the most-active aggregate is bounded work on a schedule
+  rather than per request, and neither sort discloses a guild the caller could not already see.
 - **M73 — Instance Admin lockout recovery**: the server-side recovery CLI command
   (`norite instance grant-admin <email>`, filesystem-access-gated). Done when: it successfully regrants the tier on a test
   instance with zero remaining admins.
@@ -980,6 +1108,12 @@ of this section.
   can review a filed report on a whisper and that specific access is itself an audit-log entry, a report
   filed against a plain DM or Group DM also reaches the Instance Admin triage queue, a timed-out account
   can still read but cannot post until the timeout expires, and a bulk delete is bounded and audit-logged.
+
+  **It also owns the guild directory's report path.** M72a lists guilds whose name and description are
+  written by a stranger and read by everyone on the instance, and deliberately adds no report affordance —
+  moderation there is reactive, so without an inbox an Instance Admin only finds an abusive listing by
+  browsing for it. Screen `3f` reserves the keybinding and nothing behind it; this milestone is what makes
+  it do something.
 - **M75 — Instance Admin proactive intervention**: report-less intervention capability
   (legal/compliance), gated by a mandatory logged justification field distinguishing it from
   report-triggered entries. Done when: a proactive action is blocked without a justification string and

@@ -83,6 +83,7 @@ UPPERCASE with `letter-spacing:.06em` in the mock → in a TUI, just uppercase i
 | `▤` | file attachment |
 | `⚑` `⚙` `@` | reports, settings, direct-messages rail entry |
 | `◎` | discover / public matchmaking rail entry |
+| `+` | guild directory, at the foot of the rail's guild list (`M72a`) |
 | `◆` | focused pane marker |
 | `›` | composer / list cursor prompt |
 | `▾` | expanded sidebar section |

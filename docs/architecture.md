@@ -304,8 +304,38 @@ CREATE INDEX ON user_recovery_codes (user_id) WHERE used_at IS NULL;
 CREATE TABLE guilds (
   id bigint PRIMARY KEY, name varchar(100) NOT NULL, owner_id bigint NOT NULL REFERENCES users(id),
   icon_hash text NULL, description text NULL, system_channel_id bigint NULL,
+  -- M72a. Default false, and that default is the whole design: M12 makes a guild's existence unlearnable
+  -- to a non-member, and the directory publishes exactly that for guilds whose owner opted in. Everything
+  -- outside the directory keeps M12's behaviour.
+  discoverable boolean NOT NULL DEFAULT false,
+  -- M72a. Set by an Instance Admin taking a listing down; while it is non-NULL the owner's own toggle is
+  -- refused. Without it "force-unpublish" lasts until the owner notices and flips the boolean back, which
+  -- is not a moderation action. Clearing it is an admin action too, and both writes are rule 14's.
+  --
+  -- Banning the owner does not touch this column, or `discoverable`, at all. The two are orthogonal levers
+  -- an admin composes: a guild with a thousand members is not abusive for having had one bad owner, and
+  -- unpublishing it would punish the members for that. Locking a listing and banning a person are answers
+  -- to two different facts, and which of them is true is the admin's judgement to make.
+  discoverable_locked_at timestamptz NULL,
+  -- M72a. A counter maintained in the same transaction as the join or leave that changes it, not an
+  -- aggregate: count(*) per listed guild is the N+1 §15.2 names, on a paginated directory over the
+  -- instance's hottest table. A reconciliation sweep checks it, because a counter that can drift and never
+  -- be checked is a number nobody can trust.
+  --
+  -- It counts *live humans*: a soft-deleted account (users.deleted_at, kept so its authored content still
+  -- renders as "Deleted User") is decremented out, and bots are excluded when they exist. Counting every
+  -- guild_members row instead is simpler and slowly wrong — the inflation only grows, on the column that
+  -- is the directory's default sort. The rule is fixed before bots arrive so the number never quietly
+  -- changes meaning.
+  member_count integer NOT NULL DEFAULT 0,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- The directory's default sort. Partial on discoverable, because the rows it excludes are the
+-- overwhelming majority on any instance and none of them is ever listed.
+CREATE INDEX ON guilds (member_count DESC) WHERE discoverable;
+-- Prefix search on the name, deliberately not fuzzy: a b-tree serves `name ILIKE $1 || '%'` and needs no
+-- pg_trgm, so the directory does not depend on M65. Enough for "I half-remember what it was called".
+CREATE INDEX ON guilds (name) WHERE discoverable;
 
 CREATE TABLE guild_members (
   guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
@@ -580,8 +610,13 @@ CREATE TABLE reports (                          -- unified: guild, instance-leve
 CREATE INDEX ON reports (reporter_id);
 CREATE INDEX ON reports (status, routed_to);
 
--- Entitlements (ADR 0032) — inert seams, unused by any v1 code path. The per-instance seam has lost the
--- customer it was designed for (self-hosting is free); it is kept unbuilt rather than deleted.
+-- Entitlements (ADR 0032). The per-instance seam is inert and has lost the customer it was designed for
+-- (self-hosting is free); it is kept unbuilt rather than deleted. **The per-user seam stops being inert at
+-- M72a**, which makes the owned-guild and joined-guild limits resolve from it rather than from constants —
+-- an ordinary account gets 50 and 100, a flagship subscriber more, an Instance Admin the maximum.
+--
+-- Only an Instance Admin may write user_entitlements, and that write is a rule-14 action logged in
+-- instance_audit_log. Without both halves a subscriber grants themselves 5,000 guilds.
 CREATE TABLE entitlements (                     -- per-instance (self-hosted license)
   id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),   -- singleton
   licensed boolean NOT NULL DEFAULT false, license_key text NULL, entitlements_blob jsonb NOT NULL DEFAULT '{}'
@@ -768,6 +803,20 @@ GET    /users/@me/export                   -- server-side export; see E2E export
 -- Guild routes additionally require an API token to hold `guilds.read` (reads) or `guilds.write`
 -- (everything else). A user's own access token passes both: a scope bounds a *delegated* credential and
 -- never a person. Permission resolution still runs underneath, so a scope narrows and never grants.
+GET    /guilds/discover?sort=&q=&after=&limit=
+                                           -- M72a; the public directory. Reads only discoverable=true,
+                                           --   so it discloses nothing M12 protects. `q` is a name prefix.
+                                           --   Cursor on (member_count, id) — the tiebreak makes the
+                                           --   ordering total, and a guild whose count changes mid-browse
+                                           --   may repeat or be skipped, which is accepted for a browse
+                                           --   surface
+POST   /guilds/{guild_id}/join             -- M72a; direct join, no invite. Refuses unless the guild is
+                                           --   discoverable, so this is not a second way into a private
+                                           --   one. Writes the membership, the counter and an audit entry
+                                           --   in one transaction
+PATCH  /guilds/{guild_id}/discoverability  -- M72a; the owner publishes or unpublishes. An Instance Admin
+                                           --   uses the same route to force-unpublish, which also sets
+                                           --   discoverable_locked_at and is a rule-14 action
 POST   /guilds                             -- M12; writes guild + @everyone + owner membership in one tx
 GET    /guilds/{guild_id}                  -- M12
 PATCH  /guilds/{guild_id}                  -- M12; PermManageGuild

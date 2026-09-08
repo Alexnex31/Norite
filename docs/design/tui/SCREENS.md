@@ -12,8 +12,13 @@ Every screen shares: 120×40 cells, the 4-column chrome (rail 8 / channels 25 / 
 **Purpose** the default view: read and post in a guild channel.
 **Layout** all four columns, one pane, full chrome.
 - **Rail (8 cells)**: `@` direct-messages entry, divider, guild initials (2 letters, active = `accent.fill`
-  + `accent`), divider, `◎` discover/matchmaking, spacer, then pinned status glyphs at the bottom
+  + `accent`), then `+` at the **foot of the guild list** (`M72a`, the guild directory), divider, `◎`
+  discover/matchmaking, spacer, then pinned status glyphs at the bottom
   (`●` daemon health, `♪` voice). Guilds are numbered implicitly for `M-1…M-9`.
+- The `+` sits below the last guild rather than in its own rail section, so reaching the end of the guilds
+  you have *is* the affordance for finding more. On an account with none the list above it is empty and the
+  `+` is the only thing in that region, which is what makes `5b`'s dead end resolve without a second
+  screen explaining itself.
 - **Channel list (25)**: header `Norite` + `M-1`; sections `▾ TEXT`, `▾ VOICE`, `▾ DIRECT`;
   active channel `accent.fill`; unread channel `text.bright` + count in `danger`; footer row
   `● alex` + presence (`deep work` in `warn`).
@@ -160,6 +165,35 @@ again opens the manual; `/` filters.
 - Output pane: `M-x output` + `◆ exit 0 · 41ms`; the shell line in dim, then syntax-colored JSON
   (keys `presence`, strings `ok`, numbers `warn`, punctuation dim); footer
   `piped to pane · C-c y yank · C-c > write to file`.
+
+### 3f — Guild directory
+**Layout** full-width single pane; the channel column becomes **Sort** and **Filter**.
+- Header is the sort row: `▾ SORT` (members ▾ / newest / a–z, and — only once M72b lands — most active /
+  friends in it), `▾ SEARCH` name **prefix**, right `312 public guilds`. Prefix rather than substring: it
+  is a b-tree lookup and needs no `pg_trgm`, so this screen does not wait on M65.
+- Rows carry name, member count, a one-line truncated description, and `JOIN` / `JOINED`. Untrusted text,
+  all of it: name and description are written by a stranger and read by everyone on the instance, so both
+  go through `termsafe` (rule 19) — this is the first screen where that text has never been filtered by
+  membership.
+- A guild the account already belongs to shows `JOINED` in `dim` and is not actionable; joining is a single
+  keystroke with no confirm, since it is direct (no invite, no approval), reversible and rate-limited. An
+  account at its joined-guild ceiling sees `JOIN` in `dim` with the reason in the footer rather than a
+  failure after the keystroke.
+- Footer `RET join · TAB sort · / search · C-c ? report` — the report verb is **M74's**, not M72a's, and the
+  binding is reserved here so it does not move once reports route.
+- Empty state: `no public guilds yet` plus the invite-redeem box from `5b`. **This screen exists because of
+  that one**: `5b` is a new account with no guilds whose only affordance is pasting a code somebody must
+  have sent them, which is a dead end for anyone who has not been invited anywhere.
+- Reached from `+` at the foot of the rail's guild list — scrolling past the last guild you are in is the
+  gesture for finding one you are not. **Not** the `◎` discover entry, which is public matchmaking's
+  (`M66`) and a different thing: matchmaking is guild-less channels, this is guilds. Sharing one entry
+  would merge two concepts that only sound alike.
+- On an account with no guilds the list above `+` is empty, so `+` is the whole rail region. That is the
+  screen's reason for existing: `5b` currently offers a new account nothing but a box to paste a code
+  somebody must have sent them.
+- Instance-level toggle, defaulting **on**, matching ADR 0013's matchmaking toggle. With discovery off the
+  `+` is absent and the rail ends at the last guild; `◎` is unaffected, since matchmaking has its own
+  toggle and the two are independent.
 
 ---
 
