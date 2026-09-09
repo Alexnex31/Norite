@@ -579,10 +579,15 @@ type Querier interface {
 	// guild and falls off a cliff at the channel ceiling, because the planner stops choosing the nested loop
 	// and sequentially scans the whole overwrite table. On PostgreSQL 16 against 175,000 overwrite rows:
 	//
-	//                                        time      buffers
-	//   join form, 10-channel guild        0.319 ms         75   Nested Loop, pkey lookups
-	//   join form, 500-channel guild      13.682 ms      1,523   Seq Scan, 176,500 rows for 1,500 returned
-	//   this form, 500-channel guild       0.388 ms      1,513   Bitmap Index Scan on pkey
+	//                                            time      buffers
+	//   guild-join form, 10-channel guild      0.319 ms         75   Nested Loop, pkey lookups
+	//   guild-join form, 500-channel guild    13.682 ms      1,523   Seq Scan, 176,500 rows for 1,500 back
+	//   this form, 500-channel guild           0.536 ms      1,523   Bitmap Index Scan on pkey
+	//
+	// The last figure is the query as it stands, with the guild join a security review added afterwards. The
+	// ids alone measured 0.388 ms; scoping costs ~0.15 ms and a hash join over the guild's channels, and is
+	// kept for the reason that review gives. Re-measured rather than left quoting the pre-scoping number,
+	// because a comment citing a figure the code no longer produces is worse than one citing none.
 	//
 	// The planner is not wrong by its own cost model — it weighs one sequential scan against 500 index
 	// descents — but the cost it minimises grows with the whole instance while the alternative grows with one
@@ -869,6 +874,21 @@ type Querier interface {
 	// advisory lock CreateRole already takes, because two concurrent creates that both renumber and both
 	// insert at 1 would collide — and migration 000015 deliberately declines the unique constraint that would
 	// catch it.
+	// # The outer guild_id is not redundant, and an EXPLAIN is what says so
+	//
+	// `r.id = ranked.id` looks like it settles the outer scan: 253 primary keys, 253 lookups. The planner
+	// does not read it that way. It builds the ranked set, then *sequentially scans every role on the
+	// instance* and hash-joins — 25,254 rows read to update 253, because it has no restriction on `r` other
+	// than the join condition and a seq scan plus hash beats what it estimates the lookups to cost.
+	//
+	// Naming the guild on the outer relation gives it roles_guild_id_position_idx on both sides:
+	//
+	//   without   4.261 ms   Seq Scan on roles, 25,254 rows
+	//   with      1.879 ms   Bitmap Index Scan, this guild's roles only
+	//
+	// The ratio is the least interesting part. The seq-scan form's cost grows with the *instance's* role
+	// count while the indexed form grows with the guild's, so the gap widens for the life of the instance —
+	// the same shape 000015 measures three times over.
 	ShiftRolePositionsUp(ctx context.Context, guildID int64) error
 	// Records use, at most once every few minutes per token.
 	//

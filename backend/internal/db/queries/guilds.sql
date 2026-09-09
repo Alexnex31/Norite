@@ -345,7 +345,24 @@ FROM (
     FROM roles inner_r
     WHERE inner_r.guild_id = sqlc.arg(guild_id) AND NOT inner_r.is_default
 ) ranked
-WHERE r.id = ranked.id AND r.position IS DISTINCT FROM ranked.position;
+-- # The outer guild_id is not redundant, and an EXPLAIN is what says so
+--
+-- `r.id = ranked.id` looks like it settles the outer scan: 253 primary keys, 253 lookups. The planner
+-- does not read it that way. It builds the ranked set, then *sequentially scans every role on the
+-- instance* and hash-joins — 25,254 rows read to update 253, because it has no restriction on `r` other
+-- than the join condition and a seq scan plus hash beats what it estimates the lookups to cost.
+--
+-- Naming the guild on the outer relation gives it roles_guild_id_position_idx on both sides:
+--
+--   without   4.261 ms   Seq Scan on roles, 25,254 rows
+--   with      1.879 ms   Bitmap Index Scan, this guild's roles only
+--
+-- The ratio is the least interesting part. The seq-scan form's cost grows with the *instance's* role
+-- count while the indexed form grows with the guild's, so the gap widens for the life of the instance —
+-- the same shape 000015 measures three times over.
+WHERE r.id = ranked.id
+  AND r.guild_id = sqlc.arg(guild_id)
+  AND r.position IS DISTINCT FROM ranked.position;
 
 -- name: SetRolePosition :execrows
 -- One row of a reorder. The whole reorder is several of these in one transaction under the same advisory

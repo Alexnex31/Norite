@@ -930,7 +930,9 @@ FROM (
     FROM roles inner_r
     WHERE inner_r.guild_id = $1 AND NOT inner_r.is_default
 ) ranked
-WHERE r.id = ranked.id AND r.position IS DISTINCT FROM ranked.position
+WHERE r.id = ranked.id
+  AND r.guild_id = $1
+  AND r.position IS DISTINCT FROM ranked.position
 `
 
 // Make room at the bottom of the hierarchy for a new role (Milestone M13).
@@ -957,6 +959,21 @@ WHERE r.id = ranked.id AND r.position IS DISTINCT FROM ranked.position
 // advisory lock CreateRole already takes, because two concurrent creates that both renumber and both
 // insert at 1 would collide — and migration 000015 deliberately declines the unique constraint that would
 // catch it.
+// # The outer guild_id is not redundant, and an EXPLAIN is what says so
+//
+// `r.id = ranked.id` looks like it settles the outer scan: 253 primary keys, 253 lookups. The planner
+// does not read it that way. It builds the ranked set, then *sequentially scans every role on the
+// instance* and hash-joins — 25,254 rows read to update 253, because it has no restriction on `r` other
+// than the join condition and a seq scan plus hash beats what it estimates the lookups to cost.
+//
+// Naming the guild on the outer relation gives it roles_guild_id_position_idx on both sides:
+//
+//	without   4.261 ms   Seq Scan on roles, 25,254 rows
+//	with      1.879 ms   Bitmap Index Scan, this guild's roles only
+//
+// The ratio is the least interesting part. The seq-scan form's cost grows with the *instance's* role
+// count while the indexed form grows with the guild's, so the gap widens for the life of the instance —
+// the same shape 000015 measures three times over.
 func (q *Queries) ShiftRolePositionsUp(ctx context.Context, guildID int64) error {
 	_, err := q.db.Exec(ctx, shiftRolePositionsUp, guildID)
 	return err

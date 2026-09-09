@@ -95,7 +95,7 @@ func channelFromListRow(row db.ListGuildChannelsRow) Channel {
 //
 // Two queries rather than 2N. Measured at the ceiling that matters, because the shape of the overwrite
 // read is not obvious: written as a join on guild_id it costs 13.682 ms on a 500-channel guild, where
-// passing the channel ids the listing has already loaded costs 0.388 ms — the planner abandons the nested
+// passing the channel ids the listing has already loaded costs 0.536 ms — the planner abandons the nested
 // loop and sequentially scans the whole overwrite table. See ListGuildPermissionOverwrites.
 //
 // # Who is not filtered
