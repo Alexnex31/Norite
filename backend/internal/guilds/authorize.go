@@ -105,14 +105,27 @@ func (d decision) allows(need roles.Permission) bool {
 	return d.instanceAdmin || d.resolution.Permissions.Has(need)
 }
 
-// The standing wrapper lands with its first caller, not here.
+// outranks reports whether the actor may act on something standing at the given position.
 //
-// decision is where ADR 0008's layers meet, so a hierarchy check belongs on it: an Instance Admin is above
-// every guild's hierarchy and is never resolved against one, so the tier has to be asked before
-// roles.Resolution.Outranks is. That wrapper is one line and it is absent only because nothing calls it
-// yet — an unexported method with no callers does not survive the linter, and silencing that would be
-// worse than waiting. The primitive it will wrap is built and tested in the roles package; the first
-// endpoint to need it adds the wrapper in the same commit.
+// The full ADR 0008 answer rather than layer 4's half: an Instance Admin is above every guild's hierarchy
+// and is never resolved against one, so there is no standing to compare and the tier answers first. Below
+// that, roles.Resolution.Outranks handles the owner and the strictly-greater comparison.
+//
+// One function, for the reason authorize is one function: a rule written as N call sites has N chances to
+// miss one, and this package has already shipped three member operations that checked a permission and
+// never asked about standing.
+func (d decision) outranks(position int32) bool {
+	return d.instanceAdmin || d.resolution.Outranks(position)
+}
+
+// outranksMember is outranks for a target that is a person rather than a role.
+//
+// Separate because the guild owner cannot be reached by a positional comparison — their own standing is a
+// meaningless zero, so comparing it reports that any role-holder outranks them. An Instance Admin still
+// may act on the owner, which is why the tier is checked here and not inside roles.Resolution.
+func (d decision) outranksMember(targetID snowflake.ID, targetStanding int32) bool {
+	return d.instanceAdmin || d.resolution.OutranksMember(targetID, targetStanding)
+}
 
 // authorizeWith is authorize against an explicit querier, so a check can run inside a caller's
 // transaction rather than on a separate connection.

@@ -145,6 +145,26 @@ func (q *Queries) CopyChannelOverwrites(ctx context.Context, arg CopyChannelOver
 	return err
 }
 
+const countChannelPermissionOverwrites = `-- name: CountChannelPermissionOverwrites :one
+SELECT count(*) FROM permission_overwrites WHERE channel_id = $1
+`
+
+// How many overwrites a channel carries, for the creation ceiling.
+//
+// The ceiling exists for the reason CLAUDE.md settles for channels and roles: a list that cannot be
+// paginated is bounded at creation instead. Overwrites are read whole — once per channel before every
+// channel-scoped mutation, and once per guild on the channel listing — so an unbounded count is work on
+// two hot paths, done on behalf of rows a caller wrote and nobody can see. target_id is polymorphic and
+// cannot be a foreign key, so a fabricated one persists with nothing to clean it up.
+//
+// Served by the primary key's leading column.
+func (q *Queries) CountChannelPermissionOverwrites(ctx context.Context, channelID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countChannelPermissionOverwrites, channelID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countGuildChannels = `-- name: CountGuildChannels :one
 SELECT count(*) FROM channels WHERE guild_id = $1
 `

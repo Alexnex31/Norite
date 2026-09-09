@@ -456,3 +456,15 @@ WHERE po.channel_id = sqlc.arg(source_channel_id)
   AND src.guild_id = sqlc.arg(guild_id)::bigint
   AND dest.guild_id = sqlc.arg(guild_id)::bigint
 ON CONFLICT DO NOTHING;
+
+-- name: CountChannelPermissionOverwrites :one
+-- How many overwrites a channel carries, for the creation ceiling.
+--
+-- The ceiling exists for the reason CLAUDE.md settles for channels and roles: a list that cannot be
+-- paginated is bounded at creation instead. Overwrites are read whole — once per channel before every
+-- channel-scoped mutation, and once per guild on the channel listing — so an unbounded count is work on
+-- two hot paths, done on behalf of rows a caller wrote and nobody can see. target_id is polymorphic and
+-- cannot be a foreign key, so a fabricated one persists with nothing to clean it up.
+--
+-- Served by the primary key's leading column.
+SELECT count(*) FROM permission_overwrites WHERE channel_id = $1;

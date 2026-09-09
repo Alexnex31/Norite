@@ -2585,6 +2585,121 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /channels/{channel_id}/permissions/{overwrite_id}:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: overwrite_id
+        in: path
+        required: true
+        description: >
+          The role or member this overwrite targets. Which of the two it is comes from `type` in the body
+          — the id alone does not say, and looking it up in both tables would make the answer depend on
+          which one happened to hold it.
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    put:
+      summary: Create or replace a channel permission overwrite
+      description: >
+        ADR 0008 layer 5. Requires `MANAGE_ROLES` **resolved in this channel**, not at guild level — a
+        caller denied a permission here would otherwise be able to allow it back to themselves in one
+        request.
+
+
+        Three further checks, none of which is the permission check:
+
+
+        The target must exist **in this guild**, verified against the `type` sent rather than against
+        either table. A request naming a role id while claiming a member target is refused rather than
+        stored, because the row would be inert and no client could explain it.
+
+
+        The caller must **outrank the target** — a role strictly below their own highest, or a member
+        whose highest role is strictly below it. Naming yourself is exempt from this comparison and from
+        nothing else, since nobody outranks themselves and the escalation rule below is what bounds that
+        case.
+
+
+        The caller may only name permissions they themselves hold in this channel, in **either** field.
+        Denying is restricted as well as allowing, matching Discord. And the check covers the union of
+        what the request *changes*, not what it writes: replacing an existing overwrite with an empty one
+        removes whatever it allowed or denied, so those bits are part of the change. Without that,
+        blanking a row that denies you something grants it to you.
+
+
+        Idempotent. An omitted `allow` or `deny` means empty, not "leave alone" — this is a `PUT` and it
+        replaces the row it names.
+      operationId: setChannelPermissionOverwrite
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetOverwriteRequest"
+      responses:
+        "200":
+          description: The overwrite, as written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionOverwrite"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller lacks `MANAGE_ROLES` in this channel, is an API token without the `guilds.write`
+            scope, does not outrank the target, or named a permission they do not hold here. The message
+            names neither the missing permission nor any position — both are a map of the guild's
+            configuration handed to somebody probing its edges.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The channel is at its ceiling of 50 permission overwrites.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Delete a channel permission overwrite
+      description: >
+        Every check `PUT` makes, including the escalation one — which is the half that looks unnecessary
+        and is not. Deleting an overwrite changes exactly the permissions it allowed or denied, so a
+        caller who may not name those bits may not remove them.
+
+
+        Carries a body, unusually for a `DELETE`, because the target is polymorphic and the path id does
+        not say which kind it is. A query parameter would put it in the request log where a body is not.
+      operationId: deleteChannelPermissionOverwrite
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteOverwriteRequest"
+      responses:
+        "204":
+          description: The overwrite is gone.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            As for `PUT`, including the escalation check over the bits the removed row carried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /guilds/{guild_id}/roles:
     parameters:
       - name: guild_id
@@ -3822,6 +3937,64 @@ components:
           type: integer
           minimum: 0
           maximum: 99
+
+    PermissionOverwrite:
+      type: object
+      description: >
+        One channel permission overwrite — ADR 0008 layer 5.
+
+
+        `target_id` is polymorphic: a role id when `type` is 0, a user id when it is 1. It carries no
+        foreign key for that reason, which is why deleting a role or removing a member deletes their
+        overwrites explicitly rather than leaving the database to cascade.
+      additionalProperties: false
+      required: [channel_id, type, target_id, allow, deny]
+      properties:
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+        type:
+          type: integer
+          format: int32
+          enum: [0, 1]
+          description: 0 role, 1 member.
+        target_id:
+          $ref: "#/components/schemas/Snowflake"
+        allow:
+          $ref: "#/components/schemas/Permissions"
+        deny:
+          $ref: "#/components/schemas/Permissions"
+
+    SetOverwriteRequest:
+      type: object
+      description: >
+        A replacement, not a patch. An omitted `allow` or `deny` means empty — there is no way to change
+        one and leave the other, because the row is written whole.
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: integer
+          format: int32
+          enum: [0, 1]
+          description: >
+            Which kind of thing `overwrite_id` names. Required, and validated rather than stored: a value
+            the resolver would ignore is refused, so the table cannot accumulate rows that resolve to
+            nothing and that no cleanup path knows about.
+        allow:
+          $ref: "#/components/schemas/Permissions"
+        deny:
+          $ref: "#/components/schemas/Permissions"
+
+    DeleteOverwriteRequest:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: integer
+          format: int32
+          enum: [0, 1]
+          description: Which kind of thing `overwrite_id` names.
 
     Role:
       type: object

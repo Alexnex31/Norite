@@ -122,6 +122,16 @@ type Querier interface {
 	// a guild-scoped one, so a copied member row genuinely applies in the guild it landed in — applyOverwrites
 	// matches on user id — and DeleteOverwritesForTarget is guild-scoped, so nothing would ever clean it up.
 	CopyChannelOverwrites(ctx context.Context, arg CopyChannelOverwritesParams) error
+	// How many overwrites a channel carries, for the creation ceiling.
+	//
+	// The ceiling exists for the reason CLAUDE.md settles for channels and roles: a list that cannot be
+	// paginated is bounded at creation instead. Overwrites are read whole — once per channel before every
+	// channel-scoped mutation, and once per guild on the channel listing — so an unbounded count is work on
+	// two hot paths, done on behalf of rows a caller wrote and nobody can see. target_id is polymorphic and
+	// cannot be a foreign key, so a fabricated one persists with nothing to clean it up.
+	//
+	// Served by the primary key's leading column.
+	CountChannelPermissionOverwrites(ctx context.Context, channelID int64) (int64, error)
 	// How many channels a guild has, for the creation cap.
 	//
 	// Served by the leading column of channels_guild_id_position_idx: a bitmap index scan into the heap, 15

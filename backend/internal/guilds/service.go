@@ -62,6 +62,16 @@ var (
 	// number behind it.
 	ErrGuildFull = errors.New("guilds: the guild is at its limit for this kind of object")
 
+	// ErrOutranked reports an attempt to act on a role or a member standing at or above the actor.
+	//
+	// Deliberately does not say which, or by how much. Naming the target's position is a map of the
+	// guild's hierarchy handed to somebody probing its edges, and the actor can already read the role
+	// list — the same reasoning that keeps authorize from naming the permission it refused.
+	ErrOutranked = errors.New("guilds: the target stands at or above the actor")
+
+	// ErrChannelFull reports an overwrite refused because the channel is at its overwrite ceiling.
+	ErrChannelFull = errors.New("guilds: the channel is at its limit for permission overwrites")
+
 	// ErrCannotRemoveOwner reports an attempt to remove the guild owner from their own guild.
 	//
 	// Not a permission question: nothing in ADR 0008 grants the authority, because the owner *is* layer 2

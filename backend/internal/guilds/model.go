@@ -33,6 +33,11 @@ const (
 	ActionRoleDelete    = "role.delete"
 	ActionMemberUpdate  = "member.update"
 	ActionMemberRemove  = "member.remove"
+
+	// One action for writing an overwrite rather than separate create and update verbs, because the
+	// endpoint is a PUT and does not distinguish them either. What changed is in the entry's `changes`.
+	ActionOverwriteSet    = "overwrite.set"
+	ActionOverwriteDelete = "overwrite.delete"
 )
 
 // Channel types, as stored in channels.type.
@@ -167,4 +172,28 @@ func idPtr(v *int64) *snowflake.ID {
 	}
 	id := snowflake.ID(*v)
 	return &id
+}
+
+// Overwrite is the wire representation of one channel permission overwrite.
+//
+// Three of its four values are 64-bit and every one of them marshals as a quoted string. target_id is a
+// snowflake (ADR 0003); allow and deny are permission bitfields, which M12 settled as quoted decimal for
+// the same reason — a 63-bit field and a float64 do not mix above 2^53, and a client that silently drops
+// the top bits of a permission set is worse than one that fails to parse.
+type Overwrite struct {
+	ChannelID snowflake.ID     `json:"channel_id"`
+	Type      int16            `json:"type"`
+	TargetID  snowflake.ID     `json:"target_id"`
+	Allow     roles.Permission `json:"allow"`
+	Deny      roles.Permission `json:"deny"`
+}
+
+func overwriteFromRow(row db.PermissionOverwrite) Overwrite {
+	return Overwrite{
+		ChannelID: snowflake.ID(row.ChannelID),
+		Type:      row.TargetType,
+		TargetID:  snowflake.ID(row.TargetID),
+		Allow:     roles.PermissionFromInt64(row.Allow),
+		Deny:      roles.PermissionFromInt64(row.Deny),
+	}
 }
