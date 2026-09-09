@@ -427,10 +427,23 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   and it was M13's; four of ADR 0008's six layers have data at M12, so what is built here is complete
   rather than a placeholder. M13 keeps the overwrite endpoints and position hierarchy; M14 keeps the read
   surface and the `changes` diffing.
-- **M13 — Permission overwrites and role hierarchy**: next, and smaller than its original entry. The
-  resolution engine exists; what M13 adds is the endpoints that write an overwrite — so layer 5 finally has
-  rows to resolve against — plus position-based hierarchy, and the per-channel view filtering M12's channel
-  listing deliberately does not do yet.
+- **M13 — Permission overwrites, role hierarchy, and role assignment**: next, and **larger** than its
+  original entry, which said the opposite. The resolution engine exists; what M13 adds is the endpoints
+  that write an overwrite — so layer 5 finally has rows to resolve against — plus position-based
+  hierarchy, and the per-channel view filtering M12's channel listing deliberately does not do yet.
+
+  It grew for three reasons found by reading M12 against the done-when rather than by reading the entry.
+  **Nothing writes `guild_member_roles`** — no assignment endpoint exists anywhere in the repo or the
+  roadmap, so every non-owner's standing is permanently 0 and a hierarchy check would ship with its
+  interesting branch unreachable. **`position` needs an atomic multi-row writer**, because N single-role
+  updates leave two roles sharing a position and two roles at one position are neither above nor below
+  each other. And **`CreateChannel` copies no category overwrites and authorizes at guild level**, so a
+  channel created inside a locked category is readable by everyone and creatable by someone that category
+  denies — invisible at M12 because no overwrite could exist.
+
+  Two decisions in it outlive the milestone: a new role is created at the **bottom**, as Discord does; and
+  **assignment is escalation-checked**, which is a deliberate departure from Discord, where hierarchy
+  alone gates it. See the roadmap entry for both arguments.
 
 
 What exists on the backend today, and the conventions the next milestone should follow rather than

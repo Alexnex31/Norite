@@ -324,41 +324,91 @@ of this section.
   Done when: a guild, its channels, its roles and its membership can be created, read, updated and deleted
   via the REST API; every mutating route resolves permissions through one chokepoint; and every mutation
   writes exactly one audit entry in its own transaction.
-- **M13 — Permission overwrites and role hierarchy**: the `permission_overwrites` endpoints, and
-  position-based hierarchy enforcement — who may manage whom.
+- **M13 — Permission overwrites, role hierarchy, and role assignment**: the `permission_overwrites`
+  endpoints, position-based hierarchy enforcement — who may manage whom — and the role-assignment
+  endpoints without which neither is reachable.
 
-  **M12 built the resolution engine, so this entry is smaller than it was.** `roles.Resolve` exists with
-  ADR 0008's layers 2 through 5: owner bypass, `PermAdministrator` short-circuit, the OR of role bits, and
-  overwrite precedence (`@everyone` → the union of role overwrites → member). The permission bitfield
-  exists and its bit order is pinned by a test. What M13 adds is the half M12 could not: endpoints that
-  write an overwrite, so layer 5 has rows to resolve against, and role `position` hierarchy, which is a
-  different question from permission resolution and is genuinely untouched.
+  **This entry used to open by saying it was smaller than it was, and that is no longer true.** M12 built
+  the resolution engine, so `roles.Resolve` already implements ADR 0008's layers 2 through 5: owner
+  bypass, `PermAdministrator` short-circuit, the OR of role bits, and overwrite precedence (`@everyone` →
+  the union of role overwrites → member). The bitfield exists and its bit order is pinned by a test. What
+  grew the milestone is three things that were invisible from here until the code was read against the
+  done-when.
 
-  M12 tests layer 5 by inserting overwrite rows directly, which is what stops it shipping unexercised —
-  but "an overwrite created through the API behaves as documented" is still M13's to demonstrate.
+  **Nothing writes `guild_member_roles`.** The table is read in two places and written in none — there is
+  no assignment endpoint in M12, in §2's endpoint list, or in any milestone through M125. So every
+  non-owner's highest role position is permanently 0, and a hierarchy check landed without assignment is a
+  check whose interesting branch cannot be reached through the API — the same debt M12 handed forward on
+  layer 5, one milestone later and on the rule that decides who may act on whom. Worse, "give yourself a
+  role above your own" is the attack the position rule exists to refuse, and it cannot be attempted.
+  `PUT`/`DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}`, one role per request.
 
-  Two items M12 deferred here explicitly: the channel listing does not yet hide channels the caller cannot
-  view, because nothing can write an overwrite to hide one with; and role `position` is not settable
-  through the role endpoints, because reordering is a multi-row swap that belongs with the hierarchy rules
-  that give it meaning.
+  **`position` needs a writer, and it cannot be the single-role `PATCH`.** Reordering is a multi-row swap
+  — which is why 000015 declines a unique constraint on `(guild_id, position)` — so N single-role updates
+  leave two roles briefly sharing a position, and two roles at one position are neither above nor below
+  each other. That dissolves the ordering every check in this milestone rests on. `PATCH
+  /guilds/{guild_id}/roles` takes `[{id, position}]` and does the swap in one transaction under the
+  advisory lock `CreateRole` already holds.
 
-  **The hierarchy gap is wider than roles, and that is the part this entry used to miss.** A security
-  review of M12 found the same missing check on two member operations, neither of which is about roles at
-  all: `RemoveMember` lets a `PermKickMembers` holder kick an administrator, and `UpdateMember` lets a
-  `PermMuteMembers` holder server-mute one. The shape is identical in all three places — the permission is
-  checked and the *relative standing* of actor and target never is — so a milestone that lands the role
-  check alone produces the worse outcome of the two: a hierarchy that holds for roles and silently does
-  not for people. M12 left all three open together and they close together.
+  **A channel created under a category must inherit its permissions**, and M12's `CreateChannel` copies
+  nothing — so a channel created inside a locked-down category is readable by everyone the moment it
+  exists. Invisible at M12 because no overwrite could exist; live the moment this milestone ships. Discord
+  copies the category's overwrites at creation and the channel does not follow later changes, so "sync" is
+  a client-side re-copy through these same endpoints and needs no server state. The same reading found
+  that `CreateChannel` authorizes `PermManageChannels` at guild level while `UpdateChannel` and
+  `DeleteChannel` resolve per-channel, so a member denied that permission *inside* a category can still
+  create channels in it — a fix to M12 that belongs here because here is where it stops being theoretical.
 
-  What "standing" means needs deciding once, here, rather than three times: the natural rule is the target's
-  highest role position against the actor's, with the guild owner and an Instance Admin above everyone. Note
-  that `@everyone` is position 0, so a member holding no role at all is at the floor and can be acted on by
-  anybody with the permission — which is correct, and worth stating so it is not later mistaken for a bug.
+  **Two decisions that outlive the milestone.** A new role is created at the **bottom** of the hierarchy,
+  immediately above `@everyone`, as Discord does — top placement leaves a non-owner unable to edit, delete,
+  assign or reposition the role they just made. And **assignment is escalation-checked**: a role may only
+  be assigned by somebody who holds every permission it carries. That is the one deliberate departure from
+  Discord in this milestone, and the reason is that Discord gates assignment on hierarchy alone and relies
+  on powerful roles being placed high — a configuration assumption a public flagship should not rest on,
+  where "a delegated authority never exceeds its delegator" is a principle this project holds everywhere
+  else. It needs no owner branch: `decision.allows` already exempts the owner and the Instance Admin.
+
+  **Two items M12 deferred here explicitly**, both still in scope: the channel listing does not yet hide
+  channels the caller cannot view, because nothing can write an overwrite to hide one with; and M12 tests
+  layer 5 by inserting rows directly, so "an overwrite created through the API behaves as documented" is
+  still this milestone's to demonstrate.
+
+  **The hierarchy gap is wider than roles.** A security review of M12 found the same missing check on the
+  member operations: `RemoveMember` lets a `PermKickMembers` holder kick an administrator, and
+  `UpdateMember` lets a `PermMuteMembers` holder server-mute one — and `nickname`, the fourth field, which
+  the review did not name. The shape is identical everywhere: the permission is checked and the *relative
+  standing* of actor and target never is. A milestone landing the role check alone produces the worse
+  outcome of the two, a hierarchy that holds for roles and silently does not for people.
+
+  **What "standing" means, decided once here rather than at nine call sites.** The target's highest role
+  position against the actor's, **strictly greater** — equal standing must not permit acting, or two
+  members holding the same role can kick each other. The owner and an Instance Admin are above everyone and
+  are never compared positionally. `PermAdministrator` **does not confer standing**: it short-circuits
+  permissions at layer 3 and says nothing about position, which is the detail most likely to be implemented
+  the other way round. `@everyone` is position 0, so a member holding no role is at the floor and can be
+  acted on by anybody with the permission — correct, and stated so it is not later filed as a bug.
+
+  **Leaving a guild is the only self-exemption, and shedding a role is not.** Removing a role from yourself
+  looked like a demotion and stopped being one in this very milestone: with overwrites, a role can
+  *restrict*, and the commonest use of one is a `muted` role denying `PermSendMessages`. Self-removal takes
+  `PermManageRoles` and the strictly-below check like any other unassignment. That binds the members it is
+  aimed at and not a moderator, because **a positional hierarchy cannot protect a restriction placed low** —
+  which is the argument for M74's timeout existing at all.
+
+  **Considered and rejected: splitting overwrites and hierarchy into two milestones.** They are separable
+  on paper and the split is worse in both orderings. Overwrites first leaves a milestone whose role-targeted
+  rows are inert, because nothing can hold a role yet; hierarchy first inverts the entry's own title and
+  still cannot demonstrate the interactions. And the interactions are where the value is: three of this
+  milestone's escalation findings exist only because overwrites and hierarchy are both present. M12
+  absorbing scope from two later milestones is the precedent.
 
   Done when: an overwrite can be created, updated and deleted through the API and changes what
-  `roles.Resolve` returns; a member cannot manage a role positioned above their own highest, **nor kick,
-  mute or deafen a member whose highest role is above their own**; and the channel listing reflects
-  per-channel view permission.
+  `roles.Resolve` returns; a role can be assigned and unassigned, and cannot be assigned by somebody who
+  does not hold its permissions; roles can be reordered atomically and no two ever share a position; a
+  member cannot manage a role positioned above their own highest, **nor kick, mute, deafen or rename a
+  member whose highest role is above their own**; a channel created under a category inherits that
+  category's overwrites and cannot be created there by somebody the category denies; and the channel
+  listing reflects per-channel view permission.
 - **M13a — Guild ownership transfer**: `POST /guilds/{guild_id}/owner`, moving ownership to another
   member. Small, and scheduled here because M12 left two dead ends that only this closes.
 
@@ -800,7 +850,17 @@ of this section.
   (existing pattern). Carries its screens: `1b` (DM — the peer column, verified-device header, `◈` composer)
   and `1c` (group DM, which shows instance-side encryption and **no** `◈`, since E2E is `DM`-only per rule
   13), plus `5b` (empty / first join, with the invite-redeem box) and the DM entries the M50 switcher gains.
-  Done when: a user can DM another user and create/redeem a guild invite.
+
+  **This is the first milestone where a guild can be *re*joined, and M13 left a question waiting for it.**
+  `RemoveMember` deletes the departing member's own permission overwrites — deliberately, so that a rejoin
+  does not silently restore a channel-level deny nothing in the UI or the audit log explains. Read the
+  other way, leaving and rejoining sheds every member-tier restriction. That was unreachable at M13 because
+  no join path existed; it is reachable here. Decide it rather than inherit it: either the deletion stands
+  and a rejoin is a clean slate, or member-tier overwrites survive a departure and the M13 comment is
+  wrong.
+
+  Done when: a user can DM another user and create/redeem a guild invite; and rejoining a guild has a
+  stated, tested answer for member-tier permission overwrites.
 - **M58 — Attachments storage**: the pluggable storage interface (local disk default), server-side
   content-type sniffing, size/rate limits. The `minio-go` S3-compatible backend is wired in as the alternate
   implementation (used later by the flagship at M115, self-hosted instances never touch it). Carries the `▤`
@@ -1052,9 +1112,16 @@ of this section.
   it true. The migration also backfills the counter from `guild_members`, which is the same statement the
   reconciliation sweep runs.
 
+  **The direct-join path inherits M57's rejoin question**, and inherits it in a sharper form: a public
+  guild can be left and rejoined by anyone, repeatedly, with no invite to gate it. `RemoveMember` deletes
+  the departing member's own permission overwrites, so a member-tier channel deny is shed by leaving and
+  coming back. Whatever M57 settles applies here; what is different is that here the cycle costs the
+  attacker nothing.
+
   Done when: an owner can publish a guild and unpublish it; the directory lists only published guilds and
   never leaks the existence of an unpublished one; the three sorts and prefix search work; a guild can be
-  joined directly from the listing and not at all when it is unpublished; member counts stay correct across
+  joined directly from the listing and not at all when it is unpublished; a leave-and-rejoin cycle through
+  this path behaves as M57 decided for member-tier overwrites; member counts stay correct across
   joins, leaves, kicks, guild deletion and account soft-deletion, and the reconciliation sweep finds no
   drift; an Instance Admin can force-unpublish and the owner cannot undo it; a non-subscriber is held to 50
   owned and 100 joined; and discovery can be switched off instance-wide, which removes the screen rather
@@ -1085,6 +1152,14 @@ of this section.
   the table, the expanding selected report with its defanged excerpt, the two action rows, and the standing
   note that only reporter-attached content is visible — the honest statement of ADR 0013's break-glass
   posture.
+
+  **`PermModerateMembers` is not a nicer `muted` role, and M13 is where that stopped being a matter of
+  taste.** A timeout is enforced by a bit on the member rather than by a role, and the reason is
+  structural: a positional hierarchy cannot protect a restriction that is placed low, and a restricting
+  role is placed low by definition. So a `muted` role denying `PermSendMessages` binds exactly the members
+  who lack `PermManageRoles` — a moderator handed one can unassign it from themselves, and M13 refuses to
+  pretend otherwise. Written here because this milestone is the one that has to be built rather than
+  argued for, and the argument would otherwise be reconstructed from scratch.
 
   **Those two action rows are `C-c C-t` (timeout 24h) and `C-c C-d` (delete subject's posts), and neither
   had anything behind it until now** — no table, no permission bit, no endpoint, no milestone. The screen
