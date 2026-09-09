@@ -40,6 +40,81 @@ func (q *Queries) AddGuildMember(ctx context.Context, arg AddGuildMemberParams) 
 	return i, err
 }
 
+const assignRoleToMember = `-- name: AssignRoleToMember :execrows
+
+INSERT INTO guild_member_roles (guild_id, user_id, role_id)
+SELECT gm.guild_id, gm.user_id, r.id
+FROM guild_members gm
+JOIN roles r ON r.guild_id = gm.guild_id
+WHERE gm.guild_id = $1
+  AND gm.user_id = $2
+  AND r.id = $3
+`
+
+type AssignRoleToMemberParams struct {
+	GuildID int64
+	UserID  int64
+	RoleID  int64
+}
+
+// Role assignment, role positions and permission overwrites (Milestone M13).
+// Give a member a role.
+//
+// # Why there is no ON CONFLICT, and why the row comes from a SELECT
+//
+// Deliberately conflicting rather than swallowing, for AddGuildMember's reason one table over: ON CONFLICT
+// DO NOTHING would make a second assignment return zero rows, which is indistinguishable from an insert
+// that matched nothing. Those two need different answers — the first is an idempotent PUT succeeding, the
+// second is a 404 — so the unique violation is left to surface and the caller translates it.
+//
+// The SELECT is what verifies both ids belong together before anything is written: the role must be in
+// this guild, and the (guild, user) pair must be a real membership. Rule 1 in the statement rather than in
+// a check a handler has to remember. The composite foreign key would refuse a non-member anyway, but it
+// would do it as a constraint violation the caller has to reverse-engineer, and a 500 is not an answer.
+func (q *Queries) AssignRoleToMember(ctx context.Context, arg AssignRoleToMemberParams) (int64, error) {
+	result, err := q.db.Exec(ctx, assignRoleToMember, arg.GuildID, arg.UserID, arg.RoleID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const copyChannelOverwrites = `-- name: CopyChannelOverwrites :exec
+INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+SELECT $1, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = $2
+  AND c.guild_id = $3::bigint
+ON CONFLICT DO NOTHING
+`
+
+type CopyChannelOverwritesParams struct {
+	ChannelID       int64
+	SourceChannelID int64
+	GuildID         int64
+}
+
+// Copy a category's overwrites onto a channel being created under it (Milestone M13).
+//
+// Inheritance is a copy at creation and not a lookup at resolution time, which is what Discord does: a
+// channel does not follow its category's later permission changes, and "sync permissions with category" is
+// a client re-copying through the overwrite endpoints rather than a flag anything stores. roles.Resolve
+// therefore keeps reading exactly one channel's rows and never walks to a parent — resolution-time
+// inheritance would put a second query on the check that runs before every mutation.
+//
+// Without this, a channel created inside a locked-down category is readable by everyone the moment it
+// exists. That was unreachable while nothing could write an overwrite, which is why M12 does not do it.
+//
+// Not escalation-checked, deliberately: the copy replicates a configuration the guild already authored
+// rather than authoring a new one, so refusing bits the creator does not hold would make inheritance fail
+// exactly under the locked-down category it is most wanted under. What is checked is the creator's
+// authority over the parent, in CreateChannel.
+func (q *Queries) CopyChannelOverwrites(ctx context.Context, arg CopyChannelOverwritesParams) error {
+	_, err := q.db.Exec(ctx, copyChannelOverwrites, arg.ChannelID, arg.SourceChannelID, arg.GuildID)
+	return err
+}
+
 const countGuildChannels = `-- name: CountGuildChannels :one
 SELECT count(*) FROM channels WHERE guild_id = $1
 `
@@ -293,6 +368,37 @@ func (q *Queries) DeleteOverwritesForTarget(ctx context.Context, arg DeleteOverw
 	return err
 }
 
+const deletePermissionOverwrite = `-- name: DeletePermissionOverwrite :execrows
+DELETE FROM permission_overwrites po
+USING channels c
+WHERE po.channel_id = c.id
+  AND c.guild_id = $1::bigint
+  AND po.channel_id = $2
+  AND po.target_type = $3
+  AND po.target_id = $4
+`
+
+type DeletePermissionOverwriteParams struct {
+	GuildID    int64
+	ChannelID  int64
+	TargetType int16
+	TargetID   int64
+}
+
+// Remove an overwrite. Scoped through channels for UpsertPermissionOverwrite's reason.
+func (q *Queries) DeletePermissionOverwrite(ctx context.Context, arg DeletePermissionOverwriteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePermissionOverwrite,
+		arg.GuildID,
+		arg.ChannelID,
+		arg.TargetType,
+		arg.TargetID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteRole = `-- name: DeleteRole :execrows
 DELETE FROM roles WHERE id = $1 AND guild_id = $2 AND NOT is_default
 `
@@ -387,6 +493,48 @@ func (q *Queries) GetGuildMember(ctx context.Context, arg GetGuildMemberParams) 
 		&i.JoinedAt,
 		&i.Deaf,
 		&i.Mute,
+	)
+	return i, err
+}
+
+const getPermissionOverwrite = `-- name: GetPermissionOverwrite :one
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = $1
+  AND po.target_type = $2
+  AND po.target_id = $3
+  AND c.guild_id = $4::bigint
+`
+
+type GetPermissionOverwriteParams struct {
+	ChannelID  int64
+	TargetType int16
+	TargetID   int64
+	GuildID    int64
+}
+
+// One overwrite, scoped to the guild through its channel.
+//
+// Read before every write and before every delete, because the escalation check covers the union of what
+// the request changes: the bits the existing row allows or denies, or'd with the bits the new one does.
+// Checking only the value being written leaves deletion checked by nothing at all — and deleting an
+// overwrite that denies you something grants you that thing, which is a self-escalation on the endpoint
+// whose whole subject is per-channel permissions.
+func (q *Queries) GetPermissionOverwrite(ctx context.Context, arg GetPermissionOverwriteParams) (PermissionOverwrite, error) {
+	row := q.db.QueryRow(ctx, getPermissionOverwrite,
+		arg.ChannelID,
+		arg.TargetType,
+		arg.TargetID,
+		arg.GuildID,
+	)
+	var i PermissionOverwrite
+	err := row.Scan(
+		&i.ChannelID,
+		&i.TargetType,
+		&i.TargetID,
+		&i.Allow,
+		&i.Deny,
 	)
 	return i, err
 }
@@ -679,6 +827,80 @@ func (q *Queries) RemoveGuildMember(ctx context.Context, arg RemoveGuildMemberPa
 	return result.RowsAffected(), nil
 }
 
+const setRolePosition = `-- name: SetRolePosition :execrows
+UPDATE roles
+SET position = $1, updated_at = now()
+WHERE id = $2 AND guild_id = $3 AND NOT is_default
+`
+
+type SetRolePositionParams struct {
+	Position int32
+	ID       int64
+	GuildID  int64
+}
+
+// One row of a reorder. The whole reorder is several of these in one transaction under the same advisory
+// lock, because N separate requests would leave two roles sharing a position between them — and two roles
+// at one position are neither above nor below each other, which dissolves the ordering every hierarchy
+// check rests on.
+//
+// `AND NOT is_default` refuses to move @everyone off 0 in the statement rather than in a check before it,
+// the same discipline DeleteRole applies to the same role.
+func (q *Queries) SetRolePosition(ctx context.Context, arg SetRolePositionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setRolePosition, arg.Position, arg.ID, arg.GuildID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const shiftRolePositionsUp = `-- name: ShiftRolePositionsUp :exec
+UPDATE roles
+SET position = position + 1, updated_at = now()
+WHERE guild_id = $1 AND NOT is_default
+`
+
+// Make room at the bottom of the hierarchy for a new role (Milestone M13).
+//
+// A new role is created immediately above @everyone rather than above every existing role, which is what
+// Discord does and what stops a non-owner creating a role they then cannot edit, delete, assign or
+// reposition. That means everything else moves up one, and @everyone stays on the floor every layer-4
+// resolution starts from.
+//
+// Bounded by the role ceiling, so this rewrites at most 249 rows on a path that runs when somebody clicks
+// "create role". It runs inside the same advisory lock CreateRole already takes, because two concurrent
+// creates that both shift and both insert at 1 would collide — and migration 000015 deliberately declines
+// the unique constraint that would catch it.
+func (q *Queries) ShiftRolePositionsUp(ctx context.Context, guildID int64) error {
+	_, err := q.db.Exec(ctx, shiftRolePositionsUp, guildID)
+	return err
+}
+
+const unassignRoleFromMember = `-- name: UnassignRoleFromMember :execrows
+DELETE FROM guild_member_roles
+WHERE guild_id = $1 AND user_id = $2 AND role_id = $3
+`
+
+type UnassignRoleFromMemberParams struct {
+	GuildID int64
+	UserID  int64
+	RoleID  int64
+}
+
+// Take a role away. Zero rows means the member did not hold it, which is an idempotent DELETE succeeding
+// rather than an error — the caller has already established that the member exists, because the hierarchy
+// check reads their standing first and GetMemberHighestRolePosition returns no row for a non-member.
+//
+// guild_id in the WHERE is not redundant with role_id: it scopes the delete to this guild's grant even
+// though the pair could only ever appear together, which is the same belt-and-braces GetRole applies.
+func (q *Queries) UnassignRoleFromMember(ctx context.Context, arg UnassignRoleFromMemberParams) (int64, error) {
+	result, err := q.db.Exec(ctx, unassignRoleFromMember, arg.GuildID, arg.UserID, arg.RoleID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateChannel = `-- name: UpdateChannel :one
 UPDATE channels
 SET name       = COALESCE($1, name),
@@ -874,6 +1096,51 @@ func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, e
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertPermissionOverwrite = `-- name: UpsertPermissionOverwrite :one
+INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+SELECT c.id, $1, $2, $3, $4
+FROM channels c
+WHERE c.id = $5 AND c.guild_id = $6::bigint
+ON CONFLICT (channel_id, target_type, target_id)
+DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny
+RETURNING channel_id, target_type, target_id, allow, deny
+`
+
+type UpsertPermissionOverwriteParams struct {
+	TargetType int16
+	TargetID   int64
+	Allow      int64
+	Deny       int64
+	ChannelID  int64
+	GuildID    int64
+}
+
+// Write an overwrite, creating or replacing.
+//
+// PUT rather than POST/PATCH on the wire, so the same statement has to serve both — ON CONFLICT on the
+// primary key is what makes the endpoint idempotent. The row is selected from channels rather than
+// supplied directly, so a channel in another guild inserts nothing and the caller sees pgx.ErrNoRows
+// rather than writing an overwrite onto somebody else's channel (rule 1, in the statement).
+func (q *Queries) UpsertPermissionOverwrite(ctx context.Context, arg UpsertPermissionOverwriteParams) (PermissionOverwrite, error) {
+	row := q.db.QueryRow(ctx, upsertPermissionOverwrite,
+		arg.TargetType,
+		arg.TargetID,
+		arg.Allow,
+		arg.Deny,
+		arg.ChannelID,
+		arg.GuildID,
+	)
+	var i PermissionOverwrite
+	err := row.Scan(
+		&i.ChannelID,
+		&i.TargetType,
+		&i.TargetID,
+		&i.Allow,
+		&i.Deny,
 	)
 	return i, err
 }

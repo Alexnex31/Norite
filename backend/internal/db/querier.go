@@ -19,6 +19,21 @@ type Querier interface {
 	// no store of its own: replaying one matches zero rows. The remaining conditions mean an approval racing
 	// a denial or an expiry loses rather than overwriting it.
 	ApproveDeviceCode(ctx context.Context, arg ApproveDeviceCodeParams) (DeviceCode, error)
+	// Role assignment, role positions and permission overwrites (Milestone M13).
+	// Give a member a role.
+	//
+	// # Why there is no ON CONFLICT, and why the row comes from a SELECT
+	//
+	// Deliberately conflicting rather than swallowing, for AddGuildMember's reason one table over: ON CONFLICT
+	// DO NOTHING would make a second assignment return zero rows, which is indistinguishable from an insert
+	// that matched nothing. Those two need different answers — the first is an idempotent PUT succeeding, the
+	// second is a 404 — so the unique violation is left to surface and the caller translates it.
+	//
+	// The SELECT is what verifies both ids belong together before anything is written: the role must be in
+	// this guild, and the (guild, user) pair must be a real membership. Rule 1 in the statement rather than in
+	// a check a handler has to remember. The composite foreign key would refuse a non-member anyway, but it
+	// would do it as a constraint violation the caller has to reverse-engineer, and a 500 is not an answer.
+	AssignRoleToMember(ctx context.Context, arg AssignRoleToMemberParams) (int64, error)
 	// The moment the factor becomes required. Guarded on still being unconfirmed so a replayed confirmation
 	// cannot move the timestamp, which is the same single-transition discipline the device flow uses.
 	ConfirmTOTP(ctx context.Context, userID int64) (UserTotp, error)
@@ -63,6 +78,22 @@ type Querier interface {
 	// query in sessions.sql is scoped by device: a lookup that can only ever match this account's rows cannot
 	// be made to act on another's by a collision or a future schema change.
 	ConsumeRecoveryCode(ctx context.Context, arg ConsumeRecoveryCodeParams) (UserRecoveryCode, error)
+	// Copy a category's overwrites onto a channel being created under it (Milestone M13).
+	//
+	// Inheritance is a copy at creation and not a lookup at resolution time, which is what Discord does: a
+	// channel does not follow its category's later permission changes, and "sync permissions with category" is
+	// a client re-copying through the overwrite endpoints rather than a flag anything stores. roles.Resolve
+	// therefore keeps reading exactly one channel's rows and never walks to a parent — resolution-time
+	// inheritance would put a second query on the check that runs before every mutation.
+	//
+	// Without this, a channel created inside a locked-down category is readable by everyone the moment it
+	// exists. That was unreachable while nothing could write an overwrite, which is why M12 does not do it.
+	//
+	// Not escalation-checked, deliberately: the copy replicates a configuration the guild already authored
+	// rather than authoring a new one, so refusing bits the creator does not hold would make inheritance fail
+	// exactly under the locked-down category it is most wanted under. What is checked is the creator's
+	// authority over the parent, in CreateChannel.
+	CopyChannelOverwrites(ctx context.Context, arg CopyChannelOverwritesParams) error
 	// How many channels a guild has, for the creation cap.
 	//
 	// Served by the leading column of channels_guild_id_position_idx: a bitmap index scan into the heap, 15
@@ -254,6 +285,8 @@ type Querier interface {
 	// alone would match them — a snowflake is unique in practice, but "in practice" is not the guarantee
 	// rule 1 asks for.
 	DeleteOverwritesForTarget(ctx context.Context, arg DeleteOverwritesForTargetParams) error
+	// Remove an overwrite. Scoped through channels for UpsertPermissionOverwrite's reason.
+	DeletePermissionOverwrite(ctx context.Context, arg DeletePermissionOverwriteParams) (int64, error)
 	// Used when the whole set is replaced or the factor is disabled. Deletes rather than marking spent: these
 	// are not evidence of anything once the factor they belonged to is gone.
 	DeleteRecoveryCodesForUser(ctx context.Context, userID int64) (int64, error)
@@ -303,6 +336,27 @@ type Querier interface {
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	GetGuild(ctx context.Context, id int64) (Guild, error)
 	GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error)
+	// The target's standing: the highest position among the roles one member holds (Milestone M13).
+	//
+	// The actor's standing comes free from ListGuildMemberAuthority above. This is the other side of every
+	// hierarchy check — the person being kicked, muted, renamed, or given a role — and it is a separate read
+	// because the target is not the account whose permissions were just resolved.
+	//
+	// # Why the join to guild_members, and why GROUP BY
+	//
+	// Both exist to keep two different answers from collapsing into the same number, which is the trap this
+	// query is shaped around.
+	//
+	// @everyone is never stored in guild_member_roles, so a member holding no other role has zero rows there
+	// and MAX(position) over them is NULL. Coalescing that to 0 is correct — 0 is @everyone's position and the
+	// floor is where such a member belongs. But an aggregate with no GROUP BY returns exactly one row even
+	// over no input at all, so somebody who is not in the guild would also coalesce to 0: a non-member
+	// evaluating as a member at the floor, which every actor above the floor then outranks. The mutation
+	// itself would fail further down on a row count, so the result is safe by accident rather than by design.
+	//
+	// The join makes membership the thing that produces a row and GROUP BY makes "no member" produce no rows,
+	// so the caller gets pgx.ErrNoRows for a non-member and a real 0 for a member at the floor.
+	GetMemberHighestRolePosition(ctx context.Context, arg GetMemberHighestRolePositionParams) (int32, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
@@ -324,6 +378,14 @@ type Querier interface {
 	// tell "no such token" from "already used" for its own logging, even though both are reported to the
 	// client identically.
 	GetPasswordResetTokenByHash(ctx context.Context, tokenHash []byte) (PasswordResetToken, error)
+	// One overwrite, scoped to the guild through its channel.
+	//
+	// Read before every write and before every delete, because the escalation check covers the union of what
+	// the request changes: the bits the existing row allows or denies, or'd with the bits the new one does.
+	// Checking only the value being written leaves deletion checked by nothing at all — and deleting an
+	// overwrite that denies you something grants you that thing, which is a self-escalation on the endpoint
+	// whose whole subject is per-channel permissions.
+	GetPermissionOverwrite(ctx context.Context, arg GetPermissionOverwriteParams) (PermissionOverwrite, error)
 	// Scoped by guild as well as by id, so a role id from another guild resolves to nothing rather than to
 	// somebody else's role. Rule 1: never trust a client-supplied ID without verifying it belongs to the
 	// actor's claimed context — enforced in the statement, not in a check a handler has to remember.
@@ -428,6 +490,14 @@ type Querier interface {
 	// which of the returned roles is the default one. Deriving it any other way — a second query, or assuming
 	// the lowest position — is a lookup this query has already paid for.
 	//
+	// position is M13's addition and it is the whole of the actor's half of the hierarchy check. Standing is
+	// the highest position among the roles a member holds, and this query already returns exactly those roles
+	// — so the alternative was a second query on every kick, mute, deafen, assignment and role edit, to fetch
+	// a number that was one column away. M12's authorize.go argued against widening roles.Resolve's return for
+	// owner_id, on the grounds that it would reshape a security-critical signature to save a lookup on two
+	// cold paths. That argument does not carry here: standing is layer 4, the same layer this query already
+	// serves, and the saving is on every hierarchy-checked mutation rather than on two.
+	//
 	// owner_id and is_member repeat on every row. That is two columns times a handful of roles, and the
 	// alternative is the extra round trip this query exists to avoid.
 	ListGuildMemberAuthority(ctx context.Context, arg ListGuildMemberAuthorityParams) ([]ListGuildMemberAuthorityRow, error)
@@ -439,6 +509,28 @@ type Querier interface {
 	// key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
 	// 15,000-member guild.
 	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]GuildMember, error)
+	// Every overwrite on a set of channels, for the channel listing's per-channel view filter (Milestone M13).
+	//
+	// # This must not be written as a join on guild_id, and that is measured rather than argued
+	//
+	// The obvious shape — JOIN channels c ON c.id = po.channel_id WHERE c.guild_id = $1 — is fine on a small
+	// guild and falls off a cliff at the channel ceiling, because the planner stops choosing the nested loop
+	// and sequentially scans the whole overwrite table. On PostgreSQL 16 against 175,000 overwrite rows:
+	//
+	//                                        time      buffers
+	//   join form, 10-channel guild        0.319 ms         75   Nested Loop, pkey lookups
+	//   join form, 500-channel guild      13.682 ms      1,523   Seq Scan, 176,500 rows for 1,500 returned
+	//   this form, 500-channel guild       0.388 ms      1,513   Bitmap Index Scan on pkey
+	//
+	// The planner is not wrong by its own cost model — it weighs one sequential scan against 500 index
+	// descents — but the cost it minimises grows with the whole instance while the alternative grows with one
+	// guild, so the gap widens for the life of the instance. Handing it the ids removes the choice.
+	//
+	// The ids are the ones ListGuildChannels just returned for this guild, so they are server-derived rather
+	// than client-supplied and need no re-scoping — which is the difference between this query and
+	// ListChannelPermissionOverwrites above, where the channel id arrives in a request path and the join to
+	// channels is what stops another guild's row being applied.
+	ListGuildPermissionOverwrites(ctx context.Context, channelIds []int64) ([]PermissionOverwrite, error)
 	// Ordered by position, which the (guild_id, position) index serves.
 	ListGuildRoles(ctx context.Context, guildID int64) ([]Role, error)
 	// Everything outstanding, newest first.
@@ -660,7 +752,27 @@ type Querier interface {
 	// single-use: a second presentation finds revoked_at set and replaced_by_id populated, which is the replay
 	// signature.
 	RotateSession(ctx context.Context, arg RotateSessionParams) (Session, error)
+	// One row of a reorder. The whole reorder is several of these in one transaction under the same advisory
+	// lock, because N separate requests would leave two roles sharing a position between them — and two roles
+	// at one position are neither above nor below each other, which dissolves the ordering every hierarchy
+	// check rests on.
+	//
+	// `AND NOT is_default` refuses to move @everyone off 0 in the statement rather than in a check before it,
+	// the same discipline DeleteRole applies to the same role.
+	SetRolePosition(ctx context.Context, arg SetRolePositionParams) (int64, error)
 	SetUserPassword(ctx context.Context, arg SetUserPasswordParams) (User, error)
+	// Make room at the bottom of the hierarchy for a new role (Milestone M13).
+	//
+	// A new role is created immediately above @everyone rather than above every existing role, which is what
+	// Discord does and what stops a non-owner creating a role they then cannot edit, delete, assign or
+	// reposition. That means everything else moves up one, and @everyone stays on the floor every layer-4
+	// resolution starts from.
+	//
+	// Bounded by the role ceiling, so this rewrites at most 249 rows on a path that runs when somebody clicks
+	// "create role". It runs inside the same advisory lock CreateRole already takes, because two concurrent
+	// creates that both shift and both insert at 1 would collide — and migration 000015 deliberately declines
+	// the unique constraint that would catch it.
+	ShiftRolePositionsUp(ctx context.Context, guildID int64) error
 	// Records use, at most once every few minutes per token.
 	//
 	// Writing on every authenticated request would put a row update — and its WAL traffic, and its dead tuple
@@ -670,6 +782,13 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
+	// Take a role away. Zero rows means the member did not hold it, which is an idempotent DELETE succeeding
+	// rather than an error — the caller has already established that the member exists, because the hierarchy
+	// check reads their standing first and GetMemberHighestRolePosition returns no row for a non-member.
+	//
+	// guild_id in the WHERE is not redundant with role_id: it scopes the delete to this guild's grant even
+	// though the pair could only ever appear together, which is the same belt-and-braces GetRole applies.
+	UnassignRoleFromMember(ctx context.Context, arg UnassignRoleFromMemberParams) (int64, error)
 	// Scoped by guild, because by the time this runs the handler has resolved the channel's own guild from
 	// GetChannel and authorized against it. Passing it back in is a second assertion that the row being
 	// written is the row that was checked.
@@ -688,6 +807,13 @@ type Querier interface {
 	// manage whom — is M13's, so this milestone stores the column, orders by it, and does not let a single-row
 	// update reshuffle it.
 	UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, error)
+	// Write an overwrite, creating or replacing.
+	//
+	// PUT rather than POST/PATCH on the wire, so the same statement has to serve both — ON CONFLICT on the
+	// primary key is what makes the endpoint idempotent. The row is selected from channels rather than
+	// supplied directly, so a channel in another guild inserts nothing and the caller sees pgx.ErrNoRows
+	// rather than writing an overwrite onto somebody else's channel (rule 1, in the statement).
+	UpsertPermissionOverwrite(ctx context.Context, arg UpsertPermissionOverwriteParams) (PermissionOverwrite, error)
 	// Second-factor queries: one TOTP enrollment per account, and its recovery codes.
 	//
 	// Single-use lives in the statement here as it does everywhere else in this package — see
