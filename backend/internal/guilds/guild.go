@@ -229,31 +229,22 @@ func (s *Service) Update(
 // includes removing what is on it.
 func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflake.ID) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		row, err := q.GetGuild(ctx, int64(guildID))
+		// One query, not two. This used to read the guild for its owner id and then authorize, which ran
+		// ListGuildMemberAuthority — a query whose first column is that same owner id. M12 measured the
+		// redundancy and kept it rather than widen roles.Resolve's return for it; M13 widened that return
+		// for layer 4's standing, so the owner id arrives here for free.
+		//
+		// PermViewChannel is what a non-member fails, so a stranger gets the ordinary 404 rather than "you
+		// are not the owner" — which would tell them the guild exists.
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return httpx.ErrNotFound
-			}
-			return fmt.Errorf("guilds: get guild: %w", err)
+			return err
 		}
 
-		if snowflake.ID(row.OwnerID) != actor.UserID {
-			// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
-			// PermManageGuild is not — so this cannot be a plain permission check.
-			//
-			// One pass rather than two: asking IsInstanceAdmin here and then calling authorizeWith, which
-			// asks it again, ran the same query twice on every non-owner delete. The tier is read off the
-			// decision authorizeWith already reached.
-			//
-			// PermViewChannel is what a non-member fails, so a stranger gets the ordinary 404 rather than
-			// "you are not the owner" — which would tell them the guild exists.
-			allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel)
-			if err != nil {
-				return err
-			}
-			if !allowed.instanceAdmin {
-				return httpx.ErrForbidden
-			}
+		// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
+		// PermManageGuild is not — so this cannot be a plain permission check.
+		if !allowed.instanceAdmin && !allowed.owns(actor) {
+			return httpx.ErrForbidden
 		}
 
 		// The audit entry is written before the delete, in the same transaction. It has to be: guild_id

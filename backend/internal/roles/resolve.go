@@ -38,6 +38,85 @@ const (
 // which maps this to 404 and a failed permission check to 403.
 var ErrNotAMember = errors.New("roles: actor is not a member of this guild")
 
+// Resolution is everything one call to [Resolve] worked out about one account in one guild.
+//
+// It replaces the bare [Permission] this function used to return, and the reason is layer 4's second
+// sentence. ADR 0008 says role position "governs who can manage whom", which needs the *highest* position
+// among the roles a member holds — a number this query already has in hand, one column away from the
+// permissions it was returning anyway. The alternative was a second round trip on every kick, mute,
+// deafen, role edit, assignment and overwrite write.
+//
+// guilds.authorize argued against widening this signature to carry the owner id, on the grounds that
+// reshaping the function the whole authority model rests on is a poor trade for saving one lookup on two
+// cold paths. That argument does not carry here and the difference is worth stating: standing *is* layer
+// 4, the same layer this function already implements, so carrying it is not a convenience bolted onto a
+// permission check — it is the rest of the check.
+type Resolution struct {
+	// Permissions is what the requested scope resolved to: layers 2 through 4 for a guild-level call, and
+	// layer 5 applied on top when a channel was named.
+	Permissions Permission
+
+	// OwnerID is the guild's owner, which layer 2 needs and which every caller would otherwise re-read.
+	OwnerID snowflake.ID
+
+	// HighestPosition is the account's standing: the highest position among the roles they hold.
+	//
+	// **Meaningless when the account is the owner**, who is above the hierarchy rather than placed in it,
+	// and is left at the zero value there. That zero is not an obviously-empty value — it is @everyone's
+	// position, a perfectly valid standing, and the floor — so a comparison that forgets to ask about
+	// ownership first does not fail loudly. It fails by finding the owner at the bottom, unable to
+	// moderate their own guild, which looks like a permission bug and invites the repair that hands the
+	// guild to whoever holds the highest role. Ask [Resolution.IsOwner] first, always.
+	//
+	// A member holding [PermAdministrator] *does* get a real position here, because layer 3 short-circuits
+	// permissions and says nothing about standing (ADR 0008 puts the two in different layers). That return
+	// sits after the loop that computes the position, so the value exists and dropping it would be the
+	// same silent floor by a different route.
+	HighestPosition int32
+
+	// base is layers 2 through 4 with no overwrite applied, kept so [Resolution.InChannel] can resolve any
+	// number of channels from one guild-level query.
+	//
+	// Unexported and separate from Permissions on purpose: were InChannel to fold overwrites into whatever
+	// Permissions currently holds, calling it on a resolution that already named a channel would apply a
+	// second channel's overwrites on top of the first. Storing the base makes that impossible rather than
+	// forbidden, which is the difference between a rule and a comment.
+	base Permission
+
+	// bypassed records that layer 2 or 3 short-circuited, so no overwrite applies at any channel.
+	bypassed bool
+
+	heldRoleIDs    map[int64]struct{}
+	everyoneRoleID int64
+}
+
+// IsOwner reports whether the resolved account owns the guild — ADR 0008 layer 2.
+//
+// Every standing comparison asks this before it looks at [Resolution.HighestPosition], for the reason that
+// field documents.
+func (r Resolution) IsOwner(userID snowflake.ID) bool {
+	return r.OwnerID != 0 && r.OwnerID == userID
+}
+
+// InChannel applies one channel's overwrites to an already-resolved guild-level result.
+//
+// This exists for the channel listing, which has to answer "can this account see it" for every channel in
+// a guild. Calling [Resolve] once per channel would be one authority query and one overwrite query each —
+// the N+1 §15.2 names — where the authority is identical for all of them. So the listing resolves once at
+// guild level, reads every channel's overwrites in one query, and calls this per channel.
+//
+// An owner or an administrator resolved through a short-circuit is returned unchanged, because layers 2
+// and 3 sit above layer 5: no overwrite denies them anything. That check lives here rather than at the
+// call site so a caller cannot filter a channel away from the one account that must always see it.
+func (r Resolution) InChannel(
+	overwrites []db.ListChannelPermissionOverwritesRow, userID snowflake.ID,
+) Permission {
+	if r.bypassed {
+		return r.Permissions
+	}
+	return applyOverwrites(r.base, overwrites, r.heldRoleIDs, r.everyoneRoleID, userID)
+}
+
 // Resolve computes the effective permissions of one account in one guild, optionally within one channel.
 //
 // It implements ADR 0008 layers 2 through 5, in the order the ADR fixes:
@@ -55,65 +134,88 @@ var ErrNotAMember = errors.New("roles: actor is not a member of this guild")
 // instead of two on every guild-scoped mutation.
 //
 // Returns [ErrNotAMember] when the actor holds no membership, which includes the guild not existing.
-func Resolve(ctx context.Context, q db.Querier, guildID, userID, channelID snowflake.ID) (Permission, error) {
+func Resolve(
+	ctx context.Context, q db.Querier, guildID, userID, channelID snowflake.ID,
+) (Resolution, error) {
 	rows, err := q.ListGuildMemberAuthority(ctx, db.ListGuildMemberAuthorityParams{
 		ID:     int64(guildID),
 		UserID: int64(userID),
 	})
 	if err != nil {
-		return 0, fmt.Errorf("roles: load guild authority: %w", err)
+		return Resolution{}, fmt.Errorf("roles: load guild authority: %w", err)
 	}
 
 	// No rows means no guild. The LEFT joins guarantee a row for a guild that exists even when the actor
 	// is in it with no roles, so an empty result is unambiguous.
 	if len(rows) == 0 {
-		return 0, ErrNotAMember
+		return Resolution{}, ErrNotAMember
 	}
+
+	res := Resolution{OwnerID: snowflake.ID(rows[0].OwnerID)}
 
 	// Layer 2. Checked before membership on purpose: an owner is always a member in practice, but a
 	// resolution that depended on that would fail closed in exactly the situation — a half-written guild,
 	// a membership row removed by hand — where an owner is the only person who could repair it.
-	if snowflake.ID(rows[0].OwnerID) == userID {
-		return permAll, nil
+	//
+	// HighestPosition stays zero here and means nothing; see its own comment for why that is stated rather
+	// than papered over with a sentinel.
+	if res.IsOwner(userID) {
+		res.Permissions = permAll
+		res.base = permAll
+		res.bypassed = true
+		return res, nil
 	}
 
 	if !rows[0].IsMember {
-		return 0, ErrNotAMember
+		return Resolution{}, ErrNotAMember
 	}
 
-	// Layer 4, and the ids layer 5 will need. RoleID is nil when the member holds no roles and the guild
-	// has no default — which should not happen, since guild creation writes @everyone in the same
-	// transaction, but a nil dereference here would be a panic in the middle of a permission check.
-	var (
-		base           Permission
-		heldRoleIDs    = make(map[int64]struct{}, len(rows))
-		everyoneRoleID int64
-	)
+	// Layer 4, the standing layer 4's second sentence needs, and the ids layer 5 will need. RoleID is nil
+	// when the member holds no roles and the guild has no default — which should not happen, since guild
+	// creation writes @everyone in the same transaction, but a nil dereference here would be a panic in
+	// the middle of a permission check.
+	res.heldRoleIDs = make(map[int64]struct{}, len(rows))
 
 	for _, row := range rows {
 		if row.RoleID == nil {
 			continue
 		}
 
-		heldRoleIDs[*row.RoleID] = struct{}{}
+		res.heldRoleIDs[*row.RoleID] = struct{}{}
 
 		if row.RolePermissions != nil {
-			base = base.Add(PermissionFromInt64(*row.RolePermissions))
+			res.base = res.base.Add(PermissionFromInt64(*row.RolePermissions))
+		}
+
+		// Standing is the highest position held, and @everyone is included rather than excluded: it sits
+		// at 0, so a member holding nothing else lands on the floor, which is exactly where the hierarchy
+		// rules put them.
+		if row.RolePosition != nil && *row.RolePosition > res.HighestPosition {
+			res.HighestPosition = *row.RolePosition
 		}
 
 		if row.RoleIsDefault != nil && *row.RoleIsDefault {
-			everyoneRoleID = *row.RoleID
+			res.everyoneRoleID = *row.RoleID
 		}
 	}
 
+	res.Permissions = res.base
+
 	// Layer 3. After the OR rather than inside the loop, because the bit may come from any role the member
 	// holds and short-circuiting on the first one that has it would give the same answer more obscurely.
-	if base.Has(PermAdministrator) {
-		return permAll, nil
+	//
+	// HighestPosition survives this return. An administrator is above every *permission* check and is
+	// placed in the hierarchy like anybody else, so somebody above them can still act on them — and this
+	// return sits after the loop, so the position is already computed and discarding it would silently put
+	// every administrator on the floor.
+	if res.base.Has(PermAdministrator) {
+		res.Permissions = permAll
+		res.bypassed = true
+		return res, nil
 	}
 
 	if channelID == 0 {
-		return base, nil
+		return res, nil
 	}
 
 	overwrites, err := q.ListChannelPermissionOverwrites(ctx, db.ListChannelPermissionOverwritesParams{
@@ -121,10 +223,12 @@ func Resolve(ctx context.Context, q db.Querier, guildID, userID, channelID snowf
 		GuildID:   int64(guildID),
 	})
 	if err != nil {
-		return 0, fmt.Errorf("roles: load channel overwrites: %w", err)
+		return Resolution{}, fmt.Errorf("roles: load channel overwrites: %w", err)
 	}
 
-	return applyOverwrites(base, overwrites, heldRoleIDs, everyoneRoleID, userID), nil
+	res.Permissions = res.InChannel(overwrites, userID)
+
+	return res, nil
 }
 
 // applyOverwrites is ADR 0008 layer 5, split out so the precedence can be read in one screen and tested
