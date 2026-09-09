@@ -243,8 +243,30 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 
 		// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
 		// PermManageGuild is not — so this cannot be a plain permission check.
-		if !allowed.instanceAdmin && !allowed.owns(actor) {
+		if !allowed.instanceAdmin && !allowed.owns() {
 			return httpx.ErrForbidden
+		}
+
+		// Layer 1 skipped the resolution, so nothing has established that this guild exists.
+		//
+		// Every other actor reaching this line was resolved against the guild and would have been refused
+		// with 404 if it were not there. An Instance Admin is deliberately not resolved — the tier acts on
+		// guilds it is not in, so checking membership first would answer 404 for every guild on the
+		// instance — and the consequence is that for this one actor the first statement to touch the guild
+		// is the audit write, which carries a foreign key to it. Without this read that is a constraint
+		// violation and a 500, where everybody else gets 404.
+		//
+		// M12 had it by accident: Delete opened with a GetGuild whose ErrNoRows branch answered 404, and
+		// the owner comparison happened to want the same row. Removing that read for the resolved paths
+		// removed the existence check along with it. Paid only on the tier that skipped the resolution,
+		// which is the one place it is not redundant.
+		if allowed.instanceAdmin {
+			if _, err := q.GetGuild(ctx, int64(guildID)); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return httpx.ErrNotFound
+				}
+				return fmt.Errorf("guilds: get guild: %w", err)
+			}
 		}
 
 		// The audit entry is written before the delete, in the same transaction. It has to be: guild_id

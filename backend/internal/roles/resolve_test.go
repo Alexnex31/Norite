@@ -150,7 +150,7 @@ func TestResolveFollowsTheDocumentedOrder(t *testing.T) {
 		got, err := roles.Resolve(ctx, f.q, guildID, owner, 0)
 		require.NoError(t, err)
 		require.True(t, got.Permissions.Has(roles.PermBanMembers|roles.PermManageGuild),
-			"the owner must hold every permission, got %d", got)
+			"the owner must hold every permission, got %s", got.Permissions)
 	})
 
 	t.Run("layer 3: PermAdministrator short-circuits", func(t *testing.T) {
@@ -168,7 +168,7 @@ func TestResolveFollowsTheDocumentedOrder(t *testing.T) {
 		got, err := roles.Resolve(ctx, f.q, guildID, member, 0)
 		require.NoError(t, err)
 		require.True(t, got.Permissions.Has(roles.PermBanMembers|roles.PermManageGuild),
-			"an administrator must hold every permission, got %d", got)
+			"an administrator must hold every permission, got %s", got.Permissions)
 	})
 
 	t.Run("layer 4: role bits are OR'd, including @everyone", func(t *testing.T) {
@@ -450,7 +450,7 @@ func TestStandingSurvivesEveryShortCircuit(t *testing.T) {
 
 		got, err := roles.Resolve(ctx, f.q, guildID, member, 0)
 		require.NoError(t, err)
-		require.Equal(t, int32(7), got.HighestPosition,
+		require.Equal(t, int32(7), got.Standing(),
 			"standing is the highest position held, not the highest that exists")
 		require.NotEqual(t, unheld, snowflake.ID(0), "the unheld role exists to not be counted")
 	})
@@ -466,7 +466,7 @@ func TestStandingSurvivesEveryShortCircuit(t *testing.T) {
 
 		got, err := roles.Resolve(ctx, f.q, guildID, member, 0)
 		require.NoError(t, err)
-		require.Equal(t, int32(0), got.HighestPosition,
+		require.Equal(t, int32(0), got.Standing(),
 			"@everyone is position 0 and a member with nothing else is at the floor")
 	})
 
@@ -486,9 +486,9 @@ func TestStandingSurvivesEveryShortCircuit(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, got.Permissions.Has(roles.PermBanMembers),
 			"layer 3 short-circuits permissions to everything")
-		require.Equal(t, int32(5), got.HighestPosition,
+		require.Equal(t, int32(5), got.Standing(),
 			"and says nothing about standing — ADR 0008 puts the two in different layers")
-		require.False(t, got.IsOwner(admin), "an administrator is not the owner")
+		require.False(t, got.IsOwner(), "an administrator is not the owner")
 	})
 
 	t.Run("the owner is identified by ownership, never by position", func(t *testing.T) {
@@ -500,8 +500,8 @@ func TestStandingSurvivesEveryShortCircuit(t *testing.T) {
 
 		got, err := roles.Resolve(ctx, f.q, guildID, owner, 0)
 		require.NoError(t, err)
-		require.True(t, got.IsOwner(owner), "layer 2 is what a caller must ask about first")
-		require.Equal(t, int32(0), got.HighestPosition,
+		require.True(t, got.IsOwner(), "layer 2 is what a caller must ask about first")
+		require.Equal(t, int32(0), got.Standing(),
 			"the owner's standing is meaningless and left at zero — which is why IsOwner is asked first")
 	})
 }
@@ -533,7 +533,7 @@ func TestInChannelResolvesManyChannelsFromOneQuery(t *testing.T) {
 	res, err := roles.Resolve(ctx, f.q, guildID, member, 0)
 	require.NoError(t, err)
 
-	load := func(channelID snowflake.ID) []db.ListChannelPermissionOverwritesRow {
+	load := func(channelID snowflake.ID) []db.PermissionOverwrite {
 		rows, err := f.q.ListChannelPermissionOverwrites(ctx, db.ListChannelPermissionOverwritesParams{
 			ChannelID: int64(channelID),
 			GuildID:   int64(guildID),
@@ -542,15 +542,15 @@ func TestInChannelResolvesManyChannelsFromOneQuery(t *testing.T) {
 		return rows
 	}
 
-	require.True(t, res.InChannel(load(open), member).Has(roles.PermViewChannel),
+	require.True(t, res.InChannel(load(open)).Has(roles.PermViewChannel),
 		"the open channel is visible")
-	require.False(t, res.InChannel(load(denied), member).Has(roles.PermViewChannel),
+	require.False(t, res.InChannel(load(denied)).Has(roles.PermViewChannel),
 		"the denied channel is not")
 
 	// Applied again, in the other order, on the same resolution. Every answer must be unchanged.
-	require.False(t, res.InChannel(load(denied), member).Has(roles.PermViewChannel),
+	require.False(t, res.InChannel(load(denied)).Has(roles.PermViewChannel),
 		"a second call must not compound")
-	require.True(t, res.InChannel(load(open), member).Has(roles.PermViewChannel),
+	require.True(t, res.InChannel(load(open)).Has(roles.PermViewChannel),
 		"and the deny must not have leaked into a channel that does not carry it")
 
 	// The case the two assertions above cannot see, and the only one that distinguishes resolving from
@@ -564,7 +564,7 @@ func TestInChannelResolvesManyChannelsFromOneQuery(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, inDenied.Permissions.Has(roles.PermViewChannel), "the deny applied, as it should")
 
-	require.True(t, inDenied.InChannel(load(open), member).Has(roles.PermViewChannel),
+	require.True(t, inDenied.InChannel(load(open)).Has(roles.PermViewChannel),
 		"asking about the open channel must answer from the guild-level base, not from the denied "+
 			"channel's result — otherwise a listing loop accumulates every channel's denies and hides "+
 			"channels nobody denied")
@@ -604,7 +604,101 @@ func TestAnOwnerAndAnAdministratorAreNotFilteredByOverwrites(t *testing.T) {
 	}{{"owner", owner}, {"administrator", admin}} {
 		res, err := roles.Resolve(ctx, f.q, guildID, tc.who, 0)
 		require.NoError(t, err)
-		require.True(t, res.InChannel(rows, tc.who).Has(roles.PermViewChannel),
+		require.True(t, res.InChannel(rows).Has(roles.PermViewChannel),
 			"%s must see a channel @everyone is denied", tc.name)
 	}
+}
+
+// TestOutranksIsStrictlyGreaterAndTheOwnerIsAbove covers ADR 0008 layer 4's second sentence, which is the
+// whole of the hierarchy rule and the thing nine call sites in this milestone are about to depend on.
+//
+// The strictness is the part worth pinning. Equal standing must not permit acting, or two members whose
+// highest role is the same role could kick each other; and since @everyone is position 0, the same rule is
+// what stops two members holding nothing from acting on one another.
+func TestOutranksIsStrictlyGreaterAndTheOwnerIsAbove(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := t.Context()
+
+	owner := f.newUser(ctx, "owner")
+	mod := f.newUser(ctx, "mod")
+	peer := f.newUser(ctx, "peer")
+	plain := f.newUser(ctx, "plain")
+
+	guildID, _ := f.newGuild(ctx, owner, roles.PermViewChannel)
+	for _, u := range []snowflake.ID{mod, peer, plain} {
+		f.join(ctx, guildID, u)
+	}
+
+	modRole := f.newRole(ctx, guildID, 5, roles.PermKickMembers)
+	f.grantRole(ctx, guildID, mod, modRole)
+	f.grantRole(ctx, guildID, peer, modRole)
+
+	resolve := func(u snowflake.ID) roles.Resolution {
+		res, err := roles.Resolve(ctx, f.q, guildID, u, 0)
+		require.NoError(t, err)
+		return res
+	}
+
+	modRes, peerRes, plainRes, ownerRes := resolve(mod), resolve(peer), resolve(plain), resolve(owner)
+
+	require.True(t, modRes.Outranks(plainRes.Standing()), "5 outranks the floor")
+	require.False(t, plainRes.Outranks(modRes.Standing()), "and the floor does not outrank 5")
+
+	require.False(t, modRes.Outranks(peerRes.Standing()),
+		"equal standing is not enough, or two holders of one role could act on each other")
+	require.False(t, plainRes.Outranks(plainRes.Standing()),
+		"two members at the floor cannot act on one another either")
+
+	require.True(t, ownerRes.Outranks(modRes.Standing()), "the owner is above everyone")
+	require.True(t, ownerRes.Outranks(0), "including at the floor, where their own standing reads as 0")
+
+	// The owner as *target*, which comparing standings cannot express and which the first version of this
+	// primitive got backwards. The owner's own standing is a meaningless zero, so a bare positional
+	// comparison reports that any role-holder outranks them.
+	require.True(t, modRes.Outranks(ownerRes.Standing()),
+		"the bare positional form does say 5 > 0, which is why it is not the one to use on a member")
+	require.False(t, modRes.OutranksMember(owner, ownerRes.Standing()),
+		"nobody inside the guild acts on its owner")
+	require.True(t, modRes.OutranksMember(plain, plainRes.Standing()),
+		"and an ordinary member is still reachable")
+	require.False(t, modRes.OutranksMember(peer, peerRes.Standing()),
+		"equal standing still refuses, through the member form too")
+}
+
+// TestBothStandingReadersAgreeBelowTheFloor is the boundary two different functions have to meet at.
+//
+// Resolve computes the *actor's* standing by folding a maximum over a zero seed; GetMemberHighestRolePosition
+// computes the *target's* with an aggregate. Nothing in the schema keeps a role from sitting at or below
+// zero — roles.position carries no CHECK, and SetRolePosition's lower bound only guards the reorder path —
+// so the two must floor identically or one hierarchy comparison gets two answers depending on which side
+// of it a member is on.
+func TestBothStandingReadersAgreeBelowTheFloor(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := t.Context()
+
+	owner := f.newUser(ctx, "owner")
+	member := f.newUser(ctx, "member")
+	guildID, _ := f.newGuild(ctx, owner, roles.PermViewChannel)
+	f.join(ctx, guildID, member)
+
+	// Written directly, which is the only way in: no endpoint produces this and none should.
+	below := f.newRole(ctx, guildID, -5, roles.PermSendMessages)
+	f.grantRole(ctx, guildID, member, below)
+
+	res, err := roles.Resolve(ctx, f.q, guildID, member, 0)
+	require.NoError(t, err)
+
+	asTarget, err := f.q.GetMemberHighestRolePosition(ctx, db.GetMemberHighestRolePositionParams{
+		GuildID: int64(guildID),
+		UserID:  int64(member),
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, int32(0), res.Standing(), "the actor reader floors at @everyone's position")
+	require.Equal(t, int32(0), asTarget, "and so must the target reader")
+	require.Equal(t, res.Standing(), asTarget, "one comparison cannot have two answers")
 }

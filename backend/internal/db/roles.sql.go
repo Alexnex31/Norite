@@ -10,7 +10,7 @@ import (
 )
 
 const getMemberHighestRolePosition = `-- name: GetMemberHighestRolePosition :one
-SELECT COALESCE(MAX(r.position), 0)::integer AS highest_position
+SELECT GREATEST(COALESCE(MAX(r.position), 0), 0)::integer AS highest_position
 FROM guild_members gm
 LEFT JOIN guild_member_roles gmr
     ON gmr.guild_id = gm.guild_id AND gmr.user_id = gm.user_id
@@ -44,6 +44,17 @@ type GetMemberHighestRolePositionParams struct {
 //
 // The join makes membership the thing that produces a row and GROUP BY makes "no member" produce no rows,
 // so the caller gets pgx.ErrNoRows for a non-member and a real 0 for a member at the floor.
+// GREATEST as well as COALESCE, and the two cover different holes. COALESCE handles a member with no
+// rows here at all, whose maximum is NULL and whose standing is @everyone's 0. GREATEST handles a role
+// sitting at or below 0, which nothing in the schema prevents: roles.position carries no CHECK, and
+// SetRolePosition's lower bound only guards the reorder path, so a direct insert or a future import can
+// still place one there.
+//
+// Without it the two halves of every hierarchy check disagree at exactly that boundary. Resolve computes
+// the actor's standing by taking the maximum over a floor of zero, so it reads such a member as standing
+// at 0; this query would read the same member as standing at -5. One comparison, two readers, two answers
+// — and the strictly-greater rule then gives a different verdict depending on which side of it the member
+// is on.
 func (q *Queries) GetMemberHighestRolePosition(ctx context.Context, arg GetMemberHighestRolePositionParams) (int32, error) {
 	row := q.db.QueryRow(ctx, getMemberHighestRolePosition, arg.GuildID, arg.UserID)
 	var highest_position int32
@@ -52,7 +63,7 @@ func (q *Queries) GetMemberHighestRolePosition(ctx context.Context, arg GetMembe
 }
 
 const listChannelPermissionOverwrites = `-- name: ListChannelPermissionOverwrites :many
-SELECT po.target_type, po.target_id, po.allow, po.deny
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
 FROM permission_overwrites po
 JOIN channels c ON c.id = po.channel_id
 WHERE po.channel_id = $1 AND c.guild_id = $2::bigint
@@ -61,13 +72,6 @@ WHERE po.channel_id = $1 AND c.guild_id = $2::bigint
 type ListChannelPermissionOverwritesParams struct {
 	ChannelID int64
 	GuildID   int64
-}
-
-type ListChannelPermissionOverwritesRow struct {
-	TargetType int16
-	TargetID   int64
-	Allow      int64
-	Deny       int64
 }
 
 // Every overwrite on one channel: ADR 0008 layer 5, in one lookup, ordered in Go by the precedence the ADR
@@ -90,16 +94,22 @@ type ListChannelPermissionOverwritesRow struct {
 //
 // The primary key (channel_id, target_type, target_id) serves the lookup on its leading column: measured
 // at 0.092 ms and 6 buffers, Index Scan.
-func (q *Queries) ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]ListChannelPermissionOverwritesRow, error) {
+// channel_id is selected although this query already knows it, so that both overwrite reads return the
+// same generated struct. Resolution.InChannel consumes either — the guild-wide read feeds the channel
+// listing and this one feeds a single-channel resolve — and two structurally identical row types would
+// have meant a field-by-field conversion loop written at whichever call site was built second, on the hot
+// path the guild-wide query's own plan exists to keep cheap.
+func (q *Queries) ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]PermissionOverwrite, error) {
 	rows, err := q.db.Query(ctx, listChannelPermissionOverwrites, arg.ChannelID, arg.GuildID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListChannelPermissionOverwritesRow{}
+	items := []PermissionOverwrite{}
 	for rows.Next() {
-		var i ListChannelPermissionOverwritesRow
+		var i PermissionOverwrite
 		if err := rows.Scan(
+			&i.ChannelID,
 			&i.TargetType,
 			&i.TargetID,
 			&i.Allow,
@@ -226,10 +236,17 @@ func (q *Queries) ListGuildMemberAuthority(ctx context.Context, arg ListGuildMem
 }
 
 const listGuildPermissionOverwrites = `-- name: ListGuildPermissionOverwrites :many
-SELECT channel_id, target_type, target_id, allow, deny
-FROM permission_overwrites
-WHERE channel_id = ANY($1::bigint[])
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = ANY($1::bigint[])
+  AND c.guild_id = $2::bigint
 `
+
+type ListGuildPermissionOverwritesParams struct {
+	ChannelIds []int64
+	GuildID    int64
+}
 
 // Every overwrite on a set of channels, for the channel listing's per-channel view filter (Milestone M13).
 //
@@ -248,12 +265,19 @@ WHERE channel_id = ANY($1::bigint[])
 // descents — but the cost it minimises grows with the whole instance while the alternative grows with one
 // guild, so the gap widens for the life of the instance. Handing it the ids removes the choice.
 //
-// The ids are the ones ListGuildChannels just returned for this guild, so they are server-derived rather
-// than client-supplied and need no re-scoping — which is the difference between this query and
-// ListChannelPermissionOverwrites above, where the channel id arrives in a request path and the join to
-// channels is what stops another guild's row being applied.
-func (q *Queries) ListGuildPermissionOverwrites(ctx context.Context, channelIds []int64) ([]PermissionOverwrite, error) {
-	rows, err := q.db.Query(ctx, listGuildPermissionOverwrites, channelIds)
+// # Scoped to the guild as well, even though the caller supplies the ids
+//
+// The first draft left the guild out, reasoning that the ids come from ListGuildChannels and are therefore
+// server-derived. That is the argument CopyChannelOverwrites made about its destination one file over, and
+// this milestone rejected it there after reproducing four rows crossing between guilds: a rule that holds
+// because of who happens to call it is not the rule. The same applies here and the consequence is the same
+// shape — a member-tier target_id is a global user id, so another guild's deny genuinely matches and
+// silently removes a permission from this guild's resolution.
+//
+// The join costs nothing measurable: the ids already restrict the scan to one guild's channels, so this
+// adds a primary-key lookup per channel to a query that was already reading those rows.
+func (q *Queries) ListGuildPermissionOverwrites(ctx context.Context, arg ListGuildPermissionOverwritesParams) ([]PermissionOverwrite, error) {
+	rows, err := q.db.Query(ctx, listGuildPermissionOverwrites, arg.ChannelIds, arg.GuildID)
 	if err != nil {
 		return nil, err
 	}

@@ -835,10 +835,26 @@ DELETE /guilds/{guild_id}/members/{user_id}
 GET    /guilds/{guild_id}/roles            -- M12
 POST   /guilds/{guild_id}/roles            -- M12; PermManageRoles, and refuses to grant a permission the
                                            --   caller does not hold — without that, PermManageRoles *is*
-                                           --   every permission
+                                           --   every permission. M13 places the new role at the *bottom*,
+                                           --   above @everyone: created at the top it would be one its
+                                           --   own creator could not then manage
+PATCH  /guilds/{guild_id}/roles            -- M13; bulk reorder, [{id, position}]. One transaction under
+                                           --   one advisory lock, because N single-role updates leave two
+                                           --   roles briefly sharing a position — and two roles at one
+                                           --   position are neither above nor below each other
 PATCH  /guilds/{guild_id}/roles/{role_id}  -- M12; same escalation refusal. @everyone's permissions are
                                            --   editable, its name is not
 DELETE /guilds/{guild_id}/roles/{role_id}  -- M12; @everyone refused in the statement's WHERE, not in Go
+PUT    /guilds/{guild_id}/members/{user_id}/roles/{role_id}
+                                           -- M13; PermManageRoles, the role and the target both strictly
+                                           --   below the caller's standing, and the role's permissions a
+                                           --   subset of the caller's own. That last check is a
+                                           --   deliberate departure from Discord, which gates assignment
+                                           --   on hierarchy alone
+DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}
+                                           -- M13; the same checks. Removing a role lifts that role's
+                                           --   channel denies off the target, so it is not the pure
+                                           --   demotion it looks like
 GET    /guilds/{guild_id}/invites
 GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it
 GET    /guilds/{guild_id}/emojis
@@ -854,7 +870,13 @@ DELETE /channels/{channel_id}              -- M12; same resolution. Deleting a c
                                            --   children rather than deleting them
 PUT    /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; the endpoint that finally writes what roles.Resolve
-                                           --   has read since M12
+                                           --   has read since M12. PermManageRoles resolved *in that
+                                           --   channel*, not at guild level, or a caller denied a
+                                           --   permission there could allow it back to themselves
+DELETE /channels/{channel_id}/permissions/{overwrite_id}
+                                           -- M13; escalation-checked over the row being removed, not the
+                                           --   one being written — deleting an overwrite that denies you
+                                           --   something grants you that thing
 GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
 POST   /channels/{channel_id}/messages
 PATCH  /channels/{channel_id}/messages/{message_id}

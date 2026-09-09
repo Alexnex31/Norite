@@ -52,6 +52,16 @@ var ErrNotAMember = errors.New("roles: actor is not a member of this guild")
 // 4, the same layer this function already implements, so carrying it is not a convenience bolted onto a
 // permission check — it is the rest of the check.
 type Resolution struct {
+	// UserID is the account this resolution describes, carried so that nothing else has to be told again.
+	//
+	// [Resolution.IsOwner] and [Resolution.InChannel] used to take it as a parameter, which made it
+	// possible — and on the channel-listing loop, easy — to resolve one account and then ask about
+	// another: member-tier overwrites belonging to one person applied on top of another's roles and base
+	// permissions, producing an answer that belonged to neither. Holding the id here makes that
+	// unrepresentable rather than merely wrong, which is the same argument the base field below makes for
+	// staying unexported.
+	UserID snowflake.ID
+
 	// Permissions is what the requested scope resolved to: layers 2 through 4 for a guild-level call, and
 	// layer 5 applied on top when a channel was named.
 	Permissions Permission
@@ -59,20 +69,26 @@ type Resolution struct {
 	// OwnerID is the guild's owner, which layer 2 needs and which every caller would otherwise re-read.
 	OwnerID snowflake.ID
 
-	// HighestPosition is the account's standing: the highest position among the roles they hold.
+	// highestPosition is the account's standing: the highest position among the roles they hold.
 	//
-	// **Meaningless when the account is the owner**, who is above the hierarchy rather than placed in it,
-	// and is left at the zero value there. That zero is not an obviously-empty value — it is @everyone's
-	// position, a perfectly valid standing, and the floor — so a comparison that forgets to ask about
-	// ownership first does not fail loudly. It fails by finding the owner at the bottom, unable to
-	// moderate their own guild, which looks like a permission bug and invites the repair that hands the
-	// guild to whoever holds the highest role. Ask [Resolution.IsOwner] first, always.
+	// Unexported, and read only through [Resolution.Outranks], because on its own it is a number that
+	// invites exactly one mistake. It is **meaningless when the account is the owner**, who is above the
+	// hierarchy rather than placed in it, and is left at the zero value there — and zero is not an
+	// obviously-empty value. It is @everyone's position, a perfectly valid standing, and the floor. So a
+	// comparison that forgets to ask about ownership first does not fail loudly: it finds the owner at the
+	// bottom, unable to moderate their own guild, which reads as a permission bug and invites the repair
+	// that hands the guild to whoever holds the highest role.
+	//
+	// The first version of this field was exported with a comment saying to ask [Resolution.IsOwner] first.
+	// A comment cannot fail to compile at any of the nine call sites this milestone adds, and this package
+	// has had to make that lesson structural three times already — revokeEverything, RequireLiveSession,
+	// factorProof. Outranks folds the ownership question in so there is nothing to remember.
 	//
 	// A member holding [PermAdministrator] *does* get a real position here, because layer 3 short-circuits
 	// permissions and says nothing about standing (ADR 0008 puts the two in different layers). That return
 	// sits after the loop that computes the position, so the value exists and dropping it would be the
 	// same silent floor by a different route.
-	HighestPosition int32
+	highestPosition int32
 
 	// base is layers 2 through 4 with no overwrite applied, kept so [Resolution.InChannel] can resolve any
 	// number of channels from one guild-level query.
@@ -91,11 +107,57 @@ type Resolution struct {
 }
 
 // IsOwner reports whether the resolved account owns the guild — ADR 0008 layer 2.
+func (r Resolution) IsOwner() bool {
+	return r.OwnerID != 0 && r.OwnerID == r.UserID
+}
+
+// Standing is the resolved account's position in the hierarchy, for a caller that needs to report or
+// compare it against something other than another Resolution — the target of a kick, or the role being
+// assigned, neither of which is resolved.
 //
-// Every standing comparison asks this before it looks at [Resolution.HighestPosition], for the reason that
-// field documents.
-func (r Resolution) IsOwner(userID snowflake.ID) bool {
-	return r.OwnerID != 0 && r.OwnerID == userID
+// Prefer [Resolution.Outranks], which is the same number with the ownership question already asked.
+func (r Resolution) Standing() int32 {
+	return r.highestPosition
+}
+
+// Outranks reports whether this account may act on something standing at the given position — ADR 0008
+// layer 4's second sentence, which is the whole of the hierarchy rule.
+//
+// **Strictly greater**, and the strictness is load-bearing: equal standing must not permit acting, or two
+// members whose highest role is the same role could kick each other, and a role at your own highest
+// position would be editable by you. It also makes the floor behave: @everyone is position 0, so a member
+// holding no other role cannot act on another member holding no other role.
+//
+// The guild owner outranks everything, unconditionally and without their position being consulted, because
+// they have none — layer 2 sits above the hierarchy rather than in it. That check is inside this method
+// rather than at its call sites for the reason highestPosition documents.
+//
+// Layer 1 is not here and cannot be: an Instance Admin is never resolved against a guild, so there is no
+// Resolution to ask. Callers hold that tier separately and check it alongside this — see guilds.decision.
+//
+// This is the form for acting on a **role**, whose position is all there is to it. Acting on a *member*
+// goes through [Resolution.OutranksMember], which has one more question to ask.
+func (r Resolution) Outranks(position int32) bool {
+	return r.IsOwner() || r.highestPosition > position
+}
+
+// OutranksMember reports whether this account may act on another member of the same guild.
+//
+// The extra question is the guild owner, and it cannot be answered by comparing standings — which is the
+// trap this method exists to remove rather than document. An owner's own standing is a meaningless zero
+// (see highestPosition), so passing it to [Resolution.Outranks] reports that anybody holding any role
+// outranks the guild's owner: the exact inversion of layer 2. That is not a subtle failure, it is a
+// moderator kicking the owner out of their own guild, and the first version of the primitive had it.
+//
+// Found by writing the test rather than by reading the code, which is worth recording: the assertion
+// "a moderator does not outrank the owner" is the natural thing to write, and it is the one that fails.
+func (r Resolution) OutranksMember(targetID snowflake.ID, targetStanding int32) bool {
+	if targetID == r.OwnerID {
+		// Nobody inside the guild acts on its owner. An Instance Admin still may, and holds that tier
+		// outside this type entirely.
+		return false
+	}
+	return r.Outranks(targetStanding)
 }
 
 // InChannel applies one channel's overwrites to an already-resolved guild-level result.
@@ -108,13 +170,11 @@ func (r Resolution) IsOwner(userID snowflake.ID) bool {
 // An owner or an administrator resolved through a short-circuit is returned unchanged, because layers 2
 // and 3 sit above layer 5: no overwrite denies them anything. That check lives here rather than at the
 // call site so a caller cannot filter a channel away from the one account that must always see it.
-func (r Resolution) InChannel(
-	overwrites []db.ListChannelPermissionOverwritesRow, userID snowflake.ID,
-) Permission {
+func (r Resolution) InChannel(overwrites []db.PermissionOverwrite) Permission {
 	if r.bypassed {
 		return r.Permissions
 	}
-	return applyOverwrites(r.base, overwrites, r.heldRoleIDs, r.everyoneRoleID, userID)
+	return applyOverwrites(r.base, overwrites, r.heldRoleIDs, r.everyoneRoleID, r.UserID)
 }
 
 // Resolve computes the effective permissions of one account in one guild, optionally within one channel.
@@ -151,7 +211,7 @@ func Resolve(
 		return Resolution{}, ErrNotAMember
 	}
 
-	res := Resolution{OwnerID: snowflake.ID(rows[0].OwnerID)}
+	res := Resolution{UserID: userID, OwnerID: snowflake.ID(rows[0].OwnerID)}
 
 	// Layer 2. Checked before membership on purpose: an owner is always a member in practice, but a
 	// resolution that depended on that would fail closed in exactly the situation — a half-written guild,
@@ -159,7 +219,7 @@ func Resolve(
 	//
 	// HighestPosition stays zero here and means nothing; see its own comment for why that is stated rather
 	// than papered over with a sentinel.
-	if res.IsOwner(userID) {
+	if res.IsOwner() {
 		res.Permissions = permAll
 		res.base = permAll
 		res.bypassed = true
@@ -190,8 +250,8 @@ func Resolve(
 		// Standing is the highest position held, and @everyone is included rather than excluded: it sits
 		// at 0, so a member holding nothing else lands on the floor, which is exactly where the hierarchy
 		// rules put them.
-		if row.RolePosition != nil && *row.RolePosition > res.HighestPosition {
-			res.HighestPosition = *row.RolePosition
+		if row.RolePosition != nil && *row.RolePosition > res.highestPosition {
+			res.highestPosition = *row.RolePosition
 		}
 
 		if row.RoleIsDefault != nil && *row.RoleIsDefault {
@@ -226,7 +286,7 @@ func Resolve(
 		return Resolution{}, fmt.Errorf("roles: load channel overwrites: %w", err)
 	}
 
-	res.Permissions = res.InChannel(overwrites, userID)
+	res.Permissions = res.InChannel(overwrites)
 
 	return res, nil
 }
@@ -247,7 +307,7 @@ func Resolve(
 // broader deny removed. That is what "most specific wins" means operationally.
 func applyOverwrites(
 	base Permission,
-	overwrites []db.ListChannelPermissionOverwritesRow,
+	overwrites []db.PermissionOverwrite,
 	heldRoleIDs map[int64]struct{},
 	everyoneRoleID int64,
 	userID snowflake.ID,

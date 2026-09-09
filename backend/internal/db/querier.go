@@ -19,7 +19,12 @@ type Querier interface {
 	// no store of its own: replaying one matches zero rows. The remaining conditions mean an approval racing
 	// a denial or an expiry loses rather than overwriting it.
 	ApproveDeviceCode(ctx context.Context, arg ApproveDeviceCodeParams) (DeviceCode, error)
-	// Role assignment, role positions and permission overwrites (Milestone M13).
+	//
+	// Role assignment, role positions and permission overwrites (Milestone M13) follow. This separator is a
+	// lone comment line rather than prose, because sqlc attaches any comment block immediately above a query
+	// to that query's godoc — a section heading here becomes AssignRoleToMember's first documented sentence,
+	// and the Querier interface's.
+	//
 	// Give a member a role.
 	//
 	// # Why there is no ON CONFLICT, and why the row comes from a SELECT
@@ -103,6 +108,7 @@ type Querier interface {
 	// rather than authoring a new one, so refusing bits the creator does not hold would make inheritance fail
 	// exactly under the locked-down category it is most wanted under. What is checked is the creator's
 	// authority over the parent, in CreateChannel.
+	//
 	// # Both channels are scoped, not just the source
 	//
 	// The first draft constrained `guild_id` only on the join to the source channel and took the destination
@@ -378,6 +384,17 @@ type Querier interface {
 	//
 	// The join makes membership the thing that produces a row and GROUP BY makes "no member" produce no rows,
 	// so the caller gets pgx.ErrNoRows for a non-member and a real 0 for a member at the floor.
+	// GREATEST as well as COALESCE, and the two cover different holes. COALESCE handles a member with no
+	// rows here at all, whose maximum is NULL and whose standing is @everyone's 0. GREATEST handles a role
+	// sitting at or below 0, which nothing in the schema prevents: roles.position carries no CHECK, and
+	// SetRolePosition's lower bound only guards the reorder path, so a direct insert or a future import can
+	// still place one there.
+	//
+	// Without it the two halves of every hierarchy check disagree at exactly that boundary. Resolve computes
+	// the actor's standing by taking the maximum over a floor of zero, so it reads such a member as standing
+	// at 0; this query would read the same member as standing at -5. One comparison, two readers, two answers
+	// — and the strictly-greater rule then gives a different verdict depending on which side of it the member
+	// is on.
 	GetMemberHighestRolePosition(ctx context.Context, arg GetMemberHighestRolePositionParams) (int32, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
@@ -466,7 +483,12 @@ type Querier interface {
 	//
 	// The primary key (channel_id, target_type, target_id) serves the lookup on its leading column: measured
 	// at 0.092 ms and 6 buffers, Index Scan.
-	ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]ListChannelPermissionOverwritesRow, error)
+	// channel_id is selected although this query already knows it, so that both overwrite reads return the
+	// same generated struct. Resolution.InChannel consumes either — the guild-wide read feeds the channel
+	// listing and this one feeds a single-channel resolve — and two structurally identical row types would
+	// have meant a field-by-field conversion loop written at whichever call site was built second, on the hot
+	// path the guild-wide query's own plan exists to keep cheap.
+	ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]PermissionOverwrite, error)
 	// Columns enumerated rather than `SELECT *`, and topic_search is the reason.
 	//
 	// It is a generated tsvector that nothing in this codebase reads until M63's channel search, and pgx
@@ -548,11 +570,18 @@ type Querier interface {
 	// descents — but the cost it minimises grows with the whole instance while the alternative grows with one
 	// guild, so the gap widens for the life of the instance. Handing it the ids removes the choice.
 	//
-	// The ids are the ones ListGuildChannels just returned for this guild, so they are server-derived rather
-	// than client-supplied and need no re-scoping — which is the difference between this query and
-	// ListChannelPermissionOverwrites above, where the channel id arrives in a request path and the join to
-	// channels is what stops another guild's row being applied.
-	ListGuildPermissionOverwrites(ctx context.Context, channelIds []int64) ([]PermissionOverwrite, error)
+	// # Scoped to the guild as well, even though the caller supplies the ids
+	//
+	// The first draft left the guild out, reasoning that the ids come from ListGuildChannels and are therefore
+	// server-derived. That is the argument CopyChannelOverwrites made about its destination one file over, and
+	// this milestone rejected it there after reproducing four rows crossing between guilds: a rule that holds
+	// because of who happens to call it is not the rule. The same applies here and the consequence is the same
+	// shape — a member-tier target_id is a global user id, so another guild's deny genuinely matches and
+	// silently removes a permission from this guild's resolution.
+	//
+	// The join costs nothing measurable: the ids already restrict the scan to one guild's channels, so this
+	// adds a primary-key lookup per channel to a query that was already reading those rows.
+	ListGuildPermissionOverwrites(ctx context.Context, arg ListGuildPermissionOverwritesParams) ([]PermissionOverwrite, error)
 	// Ordered by position, which the (guild_id, position) index serves.
 	ListGuildRoles(ctx context.Context, guildID int64) ([]Role, error)
 	// Everything outstanding, newest first.
@@ -805,10 +834,23 @@ type Querier interface {
 	// reposition. That means everything else moves up one, and @everyone stays on the floor every layer-4
 	// resolution starts from.
 	//
-	// Bounded by the role ceiling, so this rewrites at most 249 rows on a path that runs when somebody clicks
-	// "create role". It runs inside the same advisory lock CreateRole already takes, because two concurrent
-	// creates that both shift and both insert at 1 would collide — and migration 000015 deliberately declines
-	// the unique constraint that would catch it.
+	// # Renumbering rather than shifting, so positions stay bounded by the ceiling
+	//
+	// The obvious implementation is `position = position + 1`, and it makes positions grow with the guild's
+	// *lifetime* creation count rather than with the roles it currently has. A guild that keeps one long-lived
+	// role and churns ten thousand others leaves that role near position 10,000 against a ceiling of 250 — so
+	// any service-side bound derived from the ceiling would reject a legitimate reorder of the guild's own
+	// current hierarchy, and nothing anywhere would bring the numbers back down.
+	//
+	// Renumbering from row_number() closes it: after every create, the live non-default roles occupy 2..N+1
+	// with position 1 free for the new one, so no position ever exceeds the role ceiling plus one. Relative
+	// order is preserved, which is the only property the hierarchy depends on — `ORDER BY position, id`
+	// matches ListGuildRoles, so two roles that tie today keep the order the listing already shows.
+	//
+	// At most 250 rows on a path that runs when somebody clicks "create role". It runs inside the same
+	// advisory lock CreateRole already takes, because two concurrent creates that both renumber and both
+	// insert at 1 would collide — and migration 000015 deliberately declines the unique constraint that would
+	// catch it.
 	ShiftRolePositionsUp(ctx context.Context, guildID int64) error
 	// Records use, at most once every few minutes per token.
 	//

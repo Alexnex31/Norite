@@ -68,15 +68,17 @@ func (s *Service) authorize(
 type decision struct {
 	// instanceAdmin is layer 1: authority from outside the guild entirely.
 	instanceAdmin bool
-	// permissions is what layers 2..5 resolved. Meaningless when instanceAdmin is true, because an
-	// Instance Admin is not a member and was never resolved.
-	permissions roles.Permission
-	// resolution is everything else roles.Resolve worked out — the owner id and the actor's standing.
+	// resolution is what layers 2..5 worked out: the permissions, the owner, and the actor's standing.
 	//
-	// Zero when instanceAdmin is true, and that matters more than the permissions field being zero does.
-	// An empty permission set reads as absence; a standing of zero reads as data, because zero is
-	// @everyone's position and a real place in the hierarchy. Never compare it without asking outranks
-	// about the tier first.
+	// The zero value when instanceAdmin is true, because an Instance Admin is not a member and was never
+	// resolved — and that matters more than an empty permission set would. An empty permission set reads
+	// as absence; a standing of zero reads as data, because zero is @everyone's position and a real place
+	// in the hierarchy. Which is why nothing reads the standing directly: roles.Resolution.Outranks asks
+	// about ownership first, and the wrapper described below asks about the tier before that.
+	//
+	// This was two fields until a review pointed out they always held the same value — a `permissions`
+	// copy read by allows, and the resolution read by owns — each with its own explanation of when it was
+	// meaningless. One fact, one field.
 	resolution roles.Resolution
 }
 
@@ -100,8 +102,17 @@ type decision struct {
 
 // allows reports whether the decision covers a permission, from either authority.
 func (d decision) allows(need roles.Permission) bool {
-	return d.instanceAdmin || d.permissions.Has(need)
+	return d.instanceAdmin || d.resolution.Permissions.Has(need)
 }
+
+// The standing wrapper lands with its first caller, not here.
+//
+// decision is where ADR 0008's layers meet, so a hierarchy check belongs on it: an Instance Admin is above
+// every guild's hierarchy and is never resolved against one, so the tier has to be asked before
+// roles.Resolution.Outranks is. That wrapper is one line and it is absent only because nothing calls it
+// yet — an unexported method with no callers does not survive the linter, and silencing that would be
+// worse than waiting. The primitive it will wrap is built and tested in the roles package; the first
+// endpoint to need it adds the wrapper in the same commit.
 
 // authorizeWith is authorize against an explicit querier, so a check can run inside a caller's
 // transaction rather than on a separate connection.
@@ -157,14 +168,14 @@ func authorizeWith(
 		return decision{}, httpx.ErrForbidden
 	}
 
-	return decision{permissions: res.Permissions, resolution: res}, nil
+	return decision{resolution: res}, nil
 }
 
 // owns reports whether the actor is the guild's owner — ADR 0008 layer 2.
 //
 // False for an Instance Admin, who is never resolved against a guild at all and holds layer 1 instead.
-// A caller wanting "may act as the guild's own authority" wants `d.instanceAdmin || d.owns(actor)`, and
-// both halves are load-bearing: the tier acts on guilds it is not in, and the owner is not a tier.
-func (d decision) owns(actor auth.Actor) bool {
-	return d.resolution.IsOwner(actor.UserID)
+// A caller wanting "may act as the guild's own authority" wants `d.instanceAdmin || d.owns()`, and both
+// halves are load-bearing: the tier acts on guilds it is not in, and the owner is not a tier.
+func (d decision) owns() bool {
+	return d.resolution.IsOwner()
 }

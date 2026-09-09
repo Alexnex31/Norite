@@ -263,7 +263,12 @@ SELECT guild_id, user_id, role_id
 FROM guild_member_roles
 WHERE guild_id = $1 AND user_id = ANY(sqlc.arg(user_ids)::bigint[]);
 
--- Role assignment, role positions and permission overwrites (Milestone M13).
+--
+-- Role assignment, role positions and permission overwrites (Milestone M13) follow. This separator is a
+-- lone comment line rather than prose, because sqlc attaches any comment block immediately above a query
+-- to that query's godoc — a section heading here becomes AssignRoleToMember's first documented sentence,
+-- and the Querier interface's.
+--
 
 -- name: AssignRoleToMember :execrows
 -- Give a member a role.
@@ -316,13 +321,31 @@ WHERE guild_id = $1 AND user_id = $2 AND role_id = $3;
 -- reposition. That means everything else moves up one, and @everyone stays on the floor every layer-4
 -- resolution starts from.
 --
--- Bounded by the role ceiling, so this rewrites at most 249 rows on a path that runs when somebody clicks
--- "create role". It runs inside the same advisory lock CreateRole already takes, because two concurrent
--- creates that both shift and both insert at 1 would collide — and migration 000015 deliberately declines
--- the unique constraint that would catch it.
-UPDATE roles
-SET position = position + 1, updated_at = now()
-WHERE guild_id = $1 AND NOT is_default;
+-- # Renumbering rather than shifting, so positions stay bounded by the ceiling
+--
+-- The obvious implementation is `position = position + 1`, and it makes positions grow with the guild's
+-- *lifetime* creation count rather than with the roles it currently has. A guild that keeps one long-lived
+-- role and churns ten thousand others leaves that role near position 10,000 against a ceiling of 250 — so
+-- any service-side bound derived from the ceiling would reject a legitimate reorder of the guild's own
+-- current hierarchy, and nothing anywhere would bring the numbers back down.
+--
+-- Renumbering from row_number() closes it: after every create, the live non-default roles occupy 2..N+1
+-- with position 1 free for the new one, so no position ever exceeds the role ceiling plus one. Relative
+-- order is preserved, which is the only property the hierarchy depends on — `ORDER BY position, id`
+-- matches ListGuildRoles, so two roles that tie today keep the order the listing already shows.
+--
+-- At most 250 rows on a path that runs when somebody clicks "create role". It runs inside the same
+-- advisory lock CreateRole already takes, because two concurrent creates that both renumber and both
+-- insert at 1 would collide — and migration 000015 deliberately declines the unique constraint that would
+-- catch it.
+UPDATE roles r
+SET position = ranked.position, updated_at = now()
+FROM (
+    SELECT inner_r.id, (row_number() OVER (ORDER BY inner_r.position, inner_r.id) + 1)::integer AS position
+    FROM roles inner_r
+    WHERE inner_r.guild_id = sqlc.arg(guild_id) AND NOT inner_r.is_default
+) ranked
+WHERE r.id = ranked.id AND r.position IS DISTINCT FROM ranked.position;
 
 -- name: SetRolePosition :execrows
 -- One row of a reorder. The whole reorder is several of these in one transaction under the same advisory
@@ -411,6 +434,7 @@ WHERE po.channel_id = c.id
 -- rather than authoring a new one, so refusing bits the creator does not hold would make inheritance fail
 -- exactly under the locked-down category it is most wanted under. What is checked is the creator's
 -- authority over the parent, in CreateChannel.
+--
 -- # Both channels are scoped, not just the source
 --
 -- The first draft constrained `guild_id` only on the join to the source channel and took the destination

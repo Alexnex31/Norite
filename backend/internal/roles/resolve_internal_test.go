@@ -25,8 +25,8 @@ const (
 	memberID   = snowflake.ID(400)
 )
 
-func overwriteRow(targetType int16, targetID int64, allow, deny Permission) db.ListChannelPermissionOverwritesRow {
-	return db.ListChannelPermissionOverwritesRow{
+func overwriteRow(targetType int16, targetID int64, allow, deny Permission) db.PermissionOverwrite {
+	return db.PermissionOverwrite{
 		TargetType: targetType,
 		TargetID:   targetID,
 		Allow:      allow.Int64(),
@@ -58,7 +58,7 @@ func held() map[int64]struct{} {
 func TestAnEveryoneAllowIsOverriddenByARoleDeny(t *testing.T) {
 	got := applyOverwrites(
 		0,
-		[]db.ListChannelPermissionOverwritesRow{
+		[]db.PermissionOverwrite{
 			overwriteRow(OverwriteTargetRole, everyoneID, PermSendMessages, 0),
 			overwriteRow(OverwriteTargetRole, heldID, 0, PermSendMessages),
 		},
@@ -85,10 +85,10 @@ func TestRoleOverwritesDoNotDependOnRowOrder(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		rows []db.ListChannelPermissionOverwritesRow
+		rows []db.PermissionOverwrite
 	}{
-		{"allow first", []db.ListChannelPermissionOverwritesRow{allowRow, denyRow}},
-		{"deny first", []db.ListChannelPermissionOverwritesRow{denyRow, allowRow}},
+		{"allow first", []db.PermissionOverwrite{allowRow, denyRow}},
+		{"deny first", []db.PermissionOverwrite{denyRow, allowRow}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			heldBoth := map[int64]struct{}{everyoneID: {}, heldID: {}, otherID: {}}
@@ -109,10 +109,10 @@ func TestAMemberOverwriteBeatsEveryRoleTier(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		rows []db.ListChannelPermissionOverwritesRow
+		rows []db.PermissionOverwrite
 	}{
-		{"role first", []db.ListChannelPermissionOverwritesRow{roleDeny, memberAllow}},
-		{"member first", []db.ListChannelPermissionOverwritesRow{memberAllow, roleDeny}},
+		{"role first", []db.PermissionOverwrite{roleDeny, memberAllow}},
+		{"member first", []db.PermissionOverwrite{memberAllow, roleDeny}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := applyOverwrites(0, tc.rows, held(), everyoneID, memberID)
@@ -128,7 +128,7 @@ func TestAMemberOverwriteBeatsEveryRoleTier(t *testing.T) {
 func TestAMemberDenyBeatsAnEveryoneAndRoleAllow(t *testing.T) {
 	got := applyOverwrites(
 		0,
-		[]db.ListChannelPermissionOverwritesRow{
+		[]db.PermissionOverwrite{
 			overwriteRow(OverwriteTargetRole, everyoneID, PermSendMessages, 0),
 			overwriteRow(OverwriteTargetRole, heldID, PermSendMessages, 0),
 			overwriteRow(OverwriteTargetMember, int64(memberID), 0, PermSendMessages),
@@ -148,7 +148,7 @@ func TestAMemberDenyBeatsAnEveryoneAndRoleAllow(t *testing.T) {
 func TestAnUnknownTargetTypeIsIgnored(t *testing.T) {
 	got := applyOverwrites(
 		PermViewChannel,
-		[]db.ListChannelPermissionOverwritesRow{
+		[]db.PermissionOverwrite{
 			overwriteRow(int16(7), heldID, PermBanMembers, 0),
 		},
 		held(), everyoneID, memberID,

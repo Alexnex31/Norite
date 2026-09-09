@@ -291,3 +291,29 @@ func TestAZeroCeilingIsRefusedAtConstruction(t *testing.T) {
 	require.Error(t, err, "a zero ceiling must be refused before the service exists")
 	require.Contains(t, err.Error(), "ceiling")
 }
+
+// TestDeletingAGuildThatDoesNotExistAnswers404 covers the one refusal an Instance Admin reaches that no
+// guild resolution can produce.
+//
+// Every other caller of Delete is refused by authorizeWith, which resolves the guild and answers 404 when
+// it finds nothing. An Instance Admin is not resolved at all — layer 1 short-circuits above roles.Resolve
+// by design, because the tier acts on guilds it is not in — so for that one actor the guild's existence is
+// never established, and the first thing to touch it is the audit write. Without an explicit check that
+// is a foreign-key violation and a 500, where every other actor gets 404.
+//
+// M12 got this right by accident: Delete opened with a GetGuild whose ErrNoRows branch answered 404, and
+// the owner comparison happened to need the same row. M13 removed that read, because the owner id now
+// arrives with the resolution — and removed the existence check with it.
+func TestDeletingAGuildThatDoesNotExistAnswers404(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := t.Context()
+
+	admin := f.newUser(ctx, "admin")
+	f.makeInstanceAdmin(ctx, admin)
+
+	err := f.svc.Delete(ctx, userActor(admin), f.next())
+	require.ErrorIs(t, err, httpx.ErrNotFound,
+		"an Instance Admin deleting a guild that is not there gets the same 404 as anybody else")
+}
