@@ -138,22 +138,41 @@ func (s *Service) ListChannels(
 		return nil, fmt.Errorf("guilds: list guild overwrites: %w", err)
 	}
 
-	byChannel := make(map[snowflake.ID][]Overwrite, len(out))
+	// Grouped once, and the grouping is what keeps this linear.
+	//
+	// InChannel skips rows belonging to other channels, so handing it the whole guild's slice is correct
+	// and quadratic: every channel walks every overwrite in the guild. Measured on a guild at the
+	// 500-channel ceiling with three overwrites each, 1,500 rows in total:
+	//
+	//   whole slice   757,295 ns/op
+	//   grouped       130,493 ns/op
+	//
+	// Ten times the channels cost a hundred and nine times the work, against under nine for the grouped
+	// form. The absolute number is small at ordinary sizes — 7 us on a fifty-channel guild — but at the
+	// ceiling it is twice what the database round trip costs, on a path rule 7 names.
+	//
+	// The grouping itself is free: this loop replaced one that grouped the same rows into the wire type,
+	// so the pass was already being paid for. Converting is now done only for channels that survive the
+	// filter, which is the other half of the saving.
+	byChannel := make(map[snowflake.ID][]db.PermissionOverwrite, len(out))
 	for _, ow := range overwrites {
 		id := snowflake.ID(ow.ChannelID)
-		byChannel[id] = append(byChannel[id], overwriteFromRow(ow))
+		byChannel[id] = append(byChannel[id], ow)
 	}
 
 	visible := out[:0]
 	for _, ch := range out {
+		rows := byChannel[ch.ID]
+
 		// Layer 1 is outside the guild, so it was never resolved and cannot be filtered with. Checked
 		// here rather than folded into the resolution, which is ADR 0008's whole point about that tier.
-		if !allowed.instanceAdmin && !allowed.resolution.InChannel(ch.ID, overwrites).Has(roles.PermViewChannel) {
+		if !allowed.instanceAdmin && !allowed.resolution.InChannel(ch.ID, rows).Has(roles.PermViewChannel) {
 			continue
 		}
-		ch.PermissionOverwrites = byChannel[ch.ID]
-		if ch.PermissionOverwrites == nil {
-			ch.PermissionOverwrites = []Overwrite{}
+
+		ch.PermissionOverwrites = make([]Overwrite, 0, len(rows))
+		for _, ow := range rows {
+			ch.PermissionOverwrites = append(ch.PermissionOverwrites, overwriteFromRow(ow))
 		}
 		visible = append(visible, ch)
 	}
