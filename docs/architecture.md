@@ -822,7 +822,10 @@ GET    /guilds/{guild_id}                  -- M12
 PATCH  /guilds/{guild_id}                  -- M12; PermManageGuild
 DELETE /guilds/{guild_id}                  -- M12; *owner or Instance Admin only*, not PermManageGuild —
                                            --   a cascading destroy is not a delegable permission
-GET    /guilds/{guild_id}/channels         -- M12; per-channel view filtering arrives with overwrites (M13)
+GET    /guilds/{guild_id}/channels         -- M12; M13 filters it by per-channel view permission, and
+                                           --   embeds each channel's overwrites. Two queries whatever
+                                           --   the channel count: resolved once at guild level, every
+                                           --   overwrite read in one statement, applied per channel
 POST   /guilds/{guild_id}/channels         -- M12; PermManageChannels
 GET    /guilds/{guild_id}/members?after={id}&limit=100
                                            -- M12; cursor-only, limit clamped to 100 rather than refused

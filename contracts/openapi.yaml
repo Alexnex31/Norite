@@ -2456,9 +2456,15 @@ paths:
         ceiling enforced when a channel is created, not by a `limit` the caller passes.
 
 
-        **Not filtered by per-channel permission overwrites at this version.** Nothing can write an
-        overwrite until the overwrite endpoints exist, so every channel resolves identically today; once
-        they do, this listing hides channels the caller cannot view.
+        **Filtered by per-channel view permission.** A channel the caller cannot view is absent rather
+        than redacted — its name, topic and category are not information somebody denied it should be able
+        to read. Three authorities see everything: an Instance Admin, the guild owner, and any member
+        holding `ADMINISTRATOR`.
+
+
+        Two queries regardless of how many channels the guild has, not two per channel. The caller is
+        resolved once at guild level and every channel's overwrites are read in one statement, then
+        applied per channel from that single result.
       operationId: listGuildChannels
       tags: [guilds]
       responses:
@@ -3820,11 +3826,27 @@ components:
       type: object
       required:
         [id, guild_id, type, parent_id, name, topic, position, nsfw, last_message_id, bitrate, user_limit,
-         created_at, updated_at]
+         created_at, updated_at, permission_overwrites]
       additionalProperties: false
       properties:
         id:
           $ref: "#/components/schemas/Snowflake"
+        permission_overwrites:
+          type: array
+          description: >
+            Every overwrite configured on this channel — as configured, not as resolved for the caller.
+
+
+            Required and never null, on every route that returns a channel. An omitted array and an empty
+            one would be one schema meaning two things depending on which route produced it, and a client
+            refreshing its cache from a response is entitled to read this as the whole truth.
+
+
+            Present on the listing because a permission editor cannot be drawn without it and there is no
+            single-channel `GET` to ask instead. The listing already reads every channel in the guild, so
+            one further query answers the whole sidebar rather than one request per tab opened.
+          items:
+            $ref: "#/components/schemas/PermissionOverwrite"
         guild_id:
           oneOf:
             - $ref: "#/components/schemas/Snowflake"

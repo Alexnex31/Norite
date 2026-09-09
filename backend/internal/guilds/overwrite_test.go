@@ -213,3 +213,106 @@ func TestAStrangerGetsTheSameAnswerForEveryOverwriteRefusal(t *testing.T) {
 		})
 	}
 }
+
+// TestTheChannelListingHidesADeniedChannel is the debt M12 wrote into M13's roadmap entry: the listing
+// could not filter by per-channel view permission because nothing could write an overwrite to hide one
+// with.
+//
+// The three short-circuits are asserted alongside, because a filter written against the two obvious ones
+// looks correct while doing the right thing by accident — layer 3 returns permAll before overwrites are
+// applied, so an administrator's listing is unfiltered whether the code remembers them or not.
+func TestTheChannelListingHidesADeniedChannel(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	open := f.channelID
+	hidden := f.newChannel(ctx, f.guildID)
+	f.overwrite(ctx, hidden, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermViewChannel)
+
+	names := func(who snowflake.ID) []snowflake.ID {
+		got, err := f.svc.ListChannels(ctx, userActor(who), f.guildID)
+		require.NoError(t, err)
+		ids := make([]snowflake.ID, 0, len(got))
+		for _, c := range got {
+			ids = append(ids, c.ID)
+		}
+		return ids
+	}
+
+	require.ElementsMatch(t, []snowflake.ID{open}, names(f.plain),
+		"a plain member sees only the channel they are not denied")
+	require.ElementsMatch(t, []snowflake.ID{open, hidden}, names(f.owner),
+		"the owner sees everything — layer 2 sits above layer 5")
+
+	admin := f.newUser(ctx, "admin")
+	f.join(ctx, f.guildID, admin)
+	adminRole := f.newRole(ctx, f.guildID, 7, roles.PermAdministrator)
+	f.grantRole(ctx, f.guildID, admin, adminRole)
+	require.ElementsMatch(t, []snowflake.ID{open, hidden}, names(admin),
+		"and so does a member holding PermAdministrator — layer 3, the short-circuit a two-name filter misses")
+
+	instanceAdmin := f.newUser(ctx, "instance-admin")
+	f.makeInstanceAdmin(ctx, instanceAdmin)
+	require.ElementsMatch(t, []snowflake.ID{open, hidden}, names(instanceAdmin),
+		"layer 1 is never resolved against the guild, so the filter has to check the tier explicitly")
+}
+
+// TestADenyInOneChannelDoesNotFollowTheListingLoop is the bug the guild-wide read makes possible and that
+// a single-channel fixture cannot see.
+//
+// Every channel's overwrites arrive in one slice, so a loop that applies the whole slice per channel
+// accumulates them: an allow on one channel restoring what another denied, and a deny anywhere hiding
+// everything. Resolution.InChannel filters by channel id for this reason, and this is the service-level
+// assertion of it.
+func TestADenyInOneChannelDoesNotFollowTheListingLoop(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermSendMessages)
+	ctx := t.Context()
+
+	first := f.channelID
+	second := f.newChannel(ctx, f.guildID)
+	third := f.newChannel(ctx, f.guildID)
+
+	// One allow, one deny, one member-tier deny — three tiers, three channels, one slice.
+	f.overwrite(ctx, first, roles.OverwriteTargetRole, f.everyoneID, roles.PermViewChannel, 0)
+	f.overwrite(ctx, second, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermViewChannel)
+	f.overwrite(ctx, third, roles.OverwriteTargetMember, f.plain, 0, roles.PermSendMessages)
+
+	got, err := f.svc.ListChannels(ctx, userActor(f.plain), f.guildID)
+	require.NoError(t, err)
+
+	ids := make([]snowflake.ID, 0, len(got))
+	for _, c := range got {
+		ids = append(ids, c.ID)
+	}
+	require.ElementsMatch(t, []snowflake.ID{first, third}, ids,
+		"only the channel that denies viewing is hidden — the other two carry unrelated overwrites")
+}
+
+// TestTheListingCarriesEachChannelsOwnOverwrites pins the embedded payload, which is the read side of the
+// endpoint C1 added and the reason a client can draw a permission editor at all.
+func TestTheListingCarriesEachChannelsOwnOverwrites(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	bare := f.channelID
+	configured := f.newChannel(ctx, f.guildID)
+	f.overwrite(ctx, configured, roles.OverwriteTargetRole, f.everyoneID, roles.PermSendMessages, 0)
+	f.overwrite(ctx, configured, roles.OverwriteTargetMember, f.plain, 0, roles.PermSendMessages)
+
+	got, err := f.svc.ListChannels(ctx, userActor(f.owner), f.guildID)
+	require.NoError(t, err)
+
+	byID := map[snowflake.ID]Channel{}
+	for _, c := range got {
+		byID[c.ID] = c
+	}
+
+	require.NotNil(t, byID[bare].PermissionOverwrites,
+		"never nil: an omitted array and an empty one must not be one schema meaning two things")
+	require.Empty(t, byID[bare].PermissionOverwrites)
+	require.Len(t, byID[configured].PermissionOverwrites, 2,
+		"and a channel's own rows, not the guild's")
+}

@@ -342,8 +342,15 @@ type Channel struct {
 
 	// ParentId The category this channel sits under. Deleting a category sets this to null on its children rather than deleting them — losing a category must not lose the conversations in it.
 	ParentId *Snowflake `json:"parent_id"`
-	Position int        `json:"position"`
-	Topic    *string    `json:"topic"`
+
+	// PermissionOverwrites Every overwrite configured on this channel — as configured, not as resolved for the caller.
+	//
+	// Required and never null, on every route that returns a channel. An omitted array and an empty one would be one schema meaning two things depending on which route produced it, and a client refreshing its cache from a response is entitled to read this as the whole truth.
+	//
+	// Present on the listing because a permission editor cannot be drawn without it and there is no single-channel `GET` to ask instead. The listing already reads every channel in the guild, so one further query answers the whole sidebar rather than one request per tab opened.
+	PermissionOverwrites []PermissionOverwrite `json:"permission_overwrites"`
+	Position             int                   `json:"position"`
+	Topic                *string               `json:"topic"`
 
 	// Type `0` text, `1` DM, `2` voice, `3` group DM, `4` category, `5` announcement (reserved), `6` stage voice (reserved), `7` public matchmaking.
 	//

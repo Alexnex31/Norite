@@ -132,6 +132,20 @@ type Channel struct {
 	UserLimit     *int32        `json:"user_limit"`
 	CreatedAt     time.Time     `json:"created_at"`
 	UpdatedAt     time.Time     `json:"updated_at"`
+
+	// PermissionOverwrites is every overwrite on this channel — ADR 0008 layer 5, as configured rather
+	// than as resolved.
+	//
+	// Embedded rather than served from a route of its own, because a permission editor cannot be drawn
+	// from a listing that omits them and there is no GET /channels/{id} to ask instead. The listing
+	// already reads every channel in the guild, so one more query answers the whole sidebar; a per-channel
+	// fetch would be a request each time somebody opened a tab, which is the chattiness rule 21 asks to be
+	// weighed at the time an endpoint is added.
+	//
+	// Never nil. An omitted array and an empty one would be one schema meaning two things depending on
+	// which route produced it, which is the bug M12 shipped on a member's `roles` and had to correct — a
+	// client refreshing its cache from a response is entitled to read this as the whole truth.
+	PermissionOverwrites []Overwrite `json:"permission_overwrites"`
 }
 
 // Member is the wire representation of a guild membership.
