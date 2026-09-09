@@ -542,15 +542,15 @@ func TestInChannelResolvesManyChannelsFromOneQuery(t *testing.T) {
 		return rows
 	}
 
-	require.True(t, res.InChannel(load(open)).Has(roles.PermViewChannel),
+	require.True(t, res.InChannel(open, load(open)).Has(roles.PermViewChannel),
 		"the open channel is visible")
-	require.False(t, res.InChannel(load(denied)).Has(roles.PermViewChannel),
+	require.False(t, res.InChannel(denied, load(denied)).Has(roles.PermViewChannel),
 		"the denied channel is not")
 
 	// Applied again, in the other order, on the same resolution. Every answer must be unchanged.
-	require.False(t, res.InChannel(load(denied)).Has(roles.PermViewChannel),
+	require.False(t, res.InChannel(denied, load(denied)).Has(roles.PermViewChannel),
 		"a second call must not compound")
-	require.True(t, res.InChannel(load(open)).Has(roles.PermViewChannel),
+	require.True(t, res.InChannel(open, load(open)).Has(roles.PermViewChannel),
 		"and the deny must not have leaked into a channel that does not carry it")
 
 	// The case the two assertions above cannot see, and the only one that distinguishes resolving from
@@ -564,7 +564,7 @@ func TestInChannelResolvesManyChannelsFromOneQuery(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, inDenied.Permissions.Has(roles.PermViewChannel), "the deny applied, as it should")
 
-	require.True(t, inDenied.InChannel(load(open)).Has(roles.PermViewChannel),
+	require.True(t, inDenied.InChannel(open, load(open)).Has(roles.PermViewChannel),
 		"asking about the open channel must answer from the guild-level base, not from the denied "+
 			"channel's result — otherwise a listing loop accumulates every channel's denies and hides "+
 			"channels nobody denied")
@@ -604,7 +604,7 @@ func TestAnOwnerAndAnAdministratorAreNotFilteredByOverwrites(t *testing.T) {
 	}{{"owner", owner}, {"administrator", admin}} {
 		res, err := roles.Resolve(ctx, f.q, guildID, tc.who, 0)
 		require.NoError(t, err)
-		require.True(t, res.InChannel(rows).Has(roles.PermViewChannel),
+		require.True(t, res.InChannel(channelID, rows).Has(roles.PermViewChannel),
 			"%s must see a channel @everyone is denied", tc.name)
 	}
 }
@@ -701,4 +701,91 @@ func TestBothStandingReadersAgreeBelowTheFloor(t *testing.T) {
 	require.Equal(t, int32(0), res.Standing(), "the actor reader floors at @everyone's position")
 	require.Equal(t, int32(0), asTarget, "and so must the target reader")
 	require.Equal(t, res.Standing(), asTarget, "one comparison cannot have two answers")
+}
+
+// TestAGuildWideSliceResolvesEachChannelSeparately is the case ListGuildPermissionOverwrites exists to
+// serve and that nothing exercised until a security review asked for it.
+//
+// The channel listing loads every overwrite in the guild in one query and asks about each channel in turn.
+// Both overwrite queries deliberately return the same row type, so handing the whole slice to InChannel is
+// type-correct — and before the channel id became a parameter it silently merged every channel's tiers:
+// an allow on one channel restoring what another denied, which shows a private channel in a listing, and
+// a member-tier deny anywhere hiding every channel.
+//
+// Confirmed by removal: drop the ChannelID guard in applyOverwrites and this test fails — on the
+// #general assertion, not the #staff one it would be natural to predict. That is the sharper version of
+// the bug. The @everyone tier is applied row by row as it is encountered, so merging two channels' rows
+// makes the answer depend on the order the query returned them: #staff's deny lands after #general's
+// allow and takes viewing away from a channel nobody denied. Merged tiers do not resolve to one wrong
+// answer, they resolve to whichever wrong answer the row order picks.
+func TestAGuildWideSliceResolvesEachChannelSeparately(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := t.Context()
+
+	owner := f.newUser(ctx, "owner")
+	member := f.newUser(ctx, "member")
+	guildID, everyoneID := f.newGuild(ctx, owner, roles.PermViewChannel|roles.PermSendMessages)
+	f.join(ctx, guildID, member)
+
+	general := f.newChannel(ctx, guildID)
+	staff := f.newChannel(ctx, guildID)
+	quiet := f.newChannel(ctx, guildID)
+
+	// #general re-allows what @everyone already grants; #staff denies viewing; #quiet denies sending only
+	// to this one member. Three channels, three different tiers, one slice.
+	f.overwrite(ctx, general, roles.OverwriteTargetRole, everyoneID, roles.PermViewChannel, 0)
+	f.overwrite(ctx, staff, roles.OverwriteTargetRole, everyoneID, 0, roles.PermViewChannel)
+	f.overwrite(ctx, quiet, roles.OverwriteTargetMember, member, 0, roles.PermSendMessages)
+
+	res, err := roles.Resolve(ctx, f.q, guildID, member, 0)
+	require.NoError(t, err)
+
+	all, err := f.q.ListGuildPermissionOverwrites(ctx, db.ListGuildPermissionOverwritesParams{
+		ChannelIds: []int64{int64(general), int64(staff), int64(quiet)},
+		GuildID:    int64(guildID),
+	})
+	require.NoError(t, err)
+	require.Len(t, all, 3, "one query returns every channel's rows, which is the point of it")
+
+	require.True(t, res.InChannel(general, all).Has(roles.PermViewChannel),
+		"#general is visible")
+	require.False(t, res.InChannel(staff, all).Has(roles.PermViewChannel),
+		"#staff must stay hidden — #general's allow belongs to #general and must not reach this evaluation")
+	require.True(t, res.InChannel(quiet, all).Has(roles.PermViewChannel),
+		"#quiet is visible; only sending is denied there")
+	require.False(t, res.InChannel(quiet, all).Has(roles.PermSendMessages),
+		"the member-tier deny applies in its own channel")
+	require.True(t, res.InChannel(general, all).Has(roles.PermSendMessages),
+		"and nowhere else — a deny in one channel must not follow the loop into the others")
+}
+
+// TestAnOverwriteForAnotherGuildIsNotReturned pins the scoping on the guild-wide read.
+//
+// The ids come from this guild's own channel listing, so the guild predicate is redundant against every
+// caller that exists — which is exactly the reasoning this milestone rejected once already, after
+// reproducing overwrite rows crossing between guilds through a statement whose caller happened to be safe.
+func TestAnOverwriteForAnotherGuildIsNotReturned(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := t.Context()
+
+	owner := f.newUser(ctx, "owner")
+	mine, myEveryone := f.newGuild(ctx, owner, roles.PermViewChannel)
+	theirs, theirEveryone := f.newGuild(ctx, owner, roles.PermViewChannel)
+
+	myChannel := f.newChannel(ctx, mine)
+	theirChannel := f.newChannel(ctx, theirs)
+	f.overwrite(ctx, myChannel, roles.OverwriteTargetRole, myEveryone, 0, roles.PermSendMessages)
+	f.overwrite(ctx, theirChannel, roles.OverwriteTargetRole, theirEveryone, 0, roles.PermSendMessages)
+
+	got, err := f.q.ListGuildPermissionOverwrites(ctx, db.ListGuildPermissionOverwritesParams{
+		ChannelIds: []int64{int64(myChannel), int64(theirChannel)},
+		GuildID:    int64(mine),
+	})
+	require.NoError(t, err)
+	require.Len(t, got, 1, "a channel id from another guild contributes nothing")
+	require.Equal(t, int64(myChannel), got[0].ChannelID)
 }

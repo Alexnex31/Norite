@@ -170,11 +170,24 @@ func (r Resolution) OutranksMember(targetID snowflake.ID, targetStanding int32) 
 // An owner or an administrator resolved through a short-circuit is returned unchanged, because layers 2
 // and 3 sit above layer 5: no overwrite denies them anything. That check lives here rather than at the
 // call site so a caller cannot filter a channel away from the one account that must always see it.
-func (r Resolution) InChannel(overwrites []db.PermissionOverwrite) Permission {
+//
+// # Why the channel id is a parameter and rows are filtered rather than trusted
+//
+// The slice this is handed is expected to span the whole guild — that is the point of the one query — so
+// it must say which channel it is being asked about, and rows for the others are skipped here rather than
+// by the caller slicing correctly.
+//
+// Taking only the slice made the wrong call compile and read naturally. Both overwrite queries return the
+// same row type (deliberately, so the listing needs no field-by-field conversion on a hot path), so
+// handing the whole guild's rows in was a type-correct way to merge every channel's tiers into one
+// answer: an allow on one channel restoring a permission denied on another, which shows a private channel
+// in a listing — and a member-tier deny anywhere hiding every channel. Found by a security review, and it
+// is the same shape as the account mix-up UserID was promoted to a field to prevent, one dimension over.
+func (r Resolution) InChannel(channelID snowflake.ID, overwrites []db.PermissionOverwrite) Permission {
 	if r.bypassed {
 		return r.Permissions
 	}
-	return applyOverwrites(r.base, overwrites, r.heldRoleIDs, r.everyoneRoleID, r.UserID)
+	return applyOverwrites(r.base, channelID, overwrites, r.heldRoleIDs, r.everyoneRoleID, r.UserID)
 }
 
 // Resolve computes the effective permissions of one account in one guild, optionally within one channel.
@@ -286,7 +299,7 @@ func Resolve(
 		return Resolution{}, fmt.Errorf("roles: load channel overwrites: %w", err)
 	}
 
-	res.Permissions = res.InChannel(overwrites)
+	res.Permissions = res.InChannel(channelID, overwrites)
 
 	return res, nil
 }
@@ -307,6 +320,7 @@ func Resolve(
 // broader deny removed. That is what "most specific wins" means operationally.
 func applyOverwrites(
 	base Permission,
+	channelID snowflake.ID,
 	overwrites []db.PermissionOverwrite,
 	heldRoleIDs map[int64]struct{},
 	everyoneRoleID int64,
@@ -318,6 +332,12 @@ func applyOverwrites(
 	)
 
 	for _, ow := range overwrites {
+		// Rows for other channels, which a guild-wide slice is full of. Skipped here rather than trusted
+		// to have been filtered out — see InChannel.
+		if ow.ChannelID != int64(channelID) {
+			continue
+		}
+
 		allow := PermissionFromInt64(ow.Allow)
 		deny := PermissionFromInt64(ow.Deny)
 

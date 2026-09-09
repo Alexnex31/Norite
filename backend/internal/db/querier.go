@@ -395,6 +395,14 @@ type Querier interface {
 	// at 0; this query would read the same member as standing at -5. One comparison, two readers, two answers
 	// — and the strictly-greater rule then gives a different verdict depending on which side of it the member
 	// is on.
+	// The guild predicate on this join is redundant against every writer that exists — AssignRoleToMember
+	// scopes the role to the guild and is the only one — and it is here anyway, for the reason
+	// CopyChannelOverwrites and ListGuildPermissionOverwrites carry theirs: a rule that holds because of who
+	// happens to call it is not the rule. guild_member_roles.role_id references roles(id) alone, only the
+	// (guild_id, user_id) foreign key is composite, so nothing in the schema refuses a row naming another
+	// guild's role — and this query would then report that role's position as the member's standing here.
+	// ListGuildMemberAuthority scopes the actor's side the same way, and the two halves of one comparison
+	// reading different rule sets is exactly what this query's comment above exists to prevent.
 	GetMemberHighestRolePosition(ctx context.Context, arg GetMemberHighestRolePositionParams) (int32, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
