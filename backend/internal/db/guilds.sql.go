@@ -49,6 +49,7 @@ JOIN roles r ON r.guild_id = gm.guild_id
 WHERE gm.guild_id = $1
   AND gm.user_id = $2
   AND r.id = $3
+  AND NOT r.is_default
 `
 
 type AssignRoleToMemberParams struct {
@@ -71,6 +72,16 @@ type AssignRoleToMemberParams struct {
 // this guild, and the (guild, user) pair must be a real membership. Rule 1 in the statement rather than in
 // a check a handler has to remember. The composite foreign key would refuse a non-member anyway, but it
 // would do it as a constraint violation the caller has to reverse-engineer, and a 500 is not an answer.
+//
+// # Why NOT is_default
+//
+// @everyone is held by every member by virtue of membership and is never stored here — ListGuildMemberAuthority
+// reads it through `is_default OR EXISTS(...)` precisely so that it does not have to be, and
+// GetMemberHighestRolePosition's explanation rests on the same premise. Without this predicate the premise
+// is merely a convention, and granting @everyone explicitly writes a row that permission resolution
+// ignores, that the member's role list reports and nobody else's does, and that DeleteRole cannot remove
+// because it refuses to delete the default role at all. Every other role-mutating statement here carries
+// the same guard; this one was the exception until a review found it.
 func (q *Queries) AssignRoleToMember(ctx context.Context, arg AssignRoleToMemberParams) (int64, error) {
 	result, err := q.db.Exec(ctx, assignRoleToMember, arg.GuildID, arg.UserID, arg.RoleID)
 	if err != nil {
@@ -81,11 +92,13 @@ func (q *Queries) AssignRoleToMember(ctx context.Context, arg AssignRoleToMember
 
 const copyChannelOverwrites = `-- name: CopyChannelOverwrites :exec
 INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
-SELECT $1, po.target_type, po.target_id, po.allow, po.deny
+SELECT dest.id, po.target_type, po.target_id, po.allow, po.deny
 FROM permission_overwrites po
-JOIN channels c ON c.id = po.channel_id
+JOIN channels src ON src.id = po.channel_id
+JOIN channels dest ON dest.id = $1
 WHERE po.channel_id = $2
-  AND c.guild_id = $3::bigint
+  AND src.guild_id = $3::bigint
+  AND dest.guild_id = $3::bigint
 ON CONFLICT DO NOTHING
 `
 
@@ -110,6 +123,18 @@ type CopyChannelOverwritesParams struct {
 // rather than authoring a new one, so refusing bits the creator does not hold would make inheritance fail
 // exactly under the locked-down category it is most wanted under. What is checked is the creator's
 // authority over the parent, in CreateChannel.
+// # Both channels are scoped, not just the source
+//
+// The first draft constrained `guild_id` only on the join to the source channel and took the destination
+// as a bare parameter, so it would happily copy one guild's overwrites onto another guild's channel —
+// reproduced, four rows crossing. Today's only caller passes an id it minted a few lines earlier, which is
+// what made it survive review of the statement in isolation; the sibling UpsertPermissionOverwrite claims
+// exactly this property for itself in its own comment, and a rule that holds because of who happens to
+// call it is not the rule that comment describes.
+//
+// It would also not have stayed harmless. target_id for a member overwrite is a global user id rather than
+// a guild-scoped one, so a copied member row genuinely applies in the guild it landed in — applyOverwrites
+// matches on user id — and DeleteOverwritesForTarget is guild-scoped, so nothing would ever clean it up.
 func (q *Queries) CopyChannelOverwrites(ctx context.Context, arg CopyChannelOverwritesParams) error {
 	_, err := q.db.Exec(ctx, copyChannelOverwrites, arg.ChannelID, arg.SourceChannelID, arg.GuildID)
 	return err
@@ -830,7 +855,10 @@ func (q *Queries) RemoveGuildMember(ctx context.Context, arg RemoveGuildMemberPa
 const setRolePosition = `-- name: SetRolePosition :execrows
 UPDATE roles
 SET position = $1, updated_at = now()
-WHERE id = $2 AND guild_id = $3 AND NOT is_default
+WHERE id = $2
+  AND guild_id = $3
+  AND NOT is_default
+  AND $1::integer > 0
 `
 
 type SetRolePositionParams struct {
@@ -844,8 +872,23 @@ type SetRolePositionParams struct {
 // at one position are neither above nor below each other, which dissolves the ordering every hierarchy
 // check rests on.
 //
-// `AND NOT is_default` refuses to move @everyone off 0 in the statement rather than in a check before it,
-// the same discipline DeleteRole applies to the same role.
+// Two guards, and both are in the statement rather than in a check before it — the same discipline
+// DeleteRole applies to the same role.
+//
+// `NOT is_default` refuses to move @everyone off 0. The position bound is the other half and is the one
+// that is easy to leave out, because @everyone staying at 0 sounds like it already implies the floor is
+// reserved. It does not: nothing stopped a *real* role being moved onto 0, or to a negative position below
+// it. Both are corruptions rather than curiosities. A role sharing @everyone's position is neither above
+// nor below it, which dissolves the strictly-greater comparison the whole hierarchy rests on; and
+// GetMemberHighestRolePosition coalesces an absent maximum to 0, so a member whose only role sits at 0
+// becomes indistinguishable from a member holding no roles at all — losing exactly the protection the
+// position was granted to give them. A client sending zero-based positions is the ordinary way in, since
+// role lists render 0-indexed.
+//
+// The *upper* bound lives in the service rather than here, because it derives from the configurable role
+// ceiling: positions only ever grow through role creation, which shifts every role up by one, and the
+// bound exists so that shift can never overflow `position`'s integer. A magic number in this file would be
+// a policy constant in the wrong place, and the ceilings it follows from are already config.
 func (q *Queries) SetRolePosition(ctx context.Context, arg SetRolePositionParams) (int64, error) {
 	result, err := q.db.Exec(ctx, setRolePosition, arg.Position, arg.ID, arg.GuildID)
 	if err != nil {
