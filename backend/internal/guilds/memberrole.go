@@ -135,12 +135,19 @@ func (s *Service) changeMemberRole(
 			return httpx.Errorf(ErrOutranked, "you cannot act on a member above you")
 		}
 
-		// The subset check, and its mirror.
+		// The subset check, and its mirror over the role's overwrites.
 		//
 		// Assigning hands the target this role's permissions, so the caller must hold them. Unassigning
 		// lifts whatever the role's channel overwrites imposed on that member, which is the same question
 		// asked backwards — and reuses the check DeleteRole already needed, because deleting a role and
 		// taking it off somebody remove the same denies from the same person's resolution.
+		//
+		// The overwrite half runs on assignment too, and there it is deliberately a superset: it requires
+		// the caller to hold what the role's overwrites *deny* as well as what they allow, where only the
+		// allows are being granted. Kept because the alternative is two nearly-identical checks differing
+		// in one bitfield, and because the cost is theoretical — the bits a restricting role denies are
+		// ones an ordinary member holds, so a caller who cannot pass this could not have assigned the role
+		// under the permission check either.
 		if assigning {
 			if err := refuseEscalation(allowed, roles.PermissionFromInt64(role.Permissions)); err != nil {
 				return err
@@ -152,37 +159,55 @@ func (s *Service) changeMemberRole(
 			return err
 		}
 
+		// The row count is what tells an idempotent repeat from a real change, and it is read rather than
+		// discarded because the audit log is the thing that cares about the difference.
+		//
+		// Assigning a role the member already holds succeeds, and so does removing one they do not have —
+		// that is what makes these verbs idempotent. Neither is a mutation. Writing an entry for one would
+		// put "X was given role Y" in the log for a member who already had it, which is an operator
+		// reading a record of something that did not happen; rule 2 asks for an entry per mutation, and a
+		// no-op is not one. M14's coverage test asserts exactly one entry per mutation type and would
+		// have to special-case these two otherwise.
+		var changed int64
+		var err2 error
+
 		action := ActionMemberRoleRemove
 		if assigning {
 			action = ActionMemberRoleAdd
 
-			// Zero rows is the PUT succeeding on a grant that already exists, and it can only mean that:
-			// the role read and the standing read above have already answered 404 for a role outside this
-			// guild and for a target outside it. The statement carries ON CONFLICT DO NOTHING rather than
-			// letting the violation surface, because a constraint error aborts this transaction — and the
-			// audit write and the member read below are in it.
-			if _, err := q.AssignRoleToMember(ctx, db.AssignRoleToMemberParams{
+			// Zero rows means the grant already exists, and it can only mean that: the role read and the
+			// standing read above have already answered 404 for a role outside this guild and for a
+			// target outside it. The statement carries ON CONFLICT DO NOTHING rather than letting the
+			// violation surface, because a constraint error aborts this transaction — and the audit write
+			// and the member read below are in it.
+			changed, err2 = q.AssignRoleToMember(ctx, db.AssignRoleToMemberParams{
 				GuildID: int64(guildID),
 				UserID:  int64(userID),
 				RoleID:  int64(roleID),
-			}); err != nil {
-				return fmt.Errorf("guilds: assign role: %w", err)
+			})
+			if err2 != nil {
+				return fmt.Errorf("guilds: assign role: %w", err2)
 			}
-		} else if _, err := q.UnassignRoleFromMember(ctx, db.UnassignRoleFromMemberParams{
-			GuildID: int64(guildID),
-			UserID:  int64(userID),
-			RoleID:  int64(roleID),
-		}); err != nil {
-			// Zero rows means the member did not hold it, which is an idempotent DELETE succeeding. Their
-			// membership was already established by the standing read above.
-			return fmt.Errorf("guilds: unassign role: %w", err)
+		} else {
+			// Zero rows means the member did not hold it. Their membership was already established by the
+			// standing read above, so this cannot be a missing member.
+			changed, err2 = q.UnassignRoleFromMember(ctx, db.UnassignRoleFromMemberParams{
+				GuildID: int64(guildID),
+				UserID:  int64(userID),
+				RoleID:  int64(roleID),
+			})
+			if err2 != nil {
+				return fmt.Errorf("guilds: unassign role: %w", err2)
+			}
 		}
 
-		target := userID
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, action, &target, map[string]any{
-			"role_id": roleID.String(),
-		}); err != nil {
-			return err
+		if changed > 0 {
+			target := userID
+			if err := s.writeAudit(ctx, q, guildID, actor.UserID, action, &target, map[string]any{
+				"role_id": roleID.String(),
+			}); err != nil {
+				return err
+			}
 		}
 
 		member, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{

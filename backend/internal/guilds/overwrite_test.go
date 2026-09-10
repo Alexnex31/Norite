@@ -844,3 +844,43 @@ func TestYouCanAlwaysLeave(t *testing.T) {
 	err := f.svc.RemoveMember(ctx, userActor(f.owner), f.guildID, f.owner)
 	require.ErrorIs(t, err, ErrCannotRemoveOwner)
 }
+
+// TestAnIdempotentRepeatWritesNoAuditEntry is the difference between succeeding and having done something.
+//
+// Assigning a role the member already holds succeeds, and so does removing one they do not have — that is
+// what makes these verbs idempotent. Neither is a mutation, and rule 2 asks for an entry per mutation. An
+// entry for a no-op puts "X was given role Y" in the log for a member who already had it, which is an
+// operator reading a record of something that did not happen.
+func TestAnIdempotentRepeatWritesNoAuditEntry(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	target := f.newRole(ctx, f.guildID, 2, 0)
+
+	entries := func() int {
+		var n int
+		require.NoError(t, f.pool.QueryRow(ctx,
+			`SELECT count(*) FROM audit_log_entries WHERE guild_id = $1 AND action = ANY($2)`,
+			int64(f.guildID), []string{ActionMemberRoleAdd, ActionMemberRoleRemove}).Scan(&n))
+		return n
+	}
+
+	require.Zero(t, entries())
+
+	_, err := f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.plain, target)
+	require.NoError(t, err)
+	require.Equal(t, 1, entries(), "the grant happened")
+
+	_, err = f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.plain, target)
+	require.NoError(t, err, "the repeat still succeeds")
+	require.Equal(t, 1, entries(), "and records nothing, because nothing changed")
+
+	_, err = f.svc.UnassignRole(ctx, userActor(f.mod), f.guildID, f.plain, target)
+	require.NoError(t, err)
+	require.Equal(t, 2, entries(), "the removal happened")
+
+	_, err = f.svc.UnassignRole(ctx, userActor(f.mod), f.guildID, f.plain, target)
+	require.NoError(t, err, "removing what is not held still succeeds")
+	require.Equal(t, 2, entries(), "and records nothing")
+}
