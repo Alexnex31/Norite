@@ -427,7 +427,7 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   and it was M13's; four of ADR 0008's six layers have data at M12, so what is built here is complete
   rather than a placeholder. M13 keeps the overwrite endpoints and position hierarchy; M14 keeps the read
   surface and the `changes` diffing.
-- **M13 — Permission overwrites, role hierarchy, and role assignment**: done (tag `m13`). Six endpoints —
+- **M13 — Permission overwrites, role hierarchy, and role assignment**: done (tag `m13`). Five endpoints —
   the overwrite pair on `/channels/{id}/permissions/{id}`, the role-assignment pair, the bulk reorder —
   plus `roles.Resolve` widened to a `Resolution` carrying standing, the channel listing filtered by
   per-channel view permission, category overwrites copied at channel creation, and the hierarchy check on
