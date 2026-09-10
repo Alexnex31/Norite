@@ -2797,7 +2797,10 @@ paths:
 
 
         Carries a body, unusually for a `DELETE`, because the target is polymorphic and the path id does
-        not say which kind it is. A query parameter would put it in the request log where a body is not.
+        not say which kind it is, and looking it up in both tables would make the answer depend on which
+        one happened to hold it. An earlier version of this paragraph justified the body by saying a query
+        parameter would land in the request log; it would not, since the logger records the path and never
+        the query string.
       operationId: deleteChannelPermissionOverwrite
       tags: [guilds]
       requestBody:

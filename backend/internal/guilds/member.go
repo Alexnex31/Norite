@@ -258,14 +258,23 @@ func (s *Service) RemoveMember(
 		}
 
 		if userID == actor.UserID {
-			// Leaving. Still needs to be a member, which PermViewChannel establishes, and still writes an
-			// audit entry — "who left" is exactly what an operator reads this log for.
+			// Leaving. It needs membership and nothing else, which is why the permission asked for is the
+			// empty set: resolving at all is what establishes membership, and Permission.Has(0) is true by
+			// design. It still writes an audit entry — "who left" is exactly what an operator reads this
+			// log for.
+			//
+			// **It used to ask for PermViewChannel**, on the reasoning that membership is what that
+			// establishes. True until this milestone, and then not: an overwrite can grant view on one
+			// channel while @everyone withholds it at guild level, which is an ordinary way to build a
+			// guild whose front door is a single welcome channel. A member of such a guild resolves to
+			// nothing at guild level — so they could not list its channels, and could not leave it either.
+			// Locked into a guild by a permission check whose only job was to confirm they were in it.
 			//
 			// The one self-action exempt from the hierarchy entirely, and the reason is not that it is a
 			// demotion — removing a role looked like one too and stopped being one when roles gained
 			// channel denies. Leaving forfeits every permission in the guild at once, so it cannot be a
 			// route to gaining one. That property, not the shape of the operation, is what earns it.
-			if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel); err != nil {
+			if _, err := authorizeWith(ctx, q, actor, guildID, 0, 0); err != nil {
 				return err
 			}
 		} else {

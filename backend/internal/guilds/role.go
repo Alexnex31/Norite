@@ -139,9 +139,17 @@ func (s *Service) CreateRole(
 			return fmt.Errorf("guilds: create role: %w", err)
 		}
 
+		// `renumbered` is not decoration. Creating a role shifts every other role in the guild up one, so
+		// this transaction rewrote the position of roles the caller cannot edit, delete or reposition —
+		// including ones above them. Relative order is preserved so nothing escalates, but an operator
+		// reading M14's audit log would otherwise see a role.create entry and have no way to know the
+		// whole hierarchy was renumbered, and a client caching positions from GET /roles is stale after
+		// an unrelated create.
 		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionRoleCreate, &roleID, map[string]any{
 			"name":        in.Name,
 			"permissions": in.Permissions.Int64(),
+			"position":    bottom,
+			"renumbered":  true,
 		}); err != nil {
 			return err
 		}
@@ -481,9 +489,15 @@ func (s *Service) ReorderRoles(
 				return fmt.Errorf("guilds: set role position: %w", err)
 			}
 			if affected == 0 {
-				// Every reason this statement matches nothing was ruled out above, so reaching here means
-				// the guild changed underneath the lock — which it cannot, or the checks are wrong.
-				return fmt.Errorf("guilds: role %s was not repositioned", want.ID)
+				// The role went away between the read and the write.
+				//
+				// An earlier comment here said the lock made this impossible. It does not: DeleteRole
+				// never takes LockGuildRolePositions — it has no read-modify-write of its own to protect
+				// — so a concurrent delete of a role named in this request is not serialized against it.
+				// Returning a raw error made that race a 500; it is a conflict, and the caller's remedy is
+				// to re-read the role list and try again.
+				return httpx.Errorf(httpx.ErrConflict,
+					"a role in this request was deleted while it was being reordered")
 			}
 			changes[want.ID.String()] = want.Position
 		}

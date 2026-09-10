@@ -884,3 +884,40 @@ func TestAnIdempotentRepeatWritesNoAuditEntry(t *testing.T) {
 	require.NoError(t, err, "removing what is not held still succeeds")
 	require.Equal(t, 2, entries(), "and records nothing")
 }
+
+// TestAMemberWhoseViewComesFromAnOverwriteIsNotLockedIn is the configuration this milestone made
+// buildable and the previous shape of these gates made a trap.
+//
+// @everyone withholds PermViewChannel at role level and one channel allows it back — an ordinary way to
+// build a guild whose front door is a single welcome channel. Such a member resolves to nothing at guild
+// level, so a listing gated on guild-level view refused them the listing its own per-channel filter would
+// have answered correctly, and a leave gated the same way refused them the exit.
+func TestAMemberWhoseViewComesFromAnOverwriteIsNotLockedIn(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, 0) // @everyone grants nothing at all
+	ctx := t.Context()
+
+	welcome := f.newChannel(ctx, f.guildID)
+	hidden := f.newChannel(ctx, f.guildID)
+	f.overwrite(ctx, welcome, roles.OverwriteTargetRole, f.everyoneID, roles.PermViewChannel, 0)
+
+	got, err := f.svc.ListChannels(ctx, userActor(f.plain), f.guildID)
+	require.NoError(t, err, "membership is what the listing needs; the filter decides the rest")
+
+	ids := make([]snowflake.ID, 0, len(got))
+	for _, c := range got {
+		ids = append(ids, c.ID)
+	}
+	require.ElementsMatch(t, []snowflake.ID{welcome}, ids,
+		"the channel the overwrite allows, and only that one")
+	require.NotContains(t, ids, hidden)
+
+	// And they can leave. A permission check whose only job was to confirm membership must not be able to
+	// refuse somebody who is plainly a member.
+	require.NoError(t, f.svc.RemoveMember(ctx, userActor(f.plain), f.guildID, f.plain))
+
+	// A non-member is still refused, so the gate did not become nothing.
+	stranger := f.newUser(ctx, "stranger")
+	_, err = f.svc.ListChannels(ctx, userActor(stranger), f.guildID)
+	require.ErrorIs(t, err, httpx.ErrNotFound)
+}

@@ -61,7 +61,7 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 	var out Overwrite
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		guildID, allowed, err := s.authorizeChannel(ctx, q, actor, in.ChannelID, roles.PermManageRoles)
+		_, guildID, allowed, err := s.authorizeChannel(ctx, q, actor, in.ChannelID, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -158,7 +158,7 @@ func (s *Service) DeleteOverwrite(
 	ctx context.Context, actor auth.Actor, channelID snowflake.ID, targetType int16, targetID snowflake.ID,
 ) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		guildID, allowed, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageRoles)
+		_, guildID, allowed, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -220,18 +220,18 @@ func (s *Service) DeleteOverwrite(
 // authorizeWith so the decision is what the caller holds in *this* channel.
 func (s *Service) authorizeChannel(
 	ctx context.Context, q *db.Queries, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
-) (snowflake.ID, decision, error) {
+) (db.Channel, snowflake.ID, decision, error) {
 	row, err := q.GetChannel(ctx, int64(channelID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, decision{}, httpx.ErrNotFound
+			return db.Channel{}, 0, decision{}, httpx.ErrNotFound
 		}
-		return 0, decision{}, fmt.Errorf("guilds: get channel: %w", err)
+		return db.Channel{}, 0, decision{}, fmt.Errorf("guilds: get channel: %w", err)
 	}
 
 	guildID, err := guildOf(row)
 	if err != nil {
-		return 0, decision{}, err
+		return db.Channel{}, 0, decision{}, err
 	}
 
 	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, need)
@@ -252,17 +252,17 @@ func (s *Service) authorizeChannel(
 			case viewErr == nil:
 				// They can see it, so its existence was never a secret. The original 403 stands.
 			case errors.Is(viewErr, httpx.ErrForbidden), errors.Is(viewErr, httpx.ErrNotFound):
-				return 0, decision{}, httpx.ErrNotFound
+				return db.Channel{}, 0, decision{}, httpx.ErrNotFound
 			default:
 				// A database failure during the second check is not evidence about the channel. Reporting
 				// it as missing would turn a connection blip into a 404 the caller would cache as truth.
-				return 0, decision{}, viewErr
+				return db.Channel{}, 0, decision{}, viewErr
 			}
 		}
-		return 0, decision{}, err
+		return db.Channel{}, 0, decision{}, err
 	}
 
-	return guildID, allowed, nil
+	return row, guildID, allowed, nil
 }
 
 // checkOverwriteTarget verifies that an overwrite names something real in this guild, and that the caller
@@ -376,10 +376,6 @@ func (s *Service) refuseRemovingOverwritesFor(
 	targetType int16,
 	targetID snowflake.ID,
 ) error {
-	if allowed.instanceAdmin {
-		return nil
-	}
-
 	affected, err := q.ListOverwritesForTarget(ctx, db.ListOverwritesForTargetParams{
 		GuildID:    int64(guildID),
 		TargetType: targetType,
@@ -416,7 +412,7 @@ func (s *Service) refuseRemovingOverwritesFor(
 	for _, ow := range affected {
 		channelID := snowflake.ID(ow.ChannelID)
 		removing := roles.PermissionFromInt64(ow.Allow).Add(roles.PermissionFromInt64(ow.Deny))
-		if allowed.resolution.InChannel(channelID, byChannel[channelID]).Has(removing) {
+		if allowed.allowsInChannel(channelID, byChannel[channelID], removing) {
 			continue
 		}
 		// Names neither the channel nor the bits, for the reason every refusal in this package names

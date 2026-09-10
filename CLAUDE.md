@@ -325,7 +325,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M12 done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M13 done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 

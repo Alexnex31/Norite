@@ -108,7 +108,15 @@ func channelFromListRow(row db.ListGuildChannelsRow) Channel {
 func (s *Service) ListChannels(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID,
 ) ([]Channel, error) {
-	allowed, err := authorizeWith(ctx, s.queries, actor, guildID, 0, roles.PermViewChannel)
+	// Membership, not guild-level view. The filter below is what decides visibility, one channel at a
+	// time, and gating the whole listing on a guild-level PermViewChannel makes the two contradict: a
+	// member whose view comes from a channel overwrite — @everyone withholding it at role level and one
+	// welcome channel allowing it back, which is an ordinary way to build a guild — resolves to nothing
+	// here and is refused the listing the filter would have answered correctly.
+	//
+	// Permission.Has(0) is true by design, so this establishes membership and asserts nothing else. A
+	// non-member is still refused by authorizeWith, with the 404 every other guild route gives them.
+	allowed, err := authorizeWith(ctx, s.queries, actor, guildID, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -164,9 +172,9 @@ func (s *Service) ListChannels(
 	for _, ch := range out {
 		rows := byChannel[ch.ID]
 
-		// Layer 1 is outside the guild, so it was never resolved and cannot be filtered with. Checked
-		// here rather than folded into the resolution, which is ADR 0008's whole point about that tier.
-		if !allowed.instanceAdmin && !allowed.resolution.InChannel(ch.ID, rows).Has(roles.PermViewChannel) {
+		// Layer 1 is outside the guild and was never resolved, so the tier is asked first — inside
+		// allowsInChannel rather than here, so a third caller cannot forget it.
+		if !allowed.allowsInChannel(ch.ID, rows, roles.PermViewChannel) {
 			continue
 		}
 
@@ -397,17 +405,11 @@ func (s *Service) UpdateChannel(
 		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
 		// is an oracle confirming exactly what the filter withholds — and that reasoning applies to these
 		// routes as much as to the permission ones, which had it and these did not.
-		guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
+		// One read. authorizeChannel loads the row to find its guild and hands it back, so nothing here
+		// reads it twice — DeleteChannel said that in a comment before this function did it in code.
+		existing, guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
 		if err != nil {
 			return err
-		}
-
-		existing, err := q.GetChannel(ctx, int64(channelID))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return httpx.ErrNotFound
-			}
-			return fmt.Errorf("guilds: get channel: %w", err)
 		}
 
 		// The same voice-only rule as creation, checked against the type the channel actually has rather
@@ -508,7 +510,7 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 		// routes as much as to the permission ones, which had it and these did not.
 		// One read, not two: authorizeChannel loads the row to find its guild, and the guild is the only
 		// thing this operation wanted it for.
-		guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
+		_, guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
 		if err != nil {
 			return err
 		}

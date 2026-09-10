@@ -118,6 +118,23 @@ func (d decision) outranks(position int32) bool {
 	return d.instanceAdmin || d.resolution.Outranks(position)
 }
 
+// allowsInChannel is allows, resolved within one channel — layer 1 first, then layer 5.
+//
+// A predicate rather than a permission set, because permAll is deliberately unexported: nothing outside
+// the roles package should be able to name "everything", and a wrapper that had to would be reaching for
+// it. This mirrors allows exactly, one scope down.
+//
+// The tier has to be asked first. An Instance Admin is never resolved against a guild, so `d.resolution`
+// is the zero value on that path — calling InChannel on it resolves to no permissions at all, which would
+// hide every channel in the guild from the one account that must always see them. Both callers guarded
+// that by hand, which is the shape this package has three times decided not to rely on: allows, outranks
+// and outranksMember each exist so a caller cannot forget the tier, and this is the fourth.
+func (d decision) allowsInChannel(
+	channelID snowflake.ID, overwrites []db.PermissionOverwrite, need roles.Permission,
+) bool {
+	return d.instanceAdmin || d.resolution.InChannel(channelID, overwrites).Has(need)
+}
+
 // outranksMember is outranks for a target that is a person rather than a role.
 //
 // Separate because the guild owner cannot be reached by a positional comparison — their own standing is a

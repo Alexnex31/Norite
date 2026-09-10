@@ -124,3 +124,46 @@ would flip them.
   bounded by the ceiling.
 - **Reopens if**: role creation becomes reachable without guild membership, or the renumber grows beyond
   the ceiling's bound.
+
+### A self-targeted overwrite is a one-way door for its author
+- **Raised**: M13, `/code-review xhigh`
+- **Verdict**: not a vulnerability — the escalation check working
+- **Why**: a moderator who denies themselves a permission in a channel cannot then blank or delete that
+  row, because the union check requires holding the bits the removal would restore. That is precisely
+  gap 12: removing a deny grants what it denied. The same shape lets a moderator write an `@everyone`
+  overwrite denying `PermManageRoles` on a channel and put it permanently beyond every non-administrator,
+  themselves included — a denial of management rather than an escalation, repairable by the owner, an
+  administrator or an Instance Admin, and the same footgun Discord has.
+- **Reopens if**: the union check is ever narrowed to the value being written, which would make the door
+  swing both ways and reopen gap 12 with it.
+
+### The per-channel overwrite ceiling is a read-then-insert with no lock
+- **Raised**: M13, `/code-review xhigh`
+- **Verdict**: accepted risk
+- **Why**: two concurrent writes both read 49 and both insert, so the channel lands at 51. Consistent with
+  the precedent this codebase already set for the channel, role and guild ceilings, whose comment says the
+  consequence is "one over a soft limit, not a corrupted ordering". Role *position* takes an advisory lock
+  because a collision there corrupts an ordering; a ceiling overshoot does not.
+- **Reopens if**: the overwrite ceiling ever becomes load-bearing for something other than bounding work —
+  a fixed-size buffer, or a payload guarantee a client relies on.
+
+### Assignment pays two overwrite queries for a check that is a superset there
+- **Raised**: M13, `/code-review xhigh`
+- **Verdict**: not a vulnerability, and the cost is the check rather than the sharing
+- **Why**: `refuseRemovingOverwritesFor` runs on assignment as well as removal, and the review proposed
+  skipping it when assigning. That would remove a real check: a role whose overwrite *allows* a permission
+  grants it to whoever is given the role, so the caller must hold it. The query is what answers that
+  question, so it is not saved by splitting the function — only by dropping the check. What is fairly
+  criticised is that the comment called the *strictness* theoretical without mentioning the two round
+  trips, which is now stated.
+- **Reopens if**: bulk role sync becomes a real workload (a bot doing hundreds of grants), at which point
+  the answer is to resolve the role's overwrites once per batch rather than per grant.
+
+### An idempotent no-op still reads the member back
+- **Raised**: M13, `/code-review xhigh`
+- **Verdict**: accepted risk
+- **Why**: a repeat grant skips the audit write but still runs `GetGuildMember` and `ListMemberRoleIDs` to
+  build the response, inside the transaction. Two indexed reads on a cold path, and the response has to
+  carry the member either way — a `PUT` that returned nothing on a repeat would make the endpoint's shape
+  depend on whether it had been called before.
+- **Reopens if**: the same bulk-sync workload above makes the repeat case the common one.
