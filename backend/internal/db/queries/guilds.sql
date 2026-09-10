@@ -259,12 +259,20 @@ WHERE guild_id = $1 AND user_id = ANY(sqlc.arg(user_ids)::bigint[]);
 -- name: AssignRoleToMember :execrows
 -- Give a member a role.
 --
--- # Why there is no ON CONFLICT, and why the row comes from a SELECT
+-- # ON CONFLICT DO NOTHING, and why that became the right answer
 --
--- Deliberately conflicting rather than swallowing, for AddGuildMember's reason one table over: ON CONFLICT
--- DO NOTHING would make a second assignment return zero rows, which is indistinguishable from an insert
--- that matched nothing. Those two need different answers — the first is an idempotent PUT succeeding, the
--- second is a 404 — so the unique violation is left to surface and the caller translates it.
+-- The first draft deliberately let the conflict surface, reasoning that ON CONFLICT DO NOTHING makes a
+-- repeat assignment return zero rows, indistinguishable from an insert that matched nothing — and those
+-- need different answers, an idempotent PUT succeeding against a 404. That is AddGuildMember's reasoning
+-- one table over, and it is sound where nothing has already established the preconditions.
+--
+-- It is wrong here for a reason Postgres decides rather than this schema: a constraint violation aborts
+-- the surrounding transaction, so a caller cannot catch the conflict and carry on — and this statement
+-- runs inside the transaction that also writes the audit entry and reads the member back.
+--
+-- What makes DO NOTHING safe is that the caller rules the other cases out first. AssignRole reads the role
+-- (404 if it is not in this guild) and the target's standing (404 if they are not a member) before
+-- reaching here, so zero rows can only mean the grant already exists — which is the PUT succeeding.
 --
 -- The SELECT is what verifies both ids belong together before anything is written: the role must be in
 -- this guild, and the (guild, user) pair must be a real membership. Rule 1 in the statement rather than in
@@ -287,7 +295,8 @@ JOIN roles r ON r.guild_id = gm.guild_id
 WHERE gm.guild_id = sqlc.arg(guild_id)
   AND gm.user_id = sqlc.arg(user_id)
   AND r.id = sqlc.arg(role_id)
-  AND NOT r.is_default;
+  AND NOT r.is_default
+ON CONFLICT DO NOTHING;
 
 -- name: UnassignRoleFromMember :execrows
 -- Take a role away. Zero rows means the member did not hold it, which is an idempotent DELETE succeeding

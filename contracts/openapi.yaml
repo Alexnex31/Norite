@@ -2591,6 +2591,121 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /guilds/{guild_id}/members/{user_id}/roles/{role_id}:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: role_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    put:
+      summary: Give a member a role
+      description: >
+        Requires `MANAGE_ROLES`, and three further checks.
+
+
+        The role must be **strictly below the caller's own highest**, and so must the target — except when
+        the target is the caller, which skips only the second comparison. Nobody outranks themselves, so a
+        flat rule would make self-assignment impossible for every non-owner and break self-service roles;
+        the role check is the one that has to hold on yourself, and it does.
+
+
+        **The role's permissions must be a subset of the caller's own.** This is the one deliberate
+        departure from Discord in this API. Discord gates assignment on hierarchy alone and relies on
+        powerful roles being placed high, so a bot role low in the list carrying `MANAGE_GUILD` is a
+        misconfiguration rather than a vulnerability there. That is a configuration assumption a public
+        instance should not rest on: without this, a moderator holding `MANAGE_ROLES` and not
+        `MANAGE_GUILD` assigns such a role to an account they control and has `MANAGE_GUILD` by proxy.
+
+
+        `@everyone` cannot be assigned — every member holds it by virtue of membership and it is never
+        stored as a grant.
+
+
+        Idempotent: assigning a role the member already holds succeeds.
+      operationId: addGuildMemberRole
+      tags: [guilds]
+      responses:
+        "200":
+          description: The member, with the roles they now hold.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller lacks `MANAGE_ROLES`, is an API token without `guilds.write`, does not outrank the
+            role or the target, or does not hold every permission the role carries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            No such role in this guild, or no such member of it. A non-member target answers the same as a
+            user id that does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The role is `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Take a role away from a member
+      description: >
+        The same checks, and it is checked like an assignment rather than like a cleanup.
+
+
+        Removing a role reads as a pure demotion and stopped being one when roles gained channel
+        overwrites: the commonest use of one is a `muted` role denying `SEND_MESSAGES`, and taking that
+        role off somebody lifts the restriction it carried. So the caller must hold whatever the role's
+        overwrites touch, in the channels they touch — and the role must be strictly below their own
+        highest **including when they are removing it from themselves**, which is why nobody can shed the
+        role that establishes their own position.
+
+
+        Idempotent: removing a role the member does not hold succeeds.
+      operationId: removeGuildMemberRole
+      tags: [guilds]
+      responses:
+        "200":
+          description: The member, with the roles they now hold.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: As for `PUT`, including the check over what the role's overwrites carry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The role is `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /channels/{channel_id}/permissions/{overwrite_id}:
     parameters:
       - name: channel_id

@@ -79,6 +79,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)
 		r.With(write).Delete("/members/{user_id}", h.removeMember)
+		r.With(write).Put("/members/{user_id}/roles/{role_id}", h.assignRole)
+		r.With(write).Delete("/members/{user_id}/roles/{role_id}", h.unassignRole)
 	})
 
 	// Mounted outside the guild group because these paths carry no guild. That is not a routing
@@ -617,6 +619,44 @@ func (h *Handler) reorderRoles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, r, http.StatusOK, out)
+}
+
+func (h *Handler) assignRole(w http.ResponseWriter, r *http.Request) { h.changeMemberRole(w, r, true) }
+func (h *Handler) unassignRole(w http.ResponseWriter, r *http.Request) {
+	h.changeMemberRole(w, r, false)
+}
+
+// changeMemberRole serves both verbs. Neither carries a body: the path names everything the operation
+// needs, and both are idempotent, so there is nothing for a body to add.
+func (h *Handler) changeMemberRole(w http.ResponseWriter, r *http.Request, assigning bool) {
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+	userID, ok := h.pathID(w, r, "user_id")
+	if !ok {
+		return
+	}
+	roleID, ok := h.pathID(w, r, "role_id")
+	if !ok {
+		return
+	}
+
+	change := h.svc.UnassignRole
+	if assigning {
+		change = h.svc.AssignRole
+	}
+
+	member, err := change(r.Context(), actor, guildID, userID, roleID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	// The member, with the roles they now hold. UpdateMember returns the same shape for the same reason:
+	// a client refreshing its cache from this response is entitled to read `roles` as the whole truth,
+	// and M12 shipped it returning nil until a review caught that.
+	httpx.WriteJSON(w, r, http.StatusOK, member)
 }
 
 // --- permission overwrites ---

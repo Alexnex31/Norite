@@ -137,6 +137,10 @@ func TestEveryMutatingGuildRouteRefusesANonMember(t *testing.T) {
 		{http.MethodPatch, "/api/v1/guilds/" + f.guildID + "/members/" + f.memberID,
 			map[string]any{"nickname": "hijacked"}},
 		{http.MethodDelete, "/api/v1/guilds/" + f.guildID + "/members/" + f.memberID, nil},
+		{http.MethodPut,
+			"/api/v1/guilds/" + f.guildID + "/members/" + f.memberID + "/roles/" + roleID, nil},
+		{http.MethodDelete,
+			"/api/v1/guilds/" + f.guildID + "/members/" + f.memberID + "/roles/" + roleID, nil},
 		// The overwrite pair. Added when a security review pointed out that the test whose stated value is
 		// that it "cannot miss a route" had missed two — they were covered at service level, so nothing
 		// was broken, but the guarantee this table advertises stops being true the moment it is partial.

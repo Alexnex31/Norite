@@ -38,6 +38,11 @@ const (
 	ActionMemberUpdate = "member.update"
 	ActionMemberRemove = "member.remove"
 
+	// Assignment is its own pair of verbs rather than a shape of member.update, because what an operator
+	// reads this log for is "who was given what", and burying that in a changes field makes it a scan.
+	ActionMemberRoleAdd    = "member.role_add"
+	ActionMemberRoleRemove = "member.role_remove"
+
 	// One action for writing an overwrite rather than separate create and update verbs, because the
 	// endpoint is a PUT and does not distinguish them either. What changed is in the entry's `changes`.
 	ActionOverwriteSet    = "overwrite.set"

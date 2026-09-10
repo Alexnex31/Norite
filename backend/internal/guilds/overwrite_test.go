@@ -603,3 +603,141 @@ func TestAReorderCannotMoveTheDefaultRole(t *testing.T) {
 		[]RolePosition{{ID: f.everyoneID, Position: 3}})
 	require.ErrorIs(t, err, ErrDefaultRoleImmutable)
 }
+
+// TestCreatingARoleAndAssigningItDoesNotRaiseStanding is the three-step sequence this milestone exists to
+// refuse, driven end to end.
+//
+// It asserts *which* check refused each step rather than only that standing did not rise, because two
+// independent guards refuse it and a test that watched the outcome alone would pin neither. Bottom
+// placement means step 1 produces a role below the creator; the role check means step 2 could not have
+// taken a top-placed one either.
+func TestCreatingARoleAndAssigningItDoesNotRaiseStanding(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	before, err := roles.Resolve(ctx, f.q(), f.guildID, f.mod, 0)
+	require.NoError(t, err)
+	require.Equal(t, int32(5), before.Standing())
+
+	created, err := f.svc.CreateRole(ctx, userActor(f.mod), f.guildID,
+		CreateRoleInput{Name: "ladder", Permissions: roles.PermManageRoles})
+	require.NoError(t, err)
+	require.Less(t, created.Position, before.Standing(),
+		"guard one: the new role lands below its creator, so there is no ladder to climb")
+
+	_, err = f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.mod, created.ID)
+	require.NoError(t, err, "and taking a role below you is ordinary")
+
+	after, err := roles.Resolve(ctx, f.q(), f.guildID, f.mod, 0)
+	require.NoError(t, err)
+
+	// The property is *relative*, not the absolute number, and the first draft of this test asserted the
+	// number. Creating a role renumbers the guild — everything shifts up to make room at the bottom — so
+	// the moderator's standing legitimately changes from 5 to 6 without them having gained anything. What
+	// must not change is who they outrank.
+	aboveRole, err := f.svc.ListRoles(ctx, userActor(f.owner), f.guildID)
+	require.NoError(t, err)
+	for _, r := range aboveRole {
+		if r.ID == f.aboveRole {
+			require.False(t, after.Outranks(r.Position),
+				"the role that was above them is still above them after the whole sequence")
+		}
+		if r.ID == created.ID {
+			require.True(t, after.Outranks(r.Position), "and the one they made is still below")
+		}
+	}
+
+	// Guard two, independently: a role above them cannot be taken even when one exists.
+	_, err = f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.mod, f.aboveRole)
+	require.ErrorIs(t, err, ErrOutranked,
+		"guard two: the role check refuses a top-placed role regardless of how it got there")
+}
+
+// TestYouCannotAssignARoleCarryingPermissionsYouLack is this milestone's one deliberate departure from
+// Discord, driven as the confederate scenario.
+func TestYouCannotAssignARoleCarryingPermissionsYouLack(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	// A low role carrying a permission the moderator does not hold — the misconfiguration Discord's model
+	// relies on nobody making.
+	bot := f.newRole(ctx, f.guildID, 2, roles.PermManageGuild)
+
+	_, err := f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.plain, bot)
+	require.ErrorIs(t, err, httpx.ErrForbidden,
+		"a delegated authority never exceeds its delegator, and assignment is that question")
+
+	// The owner holds everything and passes with no special branch — decision.allows exempts them.
+	_, err = f.svc.AssignRole(ctx, userActor(f.owner), f.guildID, f.plain, bot)
+	require.NoError(t, err)
+
+	// And a role whose permissions the moderator does hold assigns fine.
+	ordinary := f.newRole(ctx, f.guildID, 3, roles.PermViewChannel)
+	_, err = f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.plain, ordinary)
+	require.NoError(t, err)
+}
+
+// TestYouCannotShedARoleThatRestrictsYou is gap 13: removing a role stopped being a pure demotion the
+// moment a role could carry a channel deny.
+func TestYouCannotShedARoleThatRestrictsYou(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermSendMessages)
+	ctx := t.Context()
+
+	muted := f.newRole(ctx, f.guildID, 2, 0)
+	f.overwrite(ctx, f.channelID, roles.OverwriteTargetRole, muted, 0, roles.PermSendMessages)
+	f.grantRole(ctx, f.guildID, f.mod, muted)
+
+	_, err := f.svc.UnassignRole(ctx, userActor(f.mod), f.guildID, f.mod, muted)
+	require.ErrorIs(t, err, httpx.ErrForbidden,
+		"taking off a role that denies you something grants you that thing")
+
+	// The owner, denied nothing, may remove it — so the refusal is about the caller.
+	_, err = f.svc.UnassignRole(ctx, userActor(f.owner), f.guildID, f.mod, muted)
+	require.NoError(t, err)
+}
+
+// TestAssignmentIsIdempotentAndSelfTargeted covers the two shapes a client depends on.
+func TestAssignmentIsIdempotentAndSelfTargeted(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	target := f.newRole(ctx, f.guildID, 2, 0)
+
+	first, err := f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.plain, target)
+	require.NoError(t, err)
+	require.Contains(t, first.Roles, target)
+
+	second, err := f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.plain, target)
+	require.NoError(t, err, "a repeat assignment is a PUT succeeding, not a conflict")
+	require.Equal(t, first.Roles, second.Roles)
+
+	require.NoError(t, mustUnassign(t, f, f.mod, f.plain, target))
+	require.NoError(t, mustUnassign(t, f, f.mod, f.plain, target),
+		"and removing what is not held is a DELETE succeeding")
+
+	// Self-targeting: the target comparison is skipped, the role check is not.
+	_, err = f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.mod, target)
+	require.NoError(t, err, "nobody outranks themselves, so a flat rule would break self-service roles")
+
+	_, err = f.svc.AssignRole(ctx, userActor(f.mod), f.guildID, f.mod, f.modRole)
+	require.ErrorIs(t, err, ErrOutranked,
+		"but you still cannot take the role that establishes your own standing")
+
+	// @everyone is never a grant.
+	_, err = f.svc.AssignRole(ctx, userActor(f.owner), f.guildID, f.plain, f.everyoneID)
+	require.ErrorIs(t, err, ErrDefaultRoleImmutable)
+
+	// A non-member answers as a user id that does not exist does.
+	_, err = f.svc.AssignRole(ctx, userActor(f.owner), f.guildID, f.next(), target)
+	require.ErrorIs(t, err, httpx.ErrNotFound)
+}
+
+func mustUnassign(t *testing.T, f *overwriteFixture, actor, target, role snowflake.ID) error {
+	t.Helper()
+	_, err := f.svc.UnassignRole(t.Context(), userActor(actor), f.guildID, target, role)
+	return err
+}
