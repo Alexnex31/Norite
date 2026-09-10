@@ -16,12 +16,14 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
-[![Milestone](https://img.shields.io/badge/milestone-M12%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M13%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 > [!WARNING]
-> **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work.
-> Guilds, channels, messages and voice do not exist — those begin at `M12`. See [Status](#status) for
-> exactly what is built, and note that the full scope here is multi-year work.
+> **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work, and
+> so does the guild, channel, role and permission core — as a REST API with no client in front of it.
+> Nobody can hold a conversation on this: messages do not exist, voice does not exist, and there is
+> nothing to read them in. See [Status](#status) for exactly what is built, and note that the full scope
+> here is multi-year work.
 
 ---
 
@@ -44,8 +46,8 @@ software.
 
 ## Status
 
-**Foundation and auth are done — `M0` through `M11a`. `M12` opens the guild, channel and permission
-core.**
+**Foundation, auth and the permission core are done — `M0` through `M13`. `M15` adds messages; `M20a`
+is the first thing a person can actually use.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -65,13 +67,18 @@ core.**
 | `M10` | End-to-end instance setup: `norite instance init`, then `norite instance bootstrap` for the first administrator, with invite codes gating who else may join |
 | `M11` | The general-purpose revoke-all-sessions-and-tokens primitive |
 | `M11a` | Two-factor authentication — TOTP enrollment and verification, single-use recovery codes, threaded through every path that establishes a session: login, the OAuth exchange, and device-code approval |
+| `M12` | Guilds, channels, roles and membership — the schema, fifteen REST endpoints, the permission bitfield, and one chokepoint every mutating route resolves through |
+| `M13` | Permission overwrites and role hierarchy — who may act on whom, per-channel permission overrides, role assignment and reordering, and a channel listing that hides what you cannot see |
 
 </details>
 
 Registering an address that already has an account is indistinguishable from registering a new one, and
 an address is confirmed by email before its account can be used.
 
-**No product features exist yet** — no guilds, channels, messages, or voice. Those begin at `M12`.
+**No usable product features exist yet.** A guild, channel and permission system in the backend is not
+something anybody can use — there is no client, nothing to read, and nothing to say. The honest threshold
+is when two people can hold a text conversation, which needs `M15`'s messages and `M20a`'s first client.
+What `M12` and `M13` built is the permission model those conversations will happen inside.
 
 > [!NOTE]
 > **On releases.** Nothing ships as a release before the milestone sequence is complete. At each phase

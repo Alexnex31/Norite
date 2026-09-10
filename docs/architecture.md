@@ -684,12 +684,18 @@ const (
 )
 ```
 
-`roles.Resolve` is unchanged in shape from the original design (owner bypass → `PermAdministrator`
-short-circuit → `@everyone` overwrite → role overwrites → member overwrite). **It is not cached, and will
-not be until M18.** The cache this paragraph used to describe is invalidated by a gateway dispatch, and
-there is no gateway until M18 — a cache with nothing to invalidate it is a demotion that takes effect five
-minutes late, which is a security failure rather than a slow path. M12 built it as one indexed read per
-check; the cache lands with the signal that can clear it. See
+`roles.Resolve`'s *algorithm* is unchanged from the original design (owner bypass → `PermAdministrator`
+short-circuit → `@everyone` overwrite → role overwrites → member overwrite). **Its signature is not**: M13
+made it return a `Resolution` rather than a bare `Permission`, carrying the owner id and the caller's
+standing — the highest position among the roles they hold — because layer 4's second sentence needs a
+number the same query already had in hand. Standing is meaningless for an owner and left at zero, which is
+`@everyone`'s position, so it is unexported and read only through `Outranks`/`OutranksMember`, which ask
+about ownership first.
+
+**It is not cached, and will not be until M18.** The cache this paragraph used to describe is invalidated
+by a gateway dispatch, and there is no gateway until M18 — a cache with nothing to invalidate it is a
+demotion that takes effect five minutes late, which is a security failure rather than a slow path. M12
+built it as one indexed read per check; the cache lands with the signal that can clear it. See
 [ADR 0008](adr/0008-guild-authority-hierarchy.md) for the full consolidated authority hierarchy, including
 the parts that deliberately sit **outside** `roles.Resolve` entirely:
 
@@ -822,7 +828,10 @@ GET    /guilds/{guild_id}                  -- M12
 PATCH  /guilds/{guild_id}                  -- M12; PermManageGuild
 DELETE /guilds/{guild_id}                  -- M12; *owner or Instance Admin only*, not PermManageGuild —
                                            --   a cascading destroy is not a delegable permission
-GET    /guilds/{guild_id}/channels         -- M12; per-channel view filtering arrives with overwrites (M13)
+GET    /guilds/{guild_id}/channels         -- M12; M13 filters it by per-channel view permission, and
+                                           --   embeds each channel's overwrites. Two queries whatever
+                                           --   the channel count: resolved once at guild level, every
+                                           --   overwrite read in one statement, applied per channel
 POST   /guilds/{guild_id}/channels         -- M12; PermManageChannels
 GET    /guilds/{guild_id}/members?after={id}&limit=100
                                            -- M12; cursor-only, limit clamped to 100 rather than refused
@@ -835,10 +844,26 @@ DELETE /guilds/{guild_id}/members/{user_id}
 GET    /guilds/{guild_id}/roles            -- M12
 POST   /guilds/{guild_id}/roles            -- M12; PermManageRoles, and refuses to grant a permission the
                                            --   caller does not hold — without that, PermManageRoles *is*
-                                           --   every permission
+                                           --   every permission. M13 places the new role at the *bottom*,
+                                           --   above @everyone: created at the top it would be one its
+                                           --   own creator could not then manage
+PATCH  /guilds/{guild_id}/roles            -- M13; bulk reorder, [{id, position}]. One transaction under
+                                           --   one advisory lock, because N single-role updates leave two
+                                           --   roles briefly sharing a position — and two roles at one
+                                           --   position are neither above nor below each other
 PATCH  /guilds/{guild_id}/roles/{role_id}  -- M12; same escalation refusal. @everyone's permissions are
                                            --   editable, its name is not
 DELETE /guilds/{guild_id}/roles/{role_id}  -- M12; @everyone refused in the statement's WHERE, not in Go
+PUT    /guilds/{guild_id}/members/{user_id}/roles/{role_id}
+                                           -- M13; PermManageRoles, the role and the target both strictly
+                                           --   below the caller's standing, and the role's permissions a
+                                           --   subset of the caller's own. That last check is a
+                                           --   deliberate departure from Discord, which gates assignment
+                                           --   on hierarchy alone
+DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}
+                                           -- M13; the same checks. Removing a role lifts that role's
+                                           --   channel denies off the target, so it is not the pure
+                                           --   demotion it looks like
 GET    /guilds/{guild_id}/invites
 GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it
 GET    /guilds/{guild_id}/emojis
@@ -854,7 +879,13 @@ DELETE /channels/{channel_id}              -- M12; same resolution. Deleting a c
                                            --   children rather than deleting them
 PUT    /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; the endpoint that finally writes what roles.Resolve
-                                           --   has read since M12
+                                           --   has read since M12. PermManageRoles resolved *in that
+                                           --   channel*, not at guild level, or a caller denied a
+                                           --   permission there could allow it back to themselves
+DELETE /channels/{channel_id}/permissions/{overwrite_id}
+                                           -- M13; escalation-checked over the row being removed, not the
+                                           --   one being written — deleting an overwrite that denies you
+                                           --   something grants you that thing
 GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
 POST   /channels/{channel_id}/messages
 PATCH  /channels/{channel_id}/messages/{message_id}

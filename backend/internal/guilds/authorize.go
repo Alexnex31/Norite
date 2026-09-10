@@ -68,26 +68,80 @@ func (s *Service) authorize(
 type decision struct {
 	// instanceAdmin is layer 1: authority from outside the guild entirely.
 	instanceAdmin bool
-	// permissions is what layers 2..5 resolved. Meaningless when instanceAdmin is true, because an
-	// Instance Admin is not a member and was never resolved.
-	permissions roles.Permission
+	// resolution is what layers 2..5 worked out: the permissions, the owner, and the actor's standing.
+	//
+	// The zero value when instanceAdmin is true, because an Instance Admin is not a member and was never
+	// resolved — and that matters more than an empty permission set would. An empty permission set reads
+	// as absence; a standing of zero reads as data, because zero is @everyone's position and a real place
+	// in the hierarchy. Which is why nothing reads the standing directly: roles.Resolution.Outranks asks
+	// about ownership first, and the wrapper described below asks about the tier before that.
+	//
+	// This was two fields until a review pointed out they always held the same value — a `permissions`
+	// copy read by allows, and the resolution read by owns — each with its own explanation of when it was
+	// meaningless. One fact, one field.
+	resolution roles.Resolution
 }
 
-// A note on a round trip that was considered and kept.
+// A note on a round trip that was considered, kept, and then removed by something else.
 //
-// RemoveMember and Delete each call GetGuild and then authorizeWith, which runs ListGuildMemberAuthority —
-// a query returning owner_id as its first column. So both pay a redundant read for the one fact they need,
-// inside an open write transaction against a deliberately small pool (§15.3).
+// RemoveMember and Delete each called GetGuild and then authorizeWith, which runs
+// ListGuildMemberAuthority — a query returning owner_id as its first column. Both paid a redundant read
+// for the one fact they needed, inside an open write transaction against a deliberately small pool
+// (§15.3). M12 considered removing it and kept it, because doing so meant widening roles.Resolve's return
+// so that two cold paths could each save one indexed lookup: a small win that makes a security-critical
+// function carry a field it does not need.
 //
-// Removing it means roles.Resolve handing the owner id back to its caller, which changes the signature of
-// the function this package's whole authority model rests on so that two non-hot paths — a kick and a
-// guild delete — save one indexed lookup each. That is the trade /optimization-review names explicitly:
-// a small win that makes a security-critical function carry a field it does not need. Kept, and written
-// down so the next reviewer does not re-derive it.
+// M13 widened that return anyway, for a reason M12 did not have — layer 4's standing, which every
+// hierarchy check needs and which no second query can supply as cheaply. The owner id came along, so
+// Delete's redundant read is gone as a side effect rather than as its own argument.
+//
+// RemoveMember keeps its GetGuild, and the difference is worth naming rather than looking like an
+// oversight. Delete asks whether the *actor* owns the guild, which the actor's own resolution answers.
+// RemoveMember asks whether the *target* does — and an Instance Admin short-circuits before any
+// resolution happens, so on the path that most needs the answer there is no resolution to read it from.
 
 // allows reports whether the decision covers a permission, from either authority.
 func (d decision) allows(need roles.Permission) bool {
-	return d.instanceAdmin || d.permissions.Has(need)
+	return d.instanceAdmin || d.resolution.Permissions.Has(need)
+}
+
+// outranks reports whether the actor may act on something standing at the given position.
+//
+// The full ADR 0008 answer rather than layer 4's half: an Instance Admin is above every guild's hierarchy
+// and is never resolved against one, so there is no standing to compare and the tier answers first. Below
+// that, roles.Resolution.Outranks handles the owner and the strictly-greater comparison.
+//
+// One function, for the reason authorize is one function: a rule written as N call sites has N chances to
+// miss one, and this package has already shipped three member operations that checked a permission and
+// never asked about standing.
+func (d decision) outranks(position int32) bool {
+	return d.instanceAdmin || d.resolution.Outranks(position)
+}
+
+// allowsInChannel is allows, resolved within one channel — layer 1 first, then layer 5.
+//
+// A predicate rather than a permission set, because permAll is deliberately unexported: nothing outside
+// the roles package should be able to name "everything", and a wrapper that had to would be reaching for
+// it. This mirrors allows exactly, one scope down.
+//
+// The tier has to be asked first. An Instance Admin is never resolved against a guild, so `d.resolution`
+// is the zero value on that path — calling InChannel on it resolves to no permissions at all, which would
+// hide every channel in the guild from the one account that must always see them. Both callers guarded
+// that by hand, which is the shape this package has three times decided not to rely on: allows, outranks
+// and outranksMember each exist so a caller cannot forget the tier, and this is the fourth.
+func (d decision) allowsInChannel(
+	channelID snowflake.ID, overwrites []db.PermissionOverwrite, need roles.Permission,
+) bool {
+	return d.instanceAdmin || d.resolution.InChannel(channelID, overwrites).Has(need)
+}
+
+// outranksMember is outranks for a target that is a person rather than a role.
+//
+// Separate because the guild owner cannot be reached by a positional comparison — their own standing is a
+// meaningless zero, so comparing it reports that any role-holder outranks them. An Instance Admin still
+// may act on the owner, which is why the tier is checked here and not inside roles.Resolution.
+func (d decision) outranksMember(targetID snowflake.ID, targetStanding int32) bool {
+	return d.instanceAdmin || d.resolution.OutranksMember(targetID, targetStanding)
 }
 
 // authorizeWith is authorize against an explicit querier, so a check can run inside a caller's
@@ -132,7 +186,7 @@ func authorizeWith(
 		return decision{instanceAdmin: true}, nil
 	}
 
-	perms, err := roles.Resolve(ctx, q, guildID, actor.UserID, channelID)
+	res, err := roles.Resolve(ctx, q, guildID, actor.UserID, channelID)
 	if err != nil {
 		if errors.Is(err, roles.ErrNotAMember) {
 			return decision{}, httpx.ErrNotFound
@@ -140,9 +194,18 @@ func authorizeWith(
 		return decision{}, err
 	}
 
-	if !perms.Has(need) {
+	if !res.Permissions.Has(need) {
 		return decision{}, httpx.ErrForbidden
 	}
 
-	return decision{permissions: perms}, nil
+	return decision{resolution: res}, nil
+}
+
+// owns reports whether the actor is the guild's owner — ADR 0008 layer 2.
+//
+// False for an Instance Admin, who is never resolved against a guild at all and holds layer 1 instead.
+// A caller wanting "may act as the guild's own authority" wants `d.instanceAdmin || d.owns()`, and both
+// halves are load-bearing: the tier acts on guilds it is not in, and the owner is not a tier.
+func (d decision) owns() bool {
+	return d.resolution.IsOwner()
 }

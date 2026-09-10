@@ -110,9 +110,12 @@ SELECT count(*) FROM roles WHERE guild_id = $1;
 -- because reordering is a multi-row swap, so nothing downstream catches it.
 --
 -- The consequence is not cosmetic: position is the hierarchy M13 enforces over, and two roles at the same
--- position are neither above nor below each other. NextRolePosition's own comment calls a collision "a
--- correctness bug rather than a style preference" — that comment was written about the count-versus-max
--- cause and this is the other one.
+-- position are neither above nor below each other.
+--
+-- The read this serialises is no longer max(position)+1 — M13 places a new role at the bottom instead, so
+-- ShiftRolePositionsUp renumbers and CreateRole inserts at 1. The race is the same shape and the lock is
+-- the same answer: two concurrent creates would both renumber, both insert at 1, and leave the collision
+-- migration 000015 declines the unique constraint that would catch.
 --
 -- An advisory lock rather than row locking, and the two-argument form so it lives in its own namespace:
 -- the first key is "NOR" plus a slot number (slot 1 is the migration lock, slot 2 the instance bootstrap,
@@ -120,23 +123,6 @@ SELECT count(*) FROM roles WHERE guild_id = $1;
 -- other unnecessarily and stay correct, which is the right direction for an operation that happens a
 -- handful of times in a guild's life.
 SELECT pg_advisory_xact_lock(1313033475, (sqlc.arg(guild_id)::bigint & 2147483647)::int);
-
--- name: NextRolePosition :one
--- The position a new role goes in: one above the highest that exists.
---
--- `max(position) + 1`, not `count(*)`, and the difference is a correctness bug rather than a style
--- preference. Deleting a role leaves a gap, so after removing the middle of @everyone(0)/mods(1)/admins(2)
--- the count is 2 and the next role would be created *at* position 2 — a tie with admins, which nothing
--- prevents since there is deliberately no unique constraint on (guild_id, position). Delete more and the
--- new role lands below existing ones, contradicting "positioned above every existing role" in the contract
--- and silently corrupting the ordering M13's hierarchy rules will be enforcing.
---
--- coalesce for the empty case, which cannot happen through the API — guild creation writes @everyone in
--- the same transaction — but which would otherwise make a NULL the caller has to handle.
---
--- Reads one value out of roles_guild_id_position_idx rather than the whole role list. The previous
--- implementation selected every column of every role in the guild to take len() of the slice.
-SELECT coalesce(max(position), -1) + 1 FROM roles WHERE guild_id = $1;
 
 -- name: DeleteOverwritesForTarget :exec
 -- Removes the permission overwrites that named a role or a member, across the whole guild.
@@ -262,3 +248,257 @@ VALUES ($1, $2, $3, $4, $5, $6);
 SELECT guild_id, user_id, role_id
 FROM guild_member_roles
 WHERE guild_id = $1 AND user_id = ANY(sqlc.arg(user_ids)::bigint[]);
+
+--
+-- Role assignment, role positions and permission overwrites (Milestone M13) follow. This separator is a
+-- lone comment line rather than prose, because sqlc attaches any comment block immediately above a query
+-- to that query's godoc — a section heading here becomes AssignRoleToMember's first documented sentence,
+-- and the Querier interface's.
+--
+
+-- name: AssignRoleToMember :execrows
+-- Give a member a role.
+--
+-- # ON CONFLICT DO NOTHING, and why that became the right answer
+--
+-- The first draft deliberately let the conflict surface, reasoning that ON CONFLICT DO NOTHING makes a
+-- repeat assignment return zero rows, indistinguishable from an insert that matched nothing — and those
+-- need different answers, an idempotent PUT succeeding against a 404. That is AddGuildMember's reasoning
+-- one table over, and it is sound where nothing has already established the preconditions.
+--
+-- It is wrong here for a reason Postgres decides rather than this schema: a constraint violation aborts
+-- the surrounding transaction, so a caller cannot catch the conflict and carry on — and this statement
+-- runs inside the transaction that also writes the audit entry and reads the member back.
+--
+-- What makes DO NOTHING safe is that the caller rules the other cases out first. AssignRole reads the role
+-- (404 if it is not in this guild) and the target's standing (404 if they are not a member) before
+-- reaching here, so zero rows can only mean the grant already exists — which is the PUT succeeding.
+--
+-- The SELECT is what verifies both ids belong together before anything is written: the role must be in
+-- this guild, and the (guild, user) pair must be a real membership. Rule 1 in the statement rather than in
+-- a check a handler has to remember. The composite foreign key would refuse a non-member anyway, but it
+-- would do it as a constraint violation the caller has to reverse-engineer, and a 500 is not an answer.
+--
+-- # Why NOT is_default
+--
+-- @everyone is held by every member by virtue of membership and is never stored here — ListGuildMemberAuthority
+-- reads it through `is_default OR EXISTS(...)` precisely so that it does not have to be, and
+-- GetMemberHighestRolePosition's explanation rests on the same premise. Without this predicate the premise
+-- is merely a convention, and granting @everyone explicitly writes a row that permission resolution
+-- ignores, that the member's role list reports and nobody else's does, and that DeleteRole cannot remove
+-- because it refuses to delete the default role at all.
+--
+-- Not every role-mutating statement carries this guard, and an earlier version of this comment said they
+-- did. DeleteRole and SetRolePosition do; UpdateRole deliberately does not, because editing @everyone's
+-- permissions is how a guild sets its floor, and UnassignRoleFromMember does not either. Believing the
+-- broader claim would invite dropping the Go-side is_default check in changeMemberRole on the grounds
+-- that SQL covers it — it covers the assign half only.
+INSERT INTO guild_member_roles (guild_id, user_id, role_id)
+SELECT gm.guild_id, gm.user_id, r.id
+FROM guild_members gm
+JOIN roles r ON r.guild_id = gm.guild_id
+WHERE gm.guild_id = sqlc.arg(guild_id)
+  AND gm.user_id = sqlc.arg(user_id)
+  AND r.id = sqlc.arg(role_id)
+  AND NOT r.is_default
+ON CONFLICT DO NOTHING;
+
+-- name: UnassignRoleFromMember :execrows
+-- Take a role away. Zero rows means the member did not hold it, which is an idempotent DELETE succeeding
+-- rather than an error — the caller has already established that the member exists, because the hierarchy
+-- check reads their standing first and GetMemberHighestRolePosition returns no row for a non-member.
+--
+-- guild_id in the WHERE is not redundant with role_id: it scopes the delete to this guild's grant even
+-- though the pair could only ever appear together, which is the same belt-and-braces GetRole applies.
+DELETE FROM guild_member_roles
+WHERE guild_id = $1 AND user_id = $2 AND role_id = $3;
+
+-- name: ShiftRolePositionsUp :exec
+-- Make room at the bottom of the hierarchy for a new role (Milestone M13).
+--
+-- A new role is created immediately above @everyone rather than above every existing role, which is what
+-- Discord does and what stops a non-owner creating a role they then cannot edit, delete, assign or
+-- reposition. That means everything else moves up one, and @everyone stays on the floor every layer-4
+-- resolution starts from.
+--
+-- # Renumbering rather than shifting, so positions stay bounded by the ceiling
+--
+-- The obvious implementation is `position = position + 1`, and it makes positions grow with the guild's
+-- *lifetime* creation count rather than with the roles it currently has. A guild that keeps one long-lived
+-- role and churns ten thousand others leaves that role near position 10,000 against a ceiling of 250 — so
+-- any service-side bound derived from the ceiling would reject a legitimate reorder of the guild's own
+-- current hierarchy, and nothing anywhere would bring the numbers back down.
+--
+-- Renumbering from row_number() closes it: after every create, the live non-default roles occupy 2..N+1
+-- with position 1 free for the new one, so no position ever exceeds the role ceiling plus one. Relative
+-- order is preserved, which is the only property the hierarchy depends on — `ORDER BY position, id`
+-- matches ListGuildRoles, so two roles that tie today keep the order the listing already shows.
+--
+-- At most 250 rows on a path that runs when somebody clicks "create role". It runs inside the same
+-- advisory lock CreateRole already takes, because two concurrent creates that both renumber and both
+-- insert at 1 would collide — and migration 000015 deliberately declines the unique constraint that would
+-- catch it.
+UPDATE roles r
+SET position = ranked.position, updated_at = now()
+FROM (
+    SELECT inner_r.id, (row_number() OVER (ORDER BY inner_r.position, inner_r.id) + 1)::integer AS position
+    FROM roles inner_r
+    WHERE inner_r.guild_id = sqlc.arg(guild_id) AND NOT inner_r.is_default
+) ranked
+-- # The outer guild_id is not redundant, and an EXPLAIN is what says so
+--
+-- `r.id = ranked.id` looks like it settles the outer scan: 253 primary keys, 253 lookups. The planner
+-- does not read it that way. It builds the ranked set, then *sequentially scans every role on the
+-- instance* and hash-joins — 25,254 rows read to update 253, because it has no restriction on `r` other
+-- than the join condition and a seq scan plus hash beats what it estimates the lookups to cost.
+--
+-- Naming the guild on the outer relation gives it roles_guild_id_position_idx on both sides:
+--
+--   without   4.261 ms   Seq Scan on roles, 25,254 rows
+--   with      1.879 ms   Bitmap Index Scan, this guild's roles only
+--
+-- The ratio is the least interesting part. The seq-scan form's cost grows with the *instance's* role
+-- count while the indexed form grows with the guild's, so the gap widens for the life of the instance —
+-- the same shape 000015 measures three times over.
+WHERE r.id = ranked.id
+  AND r.guild_id = sqlc.arg(guild_id)
+  AND r.position IS DISTINCT FROM ranked.position;
+
+-- name: SetRolePosition :execrows
+-- One row of a reorder. The whole reorder is several of these in one transaction under the same advisory
+-- lock, because N separate requests would leave two roles sharing a position between them — and two roles
+-- at one position are neither above nor below each other, which dissolves the ordering every hierarchy
+-- check rests on.
+--
+-- Two guards, and both are in the statement rather than in a check before it — the same discipline
+-- DeleteRole applies to the same role.
+--
+-- `NOT is_default` refuses to move @everyone off 0. The position bound is the other half and is the one
+-- that is easy to leave out, because @everyone staying at 0 sounds like it already implies the floor is
+-- reserved. It does not: nothing stopped a *real* role being moved onto 0, or to a negative position below
+-- it. Both are corruptions rather than curiosities. A role sharing @everyone's position is neither above
+-- nor below it, which dissolves the strictly-greater comparison the whole hierarchy rests on; and
+-- GetMemberHighestRolePosition coalesces an absent maximum to 0, so a member whose only role sits at 0
+-- becomes indistinguishable from a member holding no roles at all — losing exactly the protection the
+-- position was granted to give them. A client sending zero-based positions is the ordinary way in, since
+-- role lists render 0-indexed.
+--
+-- The *upper* bound lives in the service rather than here, because it derives from the configurable role
+-- ceiling: positions only ever grow through role creation, which shifts every role up by one, and the
+-- bound exists so that shift can never overflow `position`'s integer. A magic number in this file would be
+-- a policy constant in the wrong place, and the ceilings it follows from are already config.
+UPDATE roles
+SET position = sqlc.arg(position), updated_at = now()
+WHERE id = sqlc.arg(id)
+  AND guild_id = sqlc.arg(guild_id)
+  AND NOT is_default
+  AND sqlc.arg(position)::integer > 0;
+
+-- name: GetPermissionOverwrite :one
+-- One overwrite, scoped to the guild through its channel.
+--
+-- Read before every write and before every delete, because the escalation check covers the union of what
+-- the request changes: the bits the existing row allows or denies, or'd with the bits the new one does.
+-- Checking only the value being written leaves deletion checked by nothing at all — and deleting an
+-- overwrite that denies you something grants you that thing, which is a self-escalation on the endpoint
+-- whose whole subject is per-channel permissions.
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = sqlc.arg(channel_id)
+  AND po.target_type = sqlc.arg(target_type)
+  AND po.target_id = sqlc.arg(target_id)
+  AND c.guild_id = sqlc.arg(guild_id)::bigint;
+
+-- name: UpsertPermissionOverwrite :one
+-- Write an overwrite, creating or replacing.
+--
+-- PUT rather than POST/PATCH on the wire, so the same statement has to serve both — ON CONFLICT on the
+-- primary key is what makes the endpoint idempotent. The row is selected from channels rather than
+-- supplied directly, so a channel in another guild inserts nothing and the caller sees pgx.ErrNoRows
+-- rather than writing an overwrite onto somebody else's channel (rule 1, in the statement).
+INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+SELECT c.id, sqlc.arg(target_type), sqlc.arg(target_id), sqlc.arg(allow), sqlc.arg(deny)
+FROM channels c
+WHERE c.id = sqlc.arg(channel_id) AND c.guild_id = sqlc.arg(guild_id)::bigint
+ON CONFLICT (channel_id, target_type, target_id)
+DO UPDATE SET allow = EXCLUDED.allow, deny = EXCLUDED.deny
+RETURNING channel_id, target_type, target_id, allow, deny;
+
+-- name: DeletePermissionOverwrite :execrows
+-- Remove an overwrite. Scoped through channels for UpsertPermissionOverwrite's reason.
+DELETE FROM permission_overwrites po
+USING channels c
+WHERE po.channel_id = c.id
+  AND c.guild_id = sqlc.arg(guild_id)::bigint
+  AND po.channel_id = sqlc.arg(channel_id)
+  AND po.target_type = sqlc.arg(target_type)
+  AND po.target_id = sqlc.arg(target_id);
+
+-- name: CopyChannelOverwrites :exec
+-- Copy a category's overwrites onto a channel being created under it (Milestone M13).
+--
+-- Inheritance is a copy at creation and not a lookup at resolution time, which is what Discord does: a
+-- channel does not follow its category's later permission changes, and "sync permissions with category" is
+-- a client re-copying through the overwrite endpoints rather than a flag anything stores. roles.Resolve
+-- therefore keeps reading exactly one channel's rows and never walks to a parent — resolution-time
+-- inheritance would put a second query on the check that runs before every mutation.
+--
+-- Without this, a channel created inside a locked-down category is readable by everyone the moment it
+-- exists. That was unreachable while nothing could write an overwrite, which is why M12 does not do it.
+--
+-- Not escalation-checked, deliberately: the copy replicates a configuration the guild already authored
+-- rather than authoring a new one, so refusing bits the creator does not hold would make inheritance fail
+-- exactly under the locked-down category it is most wanted under. What is checked is the creator's
+-- authority over the parent, in CreateChannel.
+--
+-- # Both channels are scoped, not just the source
+--
+-- The first draft constrained `guild_id` only on the join to the source channel and took the destination
+-- as a bare parameter, so it would happily copy one guild's overwrites onto another guild's channel —
+-- reproduced, four rows crossing. Today's only caller passes an id it minted a few lines earlier, which is
+-- what made it survive review of the statement in isolation; the sibling UpsertPermissionOverwrite claims
+-- exactly this property for itself in its own comment, and a rule that holds because of who happens to
+-- call it is not the rule that comment describes.
+--
+-- It would also not have stayed harmless. target_id for a member overwrite is a global user id rather than
+-- a guild-scoped one, so a copied member row genuinely applies in the guild it landed in — applyOverwrites
+-- matches on user id — and DeleteOverwritesForTarget is guild-scoped, so nothing would ever clean it up.
+INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+SELECT dest.id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels src ON src.id = po.channel_id
+JOIN channels dest ON dest.id = sqlc.arg(channel_id)
+WHERE po.channel_id = sqlc.arg(source_channel_id)
+  AND src.guild_id = sqlc.arg(guild_id)::bigint
+  AND dest.guild_id = sqlc.arg(guild_id)::bigint
+ON CONFLICT DO NOTHING;
+
+-- name: CountChannelPermissionOverwrites :one
+-- How many overwrites a channel carries, for the creation ceiling.
+--
+-- The ceiling exists for the reason CLAUDE.md settles for channels and roles: a list that cannot be
+-- paginated is bounded at creation instead. Overwrites are read whole — once per channel before every
+-- channel-scoped mutation, and once per guild on the channel listing — so an unbounded count is work on
+-- two hot paths, done on behalf of rows a caller wrote and nobody can see. target_id is polymorphic and
+-- cannot be a foreign key, so a fabricated one persists with nothing to clean it up.
+--
+-- Served by the primary key's leading column.
+SELECT count(*) FROM permission_overwrites WHERE channel_id = $1;
+
+-- name: ListOverwritesForTarget :many
+-- Every overwrite naming one role or member, across a guild, with the channel each sits on.
+--
+-- Read before DeleteOverwritesForTarget deletes them, because removing an overwrite is a permission
+-- change however it is removed. DeleteOverwrite refuses a caller who does not hold the bits one row
+-- carries; deleting the role that row names reaches the same outcome for every channel at once, and was
+-- reaching it behind a guild-level permission check alone.
+--
+-- Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
+-- to the guild.
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE c.guild_id = sqlc.arg(guild_id)::bigint
+  AND po.target_type = sqlc.arg(target_type)
+  AND po.target_id = sqlc.arg(target_id);

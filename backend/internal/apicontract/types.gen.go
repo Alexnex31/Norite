@@ -11,19 +11,37 @@ import (
 
 // Defines values for CreateChannelRequestType.
 const (
-	N0 CreateChannelRequestType = 0
-	N2 CreateChannelRequestType = 2
-	N4 CreateChannelRequestType = 4
+	CreateChannelRequestTypeN0 CreateChannelRequestType = 0
+	CreateChannelRequestTypeN2 CreateChannelRequestType = 2
+	CreateChannelRequestTypeN4 CreateChannelRequestType = 4
 )
 
 // Valid indicates whether the value is a known member of the CreateChannelRequestType enum.
 func (e CreateChannelRequestType) Valid() bool {
 	switch e {
-	case N0:
+	case CreateChannelRequestTypeN0:
 		return true
-	case N2:
+	case CreateChannelRequestTypeN2:
 		return true
-	case N4:
+	case CreateChannelRequestTypeN4:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for DeleteOverwriteRequestType.
+const (
+	DeleteOverwriteRequestTypeN0 DeleteOverwriteRequestType = 0
+	DeleteOverwriteRequestTypeN1 DeleteOverwriteRequestType = 1
+)
+
+// Valid indicates whether the value is a known member of the DeleteOverwriteRequestType enum.
+func (e DeleteOverwriteRequestType) Valid() bool {
+	switch e {
+	case DeleteOverwriteRequestTypeN0:
+		return true
+	case DeleteOverwriteRequestTypeN1:
 		return true
 	default:
 		return false
@@ -132,6 +150,24 @@ func (e HealthResponseStatus) Valid() bool {
 	}
 }
 
+// Defines values for PermissionOverwriteType.
+const (
+	PermissionOverwriteTypeN0 PermissionOverwriteType = 0
+	PermissionOverwriteTypeN1 PermissionOverwriteType = 1
+)
+
+// Valid indicates whether the value is a known member of the PermissionOverwriteType enum.
+func (e PermissionOverwriteType) Valid() bool {
+	switch e {
+	case PermissionOverwriteTypeN0:
+		return true
+	case PermissionOverwriteTypeN1:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Scope.
 const (
 	GuildsRead  Scope = "guilds.read"
@@ -147,6 +183,24 @@ func (e Scope) Valid() bool {
 	case GuildsWrite:
 		return true
 	case Identify:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SetOverwriteRequestType.
+const (
+	SetOverwriteRequestTypeN0 SetOverwriteRequestType = 0
+	SetOverwriteRequestTypeN1 SetOverwriteRequestType = 1
+)
+
+// Valid indicates whether the value is a known member of the SetOverwriteRequestType enum.
+func (e SetOverwriteRequestType) Valid() bool {
+	switch e {
+	case SetOverwriteRequestTypeN0:
+		return true
+	case SetOverwriteRequestTypeN1:
 		return true
 	default:
 		return false
@@ -288,8 +342,15 @@ type Channel struct {
 
 	// ParentId The category this channel sits under. Deleting a category sets this to null on its children rather than deleting them — losing a category must not lose the conversations in it.
 	ParentId *Snowflake `json:"parent_id"`
-	Position int        `json:"position"`
-	Topic    *string    `json:"topic"`
+
+	// PermissionOverwrites Every overwrite configured on this channel — as configured, not as resolved for the caller.
+	//
+	// Required and never null, on every route that returns a channel. An omitted array and an empty one would be one schema meaning two things depending on which route produced it, and a client refreshing its cache from a response is entitled to read this as the whole truth.
+	//
+	// Present on the listing because a permission editor cannot be drawn without it and there is no single-channel `GET` to ask instead. The listing already reads every channel in the guild, so one further query answers the whole sidebar rather than one request per tab opened.
+	PermissionOverwrites []PermissionOverwrite `json:"permission_overwrites"`
+	Position             int                   `json:"position"`
+	Topic                *string               `json:"topic"`
 
 	// Type `0` text, `1` DM, `2` voice, `3` group DM, `4` category, `5` announcement (reserved), `6` stage voice (reserved), `7` public matchmaking.
 	//
@@ -345,6 +406,15 @@ type CreateRoleRequest struct {
 	// Permissions Defaults to none. **Cannot exceed what the caller holds** — see the endpoint description for why that check is what stops `MANAGE_ROLES` from being every permission.
 	Permissions *Permissions `json:"permissions,omitempty"`
 }
+
+// DeleteOverwriteRequest defines model for DeleteOverwriteRequest.
+type DeleteOverwriteRequest struct {
+	// Type Which kind of thing `overwrite_id` names.
+	Type DeleteOverwriteRequestType `json:"type"`
+}
+
+// DeleteOverwriteRequestType Which kind of thing `overwrite_id` names.
+type DeleteOverwriteRequestType int32
 
 // DeviceCodeRequest defines model for DeviceCodeRequest.
 type DeviceCodeRequest struct {
@@ -596,6 +666,53 @@ type PasswordResetRequest struct {
 	Email openapi_types.Email `json:"email"`
 }
 
+// PermissionOverwrite One channel permission overwrite — ADR 0008 layer 5.
+//
+// `target_id` is polymorphic: a role id when `type` is 0, a user id when it is 1. It carries no foreign key for that reason, which is why deleting a role or removing a member deletes their overwrites explicitly rather than leaving the database to cascade.
+type PermissionOverwrite struct {
+	// Allow A permission bitfield, as a **decimal string** rather than a number.
+	//
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	//
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`.
+	//
+	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
+	//
+	//
+	// Examples: 3075, 0
+	Allow Permissions `json:"allow"`
+
+	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	ChannelId Snowflake `json:"channel_id"`
+
+	// Deny A permission bitfield, as a **decimal string** rather than a number.
+	//
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	//
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`.
+	//
+	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
+	//
+	//
+	// Examples: 3075, 0
+	Deny Permissions `json:"deny"`
+
+	// TargetId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	TargetId Snowflake `json:"target_id"`
+
+	// Type 0 role, 1 member.
+	Type PermissionOverwriteType `json:"type"`
+}
+
+// PermissionOverwriteType 0 role, 1 member.
+type PermissionOverwriteType int32
+
 // Permissions A permission bitfield, as a **decimal string** rather than a number.
 //
 // The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
@@ -664,6 +781,21 @@ type RegistrationChallenge struct {
 	//
 	// The one open object in this contract, and it is open on purpose rather than by omission — pinning it would tie the document to whichever mechanism was chosen first.
 	Parameters map[string]interface{} `json:"parameters"`
+}
+
+// ReorderRolesRequest defines model for ReorderRolesRequest.
+type ReorderRolesRequest struct {
+	// Roles The roles to move and where. Roles not named keep their position — but are still checked, since the resulting arrangement must not collide with them. Capped at 250 entries, which is the *default* role ceiling — an instance configured with a higher one reorders in batches. The cap is a fixed transport bound; the range each `position` must fall in tracks the instance's actual ceiling.
+	Roles []struct {
+		// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+		//
+		//
+		// Examples: 7238829238972837423
+		Id Snowflake `json:"id"`
+
+		// Position From 1 to the instance's role ceiling. Zero is `@everyone`'s and is refused — a client sending zero-based positions is the ordinary way in, since role lists render 0-indexed.
+		Position int32 `json:"position"`
+	} `json:"roles"`
 }
 
 // RevocationCounts What one call to the revocation primitive removed. Shared by `POST /auth/logout/all` and `DELETE /auth/2fa/totp`, which revoke exactly the same set — one schema for one server-side value, so that when M18 adds force-closed gateway connections and M101 adds E2E device trust, the count arrives in both places at once rather than in whichever was remembered.
@@ -755,6 +887,39 @@ type Session struct {
 	IpAddress  *string   `json:"ip_address"`
 	LastUsedAt time.Time `json:"last_used_at"`
 }
+
+// SetOverwriteRequest A replacement, not a patch. An omitted `allow` or `deny` means empty — there is no way to change one and leave the other, because the row is written whole.
+type SetOverwriteRequest struct {
+	// Allow A permission bitfield, as a **decimal string** rather than a number.
+	//
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	//
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`.
+	//
+	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
+	//
+	//
+	// Examples: 3075, 0
+	Allow *Permissions `json:"allow,omitempty"`
+
+	// Deny A permission bitfield, as a **decimal string** rather than a number.
+	//
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Nineteen bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	//
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`.
+	//
+	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
+	//
+	//
+	// Examples: 3075, 0
+	Deny *Permissions `json:"deny,omitempty"`
+
+	// Type Which kind of thing `overwrite_id` names. Required, and validated rather than stored: a value the resolver would ignore is refused, so the table cannot accumulate rows that resolve to nothing and that no cleanup path knows about.
+	Type SetOverwriteRequestType `json:"type"`
+}
+
+// SetOverwriteRequestType Which kind of thing `overwrite_id` names. Required, and validated rather than stored: a value the resolver would ignore is refused, so the table cannot accumulate rows that resolve to nothing and that no cleanup path knows about.
+type SetOverwriteRequestType int32
 
 // Snowflake A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
 //
@@ -1085,6 +1250,12 @@ type RequestEmailVerificationJSONRequestBody RequestEmailVerificationJSONBody
 // UpdateChannelJSONRequestBody defines body for UpdateChannel for application/json ContentType.
 type UpdateChannelJSONRequestBody = UpdateChannelRequest
 
+// DeleteChannelPermissionOverwriteJSONRequestBody defines body for DeleteChannelPermissionOverwrite for application/json ContentType.
+type DeleteChannelPermissionOverwriteJSONRequestBody = DeleteOverwriteRequest
+
+// SetChannelPermissionOverwriteJSONRequestBody defines body for SetChannelPermissionOverwrite for application/json ContentType.
+type SetChannelPermissionOverwriteJSONRequestBody = SetOverwriteRequest
+
 // SubmitDevicePageFormdataRequestBody defines body for SubmitDevicePage for application/x-www-form-urlencoded ContentType.
 type SubmitDevicePageFormdataRequestBody SubmitDevicePageFormdataBody
 
@@ -1108,6 +1279,9 @@ type CreateGuildChannelJSONRequestBody = CreateChannelRequest
 
 // UpdateGuildMemberJSONRequestBody defines body for UpdateGuildMember for application/json ContentType.
 type UpdateGuildMemberJSONRequestBody = UpdateMemberRequest
+
+// ReorderGuildRolesJSONRequestBody defines body for ReorderGuildRoles for application/json ContentType.
+type ReorderGuildRolesJSONRequestBody = ReorderRolesRequest
 
 // CreateGuildRoleJSONRequestBody defines body for CreateGuildRole for application/json ContentType.
 type CreateGuildRoleJSONRequestBody = CreateRoleRequest

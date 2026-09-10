@@ -58,7 +58,22 @@ type CreateRoleInput struct {
 //
 // The check is against the caller's *resolved* permissions, so an owner and an administrator pass it
 // trivially — they hold everything — and an Instance Admin passes by layer 1 without being resolved at
-// all. M13 adds the other half, position-based hierarchy: who may manage a role *above* their own.
+// all.
+//
+// # Where the new role lands, and why not at the top
+//
+// At the bottom, immediately above @everyone, which is what Discord does. M12 created roles at
+// max(position)+1 and said so deliberately, on the grounds that a role landing below an existing one
+// reads as broken. That was the right call for a milestone with no hierarchy and the wrong one the
+// moment this milestone added it: a non-owner who creates a role at the top cannot then edit, delete,
+// assign or reposition it, because all four require the role to be strictly below their own standing.
+// A dead end reachable by an ordinary moderator on their first use of the endpoint.
+//
+// One case behaves oddly and is allowed rather than refused. A member holding PermManageRoles only
+// through @everyone has standing 0, so the role they create at position 1 is above them and they cannot
+// manage it either. Nothing escalates — they cannot assign it to themselves, since that too requires it
+// to be below them — so it is a harmless dead end reachable only in a guild that has deliberately given
+// role management to everybody. Discord permits it; so does this.
 func (s *Service) CreateRole(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in CreateRoleInput,
 ) (Role, error) {
@@ -87,22 +102,27 @@ func (s *Service) CreateRole(
 			return httpx.Errorf(ErrGuildFull, "a guild may hold at most %d roles", s.maxRolesPerGuild)
 		}
 
-		// Appended above every existing role. Position is the hierarchy M13 enforces, and a new role
-		// landing at or below an existing one reads as broken — see NextRolePosition for why this is
-		// max(position)+1 and not the role count, which collides as soon as anything has been deleted.
+		// The lock, then the renumber, then the insert at the bottom.
 		//
-		// The lock is the other half of the same guarantee. Reading a max and then inserting is a
-		// read-modify-write, and under READ COMMITTED two concurrent creates both read the same value and
-		// both take it. Fixing only the count-versus-max cause left the race, which produces the identical
-		// corruption by a different route.
+		// The lock is not optional and its reason survives the change of placement: renumbering and then
+		// inserting is a read-modify-write, and under READ COMMITTED two concurrent creates would both
+		// renumber, both insert at 1, and leave two roles sharing a position — which migration 000015
+		// deliberately declines the unique constraint that would catch.
+		//
+		// ShiftRolePositionsUp renumbers the guild's live non-default roles to 2..N+1, leaving 1 free.
+		// Renumbering rather than incrementing is what keeps positions bounded by the role ceiling instead
+		// of by the guild's lifetime creation count — see the query.
 		if err := q.LockGuildRolePositions(ctx, int64(guildID)); err != nil {
 			return fmt.Errorf("guilds: lock role positions: %w", err)
 		}
 
-		position, err := q.NextRolePosition(ctx, int64(guildID))
-		if err != nil {
-			return fmt.Errorf("guilds: next role position: %w", err)
+		if err := q.ShiftRolePositionsUp(ctx, int64(guildID)); err != nil {
+			return fmt.Errorf("guilds: renumber role positions: %w", err)
 		}
+
+		// One, never zero: zero is @everyone's and a non-default role sharing it would be neither above
+		// nor below the floor every layer-4 resolution starts from.
+		const bottom = 1
 
 		row, err := q.CreateRole(ctx, db.CreateRoleParams{
 			ID:          int64(roleID),
@@ -110,7 +130,7 @@ func (s *Service) CreateRole(
 			Name:        in.Name,
 			Color:       in.Color,
 			Permissions: in.Permissions.Int64(),
-			Position:    position,
+			Position:    bottom,
 			Hoist:       in.Hoist,
 			Mentionable: in.Mentionable,
 			IsDefault:   false,
@@ -119,9 +139,17 @@ func (s *Service) CreateRole(
 			return fmt.Errorf("guilds: create role: %w", err)
 		}
 
+		// `renumbered` is not decoration. Creating a role shifts every other role in the guild up one, so
+		// this transaction rewrote the position of roles the caller cannot edit, delete or reposition —
+		// including ones above them. Relative order is preserved so nothing escalates, but an operator
+		// reading M14's audit log would otherwise see a role.create entry and have no way to know the
+		// whole hierarchy was renumbered, and a client caching positions from GET /roles is stale after
+		// an unrelated create.
 		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionRoleCreate, &roleID, map[string]any{
 			"name":        in.Name,
 			"permissions": in.Permissions.Int64(),
+			"position":    bottom,
+			"renumbered":  true,
 		}); err != nil {
 			return err
 		}
@@ -138,8 +166,9 @@ func (s *Service) CreateRole(
 
 // UpdateRoleInput is a partial update. A nil field is left alone.
 //
-// Position is absent on purpose: reordering is a multi-row swap and hierarchy semantics are M13's. This
-// milestone stores the column and orders by it.
+// Position is absent on purpose, and not because reordering does not exist — ReorderRoles is in this
+// file. It is a multi-row swap: moving one role moves every role between it and its destination, so a
+// single-row update cannot express one without leaving two roles sharing a position part-way through.
 type UpdateRoleInput struct {
 	Name        *string
 	Color       *int32
@@ -166,6 +195,17 @@ func (s *Service) UpdateRole(
 				return httpx.ErrNotFound
 			}
 			return fmt.Errorf("guilds: get role: %w", err)
+		}
+
+		// Layer 4's second sentence, and it is the half M12 could not build: a role above your own is not
+		// yours to edit. Below the load, because it reads a row the caller may not be able to see — the
+		// ordering M12 had corrected twice by review.
+		//
+		// This bounds what refuseEscalation cannot. That check stops you granting a permission you do not
+		// hold; it says nothing about *which* role you may grant it to, so without this a moderator could
+		// edit the administrator role's color, name, or the permissions it hands everybody who holds it.
+		if !allowed.outranks(existing.Position) {
+			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
 		}
 
 		if in.Permissions != nil {
@@ -228,7 +268,8 @@ func (s *Service) UpdateRole(
 // DeleteRole removes a role. @everyone is refused, in SQL — see DeleteRole in guilds.sql.
 func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, roleID snowflake.ID) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles); err != nil {
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		if err != nil {
 			return err
 		}
 
@@ -239,6 +280,22 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 			}
 			return fmt.Errorf("guilds: get role: %w", err)
 		}
+
+		// Layer 4's second sentence: a role above your own is not yours to delete. Below the load, because
+		// it reads a row the caller may not be able to see — the ordering M12 had corrected twice.
+		if !allowed.outranks(existing.Position) {
+			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
+		}
+
+		// And the overwrites it carries are not yours to remove unless you hold what they carry. The
+		// delete below wipes them on every channel at once, which is the same act DeleteOverwrite refuses
+		// one row at a time — see refuseRemovingOverwritesFor.
+		if err := s.refuseRemovingOverwritesFor(
+			ctx, q, allowed, guildID, roles.OverwriteTargetRole, roleID,
+		); err != nil {
+			return err
+		}
+
 		if existing.IsDefault {
 			// Reported here so the caller gets a message rather than a bare 404, but the *guarantee* is the
 			// `AND NOT is_default` in the statement below — this check could be raced and that one cannot.
@@ -302,4 +359,169 @@ func refuseEscalation(allowed decision, want roles.Permission) error {
 	// listing.
 	return httpx.Errorf(httpx.ErrForbidden,
 		"a role cannot be given permissions you do not hold yourself")
+}
+
+// RolePosition is one row of a reorder request.
+type RolePosition struct {
+	ID       snowflake.ID
+	Position int32
+}
+
+// ReorderRoles rearranges a guild's role hierarchy in one transaction.
+//
+// # Why this is not a field on UpdateRole
+//
+// Reordering is a multi-row swap. Moving a role from 2 to 5 means moving whatever sits at 3, 4 and 5 as
+// well, and done as four separate requests there is a window between each where two roles share a
+// position — which migration 000015 declines the unique constraint that would catch, because a reorder
+// needs to pass through exactly such a state. Two roles at one position are neither above nor below each
+// other, and that dissolves the strictly-greater comparison every check in this milestone rests on. One
+// request, one transaction, one lock.
+//
+// # Five checks, and the one that is easy to leave out
+//
+// The obvious rule is that every requested position must be strictly below the caller's standing. That is
+// necessary and not sufficient: it says nothing about where the role is *now*. A caller at standing 5
+// could name the administrator role at position 10 and move it to 2 — the destination passes, the role
+// is demoted, and from there it can be edited, deleted or assigned. **Both ends are checked**, and the
+// origin is the one that is easy to omit, because the destination is the value in the request body and
+// the origin is not.
+//
+// The rest: the request must be well-formed (bounded, no repeated id, every id a role in this guild),
+// every position must sit in a range that cannot collide with @everyone or overflow the column, and the
+// *resulting arrangement* must leave no two non-default roles sharing a position — which requires
+// checking the request against the roles it does not mention, not only against itself.
+func (s *Service) ReorderRoles(
+	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in []RolePosition,
+) ([]Role, error) {
+	var out []Role
+
+	err := s.inTx(ctx, func(q *db.Queries) error {
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		if err != nil {
+			return err
+		}
+
+		// The same lock role creation takes, and for the same reason: this reads every position and then
+		// writes them, which under READ COMMITTED is a read-modify-write. A concurrent create renumbering
+		// underneath would leave an arrangement neither operation intended.
+		if err := q.LockGuildRolePositions(ctx, int64(guildID)); err != nil {
+			return fmt.Errorf("guilds: lock role positions: %w", err)
+		}
+
+		current, err := q.ListGuildRoles(ctx, int64(guildID))
+		if err != nil {
+			return fmt.Errorf("guilds: list roles: %w", err)
+		}
+
+		byID := make(map[snowflake.ID]db.Role, len(current))
+		for _, r := range current {
+			byID[snowflake.ID(r.ID)] = r
+		}
+
+		// The upper bound. Positions only ever grow through creation, which renumbers to the live role
+		// count plus one, so the ceiling bounds them — and a reorder is the one path that could write an
+		// arbitrary integer. Without it an owner could place a role near the column's maximum and the next
+		// creation's renumber would overflow, taking role creation in that guild out permanently.
+		maxPosition := s.maxRolesPerGuild
+
+		seen := make(map[snowflake.ID]struct{}, len(in))
+		for _, want := range in {
+			role, ok := byID[want.ID]
+			if !ok {
+				return httpx.ErrNotFound
+			}
+			if _, duplicate := seen[want.ID]; duplicate {
+				return httpx.Errorf(httpx.ErrBadRequest, "a role appears more than once")
+			}
+			seen[want.ID] = struct{}{}
+
+			if role.IsDefault {
+				return httpx.Errorf(ErrDefaultRoleImmutable, "the default role cannot be repositioned")
+			}
+			if want.Position < 1 || want.Position > maxPosition {
+				// Zero is @everyone's and below zero is beneath the floor every layer-4 resolution starts
+				// from. A client sending zero-based positions is the ordinary way in, since role lists
+				// render 0-indexed.
+				return httpx.Errorf(httpx.ErrBadRequest,
+					"position must be between 1 and %d", maxPosition)
+			}
+
+			// Both ends. See the doc comment: checking only the destination lets a caller demote a role
+			// that is currently above them, which is a takeover in three requests.
+			if !allowed.outranks(role.Position) || !allowed.outranks(want.Position) {
+				return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
+			}
+		}
+
+		// The resulting arrangement, including the roles the request does not mention. A request that is
+		// internally consistent can still collide with one of those, and a collision is the corruption
+		// this whole operation exists to avoid producing.
+		final := make(map[int32]snowflake.ID, len(current))
+		for _, r := range current {
+			if r.IsDefault {
+				continue
+			}
+			id := snowflake.ID(r.ID)
+			position := r.Position
+			for _, want := range in {
+				if want.ID == id {
+					position = want.Position
+					break
+				}
+			}
+			if other, taken := final[position]; taken {
+				return httpx.Errorf(httpx.ErrConflict,
+					"the result would put two roles at position %d — role %s is already there",
+					position, other)
+			}
+			final[position] = id
+		}
+
+		changes := make(map[string]any, len(in))
+		for _, want := range in {
+			affected, err := q.SetRolePosition(ctx, db.SetRolePositionParams{
+				Position: want.Position,
+				ID:       int64(want.ID),
+				GuildID:  int64(guildID),
+			})
+			if err != nil {
+				return fmt.Errorf("guilds: set role position: %w", err)
+			}
+			if affected == 0 {
+				// The role went away between the read and the write.
+				//
+				// An earlier comment here said the lock made this impossible. It does not: DeleteRole
+				// never takes LockGuildRolePositions — it has no read-modify-write of its own to protect
+				// — so a concurrent delete of a role named in this request is not serialized against it.
+				// Returning a raw error made that race a 500; it is a conflict, and the caller's remedy is
+				// to re-read the role list and try again.
+				return httpx.Errorf(httpx.ErrConflict,
+					"a role in this request was deleted while it was being reordered")
+			}
+			changes[want.ID.String()] = want.Position
+		}
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionRoleReorder, nil, changes,
+		); err != nil {
+			return err
+		}
+
+		reordered, err := q.ListGuildRoles(ctx, int64(guildID))
+		if err != nil {
+			return fmt.Errorf("guilds: list roles: %w", err)
+		}
+		out = make([]Role, 0, len(reordered))
+		for _, row := range reordered {
+			out = append(out, roleFromRow(row))
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return out, nil
 }

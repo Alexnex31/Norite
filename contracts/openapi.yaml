@@ -2456,9 +2456,15 @@ paths:
         ceiling enforced when a channel is created, not by a `limit` the caller passes.
 
 
-        **Not filtered by per-channel permission overwrites at this version.** Nothing can write an
-        overwrite until the overwrite endpoints exist, so every channel resolves identically today; once
-        they do, this listing hides channels the caller cannot view.
+        **Filtered by per-channel view permission.** A channel the caller cannot view is absent rather
+        than redacted — its name, topic and category are not information somebody denied it should be able
+        to read. Three authorities see everything: an Instance Admin, the guild owner, and any member
+        holding `ADMINISTRATOR`.
+
+
+        Two queries regardless of how many channels the guild has, not two per channel. The caller is
+        resolved once at guild level and every channel's overwrites are read in one statement, then
+        applied per channel from that single result.
       operationId: listGuildChannels
       tags: [guilds]
       responses:
@@ -2585,6 +2591,239 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /guilds/{guild_id}/members/{user_id}/roles/{role_id}:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: role_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    put:
+      summary: Give a member a role
+      description: >
+        Requires `MANAGE_ROLES`, and three further checks.
+
+
+        The role must be **strictly below the caller's own highest**, and so must the target — except when
+        the target is the caller, which skips only the second comparison. Nobody outranks themselves, so a
+        flat rule would make self-assignment impossible for every non-owner and break self-service roles;
+        the role check is the one that has to hold on yourself, and it does.
+
+
+        **The role's permissions must be a subset of the caller's own.** This is the one deliberate
+        departure from Discord in this API. Discord gates assignment on hierarchy alone and relies on
+        powerful roles being placed high, so a bot role low in the list carrying `MANAGE_GUILD` is a
+        misconfiguration rather than a vulnerability there. That is a configuration assumption a public
+        instance should not rest on: without this, a moderator holding `MANAGE_ROLES` and not
+        `MANAGE_GUILD` assigns such a role to an account they control and has `MANAGE_GUILD` by proxy.
+
+
+        `@everyone` cannot be assigned — every member holds it by virtue of membership and it is never
+        stored as a grant.
+
+
+        Idempotent: assigning a role the member already holds succeeds.
+      operationId: addGuildMemberRole
+      tags: [guilds]
+      responses:
+        "200":
+          description: The member, with the roles they now hold.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller lacks `MANAGE_ROLES`, is an API token without `guilds.write`, does not outrank the
+            role or the target, or does not hold every permission the role carries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            No such role in this guild, or no such member of it. A non-member target answers the same as a
+            user id that does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The role is `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Take a role away from a member
+      description: >
+        The same checks, and it is checked like an assignment rather than like a cleanup.
+
+
+        Removing a role reads as a pure demotion and stopped being one when roles gained channel
+        overwrites: the commonest use of one is a `muted` role denying `SEND_MESSAGES`, and taking that
+        role off somebody lifts the restriction it carried. So the caller must hold whatever the role's
+        overwrites touch, in the channels they touch — and the role must be strictly below their own
+        highest **including when they are removing it from themselves**, which is why nobody can shed the
+        role that establishes their own position.
+
+
+        Idempotent: removing a role the member does not hold succeeds.
+      operationId: removeGuildMemberRole
+      tags: [guilds]
+      responses:
+        "200":
+          description: The member, with the roles they now hold.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: As for `PUT`, including the check over what the role's overwrites carry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The role is `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /channels/{channel_id}/permissions/{overwrite_id}:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: overwrite_id
+        in: path
+        required: true
+        description: >
+          The role or member this overwrite targets. Which of the two it is comes from `type` in the body
+          — the id alone does not say, and looking it up in both tables would make the answer depend on
+          which one happened to hold it.
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    put:
+      summary: Create or replace a channel permission overwrite
+      description: >
+        ADR 0008 layer 5. Requires `MANAGE_ROLES` **resolved in this channel**, not at guild level — a
+        caller denied a permission here would otherwise be able to allow it back to themselves in one
+        request.
+
+
+        Three further checks, none of which is the permission check:
+
+
+        The target must exist **in this guild**, verified against the `type` sent rather than against
+        either table. A request naming a role id while claiming a member target is refused rather than
+        stored, because the row would be inert and no client could explain it.
+
+
+        The caller must **outrank the target** — a role strictly below their own highest, or a member
+        whose highest role is strictly below it. Naming yourself is exempt from this comparison and from
+        nothing else, since nobody outranks themselves and the escalation rule below is what bounds that
+        case.
+
+
+        The caller may only name permissions they themselves hold in this channel, in **either** field.
+        Denying is restricted as well as allowing, matching Discord. And the check covers the union of
+        what the request *changes*, not what it writes: replacing an existing overwrite with an empty one
+        removes whatever it allowed or denied, so those bits are part of the change. Without that,
+        blanking a row that denies you something grants it to you.
+
+
+        Idempotent. An omitted `allow` or `deny` means empty, not "leave alone" — this is a `PUT` and it
+        replaces the row it names.
+      operationId: setChannelPermissionOverwrite
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetOverwriteRequest"
+      responses:
+        "200":
+          description: The overwrite, as written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionOverwrite"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller lacks `MANAGE_ROLES` in this channel, is an API token without the `guilds.write`
+            scope, does not outrank the target, or named a permission they do not hold here. The message
+            names neither the missing permission nor any position — both are a map of the guild's
+            configuration handed to somebody probing its edges.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The channel is at its ceiling of 50 permission overwrites.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Delete a channel permission overwrite
+      description: >
+        Every check `PUT` makes, including the escalation one — which is the half that looks unnecessary
+        and is not. Deleting an overwrite changes exactly the permissions it allowed or denied, so a
+        caller who may not name those bits may not remove them.
+
+
+        Carries a body, unusually for a `DELETE`, because the target is polymorphic and the path id does
+        not say which kind it is, and looking it up in both tables would make the answer depend on which
+        one happened to hold it. An earlier version of this paragraph justified the body by saying a query
+        parameter would land in the request log; it would not, since the logger records the path and never
+        the query string.
+      operationId: deleteChannelPermissionOverwrite
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteOverwriteRequest"
+      responses:
+        "204":
+          description: The overwrite is gone.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            As for `PUT`, including the escalation check over the bits the removed row carried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /guilds/{guild_id}/roles:
     parameters:
       - name: guild_id
@@ -2626,19 +2865,18 @@ paths:
         Requires `MANAGE_ROLES`, **and refuses to grant a permission the caller does not hold**.
 
 
+        **The new role is created at the bottom of the hierarchy**, immediately above `@everyone`, and
+        every other role shifts up one. Created at the top it would be a role its own creator could not
+        then edit, delete, assign or reposition, since all four require the role to be strictly below the
+        caller's own highest — a dead end reachable on a moderator's first use of this endpoint.
+
+
         That second half is not a nicety. Without it `MANAGE_ROLES` is every permission: create a role
         carrying `ADMINISTRATOR`, assign it to yourself, and the hierarchy is gone. An owner and an
         administrator pass it trivially because they hold everything; an Instance Admin passes above the
         guild entirely.
 
 
-        The new role is positioned above every existing role — one above the highest that exists, not the
-        role count, which would collide as soon as anything had been deleted. Position is not settable here:
-        reordering is a multi-row operation and role hierarchy, which governs who may manage whom, arrives
-        with the permission-overwrite endpoints.
-
-
-        **A guild holds at most 250 roles**, bounded at creation for the reason the channel ceiling is.
       operationId: createGuildRole
       tags: [guilds]
       requestBody:
@@ -2675,6 +2913,62 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+    patch:
+      summary: Reorder a guild's roles
+      description: >
+        A bulk rearrangement, and it is bulk because reordering is a multi-row swap. Moving a role from 2
+        to 5 means moving whatever sits at 3, 4 and 5 as well; done as separate requests there is a window
+        between each where two roles share a position, and two roles at one position are neither above nor
+        below each other — which dissolves the comparison every permission check here rests on. One
+        request, one transaction, one lock.
+
+
+        Requires `MANAGE_ROLES`. **Both the current and the requested position of every role named must be
+        strictly below the caller's own highest.** Checking only the destination is not enough: a caller
+        could name a role above them and move it below them, and from there edit, delete or assign it.
+
+
+        The resulting arrangement must leave no two non-default roles at the same position, checked
+        against the roles the request does not mention as well as within it. `@everyone` cannot be moved,
+        and nothing else may take position 0 — it is `@everyone`'s, and a role sharing the floor confers
+        no standing on whoever holds it. Positions run from 1 to the instance's role ceiling.
+      operationId: reorderGuildRoles
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReorderRolesRequest"
+      responses:
+        "200":
+          description: The guild's roles, in their new order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Role"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller lacks `MANAGE_ROLES`, is an API token without `guilds.write`, or named a role at or
+            above their own highest — at either end of the move.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >
+            The result would put two roles at the same position, or the request names `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /guilds/{guild_id}/roles/{role_id}:
     parameters:
       - name: guild_id
@@ -2690,7 +2984,12 @@ paths:
     patch:
       summary: Update a role
       description: >
-        Partial. Requires `MANAGE_ROLES`, and the same refusal to grant permissions the caller does not
+        Partial. Requires `MANAGE_ROLES`, **and that the role be strictly below the caller's own highest**
+        — the escalation rule bounds which permissions may be granted and says nothing about which role
+        may be given them, so without the position check a moderator could edit the administrator role.
+
+
+        Also the same refusal to grant permissions the caller does not
         hold.
 
 
@@ -2831,6 +3130,16 @@ paths:
 
         `mute` and `deaf` are the server-side, moderator-set values. They are distinct from the self-mute
         and self-deafen a client sets on itself, which live in voice state rather than here.
+
+
+        **The caller must also outrank the target** — the target's highest role strictly below the
+        caller's own. Holding the permission is not the same as outranking the person, and without this a
+        `MUTE_MEMBERS` holder could silence an administrator.
+
+
+        One exception: setting **your own** nickname skips the comparison, since nobody outranks
+        themselves and the alternative is that no member can rename themselves at all. It applies to the
+        nickname alone — clearing your own server-mute would undo the moderation the bit exists for.
       operationId: updateGuildMember
       tags: [guilds]
       requestBody:
@@ -2857,9 +3166,18 @@ paths:
     delete:
       summary: Remove a member, or leave
       description: >
-        Removing somebody else requires `KICK_MEMBERS`. Removing **yourself** is leaving, and requires no
-        permission beyond being a member — nobody should need a moderation bit to walk out of a room. Both
-        write an audit entry, because "who left" is exactly what that log is read for.
+        Removing somebody else requires `KICK_MEMBERS` **and outranking them** — their highest role
+        strictly below the caller's own. Holding the permission is not the same as outranking the person.
+
+
+        Removing **yourself** is leaving, and requires no permission beyond being a member — nobody should
+        need a moderation bit to walk out of a room. It is the one self-action exempt from the hierarchy
+        entirely, and not because it is a demotion: removing a role looks like one too and stopped being
+        one when roles gained channel overwrites. Leaving forfeits every permission in the guild at once,
+        so it cannot be a route to gaining one.
+
+
+        Both write an audit entry, because "who left" is exactly what that log is read for.
 
 
         The **owner cannot be removed by either route**, including by themselves: the owner is the tier
@@ -3705,11 +4023,27 @@ components:
       type: object
       required:
         [id, guild_id, type, parent_id, name, topic, position, nsfw, last_message_id, bitrate, user_limit,
-         created_at, updated_at]
+         created_at, updated_at, permission_overwrites]
       additionalProperties: false
       properties:
         id:
           $ref: "#/components/schemas/Snowflake"
+        permission_overwrites:
+          type: array
+          description: >
+            Every overwrite configured on this channel — as configured, not as resolved for the caller.
+
+
+            Required and never null, on every route that returns a channel. An omitted array and an empty
+            one would be one schema meaning two things depending on which route produced it, and a client
+            refreshing its cache from a response is entitled to read this as the whole truth.
+
+
+            Present on the listing because a permission editor cannot be drawn without it and there is no
+            single-channel `GET` to ask instead. The listing already reads every channel in the guild, so
+            one further query answers the whole sidebar rather than one request per tab opened.
+          items:
+            $ref: "#/components/schemas/PermissionOverwrite"
         guild_id:
           oneOf:
             - $ref: "#/components/schemas/Snowflake"
@@ -3822,6 +4156,94 @@ components:
           type: integer
           minimum: 0
           maximum: 99
+
+    ReorderRolesRequest:
+      type: object
+      additionalProperties: false
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          minItems: 1
+          maxItems: 250
+          description: >
+            The roles to move and where. Roles not named keep their position — but are still checked, since
+            the resulting arrangement must not collide with them. Capped at 250 entries, which is
+            the *default* role ceiling — an instance configured with a higher one reorders in batches. The
+            cap is a fixed transport bound; the range each `position` must fall in tracks the instance's
+            actual ceiling.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, position]
+            properties:
+              id:
+                $ref: "#/components/schemas/Snowflake"
+              position:
+                type: integer
+                format: int32
+                minimum: 1
+                description: >
+                  From 1 to the instance's role ceiling. Zero is `@everyone`'s and is refused — a client
+                  sending zero-based positions is the ordinary way in, since role lists render 0-indexed.
+
+    PermissionOverwrite:
+      type: object
+      description: >
+        One channel permission overwrite — ADR 0008 layer 5.
+
+
+        `target_id` is polymorphic: a role id when `type` is 0, a user id when it is 1. It carries no
+        foreign key for that reason, which is why deleting a role or removing a member deletes their
+        overwrites explicitly rather than leaving the database to cascade.
+      additionalProperties: false
+      required: [channel_id, type, target_id, allow, deny]
+      properties:
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+        type:
+          type: integer
+          format: int32
+          enum: [0, 1]
+          description: 0 role, 1 member.
+        target_id:
+          $ref: "#/components/schemas/Snowflake"
+        allow:
+          $ref: "#/components/schemas/Permissions"
+        deny:
+          $ref: "#/components/schemas/Permissions"
+
+    SetOverwriteRequest:
+      type: object
+      description: >
+        A replacement, not a patch. An omitted `allow` or `deny` means empty — there is no way to change
+        one and leave the other, because the row is written whole.
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: integer
+          format: int32
+          enum: [0, 1]
+          description: >
+            Which kind of thing `overwrite_id` names. Required, and validated rather than stored: a value
+            the resolver would ignore is refused, so the table cannot accumulate rows that resolve to
+            nothing and that no cleanup path knows about.
+        allow:
+          $ref: "#/components/schemas/Permissions"
+        deny:
+          $ref: "#/components/schemas/Permissions"
+
+    DeleteOverwriteRequest:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: integer
+          format: int32
+          enum: [0, 1]
+          description: Which kind of thing `overwrite_id` names.
 
     Role:
       type: object

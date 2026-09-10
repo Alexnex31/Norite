@@ -72,12 +72,15 @@ func (h *Handler) Routes(r chi.Router) {
 
 		r.With(read).Get("/roles", h.listRoles)
 		r.With(write).Post("/roles", h.createRole)
+		r.With(write).Patch("/roles", h.reorderRoles)
 		r.With(write).Patch("/roles/{role_id}", h.updateRole)
 		r.With(write).Delete("/roles/{role_id}", h.deleteRole)
 
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)
 		r.With(write).Delete("/members/{user_id}", h.removeMember)
+		r.With(write).Put("/members/{user_id}/roles/{role_id}", h.assignRole)
+		r.With(write).Delete("/members/{user_id}/roles/{role_id}", h.unassignRole)
 	})
 
 	// Mounted outside the guild group because these paths carry no guild. That is not a routing
@@ -86,6 +89,14 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Route("/channels/{channel_id}", func(r chi.Router) {
 		r.With(write).Patch("/", h.updateChannel)
 		r.With(write).Delete("/", h.deleteChannel)
+
+		// The overwrite pair. Scoped like everything else — M12 shipped fifteen guild routes with no
+		// scope at all and a review found an identify-only API token deleting a guild, so a new route
+		// without one is the mistake this package has already made once. This group is where it is
+		// easiest to make again: it is small, it sits outside the guild tree, and it does not look like
+		// the guild surface.
+		r.With(write).Put("/permissions/{overwrite_id}", h.setOverwrite)
+		r.With(write).Delete("/permissions/{overwrite_id}", h.deleteOverwrite)
 	})
 }
 
@@ -569,14 +580,194 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return httpx.DecodeAndValidate(w, r, h.validate, dst)
 }
 
+type reorderRolesRequest struct {
+	// An object wrapping the array rather than a bare array, so the request can carry validate tags and
+	// so a later field has somewhere to go without changing the shape a client sends.
+	//
+	// A fixed 250, which is the *default* role ceiling and not the configured one — a validator tag is
+	// evaluated at construction and cannot read config. So this is a transport-layer sanity cap on how
+	// long a list may be, and the service's own bound on each position (config.MaxRolesPerGuild) is the
+	// one that tracks the instance. They coincide on a default instance and diverge on one configured
+	// higher, where a guild holding more than 250 roles has to reorder them in batches. Stated because
+	// the two numbers look like the same number.
+	Roles []rolePositionRequest `json:"roles" validate:"required,min=1,max=250,dive"`
+}
+
+type rolePositionRequest struct {
+	ID snowflake.ID `json:"id" validate:"required"`
+	// A pointer so an omitted position is a validation error rather than a silent zero — and zero is
+	// exactly the value that would collide with @everyone.
+	Position *int32 `json:"position" validate:"required"`
+}
+
+func (h *Handler) reorderRoles(w http.ResponseWriter, r *http.Request) {
+	var req reorderRolesRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+
+	in := make([]RolePosition, 0, len(req.Roles))
+	for _, want := range req.Roles {
+		in = append(in, RolePosition{ID: want.ID, Position: *want.Position})
+	}
+
+	out, err := h.svc.ReorderRoles(r.Context(), actor, guildID, in)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, out)
+}
+
+func (h *Handler) assignRole(w http.ResponseWriter, r *http.Request) { h.changeMemberRole(w, r, true) }
+func (h *Handler) unassignRole(w http.ResponseWriter, r *http.Request) {
+	h.changeMemberRole(w, r, false)
+}
+
+// changeMemberRole serves both verbs. Neither carries a body: the path names everything the operation
+// needs, and both are idempotent, so there is nothing for a body to add.
+func (h *Handler) changeMemberRole(w http.ResponseWriter, r *http.Request, assigning bool) {
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+	userID, ok := h.pathID(w, r, "user_id")
+	if !ok {
+		return
+	}
+	roleID, ok := h.pathID(w, r, "role_id")
+	if !ok {
+		return
+	}
+
+	change := h.svc.UnassignRole
+	if assigning {
+		change = h.svc.AssignRole
+	}
+
+	member, err := change(r.Context(), actor, guildID, userID, roleID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	// The member, with the roles they now hold. UpdateMember returns the same shape for the same reason:
+	// a client refreshing its cache from this response is entitled to read `roles` as the whole truth,
+	// and M12 shipped it returning nil until a review caught that.
+	httpx.WriteJSON(w, r, http.StatusOK, member)
+}
+
+// --- permission overwrites ---
+
+type setOverwriteRequest struct {
+	// Type is the target kind: 0 role, 1 member. Required and validated against the two the resolver
+	// understands, rather than stored and silently ignored.
+	//
+	// A pointer because 0 is a meaningful value — `required` on an int16 rejects the role case, which is
+	// the common one.
+	Type *int16 `json:"type" validate:"required,oneof=0 1"`
+	// Allow and Deny arrive as quoted decimal strings, like every other permission field on this surface.
+	Allow *roles.Permission `json:"allow"`
+	Deny  *roles.Permission `json:"deny"`
+}
+
+func (h *Handler) setOverwrite(w http.ResponseWriter, r *http.Request) {
+	var req setOverwriteRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	actor, channelID, ok := h.actorAndID(w, r, "channel_id")
+	if !ok {
+		return
+	}
+	targetID, ok := h.pathID(w, r, "overwrite_id")
+	if !ok {
+		return
+	}
+
+	// Absent means "nothing", not "leave alone": a PUT replaces the row it names, so an omitted allow is
+	// an empty allow. That is the whole difference between this verb and the PATCHes above it, and it is
+	// why neither field carries a clear-flag the way a partial update would.
+	var allow, deny roles.Permission
+	if req.Allow != nil {
+		allow = *req.Allow
+	}
+	if req.Deny != nil {
+		deny = *req.Deny
+	}
+
+	out, err := h.svc.SetOverwrite(r.Context(), actor, SetOverwriteInput{
+		ChannelID:  channelID,
+		TargetType: *req.Type,
+		TargetID:   targetID,
+		Allow:      allow,
+		Deny:       deny,
+	})
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, out)
+}
+
+type deleteOverwriteRequest struct {
+	Type *int16 `json:"type" validate:"required,oneof=0 1"`
+}
+
+func (h *Handler) deleteOverwrite(w http.ResponseWriter, r *http.Request) {
+	// A body on a DELETE, which is unusual and is the price of a polymorphic target: the path carries an
+	// id that names either a role or a member, and nothing about the id says which. Guessing by looking
+	// the id up in both tables would make the answer depend on which one happened to hold it.
+	//
+	// An earlier version of this comment justified the choice by saying a query parameter would land in
+	// the request log. It would not: the logger records r.URL.Path and never RawQuery, deliberately, and
+	// M9's reasoning was about the *path* rather than the query string. The design stands on the
+	// polymorphism alone.
+	var req deleteOverwriteRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	actor, channelID, ok := h.actorAndID(w, r, "channel_id")
+	if !ok {
+		return
+	}
+	targetID, ok := h.pathID(w, r, "overwrite_id")
+	if !ok {
+		return
+	}
+
+	if err := h.svc.DeleteOverwrite(r.Context(), actor, channelID, *req.Type, targetID); err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // writeErr maps a service error to its response.
 //
 // Most refusals arrive as httpx sentinels already — authorize returns them directly, so the anti-
 // enumeration split between 404 and 403 is decided in one place and cannot be softened here.
 func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, ErrOutranked):
+		// 403 rather than 404. The caller is a member holding PermManageRoles who can already list the
+		// guild's roles and members, so refusing them by name discloses nothing they cannot read — and
+		// answering 404 for something they can see in their own client would be a bug rather than a
+		// defense. The message names neither the target's position nor their own.
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrForbidden, "%s", messageOf(err)))
+
 	case errors.Is(err, ErrDefaultRoleImmutable), errors.Is(err, ErrCannotRemoveOwner),
-		errors.Is(err, ErrGuildFull):
+		errors.Is(err, ErrGuildFull), errors.Is(err, ErrChannelFull):
 		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrConflict, "%s", messageOf(err)))
 
 	case errors.Is(err, ErrUnsupportedChannelType), errors.Is(err, ErrAlreadyAMember):

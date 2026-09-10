@@ -31,8 +31,22 @@ const (
 	ActionRoleCreate    = "role.create"
 	ActionRoleUpdate    = "role.update"
 	ActionRoleDelete    = "role.delete"
-	ActionMemberUpdate  = "member.update"
-	ActionMemberRemove  = "member.remove"
+	// One entry for a whole reorder rather than one per row moved: the operation is a single atomic
+	// rearrangement and splitting it would make an operator reading the log reconstruct which entries
+	// belonged together.
+	ActionRoleReorder  = "role.reorder"
+	ActionMemberUpdate = "member.update"
+	ActionMemberRemove = "member.remove"
+
+	// Assignment is its own pair of verbs rather than a shape of member.update, because what an operator
+	// reads this log for is "who was given what", and burying that in a changes field makes it a scan.
+	ActionMemberRoleAdd    = "member.role_add"
+	ActionMemberRoleRemove = "member.role_remove"
+
+	// One action for writing an overwrite rather than separate create and update verbs, because the
+	// endpoint is a PUT and does not distinguish them either. What changed is in the entry's `changes`.
+	ActionOverwriteSet    = "overwrite.set"
+	ActionOverwriteDelete = "overwrite.delete"
 )
 
 // Channel types, as stored in channels.type.
@@ -127,6 +141,20 @@ type Channel struct {
 	UserLimit     *int32        `json:"user_limit"`
 	CreatedAt     time.Time     `json:"created_at"`
 	UpdatedAt     time.Time     `json:"updated_at"`
+
+	// PermissionOverwrites is every overwrite on this channel — ADR 0008 layer 5, as configured rather
+	// than as resolved.
+	//
+	// Embedded rather than served from a route of its own, because a permission editor cannot be drawn
+	// from a listing that omits them and there is no GET /channels/{id} to ask instead. The listing
+	// already reads every channel in the guild, so one more query answers the whole sidebar; a per-channel
+	// fetch would be a request each time somebody opened a tab, which is the chattiness rule 21 asks to be
+	// weighed at the time an endpoint is added.
+	//
+	// Never nil. An omitted array and an empty one would be one schema meaning two things depending on
+	// which route produced it, which is the bug M12 shipped on a member's `roles` and had to correct — a
+	// client refreshing its cache from a response is entitled to read this as the whole truth.
+	PermissionOverwrites []Overwrite `json:"permission_overwrites"`
 }
 
 // Member is the wire representation of a guild membership.
@@ -167,4 +195,28 @@ func idPtr(v *int64) *snowflake.ID {
 	}
 	id := snowflake.ID(*v)
 	return &id
+}
+
+// Overwrite is the wire representation of one channel permission overwrite.
+//
+// Three of its four values are 64-bit and every one of them marshals as a quoted string. target_id is a
+// snowflake (ADR 0003); allow and deny are permission bitfields, which M12 settled as quoted decimal for
+// the same reason — a 63-bit field and a float64 do not mix above 2^53, and a client that silently drops
+// the top bits of a permission set is worse than one that fails to parse.
+type Overwrite struct {
+	ChannelID snowflake.ID     `json:"channel_id"`
+	Type      int16            `json:"type"`
+	TargetID  snowflake.ID     `json:"target_id"`
+	Allow     roles.Permission `json:"allow"`
+	Deny      roles.Permission `json:"deny"`
+}
+
+func overwriteFromRow(row db.PermissionOverwrite) Overwrite {
+	return Overwrite{
+		ChannelID: snowflake.ID(row.ChannelID),
+		Type:      row.TargetType,
+		TargetID:  snowflake.ID(row.TargetID),
+		Allow:     roles.PermissionFromInt64(row.Allow),
+		Deny:      roles.PermissionFromInt64(row.Deny),
+	}
 }
