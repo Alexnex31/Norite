@@ -1163,6 +1163,13 @@ Where they exist, invoke with `/<name>`:
 - `/security-audit` — this project's own security checklist (permissions, audit log, token/credential
   hygiene, plugin sandbox boundaries, E2E exclusion, XSS/terminal-escape safety, secrets) — complements the
   generic `/security-review` skill.
+- `/security-sweep` — the third security mode, and the one whose durable half is committed. `/security-audit`
+  walks the 24 rules and cannot find what no rule covers; `/security-review` finds OWASP-class problems and
+  **destroys everything it does not report** — a confidence floor of 8 plus category exclusions that forbid
+  reporting unbounded growth and rate limiting, both of which are invariants here. The sweep is that
+  discovery with no floor and no exclusions, where **verifying each candidate against the code replaces the
+  threshold as the noise control**, and every candidate ends in one of three buckets: fix now, deferred to a
+  named roadmap entry, or rejected into `docs/security-ledger.md`.
 - `/optimization-review` — the performance counterpart to `/security-audit`, against `docs/architecture.md`
   §15 and rule 7: hot-path identification first, then missing indexes, N+1s, avoidable round trips,
   per-request work that belongs at construction, allocation, backpressure and payload shape. Findings carry
@@ -1189,6 +1196,14 @@ should be fixed, not tolerated:
 - `docs/roadmap.md` — **what gets built, in what order.** `M0`–`M125`, each with scope, dependencies, and a
   checkable "done when". The single source of truth for milestone numbering; `architecture.md` §13 only
   points here.
+- `docs/security-ledger.md` — **every security finding this project rejected, and why.** Not a
+  vulnerability list (those get fixed, and the commit is the record) and not a backlog (a finding worth
+  doing later goes in the roadmap entry that inherits it). It holds the third case, and it exists because
+  a filtered finding is a destroyed one: on the M13 branch a 403-versus-404 oracle was filtered at
+  confidence 6, vanished, was re-derived by the next review pass, and was real. Every other kind of
+  decision here has somewhere durable — ADRs, roadmap entries, the optimization review's "deliberate
+  non-optimizations confirmed" — and security rejections were the one kind with nowhere, so they came
+  back. **Read it before reporting a finding**; each entry carries the condition that would reopen it.
 - `docs/adr/` — **why the contested calls went the way they did.** Superseded ADRs stay, marked as such in
   both directions. `SECURITY.md` covers vulnerability-reporting
 process, not architecture.
