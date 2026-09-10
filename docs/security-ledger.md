@@ -91,3 +91,36 @@ would flip them.
   feeds the filter is a server-side input and is never returned as-is.
 - **Reopens if**: the channel listing stops being filtered, or the array is added to a response that is
   not view-scoped.
+
+### A member may hold every role in the guild, and the authority query pays for it
+- **Raised**: M13, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: nothing caps roles per member. Measured on a 254-role guild with one member holding all of
+  them, `ListGuildMemberAuthority` returns 254 rows and 1,032 buffers at 0.230 ms, against a handful of
+  buffers and 0.019 ms for an ordinary member — roughly twelve times, on the query that runs before every
+  guild mutation and every listing. Bounded by the 250-role ceiling, requires `PermManageRoles` and roles
+  below the caller's standing to construct, and Discord accepts the same shape. A per-member cap would put
+  a check on the hottest path in the guild surface for a configuration a guild has to build deliberately.
+- **Reopens if**: the role ceiling is raised substantially, or the authority resolution stops being
+  per-request (a cache lands at M18, which changes what this costs).
+
+### The member listing's payload scales with roles held
+- **Raised**: M13, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: a page is 100 members and each may hold every role, so the worst case is 25,000 role ids —
+  about 513 kB of ids before the member rows. That is §15.2's "payload that scales with something the
+  client did not choose", except that it *is* bounded, by the same ceiling and for the same reason as the
+  entry above.
+- **Reopens if**: the role ceiling is raised substantially, or the member page size stops being capped
+  at 100.
+
+### Role creation renumbers up to 250 rows in the default limiter bucket
+- **Raised**: M13, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: every create renumbers the guild's live non-default roles, so create-and-delete in a loop
+  rewrites up to 250 rows per request at the global REST rate. This project has precedent for stricter
+  buckets — `auth` at 20/M, `device-poll` at 120/M — and this does not earn one: the caller is
+  authenticated, holds `PermManageRoles` in a guild they are already in, and the work per request is
+  bounded by the ceiling.
+- **Reopens if**: role creation becomes reachable without guild membership, or the renumber grows beyond
+  the ceiling's bound.
