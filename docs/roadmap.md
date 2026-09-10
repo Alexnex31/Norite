@@ -444,8 +444,30 @@ of this section.
   the entry afterwards. The durable record of an instance-level action is rule 14's `instance_audit_log`,
   at M72 — M14 should not try to solve it here.
 
+  **Two coverage tests here claim to enumerate the route surface and one of them actually does.** M14
+  inherits the job of making that true of both, because it is the milestone that needs the same walk
+  anyway — rule 2's "exactly one audit entry per mutation" is a property over *every* mutating route, and
+  a hand-written list of them is the same shape as the problem below.
+
+  `cmd/server/contract_test.go` calls `chi.Walk` on the real router, so a route mounted without a contract
+  entry fails the build — which is how M13's overwrite endpoints were caught the instant they mounted.
+  `TestEveryMutatingGuildRouteRefusesANonMember` says in its own doc comment that it exercises "every
+  non-GET route the guild handler registers", and iterates a slice of literals somebody types by hand. It
+  asks the router nothing. During M13 it needed routes adding twice — the overwrite pair, then the role
+  reorder — and both times a person noticed rather than the test.
+
+  That is the more dangerous of the two to have wrong. A missing contract entry is a documentation bug; a
+  missing entry there means a mutating route was never checked for the anti-enumeration property, on a
+  test whose entire stated purpose is that this cannot happen.
+
+  The fix is `chi.Walk` plus a body-per-route map, and the load-bearing part is not the walk: it is that
+  an unknown route must **fail** rather than be skipped. A walk that silently ignores routes it has no
+  body for is the hand-written table again, wearing a mechanism's clothes.
+
   Done when: a guild's audit log can be read back, cursor-paginated, with a `changes` diff naming what
-  actually changed; and the coverage test extends M12's to assert the diff rather than only the entry.
+  actually changed; the coverage test extends M12's to assert the diff rather than only the entry; and
+  both route-surface tests derive their route list from the router rather than from a literal, failing on
+  a route they have no case for.
 - **M15 — Core messaging CRUD**: send/edit/delete REST endpoints for channel messages, permission-checked via
   the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14. Done when: a
   permitted member can send/edit/delete a message via the REST API, an unpermitted one is rejected, and each
