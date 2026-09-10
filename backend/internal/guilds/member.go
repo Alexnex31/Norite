@@ -142,8 +142,42 @@ func (s *Service) UpdateMember(
 			return httpx.Errorf(httpx.ErrBadRequest, "no fields to update")
 		}
 
-		if _, err := authorizeWith(ctx, q, actor, guildID, 0, need); err != nil {
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, need)
+		if err != nil {
 			return err
+		}
+
+		// Layer 4, on the person — the half M12 shipped without and a security review found.
+		//
+		// The permission was checked and the *relative standing* of actor and target never was, so a
+		// PermMuteMembers holder could server-mute an administrator. The same shape sat on RemoveMember.
+		// It goes at the top of the operation rather than beside the two fields the review happened to
+		// name, because `nickname` is the third and renaming somebody above you is the same class of act.
+		//
+		// # The one carve-out, and what it deliberately does not cover
+		//
+		// Setting your own nickname is not a hierarchy question — nobody outranks themselves, so without
+		// this no member could rename themselves at all, which is a regression on an endpoint M12 shipped
+		// working.
+		//
+		// Self-mute and self-deafen get no such exemption. A self-mute is a voice_states flag the client
+		// sets on itself (M25); this endpoint's mute and deaf are the *server-side* ones a moderator
+		// applies, and letting somebody clear their own would undo the moderation the bits exist for.
+		selfNicknameOnly := userID == actor.UserID && in.Mute == nil && in.Deaf == nil
+		if !selfNicknameOnly {
+			standing, err := q.GetMemberHighestRolePosition(ctx, db.GetMemberHighestRolePositionParams{
+				GuildID: int64(guildID),
+				UserID:  int64(userID),
+			})
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return httpx.ErrNotFound
+				}
+				return fmt.Errorf("guilds: get target standing: %w", err)
+			}
+			if !allowed.outranksMember(userID, standing) {
+				return httpx.Errorf(ErrOutranked, "you cannot act on a member above you")
+			}
 		}
 
 		row, err := q.UpdateGuildMember(ctx, db.UpdateGuildMemberParams{
@@ -226,11 +260,36 @@ func (s *Service) RemoveMember(
 		if userID == actor.UserID {
 			// Leaving. Still needs to be a member, which PermViewChannel establishes, and still writes an
 			// audit entry — "who left" is exactly what an operator reads this log for.
+			//
+			// The one self-action exempt from the hierarchy entirely, and the reason is not that it is a
+			// demotion — removing a role looked like one too and stopped being one when roles gained
+			// channel denies. Leaving forfeits every permission in the guild at once, so it cannot be a
+			// route to gaining one. That property, not the shape of the operation, is what earns it.
 			if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel); err != nil {
 				return err
 			}
-		} else if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermKickMembers); err != nil {
-			return err
+		} else {
+			allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermKickMembers)
+			if err != nil {
+				return err
+			}
+
+			// Layer 4, and M12 shipped without it: a PermKickMembers holder could kick an administrator.
+			// Below the guild read above, which established the guild exists, and below the permission
+			// check, because it reads a row about somebody the caller may not be entitled to know about.
+			standing, err := q.GetMemberHighestRolePosition(ctx, db.GetMemberHighestRolePositionParams{
+				GuildID: int64(guildID),
+				UserID:  int64(userID),
+			})
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return httpx.ErrNotFound
+				}
+				return fmt.Errorf("guilds: get target standing: %w", err)
+			}
+			if !allowed.outranksMember(userID, standing) {
+				return httpx.Errorf(ErrOutranked, "you cannot act on a member above you")
+			}
 		}
 
 		// The owner check comes *after* authorization, and the ordering is the whole point.

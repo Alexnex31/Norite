@@ -3134,6 +3134,16 @@ paths:
 
         `mute` and `deaf` are the server-side, moderator-set values. They are distinct from the self-mute
         and self-deafen a client sets on itself, which live in voice state rather than here.
+
+
+        **The caller must also outrank the target** — the target's highest role strictly below the
+        caller's own. Holding the permission is not the same as outranking the person, and without this a
+        `MUTE_MEMBERS` holder could silence an administrator.
+
+
+        One exception: setting **your own** nickname skips the comparison, since nobody outranks
+        themselves and the alternative is that no member can rename themselves at all. It applies to the
+        nickname alone — clearing your own server-mute would undo the moderation the bit exists for.
       operationId: updateGuildMember
       tags: [guilds]
       requestBody:
@@ -3160,9 +3170,18 @@ paths:
     delete:
       summary: Remove a member, or leave
       description: >
-        Removing somebody else requires `KICK_MEMBERS`. Removing **yourself** is leaving, and requires no
-        permission beyond being a member — nobody should need a moderation bit to walk out of a room. Both
-        write an audit entry, because "who left" is exactly what that log is read for.
+        Removing somebody else requires `KICK_MEMBERS` **and outranking them** — their highest role
+        strictly below the caller's own. Holding the permission is not the same as outranking the person.
+
+
+        Removing **yourself** is leaving, and requires no permission beyond being a member — nobody should
+        need a moderation bit to walk out of a room. It is the one self-action exempt from the hierarchy
+        entirely, and not because it is a demotion: removing a role looks like one too and stopped being
+        one when roles gained channel overwrites. Leaving forfeits every permission in the guild at once,
+        so it cannot be a route to gaining one.
+
+
+        Both write an audit entry, because "who left" is exactly what that log is read for.
 
 
         The **owner cannot be removed by either route**, including by themselves: the owner is the tier

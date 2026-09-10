@@ -741,3 +741,106 @@ func mustUnassign(t *testing.T, f *overwriteFixture, actor, target, role snowfla
 	_, err := f.svc.UnassignRole(t.Context(), userActor(actor), f.guildID, target, role)
 	return err
 }
+
+// TestAMemberAboveYourOwnCannotBeActedOn is the M12 security review's original finding, and the field it
+// did not name.
+//
+// The review found RemoveMember letting a PermKickMembers holder kick an administrator, and UpdateMember
+// letting a PermMuteMembers holder server-mute one. `nickname` is the third field on the same endpoint and
+// renaming somebody above you is the same class of act, so the check sits at the top of the operation
+// rather than beside the two the review happened to list.
+func TestAMemberAboveYourOwnCannotBeActedOn(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	// A member standing above the moderator, holding no permissions of their own — so the refusal is
+	// about position and cannot be mistaken for a permission check.
+	senior := f.newUser(ctx, "senior")
+	f.join(ctx, f.guildID, senior)
+	f.grantRole(ctx, f.guildID, senior, f.aboveRole)
+
+	// The moderator holds every bit these operations need, guild-wide.
+	f.exec(ctx, `UPDATE roles SET permissions = $1 WHERE id = $2`,
+		(roles.PermManageRoles | roles.PermViewChannel | roles.PermKickMembers |
+			roles.PermMuteMembers | roles.PermDeafenMembers | roles.PermManageGuild).Int64(),
+		int64(f.modRole))
+
+	mute, deaf := true, true
+	nickname := "renamed"
+
+	for _, tc := range []struct {
+		name  string
+		input UpdateMemberInput
+	}{
+		{"mute", UpdateMemberInput{Mute: &mute}},
+		{"deafen", UpdateMemberInput{Deaf: &deaf}},
+		{"rename", UpdateMemberInput{Nickname: &nickname}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := f.svc.UpdateMember(ctx, userActor(f.mod), f.guildID, senior, tc.input)
+			require.ErrorIs(t, err, ErrOutranked,
+				"holding the permission is not the same as outranking the person")
+		})
+	}
+
+	t.Run("kick", func(t *testing.T) {
+		err := f.svc.RemoveMember(ctx, userActor(f.mod), f.guildID, senior)
+		require.ErrorIs(t, err, ErrOutranked)
+	})
+
+	// Somebody below them is reachable by all four, so the refusals are about standing.
+	t.Run("a member below is still reachable", func(t *testing.T) {
+		_, err := f.svc.UpdateMember(ctx, userActor(f.mod), f.guildID, f.plain,
+			UpdateMemberInput{Mute: &mute})
+		require.NoError(t, err)
+		require.NoError(t, f.svc.RemoveMember(ctx, userActor(f.mod), f.guildID, f.plain))
+	})
+}
+
+// TestYouCanStillChangeYourOwnNickname is the carve-out, and its limit.
+//
+// Nobody outranks themselves, so widening the hierarchy check to every field of UpdateMember would have
+// made renaming yourself impossible — a regression on an endpoint M12 shipped working. Self-mute and
+// self-deafen get no exemption: those are the server-side bits a moderator applies, and clearing your own
+// would undo the moderation they exist for.
+func TestYouCanStillChangeYourOwnNickname(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermManageGuild)
+	ctx := t.Context()
+
+	nickname := "myself"
+	_, err := f.svc.UpdateMember(ctx, userActor(f.plain), f.guildID, f.plain,
+		UpdateMemberInput{Nickname: &nickname})
+	require.NoError(t, err, "a member must be able to rename themselves")
+
+	// Server-mute is a moderation bit, not a self-service one. Granted guild-wide and still refused,
+	// because the target is the actor and nobody outranks themselves.
+	f.exec(ctx, `UPDATE roles SET permissions = $1 WHERE id = $2`,
+		(roles.PermViewChannel | roles.PermManageGuild | roles.PermMuteMembers).Int64(),
+		int64(f.everyoneID))
+
+	unmute := false
+	_, err = f.svc.UpdateMember(ctx, userActor(f.plain), f.guildID, f.plain,
+		UpdateMemberInput{Mute: &unmute})
+	require.ErrorIs(t, err, ErrOutranked,
+		"clearing your own server-mute would undo the moderation the bit exists for")
+}
+
+// TestYouCanAlwaysLeave is the one self-action exempt from the hierarchy entirely.
+//
+// Not because it is a demotion — removing a role looked like one too, and stopped being one when roles
+// gained channel denies. Leaving forfeits every permission in the guild at once, so it cannot be a route
+// to gaining one. That property is what earns the exemption.
+func TestYouCanAlwaysLeave(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	// A member with no permissions at all, standing at the floor.
+	require.NoError(t, f.svc.RemoveMember(ctx, userActor(f.plain), f.guildID, f.plain))
+
+	// And the owner still cannot leave, because a guild without layer 2 has no layer 2 at all.
+	err := f.svc.RemoveMember(ctx, userActor(f.owner), f.guildID, f.owner)
+	require.ErrorIs(t, err, ErrCannotRemoveOwner)
+}
