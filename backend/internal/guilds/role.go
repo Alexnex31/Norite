@@ -158,8 +158,9 @@ func (s *Service) CreateRole(
 
 // UpdateRoleInput is a partial update. A nil field is left alone.
 //
-// Position is absent on purpose: reordering is a multi-row swap and hierarchy semantics are M13's. This
-// milestone stores the column and orders by it.
+// Position is absent on purpose, and not because reordering does not exist — ReorderRoles is in this
+// file. It is a multi-row swap: moving one role moves every role between it and its destination, so a
+// single-row update cannot express one without leaving two roles sharing a position part-way through.
 type UpdateRoleInput struct {
 	Name        *string
 	Color       *int32

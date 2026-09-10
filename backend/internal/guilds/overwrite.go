@@ -53,15 +53,15 @@ type SetOverwriteInput struct {
 //
 // # Resolved in the channel, not in the guild
 //
-// authorizeWith is given the channel id, so decision.permissions is what the caller holds *here*. At
-// guild level the escalation check asks the wrong question on the one endpoint whose entire subject is
-// per-channel permissions: a caller denied PermSendMessages in this channel would pass a guild-level
-// check and allow it back to themselves, in one request.
+// authorizeWith is given the channel id, so the decision's resolved permissions are what the caller holds
+// *here*. At guild level the escalation check asks the wrong question on the one endpoint whose entire
+// subject is per-channel permissions: a caller denied PermSendMessages in this channel would pass a
+// guild-level check and allow it back to themselves, in one request.
 func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOverwriteInput) (Overwrite, error) {
 	var out Overwrite
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		guildID, allowed, err := s.authorizeChannel(ctx, q, actor, in.ChannelID)
+		guildID, allowed, err := s.authorizeChannel(ctx, q, actor, in.ChannelID, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -158,7 +158,7 @@ func (s *Service) DeleteOverwrite(
 	ctx context.Context, actor auth.Actor, channelID snowflake.ID, targetType int16, targetID snowflake.ID,
 ) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		guildID, allowed, err := s.authorizeChannel(ctx, q, actor, channelID)
+		guildID, allowed, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -213,13 +213,13 @@ func (s *Service) DeleteOverwrite(
 	})
 }
 
-// authorizeChannel resolves a channel to its guild and authorizes PermManageRoles within it.
+// authorizeChannel resolves a channel to its guild and authorizes a permission within it.
 //
 // The guild comes off the channel row and never from the caller, because these routes carry no guild in
 // their path — the same reason UpdateChannel loads its own (rule 1). The channel id is passed to
 // authorizeWith so the decision is what the caller holds in *this* channel.
 func (s *Service) authorizeChannel(
-	ctx context.Context, q *db.Queries, actor auth.Actor, channelID snowflake.ID,
+	ctx context.Context, q *db.Queries, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
 ) (snowflake.ID, decision, error) {
 	row, err := q.GetChannel(ctx, int64(channelID))
 	if err != nil {
@@ -234,7 +234,7 @@ func (s *Service) authorizeChannel(
 		return 0, decision{}, err
 	}
 
-	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageRoles)
+	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, need)
 	if err != nil {
 		// A member of the guild who cannot *see* this channel is refused as though it were not there.
 		//
@@ -247,10 +247,16 @@ func (s *Service) authorizeChannel(
 		// Only the view permission is consulted here. Somebody who can see the channel and merely lacks
 		// PermManageRoles still gets 403, because for them the channel's existence was never a secret.
 		if errors.Is(err, httpx.ErrForbidden) {
-			if _, viewErr := authorizeWith(
-				ctx, q, actor, guildID, channelID, roles.PermViewChannel,
-			); viewErr != nil {
+			_, viewErr := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermViewChannel)
+			switch {
+			case viewErr == nil:
+				// They can see it, so its existence was never a secret. The original 403 stands.
+			case errors.Is(viewErr, httpx.ErrForbidden), errors.Is(viewErr, httpx.ErrNotFound):
 				return 0, decision{}, httpx.ErrNotFound
+			default:
+				// A database failure during the second check is not evidence about the channel. Reporting
+				// it as missing would turn a connection blip into a 404 the caller would cache as truth.
+				return 0, decision{}, viewErr
 			}
 		}
 		return 0, decision{}, err
@@ -344,8 +350,13 @@ func (s *Service) checkOverwriteTarget(
 // deny grants whatever it denied. Deleting the *role* that row names reaches the same outcome on every
 // channel at once, and reached it behind a guild-level permission check alone — so a member holding
 // PermManageRoles could escape a channel restriction by deleting the role carrying it, having been
-// refused a moment earlier when they tried to delete the overwrite directly. Found by a security review;
-// both paths now answer the same question.
+// refused a moment earlier when they tried to delete the overwrite directly. Found by a security review.
+//
+// **Two of the three paths that delete overwrites use this; RemoveMember deliberately does not.** Kicking
+// somebody deletes their member-tier rows, which is the same deletion — but guarding it would make a
+// member unkickable by holding an overwrite whose bits the moderator lacks, trading an escalation for a
+// denial of moderation. The residual is that a kick clears a member-tier deny, which only matters once
+// that member can come back: the rejoin question, routed to M57 and M72a where a join path first exists.
 //
 // # Resolved per channel, which is the only scope that answers it
 //

@@ -2874,13 +2874,6 @@ paths:
         guild entirely.
 
 
-        The new role is positioned above every existing role — one above the highest that exists, not the
-        role count, which would collide as soon as anything had been deleted. Position is not settable here:
-        reordering is a multi-row operation and role hierarchy, which governs who may manage whom, arrives
-        with the permission-overwrite endpoints.
-
-
-        **A guild holds at most 250 roles**, bounded at creation for the reason the channel ceiling is.
       operationId: createGuildRole
       tags: [guilds]
       requestBody:
@@ -4172,8 +4165,10 @@ components:
           maxItems: 250
           description: >
             The roles to move and where. Roles not named keep their position — but are still checked, since
-            the resulting arrangement must not collide with them. Bounded by the role ceiling: a list
-            longer than a guild can hold is malformed whatever else is true of it.
+            the resulting arrangement must not collide with them. Capped at 250 entries, which is
+            the *default* role ceiling — an instance configured with a higher one reorders in batches. The
+            cap is a fixed transport bound; the range each `position` must fall in tracks the instance's
+            actual ceiling.
           items:
             type: object
             additionalProperties: false

@@ -785,7 +785,7 @@ type RegistrationChallenge struct {
 
 // ReorderRolesRequest defines model for ReorderRolesRequest.
 type ReorderRolesRequest struct {
-	// Roles The roles to move and where. Roles not named keep their position — but are still checked, since the resulting arrangement must not collide with them. Bounded by the role ceiling: a list longer than a guild can hold is malformed whatever else is true of it.
+	// Roles The roles to move and where. Roles not named keep their position — but are still checked, since the resulting arrangement must not collide with them. Capped at 250 entries, which is the *default* role ceiling — an instance configured with a higher one reorders in batches. The cap is a fixed transport bound; the range each `position` must fall in tracks the instance's actual ceiling.
 	Roles []struct {
 		// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
 		//

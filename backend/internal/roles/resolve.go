@@ -80,9 +80,10 @@ type Resolution struct {
 	// that hands the guild to whoever holds the highest role.
 	//
 	// The first version of this field was exported with a comment saying to ask [Resolution.IsOwner] first.
-	// A comment cannot fail to compile at any of the nine call sites this milestone adds, and this package
-	// has had to make that lesson structural three times already — revokeEverything, RequireLiveSession,
-	// factorProof. Outranks folds the ownership question in so there is nothing to remember.
+	// A comment cannot fail to compile at any of the nine call sites this milestone adds. The three
+	// precedents for making such a rule structural rather than remembered — revokeEverything,
+	// RequireLiveSession, factorProof — are all in internal/auth rather than here; this package's first
+	// is Outranks, which folds the ownership question in so there is nothing to remember.
 	//
 	// A member holding [PermAdministrator] *does* get a real position here, because layer 3 short-circuits
 	// permissions and says nothing about standing (ADR 0008 puts the two in different layers). That return

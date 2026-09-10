@@ -392,21 +392,22 @@ func (s *Service) UpdateChannel(
 	var out Channel
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
+		// The same resolve-and-authorize the overwrite endpoints use, and it carries the refusal that
+		// matters here: a member who cannot *see* this channel is answered as though it were not there.
+		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
+		// is an oracle confirming exactly what the filter withholds — and that reasoning applies to these
+		// routes as much as to the permission ones, which had it and these did not.
+		guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
+		if err != nil {
+			return err
+		}
+
 		existing, err := q.GetChannel(ctx, int64(channelID))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound
 			}
 			return fmt.Errorf("guilds: get channel: %w", err)
-		}
-
-		guildID, err := guildOf(existing)
-		if err != nil {
-			return err
-		}
-
-		if _, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
-			return err
 		}
 
 		// The same voice-only rule as creation, checked against the type the channel actually has rather
@@ -500,20 +501,15 @@ func (s *Service) UpdateChannel(
 // rather than deleted — see channels.parent_id ON DELETE SET NULL in migration 000015.
 func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID snowflake.ID) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		existing, err := q.GetChannel(ctx, int64(channelID))
+		// The same resolve-and-authorize the overwrite endpoints use, and it carries the refusal that
+		// matters here: a member who cannot *see* this channel is answered as though it were not there.
+		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
+		// is an oracle confirming exactly what the filter withholds — and that reasoning applies to these
+		// routes as much as to the permission ones, which had it and these did not.
+		// One read, not two: authorizeChannel loads the row to find its guild, and the guild is the only
+		// thing this operation wanted it for.
+		guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return httpx.ErrNotFound
-			}
-			return fmt.Errorf("guilds: get channel: %w", err)
-		}
-
-		guildID, err := guildOf(existing)
-		if err != nil {
-			return err
-		}
-
-		if _, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageChannels); err != nil {
 			return err
 		}
 

@@ -584,8 +584,12 @@ type reorderRolesRequest struct {
 	// An object wrapping the array rather than a bare array, so the request can carry validate tags and
 	// so a later field has somewhere to go without changing the shape a client sends.
 	//
-	// The bound is the role ceiling: a list longer than a guild can hold is malformed whatever else is
-	// true of it, and the service checks the same bound on each position.
+	// A fixed 250, which is the *default* role ceiling and not the configured one — a validator tag is
+	// evaluated at construction and cannot read config. So this is a transport-layer sanity cap on how
+	// long a list may be, and the service's own bound on each position (config.MaxRolesPerGuild) is the
+	// one that tracks the instance. They coincide on a default instance and diverge on one configured
+	// higher, where a guild holding more than 250 roles has to reorder them in batches. Stated because
+	// the two numbers look like the same number.
 	Roles []rolePositionRequest `json:"roles" validate:"required,min=1,max=250,dive"`
 }
 
@@ -720,10 +724,13 @@ type deleteOverwriteRequest struct {
 
 func (h *Handler) deleteOverwrite(w http.ResponseWriter, r *http.Request) {
 	// A body on a DELETE, which is unusual and is the price of a polymorphic target: the path carries an
-	// id that names either a role or a member, and nothing about the id says which. A query parameter
-	// would put it in the request log where a body is not (rule 8's reasoning for the device-code poll),
-	// and guessing the type by looking the id up in both tables would make the answer depend on which
-	// table happened to hold it.
+	// id that names either a role or a member, and nothing about the id says which. Guessing by looking
+	// the id up in both tables would make the answer depend on which one happened to hold it.
+	//
+	// An earlier version of this comment justified the choice by saying a query parameter would land in
+	// the request log. It would not: the logger records r.URL.Path and never RawQuery, deliberately, and
+	// M9's reasoning was about the *path* rather than the query string. The design stands on the
+	// polymorphism alone.
 	var req deleteOverwriteRequest
 	if !h.decode(w, r, &req) {
 		return

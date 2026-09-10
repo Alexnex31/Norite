@@ -93,8 +93,13 @@ type AssignRoleToMemberParams struct {
 // GetMemberHighestRolePosition's explanation rests on the same premise. Without this predicate the premise
 // is merely a convention, and granting @everyone explicitly writes a row that permission resolution
 // ignores, that the member's role list reports and nobody else's does, and that DeleteRole cannot remove
-// because it refuses to delete the default role at all. Every other role-mutating statement here carries
-// the same guard; this one was the exception until a review found it.
+// because it refuses to delete the default role at all.
+//
+// Not every role-mutating statement carries this guard, and an earlier version of this comment said they
+// did. DeleteRole and SetRolePosition do; UpdateRole deliberately does not, because editing @everyone's
+// permissions is how a guild sets its floor, and UnassignRoleFromMember does not either. Believing the
+// broader claim would invite dropping the Go-side is_default check in changeMemberRole on the grounds
+// that SQL covers it — it covers the assign half only.
 func (q *Queries) AssignRoleToMember(ctx context.Context, arg AssignRoleToMemberParams) (int64, error) {
 	result, err := q.db.Exec(ctx, assignRoleToMember, arg.GuildID, arg.UserID, arg.RoleID)
 	if err != nil {
