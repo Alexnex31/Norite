@@ -2747,6 +2747,12 @@ paths:
         Requires `MANAGE_ROLES`, **and refuses to grant a permission the caller does not hold**.
 
 
+        **The new role is created at the bottom of the hierarchy**, immediately above `@everyone`, and
+        every other role shifts up one. Created at the top it would be a role its own creator could not
+        then edit, delete, assign or reposition, since all four require the role to be strictly below the
+        caller's own highest — a dead end reachable on a moderator's first use of this endpoint.
+
+
         That second half is not a nicety. Without it `MANAGE_ROLES` is every permission: create a role
         carrying `ADMINISTRATOR`, assign it to yourself, and the hierarchy is gone. An owner and an
         administrator pass it trivially because they hold everything; an Instance Admin passes above the
@@ -2811,7 +2817,12 @@ paths:
     patch:
       summary: Update a role
       description: >
-        Partial. Requires `MANAGE_ROLES`, and the same refusal to grant permissions the caller does not
+        Partial. Requires `MANAGE_ROLES`, **and that the role be strictly below the caller's own highest**
+        — the escalation rule bounds which permissions may be granted and says nothing about which role
+        may be given them, so without the position check a moderator could edit the administrator role.
+
+
+        Also the same refusal to grant permissions the caller does not
         hold.
 
 

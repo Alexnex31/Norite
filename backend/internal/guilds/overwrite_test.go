@@ -433,3 +433,73 @@ func TestAHiddenChannelAnswers404ToAMemberWhoCannotSeeIt(t *testing.T) {
 	})
 	require.ErrorIs(t, err, httpx.ErrForbidden)
 }
+
+// TestARoleIsCreatedAtTheBottom is M13's placement rule.
+//
+// M12 created roles at max(position)+1, above everything. Under a hierarchy that is a dead end: the
+// creator cannot edit, delete, assign or reposition a role above their own standing, so a moderator's
+// first use of the endpoint produced a role they could not touch.
+func TestARoleIsCreatedAtTheBottom(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	// modRole is at 5 and aboveRole at 9 from the fixture. A new role must land below both.
+	created, err := f.svc.CreateRole(ctx, userActor(f.owner), f.guildID, CreateRoleInput{Name: "new"})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), created.Position, "immediately above @everyone")
+
+	listed, err := f.svc.ListRoles(ctx, userActor(f.owner), f.guildID)
+	require.NoError(t, err)
+
+	byID := map[snowflake.ID]int32{}
+	for _, r := range listed {
+		byID[r.ID] = r.Position
+	}
+	require.Equal(t, int32(0), byID[f.everyoneID], "@everyone never moves off the floor")
+	require.Greater(t, byID[f.modRole], created.Position, "everything else shifted above it")
+	require.Greater(t, byID[f.aboveRole], byID[f.modRole], "and relative order is preserved")
+
+	// Positions stay bounded by the ceiling rather than growing with lifetime creations: create and
+	// delete repeatedly and the survivors do not drift upward.
+	for i := 0; i < 5; i++ {
+		tmp, err := f.svc.CreateRole(ctx, userActor(f.owner), f.guildID, CreateRoleInput{Name: "tmp"})
+		require.NoError(t, err)
+		require.NoError(t, f.svc.DeleteRole(ctx, userActor(f.owner), f.guildID, tmp.ID))
+	}
+	after, err := f.svc.ListRoles(ctx, userActor(f.owner), f.guildID)
+	require.NoError(t, err)
+	for _, r := range after {
+		require.LessOrEqual(t, r.Position, int32(len(after)),
+			"renumbering keeps every position within the live role count, whatever the churn")
+	}
+}
+
+// TestARoleAboveYourOwnCannotBeEditedOrDeleted is layer 4's second sentence on the two role endpoints
+// that had no hierarchy check at all.
+//
+// refuseEscalation bounds *which permissions* may be granted and says nothing about *which role* may be
+// given them, so without this a moderator could edit the administrator role — its name, its color, and
+// the permissions it hands everybody who holds it.
+func TestARoleAboveYourOwnCannotBeEditedOrDeleted(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	name := "renamed"
+	_, err := f.svc.UpdateRole(ctx, userActor(f.mod), f.guildID, f.aboveRole, UpdateRoleInput{Name: &name})
+	require.ErrorIs(t, err, ErrOutranked, "position 9 is above the moderator's 5")
+
+	err = f.svc.DeleteRole(ctx, userActor(f.mod), f.guildID, f.aboveRole)
+	require.ErrorIs(t, err, ErrOutranked)
+
+	// A role below them is editable, so the refusal is about standing and not the endpoint.
+	below := f.newRole(ctx, f.guildID, 2, 0)
+	_, err = f.svc.UpdateRole(ctx, userActor(f.mod), f.guildID, below, UpdateRoleInput{Name: &name})
+	require.NoError(t, err)
+
+	// Equal standing is not enough: the moderator cannot edit the very role that gives them their standing.
+	_, err = f.svc.UpdateRole(ctx, userActor(f.mod), f.guildID, f.modRole, UpdateRoleInput{Name: &name})
+	require.ErrorIs(t, err, ErrOutranked,
+		"strictly greater, or you could edit the role that establishes your own position")
+}

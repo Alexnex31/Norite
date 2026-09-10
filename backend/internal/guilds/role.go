@@ -58,7 +58,22 @@ type CreateRoleInput struct {
 //
 // The check is against the caller's *resolved* permissions, so an owner and an administrator pass it
 // trivially — they hold everything — and an Instance Admin passes by layer 1 without being resolved at
-// all. M13 adds the other half, position-based hierarchy: who may manage a role *above* their own.
+// all.
+//
+// # Where the new role lands, and why not at the top
+//
+// At the bottom, immediately above @everyone, which is what Discord does. M12 created roles at
+// max(position)+1 and said so deliberately, on the grounds that a role landing below an existing one
+// reads as broken. That was the right call for a milestone with no hierarchy and the wrong one the
+// moment this milestone added it: a non-owner who creates a role at the top cannot then edit, delete,
+// assign or reposition it, because all four require the role to be strictly below their own standing.
+// A dead end reachable by an ordinary moderator on their first use of the endpoint.
+//
+// One case behaves oddly and is allowed rather than refused. A member holding PermManageRoles only
+// through @everyone has standing 0, so the role they create at position 1 is above them and they cannot
+// manage it either. Nothing escalates — they cannot assign it to themselves, since that too requires it
+// to be below them — so it is a harmless dead end reachable only in a guild that has deliberately given
+// role management to everybody. Discord permits it; so does this.
 func (s *Service) CreateRole(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in CreateRoleInput,
 ) (Role, error) {
@@ -87,22 +102,27 @@ func (s *Service) CreateRole(
 			return httpx.Errorf(ErrGuildFull, "a guild may hold at most %d roles", s.maxRolesPerGuild)
 		}
 
-		// Appended above every existing role. Position is the hierarchy M13 enforces, and a new role
-		// landing at or below an existing one reads as broken — see NextRolePosition for why this is
-		// max(position)+1 and not the role count, which collides as soon as anything has been deleted.
+		// The lock, then the renumber, then the insert at the bottom.
 		//
-		// The lock is the other half of the same guarantee. Reading a max and then inserting is a
-		// read-modify-write, and under READ COMMITTED two concurrent creates both read the same value and
-		// both take it. Fixing only the count-versus-max cause left the race, which produces the identical
-		// corruption by a different route.
+		// The lock is not optional and its reason survives the change of placement: renumbering and then
+		// inserting is a read-modify-write, and under READ COMMITTED two concurrent creates would both
+		// renumber, both insert at 1, and leave two roles sharing a position — which migration 000015
+		// deliberately declines the unique constraint that would catch.
+		//
+		// ShiftRolePositionsUp renumbers the guild's live non-default roles to 2..N+1, leaving 1 free.
+		// Renumbering rather than incrementing is what keeps positions bounded by the role ceiling instead
+		// of by the guild's lifetime creation count — see the query.
 		if err := q.LockGuildRolePositions(ctx, int64(guildID)); err != nil {
 			return fmt.Errorf("guilds: lock role positions: %w", err)
 		}
 
-		position, err := q.NextRolePosition(ctx, int64(guildID))
-		if err != nil {
-			return fmt.Errorf("guilds: next role position: %w", err)
+		if err := q.ShiftRolePositionsUp(ctx, int64(guildID)); err != nil {
+			return fmt.Errorf("guilds: renumber role positions: %w", err)
 		}
+
+		// One, never zero: zero is @everyone's and a non-default role sharing it would be neither above
+		// nor below the floor every layer-4 resolution starts from.
+		const bottom = 1
 
 		row, err := q.CreateRole(ctx, db.CreateRoleParams{
 			ID:          int64(roleID),
@@ -110,7 +130,7 @@ func (s *Service) CreateRole(
 			Name:        in.Name,
 			Color:       in.Color,
 			Permissions: in.Permissions.Int64(),
-			Position:    position,
+			Position:    bottom,
 			Hoist:       in.Hoist,
 			Mentionable: in.Mentionable,
 			IsDefault:   false,
@@ -166,6 +186,17 @@ func (s *Service) UpdateRole(
 				return httpx.ErrNotFound
 			}
 			return fmt.Errorf("guilds: get role: %w", err)
+		}
+
+		// Layer 4's second sentence, and it is the half M12 could not build: a role above your own is not
+		// yours to edit. Below the load, because it reads a row the caller may not be able to see — the
+		// ordering M12 had corrected twice by review.
+		//
+		// This bounds what refuseEscalation cannot. That check stops you granting a permission you do not
+		// hold; it says nothing about *which* role you may grant it to, so without this a moderator could
+		// edit the administrator role's color, name, or the permissions it hands everybody who holds it.
+		if !allowed.outranks(existing.Position) {
+			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
 		}
 
 		if in.Permissions != nil {

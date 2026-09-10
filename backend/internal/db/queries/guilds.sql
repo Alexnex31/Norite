@@ -110,9 +110,12 @@ SELECT count(*) FROM roles WHERE guild_id = $1;
 -- because reordering is a multi-row swap, so nothing downstream catches it.
 --
 -- The consequence is not cosmetic: position is the hierarchy M13 enforces over, and two roles at the same
--- position are neither above nor below each other. NextRolePosition's own comment calls a collision "a
--- correctness bug rather than a style preference" — that comment was written about the count-versus-max
--- cause and this is the other one.
+-- position are neither above nor below each other.
+--
+-- The read this serialises is no longer max(position)+1 — M13 places a new role at the bottom instead, so
+-- ShiftRolePositionsUp renumbers and CreateRole inserts at 1. The race is the same shape and the lock is
+-- the same answer: two concurrent creates would both renumber, both insert at 1, and leave the collision
+-- migration 000015 declines the unique constraint that would catch.
 --
 -- An advisory lock rather than row locking, and the two-argument form so it lives in its own namespace:
 -- the first key is "NOR" plus a slot number (slot 1 is the migration lock, slot 2 the instance bootstrap,
@@ -120,23 +123,6 @@ SELECT count(*) FROM roles WHERE guild_id = $1;
 -- other unnecessarily and stay correct, which is the right direction for an operation that happens a
 -- handful of times in a guild's life.
 SELECT pg_advisory_xact_lock(1313033475, (sqlc.arg(guild_id)::bigint & 2147483647)::int);
-
--- name: NextRolePosition :one
--- The position a new role goes in: one above the highest that exists.
---
--- `max(position) + 1`, not `count(*)`, and the difference is a correctness bug rather than a style
--- preference. Deleting a role leaves a gap, so after removing the middle of @everyone(0)/mods(1)/admins(2)
--- the count is 2 and the next role would be created *at* position 2 — a tie with admins, which nothing
--- prevents since there is deliberately no unique constraint on (guild_id, position). Delete more and the
--- new role lands below existing ones, contradicting "positioned above every existing role" in the contract
--- and silently corrupting the ordering M13's hierarchy rules will be enforcing.
---
--- coalesce for the empty case, which cannot happen through the API — guild creation writes @everyone in
--- the same transaction — but which would otherwise make a NULL the caller has to handle.
---
--- Reads one value out of roles_guild_id_position_idx rather than the whole role list. The previous
--- implementation selected every column of every role in the guild to take len() of the slice.
-SELECT coalesce(max(position), -1) + 1 FROM roles WHERE guild_id = $1;
 
 -- name: DeleteOverwritesForTarget :exec
 -- Removes the permission overwrites that named a role or a member, across the whole guild.

@@ -728,11 +728,19 @@ func TestAScopedTokenIsBoundedOnTheGuildSurface(t *testing.T) {
 	})
 }
 
-// TestANewRolesPositionSurvivesADeletion covers the count-versus-max bug.
+// TestANewRolesPositionSurvivesADeletion covers the collision a deletion used to cause.
 //
-// Position came from the role count, so deleting a role left a gap and the next creation collided with an
-// existing position — or landed below one. There is no unique constraint to catch it (deliberately: see
-// migration 000015), so the corruption is silent until M13 enforces a hierarchy over it.
+// M12 took a new role's position from the role count, so deleting a role left a gap and the next creation
+// collided with an existing position — or landed below one. There is no unique constraint to catch it
+// (deliberately: see migration 000015), so the corruption was silent.
+//
+// **The direction of the placement assertion is inverted from M12's**, and the inversion is the point
+// rather than a weakened test. M12 asserted each new role went *above* the last, which was right for a
+// milestone with no hierarchy. M13 places a new role at the *bottom*, immediately above @everyone,
+// because a role created at the top is one its own creator cannot then edit, delete, assign or
+// reposition. What has to survive both rules — and does — is that no two roles ever share a position,
+// because two roles at one position are neither above nor below each other and that dissolves the
+// ordering the hierarchy rests on.
 func TestANewRolesPositionSurvivesADeletion(t *testing.T) {
 	t.Parallel()
 
@@ -750,19 +758,38 @@ func TestANewRolesPositionSurvivesADeletion(t *testing.T) {
 		return body["id"].(string), body["position"].(float64)
 	}
 
-	mods, modsPos := create(t, "mods")
-	_, adminsPos := create(t, "admins")
-	require.Greater(t, adminsPos, modsPos, "each new role goes above the last")
+	position := func(t *testing.T, id string) float64 {
+		t.Helper()
+		res := f.api.call(http.MethodGet, rolesPath, nil, withToken(f.ownerToken))
+		require.Equal(t, http.StatusOK, res.Code, res)
 
-	// Remove the middle one, leaving a gap the count no longer reflects.
+		var listed []map[string]any
+		require.NoError(t, json.Unmarshal(res.Body, &listed))
+		for _, r := range listed {
+			if r["id"] == id {
+				return r["position"].(float64)
+			}
+		}
+		t.Fatalf("role %s is not in the listing", id)
+		return 0
+	}
+
+	mods, modsPos := create(t, "mods")
+	require.Equal(t, float64(1), modsPos, "the first role goes just above @everyone")
+
+	admins, adminsPos := create(t, "admins")
+	require.Equal(t, float64(1), adminsPos, "and so does the next")
+	require.Greater(t, position(t, mods), adminsPos, "the earlier role shifted up to make room")
+
+	// Remove the middle one, leaving a gap the old count-based placement would have collided into.
 	del := f.api.call(http.MethodDelete, rolesPath+"/"+mods, nil, withToken(f.ownerToken))
 	require.Equal(t, http.StatusNoContent, del.Code, del)
 
 	_, newPos := create(t, "after-the-gap")
-	require.Greater(t, newPos, adminsPos,
-		"a new role must go above every existing one, not into the gap a deletion left")
+	require.Equal(t, float64(1), newPos, "still the bottom, whatever the churn above it")
+	require.Greater(t, position(t, admins), newPos, "and the survivor is still above it")
 
-	// And no two roles share a position, which is what the collision would have produced.
+	// The property that survives both placement rules, and the one that actually matters.
 	var dupes int
 	f.api.mustQueryRow(t,
 		`SELECT count(*) FROM (SELECT position FROM roles WHERE guild_id = $1
