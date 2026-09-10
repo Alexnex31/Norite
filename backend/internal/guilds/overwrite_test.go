@@ -503,3 +503,103 @@ func TestARoleAboveYourOwnCannotBeEditedOrDeleted(t *testing.T) {
 	require.ErrorIs(t, err, ErrOutranked,
 		"strictly greater, or you could edit the role that establishes your own position")
 }
+
+// TestAReorderCannotDemoteARoleAboveYourOwn is the takeover the origin check exists to refuse, and the
+// one a destination-only check lets through.
+//
+// The natural rule — "every requested position must be below your standing" — is necessary and not
+// sufficient. It says nothing about where the role is now, so a caller can name a role above them and
+// move it below them, at which point every other check in the milestone passes for it.
+func TestAReorderCannotDemoteARoleAboveYourOwn(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	// aboveRole sits at 9, the moderator's standing is 5. Destination 2 is below them; origin is not.
+	_, err := f.svc.ReorderRoles(ctx, userActor(f.mod), f.guildID,
+		[]RolePosition{{ID: f.aboveRole, Position: 2}})
+	require.ErrorIs(t, err, ErrOutranked,
+		"the destination is below the caller, which is exactly why the origin has to be checked too")
+
+	// A role already below them moves freely, so the refusal is about standing and not the endpoint.
+	below := f.newRole(ctx, f.guildID, 2, 0)
+	_, err = f.svc.ReorderRoles(ctx, userActor(f.mod), f.guildID,
+		[]RolePosition{{ID: below, Position: 3}})
+	require.NoError(t, err)
+
+	// And the destination check still holds on its own: a role below them cannot be pushed above them.
+	_, err = f.svc.ReorderRoles(ctx, userActor(f.mod), f.guildID,
+		[]RolePosition{{ID: below, Position: 8}})
+	require.ErrorIs(t, err, ErrOutranked)
+}
+
+// TestAReorderRefusesAnArrangementWithACollision covers both routes to two roles sharing a position.
+//
+// There is no unique constraint to catch one — 000015 declines it deliberately, because a reorder has to
+// pass through such a state — so the check is the only thing standing between a request and an ordering
+// in which two roles are neither above nor below each other.
+func TestAReorderRefusesAnArrangementWithACollision(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	a := f.newRole(ctx, f.guildID, 2, 0)
+	b := f.newRole(ctx, f.guildID, 3, 0)
+
+	t.Run("within the request", func(t *testing.T) {
+		_, err := f.svc.ReorderRoles(ctx, userActor(f.owner), f.guildID,
+			[]RolePosition{{ID: a, Position: 4}, {ID: b, Position: 4}})
+		require.ErrorIs(t, err, httpx.ErrConflict)
+	})
+
+	t.Run("against a role the request does not mention", func(t *testing.T) {
+		// modRole sits at 5 and is not in the request. A request that is internally consistent still has
+		// to be checked against the roles it leaves alone.
+		_, err := f.svc.ReorderRoles(ctx, userActor(f.owner), f.guildID,
+			[]RolePosition{{ID: a, Position: 5}})
+		require.ErrorIs(t, err, httpx.ErrConflict)
+	})
+
+	t.Run("a repeated id", func(t *testing.T) {
+		_, err := f.svc.ReorderRoles(ctx, userActor(f.owner), f.guildID,
+			[]RolePosition{{ID: a, Position: 6}, {ID: a, Position: 7}})
+		require.ErrorIs(t, err, httpx.ErrBadRequest)
+	})
+}
+
+// TestAReorderRefusesAnOutOfRangePosition bounds the one path that could write an arbitrary integer.
+//
+// Zero is @everyone's, and a role sharing the floor confers no standing on whoever holds it — so the
+// protection that role was granted to give silently disappears. The upper bound exists because positions
+// grow only through creation's renumber, which the ceiling bounds; a reorder writing near the column's
+// maximum would make the next creation's renumber overflow and take role creation out permanently.
+func TestAReorderRefusesAnOutOfRangePosition(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	target := f.newRole(ctx, f.guildID, 2, 0)
+
+	for _, position := range []int32{0, -1, 251, 2147483647} {
+		_, err := f.svc.ReorderRoles(ctx, userActor(f.owner), f.guildID,
+			[]RolePosition{{ID: target, Position: position}})
+		require.ErrorIs(t, err, httpx.ErrBadRequest, "position %d must be refused", position)
+	}
+
+	// The owner bypasses the standing check and does not bypass this one — they are the only caller who
+	// could otherwise reach the ceiling.
+	_, err := f.svc.ReorderRoles(ctx, userActor(f.owner), f.guildID,
+		[]RolePosition{{ID: target, Position: 4}})
+	require.NoError(t, err)
+}
+
+// TestAReorderCannotMoveTheDefaultRole keeps @everyone on the floor every resolution starts from.
+func TestAReorderCannotMoveTheDefaultRole(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	_, err := f.svc.ReorderRoles(ctx, userActor(f.owner), f.guildID,
+		[]RolePosition{{ID: f.everyoneID, Position: 3}})
+	require.ErrorIs(t, err, ErrDefaultRoleImmutable)
+}

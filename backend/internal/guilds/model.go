@@ -31,8 +31,12 @@ const (
 	ActionRoleCreate    = "role.create"
 	ActionRoleUpdate    = "role.update"
 	ActionRoleDelete    = "role.delete"
-	ActionMemberUpdate  = "member.update"
-	ActionMemberRemove  = "member.remove"
+	// One entry for a whole reorder rather than one per row moved: the operation is a single atomic
+	// rearrangement and splitting it would make an operator reading the log reconstruct which entries
+	// belonged together.
+	ActionRoleReorder  = "role.reorder"
+	ActionMemberUpdate = "member.update"
+	ActionMemberRemove = "member.remove"
 
 	// One action for writing an overwrite rather than separate create and update verbs, because the
 	// endpoint is a PUT and does not distinguish them either. What changed is in the entry's `changes`.

@@ -72,6 +72,7 @@ func (h *Handler) Routes(r chi.Router) {
 
 		r.With(read).Get("/roles", h.listRoles)
 		r.With(write).Post("/roles", h.createRole)
+		r.With(write).Patch("/roles", h.reorderRoles)
 		r.With(write).Patch("/roles/{role_id}", h.updateRole)
 		r.With(write).Delete("/roles/{role_id}", h.deleteRole)
 
@@ -575,6 +576,47 @@ func (h *Handler) actorAndID(
 
 func (h *Handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return httpx.DecodeAndValidate(w, r, h.validate, dst)
+}
+
+type reorderRolesRequest struct {
+	// An object wrapping the array rather than a bare array, so the request can carry validate tags and
+	// so a later field has somewhere to go without changing the shape a client sends.
+	//
+	// The bound is the role ceiling: a list longer than a guild can hold is malformed whatever else is
+	// true of it, and the service checks the same bound on each position.
+	Roles []rolePositionRequest `json:"roles" validate:"required,min=1,max=250,dive"`
+}
+
+type rolePositionRequest struct {
+	ID snowflake.ID `json:"id" validate:"required"`
+	// A pointer so an omitted position is a validation error rather than a silent zero — and zero is
+	// exactly the value that would collide with @everyone.
+	Position *int32 `json:"position" validate:"required"`
+}
+
+func (h *Handler) reorderRoles(w http.ResponseWriter, r *http.Request) {
+	var req reorderRolesRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+
+	in := make([]RolePosition, 0, len(req.Roles))
+	for _, want := range req.Roles {
+		in = append(in, RolePosition{ID: want.ID, Position: *want.Position})
+	}
+
+	out, err := h.svc.ReorderRoles(r.Context(), actor, guildID, in)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, out)
 }
 
 // --- permission overwrites ---

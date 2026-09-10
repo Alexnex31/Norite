@@ -2802,6 +2802,62 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+    patch:
+      summary: Reorder a guild's roles
+      description: >
+        A bulk rearrangement, and it is bulk because reordering is a multi-row swap. Moving a role from 2
+        to 5 means moving whatever sits at 3, 4 and 5 as well; done as separate requests there is a window
+        between each where two roles share a position, and two roles at one position are neither above nor
+        below each other — which dissolves the comparison every permission check here rests on. One
+        request, one transaction, one lock.
+
+
+        Requires `MANAGE_ROLES`. **Both the current and the requested position of every role named must be
+        strictly below the caller's own highest.** Checking only the destination is not enough: a caller
+        could name a role above them and move it below them, and from there edit, delete or assign it.
+
+
+        The resulting arrangement must leave no two non-default roles at the same position, checked
+        against the roles the request does not mention as well as within it. `@everyone` cannot be moved,
+        and nothing else may take position 0 — it is `@everyone`'s, and a role sharing the floor confers
+        no standing on whoever holds it. Positions run from 1 to the instance's role ceiling.
+      operationId: reorderGuildRoles
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReorderRolesRequest"
+      responses:
+        "200":
+          description: The guild's roles, in their new order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Role"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller lacks `MANAGE_ROLES`, is an API token without `guilds.write`, or named a role at or
+            above their own highest — at either end of the move.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >
+            The result would put two roles at the same position, or the request names `@everyone`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /guilds/{guild_id}/roles/{role_id}:
     parameters:
       - name: guild_id
@@ -3970,6 +4026,34 @@ components:
           type: integer
           minimum: 0
           maximum: 99
+
+    ReorderRolesRequest:
+      type: object
+      additionalProperties: false
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          minItems: 1
+          maxItems: 250
+          description: >
+            The roles to move and where. Roles not named keep their position — but are still checked, since
+            the resulting arrangement must not collide with them. Bounded by the role ceiling: a list
+            longer than a guild can hold is malformed whatever else is true of it.
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, position]
+            properties:
+              id:
+                $ref: "#/components/schemas/Snowflake"
+              position:
+                type: integer
+                format: int32
+                minimum: 1
+                description: >
+                  From 1 to the instance's role ceiling. Zero is `@everyone`'s and is refused — a client
+                  sending zero-based positions is the ordinary way in, since role lists render 0-indexed.
 
     PermissionOverwrite:
       type: object

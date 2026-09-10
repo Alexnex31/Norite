@@ -783,6 +783,21 @@ type RegistrationChallenge struct {
 	Parameters map[string]interface{} `json:"parameters"`
 }
 
+// ReorderRolesRequest defines model for ReorderRolesRequest.
+type ReorderRolesRequest struct {
+	// Roles The roles to move and where. Roles not named keep their position — but are still checked, since the resulting arrangement must not collide with them. Bounded by the role ceiling: a list longer than a guild can hold is malformed whatever else is true of it.
+	Roles []struct {
+		// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+		//
+		//
+		// Examples: 7238829238972837423
+		Id Snowflake `json:"id"`
+
+		// Position From 1 to the instance's role ceiling. Zero is `@everyone`'s and is refused — a client sending zero-based positions is the ordinary way in, since role lists render 0-indexed.
+		Position int32 `json:"position"`
+	} `json:"roles"`
+}
+
 // RevocationCounts What one call to the revocation primitive removed. Shared by `POST /auth/logout/all` and `DELETE /auth/2fa/totp`, which revoke exactly the same set — one schema for one server-side value, so that when M18 adds force-closed gateway connections and M101 adds E2E device trust, the count arrives in both places at once rather than in whichever was remembered.
 type RevocationCounts struct {
 	// ApiTokensRevoked API tokens revoked. Reported separately because it is the count a person needs to see to understand why a bot stopped.
@@ -1264,6 +1279,9 @@ type CreateGuildChannelJSONRequestBody = CreateChannelRequest
 
 // UpdateGuildMemberJSONRequestBody defines body for UpdateGuildMember for application/json ContentType.
 type UpdateGuildMemberJSONRequestBody = UpdateMemberRequest
+
+// ReorderGuildRolesJSONRequestBody defines body for ReorderGuildRoles for application/json ContentType.
+type ReorderGuildRolesJSONRequestBody = ReorderRolesRequest
 
 // CreateGuildRoleJSONRequestBody defines body for CreateGuildRole for application/json ContentType.
 type CreateGuildRoleJSONRequestBody = CreateRoleRequest

@@ -129,6 +129,8 @@ func TestEveryMutatingGuildRouteRefusesANonMember(t *testing.T) {
 		{http.MethodPatch, "/api/v1/channels/" + channelID, map[string]any{"name": "hijacked"}},
 		{http.MethodDelete, "/api/v1/channels/" + channelID, nil},
 		{http.MethodPost, "/api/v1/guilds/" + f.guildID + "/roles", map[string]any{"name": "x"}},
+		{http.MethodPatch, "/api/v1/guilds/" + f.guildID + "/roles",
+			map[string]any{"roles": []map[string]any{{"id": roleID, "position": 1}}}},
 		{http.MethodPatch, "/api/v1/guilds/" + f.guildID + "/roles/" + roleID,
 			map[string]any{"name": "hijacked"}},
 		{http.MethodDelete, "/api/v1/guilds/" + f.guildID + "/roles/" + roleID, nil},

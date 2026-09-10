@@ -351,3 +351,162 @@ func refuseEscalation(allowed decision, want roles.Permission) error {
 	return httpx.Errorf(httpx.ErrForbidden,
 		"a role cannot be given permissions you do not hold yourself")
 }
+
+// RolePosition is one row of a reorder request.
+type RolePosition struct {
+	ID       snowflake.ID
+	Position int32
+}
+
+// ReorderRoles rearranges a guild's role hierarchy in one transaction.
+//
+// # Why this is not a field on UpdateRole
+//
+// Reordering is a multi-row swap. Moving a role from 2 to 5 means moving whatever sits at 3, 4 and 5 as
+// well, and done as four separate requests there is a window between each where two roles share a
+// position — which migration 000015 declines the unique constraint that would catch, because a reorder
+// needs to pass through exactly such a state. Two roles at one position are neither above nor below each
+// other, and that dissolves the strictly-greater comparison every check in this milestone rests on. One
+// request, one transaction, one lock.
+//
+// # Five checks, and the one that is easy to leave out
+//
+// The obvious rule is that every requested position must be strictly below the caller's standing. That is
+// necessary and not sufficient: it says nothing about where the role is *now*. A caller at standing 5
+// could name the administrator role at position 10 and move it to 2 — the destination passes, the role
+// is demoted, and from there it can be edited, deleted or assigned. **Both ends are checked**, and the
+// origin is the one that is easy to omit, because the destination is the value in the request body and
+// the origin is not.
+//
+// The rest: the request must be well-formed (bounded, no repeated id, every id a role in this guild),
+// every position must sit in a range that cannot collide with @everyone or overflow the column, and the
+// *resulting arrangement* must leave no two non-default roles sharing a position — which requires
+// checking the request against the roles it does not mention, not only against itself.
+func (s *Service) ReorderRoles(
+	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in []RolePosition,
+) ([]Role, error) {
+	var out []Role
+
+	err := s.inTx(ctx, func(q *db.Queries) error {
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		if err != nil {
+			return err
+		}
+
+		// The same lock role creation takes, and for the same reason: this reads every position and then
+		// writes them, which under READ COMMITTED is a read-modify-write. A concurrent create renumbering
+		// underneath would leave an arrangement neither operation intended.
+		if err := q.LockGuildRolePositions(ctx, int64(guildID)); err != nil {
+			return fmt.Errorf("guilds: lock role positions: %w", err)
+		}
+
+		current, err := q.ListGuildRoles(ctx, int64(guildID))
+		if err != nil {
+			return fmt.Errorf("guilds: list roles: %w", err)
+		}
+
+		byID := make(map[snowflake.ID]db.Role, len(current))
+		for _, r := range current {
+			byID[snowflake.ID(r.ID)] = r
+		}
+
+		// The upper bound. Positions only ever grow through creation, which renumbers to the live role
+		// count plus one, so the ceiling bounds them — and a reorder is the one path that could write an
+		// arbitrary integer. Without it an owner could place a role near the column's maximum and the next
+		// creation's renumber would overflow, taking role creation in that guild out permanently.
+		maxPosition := s.maxRolesPerGuild
+
+		seen := make(map[snowflake.ID]struct{}, len(in))
+		for _, want := range in {
+			role, ok := byID[want.ID]
+			if !ok {
+				return httpx.ErrNotFound
+			}
+			if _, duplicate := seen[want.ID]; duplicate {
+				return httpx.Errorf(httpx.ErrBadRequest, "a role appears more than once")
+			}
+			seen[want.ID] = struct{}{}
+
+			if role.IsDefault {
+				return httpx.Errorf(ErrDefaultRoleImmutable, "the default role cannot be repositioned")
+			}
+			if want.Position < 1 || want.Position > maxPosition {
+				// Zero is @everyone's and below zero is beneath the floor every layer-4 resolution starts
+				// from. A client sending zero-based positions is the ordinary way in, since role lists
+				// render 0-indexed.
+				return httpx.Errorf(httpx.ErrBadRequest,
+					"position must be between 1 and %d", maxPosition)
+			}
+
+			// Both ends. See the doc comment: checking only the destination lets a caller demote a role
+			// that is currently above them, which is a takeover in three requests.
+			if !allowed.outranks(role.Position) || !allowed.outranks(want.Position) {
+				return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
+			}
+		}
+
+		// The resulting arrangement, including the roles the request does not mention. A request that is
+		// internally consistent can still collide with one of those, and a collision is the corruption
+		// this whole operation exists to avoid producing.
+		final := make(map[int32]snowflake.ID, len(current))
+		for _, r := range current {
+			if r.IsDefault {
+				continue
+			}
+			id := snowflake.ID(r.ID)
+			position := r.Position
+			for _, want := range in {
+				if want.ID == id {
+					position = want.Position
+					break
+				}
+			}
+			if other, taken := final[position]; taken {
+				return httpx.Errorf(httpx.ErrConflict,
+					"the result would put two roles at position %d — role %s is already there",
+					position, other)
+			}
+			final[position] = id
+		}
+
+		changes := make(map[string]any, len(in))
+		for _, want := range in {
+			affected, err := q.SetRolePosition(ctx, db.SetRolePositionParams{
+				Position: want.Position,
+				ID:       int64(want.ID),
+				GuildID:  int64(guildID),
+			})
+			if err != nil {
+				return fmt.Errorf("guilds: set role position: %w", err)
+			}
+			if affected == 0 {
+				// Every reason this statement matches nothing was ruled out above, so reaching here means
+				// the guild changed underneath the lock — which it cannot, or the checks are wrong.
+				return fmt.Errorf("guilds: role %s was not repositioned", want.ID)
+			}
+			changes[want.ID.String()] = want.Position
+		}
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionRoleReorder, nil, changes,
+		); err != nil {
+			return err
+		}
+
+		reordered, err := q.ListGuildRoles(ctx, int64(guildID))
+		if err != nil {
+			return fmt.Errorf("guilds: list roles: %w", err)
+		}
+		out = make([]Role, 0, len(reordered))
+		for _, row := range reordered {
+			out = append(out, roleFromRow(row))
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
