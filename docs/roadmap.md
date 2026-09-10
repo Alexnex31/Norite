@@ -402,6 +402,33 @@ of this section.
   milestone's escalation findings exist only because overwrites and hierarchy are both present. M12
   absorbing scope from two later milestones is the precedent.
 
+  **Four things the build learned that this entry could not have.** Each was found by measuring or by a
+  review rather than by planning, and each is the kind of thing the next milestone would otherwise
+  rediscover.
+
+  *Removing is not the safe direction.* The entry above reasons about who may *take* a role or write an
+  overwrite. Taking one away turned out to be the harder half: removing a role lifts whatever its channel
+  overwrites imposed, and blanking an overwrite removes what it carried exactly as deleting it does. So
+  the escalation check covers the union of what a request *changes* rather than what it writes, and three
+  deletion paths needed it. `RemoveMember` deliberately did not get it — guarding a kick would let a
+  member become unkickable by holding an overwrite whose bits the moderator lacks.
+
+  *An oracle appears the moment a listing starts hiding things.* M12's 403-for-a-member and
+  404-for-a-stranger split was right while every channel in a guild was listed to its members. Once the
+  listing filters, the pair confirms a hidden channel to anybody holding its id — so every channel-scoped
+  route now answers 404 to somebody who cannot view it. **Adding a filter to any listing is a reason to
+  re-examine the status codes of every route that names the same object.**
+
+  *Ordering within a milestone can ship a hole.* The overwrite endpoints landed before the category-copy
+  and the parent authorization that make a locked category mean anything, so for four commits a channel
+  created inside a private category was readable by everyone. Nothing was released, but the branch was
+  pushed in that state.
+
+  *Four claims that were measured and three that were wrong.* A suspected missing index did not exist;
+  the guild-wide overwrite read needed a different query shape (0.536 ms against 13.682 ms); the listing
+  needed to group rows once rather than per channel (130 us against 757 us); and the role renumber
+  sequentially scanned every role on the instance without a predicate on its outer relation.
+
   Done when: an overwrite can be created, updated and deleted through the API and changes what
   `roles.Resolve` returns; a role can be assigned and unassigned, and cannot be assigned by somebody who
   does not hold its permissions; roles can be reordered atomically and no two ever share a position; a

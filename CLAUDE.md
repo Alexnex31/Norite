@@ -427,24 +427,26 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   and it was M13's; four of ADR 0008's six layers have data at M12, so what is built here is complete
   rather than a placeholder. M13 keeps the overwrite endpoints and position hierarchy; M14 keeps the read
   surface and the `changes` diffing.
-- **M13 — Permission overwrites, role hierarchy, and role assignment**: next, and **larger** than its
-  original entry, which said the opposite. The resolution engine exists; what M13 adds is the endpoints
-  that write an overwrite — so layer 5 finally has rows to resolve against — plus position-based
-  hierarchy, and the per-channel view filtering M12's channel listing deliberately does not do yet.
+- **M13 — Permission overwrites, role hierarchy, and role assignment**: done (tag `m13`). Six endpoints —
+  the overwrite pair on `/channels/{id}/permissions/{id}`, the role-assignment pair, the bulk reorder —
+  plus `roles.Resolve` widened to a `Resolution` carrying standing, the channel listing filtered by
+  per-channel view permission, category overwrites copied at channel creation, and the hierarchy check on
+  every path that acts on a role or a person. Decisions are in the roadmap entry.
 
-  It grew for three reasons found by reading M12 against the done-when rather than by reading the entry.
-  **Nothing writes `guild_member_roles`** — no assignment endpoint exists anywhere in the repo or the
-  roadmap, so every non-owner's standing is permanently 0 and a hierarchy check would ship with its
-  interesting branch unreachable. **`position` needs an atomic multi-row writer**, because N single-role
-  updates leave two roles sharing a position and two roles at one position are neither above nor below
-  each other. And **`CreateChannel` copies no category overwrites and authorizes at guild level**, so a
-  channel created inside a locked category is readable by everyone and creatable by someone that category
-  denies — invisible at M12 because no overwrite could exist.
+  **It was larger than its entry, which said the opposite**, and the three reasons were found by reading
+  M12's code against the done-when rather than by reading the entry. Nothing wrote `guild_member_roles` —
+  no assignment endpoint existed anywhere in the repo or the roadmap — so every non-owner's standing was
+  permanently 0 and a hierarchy check would have shipped with its interesting branch unreachable.
+  `position` needed an atomic multi-row writer. And `CreateChannel` copied no category overwrites and
+  authorized at guild level, so a channel created inside a locked category was readable by everyone and
+  creatable by somebody that category denied — invisible at M12 because no overwrite could exist.
 
-  Two decisions in it outlive the milestone: a new role is created at the **bottom**, as Discord does; and
-  **assignment is escalation-checked**, which is a deliberate departure from Discord, where hierarchy
-  alone gates it. See the roadmap entry for both arguments.
-
+  Two decisions outlive the milestone: a new role is created at the **bottom**, as Discord does; and
+  **assignment is escalation-checked**, a deliberate departure from Discord, where hierarchy alone gates
+  it.
+- **M14 — Guild audit log**: next. The read surface over the table M12 created and every milestone since
+  has written to, plus the `changes` diffing and the pagination. It also inherits the route-surface test
+  that only claims to enumerate — see its roadmap entry.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -1145,6 +1147,65 @@ And on guilds, permissions and the audit log, from M12:
   drifted contract until the generated file was staged. True of `sqlc-check` too; CI is unaffected because
   it runs against a checkout where the file is tracked. Verify a new check of this shape by drifting its
   input *after* staging its output.
+
+
+And on hierarchy and overwrites, from M13:
+
+- **Layer 4 has two sentences and M12 implemented one.** Role bits are OR'd, *and* position "governs who
+  can manage whom". `roles.Resolve` returns a `Resolution` rather than a `Permission` so standing arrives
+  with the permissions — one column on a query that already returned exactly the right roles, against a
+  second round trip on every kick, mute, deafen, rename, role edit, assignment and overwrite write. M12's
+  authorize.go argued against widening that signature for `owner_id` and the argument does not carry here:
+  standing *is* layer 4, so carrying it is the rest of the check rather than a convenience bolted on.
+- **`highestPosition` is unexported and read only through `Outranks`.** For an owner it is a meaningless
+  zero — and zero is `@everyone`'s position, a real place in the hierarchy, so a comparison that forgets
+  to ask about ownership does not fail loudly. It fails by finding the owner at the bottom, unable to
+  moderate their own guild, which reads as a permission bug and invites the repair that hands the guild to
+  whoever holds the highest role. `Outranks` folds the question in; `OutranksMember` folds in the second
+  one, because an owner cannot be reached by comparing standings at all.
+- **An administrator has a real standing and the owner does not.** Layer 3 short-circuits *permissions*
+  and says nothing about position, so somebody above an administrator can still act on them. That return
+  sits after the loop, so the value exists and dropping it would put every administrator on the floor.
+- **A new role is created at the bottom**, immediately above `@everyone`, everything else shifting up.
+  Created at the top it is a role its own creator cannot edit, delete, assign or reposition. The shift
+  *renumbers* rather than increments, which is what keeps positions bounded by the role ceiling instead of
+  by the guild's lifetime creation count.
+- **Assignment is escalation-checked, and that is the one deliberate departure from Discord.** Discord
+  gates assignment on hierarchy alone and relies on powerful roles being placed high; a public instance
+  should not rest on that, because a moderator holding `PermManageRoles` and not `PermManageGuild`
+  otherwise assigns a low bot role carrying it to an account they control. It needs no owner branch —
+  `decision.allows` already exempts layer 1 and the owner.
+- **Removing is not the safe direction.** Taking a role off somebody lifts whatever its channel overwrites
+  imposed, and the commonest role overwrite anywhere is a `muted` role denying `PermSendMessages`. So
+  unassignment is checked like an assignment, `DeleteRole` refuses to remove overwrites whose bits the
+  caller lacks, and the escalation check on an overwrite covers **the union of what the request changes** —
+  the old row's `allow|deny` or'd with the new — because blanking a row removes what it carried just as a
+  delete does.
+- **A positional hierarchy cannot protect a restriction placed low**, and a restricting role is placed low
+  by definition, so a moderator can still shed one. That is not a hole in the rule; it is why
+  `PermModerateMembers` at M74 is a bit on the member rather than a role.
+- **Overwrites are resolved per channel, and the resolution knows which.** `InChannel` takes the channel
+  id and skips rows for others, because the listing reads every channel's overwrites in one query and
+  handing it the whole slice merged every channel's tiers — an allow on one restoring what another denied.
+  It resolves from an unexported `base` so calling it twice cannot compound.
+- **`RemoveMember` deliberately does not get the overwrite guard the other two deletion paths have.**
+  Guarding a kick would let a member become unkickable by holding an overwrite whose bits the moderator
+  lacks, trading an escalation for a denial of moderation. The residual — a kick clears a member-tier deny
+  — only matters once that member can return, which is M57's and M72a's.
+- **Category permissions are copied at creation, never inherited at read time.** A channel does not follow
+  its category's later changes, so "sync permissions with category" is a client re-copying through the
+  overwrite endpoints rather than a flag anything stores. Without the copy, a channel created inside a
+  locked-down category is readable by everyone the moment it exists.
+- **A channel the caller cannot view is absent from the listing, and answers 404 elsewhere.** Once the
+  listing hides channels, a 403 for a hidden one against a 404 for a nonexistent one is an oracle
+  confirming exactly what the filter withholds. Every channel-scoped route refuses that way now; somebody
+  who *can* see the channel and merely lacks the permission still gets 403.
+- **Four things this milestone measured rather than assumed.** A suspected missing index on
+  `DeleteOverwritesForTarget` did not exist — its own `USING channels` join supplies the primary key's
+  leading column. The guild-wide overwrite read must pass channel ids rather than join on `guild_id`
+  (0.536 ms against 13.682 ms at the channel ceiling). The listing must group those rows once rather than
+  hand every channel the whole slice (130 us against 757 us). And the role renumber needs `guild_id` on
+  its *outer* relation or it sequentially scans every role on the instance.
 
 ## Project-specific skills
 

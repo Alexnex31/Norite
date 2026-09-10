@@ -684,12 +684,18 @@ const (
 )
 ```
 
-`roles.Resolve` is unchanged in shape from the original design (owner bypass → `PermAdministrator`
-short-circuit → `@everyone` overwrite → role overwrites → member overwrite). **It is not cached, and will
-not be until M18.** The cache this paragraph used to describe is invalidated by a gateway dispatch, and
-there is no gateway until M18 — a cache with nothing to invalidate it is a demotion that takes effect five
-minutes late, which is a security failure rather than a slow path. M12 built it as one indexed read per
-check; the cache lands with the signal that can clear it. See
+`roles.Resolve`'s *algorithm* is unchanged from the original design (owner bypass → `PermAdministrator`
+short-circuit → `@everyone` overwrite → role overwrites → member overwrite). **Its signature is not**: M13
+made it return a `Resolution` rather than a bare `Permission`, carrying the owner id and the caller's
+standing — the highest position among the roles they hold — because layer 4's second sentence needs a
+number the same query already had in hand. Standing is meaningless for an owner and left at zero, which is
+`@everyone`'s position, so it is unexported and read only through `Outranks`/`OutranksMember`, which ask
+about ownership first.
+
+**It is not cached, and will not be until M18.** The cache this paragraph used to describe is invalidated
+by a gateway dispatch, and there is no gateway until M18 — a cache with nothing to invalidate it is a
+demotion that takes effect five minutes late, which is a security failure rather than a slow path. M12
+built it as one indexed read per check; the cache lands with the signal that can clear it. See
 [ADR 0008](adr/0008-guild-authority-hierarchy.md) for the full consolidated authority hierarchy, including
 the parts that deliberately sit **outside** `roles.Resolve` entirely:
 
