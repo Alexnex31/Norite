@@ -247,16 +247,38 @@ func (s *Service) CreateChannel(
 		// arrives from the caller and a channel is otherwise free to nest under one in a guild the caller
 		// has no permissions in — which would put its children behind that guild's overwrites (rule 1).
 		if in.ParentID != nil {
+			// One message for every way a parent can be unusable, and that is deliberate.
+			//
+			// Three distinct messages — "not a channel in this guild", "must name a category", "a category
+			// cannot be nested" — tell a caller iterating snowflakes which ids are live channels in their
+			// guild and what type each one is. That was harmless while every channel in a member's guild
+			// was listed to them. This milestone's listing hides channels, so the distinction became the
+			// same oracle the overwrite routes and the channel routes were both corrected for.
+			//
+			// The view check below is what makes them indistinguishable: a caller who cannot see the
+			// parent gets the generic answer before its type is ever consulted, so the type-specific
+			// messages only ever reach somebody the channel was not hidden from.
+			const badParent = "parent_id does not name a category in this guild you can use"
+
 			parent, err := q.GetChannel(ctx, int64(*in.ParentID))
 			switch {
 			case errors.Is(err, pgx.ErrNoRows):
-				return httpx.Errorf(httpx.ErrBadRequest, "parent_id does not name a channel in this guild")
+				return httpx.Errorf(httpx.ErrBadRequest, "%s", badParent)
 			case err != nil:
 				return fmt.Errorf("guilds: get parent channel: %w", err)
 			case parent.GuildID == nil || snowflake.ID(*parent.GuildID) != guildID:
-				return httpx.Errorf(httpx.ErrBadRequest, "parent_id does not name a channel in this guild")
+				return httpx.Errorf(httpx.ErrBadRequest, "%s", badParent)
+			}
+
+			if _, err := authorizeWith(
+				ctx, q, actor, guildID, *in.ParentID, roles.PermViewChannel,
+			); err != nil {
+				return httpx.Errorf(httpx.ErrBadRequest, "%s", badParent)
+			}
+
+			switch {
 			case parent.Type != ChannelGuildCategory:
-				return httpx.Errorf(httpx.ErrBadRequest, "parent_id must name a category channel")
+				return httpx.Errorf(httpx.ErrBadRequest, "%s", badParent)
 			case in.Type == ChannelGuildCategory:
 				// A category inside a category. The reciprocal of the check above and easy to omit,
 				// because the parent is valid — it is the *child* that is wrong. The channel list is a

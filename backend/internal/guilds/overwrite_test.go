@@ -921,3 +921,44 @@ func TestAMemberWhoseViewComesFromAnOverwriteIsNotLockedIn(t *testing.T) {
 	_, err = f.svc.ListChannels(ctx, userActor(stranger), f.guildID)
 	require.ErrorIs(t, err, httpx.ErrNotFound)
 }
+
+// TestParentIdRefusalsAreIndistinguishable closes the last of this milestone's three oracles.
+//
+// Three distinct messages told a caller iterating snowflakes which ids were live channels in their guild
+// and what type each was. Harmless while every channel in a member's guild was listed to them; an oracle
+// once the listing hides channels, which is the same correction the overwrite routes and the channel
+// routes each needed.
+func TestParentIdRefusalsAreIndistinguishable(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermManageChannels)
+	ctx := t.Context()
+
+	// A category the caller cannot see, and a plain channel they can.
+	hiddenCategory := f.newCategory(ctx, f.guildID)
+	f.overwrite(ctx, hiddenCategory, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermViewChannel)
+	visibleText := f.channelID
+
+	message := func(parent snowflake.ID) string {
+		_, err := f.svc.CreateChannel(ctx, userActor(f.plain), f.guildID, CreateChannelInput{
+			Name: "probe", Type: ChannelGuildText, ParentID: &parent,
+		})
+		require.Error(t, err)
+		return err.Error()
+	}
+
+	nonexistent := message(f.next())
+	hidden := message(hiddenCategory)
+	wrongType := message(visibleText)
+
+	require.Equal(t, nonexistent, hidden,
+		"a category being hidden must not be distinguishable from it not existing")
+	require.Equal(t, nonexistent, wrongType,
+		"nor from a channel of the wrong type")
+
+	// A parent the caller can actually use still works, so the refusals are about the parent.
+	usable := f.newCategory(ctx, f.guildID)
+	_, err := f.svc.CreateChannel(ctx, userActor(f.plain), f.guildID, CreateChannelInput{
+		Name: "fine", Type: ChannelGuildText, ParentID: &usable,
+	})
+	require.NoError(t, err)
+}
