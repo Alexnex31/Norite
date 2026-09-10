@@ -228,7 +228,8 @@ func (s *Service) UpdateRole(
 // DeleteRole removes a role. @everyone is refused, in SQL — see DeleteRole in guilds.sql.
 func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, roleID snowflake.ID) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles); err != nil {
+		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		if err != nil {
 			return err
 		}
 
@@ -239,6 +240,22 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 			}
 			return fmt.Errorf("guilds: get role: %w", err)
 		}
+
+		// Layer 4's second sentence: a role above your own is not yours to delete. Below the load, because
+		// it reads a row the caller may not be able to see — the ordering M12 had corrected twice.
+		if !allowed.outranks(existing.Position) {
+			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
+		}
+
+		// And the overwrites it carries are not yours to remove unless you hold what they carry. The
+		// delete below wipes them on every channel at once, which is the same act DeleteOverwrite refuses
+		// one row at a time — see refuseRemovingOverwritesFor.
+		if err := s.refuseRemovingOverwritesFor(
+			ctx, q, allowed, guildID, roles.OverwriteTargetRole, roleID,
+		); err != nil {
+			return err
+		}
+
 		if existing.IsDefault {
 			// Reported here so the caller gets a message rather than a bare 404, but the *guarantee* is the
 			// `AND NOT is_default` in the statement below — this check could be raced and that one cannot.

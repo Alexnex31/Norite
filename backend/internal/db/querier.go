@@ -624,6 +624,16 @@ type Querier interface {
 	// per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
 	// whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
 	ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsParams) ([]GuildMemberRole, error)
+	// Every overwrite naming one role or member, across a guild, with the channel each sits on.
+	//
+	// Read before DeleteOverwritesForTarget deletes them, because removing an overwrite is a permission
+	// change however it is removed. DeleteOverwrite refuses a caller who does not hold the bits one row
+	// carries; deleting the role that row names reaches the same outcome for every channel at once, and was
+	// reaching it behind a guild-level permission check alone.
+	//
+	// Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
+	// to the guild.
+	ListOverwritesForTarget(ctx context.Context, arg ListOverwritesForTargetParams) ([]PermissionOverwrite, error)
 	// The devices signed in to an account: one row per device family, not one per session row.
 	//
 	// A session row is one generation of a rotating family, replaced every time the client refreshes. Listing

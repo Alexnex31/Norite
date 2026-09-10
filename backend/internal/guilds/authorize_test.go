@@ -135,6 +135,13 @@ func (f *fixture) grantRole(ctx context.Context, guildID, userID, roleID snowfla
 		int64(guildID), int64(userID), int64(roleID))
 }
 
+func (f *fixture) newCategory(ctx context.Context, guildID snowflake.ID) snowflake.ID {
+	id := f.next()
+	f.exec(ctx, `INSERT INTO channels (id, guild_id, type, name, position) VALUES ($1, $2, 4, 'cat', 0)`,
+		int64(id), int64(guildID))
+	return id
+}
+
 func (f *fixture) newChannel(ctx context.Context, guildID snowflake.ID) snowflake.ID {
 	id := f.next()
 	f.exec(ctx, `INSERT INTO channels (id, guild_id, type, name, position) VALUES ($1, $2, 0, 'general', 0)`,

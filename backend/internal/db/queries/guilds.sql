@@ -485,3 +485,20 @@ ON CONFLICT DO NOTHING;
 --
 -- Served by the primary key's leading column.
 SELECT count(*) FROM permission_overwrites WHERE channel_id = $1;
+
+-- name: ListOverwritesForTarget :many
+-- Every overwrite naming one role or member, across a guild, with the channel each sits on.
+--
+-- Read before DeleteOverwritesForTarget deletes them, because removing an overwrite is a permission
+-- change however it is removed. DeleteOverwrite refuses a caller who does not hold the bits one row
+-- carries; deleting the role that row names reaches the same outcome for every channel at once, and was
+-- reaching it behind a guild-level permission check alone.
+--
+-- Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
+-- to the guild.
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE c.guild_id = sqlc.arg(guild_id)::bigint
+  AND po.target_type = sqlc.arg(target_type)
+  AND po.target_id = sqlc.arg(target_id);

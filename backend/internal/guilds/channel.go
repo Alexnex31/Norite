@@ -256,6 +256,26 @@ func (s *Service) CreateChannel(
 				// shape for a deeper tree, so this would produce data no client can render.
 				return httpx.Errorf(httpx.ErrBadRequest, "a category cannot be nested inside another")
 			}
+
+			// Authorized against the category as well as against the guild.
+			//
+			// The check above resolves PermManageChannels at guild level, which is all there was to
+			// resolve while nothing could write an overwrite. It is not all there is now: a member denied
+			// PermManageChannels *inside* a category would otherwise create channels in it on a
+			// guild-wide grant, and then own them — PATCH and DELETE resolve against the new channel's own
+			// overwrite set, which is whatever this creation gives it. UpdateChannel and DeleteChannel
+			// have always resolved per-channel; creation was the one that could not, because there was no
+			// channel yet. Its parent is the answer.
+			//
+			// Third of three steps, and the order is the whole of it: authorize at guild level, load and
+			// validate the parent, then authorize against it. Authorizing against the parent *instead*
+			// would load a caller-supplied id before any membership check, and the refusals above name a
+			// channel — so a stranger could tell "not a category in this guild" from a plain 404.
+			if _, err := authorizeWith(
+				ctx, q, actor, guildID, *in.ParentID, roles.PermManageChannels,
+			); err != nil {
+				return err
+			}
 		}
 
 		guild := int64(guildID)
@@ -281,6 +301,34 @@ func (s *Service) CreateChannel(
 			return fmt.Errorf("guilds: create channel: %w", err)
 		}
 
+		// Inheritance, and it is a copy rather than a lookup at resolution time.
+		//
+		// Discord's model, confirmed: a channel does not follow its category's later permission changes,
+		// so "sync permissions with category" is a client re-copying through the overwrite endpoints
+		// rather than a flag anything stores. roles.Resolve therefore keeps reading exactly one channel's
+		// rows and never walks to a parent, which would put a second query on the check that runs before
+		// every mutation.
+		//
+		// Without this a channel created inside a locked-down category is readable by everyone the moment
+		// it exists — the category's deny simply does not apply to it. Unreachable at M12 because no
+		// overwrite could exist; live from the moment this milestone's PUT endpoint shipped, which is
+		// why a security review found it here rather than in a later milestone.
+		//
+		// Not escalation-checked, deliberately, and it is the one place in this package where copying
+		// bits the caller does not hold is right: the rows replicate a configuration the guild already
+		// authored rather than authoring a new one, and refusing them would make inheritance fail exactly
+		// under the locked-down category it is most wanted under. What is checked is the creator's
+		// authority over that parent, immediately above.
+		if in.ParentID != nil {
+			if err := q.CopyChannelOverwrites(ctx, db.CopyChannelOverwritesParams{
+				ChannelID:       int64(channelID),
+				SourceChannelID: int64(*in.ParentID),
+				GuildID:         int64(guildID),
+			}); err != nil {
+				return fmt.Errorf("guilds: copy category overwrites: %w", err)
+			}
+		}
+
 		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionChannelCreate, &channelID, map[string]any{
 			"name": in.Name,
 			"type": in.Type,
@@ -289,6 +337,22 @@ func (s *Service) CreateChannel(
 		}
 
 		out = channelFromRow(row)
+
+		// The copied rows, so the response carries what the channel actually has rather than an empty
+		// array a client would cache as the truth.
+		if in.ParentID != nil {
+			copied, err := q.ListChannelPermissionOverwrites(ctx, db.ListChannelPermissionOverwritesParams{
+				ChannelID: int64(channelID),
+				GuildID:   int64(guildID),
+			})
+			if err != nil {
+				return fmt.Errorf("guilds: list copied overwrites: %w", err)
+			}
+			for _, ow := range copied {
+				out.PermissionOverwrites = append(out.PermissionOverwrites, overwriteFromRow(ow))
+			}
+		}
+
 		return nil
 	})
 	if err != nil {

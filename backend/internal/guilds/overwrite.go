@@ -236,6 +236,23 @@ func (s *Service) authorizeChannel(
 
 	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermManageRoles)
 	if err != nil {
+		// A member of the guild who cannot *see* this channel is refused as though it were not there.
+		//
+		// authorizeWith answers 403 for a member lacking a permission and 404 for a non-member, and that
+		// split was right while every channel in a member's guild was listed to them: they already knew
+		// it existed, so naming it disclosed nothing. This milestone's channel listing hides channels, so
+		// the two answers became an oracle — 403 confirms a hidden channel to anybody holding its id,
+		// which is exactly what the filter withholds.
+		//
+		// Only the view permission is consulted here. Somebody who can see the channel and merely lacks
+		// PermManageRoles still gets 403, because for them the channel's existence was never a secret.
+		if errors.Is(err, httpx.ErrForbidden) {
+			if _, viewErr := authorizeWith(
+				ctx, q, actor, guildID, channelID, roles.PermViewChannel,
+			); viewErr != nil {
+				return 0, decision{}, httpx.ErrNotFound
+			}
+		}
 		return 0, decision{}, err
 	}
 
@@ -313,6 +330,88 @@ func (s *Service) checkOverwriteTarget(
 		// A type roles.applyOverwrites would silently ignore. Refused rather than stored, so the table
 		// cannot accumulate rows that resolve to nothing and that no cleanup path knows about.
 		return httpx.Errorf(httpx.ErrBadRequest, "type must be 0 (role) or 1 (member)")
+	}
+
+	return nil
+}
+
+// refuseRemovingOverwritesFor refuses a caller who does not hold the permissions a target's overwrites
+// carry, in the channels those overwrites sit on.
+//
+// # Why deleting a role is an overwrite operation
+//
+// DeleteOverwrite refuses to remove a single row whose bits the caller does not hold, because removing a
+// deny grants whatever it denied. Deleting the *role* that row names reaches the same outcome on every
+// channel at once, and reached it behind a guild-level permission check alone — so a member holding
+// PermManageRoles could escape a channel restriction by deleting the role carrying it, having been
+// refused a moment earlier when they tried to delete the overwrite directly. Found by a security review;
+// both paths now answer the same question.
+//
+// # Resolved per channel, which is the only scope that answers it
+//
+// A guild-level check does not close this, and that is worth stating because it is the cheaper thing to
+// write. The interesting caller holds a permission guild-wide and is denied it in one channel by exactly
+// the overwrite being removed: at guild level they hold the bit and pass. So each affected channel is
+// resolved from the caller's existing resolution and that channel's own rows — no second authority
+// query, one read for the overwrites.
+//
+// An Instance Admin passes by layer 1. The owner and any administrator pass through InChannel's
+// short-circuit, which is where layers 2 and 3 live.
+func (s *Service) refuseRemovingOverwritesFor(
+	ctx context.Context,
+	q *db.Queries,
+	allowed decision,
+	guildID snowflake.ID,
+	targetType int16,
+	targetID snowflake.ID,
+) error {
+	if allowed.instanceAdmin {
+		return nil
+	}
+
+	affected, err := q.ListOverwritesForTarget(ctx, db.ListOverwritesForTargetParams{
+		GuildID:    int64(guildID),
+		TargetType: targetType,
+		TargetID:   int64(targetID),
+	})
+	if err != nil {
+		return fmt.Errorf("guilds: list overwrites for target: %w", err)
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+
+	channelIDs := make([]int64, 0, len(affected))
+	for _, ow := range affected {
+		channelIDs = append(channelIDs, ow.ChannelID)
+	}
+
+	// Every overwrite on the affected channels, not only the target's: resolving a channel needs the
+	// @everyone tier and the caller's own role tiers as well as the row being removed.
+	surrounding, err := q.ListGuildPermissionOverwrites(ctx, db.ListGuildPermissionOverwritesParams{
+		ChannelIds: channelIDs,
+		GuildID:    int64(guildID),
+	})
+	if err != nil {
+		return fmt.Errorf("guilds: list overwrites for removal check: %w", err)
+	}
+
+	byChannel := make(map[snowflake.ID][]db.PermissionOverwrite, len(affected))
+	for _, ow := range surrounding {
+		id := snowflake.ID(ow.ChannelID)
+		byChannel[id] = append(byChannel[id], ow)
+	}
+
+	for _, ow := range affected {
+		channelID := snowflake.ID(ow.ChannelID)
+		removing := roles.PermissionFromInt64(ow.Allow).Add(roles.PermissionFromInt64(ow.Deny))
+		if allowed.resolution.InChannel(channelID, byChannel[channelID]).Has(removing) {
+			continue
+		}
+		// Names neither the channel nor the bits, for the reason every refusal in this package names
+		// neither: the caller cannot necessarily see the channel being talked about.
+		return httpx.Errorf(httpx.ErrForbidden,
+			"this would remove a permission overwrite you do not hold the permissions for")
 	}
 
 	return nil

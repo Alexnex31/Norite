@@ -808,6 +808,56 @@ func (q *Queries) ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsPa
 	return items, nil
 }
 
+const listOverwritesForTarget = `-- name: ListOverwritesForTarget :many
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE c.guild_id = $1::bigint
+  AND po.target_type = $2
+  AND po.target_id = $3
+`
+
+type ListOverwritesForTargetParams struct {
+	GuildID    int64
+	TargetType int16
+	TargetID   int64
+}
+
+// Every overwrite naming one role or member, across a guild, with the channel each sits on.
+//
+// Read before DeleteOverwritesForTarget deletes them, because removing an overwrite is a permission
+// change however it is removed. DeleteOverwrite refuses a caller who does not hold the bits one row
+// carries; deleting the role that row names reaches the same outcome for every channel at once, and was
+// reaching it behind a guild-level permission check alone.
+//
+// Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
+// to the guild.
+func (q *Queries) ListOverwritesForTarget(ctx context.Context, arg ListOverwritesForTargetParams) ([]PermissionOverwrite, error) {
+	rows, err := q.db.Query(ctx, listOverwritesForTarget, arg.GuildID, arg.TargetType, arg.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PermissionOverwrite{}
+	for rows.Next() {
+		var i PermissionOverwrite
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.TargetType,
+			&i.TargetID,
+			&i.Allow,
+			&i.Deny,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockGuildRolePositions = `-- name: LockGuildRolePositions :exec
 SELECT pg_advisory_xact_lock(1313033475, ($1::bigint & 2147483647)::int)
 `

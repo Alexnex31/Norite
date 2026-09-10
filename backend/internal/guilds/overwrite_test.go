@@ -316,3 +316,120 @@ func TestTheListingCarriesEachChannelsOwnOverwrites(t *testing.T) {
 	require.Len(t, byID[configured].PermissionOverwrites, 2,
 		"and a channel's own rows, not the guild's")
 }
+
+// TestAChannelInheritsItsCategorysOverwrites is the control a security review found missing: the query
+// that copies them existed, fully written, with no call site — while the endpoint that makes a category
+// worth locking had already shipped.
+func TestAChannelInheritsItsCategorysOverwrites(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermManageChannels)
+	ctx := t.Context()
+
+	category := f.newCategory(ctx, f.guildID)
+	f.overwrite(ctx, category, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermViewChannel)
+
+	child, err := f.svc.CreateChannel(ctx, userActor(f.owner), f.guildID, CreateChannelInput{
+		Name: "staff-notes", Type: ChannelGuildText, ParentID: &category,
+	})
+	require.NoError(t, err)
+	require.Len(t, child.PermissionOverwrites, 1,
+		"the response carries what the channel has, not an empty array a client would cache as truth")
+
+	// The point of the copy, asserted through the listing rather than through the rows.
+	got, err := f.svc.ListChannels(ctx, userActor(f.plain), f.guildID)
+	require.NoError(t, err)
+	for _, c := range got {
+		require.NotEqual(t, child.ID, c.ID,
+			"a channel created inside a locked category must not be readable by everyone")
+	}
+
+	// And a channel created at the top level inherits nothing, so the copy is scoped to the parent.
+	loose, err := f.svc.CreateChannel(ctx, userActor(f.owner), f.guildID, CreateChannelInput{
+		Name: "general-2", Type: ChannelGuildText,
+	})
+	require.NoError(t, err)
+	require.Empty(t, loose.PermissionOverwrites)
+}
+
+// TestAChannelCannotBeCreatedInACategoryYouCannotManage is the other half. CreateChannel resolved
+// PermManageChannels at guild level while UpdateChannel and DeleteChannel resolved per-channel, so a
+// guild-wide grant reached inside a category that denied it.
+func TestAChannelCannotBeCreatedInACategoryYouCannotManage(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermManageChannels)
+	ctx := t.Context()
+
+	category := f.newCategory(ctx, f.guildID)
+	f.overwrite(ctx, category, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermManageChannels)
+
+	_, err := f.svc.CreateChannel(ctx, userActor(f.plain), f.guildID, CreateChannelInput{
+		Name: "wedge", Type: ChannelGuildText, ParentID: &category,
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden,
+		"a guild-wide grant must not reach inside a category that denies it")
+
+	// The same caller may still create at the top level, so the refusal is about the category.
+	_, err = f.svc.CreateChannel(ctx, userActor(f.plain), f.guildID, CreateChannelInput{
+		Name: "fine", Type: ChannelGuildText,
+	})
+	require.NoError(t, err)
+}
+
+// TestDeletingARoleCannotLiftARestrictionOnYou closes the route around DeleteOverwrite.
+//
+// Removing one overwrite is refused when the caller does not hold the bits it carries. Deleting the role
+// that overwrite names reached the same outcome on every channel at once, behind a guild-level permission
+// check alone — so the endpoint that refuses the act had a sibling that performed it.
+func TestDeletingARoleCannotLiftARestrictionOnYou(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermSendMessages)
+	ctx := t.Context()
+
+	// A low role that restricts whoever holds it, and the moderator holds it.
+	restricting := f.newRole(ctx, f.guildID, 2, 0)
+	f.grantRole(ctx, f.guildID, f.mod, restricting)
+	f.overwrite(ctx, f.channelID, roles.OverwriteTargetRole, restricting, 0, roles.PermViewChannel)
+
+	res, err := roles.Resolve(ctx, f.q(), f.guildID, f.mod, f.channelID)
+	require.NoError(t, err)
+	require.False(t, res.Permissions.Has(roles.PermViewChannel), "the moderator is denied this channel")
+
+	// Refused directly...
+	err = f.svc.DeleteOverwrite(ctx, userActor(f.mod), f.channelID, roles.OverwriteTargetRole, restricting)
+	require.ErrorIs(t, err, httpx.ErrForbidden)
+
+	// ...and refused by the route around it.
+	err = f.svc.DeleteRole(ctx, userActor(f.mod), f.guildID, restricting)
+	require.ErrorIs(t, err, httpx.ErrForbidden,
+		"deleting the role that carries the deny is the same act as deleting the deny")
+
+	// The owner, who is denied nothing, may still delete it — so the refusal is about the caller.
+	require.NoError(t, f.svc.DeleteRole(ctx, userActor(f.owner), f.guildID, restricting))
+}
+
+// TestAHiddenChannelAnswers404ToAMemberWhoCannotSeeIt is the oracle the listing filter opened.
+//
+// A 403 for a member lacking a permission and a 404 for a non-member was the right split while every
+// channel in a member's guild was listed to them. Once channels can be hidden, the pair confirms a hidden
+// channel's existence to anybody holding its id.
+func TestAHiddenChannelAnswers404ToAMemberWhoCannotSeeIt(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	hidden := f.newChannel(ctx, f.guildID)
+	f.overwrite(ctx, hidden, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermViewChannel)
+
+	_, err := f.svc.SetOverwrite(ctx, userActor(f.plain), SetOverwriteInput{
+		ChannelID: hidden, TargetType: roles.OverwriteTargetRole, TargetID: f.everyoneID,
+	})
+	require.ErrorIs(t, err, httpx.ErrNotFound,
+		"a member who cannot see the channel gets what a stranger gets")
+
+	// Somebody who *can* see it and merely lacks PermManageRoles still gets 403: for them the channel's
+	// existence was never a secret.
+	_, err = f.svc.SetOverwrite(ctx, userActor(f.plain), SetOverwriteInput{
+		ChannelID: f.channelID, TargetType: roles.OverwriteTargetRole, TargetID: f.everyoneID,
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden)
+}
