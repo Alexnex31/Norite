@@ -4,6 +4,7 @@
 package guilds
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
@@ -48,6 +49,34 @@ const (
 	ActionOverwriteSet    = "overwrite.set"
 	ActionOverwriteDelete = "overwrite.delete"
 )
+
+// AllAuditActions is every verb above, which is the list the block's own comment says M14 would need.
+//
+// Two callers and they want it for opposite reasons. The listing endpoint validates an `action` filter
+// against it, because an unknown verb is a query matching nothing and therefore indistinguishable from a
+// guild that has taken no such action — a typo that reads as evidence. And the coverage test walks it to
+// assert every verb is actually reachable, which is the half a list of literals scattered across four
+// handler groups cannot give: a constant nothing writes looks identical to one whose writer was removed.
+//
+// Appending a constant above without appending it here is what the coverage test exists to catch.
+var AllAuditActions = []string{
+	ActionGuildCreate,
+	ActionGuildUpdate,
+	ActionGuildDelete,
+	ActionChannelCreate,
+	ActionChannelUpdate,
+	ActionChannelDelete,
+	ActionRoleCreate,
+	ActionRoleUpdate,
+	ActionRoleDelete,
+	ActionRoleReorder,
+	ActionMemberUpdate,
+	ActionMemberRemove,
+	ActionMemberRoleAdd,
+	ActionMemberRoleRemove,
+	ActionOverwriteSet,
+	ActionOverwriteDelete,
+}
 
 // Channel types, as stored in channels.type.
 //
@@ -185,6 +214,51 @@ func memberFromRow(row db.GuildMember, roleIDs []snowflake.ID) Member {
 		Deaf:     row.Deaf,
 		Mute:     row.Mute,
 		Roles:    roleIDs,
+	}
+}
+
+// AuditLogEntry is one entry of a guild's audit log, on the wire.
+//
+// # No guild_id, deliberately
+//
+// Every other payload in this package carries one and this does not. The column is nullable — §2 keeps it
+// that way so an instance-scoped action could share the table, though rule 14 gives those their own — and
+// the route is already guild-scoped, so the field would be the path parameter repeated with a null the
+// client must handle and can never receive. Discord's audit-log entry object omits it for the same reason.
+//
+// # changes is raw
+//
+// It is passed through as stored rather than decoded and re-encoded. The shape is per-action and adding a
+// field to one writer must not mean teaching this type about it — that coupling is what would make the
+// diffing work in A3 a change to the read path as well as the write path.
+type AuditLogEntry struct {
+	ID       snowflake.ID  `json:"id"`
+	ActorID  snowflake.ID  `json:"actor_id"`
+	Action   string        `json:"action"`
+	TargetID *snowflake.ID `json:"target_id"`
+	// Changes is the per-action detail, or null. json.RawMessage so it crosses the wire as written.
+	Changes   json.RawMessage `json:"changes"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+func auditLogEntryFromRow(row db.AuditLogEntry) AuditLogEntry {
+	// An empty non-nil slice is the one value that would emit invalid JSON: json.RawMessage marshals nil
+	// as null and anything else verbatim, so a zero-length slice writes zero bytes where a value belongs
+	// and corrupts the whole response rather than this field. writeAudit leaves the column NULL when there
+	// is nothing to record, so this is unreachable today — which is exactly the sort of thing that stops
+	// being true when a second writer appears.
+	changes := json.RawMessage(row.Changes)
+	if len(changes) == 0 {
+		changes = nil
+	}
+
+	return AuditLogEntry{
+		ID:        snowflake.ID(row.ID),
+		ActorID:   snowflake.ID(row.ActorID),
+		Action:    row.Action,
+		TargetID:  idPtr(row.TargetID),
+		Changes:   changes,
+		CreatedAt: row.CreatedAt.Time,
 	}
 }
 

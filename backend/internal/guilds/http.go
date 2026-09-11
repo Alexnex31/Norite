@@ -76,6 +76,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(write).Patch("/roles/{role_id}", h.updateRole)
 		r.With(write).Delete("/roles/{role_id}", h.deleteRole)
 
+		r.With(read).Get("/audit-log", h.listAuditLog)
+
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)
 		r.With(write).Delete("/members/{user_id}", h.removeMember)
@@ -474,6 +476,68 @@ func (h *Handler) listMembers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, r, http.StatusOK, members)
+}
+
+// listAuditLog reads a page of the guild's audit log.
+//
+// Scoped `guilds.read` like every other read here. Worth a sentence because it is the one route whose
+// payload is *about* the guild's moderation rather than its content: an API token holding guilds.read can
+// read who kicked whom. That is the scope working as designed — a scope only ever restricts, and its
+// owner could read this anyway — but it is the first route where the two differ in feel.
+func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+
+	var in ListAuditLogInput
+	query := r.URL.Query()
+
+	if raw := query.Get("before"); raw != "" {
+		before, err := snowflake.Parse(raw)
+		if err != nil {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "before is not a valid id"))
+			return
+		}
+		in.Before = before
+	}
+
+	if raw := query.Get("actor_id"); raw != "" {
+		actorID, err := snowflake.Parse(raw)
+		if err != nil {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "actor_id is not a valid id"))
+			return
+		}
+		in.ActorID = actorID
+	}
+
+	if raw := query.Get("action"); raw != "" {
+		// Validated here rather than in the service, because it is a question about the request and not
+		// about the guild — and answering it before authorization discloses nothing: the vocabulary is
+		// this codebase's own, listed in the contract, and identical on every instance.
+		if err := refuseUnknownAuditAction(raw); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		in.Action = raw
+	}
+
+	if raw := query.Get("limit"); raw != "" {
+		limit, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil || limit < 1 {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "limit must be a positive integer"))
+			return
+		}
+		in.Limit = int32(limit)
+	}
+
+	entries, err := h.svc.ListAuditLog(r.Context(), actor, guildID, in)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, entries)
 }
 
 type updateMemberRequest struct {
