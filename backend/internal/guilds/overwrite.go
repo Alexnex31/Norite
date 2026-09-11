@@ -75,9 +75,13 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 		// The union of what this request changes, which is not the same as what it writes.
 		//
 		// An escalation check on the new value alone leaves the *removal* of a bit unchecked, and removing
-		// an overwrite's deny grants whatever it denied. A caller who holds PermManageRoles in a channel
-		// they cannot view — an ordinary configuration, since the deny that hides it removes viewing and
-		// not managing — could otherwise blank the row and see the channel.
+		// an overwrite's deny grants whatever it denied.
+		//
+		// The example this comment used to give is no longer reachable: it described a caller holding
+		// PermManageRoles in a channel they cannot view, and authorizeChannel now refuses that caller 404
+		// before this code runs. The check is unchanged and still right for every other bit — a caller
+		// denied PermSendMessages here can blank the row that denies it and gain the permission — but the
+		// scenario that motivated it was closed by this milestone's own first commit.
 		existing, err := q.GetPermissionOverwrite(ctx, db.GetPermissionOverwriteParams{
 			ChannelID:  int64(in.ChannelID),
 			TargetType: in.TargetType,

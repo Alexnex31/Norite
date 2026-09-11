@@ -167,3 +167,21 @@ would flip them.
   carry the member either way — a `PUT` that returned nothing on a repeat would make the endpoint's shape
   depend on whether it had been called before.
 - **Reopens if**: the same bulk-sync workload above makes the repeat case the common one.
+
+## M14 — guild audit log
+
+### A moderator can lock themselves out of a channel and not undo it
+- **Raised**: M14, `/code-review high`
+- **Verdict**: accepted risk — the cost of a fix, not a defect
+- **Why**: requiring `PermViewChannel` alongside every management permission closed a real bug — a
+  moderator administering a channel their own listing hid from them. The price is that denying `@everyone`
+  the view bit on a channel now also removes the author's route back: the standing check passes
+  (`@everyone` is position 0) and `refuseEscalation` passes (they hold the bit as they write it), and from
+  the moment it commits they cannot see the channel or reach any route that would undo it. Before M14 they
+  could have reversed their own change, because managing did not depend on seeing — which is exactly the
+  property that was wrong. Discord behaves the same way, and its recovery path is the same as ours: the
+  owner, an administrator, or an Instance Admin. Pinned by
+  `TestDenyingYourselfViewIsAOneWayDoor` so it reads as a decision.
+- **Reopens if**: guilds acquire a way to have no owner and no administrator reachable — M13a's ownership
+  transfer is what keeps that from happening — or if a self-service "undo my last overwrite" surface is
+  ever proposed, which would need a different answer.

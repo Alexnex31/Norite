@@ -23,6 +23,21 @@
 --
 -- The timings at that size are both under a millisecond and are not the argument; the sort is. It grows
 -- with the guild's history while the index scan does not grow at all.
+-- # This rebuild blocks every guild mutation while it runs
+--
+-- 000012 wrote this warning for the session sweep's index and closed it with "the next table to need this
+-- may not be small". This is that table. CREATE INDEX takes SHARE on audit_log_entries and DROP INDEX
+-- below takes ACCESS EXCLUSIVE, so no mutation anywhere in the guild surface commits until both finish —
+-- rule 2 puts a write here inside every one of them.
+--
+-- CONCURRENTLY is not available: golang-migrate runs each file in a transaction. Migrations run blocking
+-- before readiness by design, so /healthz answers 503 throughout rather than serving a half-migrated
+-- schema, and the window is a startup outage rather than a live stall.
+--
+-- It is worse here than it was there in one respect worth stating: sessions is swept, and this table is
+-- deliberately not. It grows for the life of the instance, so the cost of this rebuild grows with it. A
+-- future index change on audit_log_entries should assume the table is large and consider a
+-- non-transactional migration that can use CONCURRENTLY.
 CREATE INDEX audit_log_entries_guild_id_id_idx ON audit_log_entries (guild_id, id DESC);
 
 -- And the old one goes, which is the half worth arguing for rather than assuming.

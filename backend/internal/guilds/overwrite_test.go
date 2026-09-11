@@ -84,10 +84,13 @@ func TestAnOverwriteCannotNameAPermissionTheCallerLacks(t *testing.T) {
 // and the one whose absence would look most like thorough coverage — the create and replace paths would
 // all be green.
 //
-// The setup is an ordinary configuration rather than a contrived one: a channel denies @everyone
-// PermViewChannel, and the moderator's PermManageRoles is untouched by that deny. So they can manage the
-// channel's permissions and cannot see it, which is exactly what a staff-only channel looks like from
-// below.
+// The setup is an ordinary configuration rather than a contrived one: a channel denies @everyone a
+// permission the moderator would otherwise hold, and their PermManageRoles is untouched by that deny — so
+// they may edit the channel's permissions and are themselves subject to one of them.
+//
+// The denied bit is PermSendMessages and not PermViewChannel, which this comment used to say. A caller
+// who cannot *view* a channel is now refused it entirely, so that version of the setup stopped being
+// reachable when M14 required the view bit alongside every management permission.
 func TestDeletingAnOverwriteCannotLiftARestrictionOnYou(t *testing.T) {
 	t.Parallel()
 	f := newOverwriteFixture(t, roles.PermViewChannel|roles.PermSendMessages)
@@ -1030,5 +1033,37 @@ func TestAChannelYouCannotSeeIsNotYoursToManage(t *testing.T) {
 
 	// The owner is unaffected: layer 2 short-circuits above layer 5.
 	_, err = f.svc.UpdateChannel(ctx, userActor(f.owner), hidden, UpdateChannelInput{Name: &name})
+	require.NoError(t, err)
+}
+
+// TestDenyingYourselfViewIsAOneWayDoor pins a consequence of requiring the view bit, so that it reads as
+// a decision rather than as something nobody noticed.
+//
+// A member holding PermManageRoles can deny @everyone PermViewChannel on a channel in one request: the
+// target is @everyone at position 0 so the standing check passes, and refuseEscalation passes because
+// they hold the bit at the time of the write. From that moment they cannot see the channel, and therefore
+// cannot reach any route that would undo it.
+//
+// Before M14 required the view bit they could have reversed their own change, because managing did not
+// depend on seeing. That is the trade: the alternative is a moderator administering a channel their own
+// listing refuses to mention, which is the bug this milestone opened with. Discord behaves the same way
+// and its answer is the same — the owner, an administrator, or an Instance Admin repairs it.
+func TestDenyingYourselfViewIsAOneWayDoor(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	_, err := f.svc.SetOverwrite(ctx, userActor(f.mod), SetOverwriteInput{
+		ChannelID: f.channelID, TargetType: roles.OverwriteTargetRole, TargetID: f.everyoneID,
+		Deny: roles.PermViewChannel,
+	})
+	require.NoError(t, err, "denying @everyone the view bit is an ordinary way to make a channel private")
+
+	// And now the author cannot undo it.
+	err = f.svc.DeleteOverwrite(ctx, userActor(f.mod), f.channelID, roles.OverwriteTargetRole, f.everyoneID)
+	require.ErrorIs(t, err, httpx.ErrNotFound, "they can no longer see the channel they just hid")
+
+	// The owner can, which is the recovery path and the reason this is a trade rather than a trap.
+	err = f.svc.DeleteOverwrite(ctx, userActor(f.owner), f.channelID, roles.OverwriteTargetRole, f.everyoneID)
 	require.NoError(t, err)
 }

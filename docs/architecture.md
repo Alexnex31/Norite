@@ -476,7 +476,13 @@ CREATE TABLE audit_log_entries (
   actor_id bigint NOT NULL REFERENCES users(id), action varchar(64) NOT NULL, target_id bigint NULL,
   changes jsonb NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX ON audit_log_entries (guild_id, created_at DESC);
+-- The listing reads by id, not created_at: snowflakes are time-ordered (ADR 0003) and, unlike a
+-- timestamp, unique — a mutation and its audit entry share a transaction, so entries arrive in bursts
+-- sharing a timestamp and a cursor over created_at would skip or repeat one at every page boundary
+-- landing inside a burst. M12 created a (guild_id, created_at DESC) index when nothing read the table;
+-- M14 is the first reader and migration 000017 replaces it. A date range is expressible as an id range,
+-- so this one index serves both.
+CREATE INDEX ON audit_log_entries (guild_id, id DESC);
 
 -- Presence (persisted — Milestone M38; supersedes the original in-memory-only design)
 CREATE TABLE presence_status (
