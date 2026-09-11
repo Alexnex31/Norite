@@ -171,17 +171,23 @@ would flip them.
 ## M14 — guild audit log
 
 ### A moderator can lock themselves out of a channel and not undo it
-- **Raised**: M14, `/code-review high`
-- **Verdict**: accepted risk — the cost of a fix, not a defect
-- **Why**: requiring `PermViewChannel` alongside every management permission closed a real bug — a
-  moderator administering a channel their own listing hid from them. The price is that denying `@everyone`
-  the view bit on a channel now also removes the author's route back: the standing check passes
-  (`@everyone` is position 0) and `refuseEscalation` passes (they hold the bit as they write it), and from
-  the moment it commits they cannot see the channel or reach any route that would undo it. Before M14 they
-  could have reversed their own change, because managing did not depend on seeing — which is exactly the
-  property that was wrong. Discord behaves the same way, and its recovery path is the same as ours: the
-  owner, an administrator, or an Instance Admin. Pinned by
-  `TestDenyingYourselfViewIsAOneWayDoor` so it reads as a decision.
-- **Reopens if**: guilds acquire a way to have no owner and no administrator reachable — M13a's ownership
-  transfer is what keeps that from happening — or if a self-service "undo my last overwrite" surface is
-  ever proposed, which would need a different answer.
+- **Raised**: M14, `/code-review high`. The reasoning below was **corrected by `/security-sweep` on the
+  same branch**, which is why it is worth reading rather than skimming: the finding was right and its
+  explanation was wrong, and the explanation is the half a later reader acts on.
+- **Verdict**: not a vulnerability — the escalation check working, and older than the milestone that
+  reported it
+- **Why**: reported as a cost M14 introduced by requiring `PermViewChannel` alongside every management
+  permission. It is not. A `PermManageRoles` holder who denies `@everyone` `PermViewChannel` could never
+  undo it: `DeleteOverwrite` runs `refuseEscalation` over the bits the removed row carried, and restoring
+  the view bit means holding it *in that channel* — which the row being removed has just taken away.
+  Reproduced against `main` at `c8ec10b`, where the author's own delete answers `403 a role cannot be
+  given permissions you do not hold yourself`. That is the self-targeted-overwrite entry above,
+  generalised from `PermManageRoles` to `PermViewChannel`. What M14 changes is the **status code**, 403 to
+  404, because the channel is now hidden at the route rather than refused at the check — and it closes the
+  one escape that did work: pre-M14 the author could still delete the channel outright, which was
+  confirmed to succeed and is the divergence this milestone opened with rather than a recovery path.
+  Discord behaves the same way, and its recovery path is ours: the owner, an administrator, or an Instance
+  Admin. Pinned by `TestDenyingYourselfViewIsAOneWayDoor`.
+- **Reopens if**: the union check is narrowed to the value being written — the same condition the M13
+  entry above carries, and the accurate one, because that check is what holds the door shut and the view
+  requirement is not. A self-service "undo my last overwrite" surface would still need its own answer.

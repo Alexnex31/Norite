@@ -1044,10 +1044,15 @@ func TestAChannelYouCannotSeeIsNotYoursToManage(t *testing.T) {
 // they hold the bit at the time of the write. From that moment they cannot see the channel, and therefore
 // cannot reach any route that would undo it.
 //
-// Before M14 required the view bit they could have reversed their own change, because managing did not
-// depend on seeing. That is the trade: the alternative is a moderator administering a channel their own
-// listing refuses to mention, which is the bug this milestone opened with. Discord behaves the same way
-// and its answer is the same — the owner, an administrator, or an Instance Admin repairs it.
+// The door is older than this milestone, and M14 changes the answer rather than the outcome. Before the
+// view bit was required, DeleteOverwrite refused the author too: refuseEscalation asks for the bits the
+// removed row carried, and restoring PermViewChannel means holding it in this channel — which the row
+// being removed has just taken away. Reproduced against main, which answers 403 where this answers 404.
+//
+// What M14 does close is the one escape that worked: deleting the channel outright. That is the bug this
+// milestone opened with rather than a recovery path, so losing it is the fix and not a cost. Discord
+// behaves the same way and its answer is ours — the owner, an administrator, or an Instance Admin
+// repairs it.
 func TestDenyingYourselfViewIsAOneWayDoor(t *testing.T) {
 	t.Parallel()
 	f := newOverwriteFixture(t, roles.PermViewChannel)
@@ -1062,6 +1067,12 @@ func TestDenyingYourselfViewIsAOneWayDoor(t *testing.T) {
 	// And now the author cannot undo it.
 	err = f.svc.DeleteOverwrite(ctx, userActor(f.mod), f.channelID, roles.OverwriteTargetRole, f.everyoneID)
 	require.ErrorIs(t, err, httpx.ErrNotFound, "they can no longer see the channel they just hid")
+
+	// Nor can they take the way out that used to exist. Deleting the channel was refused by nothing
+	// before this milestone, which is the divergence M14 opened with; here it is answered like everything
+	// else that names a channel the caller cannot see.
+	require.ErrorIs(t, f.svc.DeleteChannel(ctx, userActor(f.mod), f.channelID), httpx.ErrNotFound,
+		"deleting the channel is not an escape from having hidden it")
 
 	// The owner can, which is the recovery path and the reason this is a trade rather than a trap.
 	err = f.svc.DeleteOverwrite(ctx, userActor(f.owner), f.channelID, roles.OverwriteTargetRole, f.everyoneID)
