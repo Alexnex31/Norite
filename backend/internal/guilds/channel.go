@@ -359,10 +359,22 @@ func (s *Service) CreateChannel(
 			}
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionChannelCreate, &channelID, map[string]any{
-			"name": in.Name,
-			"type": in.Type,
-		}); err != nil {
+		changes := auditDiff{}
+		changes.created("name", in.Name)
+		changes.created("type", in.Type)
+		if in.Topic != nil {
+			changes.created("topic", *in.Topic)
+		}
+		if in.ParentID != nil {
+			// Context rather than a created field, and the distinction earns its keep here: the parent is
+			// what decided the channel's starting overwrites, so an operator reading a later "why could
+			// they see this" question needs it — but the channel did not change parent, it was born in one.
+			changes.context("parent_id", *in.ParentID)
+		}
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionChannelCreate, &channelID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -467,30 +479,31 @@ func (s *Service) UpdateChannel(
 			return fmt.Errorf("guilds: update channel: %w", err)
 		}
 
-		changes := map[string]any{}
+		// Against the row authorizeChannel loaded to find the guild, so the diff costs no extra read.
+		changes := auditDiff{}
 		if in.Name != nil {
-			changes["name"] = *in.Name
+			changes.changed("name", orNil(existing.Name), *in.Name)
 		}
 		if in.ClearTopic {
-			changes["topic"] = nil
+			changes.changed("topic", orNil(existing.Topic), nil)
 		} else if in.Topic != nil {
-			changes["topic"] = *in.Topic
+			changes.changed("topic", orNil(existing.Topic), *in.Topic)
 		}
 		if in.Position != nil {
-			changes["position"] = *in.Position
+			changes.changed("position", existing.Position, *in.Position)
 		}
 		if in.NSFW != nil {
-			changes["nsfw"] = *in.NSFW
+			changes.changed("nsfw", existing.Nsfw, *in.NSFW)
 		}
 		if in.Bitrate != nil {
-			changes["bitrate"] = *in.Bitrate
+			changes.changed("bitrate", orNil(existing.Bitrate), *in.Bitrate)
 		}
 		if in.UserLimit != nil {
-			changes["user_limit"] = *in.UserLimit
+			changes.changed("user_limit", orNil(existing.UserLimit), *in.UserLimit)
 		}
 
 		if err := s.writeAudit(
-			ctx, q, guildID, actor.UserID, ActionChannelUpdate, &channelID, changes,
+			ctx, q, guildID, actor.UserID, ActionChannelUpdate, &channelID, changes.payload(),
 		); err != nil {
 			return err
 		}
@@ -532,7 +545,7 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 		// routes as much as to the permission ones, which had it and these did not.
 		// One read, not two: authorizeChannel loads the row to find its guild, and the guild is the only
 		// thing this operation wanted it for.
-		_, guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
+		existing, guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
 		if err != nil {
 			return err
 		}
@@ -540,7 +553,16 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 		// Unlike a guild deletion, this entry survives: audit_log_entries cascades from guilds, not from
 		// channels, so deleting a channel leaves its record in place. That is the whole reason target_id
 		// is not a foreign key — see migration 000016.
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionChannelDelete, &channelID, nil); err != nil {
+		// What went, from the row authorizeChannel had already loaded — the comment below notes this entry
+		// survives its channel, and an entry that survives with no description of what it names is a row
+		// saying only that something happened.
+		changes := auditDiff{}
+		changes.removed("name", orNil(existing.Name))
+		changes.removed("type", existing.Type)
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionChannelDelete, &channelID, changes.payload(),
+		); err != nil {
 			return err
 		}
 

@@ -203,9 +203,18 @@ func (s *Service) changeMemberRole(
 
 		if changed > 0 {
 			target := userID
-			if err := s.writeAudit(ctx, q, guildID, actor.UserID, action, &target, map[string]any{
-				"role_id": roleID.String(),
-			}); err != nil {
+			// Context and nothing else, which is the one place the two kinds of key differ most visibly.
+			//
+			// The role is not a field that went from one value to another: target_id names the member and
+			// the action names the direction, so what is missing is which role, and that is an identity
+			// rather than a change. Rendering it as {"to": …} would read as the member's roles having been
+			// set to this one.
+			changes := auditDiff{}
+			changes.context("role_id", roleID)
+
+			if err := s.writeAudit(
+				ctx, q, guildID, actor.UserID, action, &target, changes.payload(),
+			); err != nil {
 				return err
 			}
 		}

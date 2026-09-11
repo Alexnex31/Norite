@@ -143,7 +143,7 @@ func PermissionFromInt64(v int64) Permission { return Permission(v) }
 //
 // The same decision ADR 0003 makes for snowflakes, for the same reason: this is a 63-bit value and
 // JavaScript's number type is a float64, so anything above 2^53 loses precision silently on the way
-// through a browser. Nineteen bits are defined today and the hazard is years away — which is exactly when
+// through a browser. Twenty bits are defined today and the hazard is years away — which is exactly when
 // it is cheap to fix, because changing the wire type later is a breaking change across four codegen'd
 // clients. Discord made this change under load rather than ahead of it.
 //

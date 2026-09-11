@@ -152,7 +152,8 @@ func TestTheAuditLogDoesNotFilterByChannelVisibility(t *testing.T) {
 
 	var changes map[string]any
 	require.NoError(t, json.Unmarshal(found.Changes, &changes))
-	require.Equal(t, "staff-only", changes["name"], "including the name of a channel they cannot open")
+	require.Equal(t, map[string]any{"to": "staff-only"}, changes["name"],
+		"including the name of a channel they cannot open")
 }
 
 // TestTheAuditLogFiltersNarrowRatherThanWiden covers both optional filters together, because the property
@@ -347,4 +348,135 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 	require.Zero(t, remaining,
 		"the entry is written in the transaction (rule 2) and cascades with the guild; the durable record "+
 			"of an instance-level action is rule 14's instance_audit_log, not this table")
+}
+
+// TestTheAuditDiffShapeIsUniform is the rule auditDiff states, enforced across every action.
+//
+// Two kinds of key and one question per key: a changed field is an object carrying `from`, `to` or both;
+// a context field is a scalar. A renderer relies on that split, and a comment saying so is what the
+// seventeenth mutation breaks — the sixteenth already nearly did, since `renumbered` and `role_id` are
+// both context and both look at a glance like fields somebody forgot to diff.
+//
+// It reuses the coverage test's fixture work by driving the same mutations, then walks every entry the
+// guild produced rather than a chosen few. An action added later and left out of the drive-through is
+// caught by TestEveryAuditActionIsReachable, not here; this one asserts the shape of what does arrive.
+func TestTheAuditDiffShapeIsUniform(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+	owner := userActor(f.owner)
+
+	name := "renamed"
+	_, err := f.svc.Update(ctx, owner, f.guildID, UpdateGuildInput{Name: &name})
+	require.NoError(t, err)
+
+	ch, err := f.svc.CreateChannel(ctx, owner, f.guildID,
+		CreateChannelInput{Name: "a-channel", Type: ChannelGuildText})
+	require.NoError(t, err)
+	_, err = f.svc.UpdateChannel(ctx, owner, ch.ID, UpdateChannelInput{Name: &name})
+	require.NoError(t, err)
+
+	role, err := f.svc.CreateRole(ctx, owner, f.guildID, CreateRoleInput{Name: "a-role"})
+	require.NoError(t, err)
+	_, err = f.svc.UpdateRole(ctx, owner, f.guildID, role.ID, UpdateRoleInput{Name: &name})
+	require.NoError(t, err)
+	_, err = f.svc.ReorderRoles(ctx, owner, f.guildID, []RolePosition{{ID: role.ID, Position: 1}})
+	require.NoError(t, err)
+	_, err = f.svc.AssignRole(ctx, owner, f.guildID, f.plain, role.ID)
+	require.NoError(t, err)
+
+	_, err = f.svc.SetOverwrite(ctx, owner, SetOverwriteInput{
+		ChannelID: ch.ID, TargetType: roles.OverwriteTargetRole, TargetID: f.everyoneID,
+		Deny: roles.PermSendMessages,
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.svc.DeleteOverwrite(
+		ctx, owner, ch.ID, roles.OverwriteTargetRole, f.everyoneID))
+	require.NoError(t, f.svc.DeleteRole(ctx, owner, f.guildID, role.ID))
+	require.NoError(t, f.svc.DeleteChannel(ctx, owner, ch.ID))
+
+	entries, err := f.svc.ListAuditLog(ctx, owner, f.guildID,
+		ListAuditLogInput{Limit: maxAuditLogPageSize})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+
+	diffed := 0
+	for _, e := range entries {
+		if e.Changes == nil {
+			continue
+		}
+
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(e.Changes, &payload), e.Action)
+		require.NotEmpty(t, payload, "%s: an empty object and null would be two spellings of nothing", e.Action)
+
+		for field, value := range payload {
+			object, isObject := value.(map[string]any)
+			if !isObject {
+				// Context. Asserted as a scalar rather than merely "not an object", so that a future
+				// context value which is a list does not quietly become unreadable to the same rule.
+				require.NotContains(t, []string{"map", "slice"}, kindOf(value),
+					"%s.%s is context and must be a scalar", e.Action, field)
+				continue
+			}
+
+			diffed++
+			_, hasFrom := object["from"]
+			_, hasTo := object["to"]
+			require.True(t, hasFrom || hasTo,
+				"%s.%s is an object, so it reads as a diff, and carries neither side", e.Action, field)
+			for key := range object {
+				require.Contains(t, []string{"from", "to"}, key,
+					"%s.%s carries %q; a diff has exactly from and to", e.Action, field, key)
+			}
+		}
+	}
+
+	require.Greater(t, diffed, 0, "or this walked nothing but context and asserted nothing")
+}
+
+// kindOf names a decoded JSON value's shape, for the assertion above.
+func kindOf(v any) string {
+	switch v.(type) {
+	case map[string]any:
+		return "map"
+	case []any:
+		return "slice"
+	default:
+		return "scalar"
+	}
+}
+
+// TestAPermissionInAnAuditEntryIsAString is the wire-type rule M12 settled, on the one surface that was
+// still breaking it.
+//
+// Permissions cross the wire as quoted decimal strings because the field is 63 bits and a browser's
+// number is a float64. M12 and M13 wrote in.Permissions.Int64() into the audit payload, which rendered it
+// as a JSON number — a client reading this log through a browser would have had the same silent rounding
+// the representation exists to prevent, on the one endpoint whose purpose is to be believed.
+func TestAPermissionInAnAuditEntryIsAString(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+	owner := userActor(f.owner)
+
+	_, err := f.svc.CreateRole(ctx, owner, f.guildID,
+		CreateRoleInput{Name: "a-role", Permissions: roles.PermViewChannel | roles.PermSendMessages})
+	require.NoError(t, err)
+
+	entries, err := f.svc.ListAuditLog(ctx, owner, f.guildID,
+		ListAuditLogInput{Action: ActionRoleCreate})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	// map[string]any rather than map[string]map[string]any: the payload mixes diffs with context, and
+	// role.create's `renumbered` is a bool. That is the shape the test above pins, so decoding it as
+	// uniformly nested here would be this test disagreeing with that one.
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(entries[0].Changes, &payload))
+
+	permissions, ok := payload["permissions"].(map[string]any)
+	require.True(t, ok, "permissions is a created field, so it is an object carrying `to`")
+	require.Equal(t, "3", permissions["to"],
+		"a quoted decimal string, as roles.Permission marshals itself — not a JSON number")
 }

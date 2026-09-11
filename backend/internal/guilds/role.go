@@ -145,12 +145,20 @@ func (s *Service) CreateRole(
 		// reading M14's audit log would otherwise see a role.create entry and have no way to know the
 		// whole hierarchy was renumbered, and a client caching positions from GET /roles is stale after
 		// an unrelated create.
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionRoleCreate, &roleID, map[string]any{
-			"name":        in.Name,
-			"permissions": in.Permissions.Int64(),
-			"position":    bottom,
-			"renumbered":  true,
-		}); err != nil {
+		changes := auditDiff{}
+		changes.created("name", in.Name)
+		changes.created("permissions", in.Permissions)
+		changes.created("position", bottom)
+		changes.created("color", in.Color)
+		changes.created("hoist", in.Hoist)
+		changes.created("mentionable", in.Mentionable)
+		// Context, not a change: it says every other role moved up, which is a fact about the operation
+		// rather than a field of the role being created.
+		changes.context("renumbered", true)
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionRoleCreate, &roleID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -243,15 +251,33 @@ func (s *Service) UpdateRole(
 			return fmt.Errorf("guilds: update role: %w", err)
 		}
 
-		changes := map[string]any{}
+		// Against the row the hierarchy check above already loaded, so the diff costs no extra read.
+		//
+		// Color, hoist and mentionable are recorded here and were not before. UpdateRole has always
+		// accepted them and the entry named only two of the five fields it can change, so an operator
+		// reading the log saw "somebody updated this role" with no way to learn what — including for
+		// `hoist`, which is how a role becomes visible in the member sidebar.
+		changes := auditDiff{}
 		if in.Name != nil {
-			changes["name"] = *in.Name
+			changes.changed("name", existing.Name, *in.Name)
+		}
+		if in.Color != nil {
+			changes.changed("color", existing.Color, *in.Color)
 		}
 		if in.Permissions != nil {
-			changes["permissions"] = in.Permissions.Int64()
+			changes.changed("permissions",
+				roles.PermissionFromInt64(existing.Permissions), *in.Permissions)
+		}
+		if in.Hoist != nil {
+			changes.changed("hoist", existing.Hoist, *in.Hoist)
+		}
+		if in.Mentionable != nil {
+			changes.changed("mentionable", existing.Mentionable, *in.Mentionable)
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionRoleUpdate, &roleID, changes); err != nil {
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionRoleUpdate, &roleID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -302,7 +328,16 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 			return httpx.Errorf(ErrDefaultRoleImmutable, "the default role cannot be deleted")
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionRoleDelete, &roleID, nil); err != nil {
+		// What went. This is the entry that matters most on a delete: the role row is about to be gone, so
+		// the log is the only surviving description of what the people who held it could do.
+		changes := auditDiff{}
+		changes.removed("name", existing.Name)
+		changes.removed("permissions", roles.PermissionFromInt64(existing.Permissions))
+		changes.removed("position", existing.Position)
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionRoleDelete, &roleID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -478,7 +513,10 @@ func (s *Service) ReorderRoles(
 			final[position] = id
 		}
 
-		changes := make(map[string]any, len(in))
+		// Keyed by role id, each value the move that role made. byID holds the positions read under the
+		// lock above, so no row is read twice — and a role named in the request at the position it already
+		// holds records nothing, which is what changed() is for.
+		changes := make(auditDiff, len(in))
 		for _, want := range in {
 			affected, err := q.SetRolePosition(ctx, db.SetRolePositionParams{
 				Position: want.Position,
@@ -499,11 +537,11 @@ func (s *Service) ReorderRoles(
 				return httpx.Errorf(httpx.ErrConflict,
 					"a role in this request was deleted while it was being reordered")
 			}
-			changes[want.ID.String()] = want.Position
+			changes.changed(want.ID.String(), byID[want.ID].Position, want.Position)
 		}
 
 		if err := s.writeAudit(
-			ctx, q, guildID, actor.UserID, ActionRoleReorder, nil, changes,
+			ctx, q, guildID, actor.UserID, ActionRoleReorder, nil, changes.payload(),
 		); err != nil {
 			return err
 		}

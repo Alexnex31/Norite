@@ -82,16 +82,21 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 		// before this code runs. The check is unchanged and still right for every other bit — a caller
 		// denied PermSendMessages here can blank the row that denies it and gain the permission — but the
 		// scenario that motivated it was closed by this milestone's own first commit.
-		existing, err := q.GetPermissionOverwrite(ctx, db.GetPermissionOverwriteParams{
+		// Kept beyond the switch, because the audit diff below needs the same row: a PUT over an existing
+		// overwrite is an update and must record both sides, and one over nothing is a creation. The read
+		// that answers the escalation question is the read that answers this one.
+		prior, err := q.GetPermissionOverwrite(ctx, db.GetPermissionOverwriteParams{
 			ChannelID:  int64(in.ChannelID),
 			TargetType: in.TargetType,
 			TargetID:   int64(in.TargetID),
 			GuildID:    int64(guildID),
 		})
+		replaced := err == nil
+
 		switch {
 		case err == nil:
-			changed := roles.PermissionFromInt64(existing.Allow).
-				Add(roles.PermissionFromInt64(existing.Deny)).
+			changed := roles.PermissionFromInt64(prior.Allow).
+				Add(roles.PermissionFromInt64(prior.Deny)).
 				Add(in.Allow).Add(in.Deny)
 			if err := refuseEscalation(allowed, changed); err != nil {
 				return err
@@ -133,13 +138,26 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 			return fmt.Errorf("guilds: upsert overwrite: %w", err)
 		}
 
+		// The diff, from the row the union check above already read — or a creation where it found none.
+		//
+		// channel_id and type are context: target_id holds the role or member this overwrite names, so the
+		// channel it sits on has nowhere else to go, and the type is what says which of the two target_id
+		// is. Neither changed; a PUT that would move an overwrite to another channel is a different row.
+		changes := auditDiff{}
+		changes.context("channel_id", in.ChannelID)
+		changes.context("type", in.TargetType)
+		if replaced {
+			changes.changed("allow", roles.PermissionFromInt64(prior.Allow), in.Allow)
+			changes.changed("deny", roles.PermissionFromInt64(prior.Deny), in.Deny)
+		} else {
+			changes.created("allow", in.Allow)
+			changes.created("deny", in.Deny)
+		}
+
 		target := in.TargetID
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionOverwriteSet, &target, map[string]any{
-			"channel_id": in.ChannelID.String(),
-			"type":       in.TargetType,
-			"allow":      in.Allow.Int64(),
-			"deny":       in.Deny.Int64(),
-		}); err != nil {
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionOverwriteSet, &target, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -193,10 +211,18 @@ func (s *Service) DeleteOverwrite(
 			return err
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionOverwriteDelete, &targetID, map[string]any{
-			"channel_id": channelID.String(),
-			"type":       targetType,
-		}); err != nil {
+		// What the row carried, which is the whole of what deleting it changes — and the reason the
+		// escalation check above exists: removing a deny grants whatever it denied, so an operator reading
+		// this entry needs the bits, not just the fact that a row went.
+		changes := auditDiff{}
+		changes.context("channel_id", channelID)
+		changes.context("type", targetType)
+		changes.removed("allow", roles.PermissionFromInt64(existing.Allow))
+		changes.removed("deny", roles.PermissionFromInt64(existing.Deny))
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionOverwriteDelete, &targetID, changes.payload(),
+		); err != nil {
 			return err
 		}
 

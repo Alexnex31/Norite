@@ -4496,15 +4496,40 @@ components:
           type: [object, "null"]
           additionalProperties: true
           description: >
-            Per-action detail, or null where there is none. The shape depends on `action` and is
-            deliberately not constrained here: a writer adding a field must not also be a change to the
-            read path.
+            What the action did, or null where there is nothing to record. **Two kinds of key, told apart
+            by the value**, so a renderer asks one question per key:
+
+
+            A **changed field** is an object carrying `from`, `to`, or both — `{"name": {"from":
+            "general", "to": "lobby"}}`. An update carries both sides; a `*.create` carries `to` alone,
+            because there was no prior state and a null on every field would be noise; a `*.delete`
+            carries `from` alone, which is the case that matters most, since the object is gone and this
+            is the only surviving description of it.
+
+
+            A **context field** is a scalar — `{"channel_id": "42"}`. It exists because `target_id` is one
+            column and some actions name a pair: an overwrite names a channel *and* a role or member, a
+            role grant names a member *and* a role. The column holds one, the payload carries the other.
+            It is not a change, and rendering it as `{"to": …}` would say it had been set to that value.
+
+
+            A field sent with the value it already had records nothing — this answers "what happened", not
+            "what did the request contain", and the two differ on every edit form that submits every
+            field.
+
+
+            Permissions appear as quoted decimal strings, like the `Permissions` schema everywhere else,
+            and ids as strings. `role.reorder` is keyed by role id, each value the move that role made.
 
 
             Values can contain text a member chose — a guild, channel or role name. A client rendering
             this to a terminal must pass it through the terminal-safe sanitizer first, as it must for any
             other user-controlled string.
-          example: { "name": "general" }
+          example:
+            {
+              "name": { "from": "general", "to": "lobby" },
+              "topic": { "from": null, "to": "rules and announcements" }
+            }
         created_at:
           type: string
           format: date-time

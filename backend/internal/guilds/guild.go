@@ -120,9 +120,15 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 		// Rule 2. The only audit entry in this package describing something that did not exist when the
 		// request arrived, which is why its target is the guild itself.
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionGuildCreate, &guildID, map[string]any{
-			"name": in.Name,
-		}); err != nil {
+		changes := auditDiff{}
+		changes.created("name", in.Name)
+		if in.Description != nil {
+			changes.created("description", *in.Description)
+		}
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionGuildCreate, &guildID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -181,6 +187,22 @@ func (s *Service) Update(
 			return err
 		}
 
+		// The prior row, read for the diff and for nothing else.
+		//
+		// M13 removed a GetGuild from Delete as a redundant read, and this one is not the same thing: a
+		// diff needs the state being written over, and it exists exactly once — here, inside the
+		// transaction that replaces it. The alternative is an UPDATE ... RETURNING that carries both sides,
+		// which would mean a bespoke query shape on each of the four update paths to save one primary-key
+		// lookup on a guild rename. Loading it is what UpdateRole and UpdateChannel already do; this makes
+		// the four agree.
+		existing, err := q.GetGuild(ctx, int64(guildID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: get guild: %w", err)
+		}
+
 		row, err := q.UpdateGuild(ctx, db.UpdateGuildParams{
 			ID:               int64(guildID),
 			Name:             in.Name,
@@ -194,17 +216,19 @@ func (s *Service) Update(
 			return fmt.Errorf("guilds: update guild: %w", err)
 		}
 
-		changes := map[string]any{}
+		changes := auditDiff{}
 		if in.Name != nil {
-			changes["name"] = *in.Name
+			changes.changed("name", existing.Name, *in.Name)
 		}
 		if in.ClearDescription {
-			changes["description"] = nil
+			changes.changed("description", orNil(existing.Description), nil)
 		} else if in.Description != nil {
-			changes["description"] = *in.Description
+			changes.changed("description", orNil(existing.Description), *in.Description)
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionGuildUpdate, &guildID, changes); err != nil {
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionGuildUpdate, &guildID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -278,6 +302,12 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 		// afterwards, because M14's audit log is per-guild and this guild is gone. The instance-scoped
 		// record of a guild deletion belongs in instance_audit_log, which is rule 14's table and M72's
 		// milestone. Written down here rather than discovered there.
+		// The one action that records nothing, and deliberately.
+		//
+		// audit_log_entries cascades from guilds, so this entry is written inside the transaction — rule 2
+		// holds — and removed by the DELETE two lines below. Describing what was destroyed would be work
+		// whose result nothing can ever read. The durable record of an instance-level action is rule 14's
+		// instance_audit_log (M72), which is a different table for exactly this reason.
 		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionGuildDelete, &guildID, nil); err != nil {
 			return err
 		}

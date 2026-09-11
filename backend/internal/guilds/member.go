@@ -180,6 +180,19 @@ func (s *Service) UpdateMember(
 			}
 		}
 
+		// The prior row, for the diff. Same argument as UpdateGuild's: the state being written over exists
+		// exactly once, inside the transaction that replaces it.
+		existing, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{
+			GuildID: int64(guildID),
+			UserID:  int64(userID),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: get member: %w", err)
+		}
+
 		row, err := q.UpdateGuildMember(ctx, db.UpdateGuildMemberParams{
 			GuildID:       int64(guildID),
 			UserID:        int64(userID),
@@ -195,20 +208,22 @@ func (s *Service) UpdateMember(
 			return fmt.Errorf("guilds: update member: %w", err)
 		}
 
-		changes := map[string]any{}
+		changes := auditDiff{}
 		if in.ClearNickname {
-			changes["nickname"] = nil
+			changes.changed("nickname", orNil(existing.Nickname), nil)
 		} else if in.Nickname != nil {
-			changes["nickname"] = *in.Nickname
+			changes.changed("nickname", orNil(existing.Nickname), *in.Nickname)
 		}
 		if in.Deaf != nil {
-			changes["deaf"] = *in.Deaf
+			changes.changed("deaf", existing.Deaf, *in.Deaf)
 		}
 		if in.Mute != nil {
-			changes["mute"] = *in.Mute
+			changes.changed("mute", existing.Mute, *in.Mute)
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionMemberUpdate, &userID, changes); err != nil {
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionMemberUpdate, &userID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -320,7 +335,31 @@ func (s *Service) RemoveMember(
 				"transfer ownership before leaving a guild you own")
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionMemberRemove, &userID, nil); err != nil {
+		// The nickname, and only the nickname.
+		//
+		// A kick destroys a membership row, and what a reader wants back from it is who this was in this
+		// guild — which is the nickname, since the account itself survives and its own name is not this
+		// table's to record. The roles they held are deliberately not read: that is a second query on a
+		// moderation path, and every grant is already in this log as its own member.role_add entry.
+		member, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{
+			GuildID: int64(guildID),
+			UserID:  int64(userID),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: get member: %w", err)
+		}
+
+		changes := auditDiff{}
+		if member.Nickname != nil {
+			changes.removed("nickname", *member.Nickname)
+		}
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionMemberRemove, &userID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
