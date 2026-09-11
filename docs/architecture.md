@@ -477,11 +477,12 @@ CREATE TABLE audit_log_entries (
   changes jsonb NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
 -- The listing reads by id, not created_at: snowflakes are time-ordered (ADR 0003) and, unlike a
--- timestamp, unique — a mutation and its audit entry share a transaction, so entries arrive in bursts
--- sharing a timestamp and a cursor over created_at would skip or repeat one at every page boundary
--- landing inside a burst. M12 created a (guild_id, created_at DESC) index when nothing read the table;
--- M14 is the first reader and migration 000017 replaces it. A date range is expressible as an id range,
--- so this one index serves both.
+-- timestamp, unique — nothing constrains created_at, so a cursor over it would skip or repeat an entry at
+-- any page boundary landing inside a group of equal values. Measured, that group does not occur today,
+-- which argues for the id rather than against it: a boundary that loses a row rarely is one nobody will
+-- reproduce. M12 created a (guild_id, created_at DESC) index when nothing read the table; M14 is the
+-- first reader and migration 000017 replaces it. A date range is expressible as an id range, so this one
+-- index serves both.
 CREATE INDEX ON audit_log_entries (guild_id, id DESC);
 
 -- Presence (persisted — Milestone M38; supersedes the original in-memory-only design)

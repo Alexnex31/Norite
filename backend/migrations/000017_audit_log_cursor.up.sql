@@ -6,11 +6,20 @@
 -- # Why the cursor is on id and not created_at
 --
 -- Snowflakes are time-ordered by construction (ADR 0003), so ordering by id *is* ordering by time — with a
--- property created_at does not have: it is unique. Two entries written in the same millisecond have the
--- same timestamp to the precision that matters, and a cursor over a non-unique column either skips an
--- entry or repeats one at every page boundary that lands inside such a group. A guild mutation and its
--- audit entry share a transaction, so bursts of same-millisecond entries are the normal case here rather
--- than a rare one.
+-- property created_at does not have: it is unique. A cursor over a non-unique column either skips an entry
+-- or repeats one at every page boundary that lands inside a group of equal values, and nothing here
+-- constrains created_at to be unique.
+--
+-- An earlier version of this comment went further and claimed that same-timestamp bursts are the normal
+-- case, because a mutation and its audit entry share a transaction. That reasoning is wrong — one mutation
+-- writes one entry, so there is no burst for it to share a timestamp with — and the claim was measured and
+-- refuted on this branch: 60 entries written through the service, 30 of them concurrently, produced 60
+-- distinct created_at values. now() is the transaction's start time at microsecond resolution.
+--
+-- That strengthens the case for the id rather than weakening it. A page boundary that silently drops an
+-- entry once a year is worse than one that drops it every time, because it will never be reproduced from
+-- a report — and the id costs nothing to use: it is the primary key, the ordering is already there, and
+-- the index below serves the filter and the sort together.
 --
 -- # What the old index cost, measured
 --

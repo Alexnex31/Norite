@@ -512,10 +512,12 @@ WHERE c.guild_id = sqlc.arg(guild_id)::bigint
 -- # The cursor is an id, and that is not a style choice
 --
 -- Snowflakes are time-ordered (ADR 0003), so `id DESC` is "newest first" — with the property created_at
--- lacks: uniqueness. A mutation and its audit entry share a transaction, so entries arrive in bursts that
--- share a timestamp, and a cursor over created_at skips or repeats one at every page boundary landing
--- inside such a burst. Served by audit_log_entries_guild_id_id_idx, which migration 000017 adds for this
--- query and which removes the sort the old index left above it.
+-- lacks: uniqueness. Nothing constrains created_at, so a cursor over it skips or repeats an entry at any
+-- page boundary landing inside a group of equal values. Measured on this branch, that group does not occur
+-- today — 60 entries, 30 written concurrently, gave 60 distinct microsecond timestamps — which is an
+-- argument for the id and not against it: a boundary that loses a row rarely is one nobody will ever
+-- reproduce. Migration 000017 carries the full reasoning. Served by audit_log_entries_guild_id_id_idx,
+-- which that migration adds for this query and which removes the sort the old index left above it.
 --
 -- # Filters
 --
