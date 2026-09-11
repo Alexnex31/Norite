@@ -44,6 +44,7 @@ func TestTheBitOrderIsWhatTheDatabaseAlreadyStores(t *testing.T) {
 		{"PermManageWebhooks", PermManageWebhooks, 16},
 		{"PermManageEmojis", PermManageEmojis, 17},
 		{"PermModerateMembers", PermModerateMembers, 18},
+		{"PermViewAuditLog", PermViewAuditLog, 19},
 	} {
 		if want := Permission(1) << tc.bit; tc.got != want {
 			t.Errorf("%s = %d, want bit %d (%d) — see the comment above before changing this",
@@ -69,14 +70,19 @@ func TestVideoVoiceStaysReserved(t *testing.T) {
 // TestPermAllStopsAtTheLastDefinedBit guards the difference between permAll and ^Permission(0).
 //
 // An owner or an administrator resolves to permAll. If that were every one of the 64 bit positions, a
-// milestone defining bit 19 would find it already granted to owners on every existing instance — Has would
+// milestone defining bit 20 would find it already granted to owners on every existing instance — Has would
 // answer true for a permission nobody had written code to grant. Confirmed by removal: replace permAll
 // with ^Permission(0) and this fails.
+//
+// The sentence above said bit 19 until M14 defined PermViewAuditLog there, which is the whole mechanism
+// working: the number moves with the last defined constant, and both assertions below had to be changed
+// by hand to let this milestone compile. That is what the pinning test is for — a renumber or an
+// accidental widening cannot be absorbed by rerunning anything.
 func TestPermAllStopsAtTheLastDefinedBit(t *testing.T) {
-	if permAll.Has(1 << 19) {
+	if permAll.Has(1 << 20) {
 		t.Error("permAll grants an undefined bit; it must be derived from the last defined constant")
 	}
-	if !permAll.Has(PermModerateMembers) {
+	if !permAll.Has(PermViewAuditLog) {
 		t.Error("permAll must reach the last defined constant")
 	}
 	if permAll.Int64() < 0 {

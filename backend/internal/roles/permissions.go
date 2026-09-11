@@ -48,7 +48,7 @@ import (
 // with no migration to review and no error to catch it. Add new bits at the end, and never renumber.
 //
 // uint64 in Go against a signed bigint in Postgres, so bit 63 is unavailable and the ceiling is 63
-// permissions. Stated here rather than discovered at bit 64; there are nineteen today.
+// permissions. Stated here rather than discovered at bit 64; there are twenty today.
 type Permission uint64
 
 const (
@@ -80,6 +80,15 @@ const (
 	// because the bit order is fixed by the specification and leaving a gap to fill later is the
 	// renumbering this comment warns about.
 	PermModerateMembers
+	// PermViewAuditLog is M14's, and it is a bit of its own rather than a shape of PermManageGuild.
+	//
+	// Discord makes the same split, and the reason is the same: the log names every moderation action
+	// and who took it, which is exactly what an instance's moderators need to read and exactly what
+	// nobody else should. Folding it into PermManageGuild would mean the only way to let somebody audit
+	// the guild is to let them rename it, change its settings and edit its invites — the shape M12's
+	// UpdateMember had to be corrected out of, where a permission only ever OR'd into a base is not a
+	// grantable permission at all.
+	PermViewAuditLog
 )
 
 // permAll is every defined bit, and what an owner or an administrator resolves to.
@@ -89,7 +98,7 @@ const (
 // already granted to owners in a way no code says out loud, and Has would answer true for a permission
 // that did not exist when the check was written. This value is derived from the last defined constant, so
 // adding one at the end extends it and adding one in the middle is still the renumbering hazard above.
-const permAll = Permission(PermModerateMembers<<1 - 1)
+const permAll = Permission(PermViewAuditLog<<1 - 1)
 
 // Known reports whether p sets only bits this build defines.
 //

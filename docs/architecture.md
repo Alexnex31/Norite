@@ -687,6 +687,7 @@ const (
     PermManageWebhooks  // ACTIVE
     PermManageEmojis    // ACTIVE
     PermModerateMembers // M74 — timeout a member without suspending the account; Discord's MODERATE_MEMBERS
+    PermViewAuditLog    // M14 — ACTIVE; read the guild audit log. Its own bit, as Discord's is
 )
 ```
 
