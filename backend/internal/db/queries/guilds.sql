@@ -502,3 +502,42 @@ JOIN channels c ON c.id = po.channel_id
 WHERE c.guild_id = sqlc.arg(guild_id)::bigint
   AND po.target_type = sqlc.arg(target_type)
   AND po.target_id = sqlc.arg(target_id);
+
+-- name: ListGuildAuditLog :many
+-- One page of a guild's audit log, newest first (Milestone M14).
+--
+-- The first reader this table has ever had. Sixteen action constants and every guild-scoped mutation have
+-- been writing here since M12 under rule 2; nothing has read a row back until now.
+--
+-- # The cursor is an id, and that is not a style choice
+--
+-- Snowflakes are time-ordered (ADR 0003), so `id DESC` is "newest first" — with the property created_at
+-- lacks: uniqueness. A mutation and its audit entry share a transaction, so entries arrive in bursts that
+-- share a timestamp, and a cursor over created_at skips or repeats one at every page boundary landing
+-- inside such a burst. Served by audit_log_entries_guild_id_id_idx, which migration 000017 adds for this
+-- query and which removes the sort the old index left above it.
+--
+-- # Filters
+--
+-- action and actor_id are optional and both narrow rather than widen, so neither can return an entry the
+-- unfiltered query would not. sqlc.narg makes absent mean absent rather than meaning zero — an actor_id of
+-- 0 is not a user and a action of "" is not a verb, but relying on that would make the query's behaviour
+-- depend on values it should simply not receive.
+--
+-- # What this deliberately does not do
+--
+-- It resolves nothing. target_id is returned as an id, never joined to the channel, role or member it
+-- names — half the interesting entries are deletions whose target no longer exists, and resolving the rest
+-- would be an N+1 across four tables on a paginated endpoint.
+--
+-- It also does not filter by what the caller can see. Entries name channels, and some of those channels are
+-- hidden from some readers by the listing filter M13 added — so this endpoint's permission is the boundary
+-- rather than the row set. See guilds.ListAuditLog for that argument; it is a decision, not an oversight.
+SELECT id, guild_id, actor_id, action, target_id, changes, created_at
+FROM audit_log_entries
+WHERE guild_id = sqlc.arg(guild_id)::bigint
+  AND (sqlc.narg(before)::bigint IS NULL OR id < sqlc.narg(before)::bigint)
+  AND (sqlc.narg(action)::varchar IS NULL OR action = sqlc.narg(action)::varchar)
+  AND (sqlc.narg(actor_id)::bigint IS NULL OR actor_id = sqlc.narg(actor_id)::bigint)
+ORDER BY id DESC
+LIMIT sqlc.arg(lim);

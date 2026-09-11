@@ -520,6 +520,36 @@ type Querier interface {
 	// have meant a field-by-field conversion loop written at whichever call site was built second, on the hot
 	// path the guild-wide query's own plan exists to keep cheap.
 	ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]PermissionOverwrite, error)
+	// One page of a guild's audit log, newest first (Milestone M14).
+	//
+	// The first reader this table has ever had. Sixteen action constants and every guild-scoped mutation have
+	// been writing here since M12 under rule 2; nothing has read a row back until now.
+	//
+	// # The cursor is an id, and that is not a style choice
+	//
+	// Snowflakes are time-ordered (ADR 0003), so `id DESC` is "newest first" — with the property created_at
+	// lacks: uniqueness. A mutation and its audit entry share a transaction, so entries arrive in bursts that
+	// share a timestamp, and a cursor over created_at skips or repeats one at every page boundary landing
+	// inside such a burst. Served by audit_log_entries_guild_id_id_idx, which migration 000017 adds for this
+	// query and which removes the sort the old index left above it.
+	//
+	// # Filters
+	//
+	// action and actor_id are optional and both narrow rather than widen, so neither can return an entry the
+	// unfiltered query would not. sqlc.narg makes absent mean absent rather than meaning zero — an actor_id of
+	// 0 is not a user and a action of "" is not a verb, but relying on that would make the query's behaviour
+	// depend on values it should simply not receive.
+	//
+	// # What this deliberately does not do
+	//
+	// It resolves nothing. target_id is returned as an id, never joined to the channel, role or member it
+	// names — half the interesting entries are deletions whose target no longer exists, and resolving the rest
+	// would be an N+1 across four tables on a paginated endpoint.
+	//
+	// It also does not filter by what the caller can see. Entries name channels, and some of those channels are
+	// hidden from some readers by the listing filter M13 added — so this endpoint's permission is the boundary
+	// rather than the row set. See guilds.ListAuditLog for that argument; it is a decision, not an oversight.
+	ListGuildAuditLog(ctx context.Context, arg ListGuildAuditLogParams) ([]AuditLogEntry, error)
 	// Columns enumerated rather than `SELECT *`, and topic_search is the reason.
 	//
 	// It is a generated tsvector that nothing in this codebase reads until M63's channel search, and pgx

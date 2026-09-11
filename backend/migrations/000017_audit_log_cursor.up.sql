@@ -1,0 +1,41 @@
+-- Milestone M14 — the index the audit-log listing actually reads by.
+--
+-- M12 created audit_log_entries and gave it (guild_id, created_at DESC), which was a reasonable guess when
+-- nothing read the table. M14 is the first reader, and it reads by a different column.
+--
+-- # Why the cursor is on id and not created_at
+--
+-- Snowflakes are time-ordered by construction (ADR 0003), so ordering by id *is* ordering by time — with a
+-- property created_at does not have: it is unique. Two entries written in the same millisecond have the
+-- same timestamp to the precision that matters, and a cursor over a non-unique column either skips an
+-- entry or repeats one at every page boundary that lands inside such a group. A guild mutation and its
+-- audit entry share a transaction, so bursts of same-millisecond entries are the normal case here rather
+-- than a rare one.
+--
+-- # What the old index cost, measured
+--
+-- Ordering by id with only the created_at index available puts a Sort above the scan, and the sort's input
+-- is every entry the guild has ever produced — materialized in full to return fifty rows. On a guild with
+-- 50,000 entries in a 250,000-row table:
+--
+--   ORDER BY id DESC LIMIT 50, created_at index only     cost 143.83..143.93   Sort, quicksort
+--   the same query with this index                       cost   0.42..36.55    no sort node at all
+--
+-- The timings at that size are both under a millisecond and are not the argument; the sort is. It grows
+-- with the guild's history while the index scan does not grow at all.
+CREATE INDEX audit_log_entries_guild_id_id_idx ON audit_log_entries (guild_id, id DESC);
+
+-- And the old one goes, which is the half worth arguing for rather than assuming.
+--
+-- It has no reader — nothing has ever selected from this table — and it is maintained on the hottest write
+-- path in the guild surface, because rule 2 makes every guild-scoped mutation write a row here. An index
+-- nothing reads is pure write amplification.
+--
+-- The usual reason to keep one is a query that wants a date range, and that reason does not apply: a
+-- snowflake carries its own creation time in its high bits, so a range over created_at is expressible as a
+-- range over id and the index above serves it. That is ADR 0003's point, and it is why this table can have
+-- one index where a serial-keyed one would need two.
+--
+-- Dropped rather than left in place, because a speculative index is the kind of thing that survives by
+-- nobody wanting to be the one to remove it.
+DROP INDEX audit_log_entries_guild_id_created_at_idx;
