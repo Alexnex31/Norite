@@ -2551,8 +2551,10 @@ paths:
         rename a channel in guild B by naming A.
 
 
-        Requires `MANAGE_CHANNELS` in the channel's own guild. A DM answers 404: these routes are
-        guild-channel routes, and a DM has no guild to resolve against.
+        Requires `MANAGE_CHANNELS` **and `VIEW_CHANNEL`** in the channel itself. A channel you cannot
+        see is not yours to manage: the channel listing hides it, and every route that names it answers as
+        though it were not there, so the two agree. A DM answers 404 for the same reason — these are
+        guild-channel routes and a DM has no guild to resolve against.
       operationId: updateChannel
       tags: [guilds]
       requestBody:
@@ -2576,7 +2578,8 @@ paths:
     delete:
       summary: Delete a channel
       description: >
-        Requires `MANAGE_CHANNELS` in the channel's own guild, resolved the same way `PATCH` resolves it.
+        Requires `MANAGE_CHANNELS` and `VIEW_CHANNEL` in the channel itself, resolved the same way
+        `PATCH` resolves them.
 
 
         Deleting a **category** orphans its children to the top level rather than deleting them: losing a
@@ -2725,9 +2728,10 @@ paths:
     put:
       summary: Create or replace a channel permission overwrite
       description: >
-        ADR 0008 layer 5. Requires `MANAGE_ROLES` **resolved in this channel**, not at guild level — a
-        caller denied a permission here would otherwise be able to allow it back to themselves in one
-        request.
+        ADR 0008 layer 5. Requires `MANAGE_ROLES` and `VIEW_CHANNEL`, both **resolved in this channel**
+        rather than at guild level — a caller denied a permission here would otherwise be able to allow it
+        back to themselves in one request, and a caller who cannot see the channel would be administering
+        one their own listing refuses to mention.
 
 
         Three further checks, none of which is the permission check:

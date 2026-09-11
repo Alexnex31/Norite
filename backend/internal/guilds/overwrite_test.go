@@ -95,12 +95,19 @@ func TestDeletingAnOverwriteCannotLiftARestrictionOnYou(t *testing.T) {
 
 	// Written directly: the owner would be the one to configure this, and going through the service here
 	// would only be testing the owner's path.
-	f.overwrite(ctx, f.channelID, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermViewChannel)
+	//
+	// The denied bit is PermSendMessages rather than PermViewChannel, and the difference is M14's item
+	// zero. This test used to build a moderator who could manage a channel they could not *see*, which was
+	// reachable until every channel-scoped route started requiring the view bit alongside its own. The
+	// property under test is unchanged — a caller cannot remove a row that denies them something — and it
+	// needs a bit that does not also decide whether they may reach the endpoint at all.
+	f.overwrite(ctx, f.channelID, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermSendMessages)
 
 	res, err := roles.Resolve(ctx, f.q(), f.guildID, f.mod, f.channelID)
 	require.NoError(t, err)
 	require.True(t, res.Permissions.Has(roles.PermManageRoles), "the moderator may manage this channel")
-	require.False(t, res.Permissions.Has(roles.PermViewChannel), "and cannot see it")
+	require.True(t, res.Permissions.Has(roles.PermViewChannel), "and may see it, which the route requires")
+	require.False(t, res.Permissions.Has(roles.PermSendMessages), "but is denied this one here")
 
 	err = f.svc.DeleteOverwrite(ctx, userActor(f.mod), f.channelID, roles.OverwriteTargetRole, f.everyoneID)
 	require.ErrorIs(t, err, httpx.ErrForbidden,
@@ -388,11 +395,15 @@ func TestDeletingARoleCannotLiftARestrictionOnYou(t *testing.T) {
 	// A low role that restricts whoever holds it, and the moderator holds it.
 	restricting := f.newRole(ctx, f.guildID, 2, 0)
 	f.grantRole(ctx, f.guildID, f.mod, restricting)
-	f.overwrite(ctx, f.channelID, roles.OverwriteTargetRole, restricting, 0, roles.PermViewChannel)
+	// PermSendMessages rather than PermViewChannel, for the reason the overwrite test above gives: every
+	// channel-scoped route now requires the view bit, so a denial of *that* stops the caller reaching the
+	// endpoint rather than exercising the check under test.
+	f.overwrite(ctx, f.channelID, roles.OverwriteTargetRole, restricting, 0, roles.PermSendMessages)
 
 	res, err := roles.Resolve(ctx, f.q(), f.guildID, f.mod, f.channelID)
 	require.NoError(t, err)
-	require.False(t, res.Permissions.Has(roles.PermViewChannel), "the moderator is denied this channel")
+	require.False(t, res.Permissions.Has(roles.PermSendMessages),
+		"the moderator is denied this permission here, by a role they hold")
 
 	// Refused directly...
 	err = f.svc.DeleteOverwrite(ctx, userActor(f.mod), f.channelID, roles.OverwriteTargetRole, restricting)
@@ -960,5 +971,64 @@ func TestParentIdRefusalsAreIndistinguishable(t *testing.T) {
 	_, err := f.svc.CreateChannel(ctx, userActor(f.plain), f.guildID, CreateChannelInput{
 		Name: "fine", Type: ChannelGuildText, ParentID: &usable,
 	})
+	require.NoError(t, err)
+}
+
+// TestAChannelYouCannotSeeIsNotYoursToManage is the bug M13's manual verification found after the tag,
+// and the one no unit test on that branch was shaped to catch.
+//
+// The listing filters on PermViewChannel. Every channel-scoped mutation gated on its *own* permission,
+// and an @everyone view-deny removes only the view bit — leaving the management bits intact. So a
+// moderator got the channel omitted from their listing and could still rename it, delete it, and write
+// its permission overwrites. Two code paths disagreeing about whether the same object existed.
+//
+// It needed a real guild to surface: every M13 test that hid a channel hid it from somebody holding
+// nothing else, and every test that managed a channel managed a visible one. The divergence requires an
+// actor who holds a management permission *and* lacks view in the same channel.
+func TestAChannelYouCannotSeeIsNotYoursToManage(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	// The moderator holds both management bits guild-wide, and the channel denies @everyone the view bit
+	// alone — which is exactly what locking a channel down looks like.
+	f.exec(ctx, `UPDATE roles SET permissions = $1 WHERE id = $2`,
+		(roles.PermViewChannel | roles.PermManageChannels | roles.PermManageRoles).Int64(),
+		int64(f.modRole))
+
+	hidden := f.newChannel(ctx, f.guildID)
+	f.overwrite(ctx, hidden, roles.OverwriteTargetRole, f.everyoneID, 0, roles.PermViewChannel)
+
+	// It is absent from their listing...
+	listed, err := f.svc.ListChannels(ctx, userActor(f.mod), f.guildID)
+	require.NoError(t, err)
+	for _, c := range listed {
+		require.NotEqual(t, hidden, c.ID, "the listing hides it")
+	}
+
+	// ...so every route that names it must agree, and answer as though it were not there.
+	name := "renamed"
+	_, err = f.svc.UpdateChannel(ctx, userActor(f.mod), hidden, UpdateChannelInput{Name: &name})
+	require.ErrorIs(t, err, httpx.ErrNotFound, "renaming a channel hidden from you")
+
+	err = f.svc.DeleteChannel(ctx, userActor(f.mod), hidden)
+	require.ErrorIs(t, err, httpx.ErrNotFound, "deleting one")
+
+	_, err = f.svc.SetOverwrite(ctx, userActor(f.mod), SetOverwriteInput{
+		ChannelID: hidden, TargetType: roles.OverwriteTargetRole, TargetID: f.everyoneID,
+		Allow: roles.PermSendMessages,
+	})
+	require.ErrorIs(t, err, httpx.ErrNotFound, "writing its permissions")
+
+	err = f.svc.DeleteOverwrite(ctx, userActor(f.mod), hidden, roles.OverwriteTargetRole, f.everyoneID)
+	require.ErrorIs(t, err, httpx.ErrNotFound, "or removing them")
+
+	// And a channel they *can* see is still theirs to manage, so the refusal is about the view bit rather
+	// than about the endpoint having stopped working.
+	_, err = f.svc.UpdateChannel(ctx, userActor(f.mod), f.channelID, UpdateChannelInput{Name: &name})
+	require.NoError(t, err)
+
+	// The owner is unaffected: layer 2 short-circuits above layer 5.
+	_, err = f.svc.UpdateChannel(ctx, userActor(f.owner), hidden, UpdateChannelInput{Name: &name})
 	require.NoError(t, err)
 }

@@ -215,6 +215,24 @@ func (s *Service) DeleteOverwrite(
 
 // authorizeChannel resolves a channel to its guild and authorizes a permission within it.
 //
+// # Viewing is required alongside whatever else is asked for
+//
+// Every caller gets PermViewChannel added to its `need`, and that is a correction to M13 rather than a
+// convenience. M13 taught the channel listing to hide channels and did not teach these routes the same
+// thing, so the two disagreed about whether a channel existed: a moderator holding PermManageChannels and
+// denied PermViewChannel — an @everyone view-deny removes only the view bit — got the channel omitted
+// from their listing and could still rename it, delete it, and write its permission overwrites.
+//
+// Found by driving a real guild by hand after M13 was tagged, and it needed that: every test that hid a
+// channel hid it from somebody holding nothing else, and every test that managed one managed a channel
+// that was visible. The divergence needs an actor who holds a management permission and lacks view in the
+// same channel, which no unit test constructed and four review passes did not think to ask for.
+//
+// Requiring it here rather than at each call site is the same argument this package has made four times:
+// a rule written as N call sites has N chances to miss one. It also composes with the refusal below —
+// a caller who fails for want of the view bit is answered as though the channel were not there, which is
+// what the listing already told them.
+//
 // The guild comes off the channel row and never from the caller, because these routes carry no guild in
 // their path — the same reason UpdateChannel loads its own (rule 1). The channel id is passed to
 // authorizeWith so the decision is what the caller holds in *this* channel.
@@ -234,7 +252,7 @@ func (s *Service) authorizeChannel(
 		return db.Channel{}, 0, decision{}, err
 	}
 
-	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, need)
+	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, need.Add(roles.PermViewChannel))
 	if err != nil {
 		// A member of the guild who cannot *see* this channel is refused as though it were not there.
 		//
