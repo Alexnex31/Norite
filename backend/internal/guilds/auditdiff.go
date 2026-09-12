@@ -47,11 +47,57 @@ type auditDiff map[string]any
 // answer "what did this request contain" rather than "what happened" — the two differ on exactly the
 // request a client fires on every keystroke of an edit form. Both sides are kept even when one is null,
 // since "the topic was removed" needs the topic it had.
+//
+// # Why the comparison is not reflect.DeepEqual alone
+//
+// DeepEqual reports two values of different concrete types as unequal, whatever they hold. A call site
+// passing an int32 column against an int variable would therefore record {"from": 64000, "to": 64000} on
+// every request — the exact noise this function exists to suppress, produced silently and with no compile
+// error. Every value here arrives as `any`, so the types are erased by the time they get this far.
+//
+// The obvious fix is a type parameter, and Go does not have generic methods: it would mean free functions
+// and `diffChanged(changes, "name", …)` at twenty call sites. sameValue is the contained version, widening
+// any integer kind before comparing, which is where the mismatch would realistically come from — a schema
+// column is int32 and a Go literal is int.
 func (d auditDiff) changed(field string, from, to any) {
-	if reflect.DeepEqual(from, to) {
+	if sameValue(from, to) {
 		return
 	}
 	d[field] = map[string]any{"from": from, "to": to}
+}
+
+// sameValue compares two erased values, treating every integer width as the same number.
+//
+// Anything else falls through to reflect.DeepEqual, which is right for strings, bools and the named types
+// this package passes — roles.Permission against roles.Permission compares as itself.
+func sameValue(a, b any) bool {
+	if na, ok := asInt64(a); ok {
+		if nb, ok := asInt64(b); ok {
+			return na == nb
+		}
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+// asInt64 widens any signed or unsigned integer to int64, reporting whether the value was one.
+//
+// By reflect.Kind rather than a type switch, so a named type whose underlying type is an integer — which
+// roles.Permission and snowflake.ID both are — is compared by value like the number it is, rather than
+// falling through to a type comparison that can only ever answer "different".
+func asInt64(v any) (int64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return rv.Int(), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		// Permission is a uint64. Nothing here approaches the sign bit — permAll stops at bit 19 and is
+		// asserted positive as an int64 — so the conversion cannot change a value this package produces.
+		return int64(rv.Uint()), true
+	default:
+		return 0, false
+	}
 }
 
 // created records a field a creation set.

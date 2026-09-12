@@ -24,7 +24,14 @@ const (
 
 // ListAuditLogInput is a cursor page request.
 type ListAuditLogInput struct {
-	// Before is the entry id to resume from, exclusive. Zero starts at the newest.
+	// Before is the entry id to resume from, exclusive. Nil starts at the newest.
+	//
+	// A pointer rather than a zero-means-absent snowflake, and the difference is not style. snowflake.Parse
+	// accepts "0" — it refuses only negatives — so a client templating ?before={cursor} from an unset
+	// variable sent a valid zero, the handler stored it, and this reported "no cursor" and returned the
+	// newest page. A paging loop that reached it restarted from the top. The query refuses to rely on zero
+	// meaning absent for exactly this reason and says so; carrying it as a zero in Go reopened that at the
+	// one layer the caller can actually reach.
 	//
 	// Before rather than the member listing's After, because this listing runs newest-first and a cursor
 	// names the direction of travel. The plan for this milestone said "follow the member listing exactly";
@@ -36,12 +43,13 @@ type ListAuditLogInput struct {
 	// repeat an entry at any page boundary landing inside a group of equal values. Migration 000017 carries
 	// the full argument, including the measurement showing that group does not occur today and why that
 	// argues for the id rather than against it.
-	Before snowflake.ID
+	Before *snowflake.ID
 
-	// Action and ActorID narrow the page. Empty and zero mean absent, which is why the query uses
-	// sqlc.narg rather than relying on "" and 0 being unreachable values.
+	// Action and ActorID narrow the page. Nil is absent, for the reason Before states — an actor_id of 0
+	// parses, and a filter silently treated as absent returns the whole guild's log to a caller who
+	// believes they are reading one person's actions.
 	Action  string
-	ActorID snowflake.ID
+	ActorID *snowflake.ID
 
 	Limit int32
 }
@@ -75,6 +83,20 @@ type ListAuditLogInput struct {
 func (s *Service) ListAuditLog(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in ListAuditLogInput,
 ) ([]AuditLogEntry, error) {
+	// The vocabulary check lives here and not only in the handler.
+	//
+	// It was in the handler alone, which is the N-call-sites shape this package has four times decided
+	// against — authorize, revokeEverything, RequireLiveSession, factorProof. A second caller (the TUI's
+	// M-x surface, a bot over local IPC, a test) passing a typo would have got a 200 and an empty array,
+	// which is precisely the "reads as evidence of absence" this refusal exists to prevent. Above the
+	// authorization check because it is a question about the request and discloses nothing: the vocabulary
+	// is this codebase's own and identical on every instance.
+	if in.Action != "" {
+		if err := refuseUnknownAuditAction(in.Action); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := s.authorize(ctx, actor, guildID, 0, roles.PermViewAuditLog); err != nil {
 		return nil, err
 	}
@@ -92,19 +114,17 @@ func (s *Service) ListAuditLog(
 
 	params := db.ListGuildAuditLogParams{GuildID: int64(guildID), Lim: limit}
 
-	// Absent means absent. Passing a zero through as a value would make "no cursor" mean "before entry 0"
-	// and "no actor filter" mean "actor 0" — the first is harmless by accident and the second is a filter
-	// that matches nothing, which reads to a client as an empty log.
-	if in.Before != 0 {
-		before := int64(in.Before)
+	// Absence travels as absence the whole way down, from the query parameter to sqlc.narg.
+	if in.Before != nil {
+		before := int64(*in.Before)
 		params.Before = &before
 	}
 	if in.Action != "" {
 		action := in.Action
 		params.Action = &action
 	}
-	if in.ActorID != 0 {
-		actorID := int64(in.ActorID)
+	if in.ActorID != nil {
+		actorID := int64(*in.ActorID)
 		params.ActorID = &actorID
 	}
 
@@ -127,7 +147,7 @@ func (s *Service) ListAuditLog(
 // query that matches nothing, which is indistinguishable from a guild that has taken no such action — so
 // a typo reads as evidence. The vocabulary is closed and this codebase owns every value in it.
 func knownAuditAction(action string) bool {
-	for _, known := range AllAuditActions {
+	for _, known := range allAuditActions {
 		if action == known {
 			return true
 		}

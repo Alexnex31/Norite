@@ -359,11 +359,24 @@ func (s *Service) CreateChannel(
 			}
 		}
 
+		// Every field creation accepts, because the asymmetry is the interesting part: UpdateChannel diffs
+		// nsfw, position, bitrate and user_limit, and creation recorded none of them — so setting a
+		// channel NSFW at creation left no trace, while toggling it a minute later produced a full entry.
+		// Creation was the one way to set moderation-relevant state unreadably. role.create already
+		// recorded all six of its fields for this reason.
 		changes := auditDiff{}
 		changes.created("name", in.Name)
 		changes.created("type", in.Type)
+		changes.created("position", in.Position)
+		changes.created("nsfw", in.NSFW)
 		if in.Topic != nil {
 			changes.created("topic", *in.Topic)
+		}
+		if in.Bitrate != nil {
+			changes.created("bitrate", *in.Bitrate)
+		}
+		if in.UserLimit != nil {
+			changes.created("user_limit", *in.UserLimit)
 		}
 		if in.ParentID != nil {
 			// Context rather than a created field, and the distinction earns its keep here: the parent is

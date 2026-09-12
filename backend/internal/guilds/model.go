@@ -5,6 +5,7 @@ package guilds
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
@@ -59,7 +60,11 @@ const (
 // handler groups cannot give: a constant nothing writes looks identical to one whose writer was removed.
 //
 // Appending a constant above without appending it here is what the coverage test exists to catch.
-var AllAuditActions = []string{
+//
+// Unexported, and read through [AuditActions], because an exported slice is not a closed vocabulary: any
+// importer could append to it or nil it, and since knownAuditAction ranges over it, doing so would change
+// what the endpoint accepts process-wide — a nil would refuse every action filter.
+var allAuditActions = []string{
 	ActionGuildCreate,
 	ActionGuildUpdate,
 	ActionGuildDelete,
@@ -77,6 +82,12 @@ var AllAuditActions = []string{
 	ActionOverwriteSet,
 	ActionOverwriteDelete,
 }
+
+// AuditActions returns every action this build writes.
+//
+// A copy, so a caller ranging over it for a test table cannot reorder or truncate the vocabulary the
+// listing endpoint validates against.
+func AuditActions() []string { return slices.Clone(allAuditActions) }
 
 // Channel types, as stored in channels.type.
 //

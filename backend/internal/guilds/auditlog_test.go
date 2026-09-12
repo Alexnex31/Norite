@@ -4,6 +4,7 @@
 package guilds
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -92,7 +93,7 @@ func TestTheAuditLogIsNewestFirstAndPagesWithoutLosingAnEntry(t *testing.T) {
 
 	// The same entries, two at a time.
 	var paged []AuditLogEntry
-	var cursor snowflake.ID
+	var cursor *snowflake.ID
 	for {
 		page, err := f.svc.ListAuditLog(ctx, userActor(f.owner), f.guildID,
 			ListAuditLogInput{Before: cursor, Limit: 2})
@@ -101,7 +102,7 @@ func TestTheAuditLogIsNewestFirstAndPagesWithoutLosingAnEntry(t *testing.T) {
 			break
 		}
 		paged = append(paged, page...)
-		cursor = page[len(page)-1].ID
+		cursor = &page[len(page)-1].ID
 	}
 
 	require.Equal(t, whole, paged, "paging in twos returns every entry exactly once, in the same order")
@@ -186,7 +187,7 @@ func TestTheAuditLogFiltersNarrowRatherThanWiden(t *testing.T) {
 	}
 
 	byActor, err := f.svc.ListAuditLog(ctx, userActor(f.mod), f.guildID,
-		ListAuditLogInput{ActorID: f.mod})
+		ListAuditLogInput{ActorID: &f.mod})
 	require.NoError(t, err)
 	require.NotEmpty(t, byActor)
 	for _, e := range byActor {
@@ -194,7 +195,7 @@ func TestTheAuditLogFiltersNarrowRatherThanWiden(t *testing.T) {
 	}
 
 	both, err := f.svc.ListAuditLog(ctx, userActor(f.mod), f.guildID,
-		ListAuditLogInput{Action: ActionChannelCreate, ActorID: f.owner})
+		ListAuditLogInput{Action: ActionChannelCreate, ActorID: &f.owner})
 	require.NoError(t, err)
 	require.Empty(t, both, "the owner created no channel, so the two filters compose as AND")
 }
@@ -248,9 +249,38 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 	t.Parallel()
 	f := newOverwriteFixture(t, roles.PermViewChannel)
 	ctx := t.Context()
+
+	entries := driveEveryMutation(t, f, ctx)
+
+	seen := map[string]int{}
+	for _, e := range entries {
+		seen[e.Action]++
+	}
+
+	for _, action := range AuditActions() {
+		if action == ActionGuildDelete {
+			continue
+		}
+		require.NotZero(t, seen[action],
+			"%s is in the action vocabulary and no mutation in this test produced one — either a writer "+
+				"was removed, or this test stopped exercising the path that writes it", action)
+	}
+}
+
+// driveEveryMutation exercises every mutation the package exposes and returns the guild's whole audit log.
+//
+// Shared by the coverage test above and the shape test below, which is not merely deduplication: they had
+// each grown their own sequence, the shape test's was four actions short, and the gap was invisible
+// because its doc comment offloaded coverage to the other test — which counts actions and never decodes a
+// payload. One sequence means a seventeenth action is added in one place and both assertions see it.
+//
+// guild.create and guild.delete need a guild of their own, because the fixture inserts its one directly
+// and a guild cannot be created twice. They are also the pair that demonstrates the table's one
+// asymmetry, so the entries from that guild are collected before it is deleted and appended here.
+func driveEveryMutation(t *testing.T, f *overwriteFixture, ctx context.Context) []AuditLogEntry {
+	t.Helper()
 	owner := userActor(f.owner)
 
-	// guild.create, and the reads that follow all use this guild.
 	name := "renamed"
 	_, err := f.svc.Update(ctx, owner, f.guildID, UpdateGuildInput{Name: &name})
 	require.NoError(t, err, "guild.update")
@@ -292,6 +322,14 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 	})
 	require.NoError(t, err, "overwrite.set")
 
+	// A second PUT over the same row, so overwrite.set is exercised as a replacement as well as a
+	// creation — the two produce different payload shapes and only one of them was ever reached.
+	_, err = f.svc.SetOverwrite(ctx, owner, SetOverwriteInput{
+		ChannelID: ch.ID, TargetType: roles.OverwriteTargetRole, TargetID: f.everyoneID,
+		Deny: roles.PermSendMessages | roles.PermMentionEveryone,
+	})
+	require.NoError(t, err, "overwrite.set, replacing")
+
 	require.NoError(t, f.svc.DeleteOverwrite(
 		ctx, owner, ch.ID, roles.OverwriteTargetRole, f.everyoneID), "overwrite.delete")
 
@@ -301,9 +339,9 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 
 	require.NoError(t, f.svc.RemoveMember(ctx, owner, f.guildID, f.plain), "member.remove")
 
-	// Every entry, in pages, because there are more than the default page size by now.
-	seen := map[string]int{}
-	var cursor snowflake.ID
+	// The guild's whole log, in pages, because there are more than the default page size by now.
+	var all []AuditLogEntry
+	var cursor *snowflake.ID
 	for {
 		page, err := f.svc.ListAuditLog(ctx, owner, f.guildID,
 			ListAuditLogInput{Before: cursor, Limit: maxAuditLogPageSize})
@@ -311,15 +349,11 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 		if len(page) == 0 {
 			break
 		}
-		for _, e := range page {
-			seen[e.Action]++
-		}
-		cursor = page[len(page)-1].ID
+		all = append(all, page...)
+		cursor = &page[len(page)-1].ID
 	}
 
-	// guild.create and guild.delete need a guild of their own, because the fixture inserts its one
-	// directly and a guild cannot be created twice. They are also the pair that demonstrates the table's
-	// one asymmetry, so they are worth doing together.
+	// A guild made through the service, for the two actions the fixture's own guild cannot produce.
 	ownGuild, err := f.svc.Create(ctx, owner, CreateGuildInput{Name: "made by the service"})
 	require.NoError(t, err)
 
@@ -327,18 +361,9 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, created, 1, "creating a guild writes exactly one entry")
 	require.Equal(t, ActionGuildCreate, created[0].Action)
-	seen[ActionGuildCreate]++
+	all = append(all, created...)
 
-	for _, action := range AllAuditActions {
-		if action == ActionGuildDelete {
-			continue
-		}
-		require.NotZero(t, seen[action],
-			"%s is in AllAuditActions and no mutation in this test produced one — either a writer was "+
-				"removed, or this test stopped exercising the path that writes it", action)
-	}
-
-	// The exception, asserted rather than skipped: a deleted guild takes its own entries with it.
+	// And the exception, asserted rather than skipped: a deleted guild takes its own entries with it.
 	require.NoError(t, f.svc.Delete(ctx, owner, ownGuild.ID), "guild.delete")
 
 	var remaining int
@@ -348,6 +373,8 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 	require.Zero(t, remaining,
 		"the entry is written in the transaction (rule 2) and cascades with the guild; the durable record "+
 			"of an instance-level action is rule 14's instance_audit_log, not this table")
+
+	return all
 }
 
 // TestTheAuditDiffShapeIsUniform is the rule auditDiff states, enforced across every action.
@@ -364,40 +391,12 @@ func TestTheAuditDiffShapeIsUniform(t *testing.T) {
 	t.Parallel()
 	f := newOverwriteFixture(t, roles.PermViewChannel)
 	ctx := t.Context()
-	owner := userActor(f.owner)
 
-	name := "renamed"
-	_, err := f.svc.Update(ctx, owner, f.guildID, UpdateGuildInput{Name: &name})
-	require.NoError(t, err)
-
-	ch, err := f.svc.CreateChannel(ctx, owner, f.guildID,
-		CreateChannelInput{Name: "a-channel", Type: ChannelGuildText})
-	require.NoError(t, err)
-	_, err = f.svc.UpdateChannel(ctx, owner, ch.ID, UpdateChannelInput{Name: &name})
-	require.NoError(t, err)
-
-	role, err := f.svc.CreateRole(ctx, owner, f.guildID, CreateRoleInput{Name: "a-role"})
-	require.NoError(t, err)
-	_, err = f.svc.UpdateRole(ctx, owner, f.guildID, role.ID, UpdateRoleInput{Name: &name})
-	require.NoError(t, err)
-	_, err = f.svc.ReorderRoles(ctx, owner, f.guildID, []RolePosition{{ID: role.ID, Position: 1}})
-	require.NoError(t, err)
-	_, err = f.svc.AssignRole(ctx, owner, f.guildID, f.plain, role.ID)
-	require.NoError(t, err)
-
-	_, err = f.svc.SetOverwrite(ctx, owner, SetOverwriteInput{
-		ChannelID: ch.ID, TargetType: roles.OverwriteTargetRole, TargetID: f.everyoneID,
-		Deny: roles.PermSendMessages,
-	})
-	require.NoError(t, err)
-	require.NoError(t, f.svc.DeleteOverwrite(
-		ctx, owner, ch.ID, roles.OverwriteTargetRole, f.everyoneID))
-	require.NoError(t, f.svc.DeleteRole(ctx, owner, f.guildID, role.ID))
-	require.NoError(t, f.svc.DeleteChannel(ctx, owner, ch.ID))
-
-	entries, err := f.svc.ListAuditLog(ctx, owner, f.guildID,
-		ListAuditLogInput{Limit: maxAuditLogPageSize})
-	require.NoError(t, err)
+	// The same drive-through the coverage test uses, so the two cannot disagree about which actions
+	// exist. They had already drifted: this test ran its own shorter sequence and never reached
+	// member.update, member.remove, member.role_remove or guild.create, so four of the sixteen payloads
+	// had their shape asserted by nothing — while the doc comment claimed "every action".
+	entries := driveEveryMutation(t, f, ctx)
 	require.NotEmpty(t, entries)
 
 	diffed := 0
@@ -415,19 +414,26 @@ func TestTheAuditDiffShapeIsUniform(t *testing.T) {
 			if !isObject {
 				// Context. Asserted as a scalar rather than merely "not an object", so that a future
 				// context value which is a list does not quietly become unreadable to the same rule.
-				require.NotContains(t, []string{"map", "slice"}, kindOf(value),
+				require.Equal(t, "scalar", kindOf(value),
 					"%s.%s is context and must be a scalar", e.Action, field)
 				continue
 			}
 
 			diffed++
-			_, hasFrom := object["from"]
-			_, hasTo := object["to"]
+			from, hasFrom := object["from"]
+			to, hasTo := object["to"]
 			require.True(t, hasFrom || hasTo,
 				"%s.%s is an object, so it reads as a diff, and carries neither side", e.Action, field)
 			for key := range object {
 				require.Contains(t, []string{"from", "to"}, key,
 					"%s.%s carries %q; a diff has exactly from and to", e.Action, field, key)
+			}
+			if hasFrom && hasTo {
+				// A recorded change whose sides are equal is what a type mismatch inside changed() looks
+				// like from out here — see sameValue. It is noise rather than a wrong answer, and noise on
+				// the endpoint whose job is to be believed.
+				require.NotEqual(t, from, to,
+					"%s.%s records a change from a value to itself", e.Action, field)
 			}
 		}
 	}

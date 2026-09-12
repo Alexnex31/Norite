@@ -499,7 +499,7 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "before is not a valid id"))
 			return
 		}
-		in.Before = before
+		in.Before = &before
 	}
 
 	if raw := query.Get("actor_id"); raw != "" {
@@ -508,7 +508,7 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "actor_id is not a valid id"))
 			return
 		}
-		in.ActorID = actorID
+		in.ActorID = &actorID
 	}
 
 	if raw := query.Get("action"); raw != "" {
