@@ -535,12 +535,31 @@ type Querier interface {
 	// reproduce. Migration 000017 carries the full reasoning. Served by audit_log_entries_guild_id_id_idx,
 	// which that migration adds for this query and which removes the sort the old index left above it.
 	//
+	// # The cursor is COALESCE and not `$n IS NULL OR id < $n`, which is the obvious spelling
+	//
+	// The obvious spelling is not sargable under a generic plan. A BoolExpr OR whose first arm is a NullTest
+	// on a Param cannot be turned into an index qual, so `id <` becomes a Filter above the scan instead of a
+	// seek — measured on this branch, at 250,000 rows with the cursor half way in:
+	//
+	//   `$2 IS NULL OR id < $2`, generic plan    Filter, 125,201 rows removed, 1859 buffers, 5.168 ms
+	//   COALESCE, generic plan                   Index Cond, 200 rows removed,    9 buffers, 0.036 ms
+	//
+	// Both forms are identical under a custom plan, and plan_cache_mode defaults to `auto`, which compares the
+	// two estimates and currently keeps the custom one (10088 against 5034) — so this is robustness rather
+	// than a bug being fixed. It is taken anyway because it costs one keyword and because the comment above
+	// claims a cursor costs one index descent whatever the depth, which is a claim worth being unconditionally
+	// true. 9223372036854775807 is bigint's maximum, so an absent cursor starts at the newest entry.
+	//
 	// # Filters
 	//
 	// action and actor_id are optional and both narrow rather than widen, so neither can return an entry the
 	// unfiltered query would not. sqlc.narg makes absent mean absent rather than meaning zero — an actor_id of
-	// 0 is not a user and a action of "" is not a verb, but relying on that would make the query's behaviour
+	// 0 is not a user and an action of "" is not a verb, but relying on that would make the query's behaviour
 	// depend on values it should simply not receive.
+	//
+	// These two keep the OR form, and the reason is that COALESCE buys nothing for an equality test: the
+	// rewrite is `actor_id = COALESCE($4, actor_id)`, which names the column on both sides and is no more
+	// indexable than the OR. What makes the actor filter fast is migration 000018's index, not its spelling.
 	//
 	// # What this deliberately does not do
 	//

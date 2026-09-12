@@ -1,0 +1,34 @@
+-- Milestone M14 — the index the audit log's actor filter relies on (rule 7).
+--
+-- GET /guilds/{id}/audit-log takes an optional actor_id, and 000017 measured only the unfiltered query.
+-- The filtered one has a shape no existing index answers, and it is not the shape it first looks like.
+--
+-- # Two cases are already fine, and one is not
+--
+-- Measured at 350,000 entries, 50,000 of them in the guild being read:
+--
+--   an actor with 12 entries and 12 anywhere    audit_log_entries_actor_id_idx, 3 buffers, 0.032 ms
+--   an actor with 50,000 entries in this guild  backward scan finds 50 immediately, 6 buffers, 0.041 ms
+--
+-- The case that fails is the one in between: an actor who is rare *here* and prolific elsewhere, which is
+-- an ordinary shape on a single global instance — a moderator or a bot account active in many guilds and
+-- barely in this one. The actor_id index returns their hundred thousand entries across every guild, so the
+-- planner abandons it and scans:
+--
+--   12 entries here, 100,000 elsewhere, as shipped   350,012 rows filtered, 5,188 buffers, 14.724 ms
+--   the same query with the index below                   12 rows, Index Only Scan, 4 buffers, 0.040 ms
+--
+-- # This is the third index on the guild surface's hottest write path, deliberately
+--
+-- Rule 2 puts a write here inside every guild-scoped mutation, so each index is a btree insert on every
+-- one of them. 000017 dropped an index for exactly that reason — but it dropped one with no reader, and
+-- this one has a reader the API exposes today. It cannot be folded into the other two: with actor_id
+-- between guild_id and id it cannot seek on id for the unfiltered listing, and without actor_id leading it
+-- cannot serve the foreign key's own check against users.
+--
+-- Smaller than 000017's rebuild, since this only adds: CREATE INDEX takes SHARE, and there is no DROP
+-- taking ACCESS EXCLUSIVE beside it. Migrations still run blocking before readiness, so the window is a
+-- startup outage rather than a live stall — and the note there about assuming this table is large applies
+-- here too.
+CREATE INDEX audit_log_entries_guild_id_actor_id_id_idx
+  ON audit_log_entries (guild_id, actor_id, id DESC);
