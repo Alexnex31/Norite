@@ -230,6 +230,7 @@ func (e PermissionOverwriteType) Valid() bool {
 
 // Defines values for Scope.
 const (
+	GuildsAudit Scope = "guilds.audit"
 	GuildsRead  Scope = "guilds.read"
 	GuildsWrite Scope = "guilds.write"
 	Identify    Scope = "identify"
@@ -238,6 +239,8 @@ const (
 // Valid indicates whether the value is a known member of the Scope enum.
 func (e Scope) Valid() bool {
 	switch e {
+	case GuildsAudit:
+		return true
 	case GuildsRead:
 		return true
 	case GuildsWrite:
@@ -964,7 +967,7 @@ type Role struct {
 //
 // There is deliberately no scope for managing API tokens: minting, listing and revoking all require a logged-in user, because a credential that can create credentials can escalate itself.
 //
-// `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both.
+// `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both. `guilds.audit` is separate again, and for the same reason applied one level down. The read scope covers a guild's *current state*; the audit log is its history and attribution — who kicked whom, which permission changed, what a nickname used to be. The permission layer already draws that line with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`, so a scope that bundled the log with the channel listing would have the delegation model contradicting the permission model.
 type Scope string
 
 // Session One device signed in to an account. A device, not a session record: the underlying rows rotate on every refresh, and `id` names whichever record is newest and live for that device right now.

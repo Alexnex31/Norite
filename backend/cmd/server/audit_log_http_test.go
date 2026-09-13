@@ -79,3 +79,55 @@ func TestTheAuditLogRouteRefusesAQueryItCannotAnswer(t *testing.T) {
 	require.Len(t, entries, 1)
 	require.Equal(t, "guild.create", entries[0]["action"])
 }
+
+// TestTheAuditLogTakesItsOwnScope is the delegation half of the boundary PermViewAuditLog draws.
+//
+// The route was mounted under guilds.read first, and a security sweep of this branch reproduced what that
+// meant: a token granted "guilds, their channels, their roles and their membership" — the read scope's own
+// description — returned the guild's whole moderation history, who kicked whom and what every permission
+// used to be. A status bot that lists channels should not be one compromise away from that, which is the
+// argument already written down for why guilds.read and guilds.write are separate.
+//
+// Both directions, because a scope that granted everything would pass the first half alone.
+func TestTheAuditLogTakesItsOwnScope(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	path := fmt.Sprintf("/api/v1/guilds/%s/audit-log", f.guildID)
+
+	mint := func(t *testing.T, scopes ...string) string {
+		t.Helper()
+		res := f.api.call(http.MethodPost, "/api/v1/auth/tokens",
+			map[string]any{"name": "bot", "scopes": scopes}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusCreated, res.Code, res)
+		return res.field(t, "value")
+	}
+
+	readOnly := mint(t, "guilds.read")
+
+	channels := f.api.call(http.MethodGet,
+		fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID), nil, withToken(readOnly))
+	require.Equal(t, http.StatusOK, channels.Code,
+		"guilds.read still reads what it says it reads: %s", channels)
+
+	denied := f.api.call(http.MethodGet, path, nil, withToken(readOnly))
+	require.Equal(t, http.StatusForbidden, denied.Code,
+		"and not the audit log, which is history rather than current state: %s", denied)
+
+	// The audit scope does not imply the read one either — a scope bounds a credential, and holding one
+	// is not a reason to be granted another.
+	auditOnly := mint(t, "guilds.audit")
+
+	allowed := f.api.call(http.MethodGet, path, nil, withToken(auditOnly))
+	require.Equal(t, http.StatusOK, allowed.Code, allowed)
+
+	notChannels := f.api.call(http.MethodGet,
+		fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID), nil, withToken(auditOnly))
+	require.Equal(t, http.StatusForbidden, notChannels.Code,
+		"guilds.audit reads the log and nothing else: %s", notChannels)
+
+	// A user's own access token passes both, because a scope bounds a delegated credential and never a
+	// person — the owner could read all of this anyway.
+	owner := f.api.call(http.MethodGet, path, nil, withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, owner.Code, owner)
+}

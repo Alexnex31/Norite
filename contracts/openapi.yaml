@@ -41,9 +41,10 @@ tags:
 
 
       **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for
-      the rest. A user's own access token passes both by design, since a scope bounds a *delegated*
-      credential and never a person. Permission resolution still runs underneath, so a token holding
-      `guilds.write` can do exactly what its owner could and no more.
+      the mutating ones, and `guilds.audit` for the audit log alone. A user's own access token passes all
+      of them by design, since a scope bounds a *delegated* credential and never a person. Permission
+      resolution still runs underneath, so a token holding `guilds.write` can do exactly what its owner
+      could and no more.
 
 paths:
   /meta:
@@ -3142,8 +3143,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: >
-            The caller is a member without `VIEW_AUDIT_LOG`, or an API token without the `guilds.read`
-            scope.
+            The caller is a member without `VIEW_AUDIT_LOG`, or an API token without the `guilds.audit`
+            scope — which `guilds.read` does not confer.
           content:
             application/json:
               schema:
@@ -3408,7 +3409,13 @@ components:
         channels should not be one compromise away from deleting the guild. **Write does not imply read**:
         a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a
         token that needs both asks for both.
-      enum: [identify, guilds.read, guilds.write]
+        `guilds.audit` is separate again, and for the same reason applied one level down. The read scope
+        covers a guild's *current state*; the audit log is its history and attribution — who kicked whom,
+        which permission changed, what a nickname used to be. The permission layer already draws that line
+        with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`,
+        so a scope that bundled the log with the channel listing would have the delegation model
+        contradicting the permission model.
+      enum: [identify, guilds.read, guilds.write, guilds.audit]
 
     HealthResponse:
       type: object

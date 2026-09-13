@@ -26,8 +26,12 @@ CREATE TABLE guilds (
   name              varchar(100) NOT NULL,
   -- No ON DELETE. A guild whose owner is deleted is not a guild with a NULL owner and it is not a guild
   -- that vanishes with them — ownership transfer is a real operation with real consequences for everyone
-  -- else in it, and the account-deletion path (M66) has to make that decision explicitly rather than have
-  -- a cascade make it silently. Until then the FK refuses the delete, which is the honest failure.
+  -- else in it, and the account-deletion path has to make that decision explicitly rather than have a
+  -- cascade make it silently. Until then the FK refuses the delete, which is the honest failure.
+  --
+  -- That path is `DELETE /users/@me`, designed in architecture.md and owned by no roadmap milestone. This
+  -- comment said "(M66)" until M14 checked it; M66 is public matchmaking, and every other reference to it
+  -- in the repository is about matchmaking.
   owner_id          bigint NOT NULL REFERENCES users(id),
   icon_hash         text NULL,
   description       text NULL,

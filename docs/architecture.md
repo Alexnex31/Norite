@@ -1173,6 +1173,15 @@ and for new claims being added to it rather than to a caller.
 Account deletion otherwise follows the original design: soft-delete with placeholder username/email,
 hard-delete `oauth_identities`/`sessions`, leave authored content in place rendered as "Deleted User."
 
+**Two things it must decide about `audit_log_entries`, and neither is settled here.** `actor_id` carries no
+`ON DELETE`, deliberately — an entry naming a deleted actor is still evidence and one whose actor went NULL
+is evidence with the answer removed — so the foreign key currently *refuses* the delete, which means
+deletion cannot ship without answering it. And since M14 the `changes` payload records a removed member's
+nickname on `member.remove`, so this table holds a name the deleted account chose, in rows nothing ever
+sweeps. A placeholder rename does not reach it. Both were raised by M14's security sweep and routed here
+because **no roadmap milestone owns `DELETE /users/@me`** — the migrations pointed at M66 until M14 checked,
+and M66 is public matchmaking.
+
 **Two things about that placeholder rename are load-bearing, and neither is obvious until deletion exists.**
 `users.username` and `users.email` carry plain `UNIQUE` constraints, not partial indexes excluding
 soft-deleted rows, while every read filters `deleted_at IS NULL` — `UserExistsByEmail`, `GetUserByEmail`,

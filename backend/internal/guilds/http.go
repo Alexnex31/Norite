@@ -60,6 +60,11 @@ func (h *Handler) Routes(r chi.Router) {
 	read := auth.RequireScope(auth.ScopeGuildsRead)
 	write := auth.RequireScope(auth.ScopeGuildsWrite)
 
+	// The audit log takes its own scope rather than the read one. See auth.ScopeGuildsAudit: the read
+	// scope covers a guild's current state and this is its history, and the permission layer already
+	// treats the two as different questions.
+	audit := auth.RequireScope(auth.ScopeGuildsAudit)
+
 	r.With(write).Post("/guilds", h.createGuild)
 
 	r.Route("/guilds/{guild_id}", func(r chi.Router) {
@@ -76,7 +81,7 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(write).Patch("/roles/{role_id}", h.updateRole)
 		r.With(write).Delete("/roles/{role_id}", h.deleteRole)
 
-		r.With(read).Get("/audit-log", h.listAuditLog)
+		r.With(audit).Get("/audit-log", h.listAuditLog)
 
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)
@@ -480,10 +485,11 @@ func (h *Handler) listMembers(w http.ResponseWriter, r *http.Request) {
 
 // listAuditLog reads a page of the guild's audit log.
 //
-// Scoped `guilds.read` like every other read here. Worth a sentence because it is the one route whose
-// payload is *about* the guild's moderation rather than its content: an API token holding guilds.read can
-// read who kicked whom. That is the scope working as designed — a scope only ever restricts, and its
-// owner could read this anyway — but it is the first route where the two differ in feel.
+// Scoped `guilds.audit`, which is the one route on this surface that does not take `guilds.read`.
+//
+// It was mounted under the read scope first, and a sweep of this branch reproduced what that meant: a
+// token granted "guilds, their channels, their roles and their membership" returned the guild's whole
+// moderation history. The scope layer has to draw the line the permission layer already drew.
 func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
 	if !ok {

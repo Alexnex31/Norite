@@ -211,3 +211,30 @@ would flip them.
   rule 13 already forbids reading E2E DM content on any server-side path. It would also reopen if a
   future action recorded a channel's *members* rather than its id and name, which is a different kind of
   disclosure than this entry weighed.
+
+### `audit_log_entries` grows for the life of the instance with no ceiling and no sweep
+- **Raised**: M14, `/security-sweep`
+- **Verdict**: accepted risk — the design, and the alternative defeats the feature
+- **Why**: rule 2 puts a row here inside every guild-scoped mutation and migration `000016` states the
+  table is never swept. There is no retention window and no per-guild ceiling, so a guild's log grows
+  without bound and a determined member with `PermManageRoles` can inflate it by editing a role in a loop.
+  An audit log you can empty by waiting, or that refuses writes when full, is not an audit log — and the
+  write path is rate-limited and permission-gated like every other mutation, so the cost of inflating it
+  is bounded by both. M14 gave the table a reader but did not change its growth.
+- **Reopens if**: an instance needs a retention policy for legal reasons rather than technical ones, which
+  is the shape that would actually force this — or if a per-guild storage quota arrives, at which point
+  the ceiling belongs beside the channel and role ones rather than here. Note that a sweep would also need
+  a second index: `000018`'s reasoning assumes nothing deletes by age.
+
+### `auditDiff.context` accepts a value that is not a scalar
+- **Raised**: M14, `/security-sweep`
+- **Verdict**: not a vulnerability — a renderer contract enforced by a test rather than by a type
+- **Why**: `changes` distinguishes a diffed field from a context field by whether the value is an object,
+  so passing a map to `context` would make it indistinguishable from a diff carrying neither `from` nor
+  `to`. Go has no type for "not a map", so the signature takes `any` and
+  `TestTheAuditDiffShapeIsUniform` asserts the rule across every action every writer produces. The blast
+  radius is a client rendering a field oddly; nothing reads `changes` for an authorization decision, and
+  nothing ever should.
+- **Reopens if**: anything starts *parsing* `changes` rather than displaying it — a moderation tool that
+  branched on a diff's shape would turn a rendering bug into a logic one, and the type would then need to
+  carry the distinction the test currently does.

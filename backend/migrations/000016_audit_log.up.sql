@@ -22,8 +22,14 @@ CREATE TABLE audit_log_entries (
   -- specifies it and because narrowing it later is a rewrite of the table.
   guild_id   bigint NULL REFERENCES guilds(id) ON DELETE CASCADE,
   -- No ON DELETE. An audit entry naming a deleted actor is still evidence, and an entry whose actor went
-  -- NULL is evidence with the answer removed. The FK refuses the delete, and the account-deletion path
-  -- (M66) has to decide what to do about it in the open.
+  -- NULL is evidence with the answer removed. The FK refuses the delete, and the account-deletion path has
+  -- to decide what to do about it in the open.
+  --
+  -- That path is `DELETE /users/@me` in architecture.md's endpoint list, whose design is the soft-delete
+  -- and placeholder-rename paragraph in the same document. **It is owned by no roadmap milestone**, which
+  -- is worth knowing before relying on one: this comment and 000015's said "(M66)" until M14 checked, and
+  -- M66 is public matchmaking. It has more to decide here since M14 — `changes` now records a removed
+  -- member's nickname, so this table holds a name the deleted account chose, in rows nothing ever sweeps.
   actor_id   bigint NOT NULL REFERENCES users(id),
   -- A stable string, not an enum: this vocabulary grows with every milestone that adds a mutation, and an
   -- enum type would make each addition a migration. varchar(64) because the values are written by this

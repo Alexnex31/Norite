@@ -44,6 +44,26 @@ const (
 	// credential can reach, and reached it with no scope gate at all, so an `identify`-only token deleted
 	// a guild. Reproduced before it was fixed.
 	ScopeGuildsWrite Scope = "guilds.write"
+
+	// ScopeGuildsAudit reads a guild's audit log (M14), and is separate from ScopeGuildsRead for the
+	// reason ScopeGuildsRead is separate from ScopeGuildsWrite.
+	//
+	// The read scope's own comment enumerates what it covers — "guilds, their channels, their roles and
+	// their membership" — and an audit log is none of those. It is not current state at all: it is
+	// history and attribution, who kicked whom, which permission changed, what a nickname used to be, and
+	// the names of channels the reader's own listing hides. A status bot that lists channels should not
+	// be one compromise away from the guild's moderation history, which is the sentence already written
+	// one constant up about deleting the guild.
+	//
+	// The permission layer already draws this line: PermViewAuditLog is its own bit, granted by default to
+	// nobody and not implied by PermManageGuild. A scope that lumped the log in with the channel listing
+	// would be the delegation model contradicting the permission model — and the two are meant to compose,
+	// with the scope bounding a credential below whatever the permission already allows.
+	//
+	// Added while it was free. No token has ever been minted against a released build, so nothing is
+	// broken by narrowing guilds.read today; doing it after any exist is a breaking change for every one
+	// of them. Same argument M12 made for the permission wire format.
+	ScopeGuildsAudit Scope = "guilds.audit"
 )
 
 // Token management — minting, listing and revoking — has no scope at all: every one of those operations
@@ -60,7 +80,7 @@ const (
 // An unknown scope is rejected rather than ignored: silently dropping a scope the caller asked for would
 // hand them a token they believe is more capable than it is, and silently *keeping* one this build does not
 // understand would mean a future release could widen an existing token's reach.
-var AllScopes = []Scope{ScopeIdentify, ScopeGuildsRead, ScopeGuildsWrite}
+var AllScopes = []Scope{ScopeIdentify, ScopeGuildsRead, ScopeGuildsWrite, ScopeGuildsAudit}
 
 // ValidScope reports whether s is a scope this build understands.
 func ValidScope(s Scope) bool { return slices.Contains(AllScopes, s) }
