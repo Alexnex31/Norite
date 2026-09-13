@@ -367,6 +367,7 @@ type Querier interface {
 	// authorizes against that — which is the only ordering rule 1 permits, since scoping the read by a
 	// caller-supplied guild would be trusting the value the check exists to verify.
 	GetChannel(ctx context.Context, id int64) (Channel, error)
+	GetChannelForUpdate(ctx context.Context, id int64) (Channel, error)
 	// The verification page's re-read between steps.
 	//
 	// By id because that is what the signed continuation carries: the device code never reaches the browser at
@@ -386,7 +387,29 @@ type Querier interface {
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	GetGuild(ctx context.Context, id int64) (Guild, error)
+	// # The locking reads the audit diff needs (M14)
+	//
+	// Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is
+	// that an audit entry must not name a value no mutation replaced.
+	//
+	// A diff reads the prior state and then writes. Under READ COMMITTED those are two statements, and an
+	// UPDATE re-reads the latest committed row — so a concurrent commit landing between them makes the entry
+	// record a transition that never happened. Reproduced on this branch: T1 reads "A", T2 commits "B", T1
+	// writes "C", and T1's entry says from "A" to "C" while the value actually overwritten was "B". The mirror
+	// case is worse, because changed() suppresses equal sides: T2 commits "C", T1 writes "C", and a change T1
+	// did not make is recorded as one it did.
+	//
+	// FOR UPDATE closes it by making the read take the row lock the write would have taken a statement later,
+	// so the row cannot move in between. The lock is held for the rest of the transaction either way; what
+	// changes is that it starts a few milliseconds earlier. Nothing here is a read path — every caller is
+	// already inside a mutation's transaction — which is why these are separate queries rather than FOR UPDATE
+	// added to the originals, whose callers include listings.
+	//
+	// ReorderRoles needs none of this: it takes the guild's advisory lock (LockGuildRolePositions) before
+	// reading positions, which serializes it against itself and against role creation.
+	GetGuildForUpdate(ctx context.Context, id int64) (Guild, error)
 	GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error)
+	GetGuildMemberForUpdate(ctx context.Context, arg GetGuildMemberForUpdateParams) (GuildMember, error)
 	// The target's standing: the highest position among the roles one member holds (Milestone M13).
 	//
 	// The actor's standing comes free from ListGuildMemberAuthority above. This is the other side of every
@@ -456,10 +479,15 @@ type Querier interface {
 	// overwrite that denies you something grants you that thing, which is a self-escalation on the endpoint
 	// whose whole subject is per-channel permissions.
 	GetPermissionOverwrite(ctx context.Context, arg GetPermissionOverwriteParams) (PermissionOverwrite, error)
+	// FOR UPDATE OF po, so the join to channels does not take a lock the caller does not need — the row being
+	// read and replaced is the overwrite, and locking every channel row the join touches would serialize
+	// unrelated writes on the same channel.
+	GetPermissionOverwriteForUpdate(ctx context.Context, arg GetPermissionOverwriteForUpdateParams) (PermissionOverwrite, error)
 	// Scoped by guild as well as by id, so a role id from another guild resolves to nothing rather than to
 	// somebody else's role. Rule 1: never trust a client-supplied ID without verifying it belongs to the
 	// actor's claimed context — enforced in the statement, not in a check a handler has to remember.
 	GetRole(ctx context.Context, arg GetRoleParams) (Role, error)
+	GetRoleForUpdate(ctx context.Context, arg GetRoleForUpdateParams) (Role, error)
 	// Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
 	//
 	// The caller that needs this is "which device is this request coming from", answered from the sid claim in

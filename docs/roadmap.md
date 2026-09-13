@@ -544,12 +544,22 @@ of this section.
   the whole of M13's surface. Both derive from the walk now, failing in both directions — a route with no
   case, and a case naming a route that no longer exists.
 
-  *Two query plans were measured rather than assumed.* The optional cursor was written
+  *Two audit-completeness gaps are recorded rather than closed*, both in `docs/security-ledger.md` with
+  the condition that would reopen them: deleting a category re-parents its children and names none of
+  them, and a kick or a role deletion destroys permission overwrites without recording their bits. Both
+  are questions about entry *volume* — the counts are unbounded — rather than about the diff shape this
+  milestone settled, and the second is the rejoin question M57 and M72a already carry.
+
+  *Three query plans were measured rather than assumed.* The optional cursor was written
   `$n IS NULL OR id < $n`, which cannot become an index qual under a generic plan; `COALESCE` is sargable
   in every plan and costs a keyword. And the `actor_id` filter shipped with no index that serves it inside
   a guild — harmless for a rare actor and for a prolific one, and 14.7 ms against 0.04 ms for an actor
   rare *here* and prolific elsewhere, which is an ordinary shape on a single global instance. Migration
-  `000018` is that index, and it is the third on the table rule 2 writes to on every guild mutation.
+  `000018` is that index. The `action` filter turned out to have the same gap, found by measuring it after
+  a review asked why only one of the two public filters had been looked at — 2,682 buffers against 4 for a
+  selective action — and `000019` is its index. That makes four on the table rule 2 writes to on every
+  guild mutation, which is stated in `000019` as the reason a *third* filter should be weighed against
+  consolidating rather than simply added.
 - **M15 — Core messaging CRUD**: send/edit/delete REST endpoints for channel messages, permission-checked via
   the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14.
 

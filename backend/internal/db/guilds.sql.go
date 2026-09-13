@@ -518,12 +518,79 @@ func (q *Queries) GetChannel(ctx context.Context, id int64) (Channel, error) {
 	return i, err
 }
 
+const getChannelForUpdate = `-- name: GetChannelForUpdate :one
+SELECT id, guild_id, type, parent_id, name, topic, position, nsfw, last_message_id, bitrate, user_limit, topic_search, created_at, updated_at FROM channels WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetChannelForUpdate(ctx context.Context, id int64) (Channel, error) {
+	row := q.db.QueryRow(ctx, getChannelForUpdate, id)
+	var i Channel
+	err := row.Scan(
+		&i.ID,
+		&i.GuildID,
+		&i.Type,
+		&i.ParentID,
+		&i.Name,
+		&i.Topic,
+		&i.Position,
+		&i.Nsfw,
+		&i.LastMessageID,
+		&i.Bitrate,
+		&i.UserLimit,
+		&i.TopicSearch,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getGuild = `-- name: GetGuild :one
 SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at FROM guilds WHERE id = $1
 `
 
 func (q *Queries) GetGuild(ctx context.Context, id int64) (Guild, error) {
 	row := q.db.QueryRow(ctx, getGuild, id)
+	var i Guild
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.OwnerID,
+		&i.IconHash,
+		&i.Description,
+		&i.SystemChannelID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getGuildForUpdate = `-- name: GetGuildForUpdate :one
+
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at FROM guilds WHERE id = $1 FOR UPDATE
+`
+
+// # The locking reads the audit diff needs (M14)
+//
+// Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is
+// that an audit entry must not name a value no mutation replaced.
+//
+// A diff reads the prior state and then writes. Under READ COMMITTED those are two statements, and an
+// UPDATE re-reads the latest committed row — so a concurrent commit landing between them makes the entry
+// record a transition that never happened. Reproduced on this branch: T1 reads "A", T2 commits "B", T1
+// writes "C", and T1's entry says from "A" to "C" while the value actually overwritten was "B". The mirror
+// case is worse, because changed() suppresses equal sides: T2 commits "C", T1 writes "C", and a change T1
+// did not make is recorded as one it did.
+//
+// FOR UPDATE closes it by making the read take the row lock the write would have taken a statement later,
+// so the row cannot move in between. The lock is held for the rest of the transaction either way; what
+// changes is that it starts a few milliseconds earlier. Nothing here is a read path — every caller is
+// already inside a mutation's transaction — which is why these are separate queries rather than FOR UPDATE
+// added to the originals, whose callers include listings.
+//
+// ReorderRoles needs none of this: it takes the guild's advisory lock (LockGuildRolePositions) before
+// reading positions, which serializes it against itself and against role creation.
+func (q *Queries) GetGuildForUpdate(ctx context.Context, id int64) (Guild, error) {
+	row := q.db.QueryRow(ctx, getGuildForUpdate, id)
 	var i Guild
 	err := row.Scan(
 		&i.ID,
@@ -549,6 +616,29 @@ type GetGuildMemberParams struct {
 
 func (q *Queries) GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error) {
 	row := q.db.QueryRow(ctx, getGuildMember, arg.GuildID, arg.UserID)
+	var i GuildMember
+	err := row.Scan(
+		&i.GuildID,
+		&i.UserID,
+		&i.Nickname,
+		&i.JoinedAt,
+		&i.Deaf,
+		&i.Mute,
+	)
+	return i, err
+}
+
+const getGuildMemberForUpdate = `-- name: GetGuildMemberForUpdate :one
+SELECT guild_id, user_id, nickname, joined_at, deaf, mute FROM guild_members WHERE guild_id = $1 AND user_id = $2 FOR UPDATE
+`
+
+type GetGuildMemberForUpdateParams struct {
+	GuildID int64
+	UserID  int64
+}
+
+func (q *Queries) GetGuildMemberForUpdate(ctx context.Context, arg GetGuildMemberForUpdateParams) (GuildMember, error) {
+	row := q.db.QueryRow(ctx, getGuildMemberForUpdate, arg.GuildID, arg.UserID)
 	var i GuildMember
 	err := row.Scan(
 		&i.GuildID,
@@ -603,6 +693,45 @@ func (q *Queries) GetPermissionOverwrite(ctx context.Context, arg GetPermissionO
 	return i, err
 }
 
+const getPermissionOverwriteForUpdate = `-- name: GetPermissionOverwriteForUpdate :one
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = $1::bigint
+  AND po.target_type = $2
+  AND po.target_id = $3::bigint
+  AND c.guild_id = $4::bigint
+FOR UPDATE OF po
+`
+
+type GetPermissionOverwriteForUpdateParams struct {
+	ChannelID  int64
+	TargetType int16
+	TargetID   int64
+	GuildID    int64
+}
+
+// FOR UPDATE OF po, so the join to channels does not take a lock the caller does not need — the row being
+// read and replaced is the overwrite, and locking every channel row the join touches would serialize
+// unrelated writes on the same channel.
+func (q *Queries) GetPermissionOverwriteForUpdate(ctx context.Context, arg GetPermissionOverwriteForUpdateParams) (PermissionOverwrite, error) {
+	row := q.db.QueryRow(ctx, getPermissionOverwriteForUpdate,
+		arg.ChannelID,
+		arg.TargetType,
+		arg.TargetID,
+		arg.GuildID,
+	)
+	var i PermissionOverwrite
+	err := row.Scan(
+		&i.ChannelID,
+		&i.TargetType,
+		&i.TargetID,
+		&i.Allow,
+		&i.Deny,
+	)
+	return i, err
+}
+
 const getRole = `-- name: GetRole :one
 SELECT id, guild_id, name, color, permissions, position, hoist, mentionable, is_default, created_at, updated_at FROM roles WHERE id = $1 AND guild_id = $2
 `
@@ -617,6 +746,34 @@ type GetRoleParams struct {
 // actor's claimed context — enforced in the statement, not in a check a handler has to remember.
 func (q *Queries) GetRole(ctx context.Context, arg GetRoleParams) (Role, error) {
 	row := q.db.QueryRow(ctx, getRole, arg.ID, arg.GuildID)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.GuildID,
+		&i.Name,
+		&i.Color,
+		&i.Permissions,
+		&i.Position,
+		&i.Hoist,
+		&i.Mentionable,
+		&i.IsDefault,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRoleForUpdate = `-- name: GetRoleForUpdate :one
+SELECT id, guild_id, name, color, permissions, position, hoist, mentionable, is_default, created_at, updated_at FROM roles WHERE id = $1 AND guild_id = $2 FOR UPDATE
+`
+
+type GetRoleForUpdateParams struct {
+	ID      int64
+	GuildID int64
+}
+
+func (q *Queries) GetRoleForUpdate(ctx context.Context, arg GetRoleForUpdateParams) (Role, error) {
+	row := q.db.QueryRow(ctx, getRoleForUpdate, arg.ID, arg.GuildID)
 	var i Role
 	err := row.Scan(
 		&i.ID,

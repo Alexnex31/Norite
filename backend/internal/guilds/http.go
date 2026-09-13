@@ -499,9 +499,15 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	var in ListAuditLogInput
 	query := r.URL.Query()
 
+	// snowflake.Parse accepts "0" — it refuses only negatives — and no generator can produce it, so a
+	// zero here came from a client templating an unset variable. Carrying it through was wrong in both
+	// directions: as a value it made `id < 0` and returned an empty page forever, and the pointer that
+	// fixed "zero silently means no cursor" only turned it into "zero silently means no results".
+	// Refused, for the reason refuseUnknownAuditAction refuses a typo — a query matching nothing is
+	// indistinguishable from a guild that has nothing to match.
 	if raw := query.Get("before"); raw != "" {
 		before, err := snowflake.Parse(raw)
-		if err != nil {
+		if err != nil || before == 0 {
 			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "before is not a valid id"))
 			return
 		}
@@ -510,7 +516,7 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 
 	if raw := query.Get("actor_id"); raw != "" {
 		actorID, err := snowflake.Parse(raw)
-		if err != nil {
+		if err != nil || actorID == 0 {
 			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "actor_id is not a valid id"))
 			return
 		}
@@ -528,10 +534,16 @@ func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
 		in.Action = raw
 	}
 
+	// Refused above the ceiling rather than clamped, which is where this diverges from the member
+	// listing on purpose. Clamping is the friendlier answer when a short page means nothing — but this
+	// listing tells clients that a page shorter than `limit` means the log is exhausted, and a silently
+	// clamped limit=500 hands back 100 entries that such a client reads as the whole history. Two
+	// conventions that are each defensible and together lose data; the one that can fail loudly does.
 	if raw := query.Get("limit"); raw != "" {
 		limit, err := strconv.ParseInt(raw, 10, 32)
-		if err != nil || limit < 1 {
-			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "limit must be a positive integer"))
+		if err != nil || limit < 1 || limit > maxAuditLogPageSize {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest,
+				"limit must be between 1 and %d", maxAuditLogPageSize))
 			return
 		}
 		in.Limit = int32(limit)

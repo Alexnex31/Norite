@@ -238,3 +238,34 @@ would flip them.
 - **Reopens if**: anything starts *parsing* `changes` rather than displaying it — a moderation tool that
   branched on a diff's shape would turn a rendering bug into a logic one, and the type would then need to
   carry the distinction the test currently does.
+
+### Deleting a category re-parents its children and the log says nothing about them
+- **Raised**: M14, `/code-review xhigh`
+- **Verdict**: accepted risk — a real gap in the record, deliberately not closed here
+- **Why**: `channels.parent_id` is `ON DELETE SET NULL` (migration `000015`), so deleting a category moves
+  every channel inside it to the top level. The single `channel.delete` entry names the category and
+  nothing else, so an operator asking "why is this channel suddenly at the top level" finds no entry that
+  mentions it. M14 gave deletions a payload and this is the one deletion whose effects reach objects it
+  does not name. Closing it means either listing the affected ids as context — unbounded, up to the
+  500-channel ceiling — or emitting a `channel.update` per child, which multiplies one moderation action
+  into 500 entries in a table nothing sweeps. Both are decisions about entry *volume* rather than about
+  the diff shape this milestone settled.
+- **Reopens if**: a client renders the channel tree from the audit log rather than from the channel
+  listing, or a moderation surface starts answering "what happened to this channel" by query rather than
+  by an operator reading — either makes the missing rows load-bearing rather than merely absent.
+
+### A kick or a role deletion destroys permission overwrites and records none of their bits
+- **Raised**: M14, `/code-review xhigh`
+- **Verdict**: accepted risk, and it inherits a question already routed elsewhere
+- **Why**: `RemoveMember` calls `DeleteOverwritesForTarget` and records only the nickname; `DeleteRole`
+  removes the role's overwrites on every channel and records name, permissions and position.
+  `DeleteOverwrite`'s own comment makes the case against this — "removing a deny grants whatever it
+  denied, so an operator reading this entry needs the bits" — and a kick does that N times over. It is not
+  closed here for the same reason as the entry above: the count is unbounded, and the residual only
+  *matters* once the target can return, which is the rejoin question M13 routed to M57 and M72a. Note the
+  asymmetry is already guarded in the direction that would be an escalation: `DeleteRole` refuses to
+  remove overwrites whose bits the caller lacks, while `RemoveMember` deliberately does not, so a member
+  cannot become unkickable.
+- **Reopens if**: a join path exists (M57, M72a) — at which point the rejoin question and this one are the
+  same question and should be answered together, since what makes a silently-restored deny dangerous is
+  exactly that nothing in the log explains it.

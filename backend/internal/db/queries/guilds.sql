@@ -503,6 +503,52 @@ WHERE c.guild_id = sqlc.arg(guild_id)::bigint
   AND po.target_type = sqlc.arg(target_type)
   AND po.target_id = sqlc.arg(target_id);
 
+-- # The locking reads the audit diff needs (M14)
+--
+-- Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is
+-- that an audit entry must not name a value no mutation replaced.
+--
+-- A diff reads the prior state and then writes. Under READ COMMITTED those are two statements, and an
+-- UPDATE re-reads the latest committed row — so a concurrent commit landing between them makes the entry
+-- record a transition that never happened. Reproduced on this branch: T1 reads "A", T2 commits "B", T1
+-- writes "C", and T1's entry says from "A" to "C" while the value actually overwritten was "B". The mirror
+-- case is worse, because changed() suppresses equal sides: T2 commits "C", T1 writes "C", and a change T1
+-- did not make is recorded as one it did.
+--
+-- FOR UPDATE closes it by making the read take the row lock the write would have taken a statement later,
+-- so the row cannot move in between. The lock is held for the rest of the transaction either way; what
+-- changes is that it starts a few milliseconds earlier. Nothing here is a read path — every caller is
+-- already inside a mutation's transaction — which is why these are separate queries rather than FOR UPDATE
+-- added to the originals, whose callers include listings.
+--
+-- ReorderRoles needs none of this: it takes the guild's advisory lock (LockGuildRolePositions) before
+-- reading positions, which serializes it against itself and against role creation.
+
+-- name: GetGuildForUpdate :one
+SELECT * FROM guilds WHERE id = $1 FOR UPDATE;
+
+-- name: GetRoleForUpdate :one
+SELECT * FROM roles WHERE id = $1 AND guild_id = $2 FOR UPDATE;
+
+-- name: GetChannelForUpdate :one
+SELECT * FROM channels WHERE id = $1 FOR UPDATE;
+
+-- name: GetGuildMemberForUpdate :one
+SELECT * FROM guild_members WHERE guild_id = $1 AND user_id = $2 FOR UPDATE;
+
+-- name: GetPermissionOverwriteForUpdate :one
+-- FOR UPDATE OF po, so the join to channels does not take a lock the caller does not need — the row being
+-- read and replaced is the overwrite, and locking every channel row the join touches would serialize
+-- unrelated writes on the same channel.
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = sqlc.arg(channel_id)::bigint
+  AND po.target_type = sqlc.arg(target_type)
+  AND po.target_id = sqlc.arg(target_id)::bigint
+  AND c.guild_id = sqlc.arg(guild_id)::bigint
+FOR UPDATE OF po;
+
 -- name: ListGuildAuditLog :many
 -- One page of a guild's audit log, newest first (Milestone M14).
 --

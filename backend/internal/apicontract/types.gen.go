@@ -1267,7 +1267,7 @@ type ListGuildAuditLogParams struct {
 	// ActorId Return only entries whose actor is this user.
 	ActorId *Snowflake `form:"actor_id,omitempty" json:"actor_id,omitempty"`
 
-	// Limit Page size. Defaults to 50, and values above 100 are clamped rather than refused, as on the member listing.
+	// Limit Page size, 1 to 100. **Above 100 is refused rather than clamped**, which is the opposite of the member listing and deliberately so: this listing documents "a page shorter than `limit` means exhausted", and a silently clamped `limit=500` returns 100 entries that a client applying that rule reads as the whole log. The two conventions are each reasonable and jointly lose data, so the one that can fail loudly does.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 

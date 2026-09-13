@@ -195,7 +195,7 @@ func (s *Service) Update(
 		// which would mean a bespoke query shape on each of the four update paths to save one primary-key
 		// lookup on a guild rename. Loading it is what UpdateRole and UpdateChannel already do; this makes
 		// the four agree.
-		existing, err := q.GetGuild(ctx, int64(guildID))
+		existing, err := q.GetGuildForUpdate(ctx, int64(guildID))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound

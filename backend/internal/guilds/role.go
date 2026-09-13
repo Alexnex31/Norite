@@ -197,7 +197,8 @@ func (s *Service) UpdateRole(
 			return err
 		}
 
-		existing, err := q.GetRole(ctx, db.GetRoleParams{ID: int64(roleID), GuildID: int64(guildID)})
+		existing, err := q.GetRoleForUpdate(ctx,
+			db.GetRoleForUpdateParams{ID: int64(roleID), GuildID: int64(guildID)})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound
@@ -299,7 +300,8 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 			return err
 		}
 
-		existing, err := q.GetRole(ctx, db.GetRoleParams{ID: int64(roleID), GuildID: int64(guildID)})
+		existing, err := q.GetRoleForUpdate(ctx,
+			db.GetRoleForUpdateParams{ID: int64(roleID), GuildID: int64(guildID)})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound

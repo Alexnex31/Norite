@@ -45,8 +45,19 @@ CREATE TABLE audit_log_entries (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- The one read M14 makes: a guild's log, newest first, paginated. Measured on 300,000 entries across
--- 5,000 guilds:
+-- **M14 does not read by this index, and replaced it.** What follows is what M12 expected M14 to need,
+-- and the expectation was wrong in the one way that mattered: the listing orders by `id`, because a
+-- snowflake is time-ordered *and* unique where a timestamp is only the first. Migration 000017 creates
+-- (guild_id, id DESC) and drops this one, and 000018 adds the actor filter's. Left here rather than
+-- rewritten because the measurement below is real and the reasoning about a composite index's second
+-- column still holds — what it got wrong is which column, and that is the useful part to keep visible.
+--
+-- The paragraph after it claimed shipping the index with the table avoided a rebuild on a populated
+-- table. It bought the opposite: 000017 performs exactly that rebuild, under ACCESS EXCLUSIVE, on a table
+-- nothing sweeps.
+--
+-- The one read M12 expected M14 to make: a guild's log, newest first, paginated. Measured on 300,000
+-- entries across 5,000 guilds:
 --
 --   with the index    0.356 ms,   55 buffers   Index Scan, no sort node
 --   without           9.457 ms, 3167 buffers   Parallel Seq Scan, then a sort per worker

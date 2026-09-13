@@ -182,7 +182,7 @@ func (s *Service) UpdateMember(
 
 		// The prior row, for the diff. Same argument as UpdateGuild's: the state being written over exists
 		// exactly once, inside the transaction that replaces it.
-		existing, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{
+		existing, err := q.GetGuildMemberForUpdate(ctx, db.GetGuildMemberForUpdateParams{
 			GuildID: int64(guildID),
 			UserID:  int64(userID),
 		})
@@ -341,7 +341,7 @@ func (s *Service) RemoveMember(
 		// guild — which is the nickname, since the account itself survives and its own name is not this
 		// table's to record. The roles they held are deliberately not read: that is a second query on a
 		// moderation path, and every grant is already in this log as its own member.role_add entry.
-		member, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{
+		member, err := q.GetGuildMemberForUpdate(ctx, db.GetGuildMemberForUpdateParams{
 			GuildID: int64(guildID),
 			UserID:  int64(userID),
 		})

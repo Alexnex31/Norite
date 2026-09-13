@@ -1,0 +1,30 @@
+-- Milestone M14 — the index the audit log's *other* public filter relies on (rule 7).
+--
+-- 000018 measured actor_id and added its index, and left action — the other query parameter the same
+-- endpoint documents — with nothing. The failure is the same shape and was found the same way, by
+-- measuring the filter rather than the unfiltered listing.
+--
+-- On 250,000 entries, 50,000 of them in the guild being read, asking for an action with twelve entries in
+-- that guild's history:
+--
+--   as shipped   Bitmap Heap Scan, 50,000 rows removed by filter, 2,682 buffers, 4.092 ms
+--   with this    Index Only Scan,          12 rows, no filter,         4 buffers, 0.037 ms
+--
+-- A *common* action needs neither: the planner walks the primary key backwards and the LIMIT is satisfied
+-- within a couple of hundred rows (6 buffers). The cost falls entirely on the selective query, which is
+-- the one an operator actually makes — "show me every ban in this guild" is the question, not "show me the
+-- most recent of the thing that happens constantly".
+--
+-- # This is the fourth index on the table rule 2 writes to on every guild-scoped mutation
+--
+-- Worth stating plainly rather than adding quietly. The table now carries (guild_id, id DESC) for the
+-- listing, (guild_id, actor_id, id DESC) and (guild_id, action, id DESC) for the two filters, and
+-- (actor_id) for the foreign key's own check against users. None folds into another: an id seek needs id
+-- adjacent to guild_id, and the FK check needs actor_id leading.
+--
+-- **A third filter on this endpoint should be weighed against consolidating rather than added.** Four
+-- btree inserts per audit row is already a real cost on the guild surface's hottest write path, and the
+-- next one would be five. The alternative worth measuring first is (guild_id, id DESC) INCLUDE (action,
+-- actor_id), which would not give an index *condition* on either filter but would keep both off the heap.
+CREATE INDEX audit_log_entries_guild_id_action_id_idx
+  ON audit_log_entries (guild_id, action, id DESC);

@@ -85,7 +85,7 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 		// Kept beyond the switch, because the audit diff below needs the same row: a PUT over an existing
 		// overwrite is an update and must record both sides, and one over nothing is a creation. The read
 		// that answers the escalation question is the read that answers this one.
-		prior, err := q.GetPermissionOverwrite(ctx, db.GetPermissionOverwriteParams{
+		prior, err := q.GetPermissionOverwriteForUpdate(ctx, db.GetPermissionOverwriteForUpdateParams{
 			ChannelID:  int64(in.ChannelID),
 			TargetType: in.TargetType,
 			TargetID:   int64(in.TargetID),
@@ -145,7 +145,7 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 		// is. Neither changed; a PUT that would move an overwrite to another channel is a different row.
 		changes := auditDiff{}
 		changes.context("channel_id", in.ChannelID)
-		changes.context("type", in.TargetType)
+		changes.context("target_type", in.TargetType)
 		if replaced {
 			changes.changed("allow", roles.PermissionFromInt64(prior.Allow), in.Allow)
 			changes.changed("deny", roles.PermissionFromInt64(prior.Deny), in.Deny)
@@ -185,7 +185,7 @@ func (s *Service) DeleteOverwrite(
 			return err
 		}
 
-		existing, err := q.GetPermissionOverwrite(ctx, db.GetPermissionOverwriteParams{
+		existing, err := q.GetPermissionOverwriteForUpdate(ctx, db.GetPermissionOverwriteForUpdateParams{
 			ChannelID:  int64(channelID),
 			TargetType: targetType,
 			TargetID:   int64(targetID),
@@ -216,7 +216,7 @@ func (s *Service) DeleteOverwrite(
 		// this entry needs the bits, not just the fact that a row went.
 		changes := auditDiff{}
 		changes.context("channel_id", channelID)
-		changes.context("type", targetType)
+		changes.context("target_type", targetType)
 		changes.removed("allow", roles.PermissionFromInt64(existing.Allow))
 		changes.removed("deny", roles.PermissionFromInt64(existing.Deny))
 
@@ -266,10 +266,23 @@ func (s *Service) DeleteOverwrite(
 // The guild comes off the channel row and never from the caller, because these routes carry no guild in
 // their path — the same reason UpdateChannel loads its own (rule 1). The channel id is passed to
 // authorizeWith so the decision is what the caller holds in *this* channel.
+//
+// # The row is read FOR UPDATE
+//
+// All four callers are mutations on this channel, and two of them diff it. A diff that reads prior state
+// and then writes has a window under READ COMMITTED where a concurrent commit lands in between, and the
+// entry then records a transition that never happened — reproduced on this branch, and the reason the
+// locking query exists. Locking here rather than at each call site keeps the read single.
+//
+// It serializes concurrent mutations of one channel, which is what anybody would expect of them, and it
+// closes a race the ledger records as accepted: the per-channel overwrite ceiling was a read-then-insert
+// with no lock, so two concurrent writes could both read 49 and land the channel at 51. They now queue.
+// That entry is left in place rather than deleted, because the reasoning it records — a ceiling overshoot
+// is not a corrupted ordering — is why nobody had to fix it, and this closing it is a side effect.
 func (s *Service) authorizeChannel(
 	ctx context.Context, q *db.Queries, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
 ) (db.Channel, snowflake.ID, decision, error) {
-	row, err := q.GetChannel(ctx, int64(channelID))
+	row, err := q.GetChannelForUpdate(ctx, int64(channelID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return db.Channel{}, 0, decision{}, httpx.ErrNotFound

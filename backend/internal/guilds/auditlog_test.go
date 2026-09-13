@@ -6,8 +6,11 @@ package guilds
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
@@ -303,7 +306,19 @@ func driveEveryMutation(t *testing.T, f *overwriteFixture, ctx context.Context) 
 	_, err = f.svc.UpdateRole(ctx, owner, f.guildID, role.ID, UpdateRoleInput{Name: &name})
 	require.NoError(t, err, "role.update")
 
-	_, err = f.svc.ReorderRoles(ctx, owner, f.guildID, []RolePosition{{ID: role.ID, Position: 1}})
+	// A second role, so the reorder is a real move. CreateRole places a new role at the bottom, so
+	// reordering the first one to position 1 was the position it already held — changed() suppressed it,
+	// payload() returned nil, and the shape test skipped the entry. role.reorder is the one action whose
+	// payload is keyed by role id rather than by field name, so it was the one whose shape nothing checked.
+	second, err := f.svc.CreateRole(ctx, owner, f.guildID, CreateRoleInput{Name: "second-role"})
+	require.NoError(t, err)
+
+	// A real swap. CreateRole places each new role at the *bottom* and renumbers everything up, so after
+	// the line above second-role holds 1 and a-role holds 2 — asking for that arrangement again would be
+	// two more no-ops, which is exactly the mistake being corrected here and which the payload assertion
+	// in TestTheAuditDiffShapeIsUniform caught on the first attempt at this fix.
+	_, err = f.svc.ReorderRoles(ctx, owner, f.guildID,
+		[]RolePosition{{ID: role.ID, Position: 1}, {ID: second.ID, Position: 2}})
 	require.NoError(t, err, "role.reorder")
 
 	_, err = f.svc.AssignRole(ctx, owner, f.guildID, f.plain, role.ID)
@@ -399,11 +414,18 @@ func TestTheAuditDiffShapeIsUniform(t *testing.T) {
 	entries := driveEveryMutation(t, f, ctx)
 	require.NotEmpty(t, entries)
 
+	// Which actions actually carried a payload. Asserted below, because "skip the nil ones" is how
+	// role.reorder went unchecked: the driver moved a role to the position it already held, changed()
+	// suppressed it, payload() returned nil, and this loop stepped over the one action whose payload is
+	// keyed by role id rather than by field name.
+	carried := map[string]bool{}
+
 	diffed := 0
 	for _, e := range entries {
 		if e.Changes == nil {
 			continue
 		}
+		carried[e.Action] = true
 
 		var payload map[string]any
 		require.NoError(t, json.Unmarshal(e.Changes, &payload), e.Action)
@@ -439,6 +461,17 @@ func TestTheAuditDiffShapeIsUniform(t *testing.T) {
 	}
 
 	require.Greater(t, diffed, 0, "or this walked nothing but context and asserted nothing")
+
+	for _, action := range AuditActions() {
+		if action == ActionGuildDelete {
+			// The only action that records nothing, and its entry cascades away besides.
+			continue
+		}
+		require.Truef(t, carried[action],
+			"%s produced no payload for this test to check its shape — every other action carries at "+
+				"least one changed or context field, so an empty one means the driver exercised it in a "+
+				"way that recorded nothing", action)
+	}
 }
 
 // kindOf names a decoded JSON value's shape, for the assertion above.
@@ -485,4 +518,70 @@ func TestAPermissionInAnAuditEntryIsAString(t *testing.T) {
 	require.True(t, ok, "permissions is a created field, so it is an object carrying `to`")
 	require.Equal(t, "3", permissions["to"],
 		"a quoted decimal string, as roles.Permission marshals itself — not a JSON number")
+}
+
+// TestConcurrentUpdatesLeaveAnUnbrokenDiffChain is the property FOR UPDATE buys, stated as the thing an
+// operator actually relies on.
+//
+// A diff reads the prior state and then writes, which under READ COMMITTED is two statements. Without a
+// lock a concurrent commit lands between them and the entry records a transition that never happened —
+// measured directly on this branch: T1 reads "A", T2 commits "B", T1 writes "C", and T1's entry claims
+// from "A" while the value it actually overwrote was "B".
+//
+// Asserting that by racing two goroutines and hoping for the interleaving would be a flaky test that
+// passes for the wrong reason. The property that holds regardless of ordering is chain integrity: if
+// every entry names the value it really replaced, then the `from` values are exactly the starting value
+// plus every `to` except the last one written. A stale read breaks it by naming a value twice.
+func TestConcurrentUpdatesLeaveAnUnbrokenDiffChain(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+
+	var initial string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT name FROM guilds WHERE id = $1`, int64(f.guildID)).Scan(&initial))
+
+	const writers = 8
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := fmt.Sprintf("rename-%d", i)
+			_, err := f.svc.Update(ctx, userActor(f.owner), f.guildID, UpdateGuildInput{Name: &name})
+			assert.NoError(t, err)
+		}(i)
+	}
+	wg.Wait()
+
+	entries, err := f.svc.ListAuditLog(ctx, userActor(f.owner), f.guildID,
+		ListAuditLogInput{Action: ActionGuildUpdate, Limit: maxAuditLogPageSize})
+	require.NoError(t, err)
+	require.Len(t, entries, writers, "every writer committed")
+
+	froms := map[string]int{}
+	tos := map[string]int{}
+	for _, e := range entries {
+		var payload map[string]map[string]any
+		require.NoError(t, json.Unmarshal(e.Changes, &payload))
+		name, ok := payload["name"]
+		require.True(t, ok, "a rename records the name it changed")
+		froms[name["from"].(string)]++
+		tos[name["to"].(string)]++
+	}
+
+	var final string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT name FROM guilds WHERE id = $1`, int64(f.guildID)).Scan(&final))
+
+	// Every value was replaced exactly once, except the one still standing.
+	expected := map[string]int{initial: 1}
+	for value, n := range tos {
+		if value != final {
+			expected[value] = n
+		}
+	}
+	require.Equal(t, expected, froms,
+		"a `from` naming a value no mutation replaced, or naming one twice, means a prior-state read "+
+			"raced the write it belongs to")
 }

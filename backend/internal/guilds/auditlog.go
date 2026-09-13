@@ -106,9 +106,11 @@ func (s *Service) ListAuditLog(
 	case limit <= 0:
 		limit = defaultAuditLogPageSize
 	case limit > maxAuditLogPageSize:
-		// Clamped rather than refused, as the member listing is. A client asking for more than the ceiling
-		// is not making an error worth failing a request over, and returning the ceiling tells it what the
-		// ceiling is more clearly than a 400 it has to parse.
+		// Clamped here and *refused* at the HTTP layer, which is not a contradiction. An over-limit
+		// request is a client error and gets a 400 naming the ceiling, because this listing's contract
+		// says a short page means exhausted and a silent clamp would make a client believe that. This
+		// clamp is the backstop for a programmatic caller — a test, the TUI's own command surface — which
+		// has no response to receive and for which the ceiling is a bound rather than a message.
 		limit = maxAuditLogPageSize
 	}
 

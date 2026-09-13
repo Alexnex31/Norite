@@ -63,6 +63,14 @@ func TestTheAuditLogRouteRefusesAQueryItCannotAnswer(t *testing.T) {
 		{"a limit of zero", "?limit=0"},
 		{"a negative limit", "?limit=-1"},
 		{"a limit that is not a number", "?limit=lots"},
+		// Refused rather than clamped, unlike the member listing: this endpoint tells clients a short
+		// page means exhausted, so a silently clamped limit=500 would return 100 entries a client reads
+		// as the whole log.
+		{"a limit above the ceiling", "?limit=500"},
+		// No snowflake is zero, so a zero cursor came from an unset template variable. Carried through it
+		// would mean `id < 0` and an empty page forever.
+		{"a cursor of zero", "?before=0"},
+		{"an actor of zero", "?actor_id=0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := f.api.call(http.MethodGet, base+tc.query, nil, withToken(f.ownerToken))
