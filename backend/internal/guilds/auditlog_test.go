@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -584,4 +585,35 @@ func TestConcurrentUpdatesLeaveAnUnbrokenDiffChain(t *testing.T) {
 	require.Equal(t, expected, froms,
 		"a `from` naming a value no mutation replaced, or naming one twice, means a prior-state read "+
 			"raced the write it belongs to")
+}
+
+// TestNoAuditActionRecordsMessageContent is rule 13 as a tripwire, placed where it will fire.
+//
+// The rule names "audit-diffing" in its own list of server-side features that read message content and
+// must explicitly exclude E2E-encrypted DMs. M14 built that diffing. Nothing in it excludes anything,
+// because nothing it records is message content — and that is a fact about the current vocabulary rather
+// than a property anything enforces.
+//
+// There is a structural argument that this table can never hold E2E content, and it is worth writing down
+// because it is the thing to re-check rather than to assume: `audit_log_entries` is guild-scoped, E2E is
+// `DM`-channel-type only and never guild channels (rule 13 again), and a DM has no guild. The two cannot
+// intersect while both halves hold.
+//
+// So this test exists to make M15 confront it rather than rediscover it. M15 adds message CRUD over this
+// audit mechanism, and the moment it appends a `message.*` verb the build goes red here with the question
+// attached: does the diff put message *content* into `changes`, and does the guild/DM separation still
+// hold? Answer it, then change this test deliberately — the way M14 changed the permission bit order test.
+func TestNoAuditActionRecordsMessageContent(t *testing.T) {
+	t.Parallel()
+
+	for _, action := range AuditActions() {
+		require.Falsef(t, strings.HasPrefix(action, "message."),
+			"%s records a message operation, so rule 13 applies to this table for the first time: any "+
+				"server-side feature reading message content must explicitly exclude E2E-encrypted DMs. "+
+				"Check two things before changing this test. First, whether `changes` carries content or "+
+				"only ids — a diff of a message edit is the case that does. Second, whether the "+
+				"guild-scoped/DM-only separation still holds, which is what currently makes the exclusion "+
+				"unnecessary rather than merely absent. See docs/security-ledger.md, whose audit-log entry "+
+				"names this milestone as its reopening condition.", action)
+	}
 }
