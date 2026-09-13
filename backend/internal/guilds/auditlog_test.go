@@ -239,7 +239,7 @@ func TestAnUnknownActionFilterIsRefused(t *testing.T) {
 //
 // It drives every mutation the package exposes and requires each to leave exactly the entry it claims.
 // The value is in the direction nothing else checks: a constant that no writer produces looks identical to
-// one whose writer was removed, and both look fine to a reader of model.go. Iterating AllAuditActions is
+// one whose writer was removed, and both look fine to a reader of model.go. Iterating AuditActions() is
 // what turns "we think these all fire" into a red build when one stops.
 //
 // guild.delete is the one action this endpoint cannot observe, and that is a property rather than a gap:

@@ -16,7 +16,7 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
-[![Milestone](https://img.shields.io/badge/milestone-M13%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M14%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 > [!WARNING]
 > **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work, and
@@ -46,7 +46,7 @@ software.
 
 ## Status
 
-**Foundation, auth and the permission core are done — `M0` through `M13`. `M15` adds messages; `M20a`
+**Foundation, auth and the permission core are done — `M0` through `M14`. `M15` adds messages; `M20a`
 is the first thing a person can actually use.**
 
 <details>
@@ -69,6 +69,7 @@ is the first thing a person can actually use.**
 | `M11a` | Two-factor authentication — TOTP enrollment and verification, single-use recovery codes, threaded through every path that establishes a session: login, the OAuth exchange, and device-code approval |
 | `M12` | Guilds, channels, roles and membership — the schema, fifteen REST endpoints, the permission bitfield, and one chokepoint every mutating route resolves through |
 | `M13` | Permission overwrites and role hierarchy — who may act on whom, per-channel permission overrides, role assignment and reordering, and a channel listing that hides what you cannot see |
+| `M14` | The guild audit log — every mutation already recorded who did what, in the same transaction; this reads it back, behind its own permission, with a before-and-after diff of what actually changed |
 
 </details>
 
@@ -78,7 +79,8 @@ an address is confirmed by email before its account can be used.
 **No usable product features exist yet.** A guild, channel and permission system in the backend is not
 something anybody can use — there is no client, nothing to read, and nothing to say. The honest threshold
 is when two people can hold a text conversation, which needs `M15`'s messages and `M20a`'s first client.
-What `M12` and `M13` built is the permission model those conversations will happen inside.
+What `M12` through `M14` built is the permission model those conversations will happen inside, and the
+record of who changed it.
 
 > [!NOTE]
 > **On releases.** Nothing ships as a release before the milestone sequence is complete. At each phase

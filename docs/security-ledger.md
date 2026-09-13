@@ -191,3 +191,23 @@ would flip them.
 - **Reopens if**: the union check is narrowed to the value being written — the same condition the M13
   entry above carries, and the accurate one, because that check is what holds the door shut and the view
   requirement is not. A self-service "undo my last overwrite" surface would still need its own answer.
+
+### The audit log shows channels the reader's own listing hides
+- **Raised**: M14, while designing the read surface — the question the milestone turns on
+- **Verdict**: accepted risk, and the alternative is worse
+- **Why**: `GET /guilds/{id}/audit-log` does not filter entries by what the caller can currently see, so a
+  `PermViewAuditLog` holder denied `PermViewChannel` on a channel reads that channel's entries by id and,
+  in `changes`, by name. Three options were weighed. Filtering by present visibility is the tempting one
+  and fails twice: half the interesting entries are deletions whose target no longer exists and cannot be
+  resolved to a permission at all, and whether a channel is visible *today* is not the question a log
+  answers about an action taken last month — filtering on it would let somebody hide their tracks after
+  the fact by locking a channel down. Withholding the surface from anyone below administrator was the
+  other, and it makes the log useless for the delegated-moderator case it exists for. So the permission is
+  the boundary: it is not granted by default, is not implied by `PermManageGuild`, and cannot be handed
+  out by somebody who does not hold it (`refuseEscalation`). Stated in the contract, in `ListAuditLog`'s
+  own comment, and pinned by `TestTheAuditLogDoesNotFilterByChannelVisibility`.
+- **Reopens if**: the log ever carries message content, where the exposure stops being metadata about
+  moderation and becomes the conversations themselves — M15 puts `message.*` actions within reach, and
+  rule 13 already forbids reading E2E DM content on any server-side path. It would also reopen if a
+  future action recorded a channel's *members* rather than its id and name, which is a different kind of
+  disclosure than this entry weighed.

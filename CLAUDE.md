@@ -325,7 +325,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M13 done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M14 done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -444,9 +444,18 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   Two decisions outlive the milestone: a new role is created at the **bottom**, as Discord does; and
   **assignment is escalation-checked**, a deliberate departure from Discord, where hierarchy alone gates
   it.
-- **M14 — Guild audit log**: next. The read surface over the table M12 created and every milestone since
-  has written to, plus the `changes` diffing and the pagination. It also inherits the route-surface test
-  that only claims to enumerate — see its roadmap entry.
+- **M14 — Guild audit log**: done (tag `m14`). The read surface over the table M12 created and every
+  milestone since has written to: `GET /guilds/{guild_id}/audit-log` behind the new `PermViewAuditLog`
+  (bit 19), migrations `000017` and `000018`, `guilds/auditlog.go` and `guilds/auditdiff.go`, the
+  `changes` diff rewritten across all sixteen writers, and both route-surface tests derived from
+  `chi.Walk`. Decisions are in the roadmap entry and in `docs/security-ledger.md`.
+
+  **It opened by fixing a bug M13 tagged**, found by driving a real guild rather than by any of the four
+  review passes: a channel-scoped route gated on its own permission while the listing gated on
+  `PermViewChannel`, so a moderator could rename and delete a channel absent from their own sidebar.
+- **M15 — Core messaging CRUD**: next. Send/edit/delete over the permission engine M13 finished and the
+  audit mechanism M14 built. The first milestone whose `changes` payload could carry message content,
+  which is where rule 13 starts applying to this table.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -1080,7 +1089,8 @@ And on guilds, permissions and the audit log, from M12:
   it. Validation that reads a loaded row is an authorization question, not an input question — it belongs
   below the check, and nothing in it ever needs to run first.
 - **A structural test is only structural over the inputs it sends.**
-  `TestEveryMutatingGuildRouteRefusesANonMember` walks every mutating route with a stranger and passed
+  `TestEveryMutatingGuildRouteRefusesANonMember` (M14 renamed it `TestEveryGuildRouteRefusesANonMember`
+  and derived its route list from `chi.Walk`) walks every mutating route with a stranger and passed
   throughout, because it targets an ordinary member and always sends `{"name": "hijacked"}` — never the
   owner, never a voice-only field. The route table was covered; the branches inside the handlers were not.
   When a test's value is "it cannot miss a route", ask what it cannot miss *within* one.
@@ -1206,6 +1216,60 @@ And on hierarchy and overwrites, from M13:
   (0.536 ms against 13.682 ms at the channel ceiling). The listing must group those rows once rather than
   hand every channel the whole slice (130 us against 757 us). And the role renumber needs `guild_id` on
   its *outer* relation or it sequentially scans every role on the instance.
+
+And on the audit log, from M14:
+
+- **A permission that is only ever OR'd into a base is not grantable, so the audit log gets its own bit.**
+  `PermViewAuditLog` at position 19, not a shape of `PermManageGuild` — folding it in would mean the only
+  way to let somebody audit a guild is to let them rename it, which is verbatim the correction M12's
+  `UpdateMember` needed. Adding a bit means editing `TestTheBitOrderIsWhatTheDatabaseAlreadyStores` and
+  `TestPermAllStopsAtTheLastDefinedBit` **by hand**; that is the mechanism working, not an obstacle, and a
+  renumber is the diff those tests exist to put in front of a reviewer.
+- **A channel you cannot see is not yours to manage.** M13 taught the listing to hide channels and left
+  every channel-scoped mutation gated on its own bit, so the two disagreed about whether a channel
+  existed. `authorizeChannel` folds `PermViewChannel` into every caller's `need`. **Adding a filter to a
+  listing is a reason to re-examine the *permissions* of every route that names the same object, not only
+  their status codes** — M13 did the second half and stopped.
+- **The log is bounded by its permission, not by what the reader can currently see.** An entry names a
+  channel hidden from its reader, by id and by name. Filtering on present visibility would let somebody
+  hide their tracks after the fact by locking a channel down, and half the interesting entries are
+  deletions whose target cannot be resolved to a permission at all. In the ledger with its *reopens if*,
+  which names M15: a `message.*` action puts content in `changes`, and rule 13 applies from that moment.
+- **A diff belongs in the writer, never in the reader.** The prior state exists exactly once — in the row
+  being written over — so `changes` is built inside each mutation's transaction. A reader cannot
+  reconstruct `from`: the previous entry may have touched other fields or may not exist at all. That is
+  why the change touched all sixteen writers rather than one function.
+- **Two kinds of key, told apart by the value.** A changed field is an object carrying `from`, `to` or
+  both; a context field is a scalar. Context exists because `target_id` is one column and some actions
+  name a pair — an overwrite names a channel *and* a role. Rendering context as `{"to": …}` would say it
+  had been set to that value. `TestTheAuditDiffShapeIsUniform` enforces it across every action, because a
+  rule stated in a comment is one the seventeenth mutation breaks.
+- **A field sent with the value it already had is not a change**, and `reflect.DeepEqual` alone cannot
+  decide that: it calls two values of different concrete types unequal whatever they hold, so an int32
+  column against an int literal would record a change on every request. Go has no generic methods, so the
+  comparison widens integer kinds instead of taking a type parameter.
+- **Permissions and ids go into `changes` as their own types, never `.Int64()`.** They marshal as quoted
+  decimal strings because the field is 63 bits and a browser's number is a float64. M12 and M13 wrote
+  numbers here, which put that hazard on the one endpoint whose purpose is to be believed.
+- **A cursor is an id, never a timestamp** — not because timestamps collide here (measured: 60 entries, 30
+  written concurrently, 60 distinct microsecond values) but because nothing *constrains* `created_at`, and
+  a page boundary that loses a row rarely is one nobody will reproduce from a report. The migration's
+  first version claimed same-millisecond bursts were normal; writing the test that claim implied is what
+  disproved it.
+- **An optional bound is `COALESCE`, not `$n IS NULL OR col < $n`.** The obvious spelling cannot become an
+  index qual under a generic plan — 1859 buffers against 9, measured. `plan_cache_mode` defaults to `auto`
+  and currently rejects that plan, so it is robustness rather than a live bug; it costs one keyword. The
+  same trick buys nothing for an *equality* filter, where the rewrite names the column on both sides.
+- **A route-surface test must fail on a route it has no case for.** Both walk `chi.Walk` now and fail in
+  *both* directions, because a stale case for a deleted route asserts nothing and reads exactly like
+  coverage. A route deliberately not exercised declares itself exempt with a reason. Before this, one
+  iterated a hand-typed slice and the other covered ten of sixteen actions — the six it missed were the
+  whole of M13's surface.
+- **An unknown filter value is refused, not answered with an empty page.** An action nobody writes matches
+  nothing, which is indistinguishable from a guild that never did it, so a typo would read as evidence of
+  absence. The check lives in the service and not only in the handler, for the reason `authorize` and
+  `revokeEverything` do. Same shape for a zero id: `snowflake.Parse` accepts `"0"`, so absence travels as
+  a pointer the whole way down rather than as a zero that silently means "no filter".
 
 ## Project-specific skills
 

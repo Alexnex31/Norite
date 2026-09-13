@@ -873,7 +873,15 @@ DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}
                                            --   channel denies off the target, so it is not the pure
                                            --   demotion it looks like
 GET    /guilds/{guild_id}/invites
-GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it
+GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it.
+                                           --   PermViewAuditLog, its own bit and not implied by
+                                           --   PermManageGuild. Cursor on the entry id, never created_at,
+                                           --   which carries no uniqueness guarantee. Entries are *not*
+                                           --   filtered by what the reader can currently see: the
+                                           --   permission is the boundary, because half the entries name
+                                           --   objects that no longer exist and because filtering on
+                                           --   present visibility would let somebody hide their tracks
+                                           --   by locking a channel down afterwards
 GET    /guilds/{guild_id}/emojis
 POST   /guilds/{guild_id}/emojis
 DELETE /guilds/{guild_id}/emojis/{id}
@@ -882,18 +890,23 @@ POST   /guilds/{guild_id}/tags
 POST   /guilds/{guild_id}/tags/{tag_id}/messages/{message_id}
 
 PATCH  /channels/{channel_id}              -- M12; carries no guild, so the guild is read off the channel
-                                           --   row and never from the caller (rule 1)
-DELETE /channels/{channel_id}              -- M12; same resolution. Deleting a category orphans its
-                                           --   children rather than deleting them
+                                           --   row and never from the caller (rule 1). M14 added
+                                           --   PermViewChannel alongside PermManageChannels: M13 taught
+                                           --   the listing to hide channels and left these routes able
+                                           --   to act on one, so the two disagreed about whether a
+                                           --   channel existed
+DELETE /channels/{channel_id}              -- M12; same resolution, and the same M14 correction. Deleting
+                                           --   a category orphans its children rather than deleting them
 PUT    /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; the endpoint that finally writes what roles.Resolve
                                            --   has read since M12. PermManageRoles resolved *in that
                                            --   channel*, not at guild level, or a caller denied a
-                                           --   permission there could allow it back to themselves
+                                           --   permission there could allow it back to themselves.
+                                           --   M14 added PermViewChannel here too
 DELETE /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; escalation-checked over the row being removed, not the
                                            --   one being written — deleting an overwrite that denies you
-                                           --   something grants you that thing
+                                           --   something grants you that thing. M14 added PermViewChannel
 GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
 POST   /channels/{channel_id}/messages
 PATCH  /channels/{channel_id}/messages/{message_id}

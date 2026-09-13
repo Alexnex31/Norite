@@ -51,7 +51,7 @@ const (
 	ActionOverwriteDelete = "overwrite.delete"
 )
 
-// AllAuditActions is every verb above, which is the list the block's own comment says M14 would need.
+// allAuditActions is every verb above, which is the list the block's own comment says M14 would need.
 //
 // Two callers and they want it for opposite reasons. The listing endpoint validates an `action` filter
 // against it, because an unknown verb is a query matching nothing and therefore indistinguishable from a
