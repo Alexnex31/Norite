@@ -1,0 +1,331 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// Two tests in this package claim to enumerate the guild route surface, and until M14 neither asked the
+// router what that surface was. Both iterated a slice somebody typed.
+//
+// That is worse than it sounds for the anti-enumeration one: a missing entry means a mutating route was
+// never checked for the property, on a test whose entire stated purpose is that this cannot happen. During
+// M13 it needed routes adding twice — the overwrite pair, then the role reorder — and a person noticed
+// both times. The audit-coverage one had drifted further: ten of the sixteen actions.
+//
+// # The walk is not the load-bearing part
+//
+// A walk that skips routes it has no case for is the hand-written table again wearing a mechanism's
+// clothes. What makes this work is [requireCasesMatchTheSurface], which fails in *both* directions: a
+// route with no case, and a case naming a route the router no longer serves. The second half matters as
+// much — a stale case for a deleted route is a test asserting something about nothing, and it looks
+// exactly like coverage.
+//
+// A route that genuinely should not be exercised declares itself exempt with a reason, which is a decision
+// a reader can disagree with rather than an absence nobody can see.
+
+// guildSurfaceRoutes returns every route the real router serves under /guilds or /channels, as
+// "METHOD /pattern" with chi's path parameters intact.
+//
+// Built from newTestRouterWithAuth, which constructs the router with nil services and therefore needs no
+// database — the route table is a property of the code, not of any instance.
+func guildSurfaceRoutes(t *testing.T) []string {
+	t.Helper()
+
+	var out []string
+	for op := range routedOperations(t, newTestRouterWithAuth(t)) {
+		_, route, _ := strings.Cut(op, " ")
+		if strings.HasPrefix(route, "/api/v1/guilds") || strings.HasPrefix(route, "/api/v1/channels") {
+			out = append(out, op)
+		}
+	}
+	sort.Strings(out)
+
+	// A surface that came back empty would make every test below vacuously pass, which is the failure mode
+	// this whole file exists to remove.
+	require.NotEmpty(t, out, "the walk found no guild routes; newRouter or the prefixes above changed")
+	return out
+}
+
+// requireCasesMatchTheSurface fails when the walked routes and a test's cases disagree either way.
+func requireCasesMatchTheSurface[T any](t *testing.T, routes []string, cases map[string]T) {
+	t.Helper()
+
+	for _, route := range routes {
+		if _, ok := cases[route]; !ok {
+			t.Errorf("the router serves %s and this test has no case for it — add one, or mark it "+
+				"exempt with the reason it is not covered here", route)
+		}
+	}
+
+	known := make(map[string]struct{}, len(routes))
+	for _, route := range routes {
+		known[route] = struct{}{}
+	}
+	for route := range cases {
+		if _, ok := known[route]; !ok {
+			t.Errorf("this test has a case for %s and the router serves no such route — a case for a "+
+				"route that no longer exists asserts nothing and reads as coverage", route)
+		}
+	}
+}
+
+var routePathParam = regexp.MustCompile(`\{[a-z_]+\}`)
+
+// fillRoute substitutes real ids into a chi pattern, failing on a parameter it has no value for.
+//
+// The failure is the point: a route introducing a new path parameter arrives here as a hard stop naming
+// the parameter, rather than as a request to a literal "{thing_id}" that answers 404 for the wrong reason
+// and passes an anti-enumeration assertion by accident.
+func fillRoute(t *testing.T, pattern string, ids map[string]string) string {
+	t.Helper()
+
+	filled := routePathParam.ReplaceAllStringFunc(pattern, func(param string) string {
+		value, ok := ids[param]
+		require.Truef(t, ok, "route %s uses %s and this test has no value for it", pattern, param)
+		return value
+	})
+	require.NotContains(t, filled, "{", "route %s was not fully substituted: %s", pattern, filled)
+	return filled
+}
+
+// refusalCase is one route as the anti-enumeration test exercises it.
+type refusalCase struct {
+	// exempt, when non-empty, says why a non-member is not refused here.
+	exempt string
+	body   any
+}
+
+// TestEveryGuildRouteRefusesANonMember is the structural test, now derived from the router.
+//
+// Every route the guild handler serves is exercised with an actor who is in no guild, and must answer 404.
+// A handler added later that assembles its own permission check instead of calling authorize fails here —
+// which is the point, since authorize being the only path to a decision is a property no single-endpoint
+// test can assert.
+//
+// 404 rather than 403 throughout: a non-member must not learn the guild exists. Guild ids are snowflakes,
+// so a 404/403 split turns a list of plausible ids into a map of what exists on the instance.
+//
+// **Widened from non-GET to every method**, which is not merely thoroughness. The reads disclose the same
+// thing the writes do — a channel list, a member list, an audit log — and the audit-log route added by this
+// milestone would have been covered by this test the moment it mounted rather than by remembering to add
+// it. The old name said "Mutating"; the reason for the limit was that mutations were where authorize was
+// being forgotten, and that is an argument about likelihood, not about what the property covers.
+func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+
+	channel := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+		map[string]any{"name": "general", "type": 0}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, channel.Code, channel)
+
+	role := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+		map[string]any{"name": "mods"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, role.Code, role)
+	roleID := role.field(t, "id")
+
+	ids := map[string]string{
+		"{guild_id}":     f.guildID,
+		"{channel_id}":   channel.field(t, "id"),
+		"{role_id}":      roleID,
+		"{user_id}":      f.memberID,
+		"{overwrite_id}": roleID,
+	}
+
+	cases := map[string]refusalCase{
+		"POST /api/v1/guilds": {
+			exempt: "creating a guild is the one mutation with no guild to be a non-member of; " +
+				"anyone who can authenticate may call it, and TestAGuildIsBoundedInChannelsAndRoles " +
+				"covers what bounds it",
+		},
+
+		"GET /api/v1/guilds/{guild_id}":                    {},
+		"PATCH /api/v1/guilds/{guild_id}":                  {body: map[string]any{"name": "hijacked"}},
+		"DELETE /api/v1/guilds/{guild_id}":                 {},
+		"GET /api/v1/guilds/{guild_id}/channels":           {},
+		"GET /api/v1/guilds/{guild_id}/roles":              {},
+		"GET /api/v1/guilds/{guild_id}/members":            {},
+		"GET /api/v1/guilds/{guild_id}/audit-log":          {},
+		"POST /api/v1/guilds/{guild_id}/channels":          {body: map[string]any{"name": "x", "type": 0}},
+		"POST /api/v1/guilds/{guild_id}/roles":             {body: map[string]any{"name": "x"}},
+		"PATCH /api/v1/guilds/{guild_id}/roles":            {body: map[string]any{"roles": []map[string]any{{"id": roleID, "position": 1}}}},
+		"PATCH /api/v1/guilds/{guild_id}/roles/{role_id}":  {body: map[string]any{"name": "hijacked"}},
+		"DELETE /api/v1/guilds/{guild_id}/roles/{role_id}": {},
+		"PATCH /api/v1/guilds/{guild_id}/members/{user_id}": {
+			body: map[string]any{"nickname": "hijacked"},
+		},
+		"DELETE /api/v1/guilds/{guild_id}/members/{user_id}":                 {},
+		"PUT /api/v1/guilds/{guild_id}/members/{user_id}/roles/{role_id}":    {},
+		"DELETE /api/v1/guilds/{guild_id}/members/{user_id}/roles/{role_id}": {},
+		"PATCH /api/v1/channels/{channel_id}":                                {body: map[string]any{"name": "hijacked"}},
+		"DELETE /api/v1/channels/{channel_id}":                               {},
+		"PUT /api/v1/channels/{channel_id}/permissions/{overwrite_id}":       {body: map[string]any{"type": 0, "allow": "0", "deny": "0"}},
+		"DELETE /api/v1/channels/{channel_id}/permissions/{overwrite_id}":    {body: map[string]any{"type": 0}},
+	}
+
+	routes := guildSurfaceRoutes(t)
+	requireCasesMatchTheSurface(t, routes, cases)
+
+	for _, route := range routes {
+		tc := cases[route]
+		if tc.exempt != "" {
+			continue
+		}
+
+		method, pattern, _ := strings.Cut(route, " ")
+		t.Run(route, func(t *testing.T) {
+			resp := f.api.call(method, fillRoute(t, pattern, ids), tc.body, withToken(f.strangerToken))
+			require.Equal(t, http.StatusNotFound, resp.Code,
+				"a non-member must be refused, and must not learn the guild exists: %s", resp)
+		})
+	}
+}
+
+// auditCase is one route as the audit-coverage test exercises it.
+//
+// Ordered, not mapped, because the sequence is load-bearing: a role must exist before it can be assigned
+// and must be assigned before it can be unassigned, and every delete has to come after everything that
+// needs the thing it deletes. The map the coverage check wants is derived from the slice.
+type auditCase struct {
+	route  string
+	action string
+	body   any
+	want   int
+	// exempt, when non-empty, says why this route writes no entry the test can count.
+	exempt string
+}
+
+// TestEveryGuildMutationWritesExactlyOneAuditEntry is rule 2 over the whole route surface.
+//
+// Every mutating route must write exactly one audit entry naming who did it, in the same transaction —
+// the transactional half is TestTheAuditEntryAndTheMutationShareATransaction, this is the "exactly one,
+// for every route" half.
+//
+// It iterated a hand-written table of ten until M14, against sixteen actions and twenty-one routes. The
+// six it never reached were role.reorder, member.role_add, member.role_remove, overwrite.set,
+// overwrite.delete and guild.delete — which is to say the whole of M13's surface, on the test whose job is
+// to notice a mutation that forgot to write one. Now derived from the router, so a route added without a
+// case fails rather than being quietly uncounted.
+func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
+	t.Parallel()
+
+	f := newGuildFixture(t)
+	guildID := mustID(t, f.guildID)
+
+	channel := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID),
+		map[string]any{"name": "general", "type": 0}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, channel.Code, channel)
+	channelID := channel.field(t, "id")
+
+	role := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
+		map[string]any{"name": "mods"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, role.Code, role)
+	roleID := role.field(t, "id")
+
+	ids := map[string]string{
+		"{guild_id}":     f.guildID,
+		"{channel_id}":   channelID,
+		"{role_id}":      roleID,
+		"{user_id}":      f.memberID,
+		"{overwrite_id}": roleID,
+	}
+
+	const readsWriteNothing = "a GET writes no audit entry — rule 4 keeps reads side-effect-free"
+
+	// In dependency order. The three already performed above carry no request.
+	sequence := []auditCase{
+		{route: "POST /api/v1/guilds", action: "guild.create",
+			exempt: "the fixture created this guild through this route; its entry is counted below"},
+		{route: "POST /api/v1/guilds/{guild_id}/channels", action: "channel.create",
+			exempt: "performed above, so the channel the later cases name exists"},
+		{route: "POST /api/v1/guilds/{guild_id}/roles", action: "role.create",
+			exempt: "performed above, so the role the later cases name exists"},
+
+		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
+		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},
+		{route: "GET /api/v1/guilds/{guild_id}/roles", exempt: readsWriteNothing},
+		{route: "GET /api/v1/guilds/{guild_id}/members", exempt: readsWriteNothing},
+		{route: "GET /api/v1/guilds/{guild_id}/audit-log", exempt: readsWriteNothing},
+
+		{route: "PATCH /api/v1/guilds/{guild_id}", action: "guild.update",
+			body: map[string]any{"name": "Renamed"}, want: http.StatusOK},
+		{route: "PATCH /api/v1/channels/{channel_id}", action: "channel.update",
+			body: map[string]any{"name": "renamed"}, want: http.StatusOK},
+		{route: "PATCH /api/v1/guilds/{guild_id}/roles/{role_id}", action: "role.update",
+			body: map[string]any{"name": "renamed"}, want: http.StatusOK},
+		{route: "PATCH /api/v1/guilds/{guild_id}/roles", action: "role.reorder",
+			body: map[string]any{"roles": []map[string]any{{"id": roleID, "position": 1}}},
+			want: http.StatusOK},
+
+		{route: "PUT /api/v1/channels/{channel_id}/permissions/{overwrite_id}", action: "overwrite.set",
+			body: map[string]any{"type": 0, "allow": "0", "deny": "0"}, want: http.StatusOK},
+		{route: "DELETE /api/v1/channels/{channel_id}/permissions/{overwrite_id}",
+			action: "overwrite.delete", body: map[string]any{"type": 0}, want: http.StatusNoContent},
+
+		{route: "PUT /api/v1/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+			action: "member.role_add", want: http.StatusOK},
+		{route: "DELETE /api/v1/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+			action: "member.role_remove", want: http.StatusOK},
+
+		{route: "PATCH /api/v1/guilds/{guild_id}/members/{user_id}", action: "member.update",
+			body: map[string]any{"nickname": "Nick"}, want: http.StatusOK},
+		{route: "DELETE /api/v1/guilds/{guild_id}/members/{user_id}", action: "member.remove",
+			want: http.StatusNoContent},
+
+		{route: "DELETE /api/v1/guilds/{guild_id}/roles/{role_id}", action: "role.delete",
+			want: http.StatusNoContent},
+		{route: "DELETE /api/v1/channels/{channel_id}", action: "channel.delete",
+			want: http.StatusNoContent},
+
+		{route: "DELETE /api/v1/guilds/{guild_id}", action: "guild.delete",
+			exempt: "the entry is written in the transaction and removed by the cascade it records — " +
+				"TestDeletingAGuildTakesItsAuditTrailWithIt asserts that state directly"},
+	}
+
+	cases := make(map[string]auditCase, len(sequence))
+	for _, c := range sequence {
+		require.NotContainsf(t, cases, c.route, "%s appears twice in the sequence", c.route)
+		cases[c.route] = c
+	}
+	requireCasesMatchTheSurface(t, guildSurfaceRoutes(t), cases)
+
+	for _, c := range sequence {
+		if c.exempt != "" {
+			continue
+		}
+		method, pattern, _ := strings.Cut(c.route, " ")
+		resp := f.api.call(method, fillRoute(t, pattern, ids), c.body, withToken(f.ownerToken))
+		require.Equalf(t, c.want, resp.Code, "%s: %s", c.route, resp)
+	}
+
+	// Counted at the end rather than after each call, because "exactly one" is a claim about the whole
+	// run: a mutation that wrote a second entry for an *earlier* action would pass a check made before it.
+	for _, c := range sequence {
+		if c.action == "" || c.route == "DELETE /api/v1/guilds/{guild_id}" {
+			continue
+		}
+		t.Run(c.action, func(t *testing.T) {
+			var n int
+			f.api.mustQueryRow(t,
+				`SELECT count(*) FROM audit_log_entries WHERE guild_id = $1 AND action = $2`,
+				[]any{guildID, c.action}, &n)
+			require.Equalf(t, 1, n, "%s must write exactly one audit entry (rule 2)", c.action)
+
+			var actor int64
+			f.api.mustQueryRow(t,
+				`SELECT actor_id FROM audit_log_entries WHERE guild_id = $1 AND action = $2`,
+				[]any{guildID, c.action}, &actor)
+			require.Equal(t, mustID(t, f.ownerID), actor, "the entry must name who did it")
+		})
+	}
+}
