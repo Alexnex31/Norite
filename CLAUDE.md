@@ -954,8 +954,11 @@ And on the instance-administration and registration side, from M10 (decisions in
   under READ COMMITTED two concurrent bootstraps both read zero.
 - **Registration answers 202 identically** whether or not the address is taken, and never returns the
   account. The difference goes to the mailbox: a verification link, or a "somebody tried to register" notice
-  that carries no link and asks for nothing. A taken **username** is still 409 — an `@handle` is public,
-  an address is not.
+  that carries **no token and nothing that acts on the account** — it does contain one bare URL, the
+  instance's `/reset` page with no token on it, which is a pointer rather than a capability. This line said
+  "carries no link" until M14's manual pass read the actual email; the property that matters is that
+  nothing in it can be *spent*, and stating it as "no link" made the true claim uncheckable.
+  A taken **username** is still 409 — an `@handle` is public, an address is not.
 - **`HashPassword` runs before the address check**, and that ordering is the timing half of the guarantee.
   Moving it below makes the taken branch ~1 ms against ~31 ms. The unique-constraint race comes back as the
   same silence, because reporting it would leave the oracle reachable by firing two requests at once.
