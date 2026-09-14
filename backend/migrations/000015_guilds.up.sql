@@ -159,6 +159,12 @@ CREATE TABLE channels (
   type            smallint NOT NULL,
   -- The category a channel sits under. ON DELETE SET NULL, so deleting a category orphans its children to
   -- the top level rather than deleting them — losing a category must not lose the conversations in it.
+  -- ON DELETE SET NULL, so deleting a category orphans its children to the top level rather than taking
+  -- them with it. Reconsidered at M14 and kept: Discord does exactly this, and losing a category must not
+  -- lose the conversations inside it — a cascade here is irreversible and would make an ordinary tidying
+  -- action destroy content nobody meant to touch. The residual is that the audit log names the category
+  -- and not the channels that moved; that is recorded in docs/security-ledger.md rather than fixed,
+  -- because the count is unbounded up to the 500-channel ceiling.
   parent_id       bigint NULL REFERENCES channels(id) ON DELETE SET NULL,
   name            varchar(100) NULL,
   topic           text NULL,

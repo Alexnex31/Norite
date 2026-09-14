@@ -253,6 +253,10 @@ would flip them.
 - **Reopens if**: a client renders the channel tree from the audit log rather than from the channel
   listing, or a moderation surface starts answering "what happened to this channel" by query rather than
   by an operator reading — either makes the missing rows load-bearing rather than merely absent.
+- **Not reopened by**: changing the deletion to cascade instead. That was weighed at M14 — it would remove
+  the re-parenting this entry is about — and rejected on Discord parity and on irreversibility: a cascade
+  makes an ordinary tidying action destroy content nobody meant to touch. Migration `000015` now carries
+  that reasoning next to the `ON DELETE SET NULL` it applies to.
 
 ### A kick or a role deletion destroys permission overwrites and records none of their bits
 - **Raised**: M14, `/code-review xhigh`
