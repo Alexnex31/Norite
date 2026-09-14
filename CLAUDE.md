@@ -503,7 +503,10 @@ re-derive:
   the v6/v1 pair M0 started with. That is a *third* version that has to move with the other two, and it is
   the one with no pin to read: the constraint is satisfied today because the pinned `v2.12.2` binary
   happens to be built with go1.26.3, which `go version -m $(which golangci-lint)` will tell you and
-  nothing else will. **`govulncheck` is deliberately not
+  nothing else will. **And a fourth, which this list did not name until M14 found it the hard way:
+  `docker/docker-compose.yml`'s `golang:` image.** It sat at 1.25 after the directive went to 1.26.0, so
+  `just dev` refused to build the backend at all — for however long it was between that raise and somebody
+  next starting the stack. CI never sees it, because CI does not run compose. **`govulncheck` is deliberately not
   pinned**, in CI or the justfile: what pinning buys the other two is that an upstream release cannot
   surprise an unrelated PR, and here the surprise *is* the product — the job fails on a new advisory
   fetched from the vulnerability database at run time, which pinning the binary would not prevent.
