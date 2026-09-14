@@ -455,7 +455,17 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   `PermViewChannel`, so a moderator could rename and delete a channel absent from their own sidebar.
 - **M15 — Core messaging CRUD**: next. Send/edit/delete over the permission engine M13 finished and the
   audit mechanism M14 built. The first milestone whose `changes` payload could carry message content,
-  which is where rule 13 starts applying to this table.
+  which is where rule 13 starts applying to this table — and
+  `TestNoAuditActionRecordsMessageContent` turns red on the first `message.*` verb to force the question.
+
+  Two scope decisions were taken at planning (2026-09-15) rather than left to be discovered, both from
+  reading `architecture.md`'s DDL against the roadmap. **`message_edit_history` is M15's**: it had sat in
+  the schema since it was written with no milestone owning it, the same gap M14 found with account
+  deletion and closed as M76a, and it belongs to the edit endpoint that writes it. **The search machinery
+  is not M15's**: the `content_search` generated column and both GIN indexes in that same DDL block are
+  M65's, and building them here would pull `pg_trgm` in ahead of any query needing it. `is_e2e` *is*
+  M15's, because it is what M65's column keys its exclusion off. Both splits are annotated in the DDL,
+  since that block is what somebody copies.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:

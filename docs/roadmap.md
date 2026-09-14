@@ -563,6 +563,29 @@ of this section.
 - **M15 — Core messaging CRUD**: send/edit/delete REST endpoints for channel messages, permission-checked via
   the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14.
 
+  **It owns `message_edit_history` as well**, settled 2026-09-15. That table has sat in
+  `docs/architecture.md` §2 since the schema was first written and no milestone had ever claimed it — the
+  same shape M14 found with account deletion and closed as M76a, and found the same way, by reading the
+  DDL against the roadmap rather than by anything failing. It belongs here rather than in a later
+  milestone because the edit endpoint is what writes it: adding the table afterwards means a second
+  migration and an edit path that silently recorded nothing in between. An edit therefore appends the
+  *previous* content in the same transaction as the update, which is the discipline rule 2 already imposes
+  on the audit write beside it.
+
+  **M15 writes that table and nothing reads it back, which is deliberate and is a shape this project has
+  run before**: `audit_log_entries` was written under rule 2 from M12 and had no reader until M14. No
+  endpoint exposing edit history exists anywhere in `architecture.md`'s route list, and **none is assigned
+  to a milestone** — an open question rather than a decision, recorded here and beside the route list so it
+  is inherited rather than rediscovered. Whoever takes it inherits rule 13, which names edit-history
+  explicitly among the server-side paths that must exclude E2E DMs.
+
+  **It deliberately does not build the search indexes.** `architecture.md`'s DDL for `messages` carries a
+  `content_search` `tsvector` column and GIN indexes including `pg_trgm`, and every one of those is
+  **M65's** — copying the block wholesale is the easy mistake, and it would pull a Postgres extension
+  dependency forward into a milestone that has no query needing it. M15 ships `(channel_id, id DESC)` and
+  nothing else. The `is_e2e` column *is* M15's, because it is what the generated column will later key its
+  exclusion off and because rule 13 is cheaper to design in than to retrofit.
+
   **It lands before M57 and M72a, which is worth knowing rather than discovering.** Those two carry the
   rejoin question M13 routed to them — a kick clears a member's channel-tier overwrites, and nothing
   restores them if that member comes back. M15 makes channels carry conversations, so from here the
@@ -573,9 +596,10 @@ of this section.
   would put content into `changes`, and rule 13 forbids reading E2E DM content on any server-side path —
   see the audit-log entry in `docs/security-ledger.md`, whose *reopens if* names exactly this.
 
-  Done when: a
-  permitted member can send/edit/delete a message via the REST API, an unpermitted one is rejected, and each
-  mutation produces an audit entry.
+  Done when: a permitted member can send/edit/delete a message via the REST API, an unpermitted one is
+  rejected, each mutation produces an audit entry, and an edited message's previous content is readable
+  from `message_edit_history` — written in the same transaction as the edit, so a successful edit that
+  recorded no history is not a state the code can reach.
 - **M16 — Guild-level reports**: the `reports` table (reporter, target type/id, reason category plus free
   text, status workflow), a file-a-report endpoint, and a guild-moderator triage view gated by
   `PermManageMessages`. This is the guild-scoped half of the eventual unified reports system — the
@@ -1038,7 +1062,17 @@ of this section.
   column, and results in two labelled groups — server hits from Postgres, and DM hits from the daemon's
   mandatory local FTS5 index over its decrypted E2E store (M98, ADR 0014), since the instance holds only
   ciphertext and cannot match against it (rule 13). The two groups are labelled because they come from
-  different machines, with different guarantees. Done when: a guild-scoped
+  different machines, with different guarantees.
+
+  **It arrives at a populated `messages` table, which M15's planning made explicit rather than left to be
+  found here.** M15 builds the table and deliberately not the search machinery, so `content_search` is an
+  `ALTER TABLE … ADD COLUMN … GENERATED ALWAYS AS … STORED` over real data — a full table rewrite holding
+  ACCESS EXCLUSIVE for its duration, on the largest table in the product. That is a deployment question,
+  not a correctness one, and the answer is not to build it early: at M15 there is no query for it and it
+  would cost `pg_trgm` up front. Plan the migration window, or add the column nullable-and-backfilled if
+  the instance is large enough by then to need it.
+
+  Done when: a guild-scoped
   search query returns relevant messages ranked reasonably, with the index verified via `EXPLAIN ANALYZE`.
 
 #### Phase I — Public matchmaking, friends, blocks, Instance Admin

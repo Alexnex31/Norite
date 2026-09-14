@@ -391,28 +391,45 @@ CREATE TABLE permission_overwrites (
   PRIMARY KEY (channel_id, target_type, target_id)
 );
 
-CREATE TABLE messages (
+-- This block spans two milestones and the split is load-bearing, because copying it whole is the easy
+-- mistake: the table and its lookup index are M15, while everything supporting search — the generated
+-- column and both GIN indexes — is M65, and one of those needs the pg_trgm extension. Building them at
+-- M15 would pull an extension dependency into a milestone that has no query using it.
+CREATE TABLE messages (                        -- M15
   id bigint PRIMARY KEY, channel_id bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   author_id bigint NULL REFERENCES users(id),
   content text NOT NULL,
   type smallint NOT NULL DEFAULT 0,   -- 0 DEFAULT, 1 SENT_VIA_AUTOMATION (webhooks + bot automation), reserved system values
   reply_to_id bigint NULL REFERENCES messages(id) ON DELETE SET NULL,
+  -- M15, though nothing reads it until E2E at M97. It is what the M65 column below keys its exclusion
+  -- off, and rule 13 is cheaper to design in than to retrofit onto a populated table.
   is_e2e boolean NOT NULL DEFAULT false,   -- true only for DM-channel-type messages sent under E2E; content
                                             -- is ciphertext server-side when true, excluded from search below
-  content_search tsvector GENERATED ALWAYS AS (
+  content_search tsvector GENERATED ALWAYS AS (   -- M65, not M15
     CASE WHEN is_e2e THEN NULL ELSE to_tsvector('english', content) END
   ) STORED,
   edited_at timestamptz NULL, deleted_at timestamptz NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX ON messages (channel_id, id DESC);
-CREATE INDEX ON messages USING GIN (content_search);
-CREATE INDEX ON messages USING GIN (content gin_trgm_ops);   -- pg_trgm fuzzy matching
+CREATE INDEX ON messages (channel_id, id DESC);              -- M15: the channel backlog read
+CREATE INDEX ON messages USING GIN (content_search);         -- M65
+CREATE INDEX ON messages USING GIN (content gin_trgm_ops);   -- M65, pg_trgm fuzzy matching
 
-CREATE TABLE message_edit_history (
+-- M15, with the edit endpoint that writes it. An edit appends the *previous* content in the same
+-- transaction as the update, so an edit cannot commit without its history row — the discipline rule 2
+-- already imposes on the audit entry written beside it.
+CREATE TABLE message_edit_history (            -- M15
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   content text NOT NULL, edited_at timestamptz NOT NULL DEFAULT now()
 );
+-- Added to this spec at M15's planning rather than carried from the original schema. Two reasons, and the
+-- first is the one this project has twice paid for and once cleared: message_id is a foreign key with
+-- ON DELETE CASCADE, and an unindexed one turns deleting a message into a sequential scan of every edit
+-- ever made. M11 measured 3,757 ms in a trigger on replaced_by_id, M12 measured 4,566 ms on
+-- guild_member_roles.role_id, and M13 suspected a third and found the join already supplied the index —
+-- which is why this line says to check rather than to trust it. Verify with EXPLAIN ANALYZE before the
+-- migration merges; the second reason, the history read itself, may well be served by the same index.
+CREATE INDEX ON message_edit_history (message_id, edited_at DESC);   -- M15
 
 CREATE TABLE message_reactions (                -- M56a
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -907,10 +924,20 @@ DELETE /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; escalation-checked over the row being removed, not the
                                            --   one being written — deleting an overwrite that denies you
                                            --   something grants you that thing. M14 added PermViewChannel
-GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
-POST   /channels/{channel_id}/messages
-PATCH  /channels/{channel_id}/messages/{message_id}
-DELETE /channels/{channel_id}/messages/{message_id}
+GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50   -- M15
+POST   /channels/{channel_id}/messages     -- M15
+PATCH  /channels/{channel_id}/messages/{message_id}    -- M15; appends the prior content to
+                                           --   message_edit_history in the same transaction
+DELETE /channels/{channel_id}/messages/{message_id}    -- M15
+                                           -- There is deliberately no route reading message_edit_history.
+                                           --   M15 writes the table and nothing reads it back, which is
+                                           --   the shape audit_log_entries had from M12 to M14 — written
+                                           --   under a rule, read once a milestone owned the surface. The
+                                           --   reader is unassigned; whoever takes it inherits rule 13,
+                                           --   which names edit-history among the server-side paths that
+                                           --   must exclude E2E DMs. Nothing else in this document
+                                           --   discusses that surface, which is part of why it has no
+                                           --   milestone.
 PUT    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- react (M56a); idempotent
 DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- un-react; idempotent
 POST   /channels/{channel_id}/typing
