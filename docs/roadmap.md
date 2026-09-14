@@ -1322,6 +1322,41 @@ of this section.
 - **M76 — Public-channel/whisper retention windows**: the 48-hour post-empty retention on public channel
   history (and whispers exchanged within it) before permanent purge, for report-investigation purposes. Done
   when: a channel's history remains queryable by Instance Admins for 48 hours after it empties, then is gone.
+- **M76a — Self-service account export and deletion**: `GET /users/@me/export` and `DELETE /users/@me`,
+  the two endpoints `architecture.md`'s §2 list has carried since the original design and which **no
+  milestone ever built**. Found by M14's security sweep, which went looking for the milestone that owns the
+  audit table's `ON DELETE` question and discovered there is none: two migrations pointed at "M66", and M66
+  is public matchmaking.
+
+  The gap is wider than one endpoint. **M77 verifies an export nothing creates** and M104 extends it with
+  the E2E half, so two milestones already depend on this one. Inserted here rather than renumbered, and
+  placed immediately before M77 because that is the dependency position — after reports (M16, M74) and
+  blocks (M70) exist, since the asymmetries M77 checks are about their rows.
+
+  The design is already written and is not re-decided here: soft-delete with a placeholder
+  username/email, hard-delete `oauth_identities` and `sessions`, authored content left in place rendered
+  as "Deleted User". Three things that design leaves for whoever builds it, all recorded in
+  `architecture.md`:
+
+  - **The placeholder rename must be guaranteed rather than best-effort.** `users.username` and
+    `users.email` carry plain `UNIQUE` constraints while every read filters `deleted_at IS NULL`, so a
+    deletion that soft-deletes without renaming leaves the constraints holding names no live account
+    holds, and registration starts refusing them.
+  - **`audit_log_entries.actor_id` carries no `ON DELETE` and therefore refuses the delete outright.** That
+    is deliberate — an entry naming a deleted actor is still evidence, and one whose actor went NULL is
+    evidence with the answer removed — which means deletion cannot ship without answering it in the open.
+    Since M14 the same table also holds a removed member's *nickname* in `changes`, a name the deleted
+    account chose, in rows nothing ever sweeps and which a placeholder rename does not reach.
+  - **`guilds.owner_id` refuses it too**, for the reason M13a exists: a guild whose owner is deleted is not
+    a guild with a NULL owner, and ownership transfer is the operation that resolves it.
+
+  Rule 17 applies in full: deletion invokes the general-purpose revoke-all-sessions primitive rather than
+  assembling its own cleanup, exactly as a ban does.
+
+  Done when: an account can export its own data and delete itself; deletion goes through
+  `revokeEverything`; the placeholder rename is atomic with the soft-delete rather than a second statement
+  that can fail; and the `audit_log_entries` and `guilds` foreign keys each have an answer written down
+  rather than a failed `DELETE`.
 - **M77 — Data export asymmetry verification**: an end-to-end test that a user's own export includes their
   filed reports and blocked accounts, and excludes reports filed against them and who has blocked them. Done
   when: both asymmetries are covered by an automated test, not just documented intent.

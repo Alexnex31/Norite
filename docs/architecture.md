@@ -1178,9 +1178,9 @@ hard-delete `oauth_identities`/`sessions`, leave authored content in place rende
 is evidence with the answer removed — so the foreign key currently *refuses* the delete, which means
 deletion cannot ship without answering it. And since M14 the `changes` payload records a removed member's
 nickname on `member.remove`, so this table holds a name the deleted account chose, in rows nothing ever
-sweeps. A placeholder rename does not reach it. Both were raised by M14's security sweep and routed here
-because **no roadmap milestone owns `DELETE /users/@me`** — the migrations pointed at M66 until M14 checked,
-and M66 is public matchmaking.
+sweeps. A placeholder rename does not reach it. Both were raised by M14's security sweep, which also
+found that **no roadmap milestone owned `DELETE /users/@me`** — the migrations pointed at M66, which is
+public matchmaking, and M77 verified an export nothing built. M76a now owns both endpoints.
 
 **Two things about that placeholder rename are load-bearing, and neither is obvious until deletion exists.**
 `users.username` and `users.email` carry plain `UNIQUE` constraints, not partial indexes excluding

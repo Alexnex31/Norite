@@ -29,9 +29,9 @@ CREATE TABLE guilds (
   -- else in it, and the account-deletion path has to make that decision explicitly rather than have a
   -- cascade make it silently. Until then the FK refuses the delete, which is the honest failure.
   --
-  -- That path is `DELETE /users/@me`, designed in architecture.md and owned by no roadmap milestone. This
-  -- comment said "(M66)" until M14 checked it; M66 is public matchmaking, and every other reference to it
-  -- in the repository is about matchmaking.
+  -- That path is `DELETE /users/@me`, built at M76a. This comment said "(M66)" until M14 checked it;
+  -- M66 is public matchmaking, and every other reference to it in the repository is about matchmaking.
+  -- M13a's ownership transfer is what gives this FK an answer other than refusing the delete.
   owner_id          bigint NOT NULL REFERENCES users(id),
   icon_hash         text NULL,
   description       text NULL,

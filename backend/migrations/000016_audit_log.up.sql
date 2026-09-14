@@ -25,11 +25,11 @@ CREATE TABLE audit_log_entries (
   -- NULL is evidence with the answer removed. The FK refuses the delete, and the account-deletion path has
   -- to decide what to do about it in the open.
   --
-  -- That path is `DELETE /users/@me` in architecture.md's endpoint list, whose design is the soft-delete
-  -- and placeholder-rename paragraph in the same document. **It is owned by no roadmap milestone**, which
-  -- is worth knowing before relying on one: this comment and 000015's said "(M66)" until M14 checked, and
-  -- M66 is public matchmaking. It has more to decide here since M14 — `changes` now records a removed
-  -- member's nickname, so this table holds a name the deleted account chose, in rows nothing ever sweeps.
+  -- That path is `DELETE /users/@me`, built at M76a. This comment and 000015's said "(M66)" until M14
+  -- checked — M66 is public matchmaking — and the sweep that found the wrong number also found that no
+  -- milestone owned the endpoint at all, which is why M76a now exists. It has more to decide here since
+  -- M14: `changes` records a removed member's nickname, so this table holds a name the deleted account
+  -- chose, in rows nothing ever sweeps and which a placeholder rename does not reach.
   actor_id   bigint NOT NULL REFERENCES users(id),
   -- A stable string, not an enum: this vocabulary grows with every milestone that adds a mutation, and an
   -- enum type would make each addition a migration. varchar(64) because the values are written by this
