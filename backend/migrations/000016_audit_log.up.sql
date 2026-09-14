@@ -22,8 +22,14 @@ CREATE TABLE audit_log_entries (
   -- specifies it and because narrowing it later is a rewrite of the table.
   guild_id   bigint NULL REFERENCES guilds(id) ON DELETE CASCADE,
   -- No ON DELETE. An audit entry naming a deleted actor is still evidence, and an entry whose actor went
-  -- NULL is evidence with the answer removed. The FK refuses the delete, and the account-deletion path
-  -- (M66) has to decide what to do about it in the open.
+  -- NULL is evidence with the answer removed. The FK refuses the delete, and the account-deletion path has
+  -- to decide what to do about it in the open.
+  --
+  -- That path is `DELETE /users/@me`, built at M76a. This comment and 000015's said "(M66)" until M14
+  -- checked — M66 is public matchmaking — and the sweep that found the wrong number also found that no
+  -- milestone owned the endpoint at all, which is why M76a now exists. It has more to decide here since
+  -- M14: `changes` records a removed member's nickname, so this table holds a name the deleted account
+  -- chose, in rows nothing ever sweeps and which a placeholder rename does not reach.
   actor_id   bigint NOT NULL REFERENCES users(id),
   -- A stable string, not an enum: this vocabulary grows with every milestone that adds a mutation, and an
   -- enum type would make each addition a migration. varchar(64) because the values are written by this
@@ -39,8 +45,19 @@ CREATE TABLE audit_log_entries (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- The one read M14 makes: a guild's log, newest first, paginated. Measured on 300,000 entries across
--- 5,000 guilds:
+-- **M14 does not read by this index, and replaced it.** What follows is what M12 expected M14 to need,
+-- and the expectation was wrong in the one way that mattered: the listing orders by `id`, because a
+-- snowflake is time-ordered *and* unique where a timestamp is only the first. Migration 000017 creates
+-- (guild_id, id DESC) and drops this one, and 000018 adds the actor filter's. Left here rather than
+-- rewritten because the measurement below is real and the reasoning about a composite index's second
+-- column still holds — what it got wrong is which column, and that is the useful part to keep visible.
+--
+-- The paragraph after it claimed shipping the index with the table avoided a rebuild on a populated
+-- table. It bought the opposite: 000017 performs exactly that rebuild, under ACCESS EXCLUSIVE, on a table
+-- nothing sweeps.
+--
+-- The one read M12 expected M14 to make: a guild's log, newest first, paginated. Measured on 300,000
+-- entries across 5,000 guilds:
 --
 --   with the index    0.356 ms,   55 buffers   Index Scan, no sort node
 --   without           9.457 ms, 3167 buffers   Parallel Seq Scan, then a sort per worker

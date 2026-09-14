@@ -14,6 +14,17 @@ oapi_codegen_version := "v2.8.0"
 # version at least as new as the highest `go` directive in the workspace, or it refuses to run at all.
 golangci_lint_version := "2.12.2"
 
+# The fourth generator, and the last to be pinned — it was `go install ...@latest` in CI until M14, which
+# was safe only by accident: v2 moved to a /v2 module path, so `@latest` on the old path could never
+# advance past v1.6.0. Pointing at /v2 removes that accident, so the version has to be stated.
+#
+# v2 over v1 because v1 reports one license per LICENSE file and three of this project's dependencies ship
+# more than one in theirs: otel appends a BSD-3-Clause block to its Apache-2.0, klauspost/compress carries
+# BSD-3-Clause, Apache-2.0 and MIT in one file, and pgerrcode's MIT is followed by the PostgreSQL license
+# its data is under. Under-reporting a license is the wrong direction for a project whose posture is
+# ADR 0032. Must match .github/workflows/ci.yml's GO_LICENSES_VERSION.
+go_licenses_version := "v2.0.1"
+
 # Default connection string for the docker-compose Postgres. Override for any other target:
 #   just database_url=postgres://... db-migrate
 database_url := env_var_or_default("NORITE_DATABASE_URL", "postgres://norite:norite@localhost:5432/norite?sslmode=disable")
@@ -162,6 +173,11 @@ security-scan: license-check
 # --ignore our own module path: go-licenses stops looking for a LICENSE at the module root, and this
 # repository's is one level above that, so every first-party package reports Unknown. The project's own
 # licensing is ADR 0032's business, not a dependency question.
+#
+# Run through `go run ...@{{go_licenses_version}}` rather than a binary on PATH, as sqlc and oapi-codegen
+# already are. Nothing has to be installed, and the version cannot be shadowed: this machine had v1.6.0 in
+# ~/go/bin and a distro-packaged v2.0.1 in /usr/bin, ~/go/bin was on no shell's PATH, and so the recipe
+# silently ran a different version than CI did.
 license-check:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -182,7 +198,7 @@ license-check:
         # Status captured before the output is filtered: go-licenses logs glog warnings about assembly it
         # cannot inspect on every run, and a pipeline that filtered those would report grep's exit code
         # instead of the check's.
-        output=$(cd "$m" && GOWORK=off go-licenses check ./... \
+        output=$(cd "$m" && GOWORK=off go run github.com/google/go-licenses/v2@{{go_licenses_version}} check ./... \
             --ignore github.com/Alexnex31/Norite \
             --disallowed_types="$types" 2>&1)
         status=$?
@@ -238,7 +254,8 @@ license-inventory:
     # committed inventory with no output at all. A partial inventory is worse than none: it passes the
     # staleness check, so nothing downstream notices that a dependency stopped being recorded.
     for m in {{go_modules}}; do
-        (cd "$m" && GOWORK=off go-licenses report ./... --ignore github.com/Alexnex31/Norite 2>/dev/null) \
+        (cd "$m" && GOWORK=off go run github.com/google/go-licenses/v2@{{go_licenses_version}} report ./... \
+            --ignore github.com/Alexnex31/Norite 2>/dev/null) \
             || { echo "license-inventory: $m failed to report; refusing to write a partial inventory" >&2
                  echo "  try: (cd $m && GOWORK=off go mod tidy)" >&2
                  exit 1; }
@@ -326,6 +343,9 @@ notices: build-local
     #!/usr/bin/env bash
     set -euo pipefail
     gen={{justfile_directory()}}/scripts/gen-third-party-notices.sh
+    # The script's third caller of go-licenses, and the pin reaches it the same way CI's does: exported,
+    # never defaulted inside the script.
+    export GO_LICENSES_VERSION={{go_licenses_version}}
     "$gen" backend ./cmd/server  bin/norite-server backend/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt

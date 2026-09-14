@@ -1,0 +1,170 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package guilds
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/Alexnex31/Norite/backend/internal/auth"
+	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
+	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/roles"
+)
+
+// Audit-log page size, matching the member listing's ceiling for the reason that one states: 100 is what
+// every comparable API uses, so a client written against one of them paginates correctly here without
+// having read this.
+const (
+	defaultAuditLogPageSize = 50
+	maxAuditLogPageSize     = 100
+)
+
+// ListAuditLogInput is a cursor page request.
+type ListAuditLogInput struct {
+	// Before is the entry id to resume from, exclusive. Nil starts at the newest.
+	//
+	// A pointer rather than a zero-means-absent snowflake, and the difference is not style. snowflake.Parse
+	// accepts "0" — it refuses only negatives — so a client templating ?before={cursor} from an unset
+	// variable sent a valid zero, the handler stored it, and this reported "no cursor" and returned the
+	// newest page. A paging loop that reached it restarted from the top. The query refuses to rely on zero
+	// meaning absent for exactly this reason and says so; carrying it as a zero in Go reopened that at the
+	// one layer the caller can actually reach.
+	//
+	// Before rather than the member listing's After, because this listing runs newest-first and a cursor
+	// names the direction of travel. The plan for this milestone said "follow the member listing exactly";
+	// following it on this field would page backwards through history from the oldest entry, which is not
+	// what anybody opens an audit log to read.
+	//
+	// A cursor on the id and not on created_at. Snowflakes are time-ordered (ADR 0003) so the two agree on
+	// order, and only the id is unique — nothing constrains created_at, so a cursor over it would skip or
+	// repeat an entry at any page boundary landing inside a group of equal values. Migration 000017 carries
+	// the full argument, including the measurement showing that group does not occur today and why that
+	// argues for the id rather than against it.
+	Before *snowflake.ID
+
+	// Action and ActorID narrow the page. Nil is absent, for the reason Before states — an actor_id of 0
+	// parses, and a filter silently treated as absent returns the whole guild's log to a caller who
+	// believes they are reading one person's actions.
+	Action  string
+	ActorID *snowflake.ID
+
+	Limit int32
+}
+
+// ListAuditLog returns a page of a guild's audit log, newest first.
+//
+// # What this endpoint discloses, which is a decision rather than an oversight
+//
+// Entries name channels, and since M13 the channel listing hides channels a member cannot view. This
+// listing does not filter to match: a reader holding PermViewAuditLog sees `channel.create` for a channel
+// their own sidebar will not show them, by id and — in the entry's `changes` — by name.
+//
+// Three options were on the table and this is the middle one. Filtering entries by what the reader can
+// currently see is the tempting answer and is wrong twice over: half the interesting entries are
+// deletions, whose target no longer exists and can no longer be resolved to a permission at all, and the
+// visibility of a channel *today* is not the question an audit log answers about an action taken a month
+// ago — a moderator could hide their tracks after the fact by locking a channel down. Withholding the
+// whole surface unless the reader is an administrator was the other option, and it makes the log useless
+// for exactly the delegated-moderator case it exists for.
+//
+// So the permission is the boundary. PermViewAuditLog is not granted by default, is not implied by
+// PermManageGuild, and cannot be given by somebody who does not hold it (refuseEscalation) — granting it
+// is granting sight of every moderation action in the guild, including the ones taken in channels the
+// grantee cannot open. That is stated in the contract, in docs/security-ledger.md, and here.
+//
+// # What it does not resolve
+//
+// Ids stay ids. target_id is never joined to the channel, role or member it names: half the entries are
+// deletions whose target is gone, and resolving the rest would be an N+1 across four tables on a
+// paginated endpoint. A client renders a name from its own cache or shows the id.
+func (s *Service) ListAuditLog(
+	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in ListAuditLogInput,
+) ([]AuditLogEntry, error) {
+	// The vocabulary check lives here and not only in the handler.
+	//
+	// It was in the handler alone, which is the N-call-sites shape this package has four times decided
+	// against — authorize, revokeEverything, RequireLiveSession, factorProof. A second caller (the TUI's
+	// M-x surface, a bot over local IPC, a test) passing a typo would have got a 200 and an empty array,
+	// which is precisely the "reads as evidence of absence" this refusal exists to prevent. Above the
+	// authorization check because it is a question about the request and discloses nothing: the vocabulary
+	// is this codebase's own and identical on every instance.
+	if in.Action != "" {
+		if err := refuseUnknownAuditAction(in.Action); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := s.authorize(ctx, actor, guildID, 0, roles.PermViewAuditLog); err != nil {
+		return nil, err
+	}
+
+	limit := in.Limit
+	switch {
+	case limit <= 0:
+		limit = defaultAuditLogPageSize
+	case limit > maxAuditLogPageSize:
+		// Clamped here and *refused* at the HTTP layer, which is not a contradiction. An over-limit
+		// request is a client error and gets a 400 naming the ceiling, because this listing's contract
+		// says a short page means exhausted and a silent clamp would make a client believe that. This
+		// clamp is the backstop for a programmatic caller — a test, the TUI's own command surface — which
+		// has no response to receive and for which the ceiling is a bound rather than a message.
+		limit = maxAuditLogPageSize
+	}
+
+	params := db.ListGuildAuditLogParams{GuildID: int64(guildID), Lim: limit}
+
+	// Absence travels as absence the whole way down, from the query parameter to sqlc.narg.
+	if in.Before != nil {
+		before := int64(*in.Before)
+		params.Before = &before
+	}
+	if in.Action != "" {
+		action := in.Action
+		params.Action = &action
+	}
+	if in.ActorID != nil {
+		actorID := int64(*in.ActorID)
+		params.ActorID = &actorID
+	}
+
+	rows, err := s.queries.ListGuildAuditLog(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("guilds: list audit log: %w", err)
+	}
+
+	out := make([]AuditLogEntry, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, auditLogEntryFromRow(row))
+	}
+
+	return out, nil
+}
+
+// knownAuditAction reports whether an action filter names a verb this build writes.
+//
+// Refused rather than passed through, and the reason is not validation hygiene. An unknown action is a
+// query that matches nothing, which is indistinguishable from a guild that has taken no such action — so
+// a typo reads as evidence. The vocabulary is closed and this codebase owns every value in it.
+func knownAuditAction(action string) bool {
+	for _, known := range allAuditActions {
+		if action == known {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseUnknownAuditAction is knownAuditAction as the error the handler returns.
+//
+// Names no valid action in the message. The vocabulary is public — it is in the contract — so this is not
+// a secret, but a refusal that enumerates is a habit rather than a judgement, and the contract is where a
+// client should be reading it from.
+func refuseUnknownAuditAction(action string) error {
+	if knownAuditAction(action) {
+		return nil
+	}
+	return httpx.Errorf(httpx.ErrBadRequest, "action is not an audit action this instance writes")
+}

@@ -60,6 +60,11 @@ func (h *Handler) Routes(r chi.Router) {
 	read := auth.RequireScope(auth.ScopeGuildsRead)
 	write := auth.RequireScope(auth.ScopeGuildsWrite)
 
+	// The audit log takes its own scope rather than the read one. See auth.ScopeGuildsAudit: the read
+	// scope covers a guild's current state and this is its history, and the permission layer already
+	// treats the two as different questions.
+	audit := auth.RequireScope(auth.ScopeGuildsAudit)
+
 	r.With(write).Post("/guilds", h.createGuild)
 
 	r.Route("/guilds/{guild_id}", func(r chi.Router) {
@@ -75,6 +80,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(write).Patch("/roles", h.reorderRoles)
 		r.With(write).Patch("/roles/{role_id}", h.updateRole)
 		r.With(write).Delete("/roles/{role_id}", h.deleteRole)
+
+		r.With(audit).Get("/audit-log", h.listAuditLog)
 
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)
@@ -474,6 +481,81 @@ func (h *Handler) listMembers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, r, http.StatusOK, members)
+}
+
+// listAuditLog reads a page of the guild's audit log.
+//
+// Scoped `guilds.audit`, which is the one route on this surface that does not take `guilds.read`.
+//
+// It was mounted under the read scope first, and a sweep of this branch reproduced what that meant: a
+// token granted "guilds, their channels, their roles and their membership" returned the guild's whole
+// moderation history. The scope layer has to draw the line the permission layer already drew.
+func (h *Handler) listAuditLog(w http.ResponseWriter, r *http.Request) {
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+
+	var in ListAuditLogInput
+	query := r.URL.Query()
+
+	// snowflake.Parse accepts "0" — it refuses only negatives — and no generator can produce it, so a
+	// zero here came from a client templating an unset variable. Carrying it through was wrong in both
+	// directions: as a value it made `id < 0` and returned an empty page forever, and the pointer that
+	// fixed "zero silently means no cursor" only turned it into "zero silently means no results".
+	// Refused, for the reason refuseUnknownAuditAction refuses a typo — a query matching nothing is
+	// indistinguishable from a guild that has nothing to match.
+	if raw := query.Get("before"); raw != "" {
+		before, err := snowflake.Parse(raw)
+		if err != nil || before == 0 {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "before is not a valid id"))
+			return
+		}
+		in.Before = &before
+	}
+
+	if raw := query.Get("actor_id"); raw != "" {
+		actorID, err := snowflake.Parse(raw)
+		if err != nil || actorID == 0 {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "actor_id is not a valid id"))
+			return
+		}
+		in.ActorID = &actorID
+	}
+
+	if raw := query.Get("action"); raw != "" {
+		// Validated here rather than in the service, because it is a question about the request and not
+		// about the guild — and answering it before authorization discloses nothing: the vocabulary is
+		// this codebase's own, listed in the contract, and identical on every instance.
+		if err := refuseUnknownAuditAction(raw); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		in.Action = raw
+	}
+
+	// Refused above the ceiling rather than clamped, which is where this diverges from the member
+	// listing on purpose. Clamping is the friendlier answer when a short page means nothing — but this
+	// listing tells clients that a page shorter than `limit` means the log is exhausted, and a silently
+	// clamped limit=500 hands back 100 entries that such a client reads as the whole history. Two
+	// conventions that are each defensible and together lose data; the one that can fail loudly does.
+	if raw := query.Get("limit"); raw != "" {
+		limit, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil || limit < 1 || limit > maxAuditLogPageSize {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest,
+				"limit must be between 1 and %d", maxAuditLogPageSize))
+			return
+		}
+		in.Limit = int32(limit)
+	}
+
+	entries, err := h.svc.ListAuditLog(r.Context(), actor, guildID, in)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, entries)
 }
 
 type updateMemberRequest struct {

@@ -75,19 +75,28 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 		// The union of what this request changes, which is not the same as what it writes.
 		//
 		// An escalation check on the new value alone leaves the *removal* of a bit unchecked, and removing
-		// an overwrite's deny grants whatever it denied. A caller who holds PermManageRoles in a channel
-		// they cannot view — an ordinary configuration, since the deny that hides it removes viewing and
-		// not managing — could otherwise blank the row and see the channel.
-		existing, err := q.GetPermissionOverwrite(ctx, db.GetPermissionOverwriteParams{
+		// an overwrite's deny grants whatever it denied.
+		//
+		// The example this comment used to give is no longer reachable: it described a caller holding
+		// PermManageRoles in a channel they cannot view, and authorizeChannel now refuses that caller 404
+		// before this code runs. The check is unchanged and still right for every other bit — a caller
+		// denied PermSendMessages here can blank the row that denies it and gain the permission — but the
+		// scenario that motivated it was closed by this milestone's own first commit.
+		// Kept beyond the switch, because the audit diff below needs the same row: a PUT over an existing
+		// overwrite is an update and must record both sides, and one over nothing is a creation. The read
+		// that answers the escalation question is the read that answers this one.
+		prior, err := q.GetPermissionOverwriteForUpdate(ctx, db.GetPermissionOverwriteForUpdateParams{
 			ChannelID:  int64(in.ChannelID),
 			TargetType: in.TargetType,
 			TargetID:   int64(in.TargetID),
 			GuildID:    int64(guildID),
 		})
+		replaced := err == nil
+
 		switch {
 		case err == nil:
-			changed := roles.PermissionFromInt64(existing.Allow).
-				Add(roles.PermissionFromInt64(existing.Deny)).
+			changed := roles.PermissionFromInt64(prior.Allow).
+				Add(roles.PermissionFromInt64(prior.Deny)).
 				Add(in.Allow).Add(in.Deny)
 			if err := refuseEscalation(allowed, changed); err != nil {
 				return err
@@ -129,13 +138,26 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 			return fmt.Errorf("guilds: upsert overwrite: %w", err)
 		}
 
+		// The diff, from the row the union check above already read — or a creation where it found none.
+		//
+		// channel_id and type are context: target_id holds the role or member this overwrite names, so the
+		// channel it sits on has nowhere else to go, and the type is what says which of the two target_id
+		// is. Neither changed; a PUT that would move an overwrite to another channel is a different row.
+		changes := auditDiff{}
+		changes.context("channel_id", in.ChannelID)
+		changes.context("target_type", in.TargetType)
+		if replaced {
+			changes.changed("allow", roles.PermissionFromInt64(prior.Allow), in.Allow)
+			changes.changed("deny", roles.PermissionFromInt64(prior.Deny), in.Deny)
+		} else {
+			changes.created("allow", in.Allow)
+			changes.created("deny", in.Deny)
+		}
+
 		target := in.TargetID
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionOverwriteSet, &target, map[string]any{
-			"channel_id": in.ChannelID.String(),
-			"type":       in.TargetType,
-			"allow":      in.Allow.Int64(),
-			"deny":       in.Deny.Int64(),
-		}); err != nil {
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionOverwriteSet, &target, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -163,7 +185,7 @@ func (s *Service) DeleteOverwrite(
 			return err
 		}
 
-		existing, err := q.GetPermissionOverwrite(ctx, db.GetPermissionOverwriteParams{
+		existing, err := q.GetPermissionOverwriteForUpdate(ctx, db.GetPermissionOverwriteForUpdateParams{
 			ChannelID:  int64(channelID),
 			TargetType: targetType,
 			TargetID:   int64(targetID),
@@ -189,10 +211,18 @@ func (s *Service) DeleteOverwrite(
 			return err
 		}
 
-		if err := s.writeAudit(ctx, q, guildID, actor.UserID, ActionOverwriteDelete, &targetID, map[string]any{
-			"channel_id": channelID.String(),
-			"type":       targetType,
-		}); err != nil {
+		// What the row carried, which is the whole of what deleting it changes — and the reason the
+		// escalation check above exists: removing a deny grants whatever it denied, so an operator reading
+		// this entry needs the bits, not just the fact that a row went.
+		changes := auditDiff{}
+		changes.context("channel_id", channelID)
+		changes.context("target_type", targetType)
+		changes.removed("allow", roles.PermissionFromInt64(existing.Allow))
+		changes.removed("deny", roles.PermissionFromInt64(existing.Deny))
+
+		if err := s.writeAudit(
+			ctx, q, guildID, actor.UserID, ActionOverwriteDelete, &targetID, changes.payload(),
+		); err != nil {
 			return err
 		}
 
@@ -215,13 +245,44 @@ func (s *Service) DeleteOverwrite(
 
 // authorizeChannel resolves a channel to its guild and authorizes a permission within it.
 //
+// # Viewing is required alongside whatever else is asked for
+//
+// Every caller gets PermViewChannel added to its `need`, and that is a correction to M13 rather than a
+// convenience. M13 taught the channel listing to hide channels and did not teach these routes the same
+// thing, so the two disagreed about whether a channel existed: a moderator holding PermManageChannels and
+// denied PermViewChannel — an @everyone view-deny removes only the view bit — got the channel omitted
+// from their listing and could still rename it, delete it, and write its permission overwrites.
+//
+// Found by driving a real guild by hand after M13 was tagged, and it needed that: every test that hid a
+// channel hid it from somebody holding nothing else, and every test that managed one managed a channel
+// that was visible. The divergence needs an actor who holds a management permission and lacks view in the
+// same channel, which no unit test constructed and four review passes did not think to ask for.
+//
+// Requiring it here rather than at each call site is the same argument this package has made four times:
+// a rule written as N call sites has N chances to miss one. It also composes with the refusal below —
+// a caller who fails for want of the view bit is answered as though the channel were not there, which is
+// what the listing already told them.
+//
 // The guild comes off the channel row and never from the caller, because these routes carry no guild in
 // their path — the same reason UpdateChannel loads its own (rule 1). The channel id is passed to
 // authorizeWith so the decision is what the caller holds in *this* channel.
+//
+// # The row is read FOR UPDATE
+//
+// All four callers are mutations on this channel, and two of them diff it. A diff that reads prior state
+// and then writes has a window under READ COMMITTED where a concurrent commit lands in between, and the
+// entry then records a transition that never happened — reproduced on this branch, and the reason the
+// locking query exists. Locking here rather than at each call site keeps the read single.
+//
+// It serializes concurrent mutations of one channel, which is what anybody would expect of them, and it
+// closes a race the ledger records as accepted: the per-channel overwrite ceiling was a read-then-insert
+// with no lock, so two concurrent writes could both read 49 and land the channel at 51. They now queue.
+// That entry is left in place rather than deleted, because the reasoning it records — a ceiling overshoot
+// is not a corrupted ordering — is why nobody had to fix it, and this closing it is a side effect.
 func (s *Service) authorizeChannel(
 	ctx context.Context, q *db.Queries, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
 ) (db.Channel, snowflake.ID, decision, error) {
-	row, err := q.GetChannel(ctx, int64(channelID))
+	row, err := q.GetChannelForUpdate(ctx, int64(channelID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return db.Channel{}, 0, decision{}, httpx.ErrNotFound
@@ -234,7 +295,7 @@ func (s *Service) authorizeChannel(
 		return db.Channel{}, 0, decision{}, err
 	}
 
-	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, need)
+	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, need.Add(roles.PermViewChannel))
 	if err != nil {
 		// A member of the guild who cannot *see* this channel is refused as though it were not there.
 		//

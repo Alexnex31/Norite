@@ -502,3 +502,109 @@ JOIN channels c ON c.id = po.channel_id
 WHERE c.guild_id = sqlc.arg(guild_id)::bigint
   AND po.target_type = sqlc.arg(target_type)
   AND po.target_id = sqlc.arg(target_id);
+
+-- # The locking reads the audit diff needs (M14)
+--
+-- Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is
+-- that an audit entry must not name a value no mutation replaced.
+--
+-- A diff reads the prior state and then writes. Under READ COMMITTED those are two statements, and an
+-- UPDATE re-reads the latest committed row — so a concurrent commit landing between them makes the entry
+-- record a transition that never happened. Reproduced on this branch: T1 reads "A", T2 commits "B", T1
+-- writes "C", and T1's entry says from "A" to "C" while the value actually overwritten was "B". The mirror
+-- case is worse, because changed() suppresses equal sides: T2 commits "C", T1 writes "C", and a change T1
+-- did not make is recorded as one it did.
+--
+-- FOR UPDATE closes it by making the read take the row lock the write would have taken a statement later,
+-- so the row cannot move in between. The lock is held for the rest of the transaction either way; what
+-- changes is that it starts a few milliseconds earlier. Nothing here is a read path — every caller is
+-- already inside a mutation's transaction — which is why these are separate queries rather than FOR UPDATE
+-- added to the originals, whose callers include listings.
+--
+-- ReorderRoles needs none of this: it takes the guild's advisory lock (LockGuildRolePositions) before
+-- reading positions, which serializes it against itself and against role creation.
+
+-- name: GetGuildForUpdate :one
+SELECT * FROM guilds WHERE id = $1 FOR UPDATE;
+
+-- name: GetRoleForUpdate :one
+SELECT * FROM roles WHERE id = $1 AND guild_id = $2 FOR UPDATE;
+
+-- name: GetChannelForUpdate :one
+SELECT * FROM channels WHERE id = $1 FOR UPDATE;
+
+-- name: GetGuildMemberForUpdate :one
+SELECT * FROM guild_members WHERE guild_id = $1 AND user_id = $2 FOR UPDATE;
+
+-- name: GetPermissionOverwriteForUpdate :one
+-- FOR UPDATE OF po, so the join to channels does not take a lock the caller does not need — the row being
+-- read and replaced is the overwrite, and locking every channel row the join touches would serialize
+-- unrelated writes on the same channel.
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = sqlc.arg(channel_id)::bigint
+  AND po.target_type = sqlc.arg(target_type)
+  AND po.target_id = sqlc.arg(target_id)::bigint
+  AND c.guild_id = sqlc.arg(guild_id)::bigint
+FOR UPDATE OF po;
+
+-- name: ListGuildAuditLog :many
+-- One page of a guild's audit log, newest first (Milestone M14).
+--
+-- The first reader this table has ever had. Sixteen action constants and every guild-scoped mutation have
+-- been writing here since M12 under rule 2; nothing has read a row back until now.
+--
+-- # The cursor is an id, and that is not a style choice
+--
+-- Snowflakes are time-ordered (ADR 0003), so `id DESC` is "newest first" — with the property created_at
+-- lacks: uniqueness. Nothing constrains created_at, so a cursor over it skips or repeats an entry at any
+-- page boundary landing inside a group of equal values. Measured on this branch, that group does not occur
+-- today — 60 entries, 30 written concurrently, gave 60 distinct microsecond timestamps — which is an
+-- argument for the id and not against it: a boundary that loses a row rarely is one nobody will ever
+-- reproduce. Migration 000017 carries the full reasoning. Served by audit_log_entries_guild_id_id_idx,
+-- which that migration adds for this query and which removes the sort the old index left above it.
+--
+-- # The cursor is COALESCE and not `$n IS NULL OR id < $n`, which is the obvious spelling
+--
+-- The obvious spelling is not sargable under a generic plan. A BoolExpr OR whose first arm is a NullTest
+-- on a Param cannot be turned into an index qual, so `id <` becomes a Filter above the scan instead of a
+-- seek — measured on this branch, at 250,000 rows with the cursor half way in:
+--
+--   `$2 IS NULL OR id < $2`, generic plan    Filter, 125,201 rows removed, 1859 buffers, 5.168 ms
+--   COALESCE, generic plan                   Index Cond, 200 rows removed,    9 buffers, 0.036 ms
+--
+-- Both forms are identical under a custom plan, and plan_cache_mode defaults to `auto`, which compares the
+-- two estimates and currently keeps the custom one (10088 against 5034) — so this is robustness rather
+-- than a bug being fixed. It is taken anyway because it costs one keyword and because the comment above
+-- claims a cursor costs one index descent whatever the depth, which is a claim worth being unconditionally
+-- true. 9223372036854775807 is bigint's maximum, so an absent cursor starts at the newest entry.
+--
+-- # Filters
+--
+-- action and actor_id are optional and both narrow rather than widen, so neither can return an entry the
+-- unfiltered query would not. sqlc.narg makes absent mean absent rather than meaning zero — an actor_id of
+-- 0 is not a user and an action of "" is not a verb, but relying on that would make the query's behaviour
+-- depend on values it should simply not receive.
+--
+-- These two keep the OR form, and the reason is that COALESCE buys nothing for an equality test: the
+-- rewrite is `actor_id = COALESCE($4, actor_id)`, which names the column on both sides and is no more
+-- indexable than the OR. What makes the actor filter fast is migration 000018's index, not its spelling.
+--
+-- # What this deliberately does not do
+--
+-- It resolves nothing. target_id is returned as an id, never joined to the channel, role or member it
+-- names — half the interesting entries are deletions whose target no longer exists, and resolving the rest
+-- would be an N+1 across four tables on a paginated endpoint.
+--
+-- It also does not filter by what the caller can see. Entries name channels, and some of those channels are
+-- hidden from some readers by the listing filter M13 added — so this endpoint's permission is the boundary
+-- rather than the row set. See guilds.ListAuditLog for that argument; it is a decision, not an oversight.
+SELECT id, guild_id, actor_id, action, target_id, changes, created_at
+FROM audit_log_entries
+WHERE guild_id = sqlc.arg(guild_id)::bigint
+  AND id < COALESCE(sqlc.narg(before)::bigint, 9223372036854775807)
+  AND (sqlc.narg(action)::varchar IS NULL OR action = sqlc.narg(action)::varchar)
+  AND (sqlc.narg(actor_id)::bigint IS NULL OR actor_id = sqlc.narg(actor_id)::bigint)
+ORDER BY id DESC
+LIMIT sqlc.arg(lim);

@@ -367,6 +367,7 @@ type Querier interface {
 	// authorizes against that — which is the only ordering rule 1 permits, since scoping the read by a
 	// caller-supplied guild would be trusting the value the check exists to verify.
 	GetChannel(ctx context.Context, id int64) (Channel, error)
+	GetChannelForUpdate(ctx context.Context, id int64) (Channel, error)
 	// The verification page's re-read between steps.
 	//
 	// By id because that is what the signed continuation carries: the device code never reaches the browser at
@@ -386,7 +387,29 @@ type Querier interface {
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	GetGuild(ctx context.Context, id int64) (Guild, error)
+	// # The locking reads the audit diff needs (M14)
+	//
+	// Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is
+	// that an audit entry must not name a value no mutation replaced.
+	//
+	// A diff reads the prior state and then writes. Under READ COMMITTED those are two statements, and an
+	// UPDATE re-reads the latest committed row — so a concurrent commit landing between them makes the entry
+	// record a transition that never happened. Reproduced on this branch: T1 reads "A", T2 commits "B", T1
+	// writes "C", and T1's entry says from "A" to "C" while the value actually overwritten was "B". The mirror
+	// case is worse, because changed() suppresses equal sides: T2 commits "C", T1 writes "C", and a change T1
+	// did not make is recorded as one it did.
+	//
+	// FOR UPDATE closes it by making the read take the row lock the write would have taken a statement later,
+	// so the row cannot move in between. The lock is held for the rest of the transaction either way; what
+	// changes is that it starts a few milliseconds earlier. Nothing here is a read path — every caller is
+	// already inside a mutation's transaction — which is why these are separate queries rather than FOR UPDATE
+	// added to the originals, whose callers include listings.
+	//
+	// ReorderRoles needs none of this: it takes the guild's advisory lock (LockGuildRolePositions) before
+	// reading positions, which serializes it against itself and against role creation.
+	GetGuildForUpdate(ctx context.Context, id int64) (Guild, error)
 	GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error)
+	GetGuildMemberForUpdate(ctx context.Context, arg GetGuildMemberForUpdateParams) (GuildMember, error)
 	// The target's standing: the highest position among the roles one member holds (Milestone M13).
 	//
 	// The actor's standing comes free from ListGuildMemberAuthority above. This is the other side of every
@@ -456,10 +479,15 @@ type Querier interface {
 	// overwrite that denies you something grants you that thing, which is a self-escalation on the endpoint
 	// whose whole subject is per-channel permissions.
 	GetPermissionOverwrite(ctx context.Context, arg GetPermissionOverwriteParams) (PermissionOverwrite, error)
+	// FOR UPDATE OF po, so the join to channels does not take a lock the caller does not need — the row being
+	// read and replaced is the overwrite, and locking every channel row the join touches would serialize
+	// unrelated writes on the same channel.
+	GetPermissionOverwriteForUpdate(ctx context.Context, arg GetPermissionOverwriteForUpdateParams) (PermissionOverwrite, error)
 	// Scoped by guild as well as by id, so a role id from another guild resolves to nothing rather than to
 	// somebody else's role. Rule 1: never trust a client-supplied ID without verifying it belongs to the
 	// actor's claimed context — enforced in the statement, not in a check a handler has to remember.
 	GetRole(ctx context.Context, arg GetRoleParams) (Role, error)
+	GetRoleForUpdate(ctx context.Context, arg GetRoleForUpdateParams) (Role, error)
 	// Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.
 	//
 	// The caller that needs this is "which device is this request coming from", answered from the sid claim in
@@ -520,6 +548,57 @@ type Querier interface {
 	// have meant a field-by-field conversion loop written at whichever call site was built second, on the hot
 	// path the guild-wide query's own plan exists to keep cheap.
 	ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]PermissionOverwrite, error)
+	// One page of a guild's audit log, newest first (Milestone M14).
+	//
+	// The first reader this table has ever had. Sixteen action constants and every guild-scoped mutation have
+	// been writing here since M12 under rule 2; nothing has read a row back until now.
+	//
+	// # The cursor is an id, and that is not a style choice
+	//
+	// Snowflakes are time-ordered (ADR 0003), so `id DESC` is "newest first" — with the property created_at
+	// lacks: uniqueness. Nothing constrains created_at, so a cursor over it skips or repeats an entry at any
+	// page boundary landing inside a group of equal values. Measured on this branch, that group does not occur
+	// today — 60 entries, 30 written concurrently, gave 60 distinct microsecond timestamps — which is an
+	// argument for the id and not against it: a boundary that loses a row rarely is one nobody will ever
+	// reproduce. Migration 000017 carries the full reasoning. Served by audit_log_entries_guild_id_id_idx,
+	// which that migration adds for this query and which removes the sort the old index left above it.
+	//
+	// # The cursor is COALESCE and not `$n IS NULL OR id < $n`, which is the obvious spelling
+	//
+	// The obvious spelling is not sargable under a generic plan. A BoolExpr OR whose first arm is a NullTest
+	// on a Param cannot be turned into an index qual, so `id <` becomes a Filter above the scan instead of a
+	// seek — measured on this branch, at 250,000 rows with the cursor half way in:
+	//
+	//   `$2 IS NULL OR id < $2`, generic plan    Filter, 125,201 rows removed, 1859 buffers, 5.168 ms
+	//   COALESCE, generic plan                   Index Cond, 200 rows removed,    9 buffers, 0.036 ms
+	//
+	// Both forms are identical under a custom plan, and plan_cache_mode defaults to `auto`, which compares the
+	// two estimates and currently keeps the custom one (10088 against 5034) — so this is robustness rather
+	// than a bug being fixed. It is taken anyway because it costs one keyword and because the comment above
+	// claims a cursor costs one index descent whatever the depth, which is a claim worth being unconditionally
+	// true. 9223372036854775807 is bigint's maximum, so an absent cursor starts at the newest entry.
+	//
+	// # Filters
+	//
+	// action and actor_id are optional and both narrow rather than widen, so neither can return an entry the
+	// unfiltered query would not. sqlc.narg makes absent mean absent rather than meaning zero — an actor_id of
+	// 0 is not a user and an action of "" is not a verb, but relying on that would make the query's behaviour
+	// depend on values it should simply not receive.
+	//
+	// These two keep the OR form, and the reason is that COALESCE buys nothing for an equality test: the
+	// rewrite is `actor_id = COALESCE($4, actor_id)`, which names the column on both sides and is no more
+	// indexable than the OR. What makes the actor filter fast is migration 000018's index, not its spelling.
+	//
+	// # What this deliberately does not do
+	//
+	// It resolves nothing. target_id is returned as an id, never joined to the channel, role or member it
+	// names — half the interesting entries are deletions whose target no longer exists, and resolving the rest
+	// would be an N+1 across four tables on a paginated endpoint.
+	//
+	// It also does not filter by what the caller can see. Entries name channels, and some of those channels are
+	// hidden from some readers by the listing filter M13 added — so this endpoint's permission is the boundary
+	// rather than the row set. See guilds.ListAuditLog for that argument; it is a decision, not an oversight.
+	ListGuildAuditLog(ctx context.Context, arg ListGuildAuditLogParams) ([]AuditLogEntry, error)
 	// Columns enumerated rather than `SELECT *`, and topic_search is the reason.
 	//
 	// It is a generated tsvector that nothing in this codebase reads until M63's channel search, and pgx

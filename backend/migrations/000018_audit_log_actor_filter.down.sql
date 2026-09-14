@@ -1,0 +1,1 @@
+DROP INDEX audit_log_entries_guild_id_actor_id_id_idx;

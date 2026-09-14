@@ -1,0 +1,65 @@
+-- Milestone M14 — the index the audit-log listing actually reads by.
+--
+-- M12 created audit_log_entries and gave it (guild_id, created_at DESC), which was a reasonable guess when
+-- nothing read the table. M14 is the first reader, and it reads by a different column.
+--
+-- # Why the cursor is on id and not created_at
+--
+-- Snowflakes are time-ordered by construction (ADR 0003), so ordering by id *is* ordering by time — with a
+-- property created_at does not have: it is unique. A cursor over a non-unique column either skips an entry
+-- or repeats one at every page boundary that lands inside a group of equal values, and nothing here
+-- constrains created_at to be unique.
+--
+-- An earlier version of this comment went further and claimed that same-timestamp bursts are the normal
+-- case, because a mutation and its audit entry share a transaction. That reasoning is wrong — one mutation
+-- writes one entry, so there is no burst for it to share a timestamp with — and the claim was measured and
+-- refuted on this branch: 60 entries written through the service, 30 of them concurrently, produced 60
+-- distinct created_at values. now() is the transaction's start time at microsecond resolution.
+--
+-- That strengthens the case for the id rather than weakening it. A page boundary that silently drops an
+-- entry once a year is worse than one that drops it every time, because it will never be reproduced from
+-- a report — and the id costs nothing to use: it is the primary key, the ordering is already there, and
+-- the index below serves the filter and the sort together.
+--
+-- # What the old index cost, measured
+--
+-- Ordering by id with only the created_at index available puts a Sort above the scan, and the sort's input
+-- is every entry the guild has ever produced — materialized in full to return fifty rows. On a guild with
+-- 50,000 entries in a 250,000-row table:
+--
+--   ORDER BY id DESC LIMIT 50, created_at index only     cost 143.83..143.93   Sort, quicksort
+--   the same query with this index                       cost   0.42..36.55    no sort node at all
+--
+-- The timings at that size are both under a millisecond and are not the argument; the sort is. It grows
+-- with the guild's history while the index scan does not grow at all.
+-- # This rebuild blocks every guild mutation while it runs
+--
+-- 000012 wrote this warning for the session sweep's index and closed it with "the next table to need this
+-- may not be small". This is that table. CREATE INDEX takes SHARE on audit_log_entries and DROP INDEX
+-- below takes ACCESS EXCLUSIVE, so no mutation anywhere in the guild surface commits until both finish —
+-- rule 2 puts a write here inside every one of them.
+--
+-- CONCURRENTLY is not available: golang-migrate runs each file in a transaction. Migrations run blocking
+-- before readiness by design, so /healthz answers 503 throughout rather than serving a half-migrated
+-- schema, and the window is a startup outage rather than a live stall.
+--
+-- It is worse here than it was there in one respect worth stating: sessions is swept, and this table is
+-- deliberately not. It grows for the life of the instance, so the cost of this rebuild grows with it. A
+-- future index change on audit_log_entries should assume the table is large and consider a
+-- non-transactional migration that can use CONCURRENTLY.
+CREATE INDEX audit_log_entries_guild_id_id_idx ON audit_log_entries (guild_id, id DESC);
+
+-- And the old one goes, which is the half worth arguing for rather than assuming.
+--
+-- It has no reader — nothing has ever selected from this table — and it is maintained on the hottest write
+-- path in the guild surface, because rule 2 makes every guild-scoped mutation write a row here. An index
+-- nothing reads is pure write amplification.
+--
+-- The usual reason to keep one is a query that wants a date range, and that reason does not apply: a
+-- snowflake carries its own creation time in its high bits, so a range over created_at is expressible as a
+-- range over id and the index above serves it. That is ADR 0003's point, and it is why this table can have
+-- one index where a serial-keyed one would need two.
+--
+-- Dropped rather than left in place, because a speculative index is the kind of thing that survives by
+-- nobody wanting to be the one to remove it.
+DROP INDEX audit_log_entries_guild_id_created_at_idx;

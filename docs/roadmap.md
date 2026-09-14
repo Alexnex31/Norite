@@ -419,6 +419,19 @@ of this section.
   route now answers 404 to somebody who cannot view it. **Adding a filter to any listing is a reason to
   re-examine the status codes of every route that names the same object.**
 
+  **And it was only half done, which M14 corrected.** The status codes were fixed; the *permission* was
+  not. A channel-scoped route still gated on its own bit alone, so a moderator holding `PermManageChannels`
+  and denied `PermViewChannel` — an `@everyone` view-deny removes only the view bit — got the channel
+  omitted from their listing and could still rename it, delete it and write its overwrites. Two code paths
+  disagreeing about whether the same object existed. M14 folds `PermViewChannel` into every
+  channel-scoped `need`, which is recorded here as well as there because a correction filed only under the
+  milestone that made it is one this entry's reader never sees.
+
+  It needed a real guild to surface, and that is the part worth keeping: every M13 test that hid a channel
+  hid it from somebody holding nothing else, and every test that managed one managed a visible channel.
+  The divergence requires an actor who holds a management permission *and* lacks view in the same channel,
+  which no unit test constructed and four review passes did not think to ask for.
+
   *Ordering within a milestone can ship a hole.* The overwrite endpoints landed before the category-copy
   and the parent authorization that make a locked category mean anything, so for four commits a channel
   created inside a private category was readable by everyone. Nothing was released, but the branch was
@@ -478,10 +491,13 @@ of this section.
 
   `cmd/server/contract_test.go` calls `chi.Walk` on the real router, so a route mounted without a contract
   entry fails the build — which is how M13's overwrite endpoints were caught the instant they mounted.
-  `TestEveryMutatingGuildRouteRefusesANonMember` says in its own doc comment that it exercises "every
-  non-GET route the guild handler registers", and iterates a slice of literals somebody types by hand. It
-  asks the router nothing. During M13 it needed routes adding twice — the overwrite pair, then the role
-  reorder — and both times a person noticed rather than the test.
+  `TestEveryMutatingGuildRouteRefusesANonMember` said in its own doc comment that it exercised "every
+  non-GET route the guild handler registers", and iterated a slice of literals somebody typed by hand. It
+  asked the router nothing. During M13 it needed routes adding twice — the overwrite pair, then the role
+  reorder — and both times a person noticed rather than the test. It is
+  `TestEveryGuildRouteRefusesANonMember` now: derived from the walk, and widened past non-GET, because the
+  reads disclose what the writes do and the old limit was an argument about where `authorize` gets
+  forgotten rather than about what the property covers.
 
   That is the more dangerous of the two to have wrong. A missing contract entry is a documentation bug; a
   missing entry there means a mutating route was never checked for the anti-enumeration property, on a
@@ -495,8 +511,69 @@ of this section.
   actually changed; the coverage test extends M12's to assert the diff rather than only the entry; and
   both route-surface tests derive their route list from the router rather than from a literal, failing on
   a route they have no case for.
+
+  **What it took beyond that, and why each was not optional.**
+
+  *It opened with a bug M13 shipped and no test on that branch was shaped to catch.* A channel-scoped
+  route gated on its own permission while the listing gated on `PermViewChannel`, so a moderator could
+  administer a channel their own sidebar refused to mention. Found by driving a real guild by hand after
+  the tag. `PermViewChannel` now joins every channel-scoped `need`; M13's entry carries the detail.
+
+  *`PermViewAuditLog` is a new bit, position 19.* Its own bit rather than a shape of `PermManageGuild`,
+  which is the split Discord makes and the one M12's `UpdateMember` had to be corrected into: a permission
+  only ever OR'd into a base is not grantable on its own, so folding it in would mean the only way to let
+  somebody audit a guild is to let them rename it. Adding it required editing the constant-pinning test by
+  hand, which is what that test is for.
+
+  *The disclosure question is the one this milestone turns on.* Entries name channels, and M13 taught the
+  listing to hide channels. The log does not filter to match — the permission is the boundary. Recorded in
+  `docs/security-ledger.md` with the condition that would reopen it, because filtering on *present*
+  visibility would let somebody hide their tracks after the fact, and half the interesting entries name
+  objects that no longer exist to resolve a permission against.
+
+  *The `changes` diff had to be built in every writer, not in the reader.* A diff needs the state being
+  written over and it exists exactly once, inside the transaction that replaces it; a reader cannot
+  reconstruct `from`. Two kinds of key, told apart by the value: a changed field is an object carrying
+  `from`/`to`, a context field is a scalar, because `target_id` is one column and some actions name a
+  pair. It closed two gaps on the way — `role.update` recorded two of the five fields it accepts, and
+  permissions were being written as JSON numbers rather than the quoted decimal strings the contract says
+  they are.
+
+  *Both coverage tests were worse than this entry knew.* The anti-enumeration one is as described above.
+  The audit one had ten cases against sixteen actions and twenty-one routes; the six it never reached were
+  the whole of M13's surface. Both derive from the walk now, failing in both directions — a route with no
+  case, and a case naming a route that no longer exists.
+
+  *Two audit-completeness gaps are recorded rather than closed*, both in `docs/security-ledger.md` with
+  the condition that would reopen them: deleting a category re-parents its children and names none of
+  them, and a kick or a role deletion destroys permission overwrites without recording their bits. Both
+  are questions about entry *volume* — the counts are unbounded — rather than about the diff shape this
+  milestone settled, and the second is the rejoin question M57 and M72a already carry.
+
+  *Three query plans were measured rather than assumed.* The optional cursor was written
+  `$n IS NULL OR id < $n`, which cannot become an index qual under a generic plan; `COALESCE` is sargable
+  in every plan and costs a keyword. And the `actor_id` filter shipped with no index that serves it inside
+  a guild — harmless for a rare actor and for a prolific one, and 14.7 ms against 0.04 ms for an actor
+  rare *here* and prolific elsewhere, which is an ordinary shape on a single global instance. Migration
+  `000018` is that index. The `action` filter turned out to have the same gap, found by measuring it after
+  a review asked why only one of the two public filters had been looked at — 2,682 buffers against 4 for a
+  selective action — and `000019` is its index. That makes four on the table rule 2 writes to on every
+  guild mutation, which is stated in `000019` as the reason a *third* filter should be weighed against
+  consolidating rather than simply added.
 - **M15 — Core messaging CRUD**: send/edit/delete REST endpoints for channel messages, permission-checked via
-  the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14. Done when: a
+  the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14.
+
+  **It lands before M57 and M72a, which is worth knowing rather than discovering.** Those two carry the
+  rejoin question M13 routed to them — a kick clears a member's channel-tier overwrites, and nothing
+  restores them if that member comes back. M15 makes channels carry conversations, so from here the
+  residual stops being about access to an empty room. Neither milestone moves: there is still no join path
+  before M57, so the question remains unreachable rather than merely unanswered.
+
+  M14's audit diff also starts mattering more here than it does for guild settings. A `message.*` action
+  would put content into `changes`, and rule 13 forbids reading E2E DM content on any server-side path —
+  see the audit-log entry in `docs/security-ledger.md`, whose *reopens if* names exactly this.
+
+  Done when: a
   permitted member can send/edit/delete a message via the REST API, an unpermitted one is rejected, and each
   mutation produces an audit entry.
 - **M16 — Guild-level reports**: the `reports` table (reporter, target type/id, reason category plus free
@@ -1245,6 +1322,41 @@ of this section.
 - **M76 — Public-channel/whisper retention windows**: the 48-hour post-empty retention on public channel
   history (and whispers exchanged within it) before permanent purge, for report-investigation purposes. Done
   when: a channel's history remains queryable by Instance Admins for 48 hours after it empties, then is gone.
+- **M76a — Self-service account export and deletion**: `GET /users/@me/export` and `DELETE /users/@me`,
+  the two endpoints `architecture.md`'s §2 list has carried since the original design and which **no
+  milestone ever built**. Found by M14's security sweep, which went looking for the milestone that owns the
+  audit table's `ON DELETE` question and discovered there is none: two migrations pointed at "M66", and M66
+  is public matchmaking.
+
+  The gap is wider than one endpoint. **M77 verifies an export nothing creates** and M104 extends it with
+  the E2E half, so two milestones already depend on this one. Inserted here rather than renumbered, and
+  placed immediately before M77 because that is the dependency position — after reports (M16, M74) and
+  blocks (M70) exist, since the asymmetries M77 checks are about their rows.
+
+  The design is already written and is not re-decided here: soft-delete with a placeholder
+  username/email, hard-delete `oauth_identities` and `sessions`, authored content left in place rendered
+  as "Deleted User". Three things that design leaves for whoever builds it, all recorded in
+  `architecture.md`:
+
+  - **The placeholder rename must be guaranteed rather than best-effort.** `users.username` and
+    `users.email` carry plain `UNIQUE` constraints while every read filters `deleted_at IS NULL`, so a
+    deletion that soft-deletes without renaming leaves the constraints holding names no live account
+    holds, and registration starts refusing them.
+  - **`audit_log_entries.actor_id` carries no `ON DELETE` and therefore refuses the delete outright.** That
+    is deliberate — an entry naming a deleted actor is still evidence, and one whose actor went NULL is
+    evidence with the answer removed — which means deletion cannot ship without answering it in the open.
+    Since M14 the same table also holds a removed member's *nickname* in `changes`, a name the deleted
+    account chose, in rows nothing ever sweeps and which a placeholder rename does not reach.
+  - **`guilds.owner_id` refuses it too**, for the reason M13a exists: a guild whose owner is deleted is not
+    a guild with a NULL owner, and ownership transfer is the operation that resolves it.
+
+  Rule 17 applies in full: deletion invokes the general-purpose revoke-all-sessions primitive rather than
+  assembling its own cleanup, exactly as a ban does.
+
+  Done when: an account can export its own data and delete itself; deletion goes through
+  `revokeEverything`; the placeholder rename is atomic with the soft-delete rather than a second statement
+  that can fail; and the `audit_log_entries` and `guilds` foreign keys each have an answer written down
+  rather than a failed `DELETE`.
 - **M77 — Data export asymmetry verification**: an end-to-end test that a user's own export includes their
   filed reports and blocked accounts, and excludes reports filed against them and who has blocked them. Done
   when: both asymmetries are covered by an automated test, not just documented intent.

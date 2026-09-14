@@ -518,12 +518,79 @@ func (q *Queries) GetChannel(ctx context.Context, id int64) (Channel, error) {
 	return i, err
 }
 
+const getChannelForUpdate = `-- name: GetChannelForUpdate :one
+SELECT id, guild_id, type, parent_id, name, topic, position, nsfw, last_message_id, bitrate, user_limit, topic_search, created_at, updated_at FROM channels WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetChannelForUpdate(ctx context.Context, id int64) (Channel, error) {
+	row := q.db.QueryRow(ctx, getChannelForUpdate, id)
+	var i Channel
+	err := row.Scan(
+		&i.ID,
+		&i.GuildID,
+		&i.Type,
+		&i.ParentID,
+		&i.Name,
+		&i.Topic,
+		&i.Position,
+		&i.Nsfw,
+		&i.LastMessageID,
+		&i.Bitrate,
+		&i.UserLimit,
+		&i.TopicSearch,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getGuild = `-- name: GetGuild :one
 SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at FROM guilds WHERE id = $1
 `
 
 func (q *Queries) GetGuild(ctx context.Context, id int64) (Guild, error) {
 	row := q.db.QueryRow(ctx, getGuild, id)
+	var i Guild
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.OwnerID,
+		&i.IconHash,
+		&i.Description,
+		&i.SystemChannelID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getGuildForUpdate = `-- name: GetGuildForUpdate :one
+
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at FROM guilds WHERE id = $1 FOR UPDATE
+`
+
+// # The locking reads the audit diff needs (M14)
+//
+// Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is
+// that an audit entry must not name a value no mutation replaced.
+//
+// A diff reads the prior state and then writes. Under READ COMMITTED those are two statements, and an
+// UPDATE re-reads the latest committed row — so a concurrent commit landing between them makes the entry
+// record a transition that never happened. Reproduced on this branch: T1 reads "A", T2 commits "B", T1
+// writes "C", and T1's entry says from "A" to "C" while the value actually overwritten was "B". The mirror
+// case is worse, because changed() suppresses equal sides: T2 commits "C", T1 writes "C", and a change T1
+// did not make is recorded as one it did.
+//
+// FOR UPDATE closes it by making the read take the row lock the write would have taken a statement later,
+// so the row cannot move in between. The lock is held for the rest of the transaction either way; what
+// changes is that it starts a few milliseconds earlier. Nothing here is a read path — every caller is
+// already inside a mutation's transaction — which is why these are separate queries rather than FOR UPDATE
+// added to the originals, whose callers include listings.
+//
+// ReorderRoles needs none of this: it takes the guild's advisory lock (LockGuildRolePositions) before
+// reading positions, which serializes it against itself and against role creation.
+func (q *Queries) GetGuildForUpdate(ctx context.Context, id int64) (Guild, error) {
+	row := q.db.QueryRow(ctx, getGuildForUpdate, id)
 	var i Guild
 	err := row.Scan(
 		&i.ID,
@@ -549,6 +616,29 @@ type GetGuildMemberParams struct {
 
 func (q *Queries) GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error) {
 	row := q.db.QueryRow(ctx, getGuildMember, arg.GuildID, arg.UserID)
+	var i GuildMember
+	err := row.Scan(
+		&i.GuildID,
+		&i.UserID,
+		&i.Nickname,
+		&i.JoinedAt,
+		&i.Deaf,
+		&i.Mute,
+	)
+	return i, err
+}
+
+const getGuildMemberForUpdate = `-- name: GetGuildMemberForUpdate :one
+SELECT guild_id, user_id, nickname, joined_at, deaf, mute FROM guild_members WHERE guild_id = $1 AND user_id = $2 FOR UPDATE
+`
+
+type GetGuildMemberForUpdateParams struct {
+	GuildID int64
+	UserID  int64
+}
+
+func (q *Queries) GetGuildMemberForUpdate(ctx context.Context, arg GetGuildMemberForUpdateParams) (GuildMember, error) {
+	row := q.db.QueryRow(ctx, getGuildMemberForUpdate, arg.GuildID, arg.UserID)
 	var i GuildMember
 	err := row.Scan(
 		&i.GuildID,
@@ -603,6 +693,45 @@ func (q *Queries) GetPermissionOverwrite(ctx context.Context, arg GetPermissionO
 	return i, err
 }
 
+const getPermissionOverwriteForUpdate = `-- name: GetPermissionOverwriteForUpdate :one
+SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM permission_overwrites po
+JOIN channels c ON c.id = po.channel_id
+WHERE po.channel_id = $1::bigint
+  AND po.target_type = $2
+  AND po.target_id = $3::bigint
+  AND c.guild_id = $4::bigint
+FOR UPDATE OF po
+`
+
+type GetPermissionOverwriteForUpdateParams struct {
+	ChannelID  int64
+	TargetType int16
+	TargetID   int64
+	GuildID    int64
+}
+
+// FOR UPDATE OF po, so the join to channels does not take a lock the caller does not need — the row being
+// read and replaced is the overwrite, and locking every channel row the join touches would serialize
+// unrelated writes on the same channel.
+func (q *Queries) GetPermissionOverwriteForUpdate(ctx context.Context, arg GetPermissionOverwriteForUpdateParams) (PermissionOverwrite, error) {
+	row := q.db.QueryRow(ctx, getPermissionOverwriteForUpdate,
+		arg.ChannelID,
+		arg.TargetType,
+		arg.TargetID,
+		arg.GuildID,
+	)
+	var i PermissionOverwrite
+	err := row.Scan(
+		&i.ChannelID,
+		&i.TargetType,
+		&i.TargetID,
+		&i.Allow,
+		&i.Deny,
+	)
+	return i, err
+}
+
 const getRole = `-- name: GetRole :one
 SELECT id, guild_id, name, color, permissions, position, hoist, mentionable, is_default, created_at, updated_at FROM roles WHERE id = $1 AND guild_id = $2
 `
@@ -632,6 +761,137 @@ func (q *Queries) GetRole(ctx context.Context, arg GetRoleParams) (Role, error) 
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getRoleForUpdate = `-- name: GetRoleForUpdate :one
+SELECT id, guild_id, name, color, permissions, position, hoist, mentionable, is_default, created_at, updated_at FROM roles WHERE id = $1 AND guild_id = $2 FOR UPDATE
+`
+
+type GetRoleForUpdateParams struct {
+	ID      int64
+	GuildID int64
+}
+
+func (q *Queries) GetRoleForUpdate(ctx context.Context, arg GetRoleForUpdateParams) (Role, error) {
+	row := q.db.QueryRow(ctx, getRoleForUpdate, arg.ID, arg.GuildID)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.GuildID,
+		&i.Name,
+		&i.Color,
+		&i.Permissions,
+		&i.Position,
+		&i.Hoist,
+		&i.Mentionable,
+		&i.IsDefault,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listGuildAuditLog = `-- name: ListGuildAuditLog :many
+SELECT id, guild_id, actor_id, action, target_id, changes, created_at
+FROM audit_log_entries
+WHERE guild_id = $1::bigint
+  AND id < COALESCE($2::bigint, 9223372036854775807)
+  AND ($3::varchar IS NULL OR action = $3::varchar)
+  AND ($4::bigint IS NULL OR actor_id = $4::bigint)
+ORDER BY id DESC
+LIMIT $5
+`
+
+type ListGuildAuditLogParams struct {
+	GuildID int64
+	Before  *int64
+	Action  *string
+	ActorID *int64
+	Lim     int32
+}
+
+// One page of a guild's audit log, newest first (Milestone M14).
+//
+// The first reader this table has ever had. Sixteen action constants and every guild-scoped mutation have
+// been writing here since M12 under rule 2; nothing has read a row back until now.
+//
+// # The cursor is an id, and that is not a style choice
+//
+// Snowflakes are time-ordered (ADR 0003), so `id DESC` is "newest first" — with the property created_at
+// lacks: uniqueness. Nothing constrains created_at, so a cursor over it skips or repeats an entry at any
+// page boundary landing inside a group of equal values. Measured on this branch, that group does not occur
+// today — 60 entries, 30 written concurrently, gave 60 distinct microsecond timestamps — which is an
+// argument for the id and not against it: a boundary that loses a row rarely is one nobody will ever
+// reproduce. Migration 000017 carries the full reasoning. Served by audit_log_entries_guild_id_id_idx,
+// which that migration adds for this query and which removes the sort the old index left above it.
+//
+// # The cursor is COALESCE and not `$n IS NULL OR id < $n`, which is the obvious spelling
+//
+// The obvious spelling is not sargable under a generic plan. A BoolExpr OR whose first arm is a NullTest
+// on a Param cannot be turned into an index qual, so `id <` becomes a Filter above the scan instead of a
+// seek — measured on this branch, at 250,000 rows with the cursor half way in:
+//
+//	`$2 IS NULL OR id < $2`, generic plan    Filter, 125,201 rows removed, 1859 buffers, 5.168 ms
+//	COALESCE, generic plan                   Index Cond, 200 rows removed,    9 buffers, 0.036 ms
+//
+// Both forms are identical under a custom plan, and plan_cache_mode defaults to `auto`, which compares the
+// two estimates and currently keeps the custom one (10088 against 5034) — so this is robustness rather
+// than a bug being fixed. It is taken anyway because it costs one keyword and because the comment above
+// claims a cursor costs one index descent whatever the depth, which is a claim worth being unconditionally
+// true. 9223372036854775807 is bigint's maximum, so an absent cursor starts at the newest entry.
+//
+// # Filters
+//
+// action and actor_id are optional and both narrow rather than widen, so neither can return an entry the
+// unfiltered query would not. sqlc.narg makes absent mean absent rather than meaning zero — an actor_id of
+// 0 is not a user and an action of "" is not a verb, but relying on that would make the query's behaviour
+// depend on values it should simply not receive.
+//
+// These two keep the OR form, and the reason is that COALESCE buys nothing for an equality test: the
+// rewrite is `actor_id = COALESCE($4, actor_id)`, which names the column on both sides and is no more
+// indexable than the OR. What makes the actor filter fast is migration 000018's index, not its spelling.
+//
+// # What this deliberately does not do
+//
+// It resolves nothing. target_id is returned as an id, never joined to the channel, role or member it
+// names — half the interesting entries are deletions whose target no longer exists, and resolving the rest
+// would be an N+1 across four tables on a paginated endpoint.
+//
+// It also does not filter by what the caller can see. Entries name channels, and some of those channels are
+// hidden from some readers by the listing filter M13 added — so this endpoint's permission is the boundary
+// rather than the row set. See guilds.ListAuditLog for that argument; it is a decision, not an oversight.
+func (q *Queries) ListGuildAuditLog(ctx context.Context, arg ListGuildAuditLogParams) ([]AuditLogEntry, error) {
+	rows, err := q.db.Query(ctx, listGuildAuditLog,
+		arg.GuildID,
+		arg.Before,
+		arg.Action,
+		arg.ActorID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuditLogEntry{}
+	for rows.Next() {
+		var i AuditLogEntry
+		if err := rows.Scan(
+			&i.ID,
+			&i.GuildID,
+			&i.ActorID,
+			&i.Action,
+			&i.TargetID,
+			&i.Changes,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listGuildChannels = `-- name: ListGuildChannels :many

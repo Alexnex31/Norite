@@ -476,7 +476,14 @@ CREATE TABLE audit_log_entries (
   actor_id bigint NOT NULL REFERENCES users(id), action varchar(64) NOT NULL, target_id bigint NULL,
   changes jsonb NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX ON audit_log_entries (guild_id, created_at DESC);
+-- The listing reads by id, not created_at: snowflakes are time-ordered (ADR 0003) and, unlike a
+-- timestamp, unique — nothing constrains created_at, so a cursor over it would skip or repeat an entry at
+-- any page boundary landing inside a group of equal values. Measured, that group does not occur today,
+-- which argues for the id rather than against it: a boundary that loses a row rarely is one nobody will
+-- reproduce. M12 created a (guild_id, created_at DESC) index when nothing read the table; M14 is the
+-- first reader and migration 000017 replaces it. A date range is expressible as an id range, so this one
+-- index serves both.
+CREATE INDEX ON audit_log_entries (guild_id, id DESC);
 
 -- Presence (persisted — Milestone M38; supersedes the original in-memory-only design)
 CREATE TABLE presence_status (
@@ -681,6 +688,7 @@ const (
     PermManageWebhooks  // ACTIVE
     PermManageEmojis    // ACTIVE
     PermModerateMembers // M74 — timeout a member without suspending the account; Discord's MODERATE_MEMBERS
+    PermViewAuditLog    // M14 — ACTIVE; read the guild audit log. Its own bit, as Discord's is
 )
 ```
 
@@ -865,7 +873,15 @@ DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}
                                            --   channel denies off the target, so it is not the pure
                                            --   demotion it looks like
 GET    /guilds/{guild_id}/invites
-GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it
+GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it.
+                                           --   PermViewAuditLog, its own bit and not implied by
+                                           --   PermManageGuild. Cursor on the entry id, never created_at,
+                                           --   which carries no uniqueness guarantee. Entries are *not*
+                                           --   filtered by what the reader can currently see: the
+                                           --   permission is the boundary, because half the entries name
+                                           --   objects that no longer exist and because filtering on
+                                           --   present visibility would let somebody hide their tracks
+                                           --   by locking a channel down afterwards
 GET    /guilds/{guild_id}/emojis
 POST   /guilds/{guild_id}/emojis
 DELETE /guilds/{guild_id}/emojis/{id}
@@ -874,18 +890,23 @@ POST   /guilds/{guild_id}/tags
 POST   /guilds/{guild_id}/tags/{tag_id}/messages/{message_id}
 
 PATCH  /channels/{channel_id}              -- M12; carries no guild, so the guild is read off the channel
-                                           --   row and never from the caller (rule 1)
-DELETE /channels/{channel_id}              -- M12; same resolution. Deleting a category orphans its
-                                           --   children rather than deleting them
+                                           --   row and never from the caller (rule 1). M14 added
+                                           --   PermViewChannel alongside PermManageChannels: M13 taught
+                                           --   the listing to hide channels and left these routes able
+                                           --   to act on one, so the two disagreed about whether a
+                                           --   channel existed
+DELETE /channels/{channel_id}              -- M12; same resolution, and the same M14 correction. Deleting
+                                           --   a category orphans its children rather than deleting them
 PUT    /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; the endpoint that finally writes what roles.Resolve
                                            --   has read since M12. PermManageRoles resolved *in that
                                            --   channel*, not at guild level, or a caller denied a
-                                           --   permission there could allow it back to themselves
+                                           --   permission there could allow it back to themselves.
+                                           --   M14 added PermViewChannel here too
 DELETE /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; escalation-checked over the row being removed, not the
                                            --   one being written — deleting an overwrite that denies you
-                                           --   something grants you that thing
+                                           --   something grants you that thing. M14 added PermViewChannel
 GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
 POST   /channels/{channel_id}/messages
 PATCH  /channels/{channel_id}/messages/{message_id}
@@ -1151,6 +1172,15 @@ and for new claims being added to it rather than to a caller.
 
 Account deletion otherwise follows the original design: soft-delete with placeholder username/email,
 hard-delete `oauth_identities`/`sessions`, leave authored content in place rendered as "Deleted User."
+
+**Two things it must decide about `audit_log_entries`, and neither is settled here.** `actor_id` carries no
+`ON DELETE`, deliberately — an entry naming a deleted actor is still evidence and one whose actor went NULL
+is evidence with the answer removed — so the foreign key currently *refuses* the delete, which means
+deletion cannot ship without answering it. And since M14 the `changes` payload records a removed member's
+nickname on `member.remove`, so this table holds a name the deleted account chose, in rows nothing ever
+sweeps. A placeholder rename does not reach it. Both were raised by M14's security sweep, which also
+found that **no roadmap milestone owned `DELETE /users/@me`** — the migrations pointed at M66, which is
+public matchmaking, and M77 verified an export nothing built. M76a now owns both endpoints.
 
 **Two things about that placeholder rename are load-bearing, and neither is obvious until deletion exists.**
 `users.username` and `users.email` carry plain `UNIQUE` constraints, not partial indexes excluding

@@ -1,0 +1,41 @@
+-- Milestone M14 — the index the audit log's *other* public filter relies on (rule 7).
+--
+-- 000018 measured actor_id and added its index, and left action — the other query parameter the same
+-- endpoint documents — with nothing. The failure is the same shape and was found the same way, by
+-- measuring the filter rather than the unfiltered listing.
+--
+-- On 250,000 entries, 50,000 of them in the guild being read, asking for an action with twelve entries in
+-- that guild's history:
+--
+--   as shipped   Bitmap Heap Scan, 50,000 rows removed by filter, 2,682 buffers, 4.092 ms
+--   with this    Index Only Scan,          12 rows, no filter,         4 buffers, 0.037 ms
+--
+-- A *common* action needs neither: the planner walks the primary key backwards and the LIMIT is satisfied
+-- within a couple of hundred rows (6 buffers). The cost falls entirely on the selective query, which is
+-- the one an operator actually makes — "show me every ban in this guild" is the question, not "show me the
+-- most recent of the thing that happens constantly".
+--
+-- # This is the fourth index on the table rule 2 writes to on every guild-scoped mutation
+--
+-- Worth stating plainly rather than adding quietly. The table now carries (guild_id, id DESC) for the
+-- listing, (guild_id, actor_id, id DESC) and (guild_id, action, id DESC) for the two filters, and
+-- (actor_id) for the foreign key's own check against users. None folds into another: an id seek needs id
+-- adjacent to guild_id, and the FK check needs actor_id leading.
+--
+-- **What that actually costs, measured, because the sentence above was written before anybody checked.**
+-- Inserting 2,000 audit rows into a 250,000-row table, with and without the two indexes M14 added:
+--
+--   with M14's two      17.3 us/row
+--   without them        15.1 us/row
+--
+-- 2.2 us and 14.8% per insert. That is small beside the mutation it rides along with — which runs an
+-- authorization resolve, its own write and the audit insert inside one transaction — so this is not a
+-- reason to hesitate over an index the endpoint genuinely needs, and the number is recorded so the next
+-- person weighing one is not deterred by a vague warning.
+--
+-- It is still a reason to prefer consolidating over accumulating: five btree inserts per row is the cost
+-- of the *current* four filters-plus-key, and the growth is linear in filters this endpoint exposes. The
+-- alternative worth measuring before adding a fifth is (guild_id, id DESC) INCLUDE (action, actor_id),
+-- which gives no index *condition* on either filter but keeps both off the heap.
+CREATE INDEX audit_log_entries_guild_id_action_id_idx
+  ON audit_log_entries (guild_id, action, id DESC);

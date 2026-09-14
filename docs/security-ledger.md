@@ -167,3 +167,109 @@ would flip them.
   carry the member either way — a `PUT` that returned nothing on a repeat would make the endpoint's shape
   depend on whether it had been called before.
 - **Reopens if**: the same bulk-sync workload above makes the repeat case the common one.
+
+## M14 — guild audit log
+
+### A moderator can lock themselves out of a channel and not undo it
+- **Raised**: M14, `/code-review high`. The reasoning below was **corrected by `/security-sweep` on the
+  same branch**, which is why it is worth reading rather than skimming: the finding was right and its
+  explanation was wrong, and the explanation is the half a later reader acts on.
+- **Verdict**: not a vulnerability — the escalation check working, and older than the milestone that
+  reported it
+- **Why**: reported as a cost M14 introduced by requiring `PermViewChannel` alongside every management
+  permission. It is not. A `PermManageRoles` holder who denies `@everyone` `PermViewChannel` could never
+  undo it: `DeleteOverwrite` runs `refuseEscalation` over the bits the removed row carried, and restoring
+  the view bit means holding it *in that channel* — which the row being removed has just taken away.
+  Reproduced against `main` at `c8ec10b`, where the author's own delete answers `403 a role cannot be
+  given permissions you do not hold yourself`. That is the self-targeted-overwrite entry above,
+  generalised from `PermManageRoles` to `PermViewChannel`. What M14 changes is the **status code**, 403 to
+  404, because the channel is now hidden at the route rather than refused at the check — and it closes the
+  one escape that did work: pre-M14 the author could still delete the channel outright, which was
+  confirmed to succeed and is the divergence this milestone opened with rather than a recovery path.
+  Discord behaves the same way, and its recovery path is ours: the owner, an administrator, or an Instance
+  Admin. Pinned by `TestDenyingYourselfViewIsAOneWayDoor`.
+- **Reopens if**: the union check is narrowed to the value being written — the same condition the M13
+  entry above carries, and the accurate one, because that check is what holds the door shut and the view
+  requirement is not. A self-service "undo my last overwrite" surface would still need its own answer.
+
+### The audit log shows channels the reader's own listing hides
+- **Raised**: M14, while designing the read surface — the question the milestone turns on
+- **Verdict**: accepted risk, and the alternative is worse
+- **Why**: `GET /guilds/{id}/audit-log` does not filter entries by what the caller can currently see, so a
+  `PermViewAuditLog` holder denied `PermViewChannel` on a channel reads that channel's entries by id and,
+  in `changes`, by name. Three options were weighed. Filtering by present visibility is the tempting one
+  and fails twice: half the interesting entries are deletions whose target no longer exists and cannot be
+  resolved to a permission at all, and whether a channel is visible *today* is not the question a log
+  answers about an action taken last month — filtering on it would let somebody hide their tracks after
+  the fact by locking a channel down. Withholding the surface from anyone below administrator was the
+  other, and it makes the log useless for the delegated-moderator case it exists for. So the permission is
+  the boundary: it is not granted by default, is not implied by `PermManageGuild`, and cannot be handed
+  out by somebody who does not hold it (`refuseEscalation`). Stated in the contract, in `ListAuditLog`'s
+  own comment, and pinned by `TestTheAuditLogDoesNotFilterByChannelVisibility`.
+- **Reopens if**: the log ever carries message content, where the exposure stops being metadata about
+  moderation and becomes the conversations themselves — M15 puts `message.*` actions within reach, and
+  rule 13 already forbids reading E2E DM content on any server-side path. It would also reopen if a
+  future action recorded a channel's *members* rather than its id and name, which is a different kind of
+  disclosure than this entry weighed.
+
+### `audit_log_entries` grows for the life of the instance with no ceiling and no sweep
+- **Raised**: M14, `/security-sweep`
+- **Verdict**: accepted risk — the design, and the alternative defeats the feature
+- **Why**: rule 2 puts a row here inside every guild-scoped mutation and migration `000016` states the
+  table is never swept. There is no retention window and no per-guild ceiling, so a guild's log grows
+  without bound and a determined member with `PermManageRoles` can inflate it by editing a role in a loop.
+  An audit log you can empty by waiting, or that refuses writes when full, is not an audit log — and the
+  write path is rate-limited and permission-gated like every other mutation, so the cost of inflating it
+  is bounded by both. M14 gave the table a reader but did not change its growth.
+- **Reopens if**: an instance needs a retention policy for legal reasons rather than technical ones, which
+  is the shape that would actually force this — or if a per-guild storage quota arrives, at which point
+  the ceiling belongs beside the channel and role ones rather than here. Note that a sweep would also need
+  a second index: `000018`'s reasoning assumes nothing deletes by age.
+
+### `auditDiff.context` accepts a value that is not a scalar
+- **Raised**: M14, `/security-sweep`
+- **Verdict**: not a vulnerability — a renderer contract enforced by a test rather than by a type
+- **Why**: `changes` distinguishes a diffed field from a context field by whether the value is an object,
+  so passing a map to `context` would make it indistinguishable from a diff carrying neither `from` nor
+  `to`. Go has no type for "not a map", so the signature takes `any` and
+  `TestTheAuditDiffShapeIsUniform` asserts the rule across every action every writer produces. The blast
+  radius is a client rendering a field oddly; nothing reads `changes` for an authorization decision, and
+  nothing ever should.
+- **Reopens if**: anything starts *parsing* `changes` rather than displaying it — a moderation tool that
+  branched on a diff's shape would turn a rendering bug into a logic one, and the type would then need to
+  carry the distinction the test currently does.
+
+### Deleting a category re-parents its children and the log says nothing about them
+- **Raised**: M14, `/code-review xhigh`
+- **Verdict**: accepted risk — a real gap in the record, deliberately not closed here
+- **Why**: `channels.parent_id` is `ON DELETE SET NULL` (migration `000015`), so deleting a category moves
+  every channel inside it to the top level. The single `channel.delete` entry names the category and
+  nothing else, so an operator asking "why is this channel suddenly at the top level" finds no entry that
+  mentions it. M14 gave deletions a payload and this is the one deletion whose effects reach objects it
+  does not name. Closing it means either listing the affected ids as context — unbounded, up to the
+  500-channel ceiling — or emitting a `channel.update` per child, which multiplies one moderation action
+  into 500 entries in a table nothing sweeps. Both are decisions about entry *volume* rather than about
+  the diff shape this milestone settled.
+- **Reopens if**: a client renders the channel tree from the audit log rather than from the channel
+  listing, or a moderation surface starts answering "what happened to this channel" by query rather than
+  by an operator reading — either makes the missing rows load-bearing rather than merely absent.
+- **Not reopened by**: changing the deletion to cascade instead. That was weighed at M14 — it would remove
+  the re-parenting this entry is about — and rejected on Discord parity and on irreversibility: a cascade
+  makes an ordinary tidying action destroy content nobody meant to touch. Migration `000015` now carries
+  that reasoning next to the `ON DELETE SET NULL` it applies to.
+
+### A kick or a role deletion destroys permission overwrites and records none of their bits
+- **Raised**: M14, `/code-review xhigh`
+- **Verdict**: accepted risk, and it inherits a question already routed elsewhere
+- **Why**: `RemoveMember` calls `DeleteOverwritesForTarget` and records only the nickname; `DeleteRole`
+  removes the role's overwrites on every channel and records name, permissions and position.
+  `DeleteOverwrite`'s own comment makes the case against this — "removing a deny grants whatever it
+  denied, so an operator reading this entry needs the bits" — and a kick does that N times over. It is not
+  closed here for the same reason as the entry above: the count is unbounded, and the residual only
+  *matters* once the target can return, which is the rejoin question M13 routed to M57 and M72a. Note the
+  asymmetry is already guarded in the direction that would be an escalation: `DeleteRole` refuses to
+  remove overwrites whose bits the caller lacks, while `RemoveMember` deliberately does not, so a member
+  cannot become unkickable.
+- **Reopens if**: a join path exists (M57, M72a) — at which point the rejoin question and this one are the
+  same question and should be answered together, since what makes a silently-restored deny dangerous is
+  exactly that nothing in the log explains it.

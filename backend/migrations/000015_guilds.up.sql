@@ -26,8 +26,12 @@ CREATE TABLE guilds (
   name              varchar(100) NOT NULL,
   -- No ON DELETE. A guild whose owner is deleted is not a guild with a NULL owner and it is not a guild
   -- that vanishes with them — ownership transfer is a real operation with real consequences for everyone
-  -- else in it, and the account-deletion path (M66) has to make that decision explicitly rather than have
-  -- a cascade make it silently. Until then the FK refuses the delete, which is the honest failure.
+  -- else in it, and the account-deletion path has to make that decision explicitly rather than have a
+  -- cascade make it silently. Until then the FK refuses the delete, which is the honest failure.
+  --
+  -- That path is `DELETE /users/@me`, built at M76a. This comment said "(M66)" until M14 checked it;
+  -- M66 is public matchmaking, and every other reference to it in the repository is about matchmaking.
+  -- M13a's ownership transfer is what gives this FK an answer other than refusing the delete.
   owner_id          bigint NOT NULL REFERENCES users(id),
   icon_hash         text NULL,
   description       text NULL,
@@ -155,6 +159,12 @@ CREATE TABLE channels (
   type            smallint NOT NULL,
   -- The category a channel sits under. ON DELETE SET NULL, so deleting a category orphans its children to
   -- the top level rather than deleting them — losing a category must not lose the conversations in it.
+  -- ON DELETE SET NULL, so deleting a category orphans its children to the top level rather than taking
+  -- them with it. Reconsidered at M14 and kept: Discord does exactly this, and losing a category must not
+  -- lose the conversations inside it — a cascade here is irreversible and would make an ordinary tidying
+  -- action destroy content nobody meant to touch. The residual is that the audit log names the category
+  -- and not the channels that moved; that is recorded in docs/security-ledger.md rather than fixed,
+  -- because the count is unbounded up to the 500-channel ceiling.
   parent_id       bigint NULL REFERENCES channels(id) ON DELETE SET NULL,
   name            varchar(100) NULL,
   topic           text NULL,

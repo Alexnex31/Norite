@@ -49,7 +49,13 @@ services:
       - "127.0.0.1:8025:8025"
 
   backend:
-    image: golang:1.25-alpine
+    # Must track the workspace's `go` directive, which is 1.26.0. It did not, and `just dev` was broken
+    # from the moment that directive was raised for an x/crypto advisory until M14's manual pass tried to
+    # start the stack: the container refused to build with "go.mod requires go >= 1.26.0 (running go
+    # 1.25.12; GOTOOLCHAIN=local)". Alpine images set GOTOOLCHAIN=local, so there is no automatic download
+    # to paper over the mismatch — which is the right behaviour and the reason it failed loudly rather
+    # than silently building against a different toolchain.
+    image: golang:1.26-alpine
     working_dir: /app/backend
     volumes:
       # go.work is deliberately NOT mounted here: it lists cli/gui/daemon too, and Go auto-discovers any
