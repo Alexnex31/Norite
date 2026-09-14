@@ -27,7 +27,15 @@ modcache=$(go env GOMODCACHE)
 first_party="github.com/Alexnex31/Norite"
 
 # go-licenses' identifiers, one "importpath license" pair per line.
-ids=$(cd "$repo/$module_dir" && GOWORK=off go-licenses report "$main_pkg" --ignore "$first_party" 2>/dev/null \
+#
+# The version is required rather than defaulted, and go-licenses is run through `go run` rather than taken
+# from PATH — the same decision the justfile and CI make, for the same reason: this script is the third
+# caller, and a default here would be a fourth place the pin could drift from. It is exported by
+# `just notices` and set at the workflow level in CI.
+: "${GO_LICENSES_VERSION:?set it, or run this through \`just notices\` which does — it must match the pin in the justfile and ci.yml}"
+ids=$(cd "$repo/$module_dir" \
+        && GOWORK=off go run "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION" report "$main_pkg" \
+             --ignore "$first_party" 2>/dev/null \
         | awk -F, 'NF>=3 {print $1, $NF}') \
   || { echo "gen-notices: $module_dir: go-licenses report failed; refusing to write a partial file" >&2; exit 1; }
 
@@ -58,6 +66,12 @@ while read -r mod ver; do
       || { echo "gen-notices: no license file found for $mod@$ver in $dir" >&2; exit 1; }
 
     # Longest-prefix join: the identifier is reported against the import path, not the module path.
+    #
+    # Since go-licenses v2 a path can report more than one identifier, because a LICENSE file can hold more
+    # than one license — pgerrcode's MIT is followed by the PostgreSQL license its error data is under. The
+    # comparison is strictly greater, so the first wins, and that is deterministic only because the version
+    # is pinned. It is also the lesser half of what this file does: the identifier is a summary, while the
+    # obligation is discharged by the full LICENSE text below it, which carries every license in the file.
     id=$(awk -v m="$mod" 'index($1, m) == 1 && length($1) >= length(m) {
              if (length($1) > best) { best = length($1); v = $2 }
          } END { print (v == "" ? "UNKNOWN" : v) }' <<<"$ids")

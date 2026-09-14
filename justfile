@@ -343,6 +343,9 @@ notices: build-local
     #!/usr/bin/env bash
     set -euo pipefail
     gen={{justfile_directory()}}/scripts/gen-third-party-notices.sh
+    # The script's third caller of go-licenses, and the pin reaches it the same way CI's does: exported,
+    # never defaulted inside the script.
+    export GO_LICENSES_VERSION={{go_licenses_version}}
     "$gen" backend ./cmd/server  bin/norite-server backend/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt
