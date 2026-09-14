@@ -506,10 +506,27 @@ re-derive:
   nothing else will. **And a fourth, which this list did not name until M14 found it the hard way:
   `docker/docker-compose.yml`'s `golang:` image.** It sat at 1.25 after the directive went to 1.26.0, so
   `just dev` refused to build the backend at all — for however long it was between that raise and somebody
-  next starting the stack. CI never sees it, because CI does not run compose. **`govulncheck` is deliberately not
+  next starting the stack. CI never sees it, because CI does not run compose. **And a fifth, found at M14
+  the first time the licence gate was actually run: `go_licenses_version` / `GO_LICENSES_VERSION`.** It was
+  `go install …@latest` in CI and nothing at all locally, which looked safe and was safe only by accident —
+  go-licenses v2 moved to a `/v2` module path, so `@latest` on the bare path can never resolve past v1.6.0.
+  The accident is gone now that it points at `/v2`, which is actively released.
+  **`govulncheck` is deliberately not
   pinned**, in CI or the justfile: what pinning buys the other two is that an upstream release cannot
   surprise an unrelated PR, and here the surprise *is* the product — the job fails on a new advisory
-  fetched from the vulnerability database at run time, which pinning the binary would not prevent.
+  fetched from the vulnerability database at run time, which pinning the binary would not prevent. That
+  reasoning was copied onto go-licenses and was wrong there: govulncheck answers from a database fetched at
+  run time, so its binary version does not decide the outcome, while go-licenses decides entirely from the
+  code in front of it — v1 reports the first licence in a `LICENSE` file and v2 reports every one, which is
+  a seven-row difference on today's tree and would be a missed copyleft block on tomorrow's.
+- **Every generator is invoked as `go run …@{{version}}`** — `sqlc`, `oapi-codegen`, and since M14
+  `go-licenses` — rather than from a binary on `PATH`. Nothing has to be installed, and the pinned version
+  cannot be shadowed by whatever a distro package put in `/usr/bin`. That is not hypothetical: the
+  maintainer's machine had go-licenses v1.6.0 in `~/go/bin` and a packaged v2.0.1 in `/usr/bin`, with
+  `~/go/bin` on no shell's `PATH`, so `just license-inventory` silently produced a different inventory than
+  CI would — a diff that would have read as *a dependency's licence changed* rather than as a tool version.
+  `golangci-lint` stays a real binary because it is too slow under `go run`, which is why it is the one that
+  warns on a mismatch instead.
 - **CI runs five jobs**: `lint`, `test`, `codegen`, `security` and `build`. `security` is `govulncheck`
   per module, the same command `just security-scan` runs, and it is blocking. It exists from M11; before
   that `architecture.md` claimed it did while `ci.yml` had four jobs and no `govulncheck` anywhere — the
