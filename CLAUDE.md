@@ -261,6 +261,22 @@ contributor list is meant to reflect that. Note this is not retroactively fixabl
 trailer after the fact means rewriting history, which invalidates the GPG signature GitHub applies to
 web-UI merges, so the cost of getting it wrong once is a permanently unsigned commit on `main`.
 
+**It is three shapes, not one.** Agent harnesses inject all three by default: a `Co-Authored-By:` trailer,
+a **session-link trailer** (`Claude-Session: https://…`, or any equivalent pointing at a conversation),
+and a **PR-body footer** (`🤖 Generated with …`). All three are forbidden, for the same reason and with the
+same one-way cost — and the session link is additionally a URL into a private conversation, pushed to a
+public repository forever.
+
+The `commit-msg` hook caught only the first until M15, when running it against one of each showed the
+other two passing cleanly; it now rejects all three. **That is not a reason to rely on it.** It is
+untracked, so a fresh clone has none of it, it cannot see a PR body at all, and the shape a harness
+injects next is one nobody has written a pattern for. Strip all three deliberately and check before every
+commit and PR body:
+
+```bash
+git log main..HEAD --format='%B' | grep -niE 'co-authored-by|claude-session|generated with|🤖'
+```
+
 **Staging — never `git add -A`, `git add .`, or `git commit -a`.** Stage the paths the commit is actually
 about, by name. This is not tidiness: those commands sweep up whatever else happens to be in the tree, and
 what is in the tree during a manual test is a config file holding real credentials. That is exactly how a
@@ -285,7 +301,10 @@ a replacement for it, for the same reason the project skills are described here 
 this file is the authority, and anything enforced only by an untracked file is enforced only on one
 machine.
 
-- `commit-msg` rejects a message crediting an AI agent as author or co-author.
+- `commit-msg` rejects a message crediting an AI agent — all three shapes above, since M15: the
+  `Co-Authored-By:` trailer it always caught, plus the session-link trailer and the "Generated with …"
+  footer, which were found to pass it by testing one of each rather than by assuming the first pattern
+  covered them.
 - `pre-commit` rejects staged content that looks like a live credential: a provider token format
   (`ghp_`, `AKIA`, `AIza`, a PEM private-key header), a secret-named setting given a long opaque value, or
   a `.env` file forced past `.gitignore`. It deliberately ignores values that announce themselves as fakes
@@ -1356,9 +1375,12 @@ Where they exist, invoke with `/<name>`:
   paraphrasing proves reading, and because the result is visible to whoever is reading the output. It then
   has the session derive milestone state from `git` rather than from "Milestone status" above, which is
   written at completion and is behind by design mid-milestone; read the authority its task needs rather
-  than the ~7,000-line doc set; and run the enumerated-fact self-checks. **It deliberately contains no
-  rules of its own** — a second copy in an untracked file is the drift this section warns about, so it
-  points at this file and defers.
+  than the ~7,000-line doc set; and run the enumerated-fact self-checks. It gives the authorship rule a
+  section of its own, because an agent's harness actively instructs it to add all three forbidden shapes
+  and the local hook is a partial, untracked backstop rather than a guarantee. It also sends the session
+  to `README.md` — the only outside-in view of the project, and the one place a wrong claim is wrong in
+  public. **It deliberately contains no rules of its own** — a second copy in an untracked file is the
+  drift this section warns about, so it points at this file and defers.
 - `/new-endpoint` — scaffold a new REST route (sqlc query → service → handler → OpenAPI contract → tests).
 - `/new-gateway-event` — scaffold a new real-time dispatch event end-to-end (backend publish → schema →
   frontend/daemon-side zod/dispatcher).
