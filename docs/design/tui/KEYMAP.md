@@ -82,6 +82,7 @@ filter, `C-c z` reverting an unsaved settings section — it keeps the global ch
 | `C-c D` | toggle deep work (`5d`) | global |
 | `C-c h` | review held messages (`5d`) | global |
 | `C-c f` | verify keys / devices (`6a`) | global |
+| `C-c g` | guild info & your preferences (`6e`) | global |
 | `C-c i` | inspect plugin manifest (`6b`) | global |
 | `C-c l` | plugin logs | global |
 | `C-c s` | save (settings, profile) | global |

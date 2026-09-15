@@ -89,18 +89,23 @@ area the width that makes it readable. What is dropped stays reachable by chord,
 its two rows at every width — truncating segments (counts first, then the clock) rather than wrapping.
 
 ## Screens
-26 screens, grouped into 7 sections. Each carries a stable id used throughout this package
+27 screens, grouped into 7 sections. Each carries a stable id used throughout this package
 (`1a`, `2c`, …) and shown as a badge in the mock. Full per-screen specs: **SCREENS.md**.
 
 | Section | Ids |
 | --- | --- |
 | 1 · Core screens | 1a main · 1b DM · 1c group DM · 1d settings · 1e own profile · 1f other's profile |
 | 2 · Panes & layout | 2a two panes, full chrome · 2b two panes, shared chrome · 2c three+ panes |
-| 3 · Finding & running | 3a switcher (default) · 3b switcher (minibuffer) · 3c search · 3d help overlay · 3e M-x |
+| 3 · Finding & running | 3a switcher (default) · 3b switcher (minibuffer) · 3c search · 3d help overlay · 3e M-x · 3f guild directory |
 | 4 · Voice | 4a full voice view · 4b in-call strip |
 | 5 · Lifecycle & states | 5a first run · 5b empty · 5c disconnected · 5d deep work · 5e whisper |
-| 6 · Trust & admin | 6a device verify · 6b plugins · 6c admin reports · 6d about & licenses |
+| 6 · Trust & admin | 6a device verify · 6b plugins · 6c admin reports · 6d about & licenses · 6e guild info |
 | 7 · Shared components | 7a status bar |
+
+The count above is **screens**, and `7a` is a shared component rather than one — so `SCREENS.md` carries
+28 `###` headings for 27 screens. This table had drifted before: `3f` was added to `SCREENS.md` when the
+guild directory became `M72a` and never reached here, which is why the two disagreed by one until `6e` was
+added and the counts were checked against each other rather than trusted.
 
 ## The three load-bearing decisions
 Everything else follows from these. Get them right first.
@@ -230,7 +235,7 @@ which is the normative document anyway.
 
 ## Files in this bundle
 - `README.md` — this file
-- `SCREENS.md` — per-screen specification, all 26 screens
+- `SCREENS.md` — per-screen specification, all 27 screens
 - `TOKENS.md` — palette, grid, glyph set, component recipes
 - `KEYMAP.md` — every chord, with scope and target screen
 - `mockups.dc.html` — the visual reference (open in a browser; ids are anchors, e.g. `#2c`)

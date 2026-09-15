@@ -16,7 +16,7 @@ quality bar and the same support commitment. The roadmap looks lopsided (Phase P
 on the flagship's Kubernetes track against M96 plus documentation for self-hosting) and that is deployment
 complexity, not priority — the flagship is the one deployment needing real horizontal scale and HA
 (ADR 0021). **Four clients**: a scriptable CLI (the command tree — one action, exit, pipeable), a
-full-screen **TUI** (the in-terminal application: panes, chords, 26 specified screens), a native GUI
+full-screen **TUI** (the in-terminal application: panes, chords, 27 specified screens), a native GUI
 mirroring the TUI's information architecture, and a lower-priority web SPA built later. The CLI, TUI and
 GUI share one local background daemon per OS user account; the CLI and TUI share one command tree, so
 `M-x` in the TUI runs every verb (ADR 0026). "CLI" here means the command tree only; where it once meant
@@ -343,12 +343,13 @@ running as an explicitly parallel track) is in `docs/roadmap.md`.
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Ten exist:
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Twelve exist:
 `M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
-surface), `M16b` (opt-in per-guild message audit), `M20a` (first usable client), `M56a` (message
-reactions), `M67a` (registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer
-sorts, optional) and `M76a` (self-service account export and deletion). `M72b` was the first `b`, which the
-convention already allowed — letters run `a`, `b`, `c` in insertion order after the same number.
+surface), `M16b` (opt-in per-guild message audit), `M17a` (guild administration verbs), `M20a` (first
+usable client), `M56a` (message reactions), `M62a` (guild info and per-guild preferences), `M67a`
+(registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional) and
+`M76a` (self-service account export and deletion). `M72b` was the first `b`, which the convention already
+allowed — letters run `a`, `b`, `c` in insertion order after the same number.
 
 **This list said "seven" and omitted `M76a` until M15's planning**, because M14 inserted that milestone
 and did not come back here. A list enumerating its own members is one that drifts silently on the next
@@ -1363,7 +1364,7 @@ Where they exist, invoke with `/<name>`:
 The doc set has one authority per topic — if two files seem to cover the same ground, that is drift and
 should be fixed, not tolerated:
 
-- `docs/design/tui/` — **what the terminal client looks like and does.** `SCREENS.md` (26 screens with
+- `docs/design/tui/` — **what the terminal client looks like and does.** `SCREENS.md` (27 screens with
   stable ids `1a`…`7a`), `KEYMAP.md`, `TOKENS.md`, and `README.md` (the grid, the responsive rules, and the
   corrections applied to the original handoff). Normative: milestones cite screen ids rather than restating
   them, and `mockups.dc.html` is an illustrative rendering, not authoritative where it disagrees.

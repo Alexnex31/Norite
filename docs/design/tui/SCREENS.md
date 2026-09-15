@@ -1,6 +1,6 @@
 # Screens
 
-26 screens. Ids match the badges in `mockups.dc.html` (open it and jump to `#1a`, `#2c`, …).
+27 screens. Ids match the badges in `mockups.dc.html` (open it and jump to `#1a`, `#2c`, …).
 Every screen shares: 120×40 cells, the 4-column chrome (rail 8 / channels 25 / message flex / members 22,
 1 blank cell between), and the 2-row status bar (`7a`). Only deviations are noted per screen.
 
@@ -359,6 +359,34 @@ except `C-c ?`, which opens it.
 
 A fork that has modified Norite shows **its own** source URL here, because the value comes from the
 instance's `[source].url` rather than from a constant — see `architecture.md` §11.
+
+### 6e — Guild info & your preferences
+**Purpose** what this guild is, and the choices *you* have about it as an ordinary member. Reached with
+`C-c g` or `M-x guild info`. **Not an administration screen** — it holds nothing gated on a permission,
+and every member of the guild sees the same thing apart from their own settings.
+
+**Deviations** settings nav with the guild's name active; no right column, like `6d`.
+- Header: the guild's name, its owner, and `N members` in `text.dim`.
+- **Recording** block, and it is the reason this screen exists. When the guild has
+  `message_audit_enabled` (`M16b`) it reads, in `warn`: *messages in this guild are recorded — every
+  message sent here is kept in a log its moderators can read, including edits and deletions*. When the
+  guild does **not**, it reads in `text.dim`: *messages in this guild are not recorded beyond the normal
+  history*. **Both states are stated; neither is silence.** A screen that showed a line only when
+  recording was on would make its absence carry meaning it cannot be trusted to carry — a member who
+  never found the screen learns nothing either way, and one who did would have to remember what absence
+  looked like.
+- **Your notification filters** block: the patterns you have scoped to this guild (`M62`), `RET` to edit
+  and `DEL` to remove. Empty until `M62`, and visibly empty rather than hidden.
+- Footer: `RET edit · DEL remove · ESC close`.
+
+**On why the notice lives here rather than in the channel view.** The alternative was a persistent
+indicator in `1a`, which is the surface every member sees without looking for it. It was rejected: a
+permanent banner on the main screen is one people stop reading within a day, and the thing that has to be
+discoverable is not the glyph but the sentence explaining what recording means. This screen is reachable
+by a chord, named in `M-x`, and linked from the join flow — see the `M62a` entry in `docs/roadmap.md`,
+which owns the decision about what a member is told at the moment they join.
+
+No chord here is new except `C-c g`. `ESC` closes, per the shared conventions.
 
 **On the obligation.** AGPL §5(d) requires an interactive program to display Appropriate Legal Notices
 *where the original already does*, so the baseline is Norite's to set rather than something already forced

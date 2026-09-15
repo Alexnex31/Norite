@@ -668,9 +668,15 @@ of this section.
 
   **It is the second surface to inherit rule 13**, after M16a, and the more dangerous one because it stores
   content rather than reading it: the exclusion of E2E DMs must be explicit and tested, not inferred from
-  the setting being guild-scoped. It also needs a decision M16a does not: whether members are *told* the
-  guild records their messages. Recording conversations without notice is a different product from
-  recording them with it, and the answer belongs in the ledger with its *reopens if*.
+  the setting being guild-scoped.
+
+  **Members are told, and the surface is `6e`** — settled 2026-09-15, because recording conversations
+  without notice is a different product from recording them with it. That screen states the guild's
+  recording status in *both* directions, so the absence of a warning is never the thing a member has to
+  interpret; it belongs to **M62a**, which also owns the remaining question of whether somebody is told at
+  the moment they join rather than only when they look. M16b's own obligation is narrower and structural:
+  the flag has to be readable by any member of the guild, not only by somebody holding a permission, or
+  the screen cannot state either case honestly.
 
   Depends on M15 (messages) and M16a (the moderation-read-over-content pattern and its disclosure
   decision). Done when: a guild with the setting off writes nothing to `message_audit_entries`, one with it
@@ -680,6 +686,32 @@ of this section.
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and
   permission gating on shared-tag creation is enforced.
+- **M17a — Guild administration verbs**: the `norite guild`, `norite channel` and `norite role` command
+  groups over the REST surface M12, M13 and M14 built. Assigned 2026-09-15.
+
+  **It closes the largest client gap in the plan, and the gap was invisible because nothing failed.**
+  M12–M14 shipped twenty-one guild routes — guild CRUD, channels, roles, the position hierarchy, permission
+  overwrites, member role assignment and the audit log — and **no milestone anywhere gave a client a way to
+  call any of them**: not a TUI screen (the 27 in `docs/design/tui/` include none for guild settings), not a
+  CLI verb (no entry mentioned `norite guild`), nothing. M48 standardizes `--json` output for "every
+  data-printing verb" and never says who creates these; ADR 0026 requires every verb to be `M-x`-invocable
+  and so assumes they exist. Found at M15's planning, the same way M76a and M16a were: by reading one
+  document against another rather than by anything breaking.
+
+  **Placed here because this is where its dependencies complete**, not for convenience: the verbs need the
+  REST endpoints (M14) and the command tree (M2), and nothing from Phase D. Every verb is a `--json`
+  structured result from the start rather than printed text retrofitted at M48 — that is ADR 0026's
+  requirement, and M48's own entry says a verb without one is a verb the TUI cannot run.
+
+  **It also makes Phase C hand-testable.** M13's channel-visibility bug was found by driving a real guild by
+  hand and M14's compose breakage the same way; today that means curl against a snowflake id copied out of
+  psql. Rule 19 applies throughout — every guild name, channel name, role name and audit entry these print
+  is text a stranger's instance chose, so it goes through `cli/internal/termsafe` (M7).
+
+  Depends on M14 (the endpoints) and M10 (`apiclient`, the transport). Done when: a guild can be created,
+  renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
+  command line, with `--json` output validated against `contracts/cli-json/` and a non-member's refusal
+  reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
 
@@ -1114,6 +1146,35 @@ of this section.
 - **M62 — Regex notification filters**: server-side evaluation via Go's stdlib `regexp` (RE2), a
   pattern-length cap as defense-in-depth. Done when: a saved filter correctly matches/suppresses
   notifications server-side, including for a client that's currently offline.
+- **M62a — Guild info and per-guild preferences** (`6e`): the member-facing guild screen — what this guild
+  is, whether it records messages, and the notification filters you have scoped to it. Assigned
+  2026-09-15. **Not an administration screen**: it holds nothing gated on a permission, which is what
+  distinguishes it from M17a's verbs.
+
+  **It owns the question M16b could not answer: whether members are told the guild records them.** The
+  answer is yes, and on this screen, and **in both directions** — a guild that records says so in `warn`,
+  and a guild that does not says *that*, in `text.dim`. Stating only the positive case is the tempting
+  design and is worse: a line that appears only when recording is on makes its absence carry a meaning
+  nothing guarantees, so a member who never opened the screen learns nothing and one who did would have to
+  remember what absence looked like. Two states, both written down, is the only version a person can rely
+  on.
+
+  **Placed here because this is where its content exists.** The screen needs the TUI shell (M41–M46),
+  the recording flag (M16b) and the filters it lists (M62) — and the `6x` screens are each drawn by the
+  milestone that owns their feature rather than by a TUI milestone, which is why `6a` sits at M98 and `6c`
+  at M74.
+
+  **One decision it must take rather than inherit**: whether a member is told at the moment they *join* a
+  recording guild, not only when they go looking. A screen behind a chord is discoverable, not
+  unmissable, and joining is the point where the choice to participate is actually made — but a modal on
+  join is also the thing people click through. The options are a system line in the channel (`1a` already
+  renders them), a one-time notice, or nothing beyond this screen. Whichever is chosen goes in
+  `docs/security-ledger.md` with its *reopens if*, beside M16b's own entries.
+
+  Depends on M16b (the flag), M62 (the filters) and M46 (the pane engine). Done when: a member with no
+  permissions can open `6e` with `C-c g` in a guild they belong to, read an accurate recording state in
+  both the on and off cases, see and remove their own filters for that guild, and reach nothing that
+  requires a permission.
 - **M63 — Bandwidth/network performance toggles**: client-side settings (e.g. disable image loading, wired
   to the M51 rendering path). Done when: toggling the setting suppresses inline image rendering without
   affecting anything else, including custom-emoji rendering, which stays unaffected.
