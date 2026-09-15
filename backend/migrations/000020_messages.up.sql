@@ -64,6 +64,17 @@ CREATE TABLE messages (
 -- 000015's argument for roles_guild_id_position_idx, on the table where it matters most.
 CREATE INDEX messages_channel_id_id_idx ON messages (channel_id, id DESC);
 
+-- **What the three indexes on this table cost, measured rather than asserted.** 50,000 inserts each way:
+--
+--   with all three    17.3 us/row
+--   primary key only  13.7 us/row
+--
+-- 3.6 us, or 26%, on the highest-volume insert path in the product. Recorded because 000019 asserted an
+-- index's cost without checking and M14 had to go back and measure it — and because the saving is the
+-- only thing that makes the cost defensible, so the two belong next to each other: 12.094 ms to 0.416 ms
+-- on the backlog read, and 6,934 ms to 5.651 ms on a 500-message delete. No index here is optional at
+-- that ratio, but the next one added to this table should be made to argue against these numbers.
+--
 -- Both of these are foreign keys, and this project has now paid for an unindexed one twice — M11's
 -- replaced_by_id at 3,757 ms in a trigger, M12's guild_member_roles.role_id at 4,566 ms on 500 deletions
 -- — and cleared a third suspicion at M13 by measuring rather than assuming. So both were measured here
