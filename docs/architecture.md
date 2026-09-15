@@ -929,15 +929,14 @@ POST   /channels/{channel_id}/messages     -- M15
 PATCH  /channels/{channel_id}/messages/{message_id}    -- M15; appends the prior content to
                                            --   message_edit_history in the same transaction
 DELETE /channels/{channel_id}/messages/{message_id}    -- M15
-                                           -- There is deliberately no route reading message_edit_history.
-                                           --   M15 writes the table and nothing reads it back, which is
-                                           --   the shape audit_log_entries had from M12 to M14 — written
-                                           --   under a rule, read once a milestone owned the surface. The
-                                           --   reader is unassigned; whoever takes it inherits rule 13,
-                                           --   which names edit-history among the server-side paths that
-                                           --   must exclude E2E DMs. Nothing else in this document
-                                           --   discusses that surface, which is part of why it has no
-                                           --   milestone.
+GET    /channels/{channel_id}/messages/{message_id}/history
+                                           -- M16a; PermManageMessages, not channel-read. M15 writes
+                                           --   message_edit_history and nothing reads it until here, the
+                                           --   shape audit_log_entries had from M12 to M14. Placed after
+                                           --   M16 because a moderator triaging a report is the consumer,
+                                           --   and rule 13 applies: E2E DM content must be excluded
+                                           --   explicitly, not left to the guild-scoped permission making
+                                           --   it unreachable by shape.
 PUT    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- react (M56a); idempotent
 DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- un-react; idempotent
 POST   /channels/{channel_id}/typing

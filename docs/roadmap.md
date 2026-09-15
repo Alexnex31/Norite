@@ -573,11 +573,10 @@ of this section.
   on the audit write beside it.
 
   **M15 writes that table and nothing reads it back, which is deliberate and is a shape this project has
-  run before**: `audit_log_entries` was written under rule 2 from M12 and had no reader until M14. No
-  endpoint exposing edit history exists anywhere in `architecture.md`'s route list, and **none is assigned
-  to a milestone** — an open question rather than a decision, recorded here and beside the route list so it
-  is inherited rather than rediscovered. Whoever takes it inherits rule 13, which names edit-history
-  explicitly among the server-side paths that must exclude E2E DMs.
+  run before**: `audit_log_entries` was written under rule 2 from M12 and had no reader until M14. The
+  reader here is **M16a**, assigned the same day rather than left open, and placed after M16 because that
+  is where its consumer is. M15 owes it nothing beyond writing rows an order can be reconstructed from —
+  which is what `edited_at` and the index on `(message_id, edited_at DESC)` are for.
 
   **It deliberately does not build the search indexes.** `architecture.md`'s DDL for `messages` carries a
   `content_search` `tsvector` column and GIN indexes including `pg_trgm`, and every one of those is
@@ -606,6 +605,35 @@ of this section.
   Instance-Admin-facing half does not exist until M74. Report filing is rate-limited now (reuses existing
   REST rate limiting). Depends on M15 (a message must exist to report). Done when: a guild member can file a
   report against a message, and a `PermManageMessages` holder can see and resolve it.
+- **M16a — Message edit history read surface**: `GET /channels/{channel_id}/messages/{message_id}/history`
+  over the `message_edit_history` table M15 writes and nothing reads. Assigned 2026-09-15, having had no
+  milestone since the table was first drawn; the gap was found the same way M76a's was, by reading
+  `architecture.md`'s DDL against this file.
+
+  **Placed after M16 rather than beside M15 because M16 builds the consumer.** The dependency is only on
+  M15 — the rows exist from the moment an edit does — but a history nobody has a reason to open is a
+  surface with a disclosure cost and no use, and the reason is a moderator triaging a report on a message
+  that was edited after it was sent. M16 also establishes `PermManageMessages` as the gate for
+  message-scoped moderation reads, which is the gate this reuses rather than inventing a bit for.
+
+  **The disclosure decision is the milestone**, and it is M14's question asked about content rather than
+  metadata. Edit history is not offered to everyone who can read the channel: a typo correction, a
+  removed phone number and a retracted sentence are all permanently readable under that design, which
+  makes editing a trap rather than a repair. It is a moderation surface, `PermManageMessages`, with an
+  author-reads-their-own carve-out to decide explicitly rather than by omission. Whatever is chosen goes
+  in `docs/security-ledger.md` with its *reopens if*, as M14's did.
+
+  **Rule 13 applies and must be satisfied explicitly, not inferred.** E2E is `DM`-only, a DM has no guild,
+  and `PermManageMessages` is guild-scoped — so the endpoint looks unreachable for E2E content by shape.
+  That is the same "closed by construction" claim M11a made about password reset not bypassing the second
+  factor, and M11a's lesson is that such a claim stops being true quietly: it was given a test anyway.
+  Do both here — the explicit exclusion rule 13 asks for, and a test that fails if the shape argument ever
+  stops holding.
+
+  Depends on M15 (the table and its writer) and M16 (the triage flow and its permission gate). Done when:
+  a `PermManageMessages` holder can read a message's prior versions in order, somebody without it cannot,
+  an E2E-encrypted DM's history is never returned by any caller, and the disclosure decision is recorded
+  in the ledger.
 - **M17 — Message tagging**: `message_tags` (plus its join table), guild-wide scope (not per-channel),
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and

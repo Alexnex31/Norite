@@ -332,11 +332,17 @@ running as an explicitly parallel track) is in `docs/roadmap.md`.
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Seven exist:
-`M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M20a` (first usable client),
-`M56a` (message reactions), `M67a` (registration anti-automation), `M72a` (guild discovery directory) and
-`M72b` (its richer sorts, optional). `M72b` is the first `b`, which the convention already allowed —
-letters run `a`, `b`, `c` in insertion order after the same number.
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Nine exist:
+`M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
+surface), `M20a` (first usable client), `M56a` (message reactions), `M67a` (registration
+anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional) and `M76a`
+(self-service account export and deletion). `M72b` is the first `b`, which the convention already allowed
+— letters run `a`, `b`, `c` in insertion order after the same number.
+
+**This list said "seven" and omitted `M76a` until M15's planning**, because M14 inserted that milestone
+and did not come back here. A list enumerating its own members is one that drifts silently on the next
+insertion, so check it against the roadmap rather than trusting it:
+`grep -cE '^- \*\*M[0-9]+[a-z] — ' docs/roadmap.md`.
 
 **Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
 testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed
@@ -461,11 +467,15 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   Two scope decisions were taken at planning (2026-09-15) rather than left to be discovered, both from
   reading `architecture.md`'s DDL against the roadmap. **`message_edit_history` is M15's**: it had sat in
   the schema since it was written with no milestone owning it, the same gap M14 found with account
-  deletion and closed as M76a, and it belongs to the edit endpoint that writes it. **The search machinery
-  is not M15's**: the `content_search` generated column and both GIN indexes in that same DDL block are
-  M65's, and building them here would pull `pg_trgm` in ahead of any query needing it. `is_e2e` *is*
-  M15's, because it is what M65's column keys its exclusion off. Both splits are annotated in the DDL,
-  since that block is what somebody copies.
+  deletion and closed as M76a, and it belongs to the edit endpoint that writes it. M15 only *writes* it;
+  the reader is **M16a**, placed after guild reports because a moderator triaging one is the consumer, and
+  carrying the disclosure decision — edit history is not offered to everyone who can read the channel, or
+  editing a typo publishes it forever.
+
+  **The search machinery is not M15's**: the `content_search` generated column and both GIN indexes in
+  that same DDL block are M65's, and building them here would pull `pg_trgm` in ahead of any query
+  needing it. `is_e2e` *is* M15's, because it is what M65's column keys its exclusion off. Both splits are
+  annotated in the DDL, since that block is what somebody copies.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
