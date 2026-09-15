@@ -274,8 +274,15 @@ injects next is one nobody has written a pattern for. Strip all three deliberate
 commit and PR body:
 
 ```bash
-git log main..HEAD --format='%B' | grep -niE 'co-authored-by|claude-session|generated with|🤖'
+git log main..HEAD --format='%B' \
+  | grep -niE '^\s*(co-authored-by:|[a-z]+[-_]?session:|🤖)|generated with \[?claude'
 ```
+
+**Anchored, and that is the point.** The unanchored version of this check was committed first and
+false-positived immediately — on the commit message introducing the rule, which necessarily names all
+three shapes in prose. A check that fires on any message *discussing* it is one somebody stops reading
+within a week, which is the reason `pre-commit` deliberately ignores values announcing themselves as
+fakes. The hook was written anchored and never had the problem.
 
 **Staging — never `git add -A`, `git add .`, or `git commit -a`.** Stage the paths the commit is actually
 about, by name. This is not tidiness: those commands sweep up whatever else happens to be in the tree, and
