@@ -97,7 +97,18 @@ These apply to every milestone, not just a final pass — treat a PR that violat
    `roles.Resolve(...)` (or an explicit hierarchy check for role/member management) using data freshly
    loaded for the *specific* guild/channel in the request path. Never trust a client-supplied ID without
    verifying it belongs to the actor's claimed context.
-2. **Every guild-scoped mutation writes an audit log entry**, in the same DB transaction as the mutation.
+2. **Every guild-scoped *administrative* mutation writes an audit log entry**, in the same DB transaction
+   as the mutation. Administrative means a change to the guild's configuration, or authority exercised over
+   another member — every verb in `guilds.AuditActions()` is one, and that list is the test. **Message
+   content is deliberately outside it**, settled at M15's planning: a member posting where they are
+   permitted exercises authority over nobody, while auditing every send would put the product's
+   highest-volume write on the audit path and bury the moderation signal the log exists to carry. A
+   moderator acting on somebody *else's* message is administrative and is audited. The word was added
+   here at M15 — before it, the rule read "every guild-scoped mutation" and M15 would have been the first
+   milestone to knowingly violate its letter, which is how a rule stops constraining the next case.
+   Guilds that want every message recorded opt in at **M16b**, which writes to its own table and never to
+   `audit_log_entries`; **turning that option off is itself administrative and is audited here**, or it
+   would be the one setting you could change to hide what you did next.
 3. **All SQL goes through sqlc-generated, parameterized queries.** No `fmt.Sprintf`-built SQL, ever.
 4. **No mutating logic in GET handlers.** GET must stay side-effect-free — the CSRF double-submit scheme
    depends on this, but that scheme itself only exists for the future web SPA's BFF layer; the
@@ -332,12 +343,12 @@ running as an explicitly parallel track) is in `docs/roadmap.md`.
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Nine exist:
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Ten exist:
 `M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
-surface), `M20a` (first usable client), `M56a` (message reactions), `M67a` (registration
-anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional) and `M76a`
-(self-service account export and deletion). `M72b` is the first `b`, which the convention already allowed
-— letters run `a`, `b`, `c` in insertion order after the same number.
+surface), `M16b` (opt-in per-guild message audit), `M20a` (first usable client), `M56a` (message
+reactions), `M67a` (registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer
+sorts, optional) and `M76a` (self-service account export and deletion). `M72b` was the first `b`, which the
+convention already allowed — letters run `a`, `b`, `c` in insertion order after the same number.
 
 **This list said "seven" and omitted `M76a` until M15's planning**, because M14 inserted that milestone
 and did not come back here. A list enumerating its own members is one that drifts silently on the next

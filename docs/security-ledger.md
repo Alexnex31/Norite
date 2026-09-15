@@ -225,6 +225,15 @@ would flip them.
   is the shape that would actually force this — or if a per-guild storage quota arrives, at which point
   the ceiling belongs beside the channel and role ones rather than here. Note that a sweep would also need
   a second index: `000018`'s reasoning assumes nothing deletes by age.
+- **Re-examined at M15 (2026-09-15), verdict unchanged, premise corrected.** The "permission-gated" half
+  of the *why* above was about to stop being true: rule 2 read "every guild-scoped mutation", which would
+  have made every message send an audit row, and `guilds.defaultEveryonePermissions` grants
+  `PermSendMessages` to `@everyone` — so inflating any guild's log would have cost an attacker nothing but
+  the send rate limit, and the ordinary member doing nothing wrong would have inflated it faster. M15
+  narrowed rule 2 to administrative mutations instead, which keeps both halves of this entry's argument
+  intact. The opt-in at M16b writes to `message_audit_entries`, a different table, so it does not reopen
+  this entry — but it inherits the whole question, and unlike this table it may take a retention policy,
+  because a record a guild switched on for itself is not the accountability record this one is.
 
 ### `auditDiff.context` accepts a value that is not a scalar
 - **Raised**: M14, `/security-sweep`

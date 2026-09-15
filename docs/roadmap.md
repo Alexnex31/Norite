@@ -591,9 +591,20 @@ of this section.
   residual stops being about access to an empty room. Neither milestone moves: there is still no join path
   before M57, so the question remains unreachable rather than merely unanswered.
 
+  **It audits administrative message actions only, and that narrowed rule 2** (settled 2026-09-15). Taken
+  literally the old wording made every send an audit row, which doubles the write volume of the hottest
+  path in the product, buries the moderation signal M14 built a reader for, and quietly removes the basis
+  of an accepted risk: the ledger's unbounded-growth entry rests on the write path being "rate-limited and
+  permission-gated", and `defaultEveryonePermissions` grants `PermSendMessages` to `@everyone` in every
+  new guild. So a moderator acting on somebody else's message is audited and a member posting, editing or
+  deleting their own is not. Rule 2 now says "administrative" in `CLAUDE.md` and `architecture.md` §14
+  both; guilds that want everything recorded opt in at **M16b**, to a separate table.
+
   M14's audit diff also starts mattering more here than it does for guild settings. A `message.*` action
   would put content into `changes`, and rule 13 forbids reading E2E DM content on any server-side path —
-  see the audit-log entry in `docs/security-ledger.md`, whose *reopens if* names exactly this.
+  see the audit-log entry in `docs/security-ledger.md`, whose *reopens if* names exactly this. The
+  narrowing above reduces which verbs exist; it does not answer the question, because a moderator
+  deletion is exactly the entry that would want to record what was deleted.
 
   Done when: a permitted member can send/edit/delete a message via the REST API, an unpermitted one is
   rejected, each mutation produces an audit entry, and an edited message's previous content is readable
@@ -634,6 +645,37 @@ of this section.
   a `PermManageMessages` holder can read a message's prior versions in order, somebody without it cannot,
   an E2E-encrypted DM's history is never returned by any caller, and the disclosure decision is recorded
   in the ledger.
+- **M16b — Opt-in per-guild message audit**: a guild setting, owner-only, that records every message
+  create/edit/delete to a table of its own — `message_audit_entries`, never `audit_log_entries` — plus the
+  read surface for it. Off by default and documented as the expensive choice. Assigned 2026-09-15, from
+  M15's planning.
+
+  **It exists because rule 2 was narrowed rather than broken.** M15 settled that content mutations are not
+  administrative and so are not audited, which is the right default and is not what every operator wants:
+  a small private guild under a compliance obligation, or one that has had an incident, may genuinely want
+  every message recorded. The answer is an opt-in that pays its own cost, not a default everybody pays.
+
+  **A separate table, and that is the whole performance argument.** Folding this into `audit_log_entries`
+  would put the product's highest-volume write on the table `GET /guilds/{id}/audit-log` pages through,
+  and M14's cursor and three indexes are sized for moderation traffic. A separate table keeps the default
+  log's shape unchanged whether or not anybody opts in, and lets this one carry a retention policy the
+  audit log deliberately refuses (M125 owns pruning).
+
+  **Turning it off is an administrative mutation and is audited in the normal log.** Without that it is the
+  one setting an abusive owner or a compromised session could flip, act under, and flip back — and the
+  ordinary audit log would show nothing. Turning it *on* is audited too, for symmetry and because a
+  member's expectations about who reads their messages just changed.
+
+  **It is the second surface to inherit rule 13**, after M16a, and the more dangerous one because it stores
+  content rather than reading it: the exclusion of E2E DMs must be explicit and tested, not inferred from
+  the setting being guild-scoped. It also needs a decision M16a does not: whether members are *told* the
+  guild records their messages. Recording conversations without notice is a different product from
+  recording them with it, and the answer belongs in the ledger with its *reopens if*.
+
+  Depends on M15 (messages) and M16a (the moderation-read-over-content pattern and its disclosure
+  decision). Done when: a guild with the setting off writes nothing to `message_audit_entries`, one with it
+  on records every create/edit/delete, both toggles appear in the ordinary audit log, an E2E DM is never
+  recorded, and the notice decision is in the ledger.
 - **M17 — Message tagging**: `message_tags` (plus its join table), guild-wide scope (not per-channel),
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and

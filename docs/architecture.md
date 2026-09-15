@@ -328,6 +328,14 @@ CREATE TABLE guilds (
   -- is the directory's default sort. The rule is fixed before bots arrive so the number never quietly
   -- changes meaning.
   member_count integer NOT NULL DEFAULT 0,
+  -- M16b. Owner-only, off by default, and the default is the design: message content is not administrative
+  -- (rule 2, narrowed at M15), so it is not audited unless a guild chooses to pay for it. When true, every
+  -- message create/edit/delete writes to message_audit_entries — never to audit_log_entries, which keeps
+  -- the moderation log's shape and M14's cursor unchanged whether anybody opts in or not.
+  --
+  -- Flipping it either way is itself administrative and is audited in the ordinary log. Off-without-a-trace
+  -- would make this the one setting to disable before acting and re-enable after.
+  message_audit_enabled boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
 -- The directory's default sort. Partial on discoverable, because the rows it excludes are the
@@ -430,6 +438,29 @@ CREATE TABLE message_edit_history (            -- M15
 -- which is why this line says to check rather than to trust it. Verify with EXPLAIN ANALYZE before the
 -- migration merges; the second reason, the history read itself, may well be served by the same index.
 CREATE INDEX ON message_edit_history (message_id, edited_at DESC);   -- M15
+
+-- M16b, and only written for guilds whose owner set guilds.message_audit_enabled. Deliberately a table of
+-- its own rather than rows in audit_log_entries: this is the product's highest-volume write, and folding it
+-- in would put it on the table GET /guilds/{id}/audit-log pages through, whose cursor and three indexes are
+-- sized for moderation traffic. Separate, the default log's shape does not depend on anybody's setting.
+--
+-- It stores content, so rule 13 applies directly and must be satisfied explicitly: E2E is DM-only and this
+-- is guild-scoped, which makes the exclusion structural, and M11a's lesson is that structural claims stop
+-- being true quietly. Unlike audit_log_entries it may take a retention policy (M125) — a record a guild
+-- switched on for itself is not the accountability record the audit log is.
+CREATE TABLE message_audit_entries (           -- M16b
+  id bigint PRIMARY KEY, guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  message_id bigint NOT NULL, channel_id bigint NOT NULL, actor_id bigint NOT NULL REFERENCES users(id),
+  action varchar(32) NOT NULL,                 -- create | edit | delete
+  content text NULL,                           -- the content as of this action; NULL for a delete if the
+                                               --   notice decision lands that way (see the roadmap entry)
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+-- message_id has no REFERENCES clause on purpose, the same call channels.last_message_id makes: an audit
+-- record that vanishes when the thing it records is deleted is not an audit record, and a cascade here
+-- would delete exactly the rows an investigation wants.
+CREATE INDEX ON message_audit_entries (guild_id, id DESC);
+CREATE INDEX ON message_audit_entries (message_id);
 
 CREATE TABLE message_reactions (                -- M56a
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -929,6 +960,10 @@ POST   /channels/{channel_id}/messages     -- M15
 PATCH  /channels/{channel_id}/messages/{message_id}    -- M15; appends the prior content to
                                            --   message_edit_history in the same transaction
 DELETE /channels/{channel_id}/messages/{message_id}    -- M15
+GET    /guilds/{guild_id}/message-audit     -- M16b; the opt-in log, empty unless the owner enabled it.
+                                           --   The toggle itself is a field on PATCH /guilds/{guild_id},
+                                           --   owner-only like deletion rather than PermManageGuild, and
+                                           --   audited in the ordinary log in both directions.
 GET    /channels/{channel_id}/messages/{message_id}/history
                                            -- M16a; PermManageMessages, not channel-read. M15 writes
                                            --   message_edit_history and nothing reads it until here, the
@@ -1978,8 +2013,11 @@ E2E key-boundary violations.
 
 2. **AuthZ, not just AuthN**: unchanged core rule — every mutating handler resolves `roles.Resolve` (or an
    explicit hierarchy/Instance-Admin check) before the write, using freshly-loaded data for the specific
-   guild/channel in the request path; every guild-scoped mutation writes an audit log entry in the same
-   transaction; every Instance Admin action writes to `instance_audit_log` in the same transaction.
+   guild/channel in the request path; every guild-scoped **administrative** mutation writes an audit log
+   entry in the same transaction; every Instance Admin action writes to `instance_audit_log` in the same
+   transaction. "Administrative" is `CLAUDE.md` rule 2's word and carries its definition: configuration
+   changes and authority exercised over another member, which is every verb in `guilds.AuditActions()`.
+   Message content is outside it by decision at M15, with per-guild opt-in recording at M16b.
 
 3. **Token-scope model**: Bearer access tokens (15 min), `device_id`-scoped refresh-token families, scoped
    `api_tokens`. **The daemon is the sole holder of its account's credential material** — access/refresh
@@ -2295,8 +2333,10 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
 - **E2E**: confirm two test identities complete a key exchange with forward secrecy demonstrated; confirm the
   release-gate flag actually blocks E2E for a normal account until flipped.
 - **Security spot-checks each milestone**: an XSS/ANSI-escape payload renders as inert text on every client;
-  the audit log gets an entry for every guild-scoped mutation exercised in tests; the account-export
-  asymmetries (blocks, reports) hold under an automated test.
+  the audit log gets an entry for every guild-scoped **administrative** mutation exercised in tests — rule
+  2's word since M15, and content mutations are outside it, so a check that counted entries per mutation
+  would fail on messages by design; the account-export asymmetries (blocks, reports) hold under an
+  automated test.
 
 ---
 
