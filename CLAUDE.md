@@ -1320,6 +1320,18 @@ And on the audit log, from M14:
   coverage. A route deliberately not exercised declares itself exempt with a reason. Before this, one
   iterated a hand-typed slice and the other covered ten of sixteen actions — the six it missed were the
   whole of M13's surface.
+- **A guard is proved by removal, and the removal must itself be proved.** Delete the guard, watch a
+  *named* test fail, restore it. On this branch that came back green four separate times while proving
+  nothing: `gofmt` had realigned whitespace the string match keyed on, so the edit applied to no lines and
+  the silence read as success. Assert the mutation landed before trusting the result. **If a check's
+  failure mode is silence, it is not a check** — the same principle that makes `spdx-check` match the
+  generated marker strictly rather than grepping the whole file, and that makes a staleness check inert on
+  a file nobody has staged.
+- **Enumerate call sites; do not spot-check them.** Pinning `go-licenses` removed a CI install step and
+  broke `scripts/gen-third-party-notices.sh`, two directories from anything in the diff, because the
+  search was `ci.yml` rather than the repository. There were three callers and the edit found two. A
+  `git grep` for the thing being changed costs one command and is the difference between a refactor and an
+  outage; the same applies to a renamed constant, a moved helper, or a rule whose wording changes.
 - **An unknown filter value is refused, not answered with an empty page.** An action nobody writes matches
   nothing, which is indistinguishable from a guild that never did it, so a typo would read as evidence of
   absence. The check lives in the service and not only in the handler, for the reason `authorize` and
@@ -1336,6 +1348,17 @@ documentation bug — fix it here rather than relying on an untracked file.
 
 Where they exist, invoke with `/<name>`:
 
+- `/onboard` — **mandatory orientation for a fresh session**, and the one to run before any other. Its
+  core is a rule pass that cannot be skipped on the grounds that this file is already in context: having a
+  document loaded and having read it are different things, and the failure mode of the first is an agent
+  that violates a rule it could quote. It requires all 24 to be restated **in the agent's own words**
+  before any work is proposed — paraphrase rather than quotation, because copying proves retrieval and
+  paraphrasing proves reading, and because the result is visible to whoever is reading the output. It then
+  has the session derive milestone state from `git` rather than from "Milestone status" above, which is
+  written at completion and is behind by design mid-milestone; read the authority its task needs rather
+  than the ~7,000-line doc set; and run the enumerated-fact self-checks. **It deliberately contains no
+  rules of its own** — a second copy in an untracked file is the drift this section warns about, so it
+  points at this file and defers.
 - `/new-endpoint` — scaffold a new REST route (sqlc query → service → handler → OpenAPI contract → tests).
 - `/new-gateway-event` — scaffold a new real-time dispatch event end-to-end (backend publish → schema →
   frontend/daemon-side zod/dispatcher).
