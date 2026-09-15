@@ -550,8 +550,16 @@ type Querier interface {
 	ListChannelPermissionOverwrites(ctx context.Context, arg ListChannelPermissionOverwritesParams) ([]PermissionOverwrite, error)
 	// One page of a guild's audit log, newest first (Milestone M14).
 	//
-	// The first reader this table has ever had. Sixteen action constants and every guild-scoped mutation have
-	// been writing here since M12 under rule 2; nothing has read a row back until now.
+	// The first reader this table has ever had. Sixteen action constants have been writing here since M12
+	// under rule 2; nothing read a row back until now.
+	//
+	// That sentence said "every guild-scoped mutation" until M15, when rule 2 was narrowed to guild-scoped
+	// *administrative* mutations — configuration changes and authority exercised over another member, which
+	// is exactly what those sixteen constants are. Message content is outside it by decision, so a member
+	// creating, editing or deleting their own message writes nothing here, and a guild that wants everything
+	// recorded opts in at M16b to message_audit_entries instead. Corrected rather than left, because this
+	// comment is copied verbatim into two generated files and a stale claim in generated code is one nobody
+	// edits.
 	//
 	// # The cursor is an id, and that is not a style choice
 	//
