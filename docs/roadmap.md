@@ -606,6 +606,12 @@ of this section.
   narrowing above reduces which verbs exist; it does not answer the question, because a moderator
   deletion is exactly the entry that would want to record what was deleted.
 
+  **Built as planned, with one addition the entry did not anticipate: `PermReadMessageHistory`** (bit 20).
+  Seeing a channel and reading what was said in it before you arrived are separate grants, as they are in
+  Discord — an announcements channel is view+history without send, a support thread opened to a reporter is
+  view+send without history. It is in `@everyone`'s default grant, so withholding it is the deliberate act
+  rather than the default.
+
   Done when: a permitted member can send/edit/delete a message via the REST API, an unpermitted one is
   rejected, a moderator acting on somebody else's message produces an audit entry while an author acting on
   their own does not, and an edited message's previous content is readable

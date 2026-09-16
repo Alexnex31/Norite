@@ -98,13 +98,12 @@ These apply to every milestone, not just a final pass — treat a PR that violat
    loaded for the *specific* guild/channel in the request path. Never trust a client-supplied ID without
    verifying it belongs to the actor's claimed context.
 2. **Every guild-scoped *administrative* mutation writes an audit log entry**, in the same DB transaction
-   as the mutation. Administrative means a change to the guild's configuration, or authority exercised over
-   another member — a mutation is administrative when it changes what the guild *is* or exercises authority over somebody
-   else, whoever performs it. `guilds.AuditActions()` is the current evidence of that definition and not
-   the definition itself — a new administrative mutation nobody remembered to audit is missing from the
-   list, so a list-as-test would rule it out exactly when the rule is needed. **Message
-   content is deliberately outside it**, settled at M15's planning: a member posting where they are
-   permitted exercises authority over nobody, while auditing every send would put the product's
+   as the mutation. A mutation is administrative when it changes what the guild *is*, or exercises
+   authority over somebody else — whoever performs it. `guilds.AuditActions()` is the current evidence of
+   that definition rather than the definition itself: a new administrative mutation nobody remembered to
+   audit is missing from that list, so treating the list as the test would rule it out exactly when the
+   rule is needed. **Message content is deliberately outside it**, settled at M15: a member posting where
+   they are permitted exercises authority over nobody, while auditing every send would put the product's
    highest-volume write on the audit path and bury the moderation signal the log exists to carry. A
    moderator acting on somebody *else's* message is administrative and is audited. The word was added
    here at M15 — before it, the rule read "every guild-scoped mutation" and M15 would have been the first
@@ -500,10 +499,15 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   **It opened by fixing a bug M13 tagged**, found by driving a real guild rather than by any of the four
   review passes: a channel-scoped route gated on its own permission while the listing gated on
   `PermViewChannel`, so a moderator could rename and delete a channel absent from their own sidebar.
-- **M15 — Core messaging CRUD**: next. Send/edit/delete over the permission engine M13 finished and the
-  audit mechanism M14 built. The first milestone whose `changes` payload could carry message content,
-  which is where rule 13 starts applying to this table — and
-  `TestNoAuditActionRecordsMessageContent` turns red on the first `message.*` verb to force the question.
+- **M15 — Core messaging CRUD**: done (tag pending). `backend/internal/messages` and four endpoints under
+  `/channels/{channel_id}/messages`, migration `000020` (`messages` and `message_edit_history`),
+  `PermReadMessageHistory` at bit 20, the `messages.read`/`messages.write` scopes, and
+  `backend/internal/guildauth` — the authorization chokepoint extracted from `guilds` so a second package
+  could reach it. Decisions are in the roadmap entry and in this block below.
+
+  **M14's tripwire did its job.** `TestNoAuditActionRecordsMessageContent` turned red on the first
+  `message.*` verb with its question attached, and the test that replaces it records both answers rather
+  than leaving them in a commit message. It still trips on any message verb other than `delete`.
 
   Two scope decisions were taken at planning (2026-09-15) rather than left to be discovered, both from
   reading `architecture.md`'s DDL against the roadmap. **`message_edit_history` is M15's**: it had sat in
@@ -517,6 +521,11 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   that same DDL block are M65's, and building them here would pull `pg_trgm` in ahead of any query
   needing it. `is_e2e` *is* M15's, because it is what M65's column keys its exclusion off. Both splits are
   annotated in the DDL, since that block is what somebody copies.
+- **M16 — Guild-level reports**: next. The `reports` table, a file-a-report endpoint, and a
+  guild-moderator triage view gated by `PermManageMessages` — the guild-scoped half of the reports system
+  whose Instance-Admin half is M74. It depends on M15 because a message must exist to report, and it is
+  the first consumer of the soft delete: a reported message has to still resolve after its author removes
+  it, which is why `messages.deleted_at` exists rather than a hard delete.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -1366,6 +1375,54 @@ And on the audit log, from M14:
   absence. The check lives in the service and not only in the handler, for the reason `authorize` and
   `revokeEverything` do. Same shape for a zero id: `snowflake.Parse` accepts `"0"`, so absence travels as
   a pointer the whole way down rather than as a zero that silently means "no filter".
+
+And on messages, from M15:
+
+- **Authority lives in `guildauth`, and `messages` proves the extraction was the point.** All three
+  chokepoint functions were unexported in `guilds`, so a second package literally could not call them.
+  Exporting from `guilds` instead would have made it the import root of `messages`, `reports`, `tags` and
+  `whispers` — the four the architecture tree gives their own package. Every operation in `messages` opens
+  by calling it, so there is no path to a message that skips authorization.
+- **There are two channel entry points and the difference is the lock.** `AuthorizeChannel` reads the
+  channel `FOR UPDATE`, which is right for a mutation and closes the diff race M14 reproduced;
+  `AuthorizeChannelForRead` does not, because the backlog fetch is the hottest read in the product and a
+  row lock per page serializes every member reading the same channel. Inside `guilds` the constraint held
+  because all four callers were mutations and a comment said so; exported, that became an assumption about
+  code nobody had written, which is why it is two functions rather than one and a note.
+- **Rule 2's narrowing is a property you assert, not one you inherit.** A member posting, editing or
+  deleting their own message writes **no** audit entry, and the test asserting that a mutation records
+  nothing would have been a bug report before M15. A moderator deleting somebody else's writes one. The
+  payload carries ids and never content, so rule 13 is satisfied by there being nothing to exclude rather
+  than by an exclusion a later reader has to remember.
+- **Only an author may edit, and `PermManageMessages` deliberately does not grant it.** That bit deletes
+  other people's messages, which is moderation with a visible outcome. Rewriting somebody's words puts
+  them in their mouth under their name, and an audit entry recording that it happened would not make the
+  message honest — which is also why there is no `message.edit` verb to record.
+- **A verb written in one package and validated in another needs a pin.** `messages` writes
+  `message.delete`; the audit-log reader in `guilds` refuses an `action` filter naming a verb outside its
+  vocabulary, so a verb missing there makes the log refuse to filter rows it already holds. Neither
+  package may import the other, so the value is a literal on the guilds side and
+  `TestTheMessageAuditVerbAgreesAcrossPackages` in `cmd/server` — which imports both — is what stops them
+  drifting. The two guilds coverage tests name the boundary rather than pretending to reach it.
+- **The three message bits compose rather than nest.** `PermViewChannel` puts a channel in your sidebar,
+  `PermSendMessages` lets you post, `PermReadMessageHistory` lets you read the backlog. Announcements is
+  view+history without send; a support thread opened to a reporter is view+send without history. All three
+  are in `@everyone`'s default grant, so withholding history is the deliberate configuration — the
+  alternative is a guild whose every channel reads as empty until somebody finds the bit.
+- **A message id from another channel answers 404 on every path.** The channel in the route is what was
+  authorized, so reaching a message through the wrong one would mean the permission check covered one
+  channel while the write landed in another. Same 404 for a `reply_to_id` naming a message elsewhere, and
+  the refusal says nothing about whether that id exists — an unvalidated cross-channel reference is a
+  disclosure, not merely a data-integrity problem.
+- **`last_message_id` is maintained in the send's own transaction.** M12 created the column with no
+  foreign key precisely so this could be a cheap write rather than a `max(id)` per channel on every
+  channel listing (§15.2's N+1). Nothing maintained it until M15, so a channel's pointer was NULL for
+  three milestones.
+- **A mutating route added to a second package is invisible to the route-surface tests until the test
+  router mounts it.** Both mounted only on a non-nil handler, and `newTestRouterWithAuth` builds with nil
+  services — so the four message routes existed and neither test saw them. That is the M10 failure
+  `contract_test.go`'s own comment warns about, one package over: routes may not be conditional, and a new
+  handler has to be added to *both* test routers, the nil-service one and the real-service one.
 
 ## Project-specific skills
 
