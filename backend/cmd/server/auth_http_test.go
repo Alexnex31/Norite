@@ -25,6 +25,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
+	"github.com/Alexnex31/Norite/backend/internal/messages"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
@@ -221,13 +222,17 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	})
 	require.NoError(t, err)
 
+	messagesSvc, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
+	require.NoError(t, err)
+
 	handler, err := newRouter(routerOptions{
-		Config:  testConfig(),
-		Logger:  zerolog.New(io.Discard),
-		Health:  health,
-		Auth:    auth.NewHandler(svc),
-		AuthSvc: svc,
-		Guilds:  guilds.NewHandler(guildsSvc),
+		Config:   testConfig(),
+		Logger:   zerolog.New(io.Discard),
+		Health:   health,
+		Auth:     auth.NewHandler(svc),
+		AuthSvc:  svc,
+		Guilds:   guilds.NewHandler(guildsSvc),
+		Messages: messages.NewHandler(messagesSvc),
 	})
 	require.NoError(t, err)
 

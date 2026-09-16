@@ -22,10 +22,17 @@ import (
 
 // defaultEveryonePermissions is what @everyone gets in a newly created guild.
 //
-// Viewing, sending, connecting to voice, speaking and adding a reaction — the set a person joining a
-// social space expects to work without anybody configuring anything. Deliberately not PermCreateInvite:
-// who may bring others in is the first decision an owner should make on purpose rather than discover.
+// Viewing, reading the backlog, sending, connecting to voice, speaking and adding a reaction — the set a
+// person joining a social space expects to work without anybody configuring anything. Deliberately not
+// PermCreateInvite: who may bring others in is the first decision an owner should make on purpose rather
+// than discover.
+//
+// PermReadMessageHistory joins the default at M15 rather than being left to the owner, because the
+// alternative is a guild where every new channel reads as empty until somebody finds the bit. Discord
+// grants it by default for the same reason. Withholding it is the deliberate configuration — a support
+// thread whose earlier conversation is not for whoever was added last.
 const defaultEveryonePermissions = roles.PermViewChannel |
+	roles.PermReadMessageHistory |
 	roles.PermSendMessages |
 	roles.PermConnectVoice |
 	roles.PermSpeakVoice

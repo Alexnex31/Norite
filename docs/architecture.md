@@ -141,6 +141,25 @@ Kubernetes via the Helm chart in `deploy/helm/` — see §12.
 
 ## 2. Backend (Go modular monolith)
 
+> **Open decision — squashing the migration history at v1.** Nothing has been released, so no database
+> outside a developer machine has ever run these migrations, and their usual justification — preserving
+> data you cannot drop — does not apply yet. They still earn their place for three reasons that are not
+> about data: `sqlc.yaml` names `migrations` as its schema source, so the set *is* the schema every query
+> is type-checked against; each file carries the measured `EXPLAIN` output and the index reasoning for the
+> change it makes; and the ordering records real constraints, such as `audit_log_entries` having to exist
+> at M12 because it references `guilds(id)`.
+>
+> Collapsing them into a single `000001_init` at v1 is a legitimate and common practice, and the argument
+> for it grows as the count does. It should happen *at* v1 rather than before — doing it earlier pays the
+> cost twice, since every milestone from here adds more — and whoever does it has to carry the per-file
+> reasoning into the squashed file or into this section, or it is lost. The `down` files are the weakest
+> part of the set today and are explicitly dev-reset tools rather than supported rollbacks; `000020`'s
+> says so in as many words.
+>
+> Recorded at M15 because the question was asked and deserved an answer somewhere durable, not because a
+> decision has been taken.
+
+
 **Router**: `go-chi/chi/v5`. **DB access**: `sqlc` over `pgx/v5`/`pgxpool` — no ORM, 100% of queries
 parameterized by construction (§14). **WebSocket**: `coder/websocket`. **Other concrete deps**:
 `alexedwards/argon2id`, `golang-jwt/jwt/v5`, `golang.org/x/oauth2` (PKCE), `go-playground/validator/v10`,

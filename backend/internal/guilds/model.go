@@ -81,6 +81,17 @@ var allAuditActions = []string{
 	ActionMemberRoleRemove,
 	ActionOverwriteSet,
 	ActionOverwriteDelete,
+
+	// Written by the `messages` package (M15), not by this one, and listed here because this is the
+	// vocabulary the *reader* validates against: an `action` filter naming a verb absent from this slice
+	// is refused, so a verb written to the table but missing here makes the audit log refuse to filter on
+	// rows it is already storing.
+	//
+	// A literal rather than an import. `messages` cannot import `guilds` — that is what the M15 chokepoint
+	// extraction was for — and `guilds` importing `messages` to read one constant would recreate the
+	// coupling in the other direction. The two are pinned equal by a test in cmd/server, which already
+	// imports both packages and is where the route-surface tests live for the same reason.
+	"message.delete",
 }
 
 // AuditActions returns every action this build writes.

@@ -13,6 +13,7 @@ type Querier interface {
 	// cannot distinguish from a failed insert. Left to conflict instead, so the unique violation is the
 	// answer.
 	AddGuildMember(ctx context.Context, arg AddGuildMemberParams) (GuildMember, error)
+	AppendMessageEditHistory(ctx context.Context, arg AppendMessageEditHistoryParams) error
 	// Records who authorized this device.
 	//
 	// `user_id IS NULL` is what makes an approval single-use, and it is the reason the approval token needs
@@ -210,6 +211,7 @@ type Querier interface {
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
 	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
 	CreateInstanceInvite(ctx context.Context, arg CreateInstanceInviteParams) (InstanceInvite, error)
+	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
 	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
 	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
 	// OAuth sign-in queries.
@@ -450,6 +452,15 @@ type Querier interface {
 	// ListGuildMemberAuthority scopes the actor's side the same way, and the two halves of one comparison
 	// reading different rule sets is exactly what this query's comment above exists to prevent.
 	GetMemberHighestRolePosition(ctx context.Context, arg GetMemberHighestRolePositionParams) (int32, error)
+	GetMessage(ctx context.Context, id int64) (Message, error)
+	// Read for update, so an edit's prior-state read and its write are one atomic step.
+	//
+	// M14 learned this on audit_log_entries the hard way: a diff that reads prior state and then writes has a
+	// window under READ COMMITTED where a concurrent commit lands in between, and the record then claims a
+	// transition that never happened. An edit here writes the *previous* content to message_edit_history, so
+	// the same window would file a history row against content that was already gone.
+	//
+	GetMessageForUpdate(ctx context.Context, id int64) (Message, error)
 	// The sign-in lookup: has this provider account been linked before, to an account that still exists?
 	//
 	// The join is the load-bearing part, and its absence was a real hole. A soft-deleted account keeps its
@@ -522,6 +533,25 @@ type Querier interface {
 	// their tier intact and usable by any credential still outstanding on it.
 	IsInstanceAdmin(ctx context.Context, userID int64) (bool, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
+	// One page of a channel's backlog (Milestone M15).
+	//
+	// # The cursor, and why it is COALESCE rather than the obvious form
+	//
+	// `before` and `after` are both optional, and the obvious spelling for an optional bound is
+	// `$n IS NULL OR id < $n`. M14 measured that on audit_log_entries and it cannot become an index qual
+	// under a generic plan — 1859 buffers against 9 — because the planner has to keep the OR for the case
+	// where the parameter is NULL. COALESCE against the type's extreme collapses to a plain comparison the
+	// index serves. The same trick buys nothing for an equality filter, where the rewrite would name the
+	// column on both sides.
+	//
+	// Ordered by id rather than created_at, for the reason M14's cursor is: a snowflake is time-ordered *and*
+	// unique, while nothing constrains created_at, so a page boundary landing inside a group of equal
+	// timestamps would skip or repeat a row.
+	//
+	// Deleted messages are excluded here and not by a partial index. 000020 says why: M16's moderation
+	// surface reads them on purpose, so an index that could not serve that reader would be the wrong shape.
+	//
+	ListChannelMessages(ctx context.Context, arg ListChannelMessagesParams) ([]Message, error)
 	// Every overwrite on one channel: ADR 0008 layer 5, in one lookup, ordered in Go by the precedence the ADR
 	// fixes rather than by SQL.
 	//
@@ -924,6 +954,14 @@ type Querier interface {
 	// single-use: a second presentation finds revoked_at set and replaced_by_id populated, which is the replay
 	// signature.
 	RotateSession(ctx context.Context, arg RotateSessionParams) (Session, error)
+	// The denormalized pointer 000015 created with no foreign key, maintained here.
+	//
+	// Written in the send's own transaction rather than derived on read: the alternative is max(id) per
+	// channel on every channel listing, which is the N+1 §15.2 names. The column carries no REFERENCES
+	// clause on purpose — a foreign key would make deleting a message rewrite the channel row on the hottest
+	// write path in the product.
+	//
+	SetChannelLastMessage(ctx context.Context, arg SetChannelLastMessageParams) error
 	// One row of a reorder. The whole reorder is several of these in one transaction under the same advisory
 	// lock, because N separate requests would leave two roles sharing a position between them — and two roles
 	// at one position are neither above nor below each other, which dissolves the ordering every hierarchy
@@ -988,6 +1026,11 @@ type Querier interface {
 	// count while the indexed form grows with the guild's, so the gap widens for the life of the instance —
 	// the same shape 000015 measures three times over.
 	ShiftRolePositionsUp(ctx context.Context, guildID int64) error
+	// Soft delete, so the row survives for M16 to carry a report against and for M16a to resolve an edit
+	// history back to its message. A hard delete would make a reported message vanish from the queue it was
+	// reported into.
+	//
+	SoftDeleteMessage(ctx context.Context, id int64) error
 	// Records use, at most once every few minutes per token.
 	//
 	// Writing on every authenticated request would put a row update — and its WAL traffic, and its dead tuple
@@ -1016,6 +1059,7 @@ type Querier interface {
 	// value that means "clear this" and the value that means "do not touch this" would be the same.
 	UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild, error)
 	UpdateGuildMember(ctx context.Context, arg UpdateGuildMemberParams) (GuildMember, error)
+	UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (Message, error)
 	// Same COALESCE shape as UpdateGuild, and the same guild scoping as GetRole.
 	//
 	// position is not updatable here. Reordering roles is a multi-row swap and role *hierarchy* — who may

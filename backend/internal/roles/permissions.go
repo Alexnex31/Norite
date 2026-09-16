@@ -48,7 +48,7 @@ import (
 // with no migration to review and no error to catch it. Add new bits at the end, and never renumber.
 //
 // uint64 in Go against a signed bigint in Postgres, so bit 63 is unavailable and the ceiling is 63
-// permissions. Stated here rather than discovered at bit 64; there are twenty today.
+// permissions. Stated here rather than discovered at bit 64; there are twenty-one today.
 type Permission uint64
 
 const (
@@ -89,16 +89,33 @@ const (
 	// UpdateMember had to be corrected out of, where a permission only ever OR'd into a base is not a
 	// grantable permission at all.
 	PermViewAuditLog
+
+	// PermReadMessageHistory is M15's, and it is a separate bit from PermViewChannel for the reason
+	// Discord separates them: seeing that a channel exists and reading what was said in it before you
+	// arrived are different grants, and a guild that wants the second without the first has nothing to
+	// configure if they are one bit.
+	//
+	// The three message bits compose rather than nest. PermViewChannel puts the channel in your sidebar;
+	// PermSendMessages lets you post into it; this one lets you read the backlog. An announcements
+	// channel that everybody may read and nobody may post in is view+history without send. A channel
+	// whose history is private to the people who were there — a support thread, a moderation room opened
+	// to a reporter — is view+send without history: you can see it and take part, and the conversation
+	// that happened before you were added is not yours to read.
+	//
+	// Added at the end, like every bit before it. The order is data: `roles.permissions` stores bit
+	// positions, so inserting in the middle reassigns every permission every guild has already granted,
+	// with no migration and no compile error to notice it.
+	PermReadMessageHistory
 )
 
 // permAll is every defined bit, and what an owner or an administrator resolves to.
 //
 // Deliberately not ^Permission(0). A member who short-circuits would otherwise hold every one of the 64
-// bit positions, including the 45 nothing has defined — so a later milestone defining bit 20 would find it
+// bit positions, including the 43 nothing has defined — so a later milestone defining bit 21 would find it
 // already granted to owners in a way no code says out loud, and Has would answer true for a permission
 // that did not exist when the check was written. This value is derived from the last defined constant, so
 // adding one at the end extends it and adding one in the middle is still the renumbering hazard above.
-const permAll = Permission(PermViewAuditLog<<1 - 1)
+const permAll = Permission(PermReadMessageHistory<<1 - 1)
 
 // Known reports whether p sets only bits this build defines.
 //
@@ -143,7 +160,7 @@ func PermissionFromInt64(v int64) Permission { return Permission(v) }
 //
 // The same decision ADR 0003 makes for snowflakes, for the same reason: this is a 63-bit value and
 // JavaScript's number type is a float64, so anything above 2^53 loses precision silently on the way
-// through a browser. Twenty bits are defined today and the hazard is years away — which is exactly when
+// through a browser. Twenty-one bits are defined today and the hazard is years away — which is exactly when
 // it is cheap to fix, because changing the wire type later is a breaking change across four codegen'd
 // clients. Discord made this change under load rather than ahead of it.
 //

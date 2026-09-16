@@ -45,6 +45,7 @@ func TestTheBitOrderIsWhatTheDatabaseAlreadyStores(t *testing.T) {
 		{"PermManageEmojis", PermManageEmojis, 17},
 		{"PermModerateMembers", PermModerateMembers, 18},
 		{"PermViewAuditLog", PermViewAuditLog, 19},
+		{"PermReadMessageHistory", PermReadMessageHistory, 20},
 	} {
 		if want := Permission(1) << tc.bit; tc.got != want {
 			t.Errorf("%s = %d, want bit %d (%d) — see the comment above before changing this",
@@ -79,10 +80,10 @@ func TestVideoVoiceStaysReserved(t *testing.T) {
 // by hand to let this milestone compile. That is what the pinning test is for — a renumber or an
 // accidental widening cannot be absorbed by rerunning anything.
 func TestPermAllStopsAtTheLastDefinedBit(t *testing.T) {
-	if permAll.Has(1 << 20) {
+	if permAll.Has(1 << 21) {
 		t.Error("permAll grants an undefined bit; it must be derived from the last defined constant")
 	}
-	if !permAll.Has(PermViewAuditLog) {
+	if !permAll.Has(PermReadMessageHistory) {
 		t.Error("permAll must reach the last defined constant")
 	}
 	if permAll.Int64() < 0 {

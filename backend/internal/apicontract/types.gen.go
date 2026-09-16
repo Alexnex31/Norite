@@ -693,6 +693,31 @@ type Member struct {
 	UserId Snowflake `json:"user_id"`
 }
 
+// Message defines model for Message.
+type Message struct {
+	// AuthorId Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
+	AuthorId Snowflake `json:"author_id"`
+
+	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	ChannelId Snowflake `json:"channel_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+	EditedAt  time.Time `json:"edited_at"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id        Snowflake `json:"id"`
+	ReplyToId Snowflake `json:"reply_to_id"`
+
+	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
+	Type int `json:"type"`
+}
+
 // MintApiTokenRequest defines model for MintApiTokenRequest.
 type MintApiTokenRequest struct {
 	Name string `json:"name"`
@@ -1213,6 +1238,29 @@ type RequestEmailVerificationJSONBody struct {
 	Email openapi_types.Email `json:"email"`
 }
 
+// ListChannelMessagesParams defines parameters for ListChannelMessages.
+type ListChannelMessagesParams struct {
+	// Before Return messages with an id strictly lower than this one.
+	Before *Snowflake `form:"before,omitempty" json:"before,omitempty"`
+
+	// After Return messages with an id strictly higher than this one.
+	After *Snowflake `form:"after,omitempty" json:"after,omitempty"`
+
+	// Limit Page size, 1 to 100. Defaults to 50.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// SendMessageJSONBody defines parameters for SendMessage.
+type SendMessageJSONBody struct {
+	Content   string     `json:"content"`
+	ReplyToId *Snowflake `json:"reply_to_id,omitempty"`
+}
+
+// UpdateMessageJSONBody defines parameters for UpdateMessage.
+type UpdateMessageJSONBody struct {
+	Content string `json:"content"`
+}
+
 // GetDevicePageParams defines parameters for GetDevicePage.
 type GetDevicePageParams struct {
 	// Code Prefills the field and does nothing else — no lookup, no state, no step skipped. A value that is not a well-formed user code is dropped rather than echoed back.
@@ -1371,6 +1419,12 @@ type RequestEmailVerificationJSONRequestBody RequestEmailVerificationJSONBody
 
 // UpdateChannelJSONRequestBody defines body for UpdateChannel for application/json ContentType.
 type UpdateChannelJSONRequestBody = UpdateChannelRequest
+
+// SendMessageJSONRequestBody defines body for SendMessage for application/json ContentType.
+type SendMessageJSONRequestBody SendMessageJSONBody
+
+// UpdateMessageJSONRequestBody defines body for UpdateMessage for application/json ContentType.
+type UpdateMessageJSONRequestBody UpdateMessageJSONBody
 
 // DeleteChannelPermissionOverwriteJSONRequestBody defines body for DeleteChannelPermissionOverwrite for application/json ContentType.
 type DeleteChannelPermissionOverwriteJSONRequestBody = DeleteOverwriteRequest
