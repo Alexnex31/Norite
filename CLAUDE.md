@@ -364,7 +364,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M14 done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M15 done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -521,6 +521,21 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   that same DDL block are M65's, and building them here would pull `pg_trgm` in ahead of any query
   needing it. `is_e2e` *is* M15's, because it is what M65's column keys its exclusion off. Both splits are
   annotated in the DDL, since that block is what somebody copies.
+
+  **Four review passes ran against the finished branch and every one of them found something**, which is
+  the part worth carrying forward rather than the fixes themselves. A security audit found `Update`
+  authorizing on the view bit alone — so a muted member could rewrite every message they had already
+  posted — and `Send` accepting any guild channel type, including categories. An optimization review found
+  `Send` holding the channel row lock for its whole transaction, serializing the product's highest-volume
+  write. A code review found six contract enum and response omissions, and an inert `MaxContentLength`.
+  The last audit found a regression the fix for that constant had introduced an hour earlier: a byte-based
+  length check against a rune-based validator, which would have refused any near-limit message in a
+  non-Latin script.
+
+  **The manual pass had already run and found none of them**, and neither had the tests. Each needed a
+  state no happy path constructs — a permission denied to somebody who already had messages, a channel
+  that is not a text channel, eight senders in one channel, a message written in Japanese. That is the
+  argument for the passes being separate skills with separate questions rather than one review.
 - **M16 — Guild-level reports**: next. The `reports` table, a file-a-report endpoint, and a
   guild-moderator triage view gated by `PermManageMessages` — the guild-scoped half of the reports system
   whose Instance-Admin half is M74. It depends on M15 because a message must exist to report, and it is
