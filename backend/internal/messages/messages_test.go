@@ -5,13 +5,17 @@ package messages
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
+	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
@@ -26,6 +30,7 @@ type fixture struct {
 	svc  *Service
 	pool *pgxpool.Pool
 	ctx  context.Context
+	ids  *snowflake.Generator
 
 	guildID, channelID snowflake.ID
 	owner, member, mod snowflake.ID
@@ -58,7 +63,7 @@ func newFixture(t *testing.T) *fixture {
 	svc, err := NewService(ServiceOptions{Pool: pool, IDs: ids})
 	require.NoError(t, err)
 
-	f := &fixture{svc: svc, pool: pool, ctx: ctx}
+	f := &fixture{svc: svc, pool: pool, ctx: ctx, ids: ids}
 	next := func() snowflake.ID {
 		id, err := ids.Next()
 		require.NoError(t, err)
@@ -112,9 +117,10 @@ func (f *fixture) exec(t *testing.T, sql string, args ...any) {
 // newChannel adds a second channel of a given type to the fixture's guild.
 func (f *fixture) newChannel(t *testing.T, name string, typ int16) snowflake.ID {
 	t.Helper()
-	gen, err := snowflake.NewGenerator(1)
-	require.NoError(t, err)
-	id, err := gen.Next()
+	// The fixture's generator, never a fresh one: a new generator restarts its sequence at 0, so two
+	// calls landing in the same millisecond mint the same id and the second insert fails on the primary
+	// key. Uniqueness is a property of one generator, not of the algorithm.
+	id, err := f.ids.Next()
 	require.NoError(t, err)
 	f.exec(t, `INSERT INTO channels (id, guild_id, name, type, position, created_at, updated_at)
 	           VALUES ($1,$2,$3::text,$4,1,now(),now())`,
@@ -462,4 +468,95 @@ func TestOnlyATextChannelAcceptsAMessage(t *testing.T) {
 		ChannelID: f.channelID, Content: "a text channel still works",
 	})
 	require.NoError(t, err)
+}
+
+// TestTheChannelPointerNeverMovesBackwards is what replaced the channel row lock.
+//
+// Send stopped taking the channel FOR UPDATE at M15's optimization pass, because it serialized every send
+// in a channel behind every other — about 5x on the product's hottest write. The lock was silently
+// providing one thing: ordering for this pointer. With a plain assignment, a send that mints a lower id
+// but commits *later* overwrites a higher one, and the channel's unread marker points at an older message
+// than the newest. Reproduced deterministically in psql with two interleaved transactions — the pointer
+// ended at 100 with message 101 present — which is why GREATEST is in the statement.
+//
+// **Asserted on the statement, not by racing goroutines.** The first version of this test ran eight
+// concurrent senders and passed with GREATEST removed, three times out of three: the interleaving it
+// needed is real but too rare to provoke by load, so the test looked like a guard and was not one. This
+// version drives the out-of-order case directly, and fails the moment GREATEST goes.
+func TestTheChannelPointerNeverMovesBackwards(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	newer := f.send(t, f.member, "the newest message")
+
+	pointer := func() int64 {
+		var v *int64
+		require.NoError(t, f.pool.QueryRow(f.ctx,
+			`SELECT last_message_id FROM channels WHERE id = $1`, int64(f.channelID)).Scan(&v))
+		require.NotNil(t, v, "the send must have set the pointer")
+		return *v
+	}
+	require.Equal(t, int64(newer.ID), pointer())
+
+	// A send that minted an older id and is only now committing its pointer update — the transaction that
+	// lost the race to commit but holds the lower value.
+	require.NoError(t, db.New(f.pool).SetChannelLastMessage(f.ctx, db.SetChannelLastMessageParams{
+		ID: int64(f.channelID), LastMessageID: ptr(int64(newer.ID) - 1),
+	}))
+	require.Equal(t, int64(newer.ID), pointer(),
+		"a later-committing send with an older id must not walk the pointer backwards")
+
+	// And a genuinely newer one still advances it, so the test fails on a statement that never writes.
+	require.NoError(t, db.New(f.pool).SetChannelLastMessage(f.ctx, db.SetChannelLastMessageParams{
+		ID: int64(f.channelID), LastMessageID: ptr(int64(newer.ID) + 1),
+	}))
+	require.Equal(t, int64(newer.ID)+1, pointer(), "a newer id must still advance the pointer")
+}
+
+func ptr(v int64) *int64 { return &v }
+
+// TestSendingIntoADeletedChannelIs404 covers the ordinary case: the channel was already gone when the
+// request arrived, so the authorization read finds nothing.
+//
+// Named for what it actually asserts. Its first version claimed to cover the *race* — a channel deleted
+// between the authorization read and the insert — and did not: it passed with the foreign-key mapping
+// disabled, because this path never reaches the insert at all. The race is covered by
+// TestChannelVanishedMapsOnlyTheForeignKeyThatCanHappen below.
+func TestSendingIntoADeletedChannelIs404(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	id := f.newChannel(t, "doomed", ChannelGuildText)
+	_, err := f.svc.Send(f.ctx, actorOf(f.member), SendInput{ChannelID: id, Content: "before"})
+	require.NoError(t, err)
+
+	f.exec(t, `DELETE FROM channels WHERE id = $1`, int64(id))
+
+	_, err = f.svc.Send(f.ctx, actorOf(f.member), SendInput{ChannelID: id, Content: "after"})
+	require.ErrorIs(t, err, httpx.ErrNotFound)
+}
+
+// TestChannelVanishedMapsOnlyTheForeignKeyThatCanHappen covers the race the unlocked authorize opened.
+//
+// The interleaving itself cannot be driven from a test — the delete has to commit inside the service's
+// own transaction — so the mapping is tested on the error Postgres actually produces. The negative cases
+// are the point: a mapping that swallowed every foreign-key error, or every pg error, would turn a real
+// bug into a 404 and hide it.
+func TestChannelVanishedMapsOnlyTheForeignKeyThatCanHappen(t *testing.T) {
+	t.Parallel()
+
+	require.ErrorIs(t, channelVanished(&pgconn.PgError{
+		Code: pgerrcode.ForeignKeyViolation, ConstraintName: "messages_channel_id_fkey",
+	}), httpx.ErrNotFound, "the channel disappearing mid-send must read as 404")
+
+	require.Nil(t, channelVanished(&pgconn.PgError{
+		Code: pgerrcode.ForeignKeyViolation, ConstraintName: "messages_author_id_fkey",
+	}), "a different foreign key is a real bug and must not be reported as a missing channel")
+
+	require.Nil(t, channelVanished(&pgconn.PgError{
+		Code: pgerrcode.UniqueViolation, ConstraintName: "messages_pkey",
+	}), "a duplicate id is a generator fault, not a missing channel")
+
+	require.Nil(t, channelVanished(errors.New("connection reset")),
+		"a non-pg error must fall through")
 }

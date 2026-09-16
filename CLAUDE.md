@@ -1443,6 +1443,26 @@ And on messages, from M15:
   the shape `TestTheMessageAuditVerbAgreesAcrossPackages` established one finding earlier. A cross-package
   literal is not a smell to remove here; it is a thing to *pin*, and the pin belongs in the one package
   that imports both.
+- **A lock inherited from a caller that needed it is not a lock this caller needs.** `Send` took the
+  channel `FOR UPDATE` because it called `AuthorizeChannel`, whose lock exists for the four `guilds`
+  mutations that *diff* the channel row. A send diffs nothing — it reads `type` and `guild_id` and writes
+  to `messages` — so the lock bought only serialization, and serialization on the product's highest-volume
+  write is a per-channel ceiling no horizontal scale lifts: 777 sends/s into one channel against 2,294
+  after removing it. Two things the lock was silently doing had to be replaced rather than dropped:
+  `last_message_id` monotonicity, now `GREATEST` in the statement (a plain assignment walks the pointer
+  backwards — reproduced in psql at pointer 100 with message 101 present), and the channel-overwrite mute
+  race, accepted in the ledger because the *role*-assignment mute never had that protection anyway.
+- **A guard-by-removal that fails to build has proved nothing**, and neither has one whose test passes.
+  Both happened here. Deleting the foreign-key mapping removed its imports, so the package stopped
+  compiling and the "failure" was the compiler; making the check never match instead kept it compilable
+  and revealed the real problem — the test reached a 404 from the *authorize* path and never exercised the
+  mapping at all. The fix was to make the mapping a named function and test it directly. This is the M14
+  lesson one layer up: there, the mutation did not apply; here it applied and the test could not see it.
+- **A race you cannot provoke is not a race you should test by racing.** The monotonicity test first ran
+  eight concurrent senders and passed three times out of three with `GREATEST` removed — the interleaving
+  is real but too rare to hit under load. Asserting the *statement's* property instead (a lower id must
+  not overwrite a higher one) fails the moment the guard goes. Prove reachability once, by hand, in psql;
+  then pin the property deterministically.
 - **A mutating route added to a second package is invisible to the route-surface tests until the test
   router mounts it.** Both mounted only on a non-nil handler, and `newTestRouterWithAuth` builds with nil
   services — so the four message routes existed and neither test saw them. That is the M10 failure

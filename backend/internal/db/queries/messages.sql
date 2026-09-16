@@ -63,5 +63,16 @@ INSERT INTO message_edit_history (id, message_id, content) VALUES ($1, $2, $3);
 -- clause on purpose — a foreign key would make deleting a message rewrite the channel row on the hottest
 -- write path in the product.
 --
+-- # GREATEST, and why it is what lets the send stop locking the channel
+--
+-- A bare assignment is only monotonic if something serializes the writers, and until M15's optimization
+-- pass that something was the channel row lock Send took through AuthorizeChannel — which cost about 3x
+-- the throughput of the product's hottest write, measured, because every send in a channel queued behind
+-- every other for its whole transaction. Two concurrent sends committing out of order would otherwise
+-- walk this pointer backwards and break unread state.
+--
+-- GREATEST makes the statement monotonic by itself, so the ordering no longer has to be bought with a
+-- lock. It ignores NULLs, so the first message in a channel still sets the pointer.
+--
 -- name: SetChannelLastMessage :exec
-UPDATE channels SET last_message_id = $2 WHERE id = $1;
+UPDATE channels SET last_message_id = GREATEST(last_message_id, $2) WHERE id = $1;

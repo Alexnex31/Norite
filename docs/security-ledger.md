@@ -316,3 +316,33 @@ would flip them.
   that would actually force it — the same condition the audit-log growth entry names. Also reopens if
   M16a's disclosure decision widens the reader beyond moderators, since the exposure this entry accepts is
   bounded by who can see it.
+
+### Dropping the channel row lock lets one message land just after a channel-overwrite mute
+- **Raised**: M15, `/optimization-review`
+- **Verdict**: accepted risk — the protection was partial and incidental, and the cheaper mute path never
+  had it
+- **Why**: `Send` read the channel `FOR UPDATE` through `guildauth.AuthorizeChannel`, and
+  `guilds.SetOverwrite`/`DeleteOverwrite` take the same lock — so a mute written as a channel overwrite
+  blocked on an in-flight send and no message could commit after the deny was durable. Measured: the
+  moderator's `SELECT ... FOR UPDATE` waited 1,480 ms behind a send that was deliberately held open.
+  Removing the lock leaves a window equal to one send transaction — a couple of milliseconds — in which a
+  send that read permissions before the deny committed still inserts.
+
+  What makes that acceptable is that **the other mute path never had the protection at all**.
+  `AssignRole`, `UpdateRole` and `DeleteRole` authorize at guild level with `channelID = 0` and take no
+  channel lock, and a `muted` role carrying a channel deny is the mute this project's own M13 notes call
+  the commonest overwrite anywhere. Reproduced: with a send holding the channel lock open for two seconds,
+  the role-assignment mute committed in 2 ms without blocking and the message landed after it. So the lock
+  covered one of the two ways to silence somebody and the code read as though it covered muting. Removing
+  it makes the two paths consistent rather than introducing a new class of race, and it buys about 3x on
+  the product's highest-volume write — a ceiling that is per channel and that horizontal scale cannot lift,
+  since it is one row lock in one database.
+
+  Note the lock never protected rule 1's freshness: `guildauth.Authorize` reads `guild_members`, `roles`
+  and `permission_overwrites` unlocked in both the locking and non-locking variants.
+- **Reopens if**: the role-assignment path is ever made to serialize against sends — at which point the
+  two paths agree again and this one becomes the odd one out — or if a moderation feature arrives whose
+  correctness depends on "no message exists after this timestamp", which timeouts (`PermModerateMembers`,
+  M74) and guild bans (M57) plausibly could. Also reopens if `SetChannelLastMessage` stops being
+  monotonic, since `GREATEST` is what replaced the lock's other job and a plain assignment would walk the
+  channel's unread pointer backwards — reproduced in psql, pointer 100 with message 101 present.

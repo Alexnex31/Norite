@@ -961,6 +961,17 @@ type Querier interface {
 	// clause on purpose — a foreign key would make deleting a message rewrite the channel row on the hottest
 	// write path in the product.
 	//
+	// # GREATEST, and why it is what lets the send stop locking the channel
+	//
+	// A bare assignment is only monotonic if something serializes the writers, and until M15's optimization
+	// pass that something was the channel row lock Send took through AuthorizeChannel — which cost about 3x
+	// the throughput of the product's hottest write, measured, because every send in a channel queued behind
+	// every other for its whole transaction. Two concurrent sends committing out of order would otherwise
+	// walk this pointer backwards and break unread state.
+	//
+	// GREATEST makes the statement monotonic by itself, so the ordering no longer has to be bought with a
+	// lock. It ignores NULLs, so the first message in a channel still sets the pointer.
+	//
 	SetChannelLastMessage(ctx context.Context, arg SetChannelLastMessageParams) error
 	// One row of a reorder. The whole reorder is several of these in one transaction under the same advisory
 	// lock, because N separate requests would leave two roles sharing a position between them — and two roles

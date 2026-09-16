@@ -14,7 +14,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
@@ -83,9 +85,23 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 
 	var out Message
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		// The locking variant, because this writes. AuthorizeChannelForRead exists for the read path and
-		// the difference is the point — see guildauth.AuthorizeChannelForRead.
-		channel, _, _, err := guildauth.AuthorizeChannel(
+		// The non-locking variant, deliberately, on the product's highest-volume write.
+		//
+		// AuthorizeChannel reads the channel FOR UPDATE and holds it to commit, which is right for the
+		// four `guilds` mutations that *diff* the channel row — M14 reproduced the race it closes. A send
+		// diffs nothing: it reads two fields off this row, `type` and `guild_id`, and writes to
+		// `messages`. Taking the lock anyway serialized every send in a channel behind every other for a
+		// whole transaction: eight concurrent senders managed 777 sends/s into one channel against 2,294
+		// after this change, and the one-channel penalty relative to eight separate channels fell from
+		// 3.3x to about 1.5x. That ceiling is per channel and no amount of horizontal scale lifts it,
+		// because it is one row lock in one database.
+		//
+		// What the lock was incidentally buying is covered in `SetChannelLastMessage` (pointer
+		// monotonicity, now GREATEST's job) and in docs/security-ledger.md (a channel-overwrite mute no
+		// longer blocks an in-flight send). The permission read is unaffected either way: Authorize reads
+		// guild_members, roles and permission_overwrites unlocked in *both* variants, so this lock never
+		// protected rule 1's freshness.
+		channel, _, _, err := guildauth.AuthorizeChannelForRead(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
 		)
 		if err != nil {
@@ -113,6 +129,9 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 			ReplyToID: reply,
 		})
 		if err != nil {
+			if vanished := channelVanished(err); vanished != nil {
+				return vanished
+			}
 			return fmt.Errorf("messages: create message: %w", err)
 		}
 
@@ -126,6 +145,28 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 		return nil
 	})
 	return out, err
+}
+
+// channelVanished maps the one error the unlocked authorize made reachable, and returns nil otherwise.
+//
+// Send stopped reading the channel FOR UPDATE, so a channel can be deleted between the authorization read
+// and the insert. The row is gone by then and `messages_channel_id_fkey` refuses the write. That must
+// reach the caller as the 404 the read would have produced a moment earlier — losing a race to a channel
+// deletion is not a server error, and a 500 would also be a worse answer than the one the caller gets if
+// they retry.
+//
+// A named function rather than an inline branch because the inline version could not be tested. Driving
+// the real interleaving needs the delete to commit *inside* the service's transaction, which no test can
+// arrange without a hook the service does not have — so the first attempt asserted a 404 that came from
+// the authorize path instead, and passed with the mapping disabled. Testing the mapping directly is the
+// honest version.
+func channelVanished(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation &&
+		pgErr.ConstraintName == "messages_channel_id_fkey" {
+		return httpx.ErrNotFound
+	}
+	return nil
 }
 
 // resolveReply validates reply_to_id, which must name a live message in *this* channel.
@@ -242,9 +283,14 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 
 	var out Message
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		// PermSendMessages, not merely the view bit AuthorizeChannel folds in. An edit is a write into
-		// this channel and a mute must bound every one of them — see the paragraph above.
-		if _, _, _, err := guildauth.AuthorizeChannel(
+		// PermSendMessages, not merely the view bit the authorize folds in. An edit is a write into this
+		// channel and a mute must bound every one of them — see the paragraph above.
+		//
+		// Non-locking, for Send's reason. The lock this path genuinely needs is on the *message* row, and
+		// loadInChannel takes it below with GetMessageForUpdate — which also closes the cascade race Send
+		// has to map an FK error for: a channel deleted mid-edit cannot remove this message while that
+		// row lock is held, and if it commits first the locking read simply finds nothing and answers 404.
+		if _, _, _, err := guildauth.AuthorizeChannelForRead(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
 		); err != nil {
 			return err
@@ -299,7 +345,9 @@ func (s *Service) Delete(
 	}
 
 	return s.inTx(ctx, func(q *db.Queries) error {
-		_, guildID, decision, err := guildauth.AuthorizeChannel(ctx, q, actor, channelID, 0)
+		// Non-locking, for the reason Update is: loadInChannel locks the message row, which is the lock
+		// this operation actually needs.
+		_, guildID, decision, err := guildauth.AuthorizeChannelForRead(ctx, q, actor, channelID, 0)
 		if err != nil {
 			return err
 		}
