@@ -16,7 +16,7 @@ quality bar and the same support commitment. The roadmap looks lopsided (Phase P
 on the flagship's Kubernetes track against M96 plus documentation for self-hosting) and that is deployment
 complexity, not priority — the flagship is the one deployment needing real horizontal scale and HA
 (ADR 0021). **Four clients**: a scriptable CLI (the command tree — one action, exit, pipeable), a
-full-screen **TUI** (the in-terminal application: panes, chords, 26 specified screens), a native GUI
+full-screen **TUI** (the in-terminal application: panes, chords, 27 specified screens), a native GUI
 mirroring the TUI's information architecture, and a lower-priority web SPA built later. The CLI, TUI and
 GUI share one local background daemon per OS user account; the CLI and TUI share one command tree, so
 `M-x` in the TUI runs every verb (ADR 0026). "CLI" here means the command tree only; where it once meant
@@ -97,7 +97,20 @@ These apply to every milestone, not just a final pass — treat a PR that violat
    `roles.Resolve(...)` (or an explicit hierarchy check for role/member management) using data freshly
    loaded for the *specific* guild/channel in the request path. Never trust a client-supplied ID without
    verifying it belongs to the actor's claimed context.
-2. **Every guild-scoped mutation writes an audit log entry**, in the same DB transaction as the mutation.
+2. **Every guild-scoped *administrative* mutation writes an audit log entry**, in the same DB transaction
+   as the mutation. A mutation is administrative when it changes what the guild *is*, or exercises
+   authority over somebody else — whoever performs it. `guilds.AuditActions()` is the current evidence of
+   that definition rather than the definition itself: a new administrative mutation nobody remembered to
+   audit is missing from that list, so treating the list as the test would rule it out exactly when the
+   rule is needed. **Message content is deliberately outside it**, settled at M15: a member posting where
+   they are permitted exercises authority over nobody, while auditing every send would put the product's
+   highest-volume write on the audit path and bury the moderation signal the log exists to carry. A
+   moderator acting on somebody *else's* message is administrative and is audited. The word was added
+   here at M15 — before it, the rule read "every guild-scoped mutation" and M15 would have been the first
+   milestone to knowingly violate its letter, which is how a rule stops constraining the next case.
+   Guilds that want every message recorded opt in at **M16b**, which writes to its own table and never to
+   `audit_log_entries`; **turning that option off is itself administrative and is audited here**, or it
+   would be the one setting you could change to hide what you did next.
 3. **All SQL goes through sqlc-generated, parameterized queries.** No `fmt.Sprintf`-built SQL, ever.
 4. **No mutating logic in GET handlers.** GET must stay side-effect-free — the CSRF double-submit scheme
    depends on this, but that scheme itself only exists for the future web SPA's BFF layer; the
@@ -181,8 +194,8 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 ## Directory layout (see `docs/architecture.md` §1 for full detail)
 
 ```
-backend/       Go modular monolith — cmd/server, internal/{config,platform,auth,users,guilds,channels,
-               roles,messages,gateway,presence,voice,db}, migrations/
+backend/       Go modular monolith — cmd/server, internal/{config,platform,auth,users,guilds,guildauth,
+               channels,roles,messages,gateway,presence,voice,db}, migrations/
 cli/           The `norite` binary — the scriptable command tree (internal/cliapp) *and* the TUI
                (shell, panes, chords, screens); one binary, two front ends onto one command tree
 gui/           The native GUI — Gio app, mirrors the TUI's screens; shares the daemon/config model
@@ -250,6 +263,29 @@ contributor list is meant to reflect that. Note this is not retroactively fixabl
 trailer after the fact means rewriting history, which invalidates the GPG signature GitHub applies to
 web-UI merges, so the cost of getting it wrong once is a permanently unsigned commit on `main`.
 
+**It is three shapes, not one.** Agent harnesses inject all three by default: a `Co-Authored-By:` trailer,
+a **session-link trailer** (`Claude-Session: https://…`, or any equivalent pointing at a conversation),
+and a **PR-body footer** (`🤖 Generated with …`). All three are forbidden, for the same reason and with the
+same one-way cost — and the session link is additionally a URL into a private conversation, pushed to a
+public repository forever.
+
+The `commit-msg` hook caught only the first until M15, when running it against one of each showed the
+other two passing cleanly; it now rejects all three. **That is not a reason to rely on it.** It is
+untracked, so a fresh clone has none of it, it cannot see a PR body at all, and the shape a harness
+injects next is one nobody has written a pattern for. Strip all three deliberately and check before every
+commit and PR body:
+
+```bash
+git log main..HEAD --format='%B' \
+  | grep -niE '^\s*(co-authored-by:|[a-z]+[-_]?session:|🤖)|generated with \[?claude'
+```
+
+**Anchored, and that is the point.** The unanchored version of this check was committed first and
+false-positived immediately — on the commit message introducing the rule, which necessarily names all
+three shapes in prose. A check that fires on any message *discussing* it is one somebody stops reading
+within a week, which is the reason `pre-commit` deliberately ignores values announcing themselves as
+fakes. The hook was written anchored and never had the problem.
+
 **Staging — never `git add -A`, `git add .`, or `git commit -a`.** Stage the paths the commit is actually
 about, by name. This is not tidiness: those commands sweep up whatever else happens to be in the tree, and
 what is in the tree during a manual test is a config file holding real credentials. That is exactly how a
@@ -274,7 +310,10 @@ a replacement for it, for the same reason the project skills are described here 
 this file is the authority, and anything enforced only by an untracked file is enforced only on one
 machine.
 
-- `commit-msg` rejects a message crediting an AI agent as author or co-author.
+- `commit-msg` rejects a message crediting an AI agent — all three shapes above, since M15: the
+  `Co-Authored-By:` trailer it always caught, plus the session-link trailer and the "Generated with …"
+  footer, which were found to pass it by testing one of each rather than by assuming the first pattern
+  covered them.
 - `pre-commit` rejects staged content that looks like a live credential: a provider token format
   (`ghp_`, `AKIA`, `AIza`, a PEM private-key header), a secret-named setting given a long opaque value, or
   a `.env` file forced past `.gitignore`. It deliberately ignores values that announce themselves as fakes
@@ -325,18 +364,25 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M14 done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M15 done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Seven exist:
-`M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M20a` (first usable client),
-`M56a` (message reactions), `M67a` (registration anti-automation), `M72a` (guild discovery directory) and
-`M72b` (its richer sorts, optional). `M72b` is the first `b`, which the convention already allowed —
-letters run `a`, `b`, `c` in insertion order after the same number.
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Twelve exist:
+`M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
+surface), `M16b` (opt-in per-guild message audit), `M17a` (guild administration verbs), `M20a` (first
+usable client), `M56a` (message reactions), `M62a` (guild info and per-guild preferences), `M67a`
+(registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional) and
+`M76a` (self-service account export and deletion). `M72b` was the first `b`, which the convention already
+allowed — letters run `a`, `b`, `c` in insertion order after the same number.
+
+**This list said "seven" and omitted `M76a` until M15's planning**, because M14 inserted that milestone
+and did not come back here. A list enumerating its own members is one that drifts silently on the next
+insertion, so check it against the roadmap rather than trusting it:
+`grep -cE '^- \*\*M[0-9]+[a-z] — ' docs/roadmap.md`.
 
 **Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
 testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed
@@ -453,9 +499,48 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   **It opened by fixing a bug M13 tagged**, found by driving a real guild rather than by any of the four
   review passes: a channel-scoped route gated on its own permission while the listing gated on
   `PermViewChannel`, so a moderator could rename and delete a channel absent from their own sidebar.
-- **M15 — Core messaging CRUD**: next. Send/edit/delete over the permission engine M13 finished and the
-  audit mechanism M14 built. The first milestone whose `changes` payload could carry message content,
-  which is where rule 13 starts applying to this table.
+- **M15 — Core messaging CRUD**: done (tag pending). `backend/internal/messages` and four endpoints under
+  `/channels/{channel_id}/messages`, migration `000020` (`messages` and `message_edit_history`),
+  `PermReadMessageHistory` at bit 20, the `messages.read`/`messages.write` scopes, and
+  `backend/internal/guildauth` — the authorization chokepoint extracted from `guilds` so a second package
+  could reach it. Decisions are in the roadmap entry and in this block below.
+
+  **M14's tripwire did its job.** `TestNoAuditActionRecordsMessageContent` turned red on the first
+  `message.*` verb with its question attached, and the test that replaces it records both answers rather
+  than leaving them in a commit message. It still trips on any message verb other than `delete`.
+
+  Two scope decisions were taken at planning (2026-09-15) rather than left to be discovered, both from
+  reading `architecture.md`'s DDL against the roadmap. **`message_edit_history` is M15's**: it had sat in
+  the schema since it was written with no milestone owning it, the same gap M14 found with account
+  deletion and closed as M76a, and it belongs to the edit endpoint that writes it. M15 only *writes* it;
+  the reader is **M16a**, placed after guild reports because a moderator triaging one is the consumer, and
+  carrying the disclosure decision — edit history is not offered to everyone who can read the channel, or
+  editing a typo publishes it forever.
+
+  **The search machinery is not M15's**: the `content_search` generated column and both GIN indexes in
+  that same DDL block are M65's, and building them here would pull `pg_trgm` in ahead of any query
+  needing it. `is_e2e` *is* M15's, because it is what M65's column keys its exclusion off. Both splits are
+  annotated in the DDL, since that block is what somebody copies.
+
+  **Four review passes ran against the finished branch and every one of them found something**, which is
+  the part worth carrying forward rather than the fixes themselves. A security audit found `Update`
+  authorizing on the view bit alone — so a muted member could rewrite every message they had already
+  posted — and `Send` accepting any guild channel type, including categories. An optimization review found
+  `Send` holding the channel row lock for its whole transaction, serializing the product's highest-volume
+  write. A code review found six contract enum and response omissions, and an inert `MaxContentLength`.
+  The last audit found a regression the fix for that constant had introduced an hour earlier: a byte-based
+  length check against a rune-based validator, which would have refused any near-limit message in a
+  non-Latin script.
+
+  **The manual pass had already run and found none of them**, and neither had the tests. Each needed a
+  state no happy path constructs — a permission denied to somebody who already had messages, a channel
+  that is not a text channel, eight senders in one channel, a message written in Japanese. That is the
+  argument for the passes being separate skills with separate questions rather than one review.
+- **M16 — Guild-level reports**: next. The `reports` table, a file-a-report endpoint, and a
+  guild-moderator triage view gated by `PermManageMessages` — the guild-scoped half of the reports system
+  whose Instance-Admin half is M74. It depends on M15 because a message must exist to report, and it is
+  the first consumer of the soft delete: a reported message has to still resolve after its author removes
+  it, which is why `messages.deleted_at` exists rather than a hard delete.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -1288,11 +1373,140 @@ And on the audit log, from M14:
   coverage. A route deliberately not exercised declares itself exempt with a reason. Before this, one
   iterated a hand-typed slice and the other covered ten of sixteen actions — the six it missed were the
   whole of M13's surface.
+- **A guard is proved by removal, and the removal must itself be proved.** Delete the guard, watch a
+  *named* test fail, restore it. On this branch that came back green four separate times while proving
+  nothing: `gofmt` had realigned whitespace the string match keyed on, so the edit applied to no lines and
+  the silence read as success. Assert the mutation landed before trusting the result. **If a check's
+  failure mode is silence, it is not a check** — the same principle that makes `spdx-check` match the
+  generated marker strictly rather than grepping the whole file, and that makes a staleness check inert on
+  a file nobody has staged.
+- **Enumerate call sites; do not spot-check them.** Pinning `go-licenses` removed a CI install step and
+  broke `scripts/gen-third-party-notices.sh`, two directories from anything in the diff, because the
+  search was `ci.yml` rather than the repository. There were three callers and the edit found two. A
+  `git grep` for the thing being changed costs one command and is the difference between a refactor and an
+  outage; the same applies to a renamed constant, a moved helper, or a rule whose wording changes.
 - **An unknown filter value is refused, not answered with an empty page.** An action nobody writes matches
   nothing, which is indistinguishable from a guild that never did it, so a typo would read as evidence of
   absence. The check lives in the service and not only in the handler, for the reason `authorize` and
   `revokeEverything` do. Same shape for a zero id: `snowflake.Parse` accepts `"0"`, so absence travels as
   a pointer the whole way down rather than as a zero that silently means "no filter".
+
+And on messages, from M15:
+
+- **Authority lives in `guildauth`, and `messages` proves the extraction was the point.** All three
+  chokepoint functions were unexported in `guilds`, so a second package literally could not call them.
+  Exporting from `guilds` instead would have made it the import root of `messages`, `reports`, `tags` and
+  `whispers` — the four the architecture tree gives their own package. Every operation in `messages` opens
+  by calling it, so there is no path to a message that skips authorization.
+- **There are two channel entry points and the difference is the lock — but the axis is not
+  read-versus-write.** `AuthorizeChannel` reads the channel `FOR UPDATE` and closes the diff race M14
+  reproduced; `AuthorizeChannelUnlocked` does not. The test for which one you want is **whether the caller
+  describes the channel row**: every `guilds` channel mutation writes an audit entry over it and must hold
+  it still, while everything in `messages` — including three mutations — reads `type` and `guild_id` off
+  it and writes elsewhere. It was called `AuthorizeChannelForRead` at first, on the assumption that the
+  lock divides reads from mutations, and that name was false at three of its four call sites **inside the
+  same milestone** — `Send`, `Update` and `Delete` all mutate and all belong on the unlocked path. A name
+  that lies is worse than a comment that lies, because people read names and skip comments.
+  `AuthorizeChannel` keeps the shorter name and the lock deliberately: taking it when you did not need it
+  costs throughput, which is measurable and recoverable, while skipping it when you did costs a wrong
+  audit entry, which is silent and permanent — so the unconsidered choice is the safe one.
+- **Rule 2's narrowing is a property you assert, not one you inherit.** A member posting, editing or
+  deleting their own message writes **no** audit entry, and the test asserting that a mutation records
+  nothing would have been a bug report before M15. A moderator deleting somebody else's writes one. The
+  payload carries ids and never content, so rule 13 is satisfied by there being nothing to exclude rather
+  than by an exclusion a later reader has to remember.
+- **Only an author may edit, and `PermManageMessages` deliberately does not grant it.** That bit deletes
+  other people's messages, which is moderation with a visible outcome. Rewriting somebody's words puts
+  them in their mouth under their name, and an audit entry recording that it happened would not make the
+  message honest — which is also why there is no `message.edit` verb to record.
+- **A verb written in one package and validated in another needs a pin.** `messages` writes
+  `message.delete`; the audit-log reader in `guilds` refuses an `action` filter naming a verb outside its
+  vocabulary, so a verb missing there makes the log refuse to filter rows it already holds. Neither
+  package may import the other, so the value is a literal on the guilds side and
+  `TestTheMessageAuditVerbAgreesAcrossPackages` in `cmd/server` — which imports both — is what stops them
+  drifting. The two guilds coverage tests name the boundary rather than pretending to reach it.
+- **The three message bits compose rather than nest.** `PermViewChannel` puts a channel in your sidebar,
+  `PermSendMessages` lets you post, `PermReadMessageHistory` lets you read the backlog. Announcements is
+  view+history without send; a support thread opened to a reporter is view+send without history. All three
+  are in `@everyone`'s default grant, so withholding history is the deliberate configuration — the
+  alternative is a guild whose every channel reads as empty until somebody finds the bit.
+- **A message id from another channel answers 404 on every path.** The channel in the route is what was
+  authorized, so reaching a message through the wrong one would mean the permission check covered one
+  channel while the write landed in another. Same 404 for a `reply_to_id` naming a message elsewhere, and
+  the refusal says nothing about whether that id exists — an unvalidated cross-channel reference is a
+  disclosure, not merely a data-integrity problem.
+- **`last_message_id` is maintained in the send's own transaction.** M12 created the column with no
+  foreign key precisely so this could be a cheap write rather than a `max(id)` per channel on every
+  channel listing (§15.2's N+1). Nothing maintained it until M15, so a channel's pointer was NULL for
+  three milestones.
+- **A write must be bounded by the permission that bounds writing, whichever verb performs it.** `Update`
+  authorized on the view bit alone, so denying `PermSendMessages` — the mute every guild uses — stopped a
+  send and left the author able to rewrite every message they had already posted, one fresh publish each
+  and a `MESSAGE_UPDATE` fan-out apiece once M18 lands. M13 spent two decisions stopping a restriction from
+  being *shed*; this was the same restriction walked around. Editing now needs `PermSendMessages`; deleting
+  deliberately still does not, because removing your own message is redaction and that is the outcome a
+  mute wants. **Found by `/security-audit` after the milestone's manual pass had already run**, which is the
+  part worth keeping: the pass drove the permission matrix and the audit asymmetry and never denied a bit
+  to somebody who already had messages, so the interesting state took a deliberate setup no ordinary happy
+  path reaches.
+- **Authorization says whether you may act in a channel, never whether the channel holds messages.**
+  `guildauth.guildOf` refuses a channel belonging to no guild, which rules out DMs and nothing else, and
+  `guilds.isGuildChannelType` is consulted only at *creation* — so a member could post into a category,
+  read it back, and advance its `last_message_id`. Reproduced on `GUILD_CATEGORY`, `GUILD_VOICE` and the
+  reserved `GUILD_ANNOUNCEMENT`. Not an authorization bypass — the caller holds the bits on that row — but
+  a place to park content no client renders, which is invisible to moderation while the API keeps serving
+  it. `messages.ChannelGuildText` gates `Send` only, so anything already stored stays readable and
+  removable. **Text-only is the reversible direction**: allowing a type later is additive, disallowing one
+  later strands whatever was stored in it.
+- **The second value written in two places gets the same treatment as the first.**
+  `messages.ChannelGuildText` duplicates `guilds.ChannelGuildText` because neither package may import the
+  other, and `TestTheTextChannelTypeAgreesAcrossPackages` in `cmd/server` is what stops them drifting —
+  the shape `TestTheMessageAuditVerbAgreesAcrossPackages` established one finding earlier. A cross-package
+  literal is not a smell to remove here; it is a thing to *pin*, and the pin belongs in the one package
+  that imports both.
+- **A lock inherited from a caller that needed it is not a lock this caller needs.** `Send` took the
+  channel `FOR UPDATE` because it called `AuthorizeChannel`, whose lock exists for the four `guilds`
+  mutations that *diff* the channel row. A send diffs nothing — it reads `type` and `guild_id` and writes
+  to `messages` — so the lock bought only serialization, and serialization on the product's highest-volume
+  write is a per-channel ceiling no horizontal scale lifts: 777 sends/s into one channel against 2,294
+  after removing it. Two things the lock was silently doing had to be replaced rather than dropped:
+  `last_message_id` monotonicity, now `GREATEST` in the statement (a plain assignment walks the pointer
+  backwards — reproduced in psql at pointer 100 with message 101 present), and the channel-overwrite mute
+  race, accepted in the ledger because the *role*-assignment mute never had that protection anyway.
+- **A guard-by-removal that fails to build has proved nothing**, and neither has one whose test passes.
+  Both happened here. Deleting the foreign-key mapping removed its imports, so the package stopped
+  compiling and the "failure" was the compiler; making the check never match instead kept it compilable
+  and revealed the real problem — the test reached a 404 from the *authorize* path and never exercised the
+  mapping at all. The fix was to make the mapping a named function and test it directly. This is the M14
+  lesson one layer up: there, the mutation did not apply; here it applied and the test could not see it.
+- **A race you cannot provoke is not a race you should test by racing.** The monotonicity test first ran
+  eight concurrent senders and passed three times out of three with `GREATEST` removed — the interleaving
+  is real but too rare to hit under load. Asserting the *statement's* property instead (a lower id must
+  not overwrite a higher one) fails the moment the guard goes. Prove reachability once, by hand, in psql;
+  then pin the property deterministically.
+- **Two vocabularies live in Go and in the contract, and nothing checked either until M15.**
+  `contract_test.go` compares the route *set*; `contract_payload_test.go` validates real responses, which
+  sees an enum only if some exercised response happens to carry the value. So `messages.read`,
+  `messages.write` and `message.delete` were added to `auth.AllScopes` and `guilds.AuditActions()`, added
+  to no enum, and both gates stayed green — a generated client could not request the scopes the message
+  routes are gated on, nor decode an audit page containing a moderator deletion. Found by a human reading
+  the YAML. `TestTheScopeVocabularyMatchesTheContract` and `TestEveryAuditActionIsInTheContract` now
+  assert it against `internal/apicontract`, which is generated from the document and staleness-checked, so
+  the comparison is Go-to-Go and needs no second YAML parser. **The error-code enum had this test since
+  M11 and nobody generalised it** — when a check exists for one vocabulary, ask what the others are.
+- **A bound enforced in two places must measure the same thing in both.** `checkContent` was added so
+  `MaxContentLength` stopped being inert, and used `len()` — bytes — while the handler tag it claims to
+  agree with is go-playground/validator's `max`, which is `utf8.RuneCountInString`. 4,000 Japanese
+  characters are 12,000 bytes and 4,000 emoji are 16,000, so every message near the limit in a non-Latin
+  script would have been accepted by the handler and refused by the service. **A test suite written in
+  English cannot see this**, which is why the regression test spends its cases on Japanese, emoji and
+  Arabic rather than on `strings.Repeat("a", n)`. Duplicating a check is only safe if you know what the
+  original measures.
+- **A mutating route added to a second package is invisible to the route-surface tests until the test
+  router mounts it.** Both mounted only on a non-nil handler, and `newTestRouterWithAuth` builds with nil
+  services — so the four message routes existed and neither test saw them. That is the M10 failure
+  `contract_test.go`'s own comment warns about, one package over: routes may not be conditional, and a new
+  handler has to be added to *both* test routers, the nil-service one and the real-service one.
 
 ## Project-specific skills
 
@@ -1304,6 +1518,20 @@ documentation bug — fix it here rather than relying on an untracked file.
 
 Where they exist, invoke with `/<name>`:
 
+- `/onboard` — **mandatory orientation for a fresh session**, and the one to run before any other. Its
+  core is a rule pass that cannot be skipped on the grounds that this file is already in context: having a
+  document loaded and having read it are different things, and the failure mode of the first is an agent
+  that violates a rule it could quote. It requires all 24 to be restated **in the agent's own words**
+  before any work is proposed — paraphrase rather than quotation, because copying proves retrieval and
+  paraphrasing proves reading, and because the result is visible to whoever is reading the output. It then
+  has the session derive milestone state from `git` rather than from "Milestone status" above, which is
+  written at completion and is behind by design mid-milestone; read the authority its task needs rather
+  than the ~7,000-line doc set; and run the enumerated-fact self-checks. It gives the authorship rule a
+  section of its own, because an agent's harness actively instructs it to add all three forbidden shapes
+  and the local hook is a partial, untracked backstop rather than a guarantee. It also sends the session
+  to `README.md` — the only outside-in view of the project, and the one place a wrong claim is wrong in
+  public. **It deliberately contains no rules of its own** — a second copy in an untracked file is the
+  drift this section warns about, so it points at this file and defers.
 - `/new-endpoint` — scaffold a new REST route (sqlc query → service → handler → OpenAPI contract → tests).
 - `/new-gateway-event` — scaffold a new real-time dispatch event end-to-end (backend publish → schema →
   frontend/daemon-side zod/dispatcher).
@@ -1332,7 +1560,7 @@ Where they exist, invoke with `/<name>`:
 The doc set has one authority per topic — if two files seem to cover the same ground, that is drift and
 should be fixed, not tolerated:
 
-- `docs/design/tui/` — **what the terminal client looks like and does.** `SCREENS.md` (26 screens with
+- `docs/design/tui/` — **what the terminal client looks like and does.** `SCREENS.md` (27 screens with
   stable ids `1a`…`7a`), `KEYMAP.md`, `TOKENS.md`, and `README.md` (the grid, the responsive rules, and the
   corrections applied to the original handoff). Normative: milestones cite screen ids rather than restating
   them, and `mockups.dc.html` is an illustrative rendering, not authoritative where it disagrees.

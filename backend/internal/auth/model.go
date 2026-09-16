@@ -64,6 +64,18 @@ const (
 	// broken by narrowing guilds.read today; doing it after any exist is a breaking change for every one
 	// of them. Same argument M12 made for the permission wire format.
 	ScopeGuildsAudit Scope = "guilds.audit"
+
+	// Messages are their own pair, not folded into guilds.read/guilds.write, and the blast radii are why.
+	// A bot granted guilds.write can rename the guild and delete channels; one that only needs to post an
+	// announcement should be able to do that and nothing else. Conversely guilds.read enumerates a guild's
+	// structure, which is metadata — message history is the conversation itself, and a credential that can
+	// read every word said in a guild is a different thing to hand out.
+	//
+	// Write does not imply read, for the reason the guild pair does not: a scope bounds a credential, and
+	// holding one is not an argument for being granted another. A webhook-shaped bot that posts needs
+	// messages.write alone and never sees a backlog.
+	ScopeMessagesRead  Scope = "messages.read"
+	ScopeMessagesWrite Scope = "messages.write"
 )
 
 // Token management — minting, listing and revoking — has no scope at all: every one of those operations
@@ -80,7 +92,11 @@ const (
 // An unknown scope is rejected rather than ignored: silently dropping a scope the caller asked for would
 // hand them a token they believe is more capable than it is, and silently *keeping* one this build does not
 // understand would mean a future release could widen an existing token's reach.
-var AllScopes = []Scope{ScopeIdentify, ScopeGuildsRead, ScopeGuildsWrite, ScopeGuildsAudit}
+var AllScopes = []Scope{
+	ScopeIdentify,
+	ScopeGuildsRead, ScopeGuildsWrite, ScopeGuildsAudit,
+	ScopeMessagesRead, ScopeMessagesWrite,
+}
 
 // ValidScope reports whether s is a scope this build understands.
 func ValidScope(s Scope) bool { return slices.Contains(AllScopes, s) }

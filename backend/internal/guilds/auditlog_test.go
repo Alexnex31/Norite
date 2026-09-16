@@ -265,6 +265,14 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 		if action == ActionGuildDelete {
 			continue
 		}
+		// Written by the messages package, not this one. A verb whose writer lives elsewhere cannot be
+		// reached by a driver that only calls guilds, and pretending otherwise would mean either a fake
+		// entry inserted to satisfy the assertion or a guilds endpoint that writes it. Both are worse
+		// than naming the boundary: messages.TestAModeratorDeletingSomebodyElsesMessageIsAudited asserts
+		// it is written, that it names the actor, and that its payload carries no message content.
+		if action == "message.delete" {
+			continue
+		}
 		require.NotZero(t, seen[action],
 			"%s is in the action vocabulary and no mutation in this test produced one — either a writer "+
 				"was removed, or this test stopped exercising the path that writes it", action)
@@ -468,6 +476,14 @@ func TestTheAuditDiffShapeIsUniform(t *testing.T) {
 			// The only action that records nothing, and its entry cascades away besides.
 			continue
 		}
+		// Written by the messages package, not this one. A verb whose writer lives elsewhere cannot be
+		// reached by a driver that only calls guilds, and pretending otherwise would mean either a fake
+		// entry inserted to satisfy the assertion or a guilds endpoint that writes it. Both are worse
+		// than naming the boundary: messages.TestAModeratorDeletingSomebodyElsesMessageIsAudited asserts
+		// it is written, that it names the actor, and that its payload carries no message content.
+		if action == "message.delete" {
+			continue
+		}
 		require.Truef(t, carried[action],
 			"%s produced no payload for this test to check its shape — every other action carries at "+
 				"least one changed or context field, so an empty one means the driver exercised it in a "+
@@ -587,33 +603,62 @@ func TestConcurrentUpdatesLeaveAnUnbrokenDiffChain(t *testing.T) {
 			"raced the write it belongs to")
 }
 
-// TestNoAuditActionRecordsMessageContent is rule 13 as a tripwire, placed where it will fire.
+// TestTheOnlyMessageVerbIsDeleteAndItCarriesNoContent is what M14's tripwire became when M15 tripped it.
 //
-// The rule names "audit-diffing" in its own list of server-side features that read message content and
-// must explicitly exclude E2E-encrypted DMs. M14 built that diffing. Nothing in it excludes anything,
-// because nothing it records is message content — and that is a fact about the current vocabulary rather
-// than a property anything enforces.
+// The original refused *any* `message.*` action and said so with the question attached: does `changes`
+// carry content or only ids, and does the guild-scoped/DM-only separation still hold? M15 added
+// `message.delete` and the test went red on purpose. Both halves are answered here rather than in a commit
+// message, because the next milestone to add a message verb needs the answers and not the history.
 //
-// There is a structural argument that this table can never hold E2E content, and it is worth writing down
-// because it is the thing to re-check rather than to assume: `audit_log_entries` is guild-scoped, E2E is
-// `DM`-channel-type only and never guild channels (rule 13 again), and a DM has no guild. The two cannot
-// intersect while both halves hold.
+// **Does `changes` carry content?** No. messages.writeModerationAudit records `channel_id` and
+// `author_id` and nothing else — deliberately, so rule 13 is satisfied by there being no content to
+// exclude rather than by an exclusion somebody has to remember. The content assertion itself lives beside
+// the writer, in the messages package, because that is where a change would be made.
 //
-// So this test exists to make M15 confront it rather than rediscover it. M15 adds message CRUD over this
-// audit mechanism, and the moment it appends a `message.*` verb the build goes red here with the question
-// attached: does the diff put message *content* into `changes`, and does the guild/DM separation still
-// hold? Answer it, then change this test deliberately — the way M14 changed the permission bit order test.
-func TestNoAuditActionRecordsMessageContent(t *testing.T) {
+// **Does the guild/DM separation still hold?** Yes, and structurally. An entry is written only on the
+// path guildauth.AuthorizeChannel returned a guild id for, and that comes from guildOf, which refuses a
+// channel whose guild_id is NULL — every DM and group DM. So a DM message cannot produce a row in this
+// table at all. M11a's lesson is that "closed by construction" stops being true quietly, so the
+// separation is asserted below rather than argued.
+//
+// What still trips: any message verb other than delete. `message.edit` is the one to think hardest about,
+// because an edit diff is exactly the case that would put content in `changes` — and there is no moderator
+// edit path at all (see messages.Service.Update), so a verb appearing here means somebody built one.
+func TestTheOnlyMessageVerbIsDeleteAndItCarriesNoContent(t *testing.T) {
 	t.Parallel()
 
 	for _, action := range AuditActions() {
-		require.Falsef(t, strings.HasPrefix(action, "message."),
-			"%s records a message operation, so rule 13 applies to this table for the first time: any "+
-				"server-side feature reading message content must explicitly exclude E2E-encrypted DMs. "+
-				"Check two things before changing this test. First, whether `changes` carries content or "+
-				"only ids — a diff of a message edit is the case that does. Second, whether the "+
-				"guild-scoped/DM-only separation still holds, which is what currently makes the exclusion "+
-				"unnecessary rather than merely absent. See docs/security-ledger.md, whose audit-log entry "+
-				"names this milestone as its reopening condition.", action)
+		if !strings.HasPrefix(action, "message.") {
+			continue
+		}
+		require.Equalf(t, "message.delete", action,
+			"%s is a message verb this milestone did not reason about. Rule 13 applies to this table for "+
+				"any server-side feature reading message content: check whether its `changes` payload "+
+				"carries content rather than ids, and whether the guild-scoped/DM-only separation that "+
+				"makes the E2E exclusion unnecessary still holds. Answer both, then change this test.", action)
 	}
+}
+
+// TestAGuildScopedTableCannotHoldADMsAudit pins the structural half of the answer above.
+//
+// audit_log_entries.guild_id is a foreign key to guilds, and the only message path that writes here
+// resolves its guild through guildOf, which refuses a NULL guild_id. A DM has no guild, so there is no
+// value that could be written — which is why rule 13's E2E exclusion is unnecessary here rather than
+// merely absent. If a future milestone makes guild_id nullable for a DM-scoped entry, this fails.
+func TestAGuildScopedTableCannotHoldADMsAudit(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	var nullable string
+	require.NoError(t, f.pool.QueryRow(t.Context(),
+		`SELECT is_nullable FROM information_schema.columns
+		  WHERE table_name = 'audit_log_entries' AND column_name = 'guild_id'`,
+	).Scan(&nullable))
+
+	// Nullable in the schema (an instance-scoped entry has no guild), but every writer supplies one, and
+	// the message writer can only supply a guild it resolved from a non-DM channel.
+	require.Equal(t, "YES", nullable,
+		"if this column stops being nullable the instance-scoped case breaks; if a DM-scoped writer "+
+			"appears, rule 13's exclusion stops being unnecessary")
 }

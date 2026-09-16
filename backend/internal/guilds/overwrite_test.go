@@ -196,7 +196,7 @@ func TestAnOverwriteIsMeasuredAgainstChannelPermissions(t *testing.T) {
 }
 
 // TestAStrangerGetsTheSameAnswerForEveryOverwriteRefusal is the anti-enumeration property, and the reason
-// checkOverwriteTarget is only ever called after authorizeChannel.
+// checkOverwriteTarget is only ever called after guildauth.AuthorizeChannel.
 //
 // M12 shipped two endpoints that answered a non-member with a public error naming something they could
 // not see, and both were found by review. Every refusal here reads a loaded row, so every one of them is
@@ -683,7 +683,7 @@ func TestYouCannotAssignARoleCarryingPermissionsYouLack(t *testing.T) {
 	require.ErrorIs(t, err, httpx.ErrForbidden,
 		"a delegated authority never exceeds its delegator, and assignment is that question")
 
-	// The owner holds everything and passes with no special branch — decision.allows exempts them.
+	// The owner holds everything and passes with no special branch — Decision.Allows exempts them.
 	_, err = f.svc.AssignRole(ctx, userActor(f.owner), f.guildID, f.plain, bot)
 	require.NoError(t, err)
 

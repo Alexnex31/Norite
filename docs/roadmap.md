@@ -563,29 +563,162 @@ of this section.
 - **M15 — Core messaging CRUD**: send/edit/delete REST endpoints for channel messages, permission-checked via
   the engine from M13 and audit-logged per the mechanism from M14. Depends on M13 and M14.
 
+  **It owns `message_edit_history` as well**, settled 2026-09-15. That table has sat in
+  `docs/architecture.md` §2 since the schema was first written and no milestone had ever claimed it — the
+  same shape M14 found with account deletion and closed as M76a, and found the same way, by reading the
+  DDL against the roadmap rather than by anything failing. It belongs here rather than in a later
+  milestone because the edit endpoint is what writes it: adding the table afterwards means a second
+  migration and an edit path that silently recorded nothing in between. An edit therefore appends the
+  *previous* content in the same transaction as the update, which is the discipline rule 2 already imposes
+  on the audit write beside it.
+
+  **M15 writes that table and nothing reads it back, which is deliberate and is a shape this project has
+  run before**: `audit_log_entries` was written under rule 2 from M12 and had no reader until M14. The
+  reader here is **M16a**, assigned the same day rather than left open, and placed after M16 because that
+  is where its consumer is. M15 owes it nothing beyond writing rows an order can be reconstructed from —
+  which is what `edited_at` and the index on `(message_id, edited_at DESC)` are for.
+
+  **It deliberately does not build the search indexes.** `architecture.md`'s DDL for `messages` carries a
+  `content_search` `tsvector` column and GIN indexes including `pg_trgm`, and every one of those is
+  **M65's** — copying the block wholesale is the easy mistake, and it would pull a Postgres extension
+  dependency forward into a milestone that has no query needing it. M15 ships `(channel_id, id DESC)` and
+  nothing else. The `is_e2e` column *is* M15's, because it is what the generated column will later key its
+  exclusion off and because rule 13 is cheaper to design in than to retrofit.
+
   **It lands before M57 and M72a, which is worth knowing rather than discovering.** Those two carry the
   rejoin question M13 routed to them — a kick clears a member's channel-tier overwrites, and nothing
   restores them if that member comes back. M15 makes channels carry conversations, so from here the
   residual stops being about access to an empty room. Neither milestone moves: there is still no join path
   before M57, so the question remains unreachable rather than merely unanswered.
 
+  **It audits administrative message actions only, and that narrowed rule 2** (settled 2026-09-15). Taken
+  literally the old wording made every send an audit row, which doubles the write volume of the hottest
+  path in the product, buries the moderation signal M14 built a reader for, and quietly removes the basis
+  of an accepted risk: the ledger's unbounded-growth entry rests on the write path being "rate-limited and
+  permission-gated", and `defaultEveryonePermissions` grants `PermSendMessages` to `@everyone` in every
+  new guild. So a moderator acting on somebody else's message is audited and a member posting, editing or
+  deleting their own is not. Rule 2 now says "administrative" in `CLAUDE.md` and `architecture.md` §14
+  both; guilds that want everything recorded opt in at **M16b**, to a separate table.
+
   M14's audit diff also starts mattering more here than it does for guild settings. A `message.*` action
   would put content into `changes`, and rule 13 forbids reading E2E DM content on any server-side path —
-  see the audit-log entry in `docs/security-ledger.md`, whose *reopens if* names exactly this.
+  see the audit-log entry in `docs/security-ledger.md`, whose *reopens if* names exactly this. The
+  narrowing above reduces which verbs exist; it does not answer the question, because a moderator
+  deletion is exactly the entry that would want to record what was deleted.
 
-  Done when: a
-  permitted member can send/edit/delete a message via the REST API, an unpermitted one is rejected, and each
-  mutation produces an audit entry.
+  **Built as planned, with one addition the entry did not anticipate: `PermReadMessageHistory`** (bit 20).
+  Seeing a channel and reading what was said in it before you arrived are separate grants, as they are in
+  Discord — an announcements channel is view+history without send, a support thread opened to a reporter is
+  view+send without history. It is in `@everyone`'s default grant, so withholding it is the deliberate act
+  rather than the default.
+
+  Done when: a permitted member can send/edit/delete a message via the REST API, an unpermitted one is
+  rejected, a moderator acting on somebody else's message produces an audit entry while an author acting on
+  their own does not, and an edited message's previous content is readable
+  from `message_edit_history` — written in the same transaction as the edit, so a successful edit that
+  recorded no history is not a state the code can reach.
 - **M16 — Guild-level reports**: the `reports` table (reporter, target type/id, reason category plus free
   text, status workflow), a file-a-report endpoint, and a guild-moderator triage view gated by
   `PermManageMessages`. This is the guild-scoped half of the eventual unified reports system — the
   Instance-Admin-facing half does not exist until M74. Report filing is rate-limited now (reuses existing
   REST rate limiting). Depends on M15 (a message must exist to report). Done when: a guild member can file a
   report against a message, and a `PermManageMessages` holder can see and resolve it.
+- **M16a — Message edit history read surface**: `GET /channels/{channel_id}/messages/{message_id}/history`
+  over the `message_edit_history` table M15 writes and nothing reads. Assigned 2026-09-15, having had no
+  milestone since the table was first drawn; the gap was found the same way M76a's was, by reading
+  `architecture.md`'s DDL against this file.
+
+  **Placed after M16 rather than beside M15 because M16 builds the consumer.** The dependency is only on
+  M15 — the rows exist from the moment an edit does — but a history nobody has a reason to open is a
+  surface with a disclosure cost and no use, and the reason is a moderator triaging a report on a message
+  that was edited after it was sent. M16 also establishes `PermManageMessages` as the gate for
+  message-scoped moderation reads, which is the gate this reuses rather than inventing a bit for.
+
+  **The disclosure decision is the milestone**, and it is M14's question asked about content rather than
+  metadata. Edit history is not offered to everyone who can read the channel: a typo correction, a
+  removed phone number and a retracted sentence are all permanently readable under that design, which
+  makes editing a trap rather than a repair. It is a moderation surface, `PermManageMessages`, with an
+  author-reads-their-own carve-out to decide explicitly rather than by omission. Whatever is chosen goes
+  in `docs/security-ledger.md` with its *reopens if*, as M14's did.
+
+  **Rule 13 applies and must be satisfied explicitly, not inferred.** E2E is `DM`-only, a DM has no guild,
+  and `PermManageMessages` is guild-scoped — so the endpoint looks unreachable for E2E content by shape.
+  That is the same "closed by construction" claim M11a made about password reset not bypassing the second
+  factor, and M11a's lesson is that such a claim stops being true quietly: it was given a test anyway.
+  Do both here — the explicit exclusion rule 13 asks for, and a test that fails if the shape argument ever
+  stops holding.
+
+  Depends on M15 (the table and its writer) and M16 (the triage flow and its permission gate). Done when:
+  a `PermManageMessages` holder can read a message's prior versions in order, somebody without it cannot,
+  an E2E-encrypted DM's history is never returned by any caller, and the disclosure decision is recorded
+  in the ledger.
+- **M16b — Opt-in per-guild message audit**: a guild setting, owner-only, that records every message
+  create/edit/delete to a table of its own — `message_audit_entries`, never `audit_log_entries` — plus the
+  read surface for it. Off by default and documented as the expensive choice. Assigned 2026-09-15, from
+  M15's planning.
+
+  **It exists because rule 2 was narrowed rather than broken.** M15 settled that content mutations are not
+  administrative and so are not audited, which is the right default and is not what every operator wants:
+  a small private guild under a compliance obligation, or one that has had an incident, may genuinely want
+  every message recorded. The answer is an opt-in that pays its own cost, not a default everybody pays.
+
+  **A separate table, and that is the whole performance argument.** Folding this into `audit_log_entries`
+  would put the product's highest-volume write on the table `GET /guilds/{id}/audit-log` pages through,
+  and M14's cursor and three indexes are sized for moderation traffic. A separate table keeps the default
+  log's shape unchanged whether or not anybody opts in, and lets this one carry a retention policy the
+  audit log deliberately refuses (M125 owns pruning).
+
+  **Turning it off is an administrative mutation and is audited in the normal log.** Without that it is the
+  one setting an abusive owner or a compromised session could flip, act under, and flip back — and the
+  ordinary audit log would show nothing. Turning it *on* is audited too, for symmetry and because a
+  member's expectations about who reads their messages just changed.
+
+  **It is the second surface to inherit rule 13**, after M16a, and the more dangerous one because it stores
+  content rather than reading it: the exclusion of E2E DMs must be explicit and tested, not inferred from
+  the setting being guild-scoped.
+
+  **Members are told, and the surface is `6e`** — settled 2026-09-15, because recording conversations
+  without notice is a different product from recording them with it. That screen states the guild's
+  recording status in *both* directions, so the absence of a warning is never the thing a member has to
+  interpret; it belongs to **M62a**, which also owns the remaining question of whether somebody is told at
+  the moment they join rather than only when they look. M16b's own obligation is narrower and structural:
+  the flag has to be readable by any member of the guild, not only by somebody holding a permission, or
+  the screen cannot state either case honestly.
+
+  Depends on M15 (messages) and M16a (the moderation-read-over-content pattern and its disclosure
+  decision). Done when: a guild with the setting off writes nothing to `message_audit_entries`, one with it
+  on records every create/edit/delete, both toggles appear in the ordinary audit log, an E2E DM is never
+  recorded, and the notice decision is in the ledger.
 - **M17 — Message tagging**: `message_tags` (plus its join table), guild-wide scope (not per-channel),
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and
   permission gating on shared-tag creation is enforced.
+- **M17a — Guild administration verbs**: the `norite guild`, `norite channel` and `norite role` command
+  groups over the REST surface M12, M13 and M14 built. Assigned 2026-09-15.
+
+  **It closes the largest client gap in the plan, and the gap was invisible because nothing failed.**
+  M12–M14 shipped twenty-one guild routes — guild CRUD, channels, roles, the position hierarchy, permission
+  overwrites, member role assignment and the audit log — and **no milestone anywhere gave a client a way to
+  call any of them**: not a TUI screen (the 27 in `docs/design/tui/` include none for guild settings), not a
+  CLI verb (no entry mentioned `norite guild`), nothing. M48 standardizes `--json` output for "every
+  data-printing verb" and never says who creates these; ADR 0026 requires every verb to be `M-x`-invocable
+  and so assumes they exist. Found at M15's planning, the same way M76a and M16a were: by reading one
+  document against another rather than by anything breaking.
+
+  **Placed here because this is where its dependencies complete**, not for convenience: the verbs need the
+  REST endpoints (M14) and the command tree (M2), and nothing from Phase D. Every verb is a `--json`
+  structured result from the start rather than printed text retrofitted at M48 — that is ADR 0026's
+  requirement, and M48's own entry says a verb without one is a verb the TUI cannot run.
+
+  **It also makes Phase C hand-testable.** M13's channel-visibility bug was found by driving a real guild by
+  hand and M14's compose breakage the same way; today that means curl against a snowflake id copied out of
+  psql. Rule 19 applies throughout — every guild name, channel name, role name and audit entry these print
+  is text a stranger's instance chose, so it goes through `cli/internal/termsafe` (M7).
+
+  Depends on M14 (the endpoints) and M10 (`apiclient`, the transport). Done when: a guild can be created,
+  renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
+  command line, with `--json` output validated against `contracts/cli-json/` and a non-member's refusal
+  reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
 
@@ -1020,6 +1153,35 @@ of this section.
 - **M62 — Regex notification filters**: server-side evaluation via Go's stdlib `regexp` (RE2), a
   pattern-length cap as defense-in-depth. Done when: a saved filter correctly matches/suppresses
   notifications server-side, including for a client that's currently offline.
+- **M62a — Guild info and per-guild preferences** (`6e`): the member-facing guild screen — what this guild
+  is, whether it records messages, and the notification filters you have scoped to it. Assigned
+  2026-09-15. **Not an administration screen**: it holds nothing gated on a permission, which is what
+  distinguishes it from M17a's verbs.
+
+  **It owns the question M16b could not answer: whether members are told the guild records them.** The
+  answer is yes, and on this screen, and **in both directions** — a guild that records says so in `warn`,
+  and a guild that does not says *that*, in `text.dim`. Stating only the positive case is the tempting
+  design and is worse: a line that appears only when recording is on makes its absence carry a meaning
+  nothing guarantees, so a member who never opened the screen learns nothing and one who did would have to
+  remember what absence looked like. Two states, both written down, is the only version a person can rely
+  on.
+
+  **Placed here because this is where its content exists.** The screen needs the TUI shell (M41–M46),
+  the recording flag (M16b) and the filters it lists (M62) — and the `6x` screens are each drawn by the
+  milestone that owns their feature rather than by a TUI milestone, which is why `6a` sits at M98 and `6c`
+  at M74.
+
+  **One decision it must take rather than inherit**: whether a member is told at the moment they *join* a
+  recording guild, not only when they go looking. A screen behind a chord is discoverable, not
+  unmissable, and joining is the point where the choice to participate is actually made — but a modal on
+  join is also the thing people click through. The options are a system line in the channel (`1a` already
+  renders them), a one-time notice, or nothing beyond this screen. Whichever is chosen goes in
+  `docs/security-ledger.md` with its *reopens if*, beside M16b's own entries.
+
+  Depends on M16b (the flag), M62 (the filters) and M46 (the pane engine). Done when: a member with no
+  permissions can open `6e` with `C-c g` in a guild they belong to, read an accurate recording state in
+  both the on and off cases, see and remove their own filters for that guild, and reach nothing that
+  requires a permission.
 - **M63 — Bandwidth/network performance toggles**: client-side settings (e.g. disable image loading, wired
   to the M51 rendering path). Done when: toggling the setting suppresses inline image rendering without
   affecting anything else, including custom-emoji rendering, which stays unaffected.
@@ -1038,7 +1200,17 @@ of this section.
   column, and results in two labelled groups — server hits from Postgres, and DM hits from the daemon's
   mandatory local FTS5 index over its decrypted E2E store (M98, ADR 0014), since the instance holds only
   ciphertext and cannot match against it (rule 13). The two groups are labelled because they come from
-  different machines, with different guarantees. Done when: a guild-scoped
+  different machines, with different guarantees.
+
+  **It arrives at a populated `messages` table, which M15's planning made explicit rather than left to be
+  found here.** M15 builds the table and deliberately not the search machinery, so `content_search` is an
+  `ALTER TABLE … ADD COLUMN … GENERATED ALWAYS AS … STORED` over real data — a full table rewrite holding
+  ACCESS EXCLUSIVE for its duration, on the largest table in the product. That is a deployment question,
+  not a correctness one, and the answer is not to build it early: at M15 there is no query for it and it
+  would cost `pg_trgm` up front. Plan the migration window, or add the column nullable-and-backfilled if
+  the instance is large enough by then to need it.
+
+  Done when: a guild-scoped
   search query returns relevant messages ranked reasonably, with the index verified via `EXPLAIN ANALYZE`.
 
 #### Phase I — Public matchmaking, friends, blocks, Instance Admin
@@ -1349,14 +1521,36 @@ of this section.
     account chose, in rows nothing ever sweeps and which a placeholder rename does not reach.
   - **`guilds.owner_id` refuses it too**, for the reason M13a exists: a guild whose owner is deleted is not
     a guild with a NULL owner, and ownership transfer is the operation that resolves it.
+  - **`messages.author_id` refuses it as well, and that one is settled** (2026-09-16, at M15): a deleted
+    account's messages survive, attributed to "Deleted User". The refusing FK is therefore the *guarantee*
+    rather than an obstacle — soft-delete plus a placeholder rename is the only reachable path, and if a
+    hard delete is ever attempted the constraint stops it instead of letting authorship be quietly NULLed
+    and called deletion. Two consequences to write into the endpoint rather than discover: an erasure
+    request cannot be satisfied by deleting the account, because the content is exactly what survives; and
+    editing a message first does not help, since `message_edit_history` keeps the prior text and has no
+    deletion path of its own.
+
+  **The list above is not the whole set, and enumerating it here is how that stays true.** As of M15 five
+  foreign keys to `users` refuse a delete — `audit_log_entries.actor_id`, `guilds.owner_id`,
+  `messages.author_id`, `instance_admins.granted_by` and `instance_invites.created_by`. The last two have
+  never been named in this entry and predate M15; it listed two of four when it was written at M14, and
+  M15 made it two of five. Derive the set rather than trusting the prose, because a done-when that names
+  its members is the drift this project has now fixed three times:
+
+  ```sql
+  SELECT c.conrelid::regclass, a.attname FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+   WHERE c.contype = 'f' AND c.confrelid = 'users'::regclass AND c.confdeltype = 'a';
+  ```
 
   Rule 17 applies in full: deletion invokes the general-purpose revoke-all-sessions primitive rather than
   assembling its own cleanup, exactly as a ban does.
 
   Done when: an account can export its own data and delete itself; deletion goes through
   `revokeEverything`; the placeholder rename is atomic with the soft-delete rather than a second statement
-  that can fail; and the `audit_log_entries` and `guilds` foreign keys each have an answer written down
-  rather than a failed `DELETE`.
+  that can fail; a deleted account's messages still render as "Deleted User" rather than vanishing or
+  losing their author; and **every** foreign key the query above returns has an answer written down rather
+  than a failed `DELETE` — checked by running it, not by reading the list above.
 - **M77 — Data export asymmetry verification**: an end-to-end test that a user's own export includes their
   filed reports and blocked accounts, and excludes reports filed against them and who has blocked them. Done
   when: both asymmetries are covered by an automated test, not just documented intent.

@@ -1,5 +1,8 @@
 -- Milestone M12 — the audit log, pulled forward from M14 because rule 2 needs it now.
 --
+-- Rule 2 was narrowed at M15 to guild-scoped *administrative* mutations; message content is outside
+-- it. The sentence below predates that and is left as written, because an applied migration is a
+-- record of what was true when it ran.
 -- Rule 2: every guild-scoped mutation writes an audit log entry, in the same DB transaction as the
 -- mutation. M12 is the first milestone that *has* guild-scoped mutations, and the table was scheduled for
 -- M14 — so the rule would have been false for two milestones and then retrofitted across every handler

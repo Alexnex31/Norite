@@ -20,6 +20,9 @@
 --
 -- # This is the third index on the guild surface's hottest write path, deliberately
 --
+-- Rule 2 was narrowed at M15 to guild-scoped *administrative* mutations; message content is outside
+-- it. The sentence below predates that and is left as written, because an applied migration is a
+-- record of what was true when it ran.
 -- Rule 2 puts a write here inside every guild-scoped mutation, so each index is a btree insert on every
 -- one of them. 000017 dropped an index for exactly that reason — but it dropped one with no reader, and
 -- this one has a reader the API exposes today. It cannot be folded into the other two: with actor_id

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -122,7 +123,7 @@ func (s *Service) UpdateMember(
 		// settings — the opposite of what splitting the bits was for.
 		//
 		// So the base is empty and each present field contributes. A request that sends nothing needs
-		// nothing beyond membership, which authorizeWith establishes anyway by resolving at all.
+		// nothing beyond membership, which guildauth.Authorize establishes anyway by resolving at all.
 		var need roles.Permission
 		if in.Nickname != nil || in.ClearNickname {
 			need = need.Add(roles.PermManageGuild)
@@ -142,7 +143,7 @@ func (s *Service) UpdateMember(
 			return httpx.Errorf(httpx.ErrBadRequest, "no fields to update")
 		}
 
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, need)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, need)
 		if err != nil {
 			return err
 		}
@@ -175,7 +176,7 @@ func (s *Service) UpdateMember(
 				}
 				return fmt.Errorf("guilds: get target standing: %w", err)
 			}
-			if !allowed.outranksMember(userID, standing) {
+			if !allowed.OutranksMember(userID, standing) {
 				return httpx.Errorf(ErrOutranked, "you cannot act on a member above you")
 			}
 		}
@@ -289,11 +290,11 @@ func (s *Service) RemoveMember(
 			// demotion — removing a role looked like one too and stopped being one when roles gained
 			// channel denies. Leaving forfeits every permission in the guild at once, so it cannot be a
 			// route to gaining one. That property, not the shape of the operation, is what earns it.
-			if _, err := authorizeWith(ctx, q, actor, guildID, 0, 0); err != nil {
+			if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, 0); err != nil {
 				return err
 			}
 		} else {
-			allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermKickMembers)
+			allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermKickMembers)
 			if err != nil {
 				return err
 			}
@@ -311,7 +312,7 @@ func (s *Service) RemoveMember(
 				}
 				return fmt.Errorf("guilds: get target standing: %w", err)
 			}
-			if !allowed.outranksMember(userID, standing) {
+			if !allowed.OutranksMember(userID, standing) {
 				return httpx.Errorf(ErrOutranked, "you cannot act on a member above you")
 			}
 		}

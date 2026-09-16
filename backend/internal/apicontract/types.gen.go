@@ -21,6 +21,7 @@ const (
 	MemberRoleAdd    AuditLogAction = "member.role_add"
 	MemberRoleRemove AuditLogAction = "member.role_remove"
 	MemberUpdate     AuditLogAction = "member.update"
+	MessageDelete    AuditLogAction = "message.delete"
 	OverwriteDelete  AuditLogAction = "overwrite.delete"
 	OverwriteSet     AuditLogAction = "overwrite.set"
 	RoleCreate       AuditLogAction = "role.create"
@@ -51,6 +52,8 @@ func (e AuditLogAction) Valid() bool {
 	case MemberRoleRemove:
 		return true
 	case MemberUpdate:
+		return true
+	case MessageDelete:
 		return true
 	case OverwriteDelete:
 		return true
@@ -230,10 +233,12 @@ func (e PermissionOverwriteType) Valid() bool {
 
 // Defines values for Scope.
 const (
-	GuildsAudit Scope = "guilds.audit"
-	GuildsRead  Scope = "guilds.read"
-	GuildsWrite Scope = "guilds.write"
-	Identify    Scope = "identify"
+	GuildsAudit   Scope = "guilds.audit"
+	GuildsRead    Scope = "guilds.read"
+	GuildsWrite   Scope = "guilds.write"
+	Identify      Scope = "identify"
+	MessagesRead  Scope = "messages.read"
+	MessagesWrite Scope = "messages.write"
 )
 
 // Valid indicates whether the value is a known member of the Scope enum.
@@ -246,6 +251,10 @@ func (e Scope) Valid() bool {
 	case GuildsWrite:
 		return true
 	case Identify:
+		return true
+	case MessagesRead:
+		return true
+	case MessagesWrite:
 		return true
 	default:
 		return false
@@ -442,7 +451,9 @@ type Channel struct {
 	// Examples: 7238829238972837423
 	Id Snowflake `json:"id"`
 
-	// LastMessageId Reserved until messages exist. Always null at this version.
+	// LastMessageId The newest message in the channel, or null if none has been sent. Maintained in the send's own transaction (M15) rather than derived with `max(id)` on every channel listing, which would be an N+1 across the sidebar.
+	//
+	// **View-gated, not history-gated.** It is returned to anyone who can see the channel, including a member denied `READ_MESSAGE_HISTORY` — it is the unread-state primitive, and a client cannot render an unread marker without it. What that discloses is a snowflake, and therefore a timestamp: that somebody posted, and when. The content stays withheld. Discord exposes the same field under the same conditions. Recorded as a decision because it reads like an oversight otherwise.
 	LastMessageId *Snowflake `json:"last_message_id"`
 	Name          *string    `json:"name"`
 	Nsfw          bool       `json:"nsfw"`
@@ -693,6 +704,31 @@ type Member struct {
 	UserId Snowflake `json:"user_id"`
 }
 
+// Message defines model for Message.
+type Message struct {
+	// AuthorId Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
+	AuthorId Snowflake `json:"author_id"`
+
+	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	ChannelId Snowflake `json:"channel_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+	EditedAt  time.Time `json:"edited_at"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id        Snowflake `json:"id"`
+	ReplyToId Snowflake `json:"reply_to_id"`
+
+	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
+	Type int `json:"type"`
+}
+
 // MintApiTokenRequest defines model for MintApiTokenRequest.
 type MintApiTokenRequest struct {
 	Name string `json:"name"`
@@ -779,9 +815,9 @@ type PasswordResetRequest struct {
 type PermissionOverwrite struct {
 	// Allow A permission bitfield, as a **decimal string** rather than a number.
 	//
-	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-one bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
 	//
-	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`.
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`, `READ_MESSAGE_HISTORY`.
 	//
 	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
 	//
@@ -797,9 +833,9 @@ type PermissionOverwrite struct {
 
 	// Deny A permission bitfield, as a **decimal string** rather than a number.
 	//
-	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-one bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
 	//
-	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`.
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`, `READ_MESSAGE_HISTORY`.
 	//
 	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
 	//
@@ -822,9 +858,9 @@ type PermissionOverwriteType int32
 
 // Permissions A permission bitfield, as a **decimal string** rather than a number.
 //
-// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-one bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
 //
-// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`.
+// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`, `READ_MESSAGE_HISTORY`.
 //
 // **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
 //
@@ -948,9 +984,9 @@ type Role struct {
 
 	// Permissions A permission bitfield, as a **decimal string** rather than a number.
 	//
-	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-one bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
 	//
-	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`.
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`, `READ_MESSAGE_HISTORY`.
 	//
 	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
 	//
@@ -967,7 +1003,7 @@ type Role struct {
 //
 // There is deliberately no scope for managing API tokens: minting, listing and revoking all require a logged-in user, because a credential that can create credentials can escalate itself.
 //
-// `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both. `guilds.audit` is separate again, and for the same reason applied one level down. The read scope covers a guild's *current state*; the audit log is its history and attribution — who kicked whom, which permission changed, what a nickname used to be. The permission layer already draws that line with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`, so a scope that bundled the log with the channel listing would have the delegation model contradicting the permission model.
+// `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both. `guilds.audit` is separate again, and for the same reason applied one level down. The read scope covers a guild's *current state*; the audit log is its history and attribution — who kicked whom, which permission changed, what a nickname used to be. The permission layer already draws that line with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`, so a scope that bundled the log with the channel listing would have the delegation model contradicting the permission model. `messages.read` and `messages.write` are separate from the guild pair, and from each other, for the same reasons one level down. `guilds.read` enumerates a guild's structure, which is metadata; message history is the conversation itself, and a credential that can read every word said in a guild is a different thing to hand out. A webhook-shaped bot that only posts needs `messages.write` and never a backlog.
 type Scope string
 
 // Session One device signed in to an account. A device, not a session record: the underlying rows rotate on every refresh, and `id` names whichever record is newest and live for that device right now.
@@ -999,9 +1035,9 @@ type Session struct {
 type SetOverwriteRequest struct {
 	// Allow A permission bitfield, as a **decimal string** rather than a number.
 	//
-	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-one bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
 	//
-	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`.
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`, `READ_MESSAGE_HISTORY`.
 	//
 	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
 	//
@@ -1011,9 +1047,9 @@ type SetOverwriteRequest struct {
 
 	// Deny A permission bitfield, as a **decimal string** rather than a number.
 	//
-	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
+	// The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-one bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.
 	//
-	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`.
+	// Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`, `READ_MESSAGE_HISTORY`.
 	//
 	// **The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.
 	//
@@ -1213,6 +1249,29 @@ type RequestEmailVerificationJSONBody struct {
 	Email openapi_types.Email `json:"email"`
 }
 
+// ListChannelMessagesParams defines parameters for ListChannelMessages.
+type ListChannelMessagesParams struct {
+	// Before Return messages with an id strictly lower than this one.
+	Before *Snowflake `form:"before,omitempty" json:"before,omitempty"`
+
+	// After Return messages with an id strictly higher than this one.
+	After *Snowflake `form:"after,omitempty" json:"after,omitempty"`
+
+	// Limit Page size, 1 to 100. Defaults to 50.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// SendMessageJSONBody defines parameters for SendMessage.
+type SendMessageJSONBody struct {
+	Content   string     `json:"content"`
+	ReplyToId *Snowflake `json:"reply_to_id,omitempty"`
+}
+
+// UpdateMessageJSONBody defines parameters for UpdateMessage.
+type UpdateMessageJSONBody struct {
+	Content string `json:"content"`
+}
+
 // GetDevicePageParams defines parameters for GetDevicePage.
 type GetDevicePageParams struct {
 	// Code Prefills the field and does nothing else — no lookup, no state, no step skipped. A value that is not a well-formed user code is dropped rather than echoed back.
@@ -1371,6 +1430,12 @@ type RequestEmailVerificationJSONRequestBody RequestEmailVerificationJSONBody
 
 // UpdateChannelJSONRequestBody defines body for UpdateChannel for application/json ContentType.
 type UpdateChannelJSONRequestBody = UpdateChannelRequest
+
+// SendMessageJSONRequestBody defines body for SendMessage for application/json ContentType.
+type SendMessageJSONRequestBody SendMessageJSONBody
+
+// UpdateMessageJSONRequestBody defines body for UpdateMessage for application/json ContentType.
+type UpdateMessageJSONRequestBody UpdateMessageJSONBody
 
 // DeleteChannelPermissionOverwriteJSONRequestBody defines body for DeleteChannelPermissionOverwrite for application/json ContentType.
 type DeleteChannelPermissionOverwriteJSONRequestBody = DeleteOverwriteRequest

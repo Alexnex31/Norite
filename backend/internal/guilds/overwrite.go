@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -53,7 +54,7 @@ type SetOverwriteInput struct {
 //
 // # Resolved in the channel, not in the guild
 //
-// authorizeWith is given the channel id, so the decision's resolved permissions are what the caller holds
+// guildauth.Authorize is given the channel id, so the decision's resolved permissions are what the caller holds
 // *here*. At guild level the escalation check asks the wrong question on the one endpoint whose entire
 // subject is per-channel permissions: a caller denied PermSendMessages in this channel would pass a
 // guild-level check and allow it back to themselves, in one request.
@@ -61,7 +62,7 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 	var out Overwrite
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		_, guildID, allowed, err := s.authorizeChannel(ctx, q, actor, in.ChannelID, roles.PermManageRoles)
+		_, guildID, allowed, err := guildauth.AuthorizeChannel(ctx, q, actor, in.ChannelID, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -78,7 +79,7 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 		// an overwrite's deny grants whatever it denied.
 		//
 		// The example this comment used to give is no longer reachable: it described a caller holding
-		// PermManageRoles in a channel they cannot view, and authorizeChannel now refuses that caller 404
+		// PermManageRoles in a channel they cannot view, and guildauth.AuthorizeChannel now refuses that caller 404
 		// before this code runs. The check is unchanged and still right for every other bit — a caller
 		// denied PermSendMessages here can blank the row that denies it and gain the permission — but the
 		// scenario that motivated it was closed by this milestone's own first commit.
@@ -180,7 +181,7 @@ func (s *Service) DeleteOverwrite(
 	ctx context.Context, actor auth.Actor, channelID snowflake.ID, targetType int16, targetID snowflake.ID,
 ) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		_, guildID, allowed, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageRoles)
+		_, guildID, allowed, err := guildauth.AuthorizeChannel(ctx, q, actor, channelID, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -243,89 +244,6 @@ func (s *Service) DeleteOverwrite(
 	})
 }
 
-// authorizeChannel resolves a channel to its guild and authorizes a permission within it.
-//
-// # Viewing is required alongside whatever else is asked for
-//
-// Every caller gets PermViewChannel added to its `need`, and that is a correction to M13 rather than a
-// convenience. M13 taught the channel listing to hide channels and did not teach these routes the same
-// thing, so the two disagreed about whether a channel existed: a moderator holding PermManageChannels and
-// denied PermViewChannel — an @everyone view-deny removes only the view bit — got the channel omitted
-// from their listing and could still rename it, delete it, and write its permission overwrites.
-//
-// Found by driving a real guild by hand after M13 was tagged, and it needed that: every test that hid a
-// channel hid it from somebody holding nothing else, and every test that managed one managed a channel
-// that was visible. The divergence needs an actor who holds a management permission and lacks view in the
-// same channel, which no unit test constructed and four review passes did not think to ask for.
-//
-// Requiring it here rather than at each call site is the same argument this package has made four times:
-// a rule written as N call sites has N chances to miss one. It also composes with the refusal below —
-// a caller who fails for want of the view bit is answered as though the channel were not there, which is
-// what the listing already told them.
-//
-// The guild comes off the channel row and never from the caller, because these routes carry no guild in
-// their path — the same reason UpdateChannel loads its own (rule 1). The channel id is passed to
-// authorizeWith so the decision is what the caller holds in *this* channel.
-//
-// # The row is read FOR UPDATE
-//
-// All four callers are mutations on this channel, and two of them diff it. A diff that reads prior state
-// and then writes has a window under READ COMMITTED where a concurrent commit lands in between, and the
-// entry then records a transition that never happened — reproduced on this branch, and the reason the
-// locking query exists. Locking here rather than at each call site keeps the read single.
-//
-// It serializes concurrent mutations of one channel, which is what anybody would expect of them, and it
-// closes a race the ledger records as accepted: the per-channel overwrite ceiling was a read-then-insert
-// with no lock, so two concurrent writes could both read 49 and land the channel at 51. They now queue.
-// That entry is left in place rather than deleted, because the reasoning it records — a ceiling overshoot
-// is not a corrupted ordering — is why nobody had to fix it, and this closing it is a side effect.
-func (s *Service) authorizeChannel(
-	ctx context.Context, q *db.Queries, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
-) (db.Channel, snowflake.ID, decision, error) {
-	row, err := q.GetChannelForUpdate(ctx, int64(channelID))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return db.Channel{}, 0, decision{}, httpx.ErrNotFound
-		}
-		return db.Channel{}, 0, decision{}, fmt.Errorf("guilds: get channel: %w", err)
-	}
-
-	guildID, err := guildOf(row)
-	if err != nil {
-		return db.Channel{}, 0, decision{}, err
-	}
-
-	allowed, err := authorizeWith(ctx, q, actor, guildID, channelID, need.Add(roles.PermViewChannel))
-	if err != nil {
-		// A member of the guild who cannot *see* this channel is refused as though it were not there.
-		//
-		// authorizeWith answers 403 for a member lacking a permission and 404 for a non-member, and that
-		// split was right while every channel in a member's guild was listed to them: they already knew
-		// it existed, so naming it disclosed nothing. This milestone's channel listing hides channels, so
-		// the two answers became an oracle — 403 confirms a hidden channel to anybody holding its id,
-		// which is exactly what the filter withholds.
-		//
-		// Only the view permission is consulted here. Somebody who can see the channel and merely lacks
-		// PermManageRoles still gets 403, because for them the channel's existence was never a secret.
-		if errors.Is(err, httpx.ErrForbidden) {
-			_, viewErr := authorizeWith(ctx, q, actor, guildID, channelID, roles.PermViewChannel)
-			switch {
-			case viewErr == nil:
-				// They can see it, so its existence was never a secret. The original 403 stands.
-			case errors.Is(viewErr, httpx.ErrForbidden), errors.Is(viewErr, httpx.ErrNotFound):
-				return db.Channel{}, 0, decision{}, httpx.ErrNotFound
-			default:
-				// A database failure during the second check is not evidence about the channel. Reporting
-				// it as missing would turn a connection blip into a 404 the caller would cache as truth.
-				return db.Channel{}, 0, decision{}, viewErr
-			}
-		}
-		return db.Channel{}, 0, decision{}, err
-	}
-
-	return row, guildID, allowed, nil
-}
-
 // checkOverwriteTarget verifies that an overwrite names something real in this guild, and that the caller
 // outranks it.
 //
@@ -340,12 +258,12 @@ func (s *Service) authorizeChannel(
 //
 // Every refusal here reads a loaded row, so it is an authorization question rather than an input one.
 // M12 shipped two endpoints that answered a non-member with a public error naming something they could
-// not see, and both were corrected by review; this function is only ever called after authorizeChannel.
+// not see, and both were corrected by review; this function is only ever called after guildauth.AuthorizeChannel.
 func (s *Service) checkOverwriteTarget(
 	ctx context.Context,
 	q *db.Queries,
 	actor auth.Actor,
-	allowed decision,
+	allowed guildauth.Decision,
 	guildID snowflake.ID,
 	targetType int16,
 	targetID snowflake.ID,
@@ -359,7 +277,7 @@ func (s *Service) checkOverwriteTarget(
 			}
 			return fmt.Errorf("guilds: get overwrite target role: %w", err)
 		}
-		if !allowed.outranks(role.Position) {
+		if !allowed.Outranks(role.Position) {
 			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
 		}
 
@@ -389,7 +307,7 @@ func (s *Service) checkOverwriteTarget(
 		//
 		// Same shape as self-unassignment of a role: the target comparison is skipped, the check that
 		// actually bounds the operation is not.
-		if targetID != actor.UserID && !allowed.outranksMember(targetID, standing) {
+		if targetID != actor.UserID && !allowed.OutranksMember(targetID, standing) {
 			return httpx.Errorf(ErrOutranked, "you cannot act on a member above you")
 		}
 
@@ -432,7 +350,7 @@ func (s *Service) checkOverwriteTarget(
 func (s *Service) refuseRemovingOverwritesFor(
 	ctx context.Context,
 	q *db.Queries,
-	allowed decision,
+	allowed guildauth.Decision,
 	guildID snowflake.ID,
 	targetType int16,
 	targetID snowflake.ID,
@@ -473,7 +391,7 @@ func (s *Service) refuseRemovingOverwritesFor(
 	for _, ow := range affected {
 		channelID := snowflake.ID(ow.ChannelID)
 		removing := roles.PermissionFromInt64(ow.Allow).Add(roles.PermissionFromInt64(ow.Deny))
-		if allowed.allowsInChannel(channelID, byChannel[channelID], removing) {
+		if allowed.AllowsInChannel(channelID, byChannel[channelID], removing) {
 			continue
 		}
 		// Names neither the channel nor the bits, for the reason every refusal in this package names

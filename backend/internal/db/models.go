@@ -113,6 +113,26 @@ type InstanceInvite struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type Message struct {
+	ID        int64
+	ChannelID int64
+	AuthorID  *int64
+	Content   string
+	Type      int16
+	ReplyToID *int64
+	IsE2e     bool
+	EditedAt  pgtype.Timestamptz
+	DeletedAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
+type MessageEditHistory struct {
+	ID        int64
+	MessageID int64
+	Content   string
+	EditedAt  pgtype.Timestamptz
+}
+
 type OauthExchangeCode struct {
 	ID            int64
 	CodeHash      []byte

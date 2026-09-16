@@ -42,6 +42,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
+	"github.com/Alexnex31/Norite/backend/internal/messages"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -202,13 +203,19 @@ func run() error {
 		return err
 	}
 
+	messageService, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
+	if err != nil {
+		return err
+	}
+
 	router, err := newRouter(routerOptions{
-		Config:  cfg,
-		Logger:  logger,
-		Health:  health,
-		Auth:    auth.NewHandler(authService),
-		AuthSvc: authService,
-		Guilds:  guilds.NewHandler(guildService),
+		Config:   cfg,
+		Logger:   logger,
+		Health:   health,
+		Auth:     auth.NewHandler(authService),
+		AuthSvc:  authService,
+		Guilds:   guilds.NewHandler(guildService),
+		Messages: messages.NewHandler(messageService),
 	})
 	if err != nil {
 		return err

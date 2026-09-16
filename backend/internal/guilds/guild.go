@@ -14,6 +14,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -21,10 +22,17 @@ import (
 
 // defaultEveryonePermissions is what @everyone gets in a newly created guild.
 //
-// Viewing, sending, connecting to voice, speaking and adding a reaction — the set a person joining a
-// social space expects to work without anybody configuring anything. Deliberately not PermCreateInvite:
-// who may bring others in is the first decision an owner should make on purpose rather than discover.
+// Viewing, reading the backlog, sending, connecting to voice, speaking and adding a reaction — the set a
+// person joining a social space expects to work without anybody configuring anything. Deliberately not
+// PermCreateInvite: who may bring others in is the first decision an owner should make on purpose rather
+// than discover.
+//
+// PermReadMessageHistory joins the default at M15 rather than being left to the owner, because the
+// alternative is a guild where every new channel reads as empty until somebody finds the bit. Discord
+// grants it by default for the same reason. Withholding it is the deliberate configuration — a support
+// thread whose earlier conversation is not for whoever was added last.
 const defaultEveryonePermissions = roles.PermViewChannel |
+	roles.PermReadMessageHistory |
 	roles.PermSendMessages |
 	roles.PermConnectVoice |
 	roles.PermSpeakVoice
@@ -182,8 +190,8 @@ func (s *Service) Update(
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
 		// Authorized on the transaction's querier, not the pool, so the permissions that allow the write
-		// are read in the same snapshot the write happens in (rule 1). See authorizeWith.
-		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
+		// are read in the same snapshot the write happens in (rule 1). See guildauth.Authorize.
+		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
 			return err
 		}
 
@@ -260,14 +268,14 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 		//
 		// PermViewChannel is what a non-member fails, so a stranger gets the ordinary 404 rather than "you
 		// are not the owner" — which would tell them the guild exists.
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermViewChannel)
 		if err != nil {
 			return err
 		}
 
 		// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
 		// PermManageGuild is not — so this cannot be a plain permission check.
-		if !allowed.instanceAdmin && !allowed.owns() {
+		if !allowed.InstanceAdmin() && !allowed.Owns() {
 			return httpx.ErrForbidden
 		}
 
@@ -284,7 +292,7 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 		// the owner comparison happened to want the same row. Removing that read for the resolved paths
 		// removed the existence check along with it. Paid only on the tier that skipped the resolution,
 		// which is the one place it is not redundant.
-		if allowed.instanceAdmin {
+		if allowed.InstanceAdmin() {
 			if _, err := q.GetGuild(ctx, int64(guildID)); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return httpx.ErrNotFound

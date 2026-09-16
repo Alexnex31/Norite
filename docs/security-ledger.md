@@ -225,6 +225,15 @@ would flip them.
   is the shape that would actually force this — or if a per-guild storage quota arrives, at which point
   the ceiling belongs beside the channel and role ones rather than here. Note that a sweep would also need
   a second index: `000018`'s reasoning assumes nothing deletes by age.
+- **Re-examined at M15 (2026-09-15), verdict unchanged, premise corrected.** The "permission-gated" half
+  of the *why* above was about to stop being true: rule 2 read "every guild-scoped mutation", which would
+  have made every message send an audit row, and `guilds.defaultEveryonePermissions` grants
+  `PermSendMessages` to `@everyone` — so inflating any guild's log would have cost an attacker nothing but
+  the send rate limit, and the ordinary member doing nothing wrong would have inflated it faster. M15
+  narrowed rule 2 to administrative mutations instead, which keeps both halves of this entry's argument
+  intact. The opt-in at M16b writes to `message_audit_entries`, a different table, so it does not reopen
+  this entry — but it inherits the whole question, and unlike this table it may take a retention policy,
+  because a record a guild switched on for itself is not the accountability record this one is.
 
 ### `auditDiff.context` accepts a value that is not a scalar
 - **Raised**: M14, `/security-sweep`
@@ -273,3 +282,96 @@ would flip them.
 - **Reopens if**: a join path exists (M57, M72a) — at which point the rejoin question and this one are the
   same question and should be answered together, since what makes a silently-restored deny dangerous is
   exactly that nothing in the log explains it.
+
+## M15 — core messaging CRUD
+
+### `messages.content` is unbounded `text` with no length constraint
+- **Raised**: M15, `/security-sweep`
+- **Verdict**: not a vulnerability — and the precedent that prompted it does not exist
+- **Why**: the candidate was raised on the belief that this schema already CHECK-constrains text length,
+  citing `notification_filters.pattern text NOT NULL CHECK (length(pattern) <= 200)`. That line is in
+  `architecture.md`'s *planned* DDL for M62 and is in no migration: `grep -c 'CHECK.*length('` over
+  `backend/migrations/` returns zero. The built pattern is `varchar(n)` for short identifiers and bare
+  `text` for free-form fields bounded at the validator — `channels.topic` is bare `text` with
+  `validate:"omitempty,max=1024"` — so `content` matches its nearest neighbour exactly. A CHECK here would
+  also be the expensive kind to change: raising a message-length cap is a product decision, and behind a
+  constraint it becomes an `ALTER TABLE` validation scan over the largest table in the product.
+- **Reopens if**: a write path reaches `messages` without passing the handler's validator — a bulk import,
+  a webhook ingest (M60), or a bot-automation path (M22) — at which point the validator stops being the
+  only door and the bound belongs where every door passes. Also reopens if a length CHECK is ever added to
+  any other table, since the argument here is consistency with a schema that has none.
+
+### A user cannot erase what they edited out, or what they posted before deleting their account
+- **Raised**: M15, `/security-sweep`
+- **Verdict**: accepted risk — it is the feature, and the alternative defeats it
+- **Why**: `message_edit_history` has no deletion path. Its only `ON DELETE CASCADE` fires when a message
+  row is *hard*-deleted, and message deletion is soft (`messages.deleted_at`), so in practice nothing
+  removes a prior version. Account deletion does not either: settled at M15, a deleted account's messages
+  survive attributed to "Deleted User", and `messages.author_id` carries no `ON DELETE` precisely so that
+  stays true. So somebody who posts something by mistake, edits it out, and then deletes their account has
+  removed none of it. That is what an edit history *is* — one that can be edited is not a history, for the
+  reason `audit_log_entries` is never swept — and M16a gates who may read it behind `PermManageMessages`
+  rather than making it public. Recorded because it is a privacy expectation somebody will raise as a bug.
+- **Reopens if**: an erasure obligation arrives that is legal rather than technical, which is the shape
+  that would actually force it — the same condition the audit-log growth entry names. Also reopens if
+  M16a's disclosure decision widens the reader beyond moderators, since the exposure this entry accepts is
+  bounded by who can see it.
+
+### Dropping the channel row lock lets one message land just after a channel-overwrite mute
+- **Raised**: M15, `/optimization-review`
+- **Verdict**: accepted risk — the protection was partial and incidental, and the cheaper mute path never
+  had it
+- **Why**: `Send` read the channel `FOR UPDATE` through `guildauth.AuthorizeChannel`, and
+  `guilds.SetOverwrite`/`DeleteOverwrite` take the same lock — so a mute written as a channel overwrite
+  blocked on an in-flight send and no message could commit after the deny was durable. Measured: the
+  moderator's `SELECT ... FOR UPDATE` waited 1,480 ms behind a send that was deliberately held open.
+  Removing the lock leaves a window equal to one send transaction — a couple of milliseconds — in which a
+  send that read permissions before the deny committed still inserts.
+
+  What makes that acceptable is that **the other mute path never had the protection at all**.
+  `AssignRole`, `UpdateRole` and `DeleteRole` authorize at guild level with `channelID = 0` and take no
+  channel lock, and a `muted` role carrying a channel deny is the mute this project's own M13 notes call
+  the commonest overwrite anywhere. Reproduced: with a send holding the channel lock open for two seconds,
+  the role-assignment mute committed in 2 ms without blocking and the message landed after it. So the lock
+  covered one of the two ways to silence somebody and the code read as though it covered muting. Removing
+  it makes the two paths consistent rather than introducing a new class of race, and it buys about 3x on
+  the product's highest-volume write — a ceiling that is per channel and that horizontal scale cannot lift,
+  since it is one row lock in one database.
+
+  Note the lock never protected rule 1's freshness: `guildauth.Authorize` reads `guild_members`, `roles`
+  and `permission_overwrites` unlocked in both the locking and non-locking variants.
+- **Reopens if**: the role-assignment path is ever made to serialize against sends — at which point the
+  two paths agree again and this one becomes the odd one out — or if a moderation feature arrives whose
+  correctness depends on "no message exists after this timestamp", which timeouts (`PermModerateMembers`,
+  M74) and guild bans (M57) plausibly could. Also reopens if `SetChannelLastMessage` stops being
+  monotonic, since `GREATEST` is what replaced the lock's other job and a plain assignment would walk the
+  channel's unread pointer backwards — reproduced in psql, pointer 100 with message 101 present.
+
+### A 403-versus-404 on edit and delete tells a member whether a snowflake names a live message
+- **Raised**: M15, twice in one session — `/security-review`'s discovery pass and then `/code-review`,
+  independently, within an hour of each other
+- **Verdict**: not a vulnerability — the fact it would disclose is published directly, for free
+- **Why**: `Update` and `Delete` load the message after authorizing the channel, and answer 403 when the
+  caller is neither author nor moderator against 404 when the id names no live message here. Neither
+  consults `PermReadMessageHistory`, so a member with view+send in a history-withheld channel can tell a
+  live message id from a dead one. The claimed harm is learning that people were talking at time T — and
+  `channels.last_message_id` hands exactly that to the same member, continuously, with no probing at all:
+  the channel listing filters on `PermViewChannel` alone and the field carries a snowflake's timestamp.
+  The history bit withholds *content*, which is what `TestReadingTheBacklogNeedsPermReadMessageHistory`
+  asserts, and M18's `MESSAGE_CREATE` fan-out will be view-gated for the same reason.
+
+  The finding is also mislocated in a way that matters for anyone tempted to fix it as described.
+  `resolveReply` is the same oracle at the same privilege — 400 against 201 — so patching `Update` and
+  `Delete` alone would close two of three doors. And confirming *historical* ids means supplying
+  candidates: snowflakes here are 41-bit ms / 10-bit node / 12-bit sequence, and the sequence is shared by
+  every entity on the instance, so a scan costs roughly a thousand probes per millisecond of history and
+  returns timing only — no content, no author, no count.
+
+  **Recorded rather than dismissed precisely because it came back twice in an hour.** That is the pattern
+  this file exists for: the M13 403/404 oracle was filtered at confidence 6, vanished, was re-derived by
+  the next pass, and was real. This one is not, and the next reviewer should be able to find that out by
+  searching rather than by re-deriving it a third time.
+- **Reopens if**: `last_message_id` is ever withheld from members lacking `PermReadMessageHistory`, or
+  M18's `MESSAGE_CREATE` dispatch is gated on the history bit rather than the view bit. Either would make
+  message *existence* something the bit actually keeps, and at that point all three paths — `Update`,
+  `Delete` and `Send`'s `reply_to_id` — must be downgraded together, not one at a time.

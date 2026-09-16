@@ -76,6 +76,9 @@ Locked-in decisions:
 │   │   │   └── license/         # offline Ed25519-JWT license file validation
 │   │   ├── auth/                # password.go, jwt.go, oauth.go, tokens.go (device_id families), handlers
 │   │   ├── users/  guilds/  channels/  roles/  messages/  invites/
+│   │   ├── guildauth/           # the channel/guild authorization chokepoint, extracted from guilds at
+│   │   │                        #   M15 so messages/, reports/, tags/ and whispers/ can reach it
+│   │   │                        #   without importing guilds (ADR 0008's layers live here)
 │   │   ├── presence/            # Deep Work status, persisted
 │   │   ├── friends/  blocks/  matchmaking/  tags/  whispers/  notifications/
 │   │   ├── emoji/  webhooks/
@@ -137,6 +140,25 @@ Kubernetes via the Helm chart in `deploy/helm/` — see §12.
 ---
 
 ## 2. Backend (Go modular monolith)
+
+> **Open decision — squashing the migration history at v1.** Nothing has been released, so no database
+> outside a developer machine has ever run these migrations, and their usual justification — preserving
+> data you cannot drop — does not apply yet. They still earn their place for three reasons that are not
+> about data: `sqlc.yaml` names `migrations` as its schema source, so the set *is* the schema every query
+> is type-checked against; each file carries the measured `EXPLAIN` output and the index reasoning for the
+> change it makes; and the ordering records real constraints, such as `audit_log_entries` having to exist
+> at M12 because it references `guilds(id)`.
+>
+> Collapsing them into a single `000001_init` at v1 is a legitimate and common practice, and the argument
+> for it grows as the count does. It should happen *at* v1 rather than before — doing it earlier pays the
+> cost twice, since every milestone from here adds more — and whoever does it has to carry the per-file
+> reasoning into the squashed file or into this section, or it is lost. The `down` files are the weakest
+> part of the set today and are explicitly dev-reset tools rather than supported rollbacks; `000020`'s
+> says so in as many words.
+>
+> Recorded at M15 because the question was asked and deserved an answer somewhere durable, not because a
+> decision has been taken.
+
 
 **Router**: `go-chi/chi/v5`. **DB access**: `sqlc` over `pgx/v5`/`pgxpool` — no ORM, 100% of queries
 parameterized by construction (§14). **WebSocket**: `coder/websocket`. **Other concrete deps**:
@@ -328,6 +350,14 @@ CREATE TABLE guilds (
   -- is the directory's default sort. The rule is fixed before bots arrive so the number never quietly
   -- changes meaning.
   member_count integer NOT NULL DEFAULT 0,
+  -- M16b. Owner-only, off by default, and the default is the design: message content is not administrative
+  -- (rule 2, narrowed at M15), so it is not audited unless a guild chooses to pay for it. When true, every
+  -- message create/edit/delete writes to message_audit_entries — never to audit_log_entries, which keeps
+  -- the moderation log's shape and M14's cursor unchanged whether anybody opts in or not.
+  --
+  -- Flipping it either way is itself administrative and is audited in the ordinary log. Off-without-a-trace
+  -- would make this the one setting to disable before acting and re-enable after.
+  message_audit_enabled boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
 -- The directory's default sort. Partial on discoverable, because the rows it excludes are the
@@ -391,28 +421,74 @@ CREATE TABLE permission_overwrites (
   PRIMARY KEY (channel_id, target_type, target_id)
 );
 
-CREATE TABLE messages (
+-- This block spans two milestones and the split is load-bearing, because copying it whole is the easy
+-- mistake: the table and its lookup index are M15, while everything supporting search — the generated
+-- column and both GIN indexes — is M65, and one of those needs the pg_trgm extension. Building them at
+-- M15 would pull an extension dependency into a milestone that has no query using it.
+CREATE TABLE messages (                        -- M15
   id bigint PRIMARY KEY, channel_id bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  -- No ON DELETE, so this refuses a user delete — and that is the guarantee, not an obstacle. Settled at
+  -- M15: a deleted account's messages survive, attributed to "Deleted User", which soft-delete plus a
+  -- placeholder rename already produces. The constraint is what stops a future hard delete from NULLing
+  -- authorship and calling it deletion. NULL is for a message with genuinely no author (system, webhook),
+  -- never for a person who left. M76a carries the consequence: erasure cannot be served by deleting the
+  -- account, because the content is what survives.
   author_id bigint NULL REFERENCES users(id),
   content text NOT NULL,
   type smallint NOT NULL DEFAULT 0,   -- 0 DEFAULT, 1 SENT_VIA_AUTOMATION (webhooks + bot automation), reserved system values
   reply_to_id bigint NULL REFERENCES messages(id) ON DELETE SET NULL,
+  -- M15, though nothing reads it until E2E at M97. It is what the M65 column below keys its exclusion
+  -- off, and rule 13 is cheaper to design in than to retrofit onto a populated table.
   is_e2e boolean NOT NULL DEFAULT false,   -- true only for DM-channel-type messages sent under E2E; content
                                             -- is ciphertext server-side when true, excluded from search below
-  content_search tsvector GENERATED ALWAYS AS (
+  content_search tsvector GENERATED ALWAYS AS (   -- M65, not M15
     CASE WHEN is_e2e THEN NULL ELSE to_tsvector('english', content) END
   ) STORED,
   edited_at timestamptz NULL, deleted_at timestamptz NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX ON messages (channel_id, id DESC);
-CREATE INDEX ON messages USING GIN (content_search);
-CREATE INDEX ON messages USING GIN (content gin_trgm_ops);   -- pg_trgm fuzzy matching
+CREATE INDEX ON messages (channel_id, id DESC);              -- M15: the channel backlog read
+CREATE INDEX ON messages USING GIN (content_search);         -- M65
+CREATE INDEX ON messages USING GIN (content gin_trgm_ops);   -- M65, pg_trgm fuzzy matching
 
-CREATE TABLE message_edit_history (
+-- M15, with the edit endpoint that writes it. An edit appends the *previous* content in the same
+-- transaction as the update, so an edit cannot commit without its history row — the discipline rule 2
+-- already imposes on the audit entry written beside it.
+CREATE TABLE message_edit_history (            -- M15
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   content text NOT NULL, edited_at timestamptz NOT NULL DEFAULT now()
 );
+-- Added to this spec at M15's planning rather than carried from the original schema. Two reasons, and the
+-- first is the one this project has twice paid for and once cleared: message_id is a foreign key with
+-- ON DELETE CASCADE, and an unindexed one turns deleting a message into a sequential scan of every edit
+-- ever made. M11 measured 3,757 ms in a trigger on replaced_by_id, M12 measured 4,566 ms on
+-- guild_member_roles.role_id, and M13 suspected a third and found the join already supplied the index —
+-- which is why this line says to check rather than to trust it. Verify with EXPLAIN ANALYZE before the
+-- migration merges; the second reason, the history read itself, may well be served by the same index.
+CREATE INDEX ON message_edit_history (message_id, edited_at DESC);   -- M15
+
+-- M16b, and only written for guilds whose owner set guilds.message_audit_enabled. Deliberately a table of
+-- its own rather than rows in audit_log_entries: this is the product's highest-volume write, and folding it
+-- in would put it on the table GET /guilds/{id}/audit-log pages through, whose cursor and three indexes are
+-- sized for moderation traffic. Separate, the default log's shape does not depend on anybody's setting.
+--
+-- It stores content, so rule 13 applies directly and must be satisfied explicitly: E2E is DM-only and this
+-- is guild-scoped, which makes the exclusion structural, and M11a's lesson is that structural claims stop
+-- being true quietly. Unlike audit_log_entries it may take a retention policy (M125) — a record a guild
+-- switched on for itself is not the accountability record the audit log is.
+CREATE TABLE message_audit_entries (           -- M16b
+  id bigint PRIMARY KEY, guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  message_id bigint NOT NULL, channel_id bigint NOT NULL, actor_id bigint NOT NULL REFERENCES users(id),
+  action varchar(32) NOT NULL,                 -- create | edit | delete
+  content text NULL,                           -- the content as of this action; NULL for a delete if the
+                                               --   notice decision lands that way (see the roadmap entry)
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+-- message_id has no REFERENCES clause on purpose, the same call channels.last_message_id makes: an audit
+-- record that vanishes when the thing it records is deleted is not an audit record, and a cascade here
+-- would delete exactly the rows an investigation wants.
+CREATE INDEX ON message_audit_entries (guild_id, id DESC);
+CREATE INDEX ON message_audit_entries (message_id);
 
 CREATE TABLE message_reactions (                -- M56a
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -689,6 +765,13 @@ const (
     PermManageEmojis    // ACTIVE
     PermModerateMembers // M74 — timeout a member without suspending the account; Discord's MODERATE_MEMBERS
     PermViewAuditLog    // M14 — ACTIVE; read the guild audit log. Its own bit, as Discord's is
+
+    PermReadMessageHistory // M15 — ACTIVE; read a channel's backlog. Separate from PermViewChannel the
+                           //   way Discord separates them: seeing a channel exists and reading what was
+                           //   said before you arrived are different grants. The three message bits
+                           //   compose rather than nest — announcements is view+history without send, a
+                           //   support thread opened to a reporter is view+send without history. In
+                           //   @everyone's default grant, so withholding it is the deliberate setting.
 )
 ```
 
@@ -907,10 +990,23 @@ DELETE /channels/{channel_id}/permissions/{overwrite_id}
                                            -- M13; escalation-checked over the row being removed, not the
                                            --   one being written — deleting an overwrite that denies you
                                            --   something grants you that thing. M14 added PermViewChannel
-GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50
-POST   /channels/{channel_id}/messages
-PATCH  /channels/{channel_id}/messages/{message_id}
-DELETE /channels/{channel_id}/messages/{message_id}
+GET    /channels/{channel_id}/messages?before={id}&after={id}&limit=50   -- M15
+POST   /channels/{channel_id}/messages     -- M15
+PATCH  /channels/{channel_id}/messages/{message_id}    -- M15; appends the prior content to
+                                           --   message_edit_history in the same transaction
+DELETE /channels/{channel_id}/messages/{message_id}    -- M15
+GET    /guilds/{guild_id}/message-audit     -- M16b; the opt-in log, empty unless the owner enabled it.
+                                           --   The toggle itself is a field on PATCH /guilds/{guild_id},
+                                           --   owner-only like deletion rather than PermManageGuild, and
+                                           --   audited in the ordinary log in both directions.
+GET    /channels/{channel_id}/messages/{message_id}/history
+                                           -- M16a; PermManageMessages, not channel-read. M15 writes
+                                           --   message_edit_history and nothing reads it until here, the
+                                           --   shape audit_log_entries had from M12 to M14. Placed after
+                                           --   M16 because a moderator triaging a report is the consumer,
+                                           --   and rule 13 applies: E2E DM content must be excluded
+                                           --   explicitly, not left to the guild-scoped permission making
+                                           --   it unreachable by shape.
 PUT    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- react (M56a); idempotent
 DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- un-react; idempotent
 POST   /channels/{channel_id}/typing
@@ -1952,8 +2048,11 @@ E2E key-boundary violations.
 
 2. **AuthZ, not just AuthN**: unchanged core rule — every mutating handler resolves `roles.Resolve` (or an
    explicit hierarchy/Instance-Admin check) before the write, using freshly-loaded data for the specific
-   guild/channel in the request path; every guild-scoped mutation writes an audit log entry in the same
-   transaction; every Instance Admin action writes to `instance_audit_log` in the same transaction.
+   guild/channel in the request path; every guild-scoped **administrative** mutation writes an audit log
+   entry in the same transaction; every Instance Admin action writes to `instance_audit_log` in the same
+   transaction. "Administrative" is `CLAUDE.md` rule 2's word and carries its definition: configuration
+   changes and authority exercised over another member, which is every verb in `guilds.AuditActions()`.
+   Message content is outside it by decision at M15, with per-guild opt-in recording at M16b.
 
 3. **Token-scope model**: Bearer access tokens (15 min), `device_id`-scoped refresh-token families, scoped
    `api_tokens`. **The daemon is the sole holder of its account's credential material** — access/refresh
@@ -2269,8 +2368,10 @@ document / `docs/roadmap.md` / `CLAUDE.md` / `docs/adr/` / `docs/design/tui/`, a
 - **E2E**: confirm two test identities complete a key exchange with forward secrecy demonstrated; confirm the
   release-gate flag actually blocks E2E for a normal account until flipped.
 - **Security spot-checks each milestone**: an XSS/ANSI-escape payload renders as inert text on every client;
-  the audit log gets an entry for every guild-scoped mutation exercised in tests; the account-export
-  asymmetries (blocks, reports) hold under an automated test.
+  the audit log gets an entry for every guild-scoped **administrative** mutation exercised in tests — rule
+  2's word since M15, and content mutations are outside it, so a check that counted entries per mutation
+  would fail on messages by design; the account-export asymmetries (blocks, reports) hold under an
+  automated test.
 
 ---
 

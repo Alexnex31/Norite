@@ -12,6 +12,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/backend/internal/guilds"
+	"github.com/Alexnex31/Norite/backend/internal/messages"
 )
 
 // Two tests in this package claim to enumerate the guild route surface, and until M14 neither asked the
@@ -134,12 +137,20 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 	require.Equal(t, http.StatusCreated, role.Code, role)
 	roleID := role.field(t, "id")
 
+	// A real message, so the message routes are exercised against something that exists. A fabricated id
+	// would answer 404 for the wrong reason and pass the anti-enumeration assertion by accident — the
+	// failure fillRoute's comment describes, one level up.
+	message := f.api.call(http.MethodPost, "/api/v1/channels/"+channel.field(t, "id")+"/messages",
+		map[string]any{"content": "hello"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, message.Code, "seeding a message: %s", message)
+
 	ids := map[string]string{
 		"{guild_id}":     f.guildID,
 		"{channel_id}":   channel.field(t, "id"),
 		"{role_id}":      roleID,
 		"{user_id}":      f.memberID,
 		"{overwrite_id}": roleID,
+		"{message_id}":   message.field(t, "id"),
 	}
 
 	cases := map[string]refusalCase{
@@ -148,6 +159,14 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 				"anyone who can authenticate may call it, and TestAGuildIsBoundedInChannelsAndRoles " +
 				"covers what bounds it",
 		},
+
+		// The message routes. A stranger must not learn a channel exists, and guildauth answers 404 for
+		// a non-member before any message is loaded — so these assert the same property the guild routes
+		// do, one level down.
+		"GET /api/v1/channels/{channel_id}/messages":                 {},
+		"POST /api/v1/channels/{channel_id}/messages":                {body: map[string]any{"content": "intruding"}},
+		"PATCH /api/v1/channels/{channel_id}/messages/{message_id}":  {body: map[string]any{"content": "hijacked"}},
+		"DELETE /api/v1/channels/{channel_id}/messages/{message_id}": {},
 
 		"GET /api/v1/guilds/{guild_id}":                    {},
 		"PATCH /api/v1/guilds/{guild_id}":                  {body: map[string]any{"name": "hijacked"}},
@@ -251,6 +270,28 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 		{route: "POST /api/v1/guilds/{guild_id}/roles", action: "role.create",
 			exempt: "performed above, so the role the later cases name exists"},
 
+		// The message routes, and all four are exempt for a reason this milestone introduced rather than
+		// for the usual one. Rule 2 was narrowed at M15 to guild-scoped *administrative* mutations, and
+		// message content is outside it: a member posting, editing or deleting their own message
+		// exercises authority over nobody, so three of these are mutations that deliberately write no
+		// audit entry at all. This test's model — every mutating route writes exactly one — stops holding
+		// here, and saying so out loud is better than the alternative of making them write entries to
+		// satisfy a test.
+		//
+		// The one case that *does* write an entry is a moderator deleting somebody else's message, which
+		// needs a second actor this fixture's sequence has no room for. It is asserted in the messages
+		// package, where both actors are cheap to build, by
+		// TestAModeratorDeletingSomebodyElsesMessageIsAudited — and its counterpart asserts that an author
+		// deleting their own writes nothing, which is the property with no other home.
+		{route: "GET /api/v1/channels/{channel_id}/messages", exempt: readsWriteNothing},
+		{route: "POST /api/v1/channels/{channel_id}/messages",
+			exempt: "sending is not administrative (rule 2, narrowed at M15) and writes no entry"},
+		{route: "PATCH /api/v1/channels/{channel_id}/messages/{message_id}",
+			exempt: "only an author may edit, which is authority over nobody; writes no entry"},
+		{route: "DELETE /api/v1/channels/{channel_id}/messages/{message_id}",
+			exempt: "an author deleting their own writes nothing; the moderator path that does is " +
+				"asserted in the messages package, which can build two actors"},
+
 		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/roles", exempt: readsWriteNothing},
@@ -328,4 +369,42 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 			require.Equal(t, mustID(t, f.ownerID), actor, "the entry must name who did it")
 		})
 	}
+}
+
+// TestTheMessageAuditVerbAgreesAcrossPackages pins the one string that is written in two places.
+//
+// `messages` writes `message.delete` and `guilds` validates an `action` filter against its own vocabulary,
+// and neither package can import the other — `messages` must not import `guilds` (that is what the M15
+// chokepoint extraction was for) and `guilds` importing `messages` to read one constant would recreate the
+// coupling in the other direction. So the value is a literal on the guilds side, and this is what stops
+// the two drifting.
+//
+// It lives here because cmd/server already imports both, for the same reason the route-surface tests do.
+// Without it, renaming the constant in `messages` would leave the audit log refusing to filter on rows it
+// is still storing — the failure M14 chose a refusal over an empty page to make loud.
+func TestTheMessageAuditVerbAgreesAcrossPackages(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, guilds.AuditActions(), messages.ActionMessageDelete,
+		"the messages package writes %q and the guilds audit-log reader does not accept it as a filter; "+
+			"a verb written to the table but missing from the vocabulary makes the reader refuse rows it "+
+			"already holds", messages.ActionMessageDelete)
+}
+
+// TestTheTextChannelTypeAgreesAcrossPackages pins the second value written in two places.
+//
+// `messages.ChannelGuildText` decides which channels accept a message; `guilds.ChannelGuildText` is the
+// vocabulary the contract and the channel-creation path use. Neither package may import the other, for
+// the reason the audit verb above is a literal, so the value is duplicated and this is what stops it
+// drifting.
+//
+// Getting it wrong is silent in the dangerous direction. If `guilds` ever renumbers the vocabulary — the
+// hazard its own comment warns about for permission bits — a stale 0 here would either refuse every text
+// channel, which is loud, or start accepting whichever type took position 0, which is not.
+func TestTheTextChannelTypeAgreesAcrossPackages(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, guilds.ChannelGuildText, messages.ChannelGuildText,
+		"messages gates sending on its own copy of the text channel type; if the two disagree, sending "+
+			"is either refused everywhere or allowed into a channel type no client renders")
 }

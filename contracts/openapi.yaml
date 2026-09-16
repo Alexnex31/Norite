@@ -41,10 +41,16 @@ tags:
 
 
       **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for
-      the mutating ones, and `guilds.audit` for the audit log alone. A user's own access token passes all
-      of them by design, since a scope bounds a *delegated* credential and never a person. Permission
-      resolution still runs underneath, so a token holding `guilds.write` can do exactly what its owner
-      could and no more.
+      the mutating ones, `guilds.audit` for the audit log alone, and `messages.read` / `messages.write` for
+      the message routes. A user's own access token passes all of them by design, since a scope bounds a
+      *delegated* credential and never a person. Permission resolution still runs underneath, so a token
+      holding `guilds.write` can do exactly what its owner could and no more.
+
+
+      Messages are their own pair rather than folded into the guild scopes, because the blast radii
+      differ: `guilds.read` enumerates a guild's structure, which is metadata, while `messages.read` is
+      every word said in it. Write does not imply read in either pair — a bot that posts an announcement
+      need never see a backlog.
 
 paths:
   /meta:
@@ -3056,6 +3062,225 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /channels/{channel_id}/messages:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: Read a channel's messages
+      description: >
+        One page of a channel's backlog, newest first.
+
+
+        Requires `VIEW_CHANNEL` **and** `READ_MESSAGE_HISTORY`, which are separate bits on purpose: seeing
+        that a channel exists and reading what was said in it before you arrived are different grants. A
+        channel configured view-and-send without history is one whose earlier conversation is not for
+        whoever was added last. Both are in `@everyone`'s default grant, so withholding history is the
+        deliberate configuration rather than the default.
+
+
+        A caller who cannot see the channel gets 404, not 403 — since M13 the channel listing hides
+        channels, so a distinct answer would confirm to anybody holding an id exactly what the filter
+        withholds. Somebody who can see the channel and lacks only history gets 403.
+
+
+        Cursor-paginated on the message `id`, never offset and never on `created_at`: a snowflake is
+        time-ordered *and* unique, while nothing constrains `created_at`, so a page boundary landing inside
+        a group of equal timestamps would skip or repeat a row. Pass the oldest `id` you received as
+        `before` to page backwards. The response is a bare array; a page is exhausted when it returns fewer
+        than `limit`.
+
+
+        Soft-deleted messages are excluded.
+      operationId: listChannelMessages
+      tags: [messages]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: Return messages with an id strictly lower than this one.
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+        - name: after
+          in: query
+          required: false
+          description: Return messages with an id strictly higher than this one.
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 100. Defaults to 50.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: One page of messages, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      summary: Send a message
+      description: >
+        Requires `SEND_MESSAGES` (and `VIEW_CHANNEL`, which every channel-scoped route folds in).
+
+
+        **Only a `GUILD_TEXT` channel accepts a message.** A category, a voice channel, or any reserved
+        type is refused with 400 however the caller's permissions resolve — permission answers whether you
+        may act in the channel, not whether the channel is one that holds messages. Text in voice channels
+        may be allowed later; allowing a type is additive, while disallowing one strands whatever was
+        already stored in it, so the narrow answer ships first. Reading, editing and deleting are not
+        restricted by type, so anything already stored stays reachable and removable.
+
+
+        `reply_to_id` must name a live message in **this** channel. A reference to a message elsewhere is
+        refused with 400 and the message says nothing about whether that id exists — an unvalidated
+        cross-channel reference would confirm the existence of a message in a channel the caller cannot
+        see.
+
+
+        Writes no audit entry. Rule 2 covers guild-scoped *administrative* mutations, and posting in a
+        channel you are permitted to post in exercises authority over nobody. A guild whose owner wants
+        every message recorded opts in at M16b, to a separate table.
+      operationId: sendMessage
+      tags: [messages]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              additionalProperties: false
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 4000
+                reply_to_id:
+                  allOf:
+                    - $ref: "#/components/schemas/Snowflake"
+                  nullable: true
+      responses:
+        "201":
+          description: The message as stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /channels/{channel_id}/messages/{message_id}:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: message_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    patch:
+      summary: Edit a message
+      description: >
+        **Only the author may edit, and `MANAGE_MESSAGES` does not grant it.** That bit lets a moderator
+        delete somebody else's message, which is a moderation action with a visible outcome; rewriting
+        somebody's words puts them in their mouth under their name, and an audit entry recording that it
+        happened would not make the message honest. There is no moderator path at all, and consequently no
+        `message.edit` audit verb.
+
+
+        **It also requires `SEND_MESSAGES`**, not merely the ability to see the channel. An edit is a write
+        into the channel, and the commonest overwrite in any guild is a role denying exactly that bit — so
+        authorizing an edit on visibility alone would leave a muted member able to rewrite every message
+        they had already posted, one fresh publish per rewrite. Deleting your own message is deliberately
+        *not* gated this way: that is redaction, which is the outcome a mute wants.
+
+
+        The previous content is appended to the message's edit history in the same transaction, so an edit
+        that commits without recording what it replaced is not a reachable state. Nothing reads that
+        history until M16a.
+
+
+        A message id that belongs to a different channel answers 404: the channel in the path is what was
+        authorized, so a message from elsewhere must not be reachable through it.
+      operationId: updateMessage
+      tags: [messages]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              additionalProperties: false
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 4000
+      responses:
+        "200":
+          description: The message as stored, with `edited_at` set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Delete a message
+      description: >
+        The author may delete their own; a holder of `MANAGE_MESSAGES` may delete anybody's.
+
+
+        **Only the moderator path writes an audit entry** (`message.delete`). An author deleting their own
+        message exercises authority over nobody, which is what rule 2's narrowing at M15 means in practice.
+        The entry carries the channel and author ids and never the content — rule 13 forbids reading
+        message content on a server-side path without excluding E2E DMs, and storing none is the cheapest
+        way to satisfy it.
+
+
+        The delete is soft. The row survives so a report filed against it (M16) still resolves and an edit
+        history can still be tied back to its message, and the message stops appearing in the backlog.
+      operationId: deleteMessage
+      tags: [messages]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Deleted.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /guilds/{guild_id}/audit-log:
     parameters:
       - name: guild_id
@@ -3419,7 +3644,12 @@ components:
         with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`,
         so a scope that bundled the log with the channel listing would have the delegation model
         contradicting the permission model.
-      enum: [identify, guilds.read, guilds.write, guilds.audit]
+        `messages.read` and `messages.write` are separate from the guild pair, and from each other, for
+        the same reasons one level down. `guilds.read` enumerates a guild's structure, which is metadata;
+        message history is the conversation itself, and a credential that can read every word said in a
+        guild is a different thing to hand out. A webhook-shaped bot that only posts needs
+        `messages.write` and never a backlog.
+      enum: [identify, guilds.read, guilds.write, guilds.audit, messages.read, messages.write]
 
     HealthResponse:
       type: object
@@ -4052,7 +4282,7 @@ components:
 
 
         The same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's
-        number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty
+        number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-one
         bits are defined today, so the hazard is years away — which is exactly why the representation is
         fixed now, while changing it costs nothing.
 
@@ -4060,7 +4290,8 @@ components:
         Bit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`,
         `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`,
         `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`,
-        `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`.
+        `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`,
+        `READ_MESSAGE_HISTORY`.
 
 
         **The order is data, not documentation.** What the database stores is bit positions, so
@@ -4189,7 +4420,18 @@ components:
           oneOf:
             - $ref: "#/components/schemas/Snowflake"
             - type: "null"
-          description: Reserved until messages exist. Always null at this version.
+          description: >
+            The newest message in the channel, or null if none has been sent. Maintained in the send's own
+            transaction (M15) rather than derived with `max(id)` on every channel listing, which would be
+            an N+1 across the sidebar.
+
+
+            **View-gated, not history-gated.** It is returned to anyone who can see the channel, including
+            a member denied `READ_MESSAGE_HISTORY` — it is the unread-state primitive, and a client cannot
+            render an unread marker without it. What that discloses is a snowflake, and therefore a
+            timestamp: that somebody posted, and when. The content stays withheld. Discord exposes the
+            same field under the same conditions. Recorded as a decision because it reads like an
+            oversight otherwise.
         bitrate:
           type: [integer, "null"]
           description: Voice channels only; null on every other type.
@@ -4476,6 +4718,46 @@ components:
         - member.role_remove
         - overwrite.set
         - overwrite.delete
+        # Written by the messages service, not by guilds, and only on the moderator path — an author
+        # deleting their own message writes nothing (rule 2 covers administrative mutations). It is in
+        # this enum because the audit-log reader accepts it as an `action` filter and returns entries
+        # carrying it, so a client generated from this contract must know the value.
+        - message.delete
+
+    Message:
+      type: object
+      required: [id, channel_id, author_id, content, type, reply_to_id, edited_at, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+        author_id:
+          allOf:
+            - $ref: "#/components/schemas/Snowflake"
+          nullable: true
+          description: >
+            Null for a message with no author — a system or webhook message. Never null because the
+            author's account was deleted: a deleted account is soft-deleted and its messages survive
+            attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
+        content:
+          type: string
+          maxLength: 4000
+        type:
+          type: integer
+          description: 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
+        reply_to_id:
+          allOf:
+            - $ref: "#/components/schemas/Snowflake"
+          nullable: true
+        edited_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
 
     AuditLogEntry:
       type: object

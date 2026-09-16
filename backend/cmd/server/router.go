@@ -14,6 +14,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
+	"github.com/Alexnex31/Norite/backend/internal/messages"
 	"github.com/Alexnex31/Norite/backend/internal/meta"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
@@ -28,12 +29,13 @@ const apiBase = "/api/v1"
 const healthzPath = apiBase + "/healthz"
 
 type routerOptions struct {
-	Config  config.Config
-	Logger  zerolog.Logger
-	Health  *health
-	Auth    *auth.Handler
-	AuthSvc *auth.Service
-	Guilds  *guilds.Handler
+	Config   config.Config
+	Logger   zerolog.Logger
+	Health   *health
+	Auth     *auth.Handler
+	AuthSvc  *auth.Service
+	Guilds   *guilds.Handler
+	Messages *messages.Handler
 }
 
 // authRateLimit is the stricter bucket the unauthenticated auth routes sit behind.
@@ -259,6 +261,15 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			// a group mounted on a service would vanish from rule 6's check exactly as /instance did.
 			if opts.Guilds != nil {
 				opts.Guilds.Routes(r)
+			}
+
+			// Channel messages (M15), mounted the same way and in the same bucket for the same reasons.
+			//
+			// It is a separate handler rather than more routes on the guild one because `messages` is its
+			// own package — the authorization chokepoint moved to `guildauth` at M15 precisely so it could
+			// be, rather than making `guilds` the import root of every domain that acts inside a channel.
+			if opts.Messages != nil {
+				opts.Messages.Routes(r)
 			}
 
 			// The AGPL section 13 source offer. Public and unauthenticated by obligation rather than by
