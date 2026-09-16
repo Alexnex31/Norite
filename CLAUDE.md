@@ -1418,6 +1418,31 @@ And on messages, from M15:
   foreign key precisely so this could be a cheap write rather than a `max(id)` per channel on every
   channel listing (§15.2's N+1). Nothing maintained it until M15, so a channel's pointer was NULL for
   three milestones.
+- **A write must be bounded by the permission that bounds writing, whichever verb performs it.** `Update`
+  authorized on the view bit alone, so denying `PermSendMessages` — the mute every guild uses — stopped a
+  send and left the author able to rewrite every message they had already posted, one fresh publish each
+  and a `MESSAGE_UPDATE` fan-out apiece once M18 lands. M13 spent two decisions stopping a restriction from
+  being *shed*; this was the same restriction walked around. Editing now needs `PermSendMessages`; deleting
+  deliberately still does not, because removing your own message is redaction and that is the outcome a
+  mute wants. **Found by `/security-audit` after the milestone's manual pass had already run**, which is the
+  part worth keeping: the pass drove the permission matrix and the audit asymmetry and never denied a bit
+  to somebody who already had messages, so the interesting state took a deliberate setup no ordinary happy
+  path reaches.
+- **Authorization says whether you may act in a channel, never whether the channel holds messages.**
+  `guildauth.guildOf` refuses a channel belonging to no guild, which rules out DMs and nothing else, and
+  `guilds.isGuildChannelType` is consulted only at *creation* — so a member could post into a category,
+  read it back, and advance its `last_message_id`. Reproduced on `GUILD_CATEGORY`, `GUILD_VOICE` and the
+  reserved `GUILD_ANNOUNCEMENT`. Not an authorization bypass — the caller holds the bits on that row — but
+  a place to park content no client renders, which is invisible to moderation while the API keeps serving
+  it. `messages.ChannelGuildText` gates `Send` only, so anything already stored stays readable and
+  removable. **Text-only is the reversible direction**: allowing a type later is additive, disallowing one
+  later strands whatever was stored in it.
+- **The second value written in two places gets the same treatment as the first.**
+  `messages.ChannelGuildText` duplicates `guilds.ChannelGuildText` because neither package may import the
+  other, and `TestTheTextChannelTypeAgreesAcrossPackages` in `cmd/server` is what stops them drifting —
+  the shape `TestTheMessageAuditVerbAgreesAcrossPackages` established one finding earlier. A cross-package
+  literal is not a smell to remove here; it is a thing to *pin*, and the pin belongs in the one package
+  that imports both.
 - **A mutating route added to a second package is invisible to the route-surface tests until the test
   router mounts it.** Both mounted only on a non-nil handler, and `newTestRouterWithAuth` builds with nil
   services — so the four message routes existed and neither test saw them. That is the M10 failure

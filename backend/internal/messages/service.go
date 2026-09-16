@@ -69,6 +69,10 @@ type SendInput struct {
 // the same snapshot the write happens in), the insert, and the `last_message_id` update that would
 // otherwise be a second round trip a crash could lose.
 //
+// Only a text channel accepts one. [ChannelGuildText] carries the reasoning; the check is here rather
+// than in guildauth because "may this channel hold a message" is this package's question, not an
+// authorization one — guildauth is right that the caller may act in the channel.
+//
 // No audit entry. Rule 2 was narrowed at M15 and posting in a channel you are permitted to post in
 // exercises authority over nobody — see [ActionMessageDelete] for the whole reasoning.
 func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Message, error) {
@@ -81,10 +85,17 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 	err = s.inTx(ctx, func(q *db.Queries) error {
 		// The locking variant, because this writes. AuthorizeChannelForRead exists for the read path and
 		// the difference is the point — see guildauth.AuthorizeChannelForRead.
-		if _, _, _, err := guildauth.AuthorizeChannel(
+		channel, _, _, err := guildauth.AuthorizeChannel(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
-		); err != nil {
+		)
+		if err != nil {
 			return err
+		}
+
+		// The channel row is already in hand, so the type check is free — and it has to happen somewhere,
+		// because guildauth only refuses a channel belonging to no guild. See ChannelGuildText.
+		if channel.Type != ChannelGuildText {
+			return httpx.Errorf(httpx.ErrBadRequest, "this channel does not hold messages")
 		}
 
 		reply, err := s.resolveReply(ctx, q, in.ChannelID, in.ReplyToID)
@@ -209,6 +220,18 @@ type UpdateInput struct {
 // happened does not make the message honest. So there is no moderator path here at all, and consequently
 // no `message.edit` audit verb.
 //
+// **It requires PermSendMessages, not merely the ability to see the channel.** Editing is a write into
+// the channel, and the commonest overwrite in any guild is a `muted` role denying exactly that bit — so
+// authorizing an edit on visibility alone leaves a muted member a write primitive into the channel they
+// were just silenced in, one rewrite per message they already posted. M13 spent two decisions keeping a
+// restriction from being *shed* (assignment is escalation-checked, DeleteRole refuses to drop overwrites
+// whose bits the caller lacks); this is the same restriction being walked around rather than shed, and at
+// M18 each rewrite fans out a MESSAGE_UPDATE to everyone in the channel. Found by a security audit after
+// the milestone's manual pass, and reproduced before it was fixed.
+//
+// Delete deliberately stays at the view bit. Removing your own message is redaction, which is the outcome
+// a mute wants rather than one it should block.
+//
 // The prior content is appended to message_edit_history inside this transaction, so an edit that commits
 // without its history row is not a state the code can reach.
 func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) (Message, error) {
@@ -219,7 +242,11 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 
 	var out Message
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		if _, _, _, err := guildauth.AuthorizeChannel(ctx, q, actor, in.ChannelID, 0); err != nil {
+		// PermSendMessages, not merely the view bit AuthorizeChannel folds in. An edit is a write into
+		// this channel and a mute must bound every one of them — see the paragraph above.
+		if _, _, _, err := guildauth.AuthorizeChannel(
+			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
+		); err != nil {
 			return err
 		}
 

@@ -109,6 +109,19 @@ func (f *fixture) exec(t *testing.T, sql string, args ...any) {
 	require.NoError(t, err)
 }
 
+// newChannel adds a second channel of a given type to the fixture's guild.
+func (f *fixture) newChannel(t *testing.T, name string, typ int16) snowflake.ID {
+	t.Helper()
+	gen, err := snowflake.NewGenerator(1)
+	require.NoError(t, err)
+	id, err := gen.Next()
+	require.NoError(t, err)
+	f.exec(t, `INSERT INTO channels (id, guild_id, name, type, position, created_at, updated_at)
+	           VALUES ($1,$2,$3::text,$4,1,now(),now())`,
+		int64(id), int64(f.guildID), name, typ)
+	return id
+}
+
 func (f *fixture) auditCount(t *testing.T, action string) int {
 	t.Helper()
 	var n int
@@ -366,4 +379,87 @@ func TestTheListingExcludesDeletedMessagesAndPagesNewestFirst(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page, 1)
 	require.Equal(t, first.ID, page[0].ID)
+}
+
+// TestAMutedMemberCannotEditAroundTheMute is the security audit's first finding, pinned.
+//
+// A member-tier overwrite denying PermSendMessages is the mute every guild uses. Before the fix, Update
+// authorized on the view bit alone, so the mute stopped new posts and left the author free to rewrite
+// every message they had already sent — one fresh publish per rewrite, and a MESSAGE_UPDATE fan-out each
+// once M18 lands. Deleting stays allowed on purpose: that is redaction, which is the outcome a mute wants.
+func TestAMutedMemberCannotEditAroundTheMute(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	msg := f.send(t, f.member, "posted before the mute")
+
+	f.exec(t, `INSERT INTO permission_overwrites (channel_id, target_id, target_type, allow, deny)
+	           VALUES ($1,$2,$3,0,$4)`,
+		int64(f.channelID), int64(f.member), roles.OverwriteTargetMember,
+		roles.PermSendMessages.Int64())
+
+	_, err := f.svc.Send(f.ctx, actorOf(f.member), SendInput{
+		ChannelID: f.channelID, Content: "a new post",
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden, "the mute must stop a send")
+
+	_, err = f.svc.Update(f.ctx, actorOf(f.member), UpdateInput{
+		ChannelID: f.channelID, MessageID: msg.ID, Content: "rewritten after the mute",
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden,
+		"an edit is a write into the channel, so the mute must stop it too")
+
+	var stored string
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT content FROM messages WHERE id = $1`, int64(msg.ID)).Scan(&stored))
+	require.Equal(t, "posted before the mute", stored, "the refused edit must not have landed")
+
+	// Redaction survives the mute, which is the half that must keep working.
+	require.NoError(t, f.svc.Delete(f.ctx, actorOf(f.member), f.channelID, msg.ID),
+		"a muted member may still remove their own message")
+}
+
+// TestOnlyATextChannelAcceptsAMessage is the audit's second finding.
+//
+// guildauth refuses a channel belonging to no guild and says nothing about the rest of the vocabulary, so
+// before ChannelGuildText a member could post into a category — somewhere no client renders, which makes
+// it invisible to moderation while the API keeps serving it. Reading and deleting stay open on every type
+// so that anything already stored remains reachable and removable.
+func TestOnlyATextChannelAcceptsAMessage(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	for _, tc := range []struct {
+		name string
+		typ  int16
+	}{
+		{"GUILD_VOICE", 2},
+		{"GUILD_CATEGORY", 4},
+		{"GUILD_ANNOUNCEMENT", 5},
+		{"GUILD_STAGE_VOICE", 6},
+	} {
+		id := f.newChannel(t, tc.name, tc.typ)
+
+		_, err := f.svc.Send(f.ctx, actorOf(f.member), SendInput{
+			ChannelID: id, Content: "does this land?",
+		})
+		require.ErrorIs(t, err, httpx.ErrBadRequest, "%s must not accept a message", tc.name)
+
+		var n int
+		require.NoError(t, f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM messages WHERE channel_id = $1`, int64(id)).Scan(&n))
+		require.Zero(t, n, "%s must hold no rows", tc.name)
+
+		var last *int64
+		require.NoError(t, f.pool.QueryRow(f.ctx,
+			`SELECT last_message_id FROM channels WHERE id = $1`, int64(id)).Scan(&last))
+		require.Nil(t, last, "%s must not have advanced its unread pointer", tc.name)
+	}
+
+	// The one type that does, so the test fails if the check is inverted rather than merely present.
+	_, err := f.svc.Send(f.ctx, actorOf(f.member), SendInput{
+		ChannelID: f.channelID, Content: "a text channel still works",
+	})
+	require.NoError(t, err)
 }

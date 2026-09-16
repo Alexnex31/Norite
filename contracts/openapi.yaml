@@ -3138,6 +3138,14 @@ paths:
         Requires `SEND_MESSAGES` (and `VIEW_CHANNEL`, which every channel-scoped route folds in).
 
 
+        **Only a `GUILD_TEXT` channel accepts a message.** A category, a voice channel, or any reserved
+        type is refused with 400 however the caller's permissions resolve — permission answers whether you
+        may act in the channel, not whether the channel is one that holds messages. Text in voice channels
+        may be allowed later; allowing a type is additive, while disallowing one strands whatever was
+        already stored in it, so the narrow answer ships first. Reading, editing and deleting are not
+        restricted by type, so anything already stored stays reachable and removable.
+
+
         `reply_to_id` must name a live message in **this** channel. A reference to a message elsewhere is
         refused with 400 and the message says nothing about whether that id exists — an unvalidated
         cross-channel reference would confirm the existence of a message in a channel the caller cannot
@@ -3199,6 +3207,13 @@ paths:
         somebody's words puts them in their mouth under their name, and an audit entry recording that it
         happened would not make the message honest. There is no moderator path at all, and consequently no
         `message.edit` audit verb.
+
+
+        **It also requires `SEND_MESSAGES`**, not merely the ability to see the channel. An edit is a write
+        into the channel, and the commonest overwrite in any guild is a role denying exactly that bit — so
+        authorizing an edit on visibility alone would leave a muted member able to rewrite every message
+        they had already posted, one fresh publish per rewrite. Deleting your own message is deliberately
+        *not* gated this way: that is redaction, which is the outcome a mute wants.
 
 
         The previous content is appended to the message's edit history in the same transaction, so an edit

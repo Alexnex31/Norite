@@ -90,3 +90,37 @@ func messageFromRow(row db.Message) Message {
 // Guilds that want every message recorded opt in at M16b, which writes to `message_audit_entries` — a
 // table of its own, never this one.
 const ActionMessageDelete = "message.delete"
+
+// ChannelGuildText is the one channel type that holds messages, and it is guilds.ChannelGuildText.
+//
+// # Why the value is duplicated rather than imported
+//
+// `messages` may not import `guilds` — that is what the M15 chokepoint extraction was for, and importing
+// it back would make `guilds` the import root of every domain that acts inside a channel. So the value is
+// a literal here, exactly as the `message.delete` verb is a literal on the `guilds` side, and the pin that
+// stops the two drifting is a test in `cmd/server`, which imports both:
+// TestTheTextChannelTypeAgreesAcrossPackages.
+//
+// # Why the check exists at all
+//
+// guildauth.guildOf refuses a channel belonging to no guild, which rules out DMs and group DMs. It says
+// nothing about the rest of the vocabulary, and `guilds.isGuildChannelType` is consulted only when a
+// channel is *created* — so before this constant a member holding view+send on a category could post into
+// it, read it back, and advance its `last_message_id`. Reproduced on all three of GUILD_CATEGORY,
+// GUILD_VOICE and the reserved GUILD_ANNOUNCEMENT during M15's security audit.
+//
+// That is not an authorization bypass: the caller genuinely holds the bits on that row. It is a place to
+// park content no client renders — no screen in docs/design/tui/SCREENS.md draws a category's backlog —
+// which makes it invisible to moderation while remaining served by the API.
+//
+// # Text only, deliberately, and it is the reversible direction
+//
+// Discord accepts text in voice channels and this may want to later. Allowing a type later is additive;
+// disallowing one later strands whatever was already stored in it. So the narrow answer goes in first and
+// widening it stays a decision somebody makes on purpose. GUILD_ANNOUNCEMENT and GUILD_STAGE_VOICE are
+// reserved (rule 10) and unbuildable today — this is what stops them becoming message-bearing by default
+// on the milestone that finally creates one.
+//
+// Only Send is gated. List, Update and Delete still work on anything already stored, so content that
+// predates this check stays readable and — more to the point — removable.
+const ChannelGuildText int16 = 0

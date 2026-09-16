@@ -390,3 +390,21 @@ func TestTheMessageAuditVerbAgreesAcrossPackages(t *testing.T) {
 			"a verb written to the table but missing from the vocabulary makes the reader refuse rows it "+
 			"already holds", messages.ActionMessageDelete)
 }
+
+// TestTheTextChannelTypeAgreesAcrossPackages pins the second value written in two places.
+//
+// `messages.ChannelGuildText` decides which channels accept a message; `guilds.ChannelGuildText` is the
+// vocabulary the contract and the channel-creation path use. Neither package may import the other, for
+// the reason the audit verb above is a literal, so the value is duplicated and this is what stops it
+// drifting.
+//
+// Getting it wrong is silent in the dangerous direction. If `guilds` ever renumbers the vocabulary — the
+// hazard its own comment warns about for permission bits — a stale 0 here would either refuse every text
+// channel, which is loud, or start accepting whichever type took position 0, which is not.
+func TestTheTextChannelTypeAgreesAcrossPackages(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, guilds.ChannelGuildText, messages.ChannelGuildText,
+		"messages gates sending on its own copy of the text channel type; if the two disagree, sending "+
+			"is either refused everywhere or allowed into a channel type no client renders")
+}
