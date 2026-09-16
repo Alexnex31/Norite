@@ -76,6 +76,9 @@ Locked-in decisions:
 │   │   │   └── license/         # offline Ed25519-JWT license file validation
 │   │   ├── auth/                # password.go, jwt.go, oauth.go, tokens.go (device_id families), handlers
 │   │   ├── users/  guilds/  channels/  roles/  messages/  invites/
+│   │   ├── guildauth/           # the channel/guild authorization chokepoint, extracted from guilds at
+│   │   │                        #   M15 so messages/, reports/, tags/ and whispers/ can reach it
+│   │   │                        #   without importing guilds (ADR 0008's layers live here)
 │   │   ├── presence/            # Deep Work status, persisted
 │   │   ├── friends/  blocks/  matchmaking/  tags/  whispers/  notifications/
 │   │   ├── emoji/  webhooks/

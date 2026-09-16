@@ -99,7 +99,10 @@ These apply to every milestone, not just a final pass — treat a PR that violat
    verifying it belongs to the actor's claimed context.
 2. **Every guild-scoped *administrative* mutation writes an audit log entry**, in the same DB transaction
    as the mutation. Administrative means a change to the guild's configuration, or authority exercised over
-   another member — every verb in `guilds.AuditActions()` is one, and that list is the test. **Message
+   another member — a mutation is administrative when it changes what the guild *is* or exercises authority over somebody
+   else, whoever performs it. `guilds.AuditActions()` is the current evidence of that definition and not
+   the definition itself — a new administrative mutation nobody remembered to audit is missing from the
+   list, so a list-as-test would rule it out exactly when the rule is needed. **Message
    content is deliberately outside it**, settled at M15's planning: a member posting where they are
    permitted exercises authority over nobody, while auditing every send would put the product's
    highest-volume write on the audit path and bury the moderation signal the log exists to carry. A
@@ -192,8 +195,8 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 ## Directory layout (see `docs/architecture.md` §1 for full detail)
 
 ```
-backend/       Go modular monolith — cmd/server, internal/{config,platform,auth,users,guilds,channels,
-               roles,messages,gateway,presence,voice,db}, migrations/
+backend/       Go modular monolith — cmd/server, internal/{config,platform,auth,users,guilds,guildauth,
+               channels,roles,messages,gateway,presence,voice,db}, migrations/
 cli/           The `norite` binary — the scriptable command tree (internal/cliapp) *and* the TUI
                (shell, panes, chords, screens); one binary, two front ends onto one command tree
 gui/           The native GUI — Gio app, mirrors the TUI's screens; shares the daemon/config model

@@ -140,7 +140,7 @@ it pipes.
 **TUI** — where a person actually spends time. A Discord-shaped layout (guild rail → channel list →
 message area → member list) with tmux-like pane splitting and Emacs-style chorded keybindings, specified
 screen by screen in [`docs/design/tui/`](docs/design/tui/): 27 screens with stable ids, a keymap, design
-tokens, and an HTML mock of each. The reasoning for treating it as a first-class client rather than a
+tokens, and an illustrative HTML mock covering most of them. The reasoning for treating it as a first-class client rather than a
 companion is in [ADR 0026](docs/adr/0026-tui-as-a-first-class-client.md).
 
 The CLI and the TUI ship in one binary and share one command tree, which is what keeps the scriptable
@@ -315,7 +315,7 @@ Processing Module. The only place cgo is allowed anywhere in the stack.
   performance deep dives, and the tensions this design knowingly accepts.
 - [`docs/roadmap.md`](docs/roadmap.md) — the dependency-ordered milestone sequence, `M0`–`M125`.
 - [`docs/design/tui/`](docs/design/tui/) — the terminal client's normative design: 27 screens with stable
-  ids, the keymap, the design tokens, and an HTML mock of each screen.
+  ids, the keymap, the design tokens, and an illustrative HTML mock of most of them.
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records.
 - [`CLAUDE.md`](CLAUDE.md) — a fast-loading project summary and the non-negotiable engineering rules, for
   human contributors and AI coding agents alike.

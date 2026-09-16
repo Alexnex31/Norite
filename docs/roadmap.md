@@ -607,7 +607,8 @@ of this section.
   deletion is exactly the entry that would want to record what was deleted.
 
   Done when: a permitted member can send/edit/delete a message via the REST API, an unpermitted one is
-  rejected, each mutation produces an audit entry, and an edited message's previous content is readable
+  rejected, a moderator acting on somebody else's message produces an audit entry while an author acting on
+  their own does not, and an edited message's previous content is readable
   from `message_edit_history` — written in the same transaction as the edit, so a successful edit that
   recorded no history is not a state the code can reach.
 - **M16 — Guild-level reports**: the `reports` table (reporter, target type/id, reason category plus free

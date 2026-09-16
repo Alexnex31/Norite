@@ -1,6 +1,9 @@
 # Screens
 
-27 screens. Ids match the badges in `mockups.dc.html` (open it and jump to `#1a`, `#2c`, …).
+27 screens. Most ids have a badge in `mockups.dc.html` (open it and jump to `#1a`, `#2c`, …) — `3f`, `6d`
+and `6e` do not, because the mock has not been redrawn since 2026-08-20 and those three were specified
+after it. The mock is illustrative and this file wins wherever they disagree, so a missing badge is a gap
+in the illustration rather than in the specification.
 Every screen shares: 120×40 cells, the 4-column chrome (rail 8 / channels 25 / message flex / members 22,
 1 blank cell between), and the 2-row status bar (`7a`). Only deviations are noted per screen.
 
@@ -360,6 +363,11 @@ except `C-c ?`, which opens it.
 A fork that has modified Norite shows **its own** source URL here, because the value comes from the
 instance's `[source].url` rather than from a constant — see `architecture.md` §11.
 
+**On the obligation.** AGPL §5(d) requires an interactive program to display Appropriate Legal Notices
+*where the original already does*, so the baseline is Norite's to set rather than something already forced
+on it. This screen sets it deliberately: a client that shows nothing would leave a downstream fork free to
+show nothing either, and the notice costs one screen.
+
 ### 6e — Guild info & your preferences
 **Purpose** what this guild is, and the choices *you* have about it as an ordinary member. Reached with
 `C-c g` or `M-x guild info`. **Not an administration screen** — it holds nothing gated on a permission,
@@ -387,11 +395,6 @@ by a chord, named in `M-x`, and linked from the join flow — see the `M62a` ent
 which owns the decision about what a member is told at the moment they join.
 
 No chord here is new except `C-c g`. `ESC` closes, per the shared conventions.
-
-**On the obligation.** AGPL §5(d) requires an interactive program to display Appropriate Legal Notices
-*where the original already does*, so the baseline is Norite's to set rather than something already forced
-on it. This screen sets it deliberately: a client that shows nothing would leave a downstream fork free to
-show nothing either, and the notice costs one screen.
 
 ---
 

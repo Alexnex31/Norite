@@ -14,10 +14,15 @@
 // makes `guilds` the import root of the whole domain — how a modular monolith becomes one package with
 // satellites. Extracting costs one refactor now, against four packages coupled to a fifth forever.
 //
-// Nothing here is new. Every function and every comment moved verbatim from `guilds/authorize.go`,
-// `guilds/overwrite.go` and `guilds/channel.go`; the only changes are the ones the package boundary
-// forces — exported names, and an InstanceAdmin accessor for the two callers that read the field
-// directly.
+// The move changed no behavior. Every function body is byte-identical to what it replaced, checked by
+// re-applying the renames to the old files and diffing. The documentation did not survive as cleanly and
+// the first version of this comment overstated it: AuthorizeChannel's doc was left behind in `guilds`
+// attached to an unrelated function, guildOf lost its scope-boundary paragraph, and the refusal contract
+// stayed on the wrapper. A review found all three and they are restored here.
+//
+// What the boundary genuinely forced: exported names, an InstanceAdmin accessor for the two callers that
+// read the field directly, and — added after the extraction, not moved — AuthorizeChannelForRead, because
+// "all four callers are mutations" stopped being true the moment this became importable.
 package guildauth
 
 import (
@@ -79,12 +84,12 @@ type Decision struct {
 // RemoveMember asks whether the *target* does — and an Instance Admin short-circuits before any
 // resolution happens, so on the path that most needs the answer there is no resolution to read it from.
 
-// allows reports whether the Decision covers a permission, from either authority.
+// Allows reports whether the Decision covers a permission, from either authority.
 func (d Decision) Allows(need roles.Permission) bool {
 	return d.instanceAdmin || d.resolution.Permissions.Has(need)
 }
 
-// outranks reports whether the actor may act on something standing at the given position.
+// Outranks reports whether the actor may act on something standing at the given position.
 //
 // The full ADR 0008 answer rather than layer 4's half: an Instance Admin is above every guild's hierarchy
 // and is never resolved against one, so there is no standing to compare and the tier answers first. Below
@@ -97,24 +102,24 @@ func (d Decision) Outranks(position int32) bool {
 	return d.instanceAdmin || d.resolution.Outranks(position)
 }
 
-// allowsInChannel is allows, resolved within one channel — layer 1 first, then layer 5.
+// AllowsInChannel is Allows, resolved within one channel — layer 1 first, then layer 5.
 //
 // A predicate rather than a permission set, because permAll is deliberately unexported: nothing outside
 // the roles package should be able to name "everything", and a wrapper that had to would be reaching for
-// it. This mirrors allows exactly, one scope down.
+// it. This mirrors Allows exactly, one scope down.
 //
 // The tier has to be asked first. An Instance Admin is never resolved against a guild, so `d.resolution`
 // is the zero value on that path — calling InChannel on it resolves to no permissions at all, which would
 // hide every channel in the guild from the one account that must always see them. Both callers guarded
-// that by hand, which is the shape this package has three times decided not to rely on: allows, outranks
-// and outranksMember each exist so a caller cannot forget the tier, and this is the fourth.
+// that by hand, which is the shape this package has three times decided not to rely on: Allows, Outranks
+// and OutranksMember each exist so a caller cannot forget the tier, and this is the fourth.
 func (d Decision) AllowsInChannel(
 	channelID snowflake.ID, overwrites []db.PermissionOverwrite, need roles.Permission,
 ) bool {
 	return d.instanceAdmin || d.resolution.InChannel(channelID, overwrites).Has(need)
 }
 
-// outranksMember is outranks for a target that is a person rather than a role.
+// OutranksMember is Outranks for a target that is a person rather than a role.
 //
 // Separate because the guild owner cannot be reached by a positional comparison — their own standing is a
 // meaningless zero, so comparing it reports that any role-holder outranks them. An Instance Admin still
@@ -123,8 +128,34 @@ func (d Decision) OutranksMember(targetID snowflake.ID, targetStanding int32) bo
 	return d.instanceAdmin || d.resolution.OutranksMember(targetID, targetStanding)
 }
 
-// Authorize is authorize against an explicit querier, so a check can run inside a caller's
+// Authorize decides whether an actor may act, against an explicit querier, so a check can run inside a caller's
 // transaction rather than on a separate connection.
+//
+// # The two questions, and why they are not one function
+//
+// ADR 0008 puts Instance Admin at layer 1 and says it "sits outside any guild's role hierarchy entirely,
+// not resolved via roles.Resolve" — and rejects the synthetic "super role" design by name. So the tier
+// check lives here and the guild resolution lives in roles.
+//
+// Folding layer 1 into Resolve would not merely be untidy, it would be wrong in a way that fails closed
+// and then gets "fixed" in the wrong direction: an Instance Admin is not a guild member, holds no roles,
+// and resolves to exactly zero permissions. Resolve returning a non-guild authority as though it were a
+// guild one is the conflation the ADR exists to prevent.
+//
+// # What the caller learns
+//
+// Two outcomes, and the split is an anti-enumeration decision rather than a convenience:
+//
+//   - [httpx.ErrNotFound] when the actor holds no membership — which covers both "no such guild" and "not
+//     in it". Guild ids are snowflakes: sequential, and carrying their own creation time. Answering 404
+//     for one and 403 for the other turns any list of plausible ids into a map of which guilds exist on
+//     the instance, which is the oracle M11 closed for session ids.
+//   - [httpx.ErrForbidden] when the actor is a member but lacks the permission. They already know the
+//     guild exists, so a distinct answer discloses nothing, and reporting "not found" to somebody looking
+//     at a guild in their own sidebar would be a bug rather than a defense.
+//
+// Neither carries the permission that was missing. A message naming the bit is a small map of the guild's
+// configuration, and every caller of this function is a mutation that has already decided to refuse.
 //
 // Rule 1 requires resolution "using data freshly loaded for the specific guild/channel in the request
 // path". A mutation that resolves permissions on the pool and then writes in a transaction reads a
@@ -159,7 +190,7 @@ func Authorize(
 	// reshaping a security boundary for 2.85 us today.
 	admin, err := q.IsInstanceAdmin(ctx, int64(actor.UserID))
 	if err != nil {
-		return Decision{}, fmt.Errorf("guilds: check instance admin: %w", err)
+		return Decision{}, fmt.Errorf("guildauth: check instance admin: %w", err)
 	}
 	if admin {
 		return Decision{instanceAdmin: true}, nil
@@ -180,7 +211,7 @@ func Authorize(
 	return Decision{resolution: res}, nil
 }
 
-// owns reports whether the actor is the guild's owner — ADR 0008 layer 2.
+// Owns reports whether the actor is the guild's owner — ADR 0008 layer 2.
 //
 // False for an Instance Admin, who is never resolved against a guild at all and holds layer 1 instead.
 // A caller wanting "may act as the guild's own authority" wants `d.instanceAdmin || d.owns()`, and both
@@ -201,16 +232,81 @@ func (d Decision) Owns() bool {
 // `if d.InstanceAdmin()` and nothing else is a check that ignores layers 2 through 5.
 func (d Decision) InstanceAdmin() bool { return d.instanceAdmin }
 
-// AuthorizeChannel resolves a channel, finds its guild, and authorizes against that guild — returning the
-// channel row so the caller does not read it twice.
+// AuthorizeChannel resolves a channel to its guild and authorizes a permission within it.
 //
-// `need` always gains PermViewChannel (M14's correction): a channel you cannot see is not yours to
-// manage, and before that the listing and the channel-scoped routes disagreed about whether a channel
-// existed.
+// # Viewing is required alongside whatever else is asked for
+//
+// Every caller gets PermViewChannel added to its `need`, and that is a correction to M13 rather than a
+// convenience. M13 taught the channel listing to hide channels and did not teach these routes the same
+// thing, so the two disagreed about whether a channel existed: a moderator holding PermManageChannels and
+// denied PermViewChannel — an @everyone view-deny removes only the view bit — got the channel omitted
+// from their listing and could still rename it, delete it, and write its permission overwrites.
+//
+// Found by driving a real guild by hand after M13 was tagged, and it needed that: every test that hid a
+// channel hid it from somebody holding nothing else, and every test that managed one managed a channel
+// that was visible. The divergence needs an actor who holds a management permission and lacks view in the
+// same channel, which no unit test constructed and four review passes did not think to ask for.
+//
+// Requiring it here rather than at each call site is the same argument this package has made four times:
+// a rule written as N call sites has N chances to miss one. It also composes with the refusal below —
+// a caller who fails for want of the view bit is answered as though the channel were not there, which is
+// what the listing already told them.
+//
+// The guild comes off the channel row and never from the caller, because these routes carry no guild in
+// their path — the same reason UpdateChannel loads its own (rule 1). The channel id is passed to
+// guildauth.Authorize so the decision is what the caller holds in *this* channel.
+//
+// # The row is read FOR UPDATE
+//
+// All four callers are mutations on this channel, and two of them diff it. A diff that reads prior state
+// and then writes has a window under READ COMMITTED where a concurrent commit lands in between, and the
+// entry then records a transition that never happened — reproduced on this branch, and the reason the
+// locking query exists. Locking here rather than at each call site keeps the read single.
+//
+// It serializes concurrent mutations of one channel, which is what anybody would expect of them, and it
+// closes a race the ledger records as accepted: the per-channel overwrite ceiling was a read-then-insert
+// with no lock, so two concurrent writes could both read 49 and land the channel at 51. They now queue.
+// That entry is left in place rather than deleted, because the reasoning it records — a ceiling overshoot
+// is not a corrupted ordering — is why nobody had to fix it, and this closing it is a side effect.
 func AuthorizeChannel(
 	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
 ) (db.Channel, snowflake.ID, Decision, error) {
-	row, err := q.GetChannelForUpdate(ctx, int64(channelID))
+	return authorizeChannel(ctx, q, actor, channelID, need, true)
+}
+
+// AuthorizeChannelForRead is AuthorizeChannel without the row lock, for a caller that only reads.
+//
+// **The lock is not free and a read must not take it.** AuthorizeChannel reads the channel FOR UPDATE,
+// which is right for the four mutations that were its only callers when it lived in `guilds` — the
+// paragraph above explains the diff race it closes. It is wrong for a read: the M15 backlog fetch is the
+// hottest read in the product, and taking an exclusive row lock on the channel for every page would
+// serialize two members scrolling the same channel against each other, and block all of them behind any
+// in-flight channel edit until it commits.
+//
+// This function exists because that constraint stopped being enforced by the call sites when the package
+// was extracted. Inside `guilds` the comment "all four callers are mutations" was true and checkable by
+// reading one file; exported for `messages`, `reports`, `tags` and `whispers`, it became an assumption
+// about code that is not written yet. A separate entry point makes the choice explicit at each call site
+// rather than inherited from where the function used to live.
+//
+// Everything else is identical, including the PermViewChannel fold and the hidden-channel refusal.
+func AuthorizeChannelForRead(
+	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
+) (db.Channel, snowflake.ID, Decision, error) {
+	return authorizeChannel(ctx, q, actor, channelID, need, false)
+}
+
+func authorizeChannel(
+	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID,
+	need roles.Permission, lock bool,
+) (db.Channel, snowflake.ID, Decision, error) {
+	var row db.Channel
+	var err error
+	if lock {
+		row, err = q.GetChannelForUpdate(ctx, int64(channelID))
+	} else {
+		row, err = q.GetChannel(ctx, int64(channelID))
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return db.Channel{}, 0, Decision{}, httpx.ErrNotFound
@@ -254,7 +350,15 @@ func AuthorizeChannel(
 	return row, guildID, allowed, nil
 }
 
-// guildOf reads a channel's guild, refusing the channel types that have none.
+// guildOf returns the guild a channel belongs to, refusing one that belongs to none.
+//
+// A DM or group DM has a NULL guild_id and no permission model at all — ADR 0008's hierarchy is
+// guild-scoped, and a DM's access rule is membership in channel_recipients, which is M57's table. So the
+// guild-channel endpoints refuse them rather than resolving against a guild that is not there.
+//
+// This paragraph was dropped in the M15 move and restored by the review that caught it. It matters for
+// M57 specifically: without it the refusal reads as an unhandled case, and the obvious "fix" is to
+// resolve a DM against a guild it does not have.
 func guildOf(row db.Channel) (snowflake.ID, error) {
 	if row.GuildID == nil {
 		// 404 rather than 400: whether a channel id names a DM is not something a caller who cannot see it

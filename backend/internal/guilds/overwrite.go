@@ -244,42 +244,6 @@ func (s *Service) DeleteOverwrite(
 	})
 }
 
-// guildauth.AuthorizeChannel resolves a channel to its guild and authorizes a permission within it.
-//
-// # Viewing is required alongside whatever else is asked for
-//
-// Every caller gets PermViewChannel added to its `need`, and that is a correction to M13 rather than a
-// convenience. M13 taught the channel listing to hide channels and did not teach these routes the same
-// thing, so the two disagreed about whether a channel existed: a moderator holding PermManageChannels and
-// denied PermViewChannel — an @everyone view-deny removes only the view bit — got the channel omitted
-// from their listing and could still rename it, delete it, and write its permission overwrites.
-//
-// Found by driving a real guild by hand after M13 was tagged, and it needed that: every test that hid a
-// channel hid it from somebody holding nothing else, and every test that managed one managed a channel
-// that was visible. The divergence needs an actor who holds a management permission and lacks view in the
-// same channel, which no unit test constructed and four review passes did not think to ask for.
-//
-// Requiring it here rather than at each call site is the same argument this package has made four times:
-// a rule written as N call sites has N chances to miss one. It also composes with the refusal below —
-// a caller who fails for want of the view bit is answered as though the channel were not there, which is
-// what the listing already told them.
-//
-// The guild comes off the channel row and never from the caller, because these routes carry no guild in
-// their path — the same reason UpdateChannel loads its own (rule 1). The channel id is passed to
-// guildauth.Authorize so the decision is what the caller holds in *this* channel.
-//
-// # The row is read FOR UPDATE
-//
-// All four callers are mutations on this channel, and two of them diff it. A diff that reads prior state
-// and then writes has a window under READ COMMITTED where a concurrent commit lands in between, and the
-// entry then records a transition that never happened — reproduced on this branch, and the reason the
-// locking query exists. Locking here rather than at each call site keeps the read single.
-//
-// It serializes concurrent mutations of one channel, which is what anybody would expect of them, and it
-// closes a race the ledger records as accepted: the per-channel overwrite ceiling was a read-then-insert
-// with no lock, so two concurrent writes could both read 49 and land the channel at 51. They now queue.
-// That entry is left in place rather than deleted, because the reasoning it records — a ceiling overshoot
-// is not a corrupted ordering — is why nobody had to fix it, and this closing it is a side effect.
 // checkOverwriteTarget verifies that an overwrite names something real in this guild, and that the caller
 // outranks it.
 //
