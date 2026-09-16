@@ -21,7 +21,7 @@
 // stayed on the wrapper. A review found all three and they are restored here.
 //
 // What the boundary genuinely forced: exported names, an InstanceAdmin accessor for the two callers that
-// read the field directly, and — added after the extraction, not moved — AuthorizeChannelForRead, because
+// read the field directly, and — added after the extraction, not moved — AuthorizeChannelUnlocked, because
 // "all four callers are mutations" stopped being true the moment this became importable.
 package guildauth
 
@@ -258,10 +258,16 @@ func (d Decision) InstanceAdmin() bool { return d.instanceAdmin }
 //
 // # The row is read FOR UPDATE
 //
-// All four callers are mutations on this channel, and two of them diff it. A diff that reads prior state
-// and then writes has a window under READ COMMITTED where a concurrent commit lands in between, and the
-// entry then records a transition that never happened — reproduced on this branch, and the reason the
-// locking query exists. Locking here rather than at each call site keeps the read single.
+// Its four callers are the `guilds` channel mutations — UpdateChannel, DeleteChannel, SetOverwrite and
+// DeleteOverwrite — and each writes an audit entry describing this row. A diff that reads prior state and
+// then writes has a window under READ COMMITTED where a concurrent commit lands in between, and the entry
+// then records a transition that never happened — reproduced on this branch, and the reason the locking
+// query exists. Locking here rather than at each call site keeps the read single.
+//
+// **That is the test for belonging here, not "is this a mutation".** Every mutation in `messages` takes
+// [AuthorizeChannelUnlocked] instead, because none of them describes the channel row — they read two
+// fields off it and write elsewhere. Getting that axis wrong is what named the other function
+// AuthorizeChannelForRead and made the name false at three of its four call sites inside one milestone.
 //
 // It serializes concurrent mutations of one channel, which is what anybody would expect of them, and it
 // closes a race the ledger records as accepted: the per-channel overwrite ceiling was a read-then-insert
@@ -274,23 +280,35 @@ func AuthorizeChannel(
 	return authorizeChannel(ctx, q, actor, channelID, need, true)
 }
 
-// AuthorizeChannelForRead is AuthorizeChannel without the row lock, for a caller that only reads.
+// AuthorizeChannelUnlocked is AuthorizeChannel without the row lock.
 //
-// **The lock is not free and a read must not take it.** AuthorizeChannel reads the channel FOR UPDATE,
-// which is right for the four mutations that were its only callers when it lived in `guilds` — the
-// paragraph above explains the diff race it closes. It is wrong for a read: the M15 backlog fetch is the
-// hottest read in the product, and taking an exclusive row lock on the channel for every page would
-// serialize two members scrolling the same channel against each other, and block all of them behind any
-// in-flight channel edit until it commits.
+// # The axis is not read-versus-write
 //
-// This function exists because that constraint stopped being enforced by the call sites when the package
-// was extracted. Inside `guilds` the comment "all four callers are mutations" was true and checkable by
-// reading one file; exported for `messages`, `reports`, `tags` and `whispers`, it became an assumption
-// about code that is not written yet. A separate entry point makes the choice explicit at each call site
-// rather than inherited from where the function used to live.
+// This was called AuthorizeChannelUnlocked when M15 extracted the package, on the assumption that the lock
+// divides reads from mutations. It does not, and the name was false at three of its four call sites
+// within one milestone: `messages` Send, Update and Delete all mutate and all belong here.
+//
+// The real question is **whether the caller needs the channel row to hold still for its transaction**,
+// and only two kinds of caller do. One diffs the row — every `guilds` mutation writes an audit entry
+// carrying a from/to over fields of this channel, and M14 reproduced the race where a concurrent commit
+// lands between the prior-state read and the write, so the entry records a transition that never
+// happened. The other needs the row's own consistency for something it is about to write into that row.
+//
+// A caller that merely reads a field off the channel and writes somewhere else does not qualify. `Send`
+// takes `type` and `guild_id` and inserts into `messages`; holding an exclusive lock for that serialized
+// every send in a channel behind every other, measured at 777 sends/s against 2,294 without it. Note that
+// the permission read is not why anyone would lock: [Authorize] reads guild_members, roles and
+// permission_overwrites unlocked either way, so the lock has never protected rule 1's freshness.
+//
+// # Which one is the safe default, and why the names are this way round
+//
+// [AuthorizeChannel] keeps the lock and the shorter name deliberately. The two failure modes are not
+// symmetric: taking the lock when you did not need it costs throughput, which is measurable and
+// recoverable, while skipping it when you did costs a wrong audit entry, which is silent and permanent.
+// So the unconsidered choice is the safe one, and giving it up is a call you have to spell out.
 //
 // Everything else is identical, including the PermViewChannel fold and the hidden-channel refusal.
-func AuthorizeChannelForRead(
+func AuthorizeChannelUnlocked(
 	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
 ) (db.Channel, snowflake.ID, Decision, error) {
 	return authorizeChannel(ctx, q, actor, channelID, need, false)

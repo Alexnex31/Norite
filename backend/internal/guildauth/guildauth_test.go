@@ -77,13 +77,13 @@ func TestTheTwoRefusalsAreDistinguishableAndDocumented(t *testing.T) {
 		"a non-member must be refused as not-found, never as forbidden — the 403 would confirm the guild exists")
 }
 
-// TestTheReadEntryPointDoesNotLockTheChannelRow pins the distinction M15 added, and it is the one thing
+// TestTheUnlockedEntryPointDoesNotLockTheChannelRow pins the distinction M15 added, and it is the one thing
 // here that a behavioral test in `guilds` cannot cover: both entry points return the same answers, so
 // only the lock tells them apart.
 //
 // Without it the backlog read — the hottest read in the product — would take an exclusive row lock on the
 // channel per page, serializing two members scrolling the same channel.
-func TestTheReadEntryPointDoesNotLockTheChannelRow(t *testing.T) {
+func TestTheUnlockedEntryPointDoesNotLockTheChannelRow(t *testing.T) {
 	t.Parallel()
 
 	_, pool, ctx := queries(t)
@@ -125,14 +125,14 @@ func TestTheReadEntryPointDoesNotLockTheChannelRow(t *testing.T) {
 		return err
 	})
 	lockedByRead := held(func(q *db.Queries) error {
-		_, _, _, err := guildauth.AuthorizeChannelForRead(ctx, q, actor, snowflake.ID(channel), roles.PermViewChannel)
+		_, _, _, err := guildauth.AuthorizeChannelUnlocked(ctx, q, actor, snowflake.ID(channel), roles.PermViewChannel)
 		return err
 	})
 
 	require.True(t, lockedByWrite,
 		"AuthorizeChannel must hold the row lock the diff race depends on — see its FOR UPDATE section")
 	require.False(t, lockedByRead,
-		"AuthorizeChannelForRead must not lock: the backlog fetch runs it per page, and a row lock there "+
+		"AuthorizeChannelUnlocked must not lock: the backlog fetch runs it per page, and a row lock there "+
 			"serializes every member reading the same channel")
 }
 

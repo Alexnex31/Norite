@@ -1383,12 +1383,18 @@ And on messages, from M15:
   Exporting from `guilds` instead would have made it the import root of `messages`, `reports`, `tags` and
   `whispers` — the four the architecture tree gives their own package. Every operation in `messages` opens
   by calling it, so there is no path to a message that skips authorization.
-- **There are two channel entry points and the difference is the lock.** `AuthorizeChannel` reads the
-  channel `FOR UPDATE`, which is right for a mutation and closes the diff race M14 reproduced;
-  `AuthorizeChannelForRead` does not, because the backlog fetch is the hottest read in the product and a
-  row lock per page serializes every member reading the same channel. Inside `guilds` the constraint held
-  because all four callers were mutations and a comment said so; exported, that became an assumption about
-  code nobody had written, which is why it is two functions rather than one and a note.
+- **There are two channel entry points and the difference is the lock — but the axis is not
+  read-versus-write.** `AuthorizeChannel` reads the channel `FOR UPDATE` and closes the diff race M14
+  reproduced; `AuthorizeChannelUnlocked` does not. The test for which one you want is **whether the caller
+  describes the channel row**: every `guilds` channel mutation writes an audit entry over it and must hold
+  it still, while everything in `messages` — including three mutations — reads `type` and `guild_id` off
+  it and writes elsewhere. It was called `AuthorizeChannelForRead` at first, on the assumption that the
+  lock divides reads from mutations, and that name was false at three of its four call sites **inside the
+  same milestone** — `Send`, `Update` and `Delete` all mutate and all belong on the unlocked path. A name
+  that lies is worse than a comment that lies, because people read names and skip comments.
+  `AuthorizeChannel` keeps the shorter name and the lock deliberately: taking it when you did not need it
+  costs throughput, which is measurable and recoverable, while skipping it when you did costs a wrong
+  audit entry, which is silent and permanent — so the unconsidered choice is the safe one.
 - **Rule 2's narrowing is a property you assert, not one you inherit.** A member posting, editing or
   deleting their own message writes **no** audit entry, and the test asserting that a mutation records
   nothing would have been a bug report before M15. A moderator deleting somebody else's writes one. The

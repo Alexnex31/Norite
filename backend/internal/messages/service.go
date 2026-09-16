@@ -102,7 +102,7 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 		// longer blocks an in-flight send). The permission read is unaffected either way: Authorize reads
 		// guild_members, roles and permission_overwrites unlocked in *both* variants, so this lock never
 		// protected rule 1's freshness.
-		channel, _, _, err := guildauth.AuthorizeChannelForRead(
+		channel, _, _, err := guildauth.AuthorizeChannelUnlocked(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
 		)
 		if err != nil {
@@ -248,11 +248,11 @@ type ListInput struct {
 // variant would take an exclusive row lock on the channel per page, serializing every member reading the
 // same channel and queueing them behind any in-flight channel edit.
 func (s *Service) List(ctx context.Context, actor auth.Actor, in ListInput) ([]Message, error) {
-	// PermReadMessageHistory, not merely PermViewChannel. AuthorizeChannelForRead folds the view bit in
+	// PermReadMessageHistory, not merely PermViewChannel. AuthorizeChannelUnlocked folds the view bit in
 	// on top of whatever is asked for, so this is "can see the channel AND may read what was said in it" —
 	// the two are separate grants, and a channel configured view+send without history is one whose earlier
 	// conversation is not for whoever was added last.
-	if _, _, _, err := guildauth.AuthorizeChannelForRead(
+	if _, _, _, err := guildauth.AuthorizeChannelUnlocked(
 		ctx, s.queries, actor, in.ChannelID, roles.PermReadMessageHistory,
 	); err != nil {
 		return nil, err
@@ -327,7 +327,7 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 		// loadInChannel takes it below with GetMessageForUpdate — which also closes the cascade race Send
 		// has to map an FK error for: a channel deleted mid-edit cannot remove this message while that
 		// row lock is held, and if it commits first the locking read simply finds nothing and answers 404.
-		if _, _, _, err := guildauth.AuthorizeChannelForRead(
+		if _, _, _, err := guildauth.AuthorizeChannelUnlocked(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
 		); err != nil {
 			return err
@@ -388,7 +388,7 @@ func (s *Service) Delete(
 	return s.inTx(ctx, func(q *db.Queries) error {
 		// Non-locking, for the reason Update is: loadInChannel locks the message row, which is the lock
 		// this operation actually needs.
-		_, guildID, decision, err := guildauth.AuthorizeChannelForRead(ctx, q, actor, channelID, 0)
+		_, guildID, decision, err := guildauth.AuthorizeChannelUnlocked(ctx, q, actor, channelID, 0)
 		if err != nil {
 			return err
 		}
