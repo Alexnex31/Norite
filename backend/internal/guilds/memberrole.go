@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -42,7 +43,7 @@ import (
 // this codebase — auth's scopes, role creation, the overwrite endpoints — and assignment is that question
 // wearing different clothes.
 //
-// It needs no owner or Instance-Admin branch: refuseEscalation takes a decision, and decision.allows
+// It needs no owner or Instance-Admin branch: refuseEscalation takes a decision, and Decision.Allows
 // already returns true for layer 1 and for the owner, who resolves to permAll.
 func (s *Service) AssignRole(
 	ctx context.Context, actor auth.Actor, guildID, userID, roleID snowflake.ID,
@@ -85,7 +86,7 @@ func (s *Service) changeMemberRole(
 	var out Member
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -108,7 +109,7 @@ func (s *Service) changeMemberRole(
 
 		// Layer 4, on the role. Applies to self as much as to anybody: you cannot take a role above your
 		// own standing, and you cannot shed the one that establishes it.
-		if !allowed.outranks(role.Position) {
+		if !allowed.Outranks(role.Position) {
 			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
 		}
 
@@ -131,7 +132,7 @@ func (s *Service) changeMemberRole(
 		// self-removal impossible for every non-owner — breaking self-service roles, which are an ordinary
 		// configuration, and making the rule above unreachable rather than strict. The role check is the
 		// one that has to hold on yourself, and it does.
-		if userID != actor.UserID && !allowed.outranksMember(userID, standing) {
+		if userID != actor.UserID && !allowed.OutranksMember(userID, standing) {
 			return httpx.Errorf(ErrOutranked, "you cannot act on a member above you")
 		}
 

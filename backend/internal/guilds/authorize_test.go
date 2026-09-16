@@ -13,6 +13,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
@@ -254,7 +255,7 @@ func TestTheOwnerIsAuthorizedForEverything(t *testing.T) {
 		roles.PermManageGuild|roles.PermBanMembers))
 }
 
-// TestAuthorizeCanRunInsideACallersTransaction covers the reason authorizeWith takes a querier.
+// TestAuthorizeCanRunInsideACallersTransaction covers the reason guildauth.Authorize takes a querier.
 //
 // Rule 1 asks for resolution against data freshly loaded for the request. A mutation that authorizes on
 // the pool and then opens a transaction to write reads a snapshot from before its own BEGIN, so a
@@ -284,7 +285,7 @@ func TestAuthorizeCanRunInsideACallersTransaction(t *testing.T) {
 		roles.PermManageGuild.Int64(), int64(guildID))
 	require.NoError(t, err)
 
-	_, err = authorizeWith(ctx, f.svc.queries.WithTx(tx), userActor(member), guildID, 0,
+	_, err = guildauth.Authorize(ctx, f.svc.queries.WithTx(tx), userActor(member), guildID, 0,
 		roles.PermManageGuild)
 	require.NoError(t, err,
 		"a check on the caller's transaction must see the caller's own uncommitted grant")
@@ -354,7 +355,7 @@ func TestAZeroCeilingIsRefusedAtConstruction(t *testing.T) {
 // TestDeletingAGuildThatDoesNotExistAnswers404 covers the one refusal an Instance Admin reaches that no
 // guild resolution can produce.
 //
-// Every other caller of Delete is refused by authorizeWith, which resolves the guild and answers 404 when
+// Every other caller of Delete is refused by guildauth.Authorize, which resolves the guild and answers 404 when
 // it finds nothing. An Instance Admin is not resolved at all — layer 1 short-circuits above roles.Resolve
 // by design, because the tier acts on guilds it is not in — so for that one actor the guild's existence is
 // never established, and the first thing to touch it is the audit write. Without an explicit check that

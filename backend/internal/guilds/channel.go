@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -115,8 +116,8 @@ func (s *Service) ListChannels(
 	// here and is refused the listing the filter would have answered correctly.
 	//
 	// Permission.Has(0) is true by design, so this establishes membership and asserts nothing else. A
-	// non-member is still refused by authorizeWith, with the 404 every other guild route gives them.
-	allowed, err := authorizeWith(ctx, s.queries, actor, guildID, 0, 0)
+	// non-member is still refused by guildauth.Authorize, with the 404 every other guild route gives them.
+	allowed, err := guildauth.Authorize(ctx, s.queries, actor, guildID, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +175,7 @@ func (s *Service) ListChannels(
 
 		// Layer 1 is outside the guild and was never resolved, so the tier is asked first — inside
 		// allowsInChannel rather than here, so a third caller cannot forget it.
-		if !allowed.allowsInChannel(ch.ID, rows, roles.PermViewChannel) {
+		if !allowed.AllowsInChannel(ch.ID, rows, roles.PermViewChannel) {
 			continue
 		}
 
@@ -228,7 +229,7 @@ func (s *Service) CreateChannel(
 	var out Channel
 
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageChannels); err != nil {
+		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageChannels); err != nil {
 			return err
 		}
 
@@ -270,7 +271,7 @@ func (s *Service) CreateChannel(
 				return httpx.Errorf(httpx.ErrBadRequest, "%s", badParent)
 			}
 
-			if _, err := authorizeWith(
+			if _, err := guildauth.Authorize(
 				ctx, q, actor, guildID, *in.ParentID, roles.PermViewChannel,
 			); err != nil {
 				return httpx.Errorf(httpx.ErrBadRequest, "%s", badParent)
@@ -301,7 +302,7 @@ func (s *Service) CreateChannel(
 			// validate the parent, then authorize against it. Authorizing against the parent *instead*
 			// would load a caller-supplied id before any membership check, and the refusals above name a
 			// channel — so a stranger could tell "not a category in this guild" from a plain 404.
-			if _, err := authorizeWith(
+			if _, err := guildauth.Authorize(
 				ctx, q, actor, guildID, *in.ParentID, roles.PermManageChannels,
 			); err != nil {
 				return err
@@ -452,9 +453,9 @@ func (s *Service) UpdateChannel(
 		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
 		// is an oracle confirming exactly what the filter withholds — and that reasoning applies to these
 		// routes as much as to the permission ones, which had it and these did not.
-		// One read. authorizeChannel loads the row to find its guild and hands it back, so nothing here
+		// One read. guildauth.AuthorizeChannel loads the row to find its guild and hands it back, so nothing here
 		// reads it twice — DeleteChannel said that in a comment before this function did it in code.
-		existing, guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
+		existing, guildID, _, err := guildauth.AuthorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
 		if err != nil {
 			return err
 		}
@@ -492,7 +493,7 @@ func (s *Service) UpdateChannel(
 			return fmt.Errorf("guilds: update channel: %w", err)
 		}
 
-		// Against the row authorizeChannel loaded to find the guild, so the diff costs no extra read.
+		// Against the row guildauth.AuthorizeChannel loaded to find the guild, so the diff costs no extra read.
 		changes := auditDiff{}
 		if in.Name != nil {
 			changes.changed("name", orNil(existing.Name), *in.Name)
@@ -556,9 +557,9 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
 		// is an oracle confirming exactly what the filter withholds — and that reasoning applies to these
 		// routes as much as to the permission ones, which had it and these did not.
-		// One read, not two: authorizeChannel loads the row to find its guild, and the guild is the only
+		// One read, not two: guildauth.AuthorizeChannel loads the row to find its guild, and the guild is the only
 		// thing this operation wanted it for.
-		existing, guildID, _, err := s.authorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
+		existing, guildID, _, err := guildauth.AuthorizeChannel(ctx, q, actor, channelID, roles.PermManageChannels)
 		if err != nil {
 			return err
 		}
@@ -566,7 +567,7 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 		// Unlike a guild deletion, this entry survives: audit_log_entries cascades from guilds, not from
 		// channels, so deleting a channel leaves its record in place. That is the whole reason target_id
 		// is not a foreign key — see migration 000016.
-		// What went, from the row authorizeChannel had already loaded — the comment below notes this entry
+		// What went, from the row guildauth.AuthorizeChannel had already loaded — the comment below notes this entry
 		// survives its channel, and an entry that survives with no description of what it names is a row
 		// saying only that something happened.
 		changes := auditDiff{}
@@ -590,18 +591,4 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 
 		return nil
 	})
-}
-
-// guildOf returns the guild a channel belongs to, refusing one that belongs to none.
-//
-// A DM or group DM has a NULL guild_id and no permission model at all — ADR 0008's hierarchy is
-// guild-scoped, and a DM's access rule is membership in channel_recipients, which is M57's table. So the
-// guild-channel endpoints refuse them rather than resolving against a guild that is not there.
-func guildOf(row db.Channel) (snowflake.ID, error) {
-	if row.GuildID == nil {
-		// 404 rather than 400: whether a channel id names a DM is not something a caller who cannot see it
-		// should learn, and these routes simply do not serve that channel.
-		return 0, httpx.ErrNotFound
-	}
-	return snowflake.ID(*row.GuildID), nil
 }

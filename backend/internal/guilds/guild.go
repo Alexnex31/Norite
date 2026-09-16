@@ -14,6 +14,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -182,8 +183,8 @@ func (s *Service) Update(
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
 		// Authorized on the transaction's querier, not the pool, so the permissions that allow the write
-		// are read in the same snapshot the write happens in (rule 1). See authorizeWith.
-		if _, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
+		// are read in the same snapshot the write happens in (rule 1). See guildauth.Authorize.
+		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
 			return err
 		}
 
@@ -260,14 +261,14 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 		//
 		// PermViewChannel is what a non-member fails, so a stranger gets the ordinary 404 rather than "you
 		// are not the owner" — which would tell them the guild exists.
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermViewChannel)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermViewChannel)
 		if err != nil {
 			return err
 		}
 
 		// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
 		// PermManageGuild is not — so this cannot be a plain permission check.
-		if !allowed.instanceAdmin && !allowed.owns() {
+		if !allowed.InstanceAdmin() && !allowed.Owns() {
 			return httpx.ErrForbidden
 		}
 
@@ -284,7 +285,7 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 		// the owner comparison happened to want the same row. Removing that read for the resolved paths
 		// removed the existence check along with it. Paid only on the tier that skipped the resolution,
 		// which is the one place it is not redundant.
-		if allowed.instanceAdmin {
+		if allowed.InstanceAdmin() {
 			if _, err := q.GetGuild(ctx, int64(guildID)); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return httpx.ErrNotFound

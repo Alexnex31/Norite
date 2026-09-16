@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -85,7 +86,7 @@ func (s *Service) CreateRole(
 	var out Role
 
 	err = s.inTx(ctx, func(q *db.Queries) error {
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -192,7 +193,7 @@ func (s *Service) UpdateRole(
 	var out Role
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -213,7 +214,7 @@ func (s *Service) UpdateRole(
 		// This bounds what refuseEscalation cannot. That check stops you granting a permission you do not
 		// hold; it says nothing about *which* role you may grant it to, so without this a moderator could
 		// edit the administrator role's color, name, or the permissions it hands everybody who holds it.
-		if !allowed.outranks(existing.Position) {
+		if !allowed.Outranks(existing.Position) {
 			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
 		}
 
@@ -295,7 +296,7 @@ func (s *Service) UpdateRole(
 // DeleteRole removes a role. @everyone is refused, in SQL — see DeleteRole in guilds.sql.
 func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, roleID snowflake.ID) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -311,7 +312,7 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 
 		// Layer 4's second sentence: a role above your own is not yours to delete. Below the load, because
 		// it reads a row the caller may not be able to see — the ordering M12 had corrected twice.
-		if !allowed.outranks(existing.Position) {
+		if !allowed.Outranks(existing.Position) {
 			return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
 		}
 
@@ -370,14 +371,14 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 //
 // See CreateRole's comment for why this is the most important check in the file.
 //
-// Pure, and takes the decision authorizeWith already reached rather than re-deriving it. It used to run
-// its own IsInstanceAdmin and its own full roles.Resolve immediately after authorizeWith had run both,
+// Pure, and takes the decision guildauth.Authorize already reached rather than re-deriving it. It used to run
+// its own IsInstanceAdmin and its own full roles.Resolve immediately after guildauth.Authorize had run both,
 // inside the same transaction — five round trips for one INSERT. The facts cannot change between the two
 // calls; only the question does.
 //
-// An Instance Admin passes through decision.allows, because layer 1 sits outside the guild: they are not
+// An Instance Admin passes through Decision.Allows, because layer 1 sits outside the guild: they are not
 // a member, resolve to zero permissions, and would otherwise be unable to grant anything at all.
-func refuseEscalation(allowed decision, want roles.Permission) error {
+func refuseEscalation(allowed guildauth.Decision, want roles.Permission) error {
 	// Bits no constant defines are refused before authority is consulted at all, because the Instance Admin
 	// short-circuit below does not consult the bitfield — so without this an admin could store bit 62, and
 	// a later milestone defining it would find it already granted. For a non-admin the escalation check
@@ -387,7 +388,7 @@ func refuseEscalation(allowed decision, want roles.Permission) error {
 			"permissions contains bits this instance does not define")
 	}
 
-	if allowed.allows(want) {
+	if allowed.Allows(want) {
 		return nil
 	}
 
@@ -434,7 +435,7 @@ func (s *Service) ReorderRoles(
 	var out []Role
 
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		allowed, err := authorizeWith(ctx, q, actor, guildID, 0, roles.PermManageRoles)
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
 		}
@@ -486,7 +487,7 @@ func (s *Service) ReorderRoles(
 
 			// Both ends. See the doc comment: checking only the destination lets a caller demote a role
 			// that is currently above them, which is a takeover in three requests.
-			if !allowed.outranks(role.Position) || !allowed.outranks(want.Position) {
+			if !allowed.Outranks(role.Position) || !allowed.Outranks(want.Position) {
 				return httpx.Errorf(ErrOutranked, "you cannot manage a role above your own")
 			}
 		}
