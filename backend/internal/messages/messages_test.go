@@ -6,6 +6,9 @@ package messages
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -559,4 +562,52 @@ func TestChannelVanishedMapsOnlyTheForeignKeyThatCanHappen(t *testing.T) {
 
 	require.Nil(t, channelVanished(errors.New("connection reset")),
 		"a non-pg error must fall through")
+}
+
+// TestTheHandlerTagAgreesWithTheConstant pins the one bound written in two places.
+//
+// A struct tag cannot reference a constant, so the handler's `max=4000` is a literal while
+// MaxContentLength is the documented bound. Before M15's code review the constant was read by nothing at
+// all — it documented a limit the code did not consult, which is worse than no constant, because the
+// security-ledger entry recording the decision pointed at it. The service now enforces it and this stops
+// the literal drifting away from it.
+func TestTheHandlerTagAgreesWithTheConstant(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []any{sendRequest{}, updateRequest{}} {
+		f, ok := reflect.TypeOf(target).FieldByName("Content")
+		require.True(t, ok)
+		require.Contains(t, f.Tag.Get("validate"), fmt.Sprintf("max=%d", MaxContentLength),
+			"%T's content tag must carry MaxContentLength", target)
+	}
+}
+
+// TestTheServiceBoundsContentEvenWithoutTheHandler is what makes MaxContentLength load-bearing.
+//
+// The ledger entry accepting a bare `text` column names its own reopening condition: a write path that
+// reaches `messages` without passing the handler's validator. M60's webhooks and M22's bot automation are
+// both exactly that, and they will call the service. So the service checks too.
+func TestTheServiceBoundsContentEvenWithoutTheHandler(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	_, err := f.svc.Send(f.ctx, actorOf(f.member), SendInput{
+		ChannelID: f.channelID, Content: strings.Repeat("a", MaxContentLength+1),
+	})
+	require.ErrorIs(t, err, httpx.ErrBadRequest, "the service must bound content, not only the handler")
+
+	msg, err := f.svc.Send(f.ctx, actorOf(f.member), SendInput{
+		ChannelID: f.channelID, Content: strings.Repeat("a", MaxContentLength),
+	})
+	require.NoError(t, err, "exactly the limit must be accepted")
+
+	_, err = f.svc.Update(f.ctx, actorOf(f.member), UpdateInput{
+		ChannelID: f.channelID, MessageID: msg.ID,
+		Content: strings.Repeat("b", MaxContentLength+1),
+	})
+	require.ErrorIs(t, err, httpx.ErrBadRequest, "an edit is bounded the same way")
+
+	_, err = f.svc.Send(f.ctx, actorOf(f.member), SendInput{ChannelID: f.channelID, Content: ""})
+	require.ErrorIs(t, err, httpx.ErrBadRequest, "an empty body is refused in the service too")
 }

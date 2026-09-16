@@ -114,6 +114,10 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 			return httpx.Errorf(httpx.ErrBadRequest, "this channel does not hold messages")
 		}
 
+		if err := checkContent(in.Content); err != nil {
+			return err
+		}
+
 		reply, err := s.resolveReply(ctx, q, in.ChannelID, in.ReplyToID)
 		if err != nil {
 			return err
@@ -145,6 +149,30 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 		return nil
 	})
 	return out, err
+}
+
+// checkContent bounds a message body in the service, not only at the handler.
+//
+// The handler's `validate:"min=1,max=4000"` tag is what a request actually hits, and it has to be a
+// literal because a struct tag cannot reference a constant. That left MaxContentLength documenting a
+// bound nothing read — a code review found it inert, and the security-ledger entry recorded for this
+// decision pointed at a constant that did nothing.
+//
+// Checking here closes that, and closes the ledger entry's own reopening condition in advance: it names
+// "a write path that reaches `messages` without passing the handler's validator — a bulk import, a
+// webhook ingest (M60), or a bot-automation path (M22)". Every one of those calls the service, not the
+// handler. Same reasoning M14 used for the unknown audit-action filter, which is checked in the service
+// and not only in the handler.
+//
+// TestTheHandlerTagAgreesWithTheConstant pins the literal against this constant, so they cannot drift.
+func checkContent(content string) error {
+	switch {
+	case content == "":
+		return httpx.Errorf(httpx.ErrBadRequest, "content is required")
+	case len(content) > MaxContentLength:
+		return httpx.Errorf(httpx.ErrBadRequest, "content must be at most %d characters", MaxContentLength)
+	}
+	return nil
 }
 
 // channelVanished maps the one error the unlocked authorize made reachable, and returns nil otherwise.
@@ -293,6 +321,10 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 		if _, _, _, err := guildauth.AuthorizeChannelForRead(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
 		); err != nil {
+			return err
+		}
+
+		if err := checkContent(in.Content); err != nil {
 			return err
 		}
 

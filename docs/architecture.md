@@ -765,6 +765,13 @@ const (
     PermManageEmojis    // ACTIVE
     PermModerateMembers // M74 — timeout a member without suspending the account; Discord's MODERATE_MEMBERS
     PermViewAuditLog    // M14 — ACTIVE; read the guild audit log. Its own bit, as Discord's is
+
+    PermReadMessageHistory // M15 — ACTIVE; read a channel's backlog. Separate from PermViewChannel the
+                           //   way Discord separates them: seeing a channel exists and reading what was
+                           //   said before you arrived are different grants. The three message bits
+                           //   compose rather than nest — announcements is view+history without send, a
+                           //   support thread opened to a reporter is view+send without history. In
+                           //   @everyone's default grant, so withholding it is the deliberate setting.
 )
 ```
 

@@ -346,3 +346,32 @@ would flip them.
   M74) and guild bans (M57) plausibly could. Also reopens if `SetChannelLastMessage` stops being
   monotonic, since `GREATEST` is what replaced the lock's other job and a plain assignment would walk the
   channel's unread pointer backwards — reproduced in psql, pointer 100 with message 101 present.
+
+### A 403-versus-404 on edit and delete tells a member whether a snowflake names a live message
+- **Raised**: M15, twice in one session — `/security-review`'s discovery pass and then `/code-review`,
+  independently, within an hour of each other
+- **Verdict**: not a vulnerability — the fact it would disclose is published directly, for free
+- **Why**: `Update` and `Delete` load the message after authorizing the channel, and answer 403 when the
+  caller is neither author nor moderator against 404 when the id names no live message here. Neither
+  consults `PermReadMessageHistory`, so a member with view+send in a history-withheld channel can tell a
+  live message id from a dead one. The claimed harm is learning that people were talking at time T — and
+  `channels.last_message_id` hands exactly that to the same member, continuously, with no probing at all:
+  the channel listing filters on `PermViewChannel` alone and the field carries a snowflake's timestamp.
+  The history bit withholds *content*, which is what `TestReadingTheBacklogNeedsPermReadMessageHistory`
+  asserts, and M18's `MESSAGE_CREATE` fan-out will be view-gated for the same reason.
+
+  The finding is also mislocated in a way that matters for anyone tempted to fix it as described.
+  `resolveReply` is the same oracle at the same privilege — 400 against 201 — so patching `Update` and
+  `Delete` alone would close two of three doors. And confirming *historical* ids means supplying
+  candidates: snowflakes here are 41-bit ms / 10-bit node / 12-bit sequence, and the sequence is shared by
+  every entity on the instance, so a scan costs roughly a thousand probes per millisecond of history and
+  returns timing only — no content, no author, no count.
+
+  **Recorded rather than dismissed precisely because it came back twice in an hour.** That is the pattern
+  this file exists for: the M13 403/404 oracle was filtered at confidence 6, vanished, was re-derived by
+  the next pass, and was real. This one is not, and the next reviewer should be able to find that out by
+  searching rather than by re-deriving it a third time.
+- **Reopens if**: `last_message_id` is ever withheld from members lacking `PermReadMessageHistory`, or
+  M18's `MESSAGE_CREATE` dispatch is gated on the history bit rather than the view bit. Either would make
+  message *existence* something the bit actually keeps, and at that point all three paths — `Update`,
+  `Delete` and `Send`'s `reply_to_id` — must be downgraded together, not one at a time.
