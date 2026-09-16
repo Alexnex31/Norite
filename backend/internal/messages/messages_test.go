@@ -611,3 +611,38 @@ func TestTheServiceBoundsContentEvenWithoutTheHandler(t *testing.T) {
 	_, err = f.svc.Send(f.ctx, actorOf(f.member), SendInput{ChannelID: f.channelID, Content: ""})
 	require.ErrorIs(t, err, httpx.ErrBadRequest, "an empty body is refused in the service too")
 }
+
+// TestTheContentBoundCountsCharactersNotBytes is the regression this check shipped with for an hour.
+//
+// go-playground/validator's `max` on a string is utf8.RuneCountInString, so the handler measures runes.
+// The first version of checkContent used len(), which measures bytes — and 4,000 Japanese characters are
+// 12,000 bytes. Every message at anything near the limit written in a non-Latin script would have been
+// refused by the service after the handler accepted it, which is a bug that would never have shown up in
+// a test suite written in English.
+func TestTheContentBoundCountsCharactersNotBytes(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	for _, tc := range []struct {
+		name string
+		char string
+	}{
+		{"Japanese (3 bytes each)", "あ"},
+		{"emoji (4 bytes each)", "🙂"},
+		{"Arabic (2 bytes each)", "ب"},
+	} {
+		body := strings.Repeat(tc.char, MaxContentLength)
+		require.Greater(t, len(body), MaxContentLength, "%s must exceed the limit in bytes", tc.name)
+
+		_, err := f.svc.Send(f.ctx, actorOf(f.member), SendInput{ChannelID: f.channelID, Content: body})
+		require.NoErrorf(t, err,
+			"%s: %d characters is exactly the limit and must be accepted, though it is %d bytes",
+			tc.name, MaxContentLength, len(body))
+
+		_, err = f.svc.Send(f.ctx, actorOf(f.member), SendInput{
+			ChannelID: f.channelID, Content: strings.Repeat(tc.char, MaxContentLength+1),
+		})
+		require.ErrorIsf(t, err, httpx.ErrBadRequest, "%s: one character over must still be refused", tc.name)
+	}
+}

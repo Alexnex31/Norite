@@ -16,7 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/Alexnex31/Norite/backend/internal/apicontract"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
+	"github.com/Alexnex31/Norite/backend/internal/guilds"
 )
 
 // The half of CLAUDE.md rule 6 that contract_test.go does not cover.
@@ -359,4 +361,57 @@ func TestTheSourceOfferNeedsNoCredential(t *testing.T) {
 	rejected := a.call(http.MethodGet, "/api/v1/meta", nil, withToken("nrt_not_a_real_token"))
 	require.Equal(t, http.StatusOK, rejected.Code, "a bad credential must not turn the offer into a 401")
 	assert.JSONEq(t, string(anonymous.Body), string(rejected.Body), "the offer is the same either way")
+}
+
+// TestTheScopeVocabularyMatchesTheContract and its audit-action sibling close the third contract gap.
+//
+// Neither existing contract test looks at an enum. contract_test.go compares the route *set*; the tests
+// above this one validate response payloads, which catches an enum only if some exercised response
+// happens to carry the value. So `messages.read`/`messages.write` and `message.delete` were added to the
+// Go vocabularies at M15 and to no enum, and both gates stayed green — a client generated from the
+// contract could not ask for the scopes the four message routes are gated on, and could not decode an
+// audit page containing a moderator deletion. Found by a code review reading the YAML by hand, which is
+// precisely the thing rule 6 exists to make unnecessary.
+//
+// Asserted against `internal/apicontract`, which is generated *from* the YAML and checked for staleness
+// by `just contract-check` — so this compares the Go vocabulary to the document, transitively, without
+// parsing YAML a second time. It lives here because this package is the only one importing `auth`,
+// `guilds` and `apicontract` together, for the reason the route-surface tests live here.
+func TestTheScopeVocabularyMatchesTheContract(t *testing.T) {
+	t.Parallel()
+
+	for _, s := range auth.AllScopes {
+		require.Truef(t, apicontract.Scope(s).Valid(),
+			"auth.AllScopes carries %q and the contract's Scope enum does not; a token minted with it "+
+				"cannot be requested by any client generated from contracts/openapi.yaml", s)
+	}
+
+	// And the other direction, so an enum value the server would reject cannot sit in the contract
+	// advertising a capability that does not exist.
+	for _, s := range []apicontract.Scope{
+		apicontract.Identify, apicontract.GuildsRead, apicontract.GuildsWrite,
+		apicontract.GuildsAudit, apicontract.MessagesRead, apicontract.MessagesWrite,
+	} {
+		require.Truef(t, auth.ValidScope(auth.Scope(s)),
+			"the contract offers scope %q and the server rejects it", s)
+	}
+}
+
+// TestEveryAuditActionIsInTheContract pins the verb vocabulary the audit-log reader returns and filters on.
+//
+// One direction only, deliberately: the Go list is what the server writes and accepts, so a verb missing
+// from the enum is the failure that matters. A value in the enum that Go does not write yet is how a
+// reserved verb would legitimately look.
+func TestEveryAuditActionIsInTheContract(t *testing.T) {
+	t.Parallel()
+
+	actions := guilds.AuditActions()
+	require.NotEmpty(t, actions, "the vocabulary came back empty, which would make this vacuous")
+
+	for _, a := range actions {
+		require.Truef(t, apicontract.AuditLogAction(a).Valid(),
+			"guilds.AuditActions() carries %q and the contract's AuditLogAction enum does not; the reader "+
+				"accepts it as an ?action filter and returns entries carrying it, so a generated client "+
+				"can neither filter on it nor decode a page containing one", a)
+	}
 }

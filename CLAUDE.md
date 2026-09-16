@@ -1463,6 +1463,24 @@ And on messages, from M15:
   is real but too rare to hit under load. Asserting the *statement's* property instead (a lower id must
   not overwrite a higher one) fails the moment the guard goes. Prove reachability once, by hand, in psql;
   then pin the property deterministically.
+- **Two vocabularies live in Go and in the contract, and nothing checked either until M15.**
+  `contract_test.go` compares the route *set*; `contract_payload_test.go` validates real responses, which
+  sees an enum only if some exercised response happens to carry the value. So `messages.read`,
+  `messages.write` and `message.delete` were added to `auth.AllScopes` and `guilds.AuditActions()`, added
+  to no enum, and both gates stayed green — a generated client could not request the scopes the message
+  routes are gated on, nor decode an audit page containing a moderator deletion. Found by a human reading
+  the YAML. `TestTheScopeVocabularyMatchesTheContract` and `TestEveryAuditActionIsInTheContract` now
+  assert it against `internal/apicontract`, which is generated from the document and staleness-checked, so
+  the comparison is Go-to-Go and needs no second YAML parser. **The error-code enum had this test since
+  M11 and nobody generalised it** — when a check exists for one vocabulary, ask what the others are.
+- **A bound enforced in two places must measure the same thing in both.** `checkContent` was added so
+  `MaxContentLength` stopped being inert, and used `len()` — bytes — while the handler tag it claims to
+  agree with is go-playground/validator's `max`, which is `utf8.RuneCountInString`. 4,000 Japanese
+  characters are 12,000 bytes and 4,000 emoji are 16,000, so every message near the limit in a non-Latin
+  script would have been accepted by the handler and refused by the service. **A test suite written in
+  English cannot see this**, which is why the regression test spends its cases on Japanese, emoji and
+  Arabic rather than on `strings.Repeat("a", n)`. Duplicating a check is only safe if you know what the
+  original measures.
 - **A mutating route added to a second package is invisible to the route-surface tests until the test
   router mounts it.** Both mounted only on a non-nil handler, and `newTestRouterWithAuth` builds with nil
   services — so the four message routes existed and neither test saw them. That is the M10 failure

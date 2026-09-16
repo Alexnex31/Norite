@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -164,12 +165,20 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 // handler. Same reasoning M14 used for the unknown audit-action filter, which is checked in the service
 // and not only in the handler.
 //
+// **Runes, not bytes**, because that is what the handler's validator counts. go-playground/validator's
+// `max` on a string is utf8.RuneCountInString, so a byte-length check here disagrees with it on every
+// non-ASCII message: 4,000 Japanese characters are 12,000 bytes and 4,000 emoji are 16,000, all of which
+// the handler accepts and a `len()` check refuses. The first version of this function used `len()` and
+// would have rejected a perfectly ordinary message for every user not writing in a Latin script — caught
+// by asking what the tag it claims to agree with actually measures, which is the whole reason the two are
+// pinned to each other.
+//
 // TestTheHandlerTagAgreesWithTheConstant pins the literal against this constant, so they cannot drift.
 func checkContent(content string) error {
 	switch {
 	case content == "":
 		return httpx.Errorf(httpx.ErrBadRequest, "content is required")
-	case len(content) > MaxContentLength:
+	case utf8.RuneCountInString(content) > MaxContentLength:
 		return httpx.Errorf(httpx.ErrBadRequest, "content must be at most %d characters", MaxContentLength)
 	}
 	return nil
