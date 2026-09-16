@@ -16,10 +16,19 @@ CREATE TABLE messages (
                                                                 --   below page without skipping a row
   channel_id  bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   -- Nullable, and no ON DELETE, matching audit_log_entries.actor_id and for the same reason: a message
-  -- whose author went NULL is a message with the answer removed. The FK refuses the delete, so the
-  -- account-deletion path (M76a) has to decide what happens to authored content in the open rather than
-  -- discovering it. §2 already names the intended answer — a soft-deleted account keeps its rows so they
-  -- render as "Deleted User" — and this column is what makes that a decision rather than a default.
+  -- whose author went NULL is a message with the answer removed.
+  --
+  -- **Settled 2026-09-16: a deleted account's messages survive, attributed to "Deleted User."** So the
+  -- refusing FK is not a problem M76a has to work around — it is the guarantee that makes that the only
+  -- reachable outcome. Account deletion is a soft delete with a placeholder rename, so `DELETE FROM users`
+  -- never runs; if a hard delete is ever attempted, this constraint stops it rather than letting a
+  -- milestone quietly NULL out authorship and call it deletion. The nullable column exists for a message
+  -- that genuinely has no author — a system or webhook message (`type` below) — not as somewhere to put a
+  -- person who left.
+  --
+  -- The cost is stated where it belongs, in M76a: erasure requests cannot be satisfied by deleting the
+  -- account, because the content is what survives. Editing a message before deleting the account does not
+  -- help either — message_edit_history keeps the prior text and has no deletion path of its own.
   author_id   bigint NULL REFERENCES users(id),
   content     text NOT NULL,
   -- 0 DEFAULT, 1 SENT_VIA_AUTOMATION (webhooks at M60, bot automation at M22). Reserved system values

@@ -405,6 +405,12 @@ CREATE TABLE permission_overwrites (
 -- M15 would pull an extension dependency into a milestone that has no query using it.
 CREATE TABLE messages (                        -- M15
   id bigint PRIMARY KEY, channel_id bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  -- No ON DELETE, so this refuses a user delete — and that is the guarantee, not an obstacle. Settled at
+  -- M15: a deleted account's messages survive, attributed to "Deleted User", which soft-delete plus a
+  -- placeholder rename already produces. The constraint is what stops a future hard delete from NULLing
+  -- authorship and calling it deletion. NULL is for a message with genuinely no author (system, webhook),
+  -- never for a person who left. M76a carries the consequence: erasure cannot be served by deleting the
+  -- account, because the content is what survives.
   author_id bigint NULL REFERENCES users(id),
   content text NOT NULL,
   type smallint NOT NULL DEFAULT 0,   -- 0 DEFAULT, 1 SENT_VIA_AUTOMATION (webhooks + bot automation), reserved system values

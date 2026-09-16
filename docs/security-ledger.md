@@ -282,3 +282,37 @@ would flip them.
 - **Reopens if**: a join path exists (M57, M72a) — at which point the rejoin question and this one are the
   same question and should be answered together, since what makes a silently-restored deny dangerous is
   exactly that nothing in the log explains it.
+
+## M15 — core messaging CRUD
+
+### `messages.content` is unbounded `text` with no length constraint
+- **Raised**: M15, `/security-sweep`
+- **Verdict**: not a vulnerability — and the precedent that prompted it does not exist
+- **Why**: the candidate was raised on the belief that this schema already CHECK-constrains text length,
+  citing `notification_filters.pattern text NOT NULL CHECK (length(pattern) <= 200)`. That line is in
+  `architecture.md`'s *planned* DDL for M62 and is in no migration: `grep -c 'CHECK.*length('` over
+  `backend/migrations/` returns zero. The built pattern is `varchar(n)` for short identifiers and bare
+  `text` for free-form fields bounded at the validator — `channels.topic` is bare `text` with
+  `validate:"omitempty,max=1024"` — so `content` matches its nearest neighbour exactly. A CHECK here would
+  also be the expensive kind to change: raising a message-length cap is a product decision, and behind a
+  constraint it becomes an `ALTER TABLE` validation scan over the largest table in the product.
+- **Reopens if**: a write path reaches `messages` without passing the handler's validator — a bulk import,
+  a webhook ingest (M60), or a bot-automation path (M22) — at which point the validator stops being the
+  only door and the bound belongs where every door passes. Also reopens if a length CHECK is ever added to
+  any other table, since the argument here is consistency with a schema that has none.
+
+### A user cannot erase what they edited out, or what they posted before deleting their account
+- **Raised**: M15, `/security-sweep`
+- **Verdict**: accepted risk — it is the feature, and the alternative defeats it
+- **Why**: `message_edit_history` has no deletion path. Its only `ON DELETE CASCADE` fires when a message
+  row is *hard*-deleted, and message deletion is soft (`messages.deleted_at`), so in practice nothing
+  removes a prior version. Account deletion does not either: settled at M15, a deleted account's messages
+  survive attributed to "Deleted User", and `messages.author_id` carries no `ON DELETE` precisely so that
+  stays true. So somebody who posts something by mistake, edits it out, and then deletes their account has
+  removed none of it. That is what an edit history *is* — one that can be edited is not a history, for the
+  reason `audit_log_entries` is never swept — and M16a gates who may read it behind `PermManageMessages`
+  rather than making it public. Recorded because it is a privacy expectation somebody will raise as a bug.
+- **Reopens if**: an erasure obligation arrives that is legal rather than technical, which is the shape
+  that would actually force it — the same condition the audit-log growth entry names. Also reopens if
+  M16a's disclosure decision widens the reader beyond moderators, since the exposure this entry accepts is
+  bounded by who can see it.

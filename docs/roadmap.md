@@ -1514,14 +1514,36 @@ of this section.
     account chose, in rows nothing ever sweeps and which a placeholder rename does not reach.
   - **`guilds.owner_id` refuses it too**, for the reason M13a exists: a guild whose owner is deleted is not
     a guild with a NULL owner, and ownership transfer is the operation that resolves it.
+  - **`messages.author_id` refuses it as well, and that one is settled** (2026-09-16, at M15): a deleted
+    account's messages survive, attributed to "Deleted User". The refusing FK is therefore the *guarantee*
+    rather than an obstacle — soft-delete plus a placeholder rename is the only reachable path, and if a
+    hard delete is ever attempted the constraint stops it instead of letting authorship be quietly NULLed
+    and called deletion. Two consequences to write into the endpoint rather than discover: an erasure
+    request cannot be satisfied by deleting the account, because the content is exactly what survives; and
+    editing a message first does not help, since `message_edit_history` keeps the prior text and has no
+    deletion path of its own.
+
+  **The list above is not the whole set, and enumerating it here is how that stays true.** As of M15 five
+  foreign keys to `users` refuse a delete — `audit_log_entries.actor_id`, `guilds.owner_id`,
+  `messages.author_id`, `instance_admins.granted_by` and `instance_invites.created_by`. The last two have
+  never been named in this entry and predate M15; it listed two of four when it was written at M14, and
+  M15 made it two of five. Derive the set rather than trusting the prose, because a done-when that names
+  its members is the drift this project has now fixed three times:
+
+  ```sql
+  SELECT c.conrelid::regclass, a.attname FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+   WHERE c.contype = 'f' AND c.confrelid = 'users'::regclass AND c.confdeltype = 'a';
+  ```
 
   Rule 17 applies in full: deletion invokes the general-purpose revoke-all-sessions primitive rather than
   assembling its own cleanup, exactly as a ban does.
 
   Done when: an account can export its own data and delete itself; deletion goes through
   `revokeEverything`; the placeholder rename is atomic with the soft-delete rather than a second statement
-  that can fail; and the `audit_log_entries` and `guilds` foreign keys each have an answer written down
-  rather than a failed `DELETE`.
+  that can fail; a deleted account's messages still render as "Deleted User" rather than vanishing or
+  losing their author; and **every** foreign key the query above returns has an answer written down rather
+  than a failed `DELETE` — checked by running it, not by reading the list above.
 - **M77 — Data export asymmetry verification**: an end-to-end test that a user's own export includes their
   filed reports and blocked accounts, and excludes reports filed against them and who has blocked them. Done
   when: both asymmetries are covered by an automated test, not just documented intent.
