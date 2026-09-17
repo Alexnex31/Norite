@@ -623,6 +623,44 @@ of this section.
   Instance-Admin-facing half does not exist until M74. Report filing is rate-limited now (reuses existing
   REST rate limiting). Depends on M15 (a message must exist to report). Done when: a guild member can file a
   report against a message, and a `PermManageMessages` holder can see and resolve it.
+
+  **The table as `architecture.md` §2 drew it could not answer this milestone's own done-when**, and that
+  was found by reading the DDL against this entry rather than by anything failing — the third time that
+  has worked, after M76a and M16a. There was no `guild_id` anywhere in `reports`, so a per-guild queue
+  would have had to reach the guild by joining `reports` → `messages` → `channels`: no index serves it, it
+  breaks outright for three of the four target types the column's own vocabulary reserves, and it makes
+  routing depend on a row a channel deletion can cascade away. Measured at 6.593 ms and 3,617 buffers
+  against 0.098 ms and 21 with the column. §2 is corrected and annotated per line, as M15 did for
+  `messages`, because that block is what somebody copies.
+
+  **Two disclosure decisions, both in `docs/security-ledger.md` with their reopening conditions.** The
+  reported message is readable by a `PermManageMessages` holder whether or not they can currently view the
+  channel it came from — M14's audit-log answer applied to content, because filtering on present
+  visibility lets somebody hide what they did by locking a channel afterwards. And **a guild moderator is
+  never told who filed a report**: the field is absent from the wire struct entirely, not stripped per
+  handler. That one is a one-way door and the reversible direction is to withhold, so it was taken
+  deliberately rather than by default.
+
+  **Content is resolved at read time and never snapshotted into the reports table**, which is also what
+  makes M16a worth building: a moderator triaging a report on a message edited after it was filed sees the
+  current text, and the prior versions are that milestone's surface. A snapshot would have answered the
+  question confidently and wrongly. The queue listing carries no content at all — two facts about the
+  target instead — so rule 13's exclusion has exactly one place to be right.
+
+  **Rule 2 is asserted in both directions.** Closing a report writes `report.resolve` or `report.dismiss`;
+  filing writes nothing, and that negative had no home until it was written as a test. Two verbs rather
+  than one because the outcome is the whole content of a triage decision — `member.role_add`'s split, not
+  `overwrite.set`'s.
+
+  **Scope reserved beyond the message target, and refused rather than stranded.** `target_type` stores
+  four values and accepts one; `under_review` is a real status nothing writes. Both are reserved so M61
+  and M74 do not renumber, and both are refused at the boundary — an accepted-but-unroutable report is
+  filed into a queue that never shows it, which is M14's unknown-filter lesson pointed at a write.
+
+  The client half is **M17a's**, assigned during this milestone's planning: nothing anywhere gave a client
+  a way to file or read a report, and the only report surface in `docs/design/tui/` is `6c`, which is
+  M74's instance queue. A guild-moderator triage *screen* remains unassigned and M17a's entry says so
+  rather than leaving the gap looking closed.
 - **M16a — Message edit history read surface**: `GET /channels/{channel_id}/messages/{message_id}/history`
   over the `message_edit_history` table M15 writes and nothing reads. Assigned 2026-09-15, having had no
   milestone since the table was first drawn; the gap was found the same way M76a's was, by reading

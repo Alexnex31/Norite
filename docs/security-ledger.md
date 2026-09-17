@@ -375,3 +375,65 @@ would flip them.
   M18's `MESSAGE_CREATE` dispatch is gated on the history bit rather than the view bit. Either would make
   message *existence* something the bit actually keeps, and at that point all three paths — `Update`,
   `Delete` and `Send`'s `reply_to_id` — must be downgraded together, not one at a time.
+
+---
+
+## M16 — guild-level reports
+
+The two entries below are not rejected *findings*. They are the milestone's two disclosure decisions,
+recorded here because each is a deliberate choice to disclose or withhold that a reviewer will otherwise
+raise as a finding — which is the same reason M14 put the audit log's visibility decision here, and each
+carries the condition that would reopen it.
+
+### A report's reported content is readable by a moderator who cannot view the channel it came from
+- **Raised**: M16, at design time
+- **Verdict**: accepted, and deliberate
+- **Why**: `GET /guilds/{guild_id}/reports/{report_id}` returns the reported message to any holder of
+  `PermManageMessages` in that guild, without consulting whether they can currently view the channel it
+  was posted in. This is M14's audit-log answer applied to content rather than metadata, and for the same
+  two reasons. Filtering on *present* visibility would let somebody hide what they did by locking a
+  channel down after the fact, which is precisely the move a report is filed about. And a report about a
+  channel the moderator is not a member of is exactly the report that needs reading — a moderation queue
+  that silently drops the cases its reader cannot already see is worse than one that discloses, because
+  nothing in it says a case was dropped.
+
+  The permission is therefore the boundary, and `PermManageMessages` already means "may act on somebody
+  else's message in this guild". The narrower alternatives were considered: gating on channel visibility
+  (above), and returning ids only and making the moderator fetch the message through the message
+  endpoints. The second fails in exactly the two cases reports exist for — a soft-deleted message, which
+  the listing filters, and a channel the moderator cannot open — so it is a triage view that cannot
+  triage.
+
+  Bounded in three ways rather than none: the queue listing carries no content at all, so this is one
+  route and not two; the content is resolved at read time rather than snapshotted, so nothing is stored a
+  second time; and E2E-encrypted content is excluded in the query regardless of any of the above.
+- **Reopens if**: a guild-scoped surface ever becomes capable of carrying E2E content (the exclusion stops
+  being redundant and becomes the only thing standing here), or if `PermManageMessages` is ever granted by
+  default rather than deliberately — today it is not in `defaultEveryonePermissions`, which is what keeps
+  the boundary meaningful. Also if M16a's edit-history reader chooses a *narrower* gate than this one,
+  since two moderation reads over the same message disagreeing about who may see it is a bug in whichever
+  came second.
+
+### A guild moderator is never told who filed a report
+- **Raised**: M16, at design time
+- **Verdict**: accepted, and deliberate — the withholding direction
+- **Why**: no route in `reports` returns `reporter_id` to a guild moderator, and the field is absent from
+  the wire struct entirely rather than stripped per handler. A guild moderator is not a vetted actor; a
+  report system has to survive the case where the moderator *is* the person being reported, and handing
+  them the reporter's identity undoes the protection at the one place it matters. `architecture.md` §2's
+  account-export asymmetry already encodes the same judgement — an export includes reports you filed and
+  excludes reports filed against you, explicitly to protect reporters from retaliation.
+
+  The cost is real and is the reason this is an entry rather than a footnote: a guild moderator cannot see
+  that five reports came from one person, which is the signal for report-spam. Two things bound it.
+  Migration 000021's partial unique index allows one open report per reporter per target, so the cheap
+  form of that abuse is already refused; and M74 owns reporter-history triage by name, for the tier that
+  *is* vetted.
+
+  The direction matters more than the decision. Adding the field later is additive for every client;
+  removing it after clients read it is not. So the reversible choice is to withhold now.
+- **Reopens if**: guild moderators gain a way to act on a *reporter* rather than on a report — a
+  report-spam control at the guild level would need to name somebody — or if M74's instance queue turns
+  out to be the only place abuse is visible and guild moderators are left unable to act on a pattern they
+  can see the shape of. Either is a reason to expose a stable pseudonym scoped to the guild rather than
+  the user id itself.

@@ -682,16 +682,44 @@ CREATE TABLE instance_audit_log (               -- separate from per-guild audit
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- **This block spans two milestones and says so per line.** M16 builds the guild-scoped half — the table,
+-- its guild routing, and the moderator queue — and M74 builds the instance-scoped half. Copying it whole
+-- is the easy mistake, exactly as it was for `messages` at M15.
 CREATE TABLE reports (                          -- unified: guild, instance-level, DM/Group-DM, whisper
   id bigint PRIMARY KEY, reporter_id bigint NOT NULL REFERENCES users(id),
   target_type smallint NOT NULL,   -- 0 message, 1 whisper, 2 channel, 3 user
-  target_id bigint NOT NULL, reason_category varchar(32) NOT NULL, detail text NULL,
+                                   --   M16 accepts 0 only; the rest are reserved and refused at the
+                                   --   boundary, since a target nothing routes is filed into a queue that
+                                   --   never shows it
+  target_id bigint NOT NULL,       -- polymorphic, so not a foreign key (M12's permission_overwrites)
+  -- **M16's addition, and this block did not draw it until M16's planning.** Found by reading this DDL
+  -- against that milestone's own done-when, which is a per-guild triage queue — a query the table as
+  -- drawn cannot answer. Reaching the guild by joining reports → messages → channels has no index behind
+  -- it, breaks outright for three of the four target types above, and makes routing depend on a row a
+  -- channel deletion can cascade away. Measured at 6.593 ms against 0.098 ms, and 3,617 buffers against
+  -- 21; see migration 000021, which carries the numbers. Denormalized at filing time. NULL is the
+  -- instance-routed case, which is M74's.
+  guild_id bigint NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  reason_category varchar(32) NOT NULL, detail text NULL,
   status smallint NOT NULL DEFAULT 0,   -- 0 open, 1 under_review, 2 resolved, 3 dismissed
+                                        --   M16 writes 0, 2 and 3; under_review is M74's
   routed_to smallint NOT NULL,   -- 0 guild moderators, 1 instance admins
+                                 --   computed from the resolved target, never client-supplied
+  resolved_by bigint NULL REFERENCES users(id),   -- M16's: the audit log is gated by a permission the
+                                                  --   triage view does not require, so who closed a report
+                                                  --   has to be readable without it
   created_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz NULL
 );
-CREATE INDEX ON reports (reporter_id);
-CREATE INDEX ON reports (status, routed_to);
+CREATE INDEX ON reports (reporter_id);          -- M16 (the FK, measured at 89x on an account delete)
+CREATE INDEX ON reports (resolved_by);          -- M16, same reason
+CREATE INDEX ON reports (guild_id, status, id DESC);   -- M16: the triage page. status sits in the middle
+                                                       --   because the default view is one status at a time
+CREATE UNIQUE INDEX ON reports (reporter_id, target_type, target_id) WHERE status = 0;   -- M16: one open
+                                                       --   report per reporter per target, in the statement
+CREATE INDEX ON reports (status, routed_to);    -- **M74's**, with the instance queue that reads it. M16
+                                                --   ships no query with this shape and an index whose only
+                                                --   reader is fifty-eight milestones away cannot argue
+                                                --   against M15's measured 26%-per-index insert cost
 
 -- Entitlements (ADR 0032). The per-instance seam is inert and has lost the customer it was designed for
 -- (self-hosting is free); it is kept unbuilt rather than deleted. **The per-user seam stops being inert at
@@ -1033,7 +1061,10 @@ POST   /friend-requests/{id}/decline
 GET    /users/@me/friends
 POST   /users/@me/blocks/{user_id}
 DELETE /users/@me/blocks/{user_id}
-POST   /reports
+POST   /reports                            -- unified filing; M16 accepts a message target only
+GET    /guilds/{guild_id}/reports          -- M16: the guild-moderator triage queue (MANAGE_MESSAGES)
+GET    /guilds/{guild_id}/reports/{report_id}          -- M16: one report, with its message attached
+POST   /guilds/{guild_id}/reports/{report_id}/resolve  -- M16: close as resolved or dismissed
 
 -- Instance Admin
 POST   /instance/bans

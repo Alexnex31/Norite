@@ -364,7 +364,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M15 done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M16 done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -499,7 +499,7 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   **It opened by fixing a bug M13 tagged**, found by driving a real guild rather than by any of the four
   review passes: a channel-scoped route gated on its own permission while the listing gated on
   `PermViewChannel`, so a moderator could rename and delete a channel absent from their own sidebar.
-- **M15 — Core messaging CRUD**: done (tag pending). `backend/internal/messages` and four endpoints under
+- **M15 — Core messaging CRUD**: done (tag `m15`). `backend/internal/messages` and four endpoints under
   `/channels/{channel_id}/messages`, migration `000020` (`messages` and `message_edit_history`),
   `PermReadMessageHistory` at bit 20, the `messages.read`/`messages.write` scopes, and
   `backend/internal/guildauth` — the authorization chokepoint extracted from `guilds` so a second package
@@ -536,11 +536,46 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   state no happy path constructs — a permission denied to somebody who already had messages, a channel
   that is not a text channel, eight senders in one channel, a message written in Japanese. That is the
   argument for the passes being separate skills with separate questions rather than one review.
-- **M16 — Guild-level reports**: next. The `reports` table, a file-a-report endpoint, and a
-  guild-moderator triage view gated by `PermManageMessages` — the guild-scoped half of the reports system
-  whose Instance-Admin half is M74. It depends on M15 because a message must exist to report, and it is
-  the first consumer of the soft delete: a reported message has to still resolve after its author removes
-  it, which is why `messages.deleted_at` exists rather than a hard delete.
+- **M16 — Guild-level reports**: done (tag pending). Migration `000021`, `backend/internal/reports`
+  (the second package to reach `guildauth`), four endpoints — `POST /reports` plus the three under
+  `/guilds/{guild_id}/reports` — the `reports.write`/`reports.moderate` scope pair, and the
+  `report.resolve`/`report.dismiss` audit verbs. Decisions are in the roadmap entry, in `000021`, and in
+  `docs/security-ledger.md`.
+
+  **The DDL could not answer the milestone's own done-when**, found by reading `architecture.md` §2
+  against the roadmap rather than by anything failing — the third time that has worked. `reports` had no
+  `guild_id`, so a per-guild queue meant joining through `messages` and `channels`: 6.593 ms and 3,617
+  buffers against 0.098 ms and 21, and broken outright for three of the four target types. §2 is
+  corrected and annotated per line.
+
+  **The first seed measured nothing and that is the transferable part.** It clustered one guild's reports
+  at the top of the id range, so every plan walked the primary key backwards and stopped immediately,
+  making every candidate index look unnecessary. Snowflakes are minted at filing time, so a guild's rows
+  are scattered through the range — a contiguous seed measures a table no instance has. It also coupled
+  the guild and status distributions to the same modulus, which handed the heavy guild every open report
+  and nobody else any. Check what a seed's conditions share before trusting a plan it produced.
+
+  **Two disclosure decisions, both in the ledger.** Reported content is readable by a
+  `PermManageMessages` holder regardless of whether they can currently view the channel — M14's
+  audit-log answer applied to content. And **the reporter is never named to a guild moderator**: absent
+  from the wire struct entirely rather than stripped per handler, because the reversible direction of a
+  one-way door is to withhold.
+
+  **Content is resolved at read time, never snapshotted**, which is what leaves M16a something to do: a
+  report on a message edited after it was filed shows the current text, and the prior versions are that
+  milestone's. The listing carries no content at all, so rule 13's exclusion has one place to be right
+  rather than two — and it lives in the SQL, as a join predicate rather than a `CASE`, both because rule
+  13 wants it inherited by the next reader and because an expression through a `LEFT JOIN` defeats sqlc's
+  nullability inference and generates a non-nullable `string` a NULL cannot scan into.
+
+  **Rule 2 asserted in both directions**: closing writes an entry, filing writes none, and the negative
+  had no home until it was a test.
+- **M16a — Message edit history read surface**: next. `GET /channels/{channel_id}/messages/{message_id}/history`
+  over the `message_edit_history` table M15 writes and nothing reads. M16 built the consumer that makes it
+  worth opening — a moderator triaging a report on a message that was edited after it was sent — and
+  established `PermManageMessages` as the gate for message-scoped moderation reads, which this reuses
+  rather than inventing a bit for. Its own entry carries the disclosure decision it owes and the rule 13
+  obligation that comes with reading content.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -1507,6 +1542,55 @@ And on messages, from M15:
   services — so the four message routes existed and neither test saw them. That is the M10 failure
   `contract_test.go`'s own comment warns about, one package over: routes may not be conditional, and a new
   handler has to be added to *both* test routers, the nil-service one and the real-service one.
+
+And on reports, from M16:
+
+- **The reporter is absent from the wire shape, not stripped from it.** `reports.Report` has no
+  `reporter_id` field at all, so every response is built without one and there is nothing a handler can
+  forget. That is the same structural move as `factorProof` and `revokeEverything`, applied to a
+  disclosure rather than to a check — and it is asserted by marshalling each of the three shapes and
+  searching the JSON, because what matters is what a client receives rather than which field somebody
+  remembered to omit.
+- **A one-way door is taken in the reversible direction.** Adding a field later is additive for every
+  client; removing one after clients read it is not. Same reasoning M12 used to fix the permission wire
+  format while nineteen bits were defined and it was still free.
+- **`routed_to` is computed, and the request struct's silence is the enforcement.** There is no routing
+  field on `FileInput` or on the request body, and `DecodeAndValidate` rejects unknown fields — so sending
+  one is a 400 rather than a value quietly ignored. The thing to not do later is add the field "to return
+  a friendlier error", which converts a structural guarantee into a check.
+- **Rule 13's exclusion is a join predicate, never an expression.** `LEFT JOIN messages mv ON mv.id = m.id
+  AND NOT mv.is_e2e`, with content read only from `mv`. Two reasons that agree: the exclusion is inherited
+  by whoever writes the next reader of that join, and sqlc cannot type an expression through a `LEFT JOIN`
+  — `CASE WHEN … THEN NULL` generated `interface{}`, and casting it to text generated a non-nullable
+  `string` that a NULL fails to scan into at runtime. A plain column types as `*string` correctly.
+- **Three states, not two, whenever a joined fact can be absent.** `target_is_e2e` is false for an
+  ordinary target, true for a withheld one, and **nil when the target does not resolve at all**.
+  Collapsing the last into false reports a vanished message as readable.
+- **Content is resolved at read time and never copied into `reports`.** A snapshot would be a second table
+  holding message content, a second place rule 13 has to hold, a copy outliving its message, and — the
+  part that decides it — a confidently wrong answer for a message edited after it was reported, which is
+  the case M16a exists to serve.
+- **A negative that rule 2 implies is a test or it is nothing.** Filing writes no audit entry, and
+  `TestFilingWritesNoAuditEntry` is the only thing that says so. Before M15's narrowing it would have read
+  as a bug report; after it, it is the property keeping member traffic out of the moderation log.
+- **A reserved value is refused at the boundary, not accepted and stranded.** Three of four `target_type`
+  values and one of four statuses are stored-but-unwritten, held so M61 and M74 do not renumber. Accepting
+  one would file a report into a queue that never shows it — M14's unknown-filter lesson pointed at a
+  write rather than a read.
+- **A cross-package audit verb is pinned, and the exemption that skips it must fail when stale.** M15
+  established the literal-plus-pin shape for `message.delete`; M16 needed a third and fourth, which is
+  where two hardcoded `if action == …` branches became a map — plus `requireForeignAuditActionsExist`,
+  because a list that only ever skips goes stale silently and a stale exemption reads exactly like
+  coverage.
+- **The route-surface prefix filter is a third place a route can hide.** `guildSurfaceRoutes` matches
+  `/guilds` and `/channels`, so `POST /reports` was invisible to both structural tests until the prefix
+  list grew. M15's lesson was that a new handler must be mounted in *both* test routers; this is the
+  other half of it, and a route mounted outside every known prefix is covered by nothing.
+- **A seed that measures nothing looks exactly like a measurement.** Two ways it happened here: ids
+  clustered so the planner walked the primary key backwards and every index looked useless, and the guild
+  and status distributions sharing one modulus so the heavy guild held every open report. Before trusting
+  a plan, check that the seed's conditions are independent and that its ids are distributed the way the ID
+  scheme actually produces them.
 
 ## Project-specific skills
 

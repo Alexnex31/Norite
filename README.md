@@ -16,14 +16,15 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
-[![Milestone](https://img.shields.io/badge/milestone-M15%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M16%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 > [!WARNING]
 > **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work, so
-> does the guild, channel, role and permission core, and since `M15` so do messages — all of it as a REST
-> API with no client in front of it. Nobody can hold a conversation on this: voice does not exist, and
-> there is nothing to read or write messages *in*. See [Status](#status) for exactly what is built, and
-> note that the full scope here is multi-year work.
+> does the guild, channel, role and permission core, and since `M15` so do messages, with reporting and
+> moderator triage on top of them since `M16` — all of it as a REST API with no client in front of it.
+> Nobody can hold a conversation on this: voice does not exist, and there is nothing to read or write
+> messages *in*. See [Status](#status) for exactly what is built, and note that the full scope here is
+> multi-year work.
 
 ---
 
@@ -46,8 +47,8 @@ software.
 
 ## Status
 
-**Foundation, auth, the permission core and messages are done — `M0` through `M15`. `M20a` is the first
-thing a person can actually use.**
+**Foundation, auth, the permission core, messages and guild-level reports are done — `M0` through `M16`.
+`M20a` is the first thing a person can actually use.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -71,6 +72,7 @@ thing a person can actually use.**
 | `M13` | Permission overwrites and role hierarchy — who may act on whom, per-channel permission overrides, role assignment and reordering, and a channel listing that hides what you cannot see |
 | `M14` | The guild audit log — every mutation already recorded who did what, in the same transaction; this reads it back, behind its own permission, with a before-and-after diff of what actually changed |
 | `M15` | Messages — send, read, edit and delete, with a cursor-paginated backlog, an edit history written in the same transaction as the edit, and a moderator's deletion audited where an author's own is deliberately not |
+| `M16` | Guild-level reports — anyone who can see a message can report it, moderators triage and close a queue of them, closing is audited and filing deliberately is not, and the reporter's identity is never shown to the moderators of the guild being reported |
 
 </details>
 
@@ -82,7 +84,7 @@ is not something anybody can use — there is no client, so there is nothing to 
 type into. The honest threshold is when two people can hold a text conversation, and as of `M15` the only
 thing still missing for that is `M20a`'s first client. What `M12` through `M14` built is the permission
 model those conversations happen inside and the record of who changed it; `M15` is the conversation
-itself, reachable today only with an HTTP client and a token.
+itself and `M16` is how it gets moderated, both reachable today only with an HTTP client and a token.
 
 > [!NOTE]
 > **On releases.** Nothing ships as a release before the milestone sequence is complete. At each phase
