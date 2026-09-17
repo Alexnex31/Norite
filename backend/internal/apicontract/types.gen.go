@@ -24,6 +24,8 @@ const (
 	MessageDelete    AuditLogAction = "message.delete"
 	OverwriteDelete  AuditLogAction = "overwrite.delete"
 	OverwriteSet     AuditLogAction = "overwrite.set"
+	ReportDismiss    AuditLogAction = "report.dismiss"
+	ReportResolve    AuditLogAction = "report.resolve"
 	RoleCreate       AuditLogAction = "role.create"
 	RoleDelete       AuditLogAction = "role.delete"
 	RoleReorder      AuditLogAction = "role.reorder"
@@ -58,6 +60,10 @@ func (e AuditLogAction) Valid() bool {
 	case OverwriteDelete:
 		return true
 	case OverwriteSet:
+		return true
+	case ReportDismiss:
+		return true
+	case ReportResolve:
 		return true
 	case RoleCreate:
 		return true
@@ -231,14 +237,118 @@ func (e PermissionOverwriteType) Valid() bool {
 	}
 }
 
+// Defines values for ReportReasonCategory.
+const (
+	Harassment ReportReasonCategory = "harassment"
+	HateSpeech ReportReasonCategory = "hate_speech"
+	Illegal    ReportReasonCategory = "illegal"
+	Nsfw       ReportReasonCategory = "nsfw"
+	Other      ReportReasonCategory = "other"
+	SelfHarm   ReportReasonCategory = "self_harm"
+	Spam       ReportReasonCategory = "spam"
+	Violence   ReportReasonCategory = "violence"
+)
+
+// Valid indicates whether the value is a known member of the ReportReasonCategory enum.
+func (e ReportReasonCategory) Valid() bool {
+	switch e {
+	case Harassment:
+		return true
+	case HateSpeech:
+		return true
+	case Illegal:
+		return true
+	case Nsfw:
+		return true
+	case Other:
+		return true
+	case SelfHarm:
+		return true
+	case Spam:
+		return true
+	case Violence:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReportStatus.
+const (
+	ReportStatusDismissed   ReportStatus = "dismissed"
+	ReportStatusOpen        ReportStatus = "open"
+	ReportStatusResolved    ReportStatus = "resolved"
+	ReportStatusUnderReview ReportStatus = "under_review"
+)
+
+// Valid indicates whether the value is a known member of the ReportStatus enum.
+func (e ReportStatus) Valid() bool {
+	switch e {
+	case ReportStatusDismissed:
+		return true
+	case ReportStatusOpen:
+		return true
+	case ReportStatusResolved:
+		return true
+	case ReportStatusUnderReview:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReportTargetType.
+const (
+	ReportTargetTypeChannel ReportTargetType = "channel"
+	ReportTargetTypeMessage ReportTargetType = "message"
+	ReportTargetTypeUser    ReportTargetType = "user"
+	ReportTargetTypeWhisper ReportTargetType = "whisper"
+)
+
+// Valid indicates whether the value is a known member of the ReportTargetType enum.
+func (e ReportTargetType) Valid() bool {
+	switch e {
+	case ReportTargetTypeChannel:
+		return true
+	case ReportTargetTypeMessage:
+		return true
+	case ReportTargetTypeUser:
+		return true
+	case ReportTargetTypeWhisper:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ResolveReportRequestStatus.
+const (
+	ResolveReportRequestStatusDismissed ResolveReportRequestStatus = "dismissed"
+	ResolveReportRequestStatusResolved  ResolveReportRequestStatus = "resolved"
+)
+
+// Valid indicates whether the value is a known member of the ResolveReportRequestStatus enum.
+func (e ResolveReportRequestStatus) Valid() bool {
+	switch e {
+	case ResolveReportRequestStatusDismissed:
+		return true
+	case ResolveReportRequestStatusResolved:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Scope.
 const (
-	GuildsAudit   Scope = "guilds.audit"
-	GuildsRead    Scope = "guilds.read"
-	GuildsWrite   Scope = "guilds.write"
-	Identify      Scope = "identify"
-	MessagesRead  Scope = "messages.read"
-	MessagesWrite Scope = "messages.write"
+	GuildsAudit     Scope = "guilds.audit"
+	GuildsRead      Scope = "guilds.read"
+	GuildsWrite     Scope = "guilds.write"
+	Identify        Scope = "identify"
+	MessagesRead    Scope = "messages.read"
+	MessagesWrite   Scope = "messages.write"
+	ReportsModerate Scope = "reports.moderate"
+	ReportsWrite    Scope = "reports.write"
 )
 
 // Valid indicates whether the value is a known member of the Scope enum.
@@ -255,6 +365,10 @@ func (e Scope) Valid() bool {
 	case MessagesRead:
 		return true
 	case MessagesWrite:
+		return true
+	case ReportsModerate:
+		return true
+	case ReportsWrite:
 		return true
 	default:
 		return false
@@ -587,6 +701,24 @@ type Error struct {
 
 // ErrorErrorCode Stable, machine-readable error identifier.
 type ErrorErrorCode string
+
+// FileReportRequest **`routed_to` is deliberately absent.** Unknown fields are rejected rather than ignored, so sending one is a 400 — which is the stronger of the two answers and is the point.
+type FileReportRequest struct {
+	// Detail Optional free text from the reporter.
+	Detail *string `json:"detail,omitempty"`
+
+	// ReasonCategory Why something was reported. A closed vocabulary rather than free text, because a category nothing recognises sorts into no bucket in any triage view. The reporter's own words go in `detail`.
+	ReasonCategory ReportReasonCategory `json:"reason_category"`
+
+	// TargetId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	TargetId Snowflake `json:"target_id"`
+
+	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	TargetType ReportTargetType `json:"target_type"`
+}
 
 // Guild defines model for Guild.
 type Guild struct {
@@ -941,6 +1073,68 @@ type ReorderRolesRequest struct {
 	} `json:"roles"`
 }
 
+// Report A filed report.
+//
+// **There is no reporter field, on this schema or any other on these routes.** See the listing endpoint for why: a guild moderator is never told who filed a report against them.
+type Report struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// Detail The reporter's own words, if they wrote any. At most 2000 characters.
+	Detail *string `json:"detail"`
+
+	// GuildId The guild whose moderators this report routes to. Null for a report that routes to Instance Admins instead, which is M74's half and cannot be produced yet.
+	GuildId *Snowflake `json:"guild_id"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+
+	// ReasonCategory Why something was reported. A closed vocabulary rather than free text, because a category nothing recognises sorts into no bucket in any triage view. The reporter's own words go in `detail`.
+	ReasonCategory ReportReasonCategory `json:"reason_category"`
+
+	// ResolvedAt When it was closed, null while it is open.
+	ResolvedAt *time.Time `json:"resolved_at"`
+
+	// ResolvedBy Who closed it, null while it is open.
+	ResolvedBy *Snowflake `json:"resolved_by"`
+
+	// Status Where a report is in its workflow. `resolved` and `dismissed` are terminal.
+	//
+	// `under_review` is reserved for the Instance Admin queue and nothing writes it at this milestone — it is nameable as a filter, where it honestly returns nothing, and refused as an outcome.
+	Status ReportStatus `json:"status"`
+
+	// TargetId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	TargetId Snowflake `json:"target_id"`
+
+	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	TargetType ReportTargetType `json:"target_type"`
+}
+
+// ReportReasonCategory Why something was reported. A closed vocabulary rather than free text, because a category nothing recognises sorts into no bucket in any triage view. The reporter's own words go in `detail`.
+type ReportReasonCategory string
+
+// ReportStatus Where a report is in its workflow. `resolved` and `dismissed` are terminal.
+//
+// `under_review` is reserved for the Instance Admin queue and nothing writes it at this milestone — it is nameable as a filter, where it honestly returns nothing, and refused as an outcome.
+type ReportStatus string
+
+// ReportTargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+type ReportTargetType string
+
+// ResolveReportRequest defines model for ResolveReportRequest.
+type ResolveReportRequest struct {
+	// Status The outcome. Only `resolved` and `dismissed` are accepted — `open` would be a reopen and `under_review` is reserved for M74.
+	Status ResolveReportRequestStatus `json:"status"`
+}
+
+// ResolveReportRequestStatus The outcome. Only `resolved` and `dismissed` are accepted — `open` would be a reopen and `under_review` is reserved for M74.
+type ResolveReportRequestStatus string
+
 // RevocationCounts What one call to the revocation primitive removed. Shared by `POST /auth/logout/all` and `DELETE /auth/2fa/totp`, which revoke exactly the same set — one schema for one server-side value, so that when M18 adds force-closed gateway connections and M101 adds E2E device trust, the count arrives in both places at once rather than in whichever was remembered.
 type RevocationCounts struct {
 	// ApiTokensRevoked API tokens revoked. Reported separately because it is the count a person needs to see to understand why a bot stopped.
@@ -1004,6 +1198,8 @@ type Role struct {
 // There is deliberately no scope for managing API tokens: minting, listing and revoking all require a logged-in user, because a credential that can create credentials can escalate itself.
 //
 // `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both. `guilds.audit` is separate again, and for the same reason applied one level down. The read scope covers a guild's *current state*; the audit log is its history and attribution — who kicked whom, which permission changed, what a nickname used to be. The permission layer already draws that line with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`, so a scope that bundled the log with the channel listing would have the delegation model contradicting the permission model. `messages.read` and `messages.write` are separate from the guild pair, and from each other, for the same reasons one level down. `guilds.read` enumerates a guild's structure, which is metadata; message history is the conversation itself, and a credential that can read every word said in a guild is a different thing to hand out. A webhook-shaped bot that only posts needs `messages.write` and never a backlog.
+//
+// **The report pair splits by audience rather than by read and write**, and it is the one pair here that does. `reports.write` files a report; `reports.moderate` reads a guild's triage queue and closes what is in it. A read/write split would put those two in the same bucket, and they are the two most worth keeping apart — a token minted so a bot can file on its owner's behalf must not also be able to dismiss every report in a guild its owner moderates.
 type Scope string
 
 // Session One device signed in to an account. A device, not a session record: the underlying rows rotate on every refresh, and `id` names whichever record is newest and live for that device right now.
@@ -1087,6 +1283,85 @@ type TokenPair struct {
 
 // TokenPairTokenType defines model for TokenPair.TokenType.
 type TokenPairTokenType string
+
+// TriageReport One row of a moderator's queue: a report plus two facts about its target, and no content.
+//
+// Written out in full rather than composed over Report with `allOf`. That is not verbosity for its own sake — `allOf` branches validate independently, so a branch carrying `additionalProperties: false` rejects the properties its sibling adds, which is exactly how MintedApiToken shipped a schema no successful response could satisfy.
+type TriageReport struct {
+	CreatedAt time.Time  `json:"created_at"`
+	Detail    *string    `json:"detail"`
+	GuildId   *Snowflake `json:"guild_id"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+
+	// ReasonCategory Why something was reported. A closed vocabulary rather than free text, because a category nothing recognises sorts into no bucket in any triage view. The reporter's own words go in `detail`.
+	ReasonCategory ReportReasonCategory `json:"reason_category"`
+	ResolvedAt     *time.Time           `json:"resolved_at"`
+	ResolvedBy     *Snowflake           `json:"resolved_by"`
+
+	// Status Where a report is in its workflow. `resolved` and `dismissed` are terminal.
+	//
+	// `under_review` is reserved for the Instance Admin queue and nothing writes it at this milestone — it is nameable as a filter, where it honestly returns nothing, and refused as an outcome.
+	Status ReportStatus `json:"status"`
+
+	// TargetDeletedAt When the target was deleted, null if it was not. A deleted message is still reportable and still triageable — that is what the soft delete is for.
+	TargetDeletedAt *time.Time `json:"target_deleted_at"`
+
+	// TargetId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	TargetId Snowflake `json:"target_id"`
+
+	// TargetIsE2e Three states rather than two. False for an ordinary target; true for one whose content is end-to-end encrypted and therefore never returned; **null when the target no longer resolves at all**. Collapsing the last into false would report a vanished target as readable.
+	TargetIsE2e *bool `json:"target_is_e2e"`
+
+	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	TargetType ReportTargetType `json:"target_type"`
+}
+
+// TriageReportDetail One report with the reported message attached. The only schema in this milestone carrying content.
+type TriageReportDetail struct {
+	CreatedAt time.Time  `json:"created_at"`
+	Detail    *string    `json:"detail"`
+	GuildId   *Snowflake `json:"guild_id"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+
+	// ReasonCategory Why something was reported. A closed vocabulary rather than free text, because a category nothing recognises sorts into no bucket in any triage view. The reporter's own words go in `detail`.
+	ReasonCategory ReportReasonCategory `json:"reason_category"`
+	ResolvedAt     *time.Time           `json:"resolved_at"`
+	ResolvedBy     *Snowflake           `json:"resolved_by"`
+
+	// Status Where a report is in its workflow. `resolved` and `dismissed` are terminal.
+	//
+	// `under_review` is reserved for the Instance Admin queue and nothing writes it at this milestone — it is nameable as a filter, where it honestly returns nothing, and refused as an outcome.
+	Status          ReportStatus `json:"status"`
+	TargetAuthorId  *Snowflake   `json:"target_author_id"`
+	TargetChannelId *Snowflake   `json:"target_channel_id"`
+
+	// TargetContent What was said. **Null when the target is end-to-end encrypted** — the exclusion is in the query rather than applied afterwards — and null when it no longer resolves. `target_is_e2e` distinguishes the two.
+	TargetContent   *string    `json:"target_content"`
+	TargetDeletedAt *time.Time `json:"target_deleted_at"`
+
+	// TargetId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	TargetId    Snowflake `json:"target_id"`
+	TargetIsE2e *bool     `json:"target_is_e2e"`
+
+	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	TargetType ReportTargetType `json:"target_type"`
+}
 
 // TwoFactorChallenge The `202` a sign-in gets when the account owes a second factor. Not a credential: presenting one without a valid code produces exactly the refusal a wrong password does. What it removes is the need to send the password twice.
 //
@@ -1339,6 +1614,18 @@ type ListGuildMembersParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// ListGuildReportsParams defines parameters for ListGuildReports.
+type ListGuildReportsParams struct {
+	// Status Return only reports in this status. Omit for every status, which is a different query and a different plan. A value outside the vocabulary is a 400 rather than an empty page — a query matching nothing is indistinguishable from a guild that has none, so a typo would read as evidence.
+	Status *ReportStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Before Resume before this report id, exclusive. Omit for the newest page.
+	Before *Snowflake `form:"before,omitempty" json:"before,omitempty"`
+
+	// Limit Page size, 1 to 100. Above 100 is refused rather than clamped, as the audit log is.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
 // RevokeInstanceInviteJSONBody defines parameters for RevokeInstanceInvite.
 type RevokeInstanceInviteJSONBody struct {
 	// Code The invite code. Case, spaces and dashes are normalised away before lookup.
@@ -1467,6 +1754,9 @@ type CreateGuildChannelJSONRequestBody = CreateChannelRequest
 // UpdateGuildMemberJSONRequestBody defines body for UpdateGuildMember for application/json ContentType.
 type UpdateGuildMemberJSONRequestBody = UpdateMemberRequest
 
+// ResolveGuildReportJSONRequestBody defines body for ResolveGuildReport for application/json ContentType.
+type ResolveGuildReportJSONRequestBody = ResolveReportRequest
+
 // ReorderGuildRolesJSONRequestBody defines body for ReorderGuildRoles for application/json ContentType.
 type ReorderGuildRolesJSONRequestBody = ReorderRolesRequest
 
@@ -1487,6 +1777,9 @@ type RevokeInstanceInviteJSONRequestBody RevokeInstanceInviteJSONBody
 
 // SubmitOAuthSignupFormdataRequestBody defines body for SubmitOAuthSignup for application/x-www-form-urlencoded ContentType.
 type SubmitOAuthSignupFormdataRequestBody SubmitOAuthSignupFormdataBody
+
+// FileReportJSONRequestBody defines body for FileReport for application/json ContentType.
+type FileReportJSONRequestBody = FileReportRequest
 
 // SubmitResetPageFormdataRequestBody defines body for SubmitResetPage for application/x-www-form-urlencoded ContentType.
 type SubmitResetPageFormdataRequestBody SubmitResetPageFormdataBody

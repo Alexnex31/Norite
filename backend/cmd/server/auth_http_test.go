@@ -30,6 +30,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/reports"
 	"github.com/Alexnex31/Norite/backend/migrations"
 )
 
@@ -225,6 +226,9 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	messagesSvc, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
 	require.NoError(t, err)
 
+	reportsSvc, err := reports.NewService(reports.ServiceOptions{Pool: pool, IDs: ids})
+	require.NoError(t, err)
+
 	handler, err := newRouter(routerOptions{
 		Config:   testConfig(),
 		Logger:   zerolog.New(io.Discard),
@@ -233,6 +237,7 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		AuthSvc:  svc,
 		Guilds:   guilds.NewHandler(guildsSvc),
 		Messages: messages.NewHandler(messagesSvc),
+		Reports:  reports.NewHandler(reportsSvc),
 	})
 	require.NoError(t, err)
 

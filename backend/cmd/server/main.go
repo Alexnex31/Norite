@@ -46,6 +46,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/reports"
 	"github.com/Alexnex31/Norite/backend/migrations"
 )
 
@@ -208,6 +209,11 @@ func run() error {
 		return err
 	}
 
+	reportService, err := reports.NewService(reports.ServiceOptions{Pool: pool, IDs: ids})
+	if err != nil {
+		return err
+	}
+
 	router, err := newRouter(routerOptions{
 		Config:   cfg,
 		Logger:   logger,
@@ -216,6 +222,7 @@ func run() error {
 		AuthSvc:  authService,
 		Guilds:   guilds.NewHandler(guildService),
 		Messages: messages.NewHandler(messageService),
+		Reports:  reports.NewHandler(reportService),
 	})
 	if err != nil {
 		return err

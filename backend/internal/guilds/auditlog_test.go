@@ -251,6 +251,7 @@ func TestAnUnknownActionFilterIsRefused(t *testing.T) {
 // transaction — rule 2 is satisfied — and removed with everything else. Asserted below as the state it is.
 func TestEveryAuditActionIsReachable(t *testing.T) {
 	t.Parallel()
+	requireForeignAuditActionsExist(t)
 	f := newOverwriteFixture(t, roles.PermViewChannel)
 	ctx := t.Context()
 
@@ -265,12 +266,7 @@ func TestEveryAuditActionIsReachable(t *testing.T) {
 		if action == ActionGuildDelete {
 			continue
 		}
-		// Written by the messages package, not this one. A verb whose writer lives elsewhere cannot be
-		// reached by a driver that only calls guilds, and pretending otherwise would mean either a fake
-		// entry inserted to satisfy the assertion or a guilds endpoint that writes it. Both are worse
-		// than naming the boundary: messages.TestAModeratorDeletingSomebodyElsesMessageIsAudited asserts
-		// it is written, that it names the actor, and that its payload carries no message content.
-		if action == "message.delete" {
+		if _, foreign := foreignAuditActions[action]; foreign {
 			continue
 		}
 		require.NotZero(t, seen[action],
@@ -413,6 +409,7 @@ func driveEveryMutation(t *testing.T, f *overwriteFixture, ctx context.Context) 
 // caught by TestEveryAuditActionIsReachable, not here; this one asserts the shape of what does arrive.
 func TestTheAuditDiffShapeIsUniform(t *testing.T) {
 	t.Parallel()
+	requireForeignAuditActionsExist(t)
 	f := newOverwriteFixture(t, roles.PermViewChannel)
 	ctx := t.Context()
 
@@ -476,18 +473,50 @@ func TestTheAuditDiffShapeIsUniform(t *testing.T) {
 			// The only action that records nothing, and its entry cascades away besides.
 			continue
 		}
-		// Written by the messages package, not this one. A verb whose writer lives elsewhere cannot be
-		// reached by a driver that only calls guilds, and pretending otherwise would mean either a fake
-		// entry inserted to satisfy the assertion or a guilds endpoint that writes it. Both are worse
-		// than naming the boundary: messages.TestAModeratorDeletingSomebodyElsesMessageIsAudited asserts
-		// it is written, that it names the actor, and that its payload carries no message content.
-		if action == "message.delete" {
+		if _, foreign := foreignAuditActions[action]; foreign {
 			continue
 		}
 		require.Truef(t, carried[action],
 			"%s produced no payload for this test to check its shape — every other action carries at "+
 				"least one changed or context field, so an empty one means the driver exercised it in a "+
 				"way that recorded nothing", action)
+	}
+}
+
+// foreignAuditActions are verbs in this package's vocabulary that another package writes.
+//
+// `guilds` owns the *reader*, so its vocabulary has to name every verb stored in audit_log_entries or the
+// listing would refuse to filter on rows it already holds. It does not own every writer: `messages` writes
+// message.delete (M15) and `reports` writes the two triage verbs (M16), and neither may import this
+// package — that is what the M15 chokepoint extraction was for.
+//
+// A driver that only calls guilds therefore cannot reach them, and pretending otherwise would mean either
+// a fake entry inserted to satisfy an assertion or a guilds endpoint that writes somebody else's verb.
+// Naming the boundary is better than both, and the value is the test that does cover it.
+//
+// This was two hardcoded `if action == "message.delete"` branches until M16 needed a third and a fourth.
+// A map is not the improvement — [requireForeignAuditActionsExist] is, because an exemption list that only
+// ever skips can go stale silently, and a stale exemption asserts nothing while reading exactly like
+// coverage. That is M14's lesson about the route-surface cases, one file over.
+var foreignAuditActions = map[string]string{
+	"message.delete": "messages.TestAModeratorDeletingSomebodyElsesMessageIsAudited",
+	"report.resolve": "reports.TestClosingAReportIsAudited",
+	"report.dismiss": "reports.TestClosingAReportIsAudited",
+}
+
+// requireForeignAuditActionsExist fails when an exemption above names a verb the vocabulary no longer has.
+func requireForeignAuditActionsExist(t *testing.T) {
+	t.Helper()
+
+	known := make(map[string]struct{})
+	for _, action := range AuditActions() {
+		known[action] = struct{}{}
+	}
+	for action, coveredBy := range foreignAuditActions {
+		if _, ok := known[action]; !ok {
+			t.Errorf("%s is exempted here as another package's verb and is no longer in the vocabulary — "+
+				"delete the exemption, or restore the verb. %s is what covers it", action, coveredBy)
+		}
 	}
 }
 

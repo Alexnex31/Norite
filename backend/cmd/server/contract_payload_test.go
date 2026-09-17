@@ -391,6 +391,7 @@ func TestTheScopeVocabularyMatchesTheContract(t *testing.T) {
 	for _, s := range []apicontract.Scope{
 		apicontract.Identify, apicontract.GuildsRead, apicontract.GuildsWrite,
 		apicontract.GuildsAudit, apicontract.MessagesRead, apicontract.MessagesWrite,
+		apicontract.ReportsWrite, apicontract.ReportsModerate,
 	} {
 		require.Truef(t, auth.ValidScope(auth.Scope(s)),
 			"the contract offers scope %q and the server rejects it", s)
@@ -413,5 +414,87 @@ func TestEveryAuditActionIsInTheContract(t *testing.T) {
 			"guilds.AuditActions() carries %q and the contract's AuditLogAction enum does not; the reader "+
 				"accepts it as an ?action filter and returns entries carrying it, so a generated client "+
 				"can neither filter on it nor decode a page containing one", a)
+	}
+}
+
+// TestTheReportResponsesMatchTheContract pins the three report shapes against the document.
+//
+// Three rather than one because they are written out flat rather than composed with `allOf` — which is
+// itself a decision this file's own history argues for: MintedApiToken composed that way and shipped a
+// schema no successful response could satisfy, because `allOf` branches validate independently and a
+// branch carrying `additionalProperties: false` rejects what its sibling adds.
+//
+// The assertion that matters most is the one about absence. `reporter_id` is deliberately not on any of
+// these, and a contract that declared it would be advertising a field the server will never send — which
+// is the direction a generated client turns into a required property it waits forever for.
+func TestTheReportResponsesMatchTheContract(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	schemas := contractSchemas(t)
+
+	owner := a.newAccount("owner", "owner@example.com", "laptop")
+	guild := a.call(http.MethodPost, "/api/v1/guilds", map[string]any{"name": "Guild"},
+		withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusCreated, guild.Code, guild)
+	guildID := guild.field(t, "id")
+
+	channel := a.call(http.MethodPost, "/api/v1/guilds/"+guildID+"/channels",
+		map[string]any{"name": "general", "type": 0}, withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusCreated, channel.Code, channel)
+
+	message := a.call(http.MethodPost, "/api/v1/channels/"+channel.field(t, "id")+"/messages",
+		map[string]any{"content": "hello"}, withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusCreated, message.Code, message)
+
+	filed := a.call(http.MethodPost, "/api/v1/reports", map[string]any{
+		"target_type": "message", "target_id": message.field(t, "id"), "reason_category": "spam",
+		"detail": "please look at this",
+	}, withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusCreated, filed.Code, filed)
+	reportID := filed.field(t, "id")
+
+	page := a.call(http.MethodGet, "/api/v1/guilds/"+guildID+"/reports", nil,
+		withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, page.Code, page)
+
+	detail := a.call(http.MethodGet, "/api/v1/guilds/"+guildID+"/reports/"+reportID, nil,
+		withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, detail.Code, detail)
+
+	var pageBody []map[string]any
+	require.NoError(t, json.Unmarshal(page.Body, &pageBody))
+	require.Len(t, pageBody, 1)
+
+	for _, tc := range []struct {
+		what   string
+		schema string
+		body   []byte
+		object map[string]any
+	}{
+		{what: "POST /reports", schema: "Report", body: filed.Body},
+		{what: "GET a guild's reports", schema: "TriageReport", object: pageBody[0]},
+		{what: "GET one report", schema: "TriageReportDetail", body: detail.Body},
+	} {
+		t.Run(tc.schema, func(t *testing.T) {
+			object := tc.object
+			if object == nil {
+				require.NoError(t, json.Unmarshal(tc.body, &object))
+			}
+
+			var got []string
+			for k := range object {
+				got = append(got, k)
+			}
+			sort.Strings(got)
+
+			declared, required := declaredProperties(t, schemas[tc.schema])
+			assert.Equal(t, declared, got,
+				"%s sent %v; %s declares %v", tc.what, got, tc.schema, declared)
+			assert.Equal(t, declared, required,
+				"%s: every field is always present on these responses, so the contract should require "+
+					"all of them — a nullable field is still sent, as null", tc.schema)
+
+			assert.NotContains(t, got, "reporter_id",
+				"%s names the reporter; a guild moderator is never told who filed", tc.what)
+		})
 	}
 }

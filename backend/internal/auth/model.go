@@ -76,6 +76,19 @@ const (
 	// messages.write alone and never sees a backlog.
 	ScopeMessagesRead  Scope = "messages.read"
 	ScopeMessagesWrite Scope = "messages.write"
+
+	// Reports split by *audience* rather than by read and write, which is the one pair here that does.
+	//
+	// `reports.write` files a report; `reports.moderate` reads a guild's queue and closes what is in it.
+	// A read/write split would put those two in the same bucket, and they are the two things most worth
+	// keeping apart: a token minted so a bot can file on its owner's behalf must not also be able to
+	// dismiss every report in a guild its owner moderates. Same blast-radius argument that took
+	// guilds.audit out of guilds.read at M14, applied where the natural axis is who is asking rather than
+	// whether they are writing.
+	//
+	// The naming asymmetry against the pairs above is the signal, not an inconsistency to smooth over.
+	ScopeReportsWrite    Scope = "reports.write"
+	ScopeReportsModerate Scope = "reports.moderate"
 )
 
 // Token management — minting, listing and revoking — has no scope at all: every one of those operations
@@ -96,6 +109,7 @@ var AllScopes = []Scope{
 	ScopeIdentify,
 	ScopeGuildsRead, ScopeGuildsWrite, ScopeGuildsAudit,
 	ScopeMessagesRead, ScopeMessagesWrite,
+	ScopeReportsWrite, ScopeReportsModerate,
 }
 
 // ValidScope reports whether s is a scope this build understands.

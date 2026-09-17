@@ -3381,6 +3381,286 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /reports:
+    post:
+      summary: File a report
+      description: >
+        Reports something to whoever is responsible for moderating it. At this milestone that means a
+        message in a guild channel, routed to that guild's moderators.
+
+
+        **`target_type` accepts only `message` today.** The other values are reserved and refused with
+        their own message, so a client learns the kind is not yet accepted rather than that it does not
+        exist. `whisper` arrives with M61 and the rest with the Instance Admin queue at M74.
+
+
+        **Where a report goes is decided by the server.** There is no `routed_to` in this body and sending
+        one is a 400, not a silently ignored field. A client-settable routing would let a member push a
+        report past their own guild's moderators into the instance queue — and, in the direction that
+        matters, let a report *about* a moderator be routed to that same moderator.
+
+
+        You may report any message in a channel you can see. That is `VIEW_CHANNEL` and deliberately not
+        `READ_MESSAGE_HISTORY`: a member without the history bit still watches live messages arrive, and
+        being able to see abuse but not report it is the worse failure. A message in a channel you cannot
+        see answers 404, which is what the channel listing already told you.
+
+
+        **A deleted message is still reportable.** One removed seconds after it was posted is the ordinary
+        case for a report, and refusing would make deleting quickly the way to dodge being reported.
+
+
+        One open report per person per target: filing a second while the first is still open answers 409.
+
+
+        Filing writes no audit-log entry. Rule 2 covers administrative mutations and reporting exercises
+        authority over nobody — the moderator is the one who decides.
+      operationId: fileReport
+      tags: [reports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileReportRequest"
+      responses:
+        "201":
+          description: The report as filed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `reports.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            No such message, or one in a channel the caller cannot see. The two are deliberately the same
+            answer — which of them it is is exactly what the channel filter withholds.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The caller already has an open report against this target.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/reports:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: List a guild's reports
+      description: >
+        The moderator triage queue, newest first. Requires `MANAGE_MESSAGES` — the bit that already means
+        "may act on somebody else's message in this guild", which is what a triage decision is.
+
+
+        **The reporter is never returned.** Not to a guild moderator, on any of these routes. A report
+        system has to survive the case where the moderator is the person being reported, and the
+        account-export asymmetry encodes the same judgement — a user's export includes reports they filed
+        and excludes reports filed against them. The identity exists in the record for the Instance Admin
+        queue at M74, for the duplicate guard, and for the filer's own export.
+
+
+        **This page carries no message content**, only two facts about the target: whether it is
+        end-to-end encrypted and whether it has been deleted. That keeps the content disclosure on one
+        route rather than two, and keeps a page of fifty from being a payload that scales with message
+        length. Open one report to read what was said.
+
+
+        Cursor-paginated on the report `id`, never offset and never on `created_at`, for the reason the
+        audit log states. Page through by passing the last `id` you received as `before`; a page shorter
+        than `limit` means exhausted.
+      operationId: listGuildReports
+      tags: [reports]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >
+            Return only reports in this status. Omit for every status, which is a different query and a
+            different plan. A value outside the vocabulary is a 400 rather than an empty page — a query
+            matching nothing is indistinguishable from a guild that has none, so a typo would read as
+            evidence.
+          schema:
+            $ref: "#/components/schemas/ReportStatus"
+        - name: before
+          in: query
+          required: false
+          description: Resume before this report id, exclusive. Omit for the newest page.
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 100. Above 100 is refused rather than clamped, as the audit log is.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: A page of reports, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TriageReport"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller is a member without `MANAGE_MESSAGES`, or an API token without the
+            `reports.moderate` scope — which `reports.write` does not confer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/reports/{report_id}:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: Read one report, with the reported message
+      description: >
+        The only endpoint in this milestone that returns reported content. Requires `MANAGE_MESSAGES`.
+
+
+        **The content is not filtered by what the moderator can currently see.** A reported message from a
+        channel hidden from the reader is still returned. That is the audit log's answer applied to
+        content, for its two reasons: filtering on present visibility would let somebody hide what they
+        did by locking a channel down afterwards, and a report about a channel the moderator is not in is
+        exactly the report that needs reading. The permission is the boundary.
+
+
+        **An end-to-end encrypted message's content is never returned**, on this route or any other. That
+        is unreachable today — encryption is offered for direct messages only, a direct message has no
+        guild, and this route is guild-scoped — and is enforced anyway rather than argued, because a
+        guarantee that holds only by the current shape of the schema stops holding quietly.
+
+
+        `target_content` is null both when the target is encrypted and when it no longer resolves at all.
+        `target_is_e2e` tells those apart: true for the first, null for the second.
+      operationId: getGuildReport
+      tags: [reports]
+      responses:
+        "200":
+          description: The report and its target.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriageReportDetail"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller is a member without `MANAGE_MESSAGES`, or an API token without the
+            `reports.moderate` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            No such report in this guild. A report id belonging to another guild answers the same, because
+            the query is scoped by guild — reaching it through this path would mean the permission check
+            covered one guild while the read landed in another.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /guilds/{guild_id}/reports/{report_id}/resolve:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    post:
+      summary: Close a report
+      description: >
+        Closes a report as either `resolved` or `dismissed`. Requires `MANAGE_MESSAGES`.
+
+
+        **Both are terminal.** A closed report cannot be reopened or closed again — the second attempt is
+        a 409. `open` and `under_review` are refused as outcomes: the first would be a reopen, and the
+        second is a state this milestone reserves for the Instance Admin queue and does not write.
+
+
+        The guard is in the statement rather than in a read-then-write, so two moderators acting at once
+        produce one decision and one audit entry rather than two of each.
+
+
+        Writes an audit-log entry — `report.resolve` or `report.dismiss` — in the same transaction. The
+        entry records the status transition and which target the report was about, and carries neither the
+        reporter nor any message content.
+      operationId: resolveGuildReport
+      tags: [reports]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveReportRequest"
+      responses:
+        "200":
+          description: The report as closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller is a member without `MANAGE_MESSAGES`, or an API token without the
+            `reports.moderate` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The report is already closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+
   /guilds/{guild_id}/members:
     parameters:
       - name: guild_id
@@ -3649,7 +3929,15 @@ components:
         message history is the conversation itself, and a credential that can read every word said in a
         guild is a different thing to hand out. A webhook-shaped bot that only posts needs
         `messages.write` and never a backlog.
-      enum: [identify, guilds.read, guilds.write, guilds.audit, messages.read, messages.write]
+
+
+        **The report pair splits by audience rather than by read and write**, and it is the one pair here
+        that does. `reports.write` files a report; `reports.moderate` reads a guild's triage queue and
+        closes what is in it. A read/write split would put those two in the same bucket, and they are the
+        two most worth keeping apart — a token minted so a bot can file on its owner's behalf must not
+        also be able to dismiss every report in a guild its owner moderates.
+      enum: [identify, guilds.read, guilds.write, guilds.audit, messages.read, messages.write,
+             reports.write, reports.moderate]
 
     HealthResponse:
       type: object
@@ -4723,6 +5011,245 @@ components:
         # this enum because the audit-log reader accepts it as an `action` filter and returns entries
         # carrying it, so a client generated from this contract must know the value.
         - message.delete
+        # Written by the reports service (M16), for the same reason and on the same terms. Two verbs
+        # rather than one because the outcome is the whole content of a triage decision — the split
+        # `member.role_add`/`member.role_remove` makes, not the one `overwrite.set` makes.
+        #
+        # There is deliberately no `report.create`: filing exercises authority over nobody, and auditing
+        # it would put an unbounded write to this table within reach of every member of every guild.
+        - report.resolve
+        - report.dismiss
+
+    ReportTargetType:
+      type: string
+      description: >
+        What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as
+        distinct values so a later milestone does not have to renumber, and refused at the boundary with a
+        message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+      enum: [message, whisper, channel, user]
+
+    ReportStatus:
+      type: string
+      description: >
+        Where a report is in its workflow. `resolved` and `dismissed` are terminal.
+
+
+        `under_review` is reserved for the Instance Admin queue and nothing writes it at this milestone —
+        it is nameable as a filter, where it honestly returns nothing, and refused as an outcome.
+      enum: [open, under_review, resolved, dismissed]
+
+    ReportReasonCategory:
+      type: string
+      description: >
+        Why something was reported. A closed vocabulary rather than free text, because a category nothing
+        recognises sorts into no bucket in any triage view. The reporter's own words go in `detail`.
+      enum: [spam, harassment, hate_speech, violence, nsfw, self_harm, illegal, other]
+
+    Report:
+      type: object
+      description: >
+        A filed report.
+
+
+        **There is no reporter field, on this schema or any other on these routes.** See the listing
+        endpoint for why: a guild moderator is never told who filed a report against them.
+      required: [id, guild_id, target_type, target_id, reason_category, detail, status, resolved_by,
+                 created_at, resolved_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          description: >
+            The guild whose moderators this report routes to. Null for a report that routes to Instance
+            Admins instead, which is M74's half and cannot be produced yet.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        target_type:
+          $ref: "#/components/schemas/ReportTargetType"
+        target_id:
+          $ref: "#/components/schemas/Snowflake"
+        reason_category:
+          $ref: "#/components/schemas/ReportReasonCategory"
+        detail:
+          description: The reporter's own words, if they wrote any. At most 2000 characters.
+          oneOf:
+            - type: string
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/ReportStatus"
+        resolved_by:
+          description: Who closed it, null while it is open.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          description: When it was closed, null while it is open.
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+
+    TriageReport:
+      type: object
+      description: >
+        One row of a moderator's queue: a report plus two facts about its target, and no content.
+
+
+        Written out in full rather than composed over Report with `allOf`. That is not verbosity for its
+        own sake — `allOf` branches validate independently, so a branch carrying
+        `additionalProperties: false` rejects the properties its sibling adds, which is exactly how
+        MintedApiToken shipped a schema no successful response could satisfy.
+      required: [id, guild_id, target_type, target_id, reason_category, detail, status, resolved_by,
+                 created_at, resolved_at, target_is_e2e, target_deleted_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        target_type:
+          $ref: "#/components/schemas/ReportTargetType"
+        target_id:
+          $ref: "#/components/schemas/Snowflake"
+        reason_category:
+          $ref: "#/components/schemas/ReportReasonCategory"
+        detail:
+          oneOf:
+            - type: string
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/ReportStatus"
+        resolved_by:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        target_is_e2e:
+          description: >
+            Three states rather than two. False for an ordinary target; true for one whose content is
+            end-to-end encrypted and therefore never returned; **null when the target no longer resolves
+            at all**. Collapsing the last into false would report a vanished target as readable.
+          oneOf:
+            - type: boolean
+            - type: "null"
+        target_deleted_at:
+          description: >
+            When the target was deleted, null if it was not. A deleted message is still reportable and
+            still triageable — that is what the soft delete is for.
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+
+    TriageReportDetail:
+      type: object
+      description: >
+        One report with the reported message attached. The only schema in this milestone carrying content.
+      required: [id, guild_id, target_type, target_id, reason_category, detail, status, resolved_by,
+                 created_at, resolved_at, target_is_e2e, target_deleted_at, target_content,
+                 target_channel_id, target_author_id]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        target_type:
+          $ref: "#/components/schemas/ReportTargetType"
+        target_id:
+          $ref: "#/components/schemas/Snowflake"
+        reason_category:
+          $ref: "#/components/schemas/ReportReasonCategory"
+        detail:
+          oneOf:
+            - type: string
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/ReportStatus"
+        resolved_by:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        resolved_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        target_is_e2e:
+          oneOf:
+            - type: boolean
+            - type: "null"
+        target_deleted_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        target_content:
+          description: >
+            What was said. **Null when the target is end-to-end encrypted** — the exclusion is in the
+            query rather than applied afterwards — and null when it no longer resolves. `target_is_e2e`
+            distinguishes the two.
+          oneOf:
+            - type: string
+            - type: "null"
+        target_channel_id:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        target_author_id:
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+
+    FileReportRequest:
+      type: object
+      description: >
+        **`routed_to` is deliberately absent.** Unknown fields are rejected rather than ignored, so sending
+        one is a 400 — which is the stronger of the two answers and is the point.
+      required: [target_type, target_id, reason_category]
+      additionalProperties: false
+      properties:
+        target_type:
+          $ref: "#/components/schemas/ReportTargetType"
+        target_id:
+          $ref: "#/components/schemas/Snowflake"
+        reason_category:
+          $ref: "#/components/schemas/ReportReasonCategory"
+        detail:
+          type: string
+          maxLength: 2000
+          description: Optional free text from the reporter.
+
+    ResolveReportRequest:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          description: >
+            The outcome. Only `resolved` and `dismissed` are accepted — `open` would be a reopen and
+            `under_review` is reserved for M74.
+          type: string
+          enum: [resolved, dismissed]
 
     Message:
       type: object
