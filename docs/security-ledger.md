@@ -437,3 +437,30 @@ carries the condition that would reopen it.
   out to be the only place abuse is visible and guild moderators are left unable to act on a pattern they
   can see the shape of. Either is a reason to expose a stable pseudonym scoped to the guild rather than
   the user id itself.
+
+### Filing a report is a work oracle for "this snowflake names a message"
+- **Raised**: M16, `/security-review`'s discovery pass, then verified independently
+- **Verdict**: accepted risk — real asymmetry, not practically exploitable
+- **Why**: `reports.File` reads the target message before it authorizes the channel, because the channel id
+  is only reachable *through* the message row — so the checks cannot be reordered. Both outcomes return a
+  byte-identical 404, but the work differs: one query when the id names nothing, four when it names a
+  message in a guild the caller is not in, eight for a member who holds no `PermViewChannel` on the
+  channel. Using this repository's own measurements for those queries (`guildauth.go`: `IsInstanceAdmin`
+  2.85 us, `ListGuildMemberAuthority` 19.42 us) the gap is roughly 50–150 us of indexed lookups — three
+  orders of magnitude below the M10 precedent that was worth closing, where `HashPassword` above the
+  address check separated ~1 ms from ~31 ms. It is under WAN jitter, and what it yields is only "some row
+  exists in `messages` with this id": not the channel, guild, author, content or time, since the attacker
+  supplied the id. Snowflakes share one sequence across every entity on the instance, so a scan costs
+  about a thousand probes per millisecond of history and returns aggregate message volume.
+- **Not the same as the M15 entry above, and the difference is the part worth keeping.** That one is about
+  a *member* of the guild, and its whole argument is that `channels.last_message_id` publishes the same
+  fact for free. **That argument does not reach a non-member**, which is who this one is about — so this is
+  a genuinely wider audience for a strictly narrower fact. Recorded separately rather than folded in,
+  because somebody checking whether the `last_message_id` argument covers them needs to find the answer
+  "no, and here is why it does not matter anyway".
+- **Reopens if**: the gap stops being microseconds. Concretely — `File` gains per-target work on the
+  *found* path (M74's whisper break-glass, a link-preview resolution, an E2E check that reads a keystore),
+  or the authorization path gains a network hop, which Phase P's Redis event bus would do. Also if message
+  existence ever becomes a fact the permission system is supposed to keep, in which case this must be
+  downgraded together with the three M15 paths — `Update`, `Delete` and `Send`'s `reply_to_id` — rather
+  than alone.
