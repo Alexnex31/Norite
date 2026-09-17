@@ -188,6 +188,21 @@ type RegistrationReservation struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type Report struct {
+	ID             int64
+	ReporterID     int64
+	TargetType     int16
+	TargetID       int64
+	GuildID        *int64
+	ReasonCategory string
+	Detail         *string
+	Status         int16
+	RoutedTo       int16
+	ResolvedBy     *int64
+	CreatedAt      pgtype.Timestamptz
+	ResolvedAt     pgtype.Timestamptz
+}
+
 type Role struct {
 	ID          int64
 	GuildID     int64
