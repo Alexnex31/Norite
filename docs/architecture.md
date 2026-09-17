@@ -907,6 +907,9 @@ POST   /device/2fa                        -- ...the factor step, on the one flow
                                           --   can be asked for it (M11a)
 POST   /device/approve                    -- ...approve or deny, a separate step on purpose (§14.21)
 POST   /auth/tokens                       -- mint a scoped api_token
+GET    /auth/tokens                       -- list this account's tokens: names, scopes, last use, never
+                                          --   the value. Needs a *user* actor like the other two, since
+                                          --   it enumerates the account's credential inventory
 DELETE /auth/tokens/{tokenId}
 POST   /auth/2fa/totp                     -- begin TOTP enrollment; the secret is returned once (M11a)
 POST   /auth/2fa/totp/confirm             -- prove a code before the factor becomes required
