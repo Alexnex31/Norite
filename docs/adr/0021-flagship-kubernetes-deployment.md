@@ -23,6 +23,19 @@ would fail. `ulule/limiter` switches to its Redis-backed store here specifically
 used to multiply an intended rate limit. Database migrations run via a Helm `pre-upgrade` Job hook — same
 `golang-migrate` tooling as self-hosted (ADR 0020), different trigger.
 
+**Amended 2026-09-17 — the object-storage choice, not the decision.** This ADR names MinIO because it was
+the obvious in-cluster S3-compatible store when this was written. Its community edition has since been
+archived: the admin console was removed mid-2025, official binaries and images were discontinued, and the
+repository is no longer maintained. The decision this ADR records — self-managed in-cluster operators over
+managed cloud services — is unchanged and is what matters here; only the product satisfying one line of it
+has to be re-picked, which `docs/roadmap.md` M115 now owns. The body above is left as written, because an
+ADR is the record of what was decided and when, not a description of the current world.
+
+Two consequences worth stating so they are not rediscovered. Postgres backups no longer need object storage
+at all — M113 moved to CSI volume snapshots, which also sidesteps CloudNativePG deprecating the
+`barmanObjectStore` method this ADR's "continuous WAL-archiving" implied. And `minio-go` is unaffected: it
+is the S3 *client* SDK, Apache-2.0 and maintained, and speaks to whatever backend M115 lands on.
+
 Graceful rollouts reuse the gateway's existing `Reconnect` op-code via a `preStop` hook, **staggered** across
 `terminationGracePeriodSeconds` with client-side randomized exponential backoff — a single replica's
 thousands of connections all reconnecting simultaneously would otherwise thundering-herd the remaining

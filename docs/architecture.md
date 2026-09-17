@@ -2034,9 +2034,11 @@ See [ADR 0021](adr/0021-flagship-kubernetes-deployment.md) for full reasoning. S
   pub/sub fan-out (§2) lets gateway events cross replicas.
 - **TURN/SFU pods**: separate, `hostNetwork: true`, own "privileged" Pod-Security-Standard namespace,
   isolated from the "restricted" namespace everything else runs in.
-- **Stateful dependencies**: self-managed in-cluster operators — CloudNativePG (Postgres, with native
-  continuous WAL-archiving backup to in-cluster MinIO), a Redis Helm chart, MinIO — not managed cloud
-  services.
+- **Stateful dependencies**: self-managed in-cluster operators — CloudNativePG (Postgres, backed up to CSI
+  volume snapshots rather than an object store), a Redis Helm chart, and an S3-compatible object store for
+  attachments — not managed cloud services. The object store is deliberately unnamed: MinIO was the
+  original choice and its community edition is archived, so M115 picks again. `minio-go` stays, being the
+  client SDK rather than the server.
 - **TLS**: `cert-manager` + Ingress, not the backend's built-in `certmagic` (every replica racing to manage
   one cert would fail).
 - **Rate limiting**: `ulule/limiter`'s Redis-backed store specifically here, so replica count can't multiply

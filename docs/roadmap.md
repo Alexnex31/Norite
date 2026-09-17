@@ -53,7 +53,7 @@ of this section.
 - **M2 — CLI skeleton and `norite instance init`, infrastructure config only**: the `norite` binary builds
   and runs on a `urfave/cli` v3 command tree, with `--json`/`--help` flag plumbing and shell completions
   wired once for every command that follows (`architecture.md` §4) — no functional client commands yet. On
-  that foundation, the setup wizard: DB-connection, storage-backend (local disk vs. S3/MinIO), ACME on/off
+  that foundation, the setup wizard: DB-connection, storage-backend (local disk vs. any S3-compatible service), ACME on/off
   (plus the LAN-only opt-out), and registration-gating prompts — plain sequential stdin/stdout prompts, not
   a full-screen TUI — writing a valid config file. **This milestone also decides and documents the instance
   config file's format, path, and precedence relative to the backend's `NORITE_*` environment variables**,
@@ -924,6 +924,11 @@ of this section.
   (including the macOS Input Monitoring entitlement). This produces a written finding, not shippable code —
   its answer determines the exact shape of M32 and the daemon's hotkey-registration approach in M35. Do not
   proceed to M28–M32's detailed design before this completes.
+
+  Done when: the written finding exists and answers both questions per OS — can a headless voice-worker
+  reuse a foreground client's mic grant, and can the daemon register a global hotkey — each recorded as
+  yes, no, or conditional-on-what, with M32's and M35's shapes chosen from those answers. A spike whose
+  output is a document still needs a completion condition, and gating five milestones is the reason.
 - **M26 — Pion SFU core**: room/participant model, codec/track-kind-agnostic RTP forwarding (built
   generically from day one so M106–M107's video activation is additive, not a redesign). Done when: two test
   clients can exchange audio through the SFU.
@@ -1856,9 +1861,18 @@ when a constraint the terminal imposed is lifted.
   Done when: the web SPA can log in and receive a session cookie without ever holding a raw Bearer token in
   JS, and a device-verification continuation is refused by a browser other than the one it was issued to.
 - **M109 — Web SPA rebuild**: adapt the originally-planned React SPA to the current backend/contracts.
+
+  Done when: the SPA builds with its API types generated from `contracts/` rather than hand-written, and a
+  person can sign in through the BFF, open a guild, read a channel and send a message in a browser.
 - **M110 — Web SPA pane-splitting**: CSS grid/flex-based resizable panes, `localStorage`-based layout
   persistence, independent of the CLI/TUI/GUI layouts.
+
+  Done when: a pane arrangement survives a reload, and changing it leaves the TUI's and GUI's layouts
+  untouched — the independence is the point, since the three clients share a daemon but not a screen.
 - **M111 — Web SPA E2E export**: the browser-side decrypt-and-export equivalent of M104.
+
+  Done when: a browser produces a decrypted archive of the account's own E2E conversations with no key
+  material leaving the page, and the result matches M104's export for the same account.
 
 #### Phase P — Flagship instance Kubernetes deployment (parallel track, not sequential with the feature
 phases above)
@@ -1875,16 +1889,60 @@ does not appear to disagree with them.
 
 - **M112 — Helm chart skeleton and API pods**: the base chart structure, the API/gateway `Deployment` behind
   an Ingress.
-- **M113 — CloudNativePG plus backups**: the Postgres operator in-cluster, native continuous backup/
-  WAL-archiving to in-cluster MinIO (M115).
+
+  Done when: `helm install` against an empty cluster brings the API up behind an Ingress and
+  `/api/v1/healthz` answers 200 from outside the cluster.
+- **M113 — CloudNativePG plus backups**: the Postgres operator in-cluster, with backup and
+  point-in-time recovery on **CSI volume snapshots** rather than an object store.
+
+  **This used to archive WAL to in-cluster MinIO (M115), and both halves of that had gone stale.** MinIO's
+  community edition is archived — console stripped mid-2025, official binaries and images discontinued,
+  the repository no longer maintained — so the destination cannot be deployed. And CloudNativePG
+  deprecated the `barmanObjectStore` method it would have used at 1.26, with removal planned for 1.30, in
+  favour of the Barman Cloud plugin. Volume snapshots are a first-class backup method in the operator,
+  declarative, and need no object storage at all.
+
+  The useful consequence is that this milestone no longer depends on M115, which is the roadmap's only
+  case of a milestone needing something numbered after it. Dissolving the dependency is better than
+  swapping the two entries, because the numbers are cited across the doc set and the swap would fix an
+  ordering problem by creating a renumbering one.
+
+  Done when: a scheduled backup completes against a running cluster, a recovery into a fresh namespace
+  reaches a chosen point in time, and neither path requires an object-storage endpoint to exist.
 - **M114 — Redis in-cluster and event-bus/rate-limit activation**: activates the previously-reserved Redis
   pub/sub fan-out (required the moment multiple API replicas run) and switches `ulule/limiter` to its
   Redis-backed store for this deployment specifically.
-- **M115 — MinIO in-cluster**: the object storage backend for attachments (M58) and Postgres backups (M113).
+
+  Done when: a client connected to one API replica receives an event published by another, and a rate limit
+  counts across replicas rather than per pod — the second being the half that silently multiplies the
+  configured limit by the replica count if it is missed.
+- **M115 — In-cluster object storage for attachments**: an S3-compatible backend for attachments (M58),
+  and only attachments now that M113 backs up to volume snapshots.
+
+  **Deliberately not MinIO, and deliberately not naming its replacement yet.** MinIO was the original
+  choice and its community edition is archived, which is a reason to pick again rather than to pick
+  hastily: the candidates differ in ways this milestone is the right place to weigh — SeaweedFS
+  (Apache-2.0, the most complete Kubernetes story), Garage (AGPL-3.0, small and single-binary), or Ceph
+  via Rook (the most complete S3 semantics and a six-node floor). Nothing above this milestone cares
+  which: M58 defines a pluggable storage interface with local disk as the default, and the flagship's
+  choice of backend is a deployment decision rather than an architectural one.
+
+  Note the client side is unaffected. `minio-go` is the S3 *client* SDK, Apache-2.0 and maintained, and it
+  speaks to any compatible service — the archived project is the server.
+
+  Done when: an attachment uploaded through one API replica is readable through another, and switching the
+  backend is a configuration change rather than a code change.
 - **M116 — TURN/SFU pods**: `hostNetwork: true`, in their own dedicated "privileged" Pod-Security-Standard
-  namespace, separate from the "restricted" API/backend/Postgres/Redis/MinIO namespace.
+  namespace, separate from the "restricted" API/backend/Postgres/Redis/object-storage namespace.
+
+  Done when: two clients on different networks complete a call relayed by the in-cluster TURN/SFU, and the
+  privileged namespace contains those pods and nothing else — the isolation being the reason the split
+  exists rather than a tidier layout.
 - **M117 — `cert-manager` plus Ingress TLS**: disables the backend's built-in `certmagic` path for this
   deployment specifically (self-hosted instances keep it).
+
+  Done when: the Ingress serves a certificate issued and renewed by `cert-manager`, and the backend's own
+  ACME path is inactive in this deployment while remaining the default everywhere else.
 - **M118 — Graceful rollout**: a `preStop` hook sending the gateway's existing `Reconnect` op-code to local
   connections before pod termination, staggered across `terminationGracePeriodSeconds` rather than fired all
   at once, paired with randomized exponential backoff in the daemon's `Reconnect` handling. Done when: a
@@ -1892,9 +1950,19 @@ does not appear to disagree with them.
   reconnect spike against the remaining replicas' auth/DB layer.
 - **M119 — DB migration Job hook**: a Helm `pre-upgrade`/`pre-install` Job running `golang-migrate`, before
   new pods start.
+
+  Done when: an upgrade carrying a pending migration applies it to completion before any new pod serves
+  traffic, and a migration that fails aborts the release rather than leaving two schema versions running.
 - **M120 — Secrets**: plain Kubernetes Secrets applied via the Helm chart.
+
+  Done when: every credential the deployment needs is read from a Secret rather than a chart value, and
+  `helm template` renders none of them in plaintext.
 - **M121 — Autoscaling**: CPU/memory-based HPA via `metrics-server` (connection-count-based scaling
   documented as a future upgrade once M93's metrics are actually scraped by something in-cluster).
+
+  Done when: sustained load adds a replica, the new replica serves gateway traffic without disturbing the
+  existing ones, and scaling back down does not drop live connections — which is M118's `Reconnect` path
+  doing its job under a second trigger.
 - **M122 — NetworkPolicies and namespace isolation**: baseline pod-to-pod traffic restriction, plus the
   backend-side half of the same concern — a trusted-proxy peer allowlist for `httpx.RealIP`. As built at
   M1, the backend honors `X-Forwarded-For` whenever `NORITE_TRUST_PROXY_HEADERS` is on, without checking
@@ -1906,6 +1974,9 @@ does not appear to disagree with them.
   outside the configured CIDRs has its `X-Forwarded-For` ignored and is rate-limited by its real source
   address, verified by a test that forges the header from an untrusted peer.
 - **M123 — CI-triggered `helm upgrade`**: a simple CI pipeline deployment trigger, not GitOps.
+
+  Done when: a release lands on the flagship without a human running `helm`, and a failed upgrade stops
+  with the previous release still serving rather than half-applied.
 
 #### M124–M125 — Gap-closure milestones (numerically appended, logically earlier — same treatment as Phase P)
 
@@ -1952,8 +2023,10 @@ before M69 (friends). M57 (DMs), M68 (recently-met), and M69 (friends) must exis
 must exist before M59 (custom emoji). M97 must land before any further work in Phase M proceeds — its
 former license-compatibility gate is answered by ADR 0032, and what it leaves behind is the standing
 constraint that libsignal is imported only from `daemon/`. Phase P (Kubernetes) depends on M114 requiring
-Phase D's Redis-fan-out design to already exist as a seam, and M58/M113 requiring M115 (MinIO) to be stood
-up first within that phase. M124 depends on
+Phase D's Redis-fan-out design to already exist as a seam, and on M58 (attachments) preceding M115, which
+is a cross-track edge and therefore fine. **M113 no longer requires M115** — it backs up to volume
+snapshots — which removes what was the roadmap's only dependency running backwards against its own
+numbering. M124 depends on
 M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14 and M72, conceptually
 belonging in Phase L despite its number — the same "numerically-late, logically-earlier" treatment already
 established for Phase P above.

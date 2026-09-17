@@ -1663,9 +1663,10 @@ should be fixed, not tolerated:
   REST endpoint list, the OAuth linking/PKCE flow, deep dives on security (§14) and performance (§15), and
   the known tensions and accepted limitations (§17). Read it before making an architectural decision this
   file doesn't already cover.
-- `docs/roadmap.md` — **what gets built, in what order.** `M0`–`M125`, each with scope, dependencies, and a
-  checkable "done when". The single source of truth for milestone numbering; `architecture.md` §13 only
-  points here.
+- `docs/roadmap.md` — **what gets built, in what order.** `M0`–`M125`, phase-grouped, with Phase P running
+  as an explicitly parallel track. The single source of truth for milestone numbering *and* for what each
+  milestone owes — read the entry rather than a summary of it, including this one, because a restatement
+  here is a second copy that drifts. `architecture.md` §13 only points here, for the same reason.
 - `docs/security-ledger.md` — **every security finding this project rejected, and why.** Not a
   vulnerability list (those get fixed, and the commit is the record) and not a backlog (a finding worth
   doing later goes in the roadmap entry that inherits it). It holds the third case, and it exists because
