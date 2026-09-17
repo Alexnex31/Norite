@@ -1351,6 +1351,24 @@ of this section.
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
   `instance_audit_log` recording every Instance Admin action.
 
+  **"Every Instance Admin action" includes the ones taken on guild-scoped surfaces, and those are the ones
+  easy to miss.** Found at M16's audit and reproduced: an Instance Admin belongs to no guild, holds ADR
+  0008's layer 1, and can therefore close any guild's reports — with the only record being an
+  `audit_log_entries` row in *that guild's* log, which `000015` cascades away when the guild is deleted.
+  So the action leaves no durable instance-level record at all. Rule 14 names report resolution
+  explicitly, which is what made this visible at M16 rather than earlier, but the shape is not M16's: it
+  is every guild mutation since M12 — guild deletion most sharply, since that one destroys its own
+  evidence by construction (M12's entry says so about the guild log and did not draw the rule 14
+  conclusion).
+
+  M16 could not fix it because this table does not exist yet, and inventing it for one writer ahead of
+  this milestone is the coupling M11 refused when it left `revokeEverything`'s unbuilt steps as named
+  gaps. What exists instead is a tripwire:
+  `reports.TestAnInstanceAdminsCloseIsRecordedOnlyInTheGuildLog` fails the moment
+  `instance_audit_log` is created, with the instruction attached. Whoever builds this milestone should
+  expect it to go red and should answer it for **every** guild-scoped path an Instance Admin can reach,
+  not only for reports.
+
   **M72a adds no statement to this transaction.** A ban and a guild's discoverability are independent
   actions an admin composes — see M72a, where that is decided and why.
 

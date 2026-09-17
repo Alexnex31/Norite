@@ -697,3 +697,61 @@ func reflectFileRequestField(name string) (string, bool) {
 	}
 	return field.Tag.Get("validate"), true
 }
+
+// TestAnInstanceAdminsCloseIsRecordedOnlyInTheGuildLog is a tripwire for rule 14, not an endorsement.
+//
+// # What it pins today
+//
+// An Instance Admin is a member of no guild and holds ADR 0008's layer 1, so `guildauth.Authorize` lets
+// them close any guild's reports. The only record is an `audit_log_entries` row — the *guild's* log, which
+// `000015` cascades away when the guild is deleted. So an Instance Admin action on this surface leaves no
+// durable instance-level record at all.
+//
+// # Why that is not fixed here
+//
+// Rule 14 requires every Instance Admin action to write `instance_audit_log`, and names report resolution
+// explicitly. **That table does not exist**: it is M72's, referenced by three comments and created by no
+// migration. M16 cannot write to it, and inventing a table for one writer ahead of the milestone that owns
+// it is the coupling M15 refused when it left `revokeEverything`'s two unbuilt steps as named gaps rather
+// than as interfaces nothing implements.
+//
+// The shape is also not M16's to have introduced. Every guild mutation since M12 is reachable by an
+// Instance Admin on the same terms; M16 is merely the first surface where rule 14 names the action by
+// name, which is what made it visible. M72's roadmap entry now carries it.
+//
+// # What makes this a tripwire rather than a comment
+//
+// It fails the moment `instance_audit_log` exists, which is exactly when somebody is in a position to do
+// something about it — the shape M14 used to hand M15 the question about message content in `changes`.
+func TestAnInstanceAdminsCloseIsRecordedOnlyInTheGuildLog(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	filed := f.file(t, f.member, f.messageID)
+
+	// The stranger belongs to no guild. Layer 1 is the whole of their authority here.
+	f.exec(t, `INSERT INTO instance_admins (user_id, granted_by, granted_at) VALUES ($1,$1,now())`,
+		int64(f.stranger))
+
+	_, err := f.svc.Resolve(f.ctx, userActor(f.stranger), f.guildID, filed.ID, "resolved")
+	require.NoError(t, err, "an Instance Admin acts on guilds they are not in; that is the tier")
+
+	var action string
+	var actorID int64
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT action, actor_id FROM audit_log_entries WHERE guild_id = $1`,
+		int64(f.guildID)).Scan(&action, &actorID))
+	require.Equal(t, ActionReportResolve, action)
+	require.Equal(t, int64(f.stranger), actorID, "the guild's log names them, which is all there is today")
+
+	var instanceLogExists bool
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+		                 WHERE table_schema = 'public' AND table_name = 'instance_audit_log')`,
+	).Scan(&instanceLogExists))
+	require.False(t, instanceLogExists,
+		"instance_audit_log now exists, so rule 14 applies to this path: an Instance Admin closing a "+
+			"guild report must write there as well as to the guild's log — the guild entry cascades away "+
+			"with the guild, so today their action leaves no durable instance-level record. Wire it up "+
+			"and replace this tripwire with the assertion that it happened. Every guild mutation since "+
+			"M12 has the same shape; this is only the surface where rule 14 names the action.")
+}
