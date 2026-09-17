@@ -66,8 +66,10 @@ reserved under §7(e) by declining to grant it, not by a trademark claim. See
 `alexedwards/argon2id`, `golang-jwt/jwt/v5`, `golang.org/x/oauth2`, `pquerna/otp` (TOTP),
 `go-playground/validator/v10`,
 `golang-migrate`, `oapi-codegen`, `ulule/limiter`, `testify` + `testcontainers-go`, Postgres (`tsvector` +
-GIN + `pg_trgm` for search), Redis (activated only for the flagship's horizontal-scale event bus/rate
-limiting; self-hosted single-process instances never touch it).
+GIN + `pg_trgm` for search), Valkey (the BSD fork of Redis 7.2.4 — activated only for the flagship's
+horizontal-scale event bus/rate limiting; self-hosted single-process instances never touch it. The
+`EVENTS_BACKEND=redis` seam and `ulule/limiter`'s "Redis-backed store" keep that name, which describes the
+protocol rather than the product — see M114).
 
 **CLI** (command tree): Go, `urfave/cli` v3 (command tree, flag parsing, `--json`/`--help`, completions —
 chosen over `spf13/cobra`), `pelletier/go-toml` v2.
@@ -203,13 +205,13 @@ daemon/        Shared background daemon — gateway client, dual IPC, plugin hos
 internal/voice/  Pion-based SFU, embedded TURN server (lives under backend/, server-side infra)
 contracts/     openapi.yaml (REST), gateway-events.schema.json (WS), CLI --json schemas — source of truth
                (also dependency-licenses.txt, the committed license inventory — ADR 0032)
-docker/        docker-compose.yml (postgres, redis, backend hot-reload) — local dev + self-hosted prod option
+docker/        docker-compose.yml (postgres, valkey, backend hot-reload) — local dev + self-hosted prod
 frontend/      React SPA — the later, tertiary web client (Phase O)
 ```
 
 ## Common commands
 
-- `just dev` — run the full local stack (docker-compose: postgres, redis, backend w/ air; frontend w/ vite
+- `just dev` — run the full local stack (docker-compose: postgres, valkey, backend w/ air; frontend w/ vite
   joins at Phase O)
 - `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
   differs from CI is not a gate. **Needs a running container runtime**: the backend's integration tests

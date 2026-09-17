@@ -124,7 +124,7 @@ Locked-in decisions:
 │   ├── openapi.yaml               # REST contract — single source of truth
 │   ├── gateway-events.schema.json # WS dispatch payload contract
 │   └── cli-json/                  # CLI --json output schemas, versioned
-├── docker/docker-compose.yml      # postgres, redis, backend (air hot-reload) — local dev + self-hosted prod
+├── docker/docker-compose.yml      # postgres, valkey, backend (air hot-reload) — local dev + self-hosted
 ├── deploy/helm/                   # flagship Kubernetes Helm chart (§12)
 ├── .env.example
 ├── .github/workflows/ci.yml
@@ -2035,7 +2035,8 @@ See [ADR 0021](adr/0021-flagship-kubernetes-deployment.md) for full reasoning. S
 - **TURN/SFU pods**: separate, `hostNetwork: true`, own "privileged" Pod-Security-Standard namespace,
   isolated from the "restricted" namespace everything else runs in.
 - **Stateful dependencies**: self-managed in-cluster operators — CloudNativePG (Postgres, backed up to CSI
-  volume snapshots rather than an object store), a Redis Helm chart, and an S3-compatible object store for
+  volume snapshots rather than an object store), a Valkey Helm chart (BSD; see M114 for why not Redis), and
+  an S3-compatible object store for
   attachments — not managed cloud services. The object store is deliberately unnamed: MinIO was the
   original choice and its community edition is archived, so M115 picks again. `minio-go` stays, being the
   client SDK rather than the server.

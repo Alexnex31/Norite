@@ -1909,9 +1909,19 @@ does not appear to disagree with them.
 
   Done when: a scheduled backup completes against a running cluster, a recovery into a fresh namespace
   reaches a chosen point in time, and neither path requires an object-storage endpoint to exist.
-- **M114 — Redis in-cluster and event-bus/rate-limit activation**: activates the previously-reserved Redis
+- **M114 — Valkey in-cluster and event-bus/rate-limit activation**: activates the previously-reserved
   pub/sub fan-out (required the moment multiple API replicas run) and switches `ulule/limiter` to its
   Redis-backed store for this deployment specifically.
+
+  **Valkey rather than Redis, decided at M16 and forced rather than preferred.** `redis:7-alpine` resolves
+  to Redis 7.4, which is RSALv2/SSPLv1 rather than BSD and reaches end of life on 2026-11-30 — so the
+  flagship would be running an unpatched datastore within weeks of that date. Valkey is the Linux
+  Foundation's BSD-3-Clause fork of 7.2.4, protocol- and format-identical, and `redis/go-redis/v9` talks to
+  it with no code change. Redis 8 was the other candidate and is genuinely open source again under a
+  tri-license including AGPLv3; Valkey wins on being plainly BSD with no license to read twice.
+
+  The library and config vocabulary keep the word "Redis" — `EVENTS_BACKEND=redis` names the protocol and
+  the limiter's store is called that upstream. Running actual Redis here stays valid.
 
   Done when: a client connected to one API replica receives an event published by another, and a rate limit
   counts across replicas rather than per pod — the second being the half that silently multiplies the

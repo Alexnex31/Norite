@@ -1,8 +1,24 @@
 # Local dev + self-hosted docker-compose production option (docs/architecture.md §1, §8.16/M96).
 #
-# Redis is present from the start even though it stays reserved-but-unused by self-hosted single-process
-# instances (docs/architecture.md §11) — only the flagship activates it. Having it here means the
-# Redis-backed event bus and rate-limiter stores can be exercised later without a compose change.
+# A RESP server is present from the start even though it stays reserved-but-unused by self-hosted
+# single-process instances (docs/architecture.md §11) — only the flagship activates it. Having it here
+# means the event bus and rate-limiter stores can be exercised later without a compose change.
+#
+# **It is Valkey rather than Redis, and the swap was forced rather than chosen.** `redis:7-alpine` is what
+# this file pinned until M16, and the `7` tag has resolved to Redis 7.4 since July 2024 — which is
+# RSALv2/SSPLv1 rather than BSD, and reaches end of life on 2026-11-30. Nobody changed a line; the floating
+# tag walked from an open-source release to a source-available one on its own, which is the same drift that
+# left the `golang:` image below a minor version behind the workspace directive until M14 caught it.
+#
+# Valkey is the Linux Foundation's BSD-3-Clause fork of Redis 7.2.4 and is drop-in here: identical RESP
+# wire protocol, same RDB/AOF formats, and `redis/go-redis/v9` — what `ulule/limiter` uses — connects to it
+# unchanged. Verified at M16 against 9.1.2: PING, PUBLISH, and the Lua INCR+EXPIRE the limiter does
+# atomically all behave, and the server reports `redis_version:7.2.4` alongside `valkey_version:9.1.2` so
+# version-gating clients stay happy.
+#
+# The seam keeps its name. `EVENTS_BACKEND=redis` and "the Redis-backed store" describe a protocol and a
+# library's own vocabulary, not a vendor, and running actual Redis here remains valid — so renaming the
+# config value would tie a seam to one product for no gain.
 #
 # Every published port is bound to 127.0.0.1 rather than the default 0.0.0.0. Docker's published ports are
 # implemented as DNAT rules that bypass most host firewall configuration, so a bare "5432:5432" on a laptop
@@ -31,7 +47,9 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    # Service name kept as `redis` deliberately: it is the hostname the backend resolves and what
+    # `EVENTS_BACKEND=redis` names. See the header for why the image is Valkey.
+    image: valkey/valkey:9.1-alpine
     ports:
       - "127.0.0.1:6379:6379"
 
