@@ -715,10 +715,30 @@ of this section.
   psql. Rule 19 applies throughout — every guild name, channel name, role name and audit entry these print
   is text a stranger's instance chose, so it goes through `cli/internal/termsafe` (M7).
 
-  Depends on M14 (the endpoints) and M10 (`apiclient`, the transport). Done when: a guild can be created,
-  renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
-  command line, with `--json` output validated against `contracts/cli-json/` and a non-member's refusal
-  reported as a usage error rather than a crash.
+  **It takes the report verbs too, assigned 2026-09-17 from M16's planning.** M16 builds four report
+  routes and the same reading that produced this milestone found the same gap behind them: no entry
+  anywhere gave a client a way to file a report or read a triage queue, and the only report surface in
+  `docs/design/tui/` is `6c`, which is explicitly M74's instance-admin queue. So `norite report` — file,
+  list, resolve, dismiss — lands here rather than becoming the third instance of a gap this project has
+  now found twice. The dependency is already satisfied by position: M16 precedes M17, which precedes this.
+
+  Rule 19 bites harder on these than on the guild verbs. A report's `detail` is free text written by a
+  stranger and its excerpt is message content written by whoever was reported, so both are exactly the
+  untrusted input `termsafe` exists for — and the excerpt is the first place this CLI prints content the
+  instance itself holds under a moderation permission.
+
+  **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
+  a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
+  `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
+  Whoever assigns it should read this paragraph first, because a gap recorded as half-closed is one nobody
+  looks at again.
+
+  Depends on M14 (the endpoints), M16 (the report endpoints) and M10 (`apiclient`, the transport). Done
+  when: a guild can be created, renamed, given a role and a channel, have an overwrite written and its
+  audit log read, entirely from the command line; a report can be filed and triaged the same way, with the
+  reporter absent from every triage output because M16's API never sends it; with `--json` output
+  validated against `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than
+  a crash.
 
 #### Phase D — Real-time gateway and daemon
 
