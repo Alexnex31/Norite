@@ -23,7 +23,7 @@ const testJWTSecret = "test-signing-key-at-least-32-bytes-long"
 // withoutConfigFile points file discovery at an empty document, so these tests exercise the
 // environment-and-defaults path regardless of whether the machine running them happens to have a real
 // /etc/norite/instance.toml. An empty file leaves every field unset, which is exactly the "no file
-// anywhere" case — see TestLoadFindsNoFile for the genuinely-absent path.
+// anywhere" case — see TestNoConfigFileIsNotAnError for the genuinely-absent path.
 func withoutConfigFile(t *testing.T) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "instance.toml")

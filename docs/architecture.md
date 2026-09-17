@@ -181,8 +181,8 @@ mutating method takes an already-authenticated `actor` and calls `roles.Resolve`
 before). Services depend on narrow repository interfaces over the single `internal/db` sqlc package.
 
 **Middleware chain order** (outermost first): `SanitizeInboundRequestID` → `RequestID` → `EchoRequestID` →
-`RealIP` → `Recoverer` → `SecureHeaders` → `StructuredLogger` → `RateLimit` (route-bucketed, `/64` IPv6
-grouping, §14) → `RefuseWhileStarting` (503 on every route but `/healthz` until migrations finish) →
+`RealIP` → `Recoverer` → `SecureHeaders` → `logging.RequestLogger` → `RateLimit` (route-bucketed, `/64`
+IPv6 grouping, §14) → `refuseWhileStarting` (503 on every route but `/healthz` until migrations finish) →
 `AuthenticateBearer` (populates `actor` from the JWT access token; 401 if absent on
 protected routes) → domain handler. No CSRF middleware exists on this surface at all — see "Auth design"
 below.
