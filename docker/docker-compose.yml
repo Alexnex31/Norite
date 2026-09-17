@@ -20,6 +20,12 @@
 # library's own vocabulary, not a vendor, and running actual Redis here remains valid — so renaming the
 # config value would tie a seam to one product for no gain.
 #
+# **What the tags above are pinned to, and the rule behind it.** The lesson from `redis:7` is not "pin
+# exactly" — it is *do not float across a range wide enough to change what the thing is*. `redis:7` floated
+# across minors and crossed a licence change doing it. `postgres:16-alpine` and `valkey/valkey:9.1-alpine`
+# float across patches only, which buys security fixes without that risk. `:latest` floats across
+# everything, which is why mailpit is the one pinned to an exact version.
+#
 # Every published port is bound to 127.0.0.1 rather than the default 0.0.0.0. Docker's published ports are
 # implemented as DNAT rules that bypass most host firewall configuration, so a bare "5432:5432" on a laptop
 # means anyone on the same café or office Wi-Fi can reach this Postgres — which trusts the throwaway
@@ -60,7 +66,11 @@ services:
   #
   # Nothing here ever leaves the machine: Mailpit is the destination, not a forwarder.
   mailpit:
-    image: axllent/mailpit:latest
+    # Pinned exactly, where postgres and valkey float within a line. `:latest` was the one tag here that
+    # could become a different major version between two `just dev` runs, which is the opposite of what a
+    # reproducible dev stack is for — and this file has now been bitten twice by tags moving underneath it
+    # (the `golang:` image at M14, `redis:7` at M16). Bump deliberately; nothing here faces the network.
+    image: axllent/mailpit:v1.31.1
     ports:
       # 1025 is SMTP, 8025 is the web UI — open http://localhost:8025 to read a reset email.
       - "127.0.0.1:1025:1025"
