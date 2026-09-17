@@ -639,6 +639,16 @@ re-derive:
   run time, so its binary version does not decide the outcome, while go-licenses decides entirely from the
   code in front of it — v1 reports the first licence in a `LICENSE` file and v2 reports every one, which is
   a seven-row difference on today's tree and would be a missed copyleft block on tomorrow's.
+
+  **That argument is about its *version* and says nothing about the Go it was built with, which is the
+  sixth pin and bit at M16.** `govulncheck` is a source-processing tool like `golangci-lint`, so a binary
+  built with an older Go cannot parse a newer toolchain's standard library: with go1.27 installed and a
+  binary built by go1.26, every module failed with `file requires newer Go version go1.27` and
+  `just security-scan` exited non-zero having checked nothing. It is not a pin anybody can read — the
+  binary's own build version is the value, `go version -m $(which govulncheck)` is the only way to see it,
+  and `go install golang.org/x/vuln/cmd/govulncheck@latest` after a toolchain upgrade is the fix. CI never
+  sees this because it installs the binary fresh with the same Go it builds with. Note the failure is loud
+  in the right direction: it refused to run rather than reporting a clean scan it had not performed.
 - **Every generator is invoked as `go run …@{{version}}`** — `sqlc`, `oapi-codegen`, and since M14
   `go-licenses` — rather than from a binary on `PATH`. Nothing has to be installed, and the pinned version
   cannot be shadowed by whatever a distro package put in `/usr/bin`. That is not hypothetical: the
