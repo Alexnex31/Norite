@@ -464,3 +464,24 @@ carries the condition that would reopen it.
   existence ever becomes a fact the permission system is supposed to keep, in which case this must be
   downgraded together with the three M15 paths — `Update`, `Delete` and `Send`'s `reply_to_id` — rather
   than alone.
+
+### `reports` grows without bound and nothing sweeps it
+- **Raised**: M16, `/security-sweep` (a category `/security-review` cannot report at any confidence)
+- **Verdict**: accepted risk
+- **Why**: there is no ceiling on rows per guild or per reporter and no retention pass — `auth.RunSweeper`
+  does not touch this table. That is the shape `audit_log_entries` already carries an entry for, and the
+  argument there rests on the write path being "rate-limited and permission-gated". Here the permission
+  half is weak in the way M15 had to correct for the audit log: filing needs only `PermViewChannel`, which
+  `defaultEveryonePermissions` grants to `@everyone`.
+  What holds it anyway is `000021`'s partial unique index. One open report per reporter per target means
+  report volume cannot outrun *target* volume, and today the only target type is a message — itself
+  created behind the send rate limit and the same permission. So inflating this table costs an attacker at
+  least what inflating `messages` costs, and the row is far smaller. A ceiling would also have to refuse
+  reports when full, which is the property that made a ceiling wrong for the audit log: a moderation
+  queue you can fill up to stop other people reporting is worse than one that grows.
+- **Reopens if**: a target type arrives that is **not** created behind a rate limit — `user` and `channel`
+  are both reserved in `reports.target_type`, and a reporter could file one report against every account
+  on the instance, which is bounded by the instance's user count rather than by anything they have to pay
+  for. M74 owns those types and should weigh a per-reporter open-report cap at the same time as the
+  per-user filing limit its entry now carries. Also reopens if the dedupe index is ever dropped or made
+  non-unique, since it is the whole of this argument.

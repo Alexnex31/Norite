@@ -1553,6 +1553,30 @@ of this section.
   Both are Instance Admin actions, so both write to `instance_audit_log` in the same transaction (rule 14),
   and both exclude E2E-encrypted DMs from anything that reads content (rule 13).
 
+  **It also owns the guild-level half's escalation, which this entry used to exclude by its own wording.**
+  Found by M16's `/security-sweep`, reading ADR 0013 against this entry. The ADR says an Instance Admin
+  may "review reports (guild-level **and** instance-level halves)"; the paragraph above narrows this
+  milestone to the scopes with "no guild owner to escalate to", so between the two documents nothing
+  builds the guild-level half. What M16 shipped makes that concrete: every report routes to
+  `routed_to = 0`, any `PermManageMessages` holder may close any report in the guild, and **`Resolve`
+  performs no check on who authored the target** — so a report about a moderator's own message lands in
+  that moderator's queue and they may dismiss it. The reporter is never told, and M16's deliberate
+  reporter-anonymity decision means the other moderators cannot see that the same person keeps being
+  reported.
+  That is not a defect in M16 — a guild-scoped system cannot adjudicate its own moderators, which is the
+  reason the tier above exists — but it is only *answered* here. So this milestone owes: guild-routed
+  reports reachable by an Instance Admin without already knowing the guild id, and a way for a report to
+  reach the tier above the people it is about. Whether that is an explicit escalation action, an
+  automatic re-route when the target is a moderator, or a periodic sweep is this milestone's call; the
+  security ledger's M16 reporter-anonymity entry is where the retaliation half of the reasoning lives.
+
+  **And the per-user filing limit, which is specified twice and built nowhere.** ADR 0013 says reports are
+  "rate-limited per user" and `architecture.md` §14.14 repeats it. M16 ships the per-IP REST bucket its
+  own entry asks for, plus `000021`'s partial unique index bounding one *open* report per reporter per
+  target — which is a per-user bound on duplicates and not on volume. A reporter may still file one report
+  against every message they can see. Naming it here because M16's entry does not, and a requirement in an
+  ADR that no milestone claims is one that ships unbuilt.
+
   Done when: an Instance Admin
   can review a filed report on a whisper and that specific access is itself an audit-log entry, a report
   filed against a plain DM or Group DM also reaches the Instance Admin triage queue, a timed-out account
