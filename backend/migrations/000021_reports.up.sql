@@ -43,15 +43,18 @@ CREATE TABLE reports (
   -- channel and a user do not resolve through `messages`), and it would make a report's routing depend on
   -- a row a channel deletion can cascade away — the opposite of why the message delete is soft.
   --
-  -- Measured on the same 220,000-report set the index below describes, one page of 50:
+  -- Measured on the same 220,000-report set the index below describes, one page of 50, **with both sides
+  -- carrying the join to `messages` that the shipped query carries** — the first version of these numbers
+  -- compared a bare `SELECT … FROM reports` against the full join, which flattered this column:
   --
-  --   this column, with its index      0.098 ms      21 buffers
-  --   the join §2 as drawn forces      6.593 ms   3,617 buffers   (a small guild)
-  --   the same join, heavy guild      13.526 ms   6,389 buffers
+  --                                   small guild                 heavy guild
+  --   this column, with its index     0.171 ms     57 buffers     0.562 ms      258 buffers
+  --   the join §2 as drawn forces     6.104 ms  3,319 buffers    26.947 ms   11,473 buffers
   --
-  -- 67x and 138x, and as with 000020's backlog index the buffer ratio is the half that matters: the join
-  -- walks reports the instance-wide way and discards what belongs to other guilds, so its work grows with
-  -- total instance traffic while the indexed form grows with this guild's.
+  -- 36x and 48x. As with 000020's backlog index the buffer ratio is the half that matters: the join walks
+  -- reports the instance-wide way and discards what belongs to other guilds, so its work grows with total
+  -- instance traffic while the indexed form grows with this guild's — which is why the heavy guild is the
+  -- worse case for the join and the better one for the column.
   --
   -- So it is denormalized at filing time from the resolved target. NULL is the instance-routed case,
   -- which is M74's: a whisper or a plain DM has no guild to escalate to, which is the whole reason that
@@ -90,35 +93,48 @@ CREATE TABLE reports (
 -- The triage page: one guild's reports, newest first, filtered to a status.
 --
 -- This is rule 7's index and the one query shape M16 adds that runs at load. Measured on PostgreSQL 16
--- against 220,000 reports over 2,000 guilds, 91% of them closed, ids interleaved across guilds — one page
--- of 50, newest first.
+-- against 220,000 reports over 2,000 guilds, 91% of them closed, ids interleaved across guilds, **every
+-- report's target resolving to a real message** — one page of 50, newest first.
+--
+-- **The numbers below are from the query that actually ships, joins included**, which is not where this
+-- block started. The first version measured `SELECT * FROM reports WHERE …` without the LEFT JOIN to
+-- `messages` that supplies `target_is_e2e` and `target_deleted_at`. The conclusion survived — this index
+-- still wins both filtered cases — but every figure was low by 2x to 3.6x, because the join adds a
+-- nested-loop primary-key lookup per row, 50 of them per page, and that is now the dominant cost.
+-- Re-measured by M16's optimization review. 000019 asserted an index's cost without checking and M14 had
+-- to go back and measure it; this is the same mistake one layer in, caught before merge rather than after.
 --
 -- **The interleaving is load-bearing and the first seed got it wrong.** Clustering one guild's reports at
 -- the top of the id range let every plan walk the primary key backwards and stop almost immediately,
 -- which made every index here look unnecessary. A snowflake is minted at filing time, so a guild's
--- reports are scattered through the instance's range; seeding them contiguously measures a table no
--- instance has.
+-- reports are scattered through the range; seeding them contiguously measures a table no instance has.
 --
---   status-filtered, a small guild (~110 reports — most guilds)
---     (guild_id, status, id DESC)    0.101 ms      21 buffers   Index Scan
---     (guild_id, id DESC)            0.644 ms     109 buffers   Bitmap Heap Scan → quicksort
---     neither                        9.268 ms   3,509 buffers   Bitmap Heap Scan → quicksort
+--   status-filtered, a small guild (~110 reports — most guilds, and the common case)
+--     (guild_id, status, id DESC)    0.251 ms      57 buffers
+--     (guild_id, id DESC)            0.446 ms     145 buffers
+--     neither                        5.279 ms   3,309 buffers
 --
 --   status-filtered, the heavy guild (22,099 reports, 2,009 open)
---     (guild_id, status, id DESC)    0.123 ms      58 buffers   Index Scan
---     (guild_id, id DESC)            0.615 ms     115 buffers   planner declines it, walks the pkey
---     neither                        0.625 ms     115 buffers
+--     (guild_id, status, id DESC)    0.546 ms     258 buffers
+--     (guild_id, id DESC)            1.067 ms     310 buffers
+--     neither                        0.702 ms     310 buffers
 --
--- So the status column earns its place in the middle, and that is the whole choice: the default triage
--- view is one status at a time, which makes it an equality the index can serve before ordering by id.
+-- So the status column earns its place in the middle: the default triage view is one status at a time,
+-- which makes it an equality the index can serve before ordering by id.
+--
+-- **The heavy guild's "neither" row beats (guild_id, id DESC) and that is not an argument against the
+-- index.** That guild holds 10% of every report on the instance, so walking the primary key backwards
+-- finds 50 of its rows almost at once. It is a density artifact — the same one the bad seed produced
+-- globally — and it disappears as soon as the instance has more guilds. The small guild, where the same
+-- walk costs 3,309 buffers, is the case that describes most of them.
 --
 -- **What it costs, stated because M12 got this axis wrong in the other direction.** With status between
 -- guild_id and id, the index cannot produce id-order for a guild *without* a status equality — so the
--- "every status" view falls to a bitmap heap scan and a quicksort, 0.409 ms and 109 buffers against
--- 0.289 ms and 56 for (guild_id, id DESC). That is the secondary view paying 1.4x so the primary one can
--- pay 6x less, it is still 21x better than no index at all, and it is bounded by the page LIMIT either
--- way. A second index to recover it would cost every insert — M15 measured three indexes on `messages` at
--- 26% of insert time — for a view nobody opens to triage.
+-- "every status" view falls to a bitmap heap scan and a quicksort, 0.951 ms and 505 buffers against
+-- 0.467 ms and 256 for (guild_id, id DESC). That is the secondary view paying about 2x so the primary one
+-- can pay about half, and it is bounded by the page LIMIT either way. A second index to recover it would
+-- cost every insert — M15 measured three indexes on `messages` at 26% of insert time — for a view nobody
+-- opens to triage.
 CREATE INDEX reports_guild_id_status_id_idx ON reports (guild_id, status, id DESC);
 
 -- The foreign-key index this project has now paid for three times by not having one: M11's replaced_by_id
