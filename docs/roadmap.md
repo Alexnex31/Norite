@@ -53,7 +53,7 @@ of this section.
 - **M2 — CLI skeleton and `norite instance init`, infrastructure config only**: the `norite` binary builds
   and runs on a `urfave/cli` v3 command tree, with `--json`/`--help` flag plumbing and shell completions
   wired once for every command that follows (`architecture.md` §4) — no functional client commands yet. On
-  that foundation, the setup wizard: DB-connection, storage-backend (local disk vs. S3/MinIO), ACME on/off
+  that foundation, the setup wizard: DB-connection, storage-backend (local disk vs. any S3-compatible service), ACME on/off
   (plus the LAN-only opt-out), and registration-gating prompts — plain sequential stdin/stdout prompts, not
   a full-screen TUI — writing a valid config file. **This milestone also decides and documents the instance
   config file's format, path, and precedence relative to the backend's `NORITE_*` environment variables**,
@@ -623,6 +623,44 @@ of this section.
   Instance-Admin-facing half does not exist until M74. Report filing is rate-limited now (reuses existing
   REST rate limiting). Depends on M15 (a message must exist to report). Done when: a guild member can file a
   report against a message, and a `PermManageMessages` holder can see and resolve it.
+
+  **The table as `architecture.md` §2 drew it could not answer this milestone's own done-when**, and that
+  was found by reading the DDL against this entry rather than by anything failing — the third time that
+  has worked, after M76a and M16a. There was no `guild_id` anywhere in `reports`, so a per-guild queue
+  would have had to reach the guild by joining `reports` → `messages` → `channels`: no index serves it, it
+  breaks outright for three of the four target types the column's own vocabulary reserves, and it makes
+  routing depend on a row a channel deletion can cascade away. Measured at 6.593 ms and 3,617 buffers
+  against 0.098 ms and 21 with the column. §2 is corrected and annotated per line, as M15 did for
+  `messages`, because that block is what somebody copies.
+
+  **Two disclosure decisions, both in `docs/security-ledger.md` with their reopening conditions.** The
+  reported message is readable by a `PermManageMessages` holder whether or not they can currently view the
+  channel it came from — M14's audit-log answer applied to content, because filtering on present
+  visibility lets somebody hide what they did by locking a channel afterwards. And **a guild moderator is
+  never told who filed a report**: the field is absent from the wire struct entirely, not stripped per
+  handler. That one is a one-way door and the reversible direction is to withhold, so it was taken
+  deliberately rather than by default.
+
+  **Content is resolved at read time and never snapshotted into the reports table**, which is also what
+  makes M16a worth building: a moderator triaging a report on a message edited after it was filed sees the
+  current text, and the prior versions are that milestone's surface. A snapshot would have answered the
+  question confidently and wrongly. The queue listing carries no content at all — two facts about the
+  target instead — so rule 13's exclusion has exactly one place to be right.
+
+  **Rule 2 is asserted in both directions.** Closing a report writes `report.resolve` or `report.dismiss`;
+  filing writes nothing, and that negative had no home until it was written as a test. Two verbs rather
+  than one because the outcome is the whole content of a triage decision — `member.role_add`'s split, not
+  `overwrite.set`'s.
+
+  **Scope reserved beyond the message target, and refused rather than stranded.** `target_type` stores
+  four values and accepts one; `under_review` is a real status nothing writes. Both are reserved so M61
+  and M74 do not renumber, and both are refused at the boundary — an accepted-but-unroutable report is
+  filed into a queue that never shows it, which is M14's unknown-filter lesson pointed at a write.
+
+  The client half is **M17a's**, assigned during this milestone's planning: nothing anywhere gave a client
+  a way to file or read a report, and the only report surface in `docs/design/tui/` is `6c`, which is
+  M74's instance queue. A guild-moderator triage *screen* remains unassigned and M17a's entry says so
+  rather than leaving the gap looking closed.
 - **M16a — Message edit history read surface**: `GET /channels/{channel_id}/messages/{message_id}/history`
   over the `message_edit_history` table M15 writes and nothing reads. Assigned 2026-09-15, having had no
   milestone since the table was first drawn; the gap was found the same way M76a's was, by reading
@@ -715,10 +753,30 @@ of this section.
   psql. Rule 19 applies throughout — every guild name, channel name, role name and audit entry these print
   is text a stranger's instance chose, so it goes through `cli/internal/termsafe` (M7).
 
-  Depends on M14 (the endpoints) and M10 (`apiclient`, the transport). Done when: a guild can be created,
-  renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
-  command line, with `--json` output validated against `contracts/cli-json/` and a non-member's refusal
-  reported as a usage error rather than a crash.
+  **It takes the report verbs too, assigned 2026-09-17 from M16's planning.** M16 builds four report
+  routes and the same reading that produced this milestone found the same gap behind them: no entry
+  anywhere gave a client a way to file a report or read a triage queue, and the only report surface in
+  `docs/design/tui/` is `6c`, which is explicitly M74's instance-admin queue. So `norite report` — file,
+  list, resolve, dismiss — lands here rather than becoming the third instance of a gap this project has
+  now found twice. The dependency is already satisfied by position: M16 precedes M17, which precedes this.
+
+  Rule 19 bites harder on these than on the guild verbs. A report's `detail` is free text written by a
+  stranger and its excerpt is message content written by whoever was reported, so both are exactly the
+  untrusted input `termsafe` exists for — and the excerpt is the first place this CLI prints content the
+  instance itself holds under a moderation permission.
+
+  **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
+  a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
+  `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
+  Whoever assigns it should read this paragraph first, because a gap recorded as half-closed is one nobody
+  looks at again.
+
+  Depends on M14 (the endpoints), M16 (the report endpoints) and M10 (`apiclient`, the transport). Done
+  when: a guild can be created, renamed, given a role and a channel, have an overwrite written and its
+  audit log read, entirely from the command line; a report can be filed and triaged the same way, with the
+  reporter absent from every triage output because M16's API never sends it; with `--json` output
+  validated against `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than
+  a crash.
 
 #### Phase D — Real-time gateway and daemon
 
@@ -866,6 +924,11 @@ of this section.
   (including the macOS Input Monitoring entitlement). This produces a written finding, not shippable code —
   its answer determines the exact shape of M32 and the daemon's hotkey-registration approach in M35. Do not
   proceed to M28–M32's detailed design before this completes.
+
+  Done when: the written finding exists and answers both questions per OS — can a headless voice-worker
+  reuse a foreground client's mic grant, and can the daemon register a global hotkey — each recorded as
+  yes, no, or conditional-on-what, with M32's and M35's shapes chosen from those answers. A spike whose
+  output is a document still needs a completion condition, and gating five milestones is the reason.
 - **M26 — Pion SFU core**: room/participant model, codec/track-kind-agnostic RTP forwarding (built
   generically from day one so M106–M107's video activation is additive, not a redesign). Done when: two test
   clients can exchange audio through the SFU.
@@ -1293,6 +1356,24 @@ of this section.
   tokens; already-issued short-lived access tokens expire naturally per the stateless-JWT design), and
   `instance_audit_log` recording every Instance Admin action.
 
+  **"Every Instance Admin action" includes the ones taken on guild-scoped surfaces, and those are the ones
+  easy to miss.** Found at M16's audit and reproduced: an Instance Admin belongs to no guild, holds ADR
+  0008's layer 1, and can therefore close any guild's reports — with the only record being an
+  `audit_log_entries` row in *that guild's* log, which `000015` cascades away when the guild is deleted.
+  So the action leaves no durable instance-level record at all. Rule 14 names report resolution
+  explicitly, which is what made this visible at M16 rather than earlier, but the shape is not M16's: it
+  is every guild mutation since M12 — guild deletion most sharply, since that one destroys its own
+  evidence by construction (M12's entry says so about the guild log and did not draw the rule 14
+  conclusion).
+
+  M16 could not fix it because this table does not exist yet, and inventing it for one writer ahead of
+  this milestone is the coupling M11 refused when it left `revokeEverything`'s unbuilt steps as named
+  gaps. What exists instead is a tripwire:
+  `reports.TestAnInstanceAdminsCloseIsRecordedOnlyInTheGuildLog` fails the moment
+  `instance_audit_log` is created, with the instruction attached. Whoever builds this milestone should
+  expect it to go red and should answer it for **every** guild-scoped path an Instance Admin can reach,
+  not only for reports.
+
   **M72a adds no statement to this transaction.** A ban and a guild's discoverability are independent
   actions an admin composes — see M72a, where that is decided and why.
 
@@ -1476,6 +1557,30 @@ of this section.
 
   Both are Instance Admin actions, so both write to `instance_audit_log` in the same transaction (rule 14),
   and both exclude E2E-encrypted DMs from anything that reads content (rule 13).
+
+  **It also owns the guild-level half's escalation, which this entry used to exclude by its own wording.**
+  Found by M16's `/security-sweep`, reading ADR 0013 against this entry. The ADR says an Instance Admin
+  may "review reports (guild-level **and** instance-level halves)"; the paragraph above narrows this
+  milestone to the scopes with "no guild owner to escalate to", so between the two documents nothing
+  builds the guild-level half. What M16 shipped makes that concrete: every report routes to
+  `routed_to = 0`, any `PermManageMessages` holder may close any report in the guild, and **`Resolve`
+  performs no check on who authored the target** — so a report about a moderator's own message lands in
+  that moderator's queue and they may dismiss it. The reporter is never told, and M16's deliberate
+  reporter-anonymity decision means the other moderators cannot see that the same person keeps being
+  reported.
+  That is not a defect in M16 — a guild-scoped system cannot adjudicate its own moderators, which is the
+  reason the tier above exists — but it is only *answered* here. So this milestone owes: guild-routed
+  reports reachable by an Instance Admin without already knowing the guild id, and a way for a report to
+  reach the tier above the people it is about. Whether that is an explicit escalation action, an
+  automatic re-route when the target is a moderator, or a periodic sweep is this milestone's call; the
+  security ledger's M16 reporter-anonymity entry is where the retaliation half of the reasoning lives.
+
+  **And the per-user filing limit, which is specified twice and built nowhere.** ADR 0013 says reports are
+  "rate-limited per user" and `architecture.md` §14.14 repeats it. M16 ships the per-IP REST bucket its
+  own entry asks for, plus `000021`'s partial unique index bounding one *open* report per reporter per
+  target — which is a per-user bound on duplicates and not on volume. A reporter may still file one report
+  against every message they can see. Naming it here because M16's entry does not, and a requirement in an
+  ADR that no milestone claims is one that ships unbuilt.
 
   Done when: an Instance Admin
   can review a filed report on a whisper and that specific access is itself an audit-log entry, a report
@@ -1756,9 +1861,18 @@ when a constraint the terminal imposed is lifted.
   Done when: the web SPA can log in and receive a session cookie without ever holding a raw Bearer token in
   JS, and a device-verification continuation is refused by a browser other than the one it was issued to.
 - **M109 — Web SPA rebuild**: adapt the originally-planned React SPA to the current backend/contracts.
+
+  Done when: the SPA builds with its API types generated from `contracts/` rather than hand-written, and a
+  person can sign in through the BFF, open a guild, read a channel and send a message in a browser.
 - **M110 — Web SPA pane-splitting**: CSS grid/flex-based resizable panes, `localStorage`-based layout
   persistence, independent of the CLI/TUI/GUI layouts.
+
+  Done when: a pane arrangement survives a reload, and changing it leaves the TUI's and GUI's layouts
+  untouched — the independence is the point, since the three clients share a daemon but not a screen.
 - **M111 — Web SPA E2E export**: the browser-side decrypt-and-export equivalent of M104.
+
+  Done when: a browser produces a decrypted archive of the account's own E2E conversations with no key
+  material leaving the page, and the result matches M104's export for the same account.
 
 #### Phase P — Flagship instance Kubernetes deployment (parallel track, not sequential with the feature
 phases above)
@@ -1775,16 +1889,70 @@ does not appear to disagree with them.
 
 - **M112 — Helm chart skeleton and API pods**: the base chart structure, the API/gateway `Deployment` behind
   an Ingress.
-- **M113 — CloudNativePG plus backups**: the Postgres operator in-cluster, native continuous backup/
-  WAL-archiving to in-cluster MinIO (M115).
-- **M114 — Redis in-cluster and event-bus/rate-limit activation**: activates the previously-reserved Redis
+
+  Done when: `helm install` against an empty cluster brings the API up behind an Ingress and
+  `/api/v1/healthz` answers 200 from outside the cluster.
+- **M113 — CloudNativePG plus backups**: the Postgres operator in-cluster, with backup and
+  point-in-time recovery on **CSI volume snapshots** rather than an object store.
+
+  **This used to archive WAL to in-cluster MinIO (M115), and both halves of that had gone stale.** MinIO's
+  community edition is archived — console stripped mid-2025, official binaries and images discontinued,
+  the repository no longer maintained — so the destination cannot be deployed. And CloudNativePG
+  deprecated the `barmanObjectStore` method it would have used at 1.26, with removal planned for 1.30, in
+  favour of the Barman Cloud plugin. Volume snapshots are a first-class backup method in the operator,
+  declarative, and need no object storage at all.
+
+  The useful consequence is that this milestone no longer depends on M115, which is the roadmap's only
+  case of a milestone needing something numbered after it. Dissolving the dependency is better than
+  swapping the two entries, because the numbers are cited across the doc set and the swap would fix an
+  ordering problem by creating a renumbering one.
+
+  Done when: a scheduled backup completes against a running cluster, a recovery into a fresh namespace
+  reaches a chosen point in time, and neither path requires an object-storage endpoint to exist.
+- **M114 — Valkey in-cluster and event-bus/rate-limit activation**: activates the previously-reserved
   pub/sub fan-out (required the moment multiple API replicas run) and switches `ulule/limiter` to its
   Redis-backed store for this deployment specifically.
-- **M115 — MinIO in-cluster**: the object storage backend for attachments (M58) and Postgres backups (M113).
+
+  **Valkey rather than Redis, decided at M16 and forced rather than preferred.** `redis:7-alpine` resolves
+  to Redis 7.4, which is RSALv2/SSPLv1 rather than BSD and reaches end of life on 2026-11-30 — so the
+  flagship would be running an unpatched datastore within weeks of that date. Valkey is the Linux
+  Foundation's BSD-3-Clause fork of 7.2.4, protocol- and format-identical, and `redis/go-redis/v9` talks to
+  it with no code change. Redis 8 was the other candidate and is genuinely open source again under a
+  tri-license including AGPLv3; Valkey wins on being plainly BSD with no license to read twice.
+
+  The library and config vocabulary keep the word "Redis" — `EVENTS_BACKEND=redis` names the protocol and
+  the limiter's store is called that upstream. Running actual Redis here stays valid.
+
+  Done when: a client connected to one API replica receives an event published by another, and a rate limit
+  counts across replicas rather than per pod — the second being the half that silently multiplies the
+  configured limit by the replica count if it is missed.
+- **M115 — In-cluster object storage for attachments**: an S3-compatible backend for attachments (M58),
+  and only attachments now that M113 backs up to volume snapshots.
+
+  **Deliberately not MinIO, and deliberately not naming its replacement yet.** MinIO was the original
+  choice and its community edition is archived, which is a reason to pick again rather than to pick
+  hastily: the candidates differ in ways this milestone is the right place to weigh — SeaweedFS
+  (Apache-2.0, the most complete Kubernetes story), Garage (AGPL-3.0, small and single-binary), or Ceph
+  via Rook (the most complete S3 semantics and a six-node floor). Nothing above this milestone cares
+  which: M58 defines a pluggable storage interface with local disk as the default, and the flagship's
+  choice of backend is a deployment decision rather than an architectural one.
+
+  Note the client side is unaffected. `minio-go` is the S3 *client* SDK, Apache-2.0 and maintained, and it
+  speaks to any compatible service — the archived project is the server.
+
+  Done when: an attachment uploaded through one API replica is readable through another, and switching the
+  backend is a configuration change rather than a code change.
 - **M116 — TURN/SFU pods**: `hostNetwork: true`, in their own dedicated "privileged" Pod-Security-Standard
-  namespace, separate from the "restricted" API/backend/Postgres/Redis/MinIO namespace.
+  namespace, separate from the "restricted" API/backend/Postgres/Redis/object-storage namespace.
+
+  Done when: two clients on different networks complete a call relayed by the in-cluster TURN/SFU, and the
+  privileged namespace contains those pods and nothing else — the isolation being the reason the split
+  exists rather than a tidier layout.
 - **M117 — `cert-manager` plus Ingress TLS**: disables the backend's built-in `certmagic` path for this
   deployment specifically (self-hosted instances keep it).
+
+  Done when: the Ingress serves a certificate issued and renewed by `cert-manager`, and the backend's own
+  ACME path is inactive in this deployment while remaining the default everywhere else.
 - **M118 — Graceful rollout**: a `preStop` hook sending the gateway's existing `Reconnect` op-code to local
   connections before pod termination, staggered across `terminationGracePeriodSeconds` rather than fired all
   at once, paired with randomized exponential backoff in the daemon's `Reconnect` handling. Done when: a
@@ -1792,9 +1960,19 @@ does not appear to disagree with them.
   reconnect spike against the remaining replicas' auth/DB layer.
 - **M119 — DB migration Job hook**: a Helm `pre-upgrade`/`pre-install` Job running `golang-migrate`, before
   new pods start.
+
+  Done when: an upgrade carrying a pending migration applies it to completion before any new pod serves
+  traffic, and a migration that fails aborts the release rather than leaving two schema versions running.
 - **M120 — Secrets**: plain Kubernetes Secrets applied via the Helm chart.
+
+  Done when: every credential the deployment needs is read from a Secret rather than a chart value, and
+  `helm template` renders none of them in plaintext.
 - **M121 — Autoscaling**: CPU/memory-based HPA via `metrics-server` (connection-count-based scaling
   documented as a future upgrade once M93's metrics are actually scraped by something in-cluster).
+
+  Done when: sustained load adds a replica, the new replica serves gateway traffic without disturbing the
+  existing ones, and scaling back down does not drop live connections — which is M118's `Reconnect` path
+  doing its job under a second trigger.
 - **M122 — NetworkPolicies and namespace isolation**: baseline pod-to-pod traffic restriction, plus the
   backend-side half of the same concern — a trusted-proxy peer allowlist for `httpx.RealIP`. As built at
   M1, the backend honors `X-Forwarded-For` whenever `NORITE_TRUST_PROXY_HEADERS` is on, without checking
@@ -1806,6 +1984,9 @@ does not appear to disagree with them.
   outside the configured CIDRs has its `X-Forwarded-For` ignored and is rate-limited by its real source
   address, verified by a test that forges the header from an untrusted peer.
 - **M123 — CI-triggered `helm upgrade`**: a simple CI pipeline deployment trigger, not GitOps.
+
+  Done when: a release lands on the flagship without a human running `helm`, and a failed upgrade stops
+  with the previous release still serving rather than half-applied.
 
 #### M124–M125 — Gap-closure milestones (numerically appended, logically earlier — same treatment as Phase P)
 
@@ -1852,8 +2033,10 @@ before M69 (friends). M57 (DMs), M68 (recently-met), and M69 (friends) must exis
 must exist before M59 (custom emoji). M97 must land before any further work in Phase M proceeds — its
 former license-compatibility gate is answered by ADR 0032, and what it leaves behind is the standing
 constraint that libsignal is imported only from `daemon/`. Phase P (Kubernetes) depends on M114 requiring
-Phase D's Redis-fan-out design to already exist as a seam, and M58/M113 requiring M115 (MinIO) to be stood
-up first within that phase. M124 depends on
+Phase D's Redis-fan-out design to already exist as a seam, and on M58 (attachments) preceding M115, which
+is a cross-track edge and therefore fine. **M113 no longer requires M115** — it backs up to volume
+snapshots — which removes what was the roadmap's only dependency running backwards against its own
+numbering. M124 depends on
 M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14 and M72, conceptually
 belonging in Phase L despite its number — the same "numerically-late, logically-earlier" treatment already
 established for Phase P above.

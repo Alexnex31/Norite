@@ -23,6 +23,31 @@ would fail. `ulule/limiter` switches to its Redis-backed store here specifically
 used to multiply an intended rate limit. Database migrations run via a Helm `pre-upgrade` Job hook — same
 `golang-migrate` tooling as self-hosted (ADR 0020), different trigger.
 
+**Amended 2026-09-17 — the object-storage choice, not the decision.** This ADR names MinIO because it was
+the obvious in-cluster S3-compatible store when this was written. Its community edition has since been
+archived: the admin console was removed mid-2025, official binaries and images were discontinued, and the
+repository is no longer maintained. The decision this ADR records — self-managed in-cluster operators over
+managed cloud services — is unchanged and is what matters here; only the product satisfying one line of it
+has to be re-picked, which `docs/roadmap.md` M115 now owns. The body above is left as written, because an
+ADR is the record of what was decided and when, not a description of the current world.
+
+Two consequences worth stating so they are not rediscovered. Postgres backups no longer need object storage
+at all — M113 moved to CSI volume snapshots, which also sidesteps CloudNativePG deprecating the
+`barmanObjectStore` method this ADR's "continuous WAL-archiving" implied. And `minio-go` is unaffected: it
+is the S3 *client* SDK, Apache-2.0 and maintained, and speaks to whatever backend M115 lands on.
+
+**Amended 2026-09-17 — the same thing happened to Redis, and the answer is Valkey.** This ADR's "a Redis
+Helm chart" is now a Valkey one. `redis:7-alpine` had resolved to Redis 7.4 since July 2024, which is
+RSALv2/SSPLv1 rather than BSD and reaches end of life on 2026-11-30; Valkey is the Linux Foundation's
+BSD-3-Clause fork of 7.2.4 and is protocol- and format-identical. The decision this ADR records —
+self-managed in-cluster components over managed cloud services — is again unchanged; only the product
+satisfying one line of it moved, and M114 owns the detail.
+
+Worth noting the pattern rather than just the two instances: both MinIO and Redis were vendor-controlled
+projects that tightened their licence, and in both cases what this ADR actually decided survived intact
+while the named product did not. That is an argument for naming *capabilities* in an ADR and leaving the
+product to the roadmap entry, which is where a swap costs one edit instead of an amendment.
+
 Graceful rollouts reuse the gateway's existing `Reconnect` op-code via a `preStop` hook, **staggered** across
 `terminationGracePeriodSeconds` with client-side randomized exponential backoff — a single replica's
 thousands of connections all reconnecting simultaneously would otherwise thundering-herd the remaining

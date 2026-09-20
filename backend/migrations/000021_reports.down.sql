@@ -1,0 +1,11 @@
+-- Back to an instance with nothing to triage.
+--
+-- One table and no ordering problem, unlike 000020's: nothing references `reports`. Its own outward
+-- references — users, guilds — are unaffected by dropping it, and target_id was never a foreign key at
+-- all (the up migration says why), so there is no constraint here to untangle first.
+--
+-- The indexes go with the table, including the partial unique one. As with every down migration in this
+-- tree, this is for a dev reset and is not a supported rollback for a populated instance: dropping it
+-- discards moderation records that the audit log's own entries still refer to by id, and nothing brings
+-- those back.
+DROP TABLE reports;

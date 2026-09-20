@@ -375,3 +375,113 @@ would flip them.
   M18's `MESSAGE_CREATE` dispatch is gated on the history bit rather than the view bit. Either would make
   message *existence* something the bit actually keeps, and at that point all three paths — `Update`,
   `Delete` and `Send`'s `reply_to_id` — must be downgraded together, not one at a time.
+
+---
+
+## M16 — guild-level reports
+
+The two entries below are not rejected *findings*. They are the milestone's two disclosure decisions,
+recorded here because each is a deliberate choice to disclose or withhold that a reviewer will otherwise
+raise as a finding — which is the same reason M14 put the audit log's visibility decision here, and each
+carries the condition that would reopen it.
+
+### A report's reported content is readable by a moderator who cannot view the channel it came from
+- **Raised**: M16, at design time
+- **Verdict**: accepted, and deliberate
+- **Why**: `GET /guilds/{guild_id}/reports/{report_id}` returns the reported message to any holder of
+  `PermManageMessages` in that guild, without consulting whether they can currently view the channel it
+  was posted in. This is M14's audit-log answer applied to content rather than metadata, and for the same
+  two reasons. Filtering on *present* visibility would let somebody hide what they did by locking a
+  channel down after the fact, which is precisely the move a report is filed about. And a report about a
+  channel the moderator is not a member of is exactly the report that needs reading — a moderation queue
+  that silently drops the cases its reader cannot already see is worse than one that discloses, because
+  nothing in it says a case was dropped.
+
+  The permission is therefore the boundary, and `PermManageMessages` already means "may act on somebody
+  else's message in this guild". The narrower alternatives were considered: gating on channel visibility
+  (above), and returning ids only and making the moderator fetch the message through the message
+  endpoints. The second fails in exactly the two cases reports exist for — a soft-deleted message, which
+  the listing filters, and a channel the moderator cannot open — so it is a triage view that cannot
+  triage.
+
+  Bounded in three ways rather than none: the queue listing carries no content at all, so this is one
+  route and not two; the content is resolved at read time rather than snapshotted, so nothing is stored a
+  second time; and E2E-encrypted content is excluded in the query regardless of any of the above.
+- **Reopens if**: a guild-scoped surface ever becomes capable of carrying E2E content (the exclusion stops
+  being redundant and becomes the only thing standing here), or if `PermManageMessages` is ever granted by
+  default rather than deliberately — today it is not in `defaultEveryonePermissions`, which is what keeps
+  the boundary meaningful. Also if M16a's edit-history reader chooses a *narrower* gate than this one,
+  since two moderation reads over the same message disagreeing about who may see it is a bug in whichever
+  came second.
+
+### A guild moderator is never told who filed a report
+- **Raised**: M16, at design time
+- **Verdict**: accepted, and deliberate — the withholding direction
+- **Why**: no route in `reports` returns `reporter_id` to a guild moderator, and the field is absent from
+  the wire struct entirely rather than stripped per handler. A guild moderator is not a vetted actor; a
+  report system has to survive the case where the moderator *is* the person being reported, and handing
+  them the reporter's identity undoes the protection at the one place it matters. `architecture.md` §2's
+  account-export asymmetry already encodes the same judgement — an export includes reports you filed and
+  excludes reports filed against you, explicitly to protect reporters from retaliation.
+
+  The cost is real and is the reason this is an entry rather than a footnote: a guild moderator cannot see
+  that five reports came from one person, which is the signal for report-spam. Two things bound it.
+  Migration 000021's partial unique index allows one open report per reporter per target, so the cheap
+  form of that abuse is already refused; and M74 owns reporter-history triage by name, for the tier that
+  *is* vetted.
+
+  The direction matters more than the decision. Adding the field later is additive for every client;
+  removing it after clients read it is not. So the reversible choice is to withhold now.
+- **Reopens if**: guild moderators gain a way to act on a *reporter* rather than on a report — a
+  report-spam control at the guild level would need to name somebody — or if M74's instance queue turns
+  out to be the only place abuse is visible and guild moderators are left unable to act on a pattern they
+  can see the shape of. Either is a reason to expose a stable pseudonym scoped to the guild rather than
+  the user id itself.
+
+### Filing a report is a work oracle for "this snowflake names a message"
+- **Raised**: M16, `/security-review`'s discovery pass, then verified independently
+- **Verdict**: accepted risk — real asymmetry, not practically exploitable
+- **Why**: `reports.File` reads the target message before it authorizes the channel, because the channel id
+  is only reachable *through* the message row — so the checks cannot be reordered. Both outcomes return a
+  byte-identical 404, but the work differs: one query when the id names nothing, four when it names a
+  message in a guild the caller is not in, eight for a member who holds no `PermViewChannel` on the
+  channel. Using this repository's own measurements for those queries (`guildauth.go`: `IsInstanceAdmin`
+  2.85 us, `ListGuildMemberAuthority` 19.42 us) the gap is roughly 50–150 us of indexed lookups — three
+  orders of magnitude below the M10 precedent that was worth closing, where `HashPassword` above the
+  address check separated ~1 ms from ~31 ms. It is under WAN jitter, and what it yields is only "some row
+  exists in `messages` with this id": not the channel, guild, author, content or time, since the attacker
+  supplied the id. Snowflakes share one sequence across every entity on the instance, so a scan costs
+  about a thousand probes per millisecond of history and returns aggregate message volume.
+- **Not the same as the M15 entry above, and the difference is the part worth keeping.** That one is about
+  a *member* of the guild, and its whole argument is that `channels.last_message_id` publishes the same
+  fact for free. **That argument does not reach a non-member**, which is who this one is about — so this is
+  a genuinely wider audience for a strictly narrower fact. Recorded separately rather than folded in,
+  because somebody checking whether the `last_message_id` argument covers them needs to find the answer
+  "no, and here is why it does not matter anyway".
+- **Reopens if**: the gap stops being microseconds. Concretely — `File` gains per-target work on the
+  *found* path (M74's whisper break-glass, a link-preview resolution, an E2E check that reads a keystore),
+  or the authorization path gains a network hop, which Phase P's Redis event bus would do. Also if message
+  existence ever becomes a fact the permission system is supposed to keep, in which case this must be
+  downgraded together with the three M15 paths — `Update`, `Delete` and `Send`'s `reply_to_id` — rather
+  than alone.
+
+### `reports` grows without bound and nothing sweeps it
+- **Raised**: M16, `/security-sweep` (a category `/security-review` cannot report at any confidence)
+- **Verdict**: accepted risk
+- **Why**: there is no ceiling on rows per guild or per reporter and no retention pass — `auth.RunSweeper`
+  does not touch this table. That is the shape `audit_log_entries` already carries an entry for, and the
+  argument there rests on the write path being "rate-limited and permission-gated". Here the permission
+  half is weak in the way M15 had to correct for the audit log: filing needs only `PermViewChannel`, which
+  `defaultEveryonePermissions` grants to `@everyone`.
+  What holds it anyway is `000021`'s partial unique index. One open report per reporter per target means
+  report volume cannot outrun *target* volume, and today the only target type is a message — itself
+  created behind the send rate limit and the same permission. So inflating this table costs an attacker at
+  least what inflating `messages` costs, and the row is far smaller. A ceiling would also have to refuse
+  reports when full, which is the property that made a ceiling wrong for the audit log: a moderation
+  queue you can fill up to stop other people reporting is worse than one that grows.
+- **Reopens if**: a target type arrives that is **not** created behind a rate limit — `user` and `channel`
+  are both reserved in `reports.target_type`, and a reporter could file one report against every account
+  on the instance, which is bounded by the instance's user count rather than by anything they have to pay
+  for. M74 owns those types and should weigh a per-reporter open-report cap at the same time as the
+  per-user filing limit its entry now carries. Also reopens if the dedupe index is ever dropped or made
+  non-unique, since it is the whole of this argument.

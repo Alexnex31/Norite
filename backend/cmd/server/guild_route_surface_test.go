@@ -47,7 +47,13 @@ func guildSurfaceRoutes(t *testing.T) []string {
 	var out []string
 	for op := range routedOperations(t, newTestRouterWithAuth(t)) {
 		_, route, _ := strings.Cut(op, " ")
-		if strings.HasPrefix(route, "/api/v1/guilds") || strings.HasPrefix(route, "/api/v1/channels") {
+		// /reports is here because filing is top-level — the target vocabulary spans objects with no
+		// guild — and a route outside these prefixes is one neither test below can see. M15 shipped the
+		// message routes invisible to both for a version of this reason; the prefix list is the other
+		// half of that lesson.
+		if strings.HasPrefix(route, "/api/v1/guilds") ||
+			strings.HasPrefix(route, "/api/v1/channels") ||
+			strings.HasPrefix(route, "/api/v1/reports") {
 			out = append(out, op)
 		}
 	}
@@ -144,6 +150,14 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		map[string]any{"content": "hello"}, withToken(f.ownerToken))
 	require.Equal(t, http.StatusCreated, message.Code, "seeding a message: %s", message)
 
+	// A real report, so the triage routes are exercised against something that exists — same argument as
+	// the message above. The owner reports their own message, which is pointless in production and is the
+	// cheapest way to get a row here.
+	report := f.api.call(http.MethodPost, "/api/v1/reports", map[string]any{
+		"target_type": "message", "target_id": message.field(t, "id"), "reason_category": "spam",
+	}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, report.Code, "seeding a report: %s", report)
+
 	ids := map[string]string{
 		"{guild_id}":     f.guildID,
 		"{channel_id}":   channel.field(t, "id"),
@@ -151,6 +165,7 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		"{user_id}":      f.memberID,
 		"{overwrite_id}": roleID,
 		"{message_id}":   message.field(t, "id"),
+		"{report_id}":    report.field(t, "id"),
 	}
 
 	cases := map[string]refusalCase{
@@ -167,6 +182,18 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		"POST /api/v1/channels/{channel_id}/messages":                {body: map[string]any{"content": "intruding"}},
 		"PATCH /api/v1/channels/{channel_id}/messages/{message_id}":  {body: map[string]any{"content": "hijacked"}},
 		"DELETE /api/v1/channels/{channel_id}/messages/{message_id}": {},
+
+		// The report routes. Filing is the interesting one: a stranger naming a real message id must be
+		// refused exactly as though it did not exist, because whether that id names a message in a channel
+		// they cannot see is what the channel filter withholds.
+		"POST /api/v1/reports": {body: map[string]any{
+			"target_type": "message", "target_id": message.field(t, "id"), "reason_category": "spam",
+		}},
+		"GET /api/v1/guilds/{guild_id}/reports":             {},
+		"GET /api/v1/guilds/{guild_id}/reports/{report_id}": {},
+		"POST /api/v1/guilds/{guild_id}/reports/{report_id}/resolve": {
+			body: map[string]any{"status": "dismissed"},
+		},
 
 		"GET /api/v1/guilds/{guild_id}":                    {},
 		"PATCH /api/v1/guilds/{guild_id}":                  {body: map[string]any{"name": "hijacked"}},
@@ -251,12 +278,26 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 	require.Equal(t, http.StatusCreated, role.Code, role)
 	roleID := role.field(t, "id")
 
+	// A message and a report against it, so the one report route that *does* write an entry has something
+	// to close. Both are the owner's own, which writes nothing itself — posting and filing are outside
+	// rule 2's narrowed scope — so neither disturbs the counts below.
+	message := f.api.call(http.MethodPost, "/api/v1/channels/"+channelID+"/messages",
+		map[string]any{"content": "hello"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, message.Code, "seeding a message: %s", message)
+
+	report := f.api.call(http.MethodPost, "/api/v1/reports", map[string]any{
+		"target_type": "message", "target_id": message.field(t, "id"), "reason_category": "spam",
+	}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, report.Code, "seeding a report: %s", report)
+
 	ids := map[string]string{
 		"{guild_id}":     f.guildID,
 		"{channel_id}":   channelID,
 		"{role_id}":      roleID,
 		"{user_id}":      f.memberID,
 		"{overwrite_id}": roleID,
+		"{message_id}":   message.field(t, "id"),
+		"{report_id}":    report.field(t, "id"),
 	}
 
 	const readsWriteNothing = "a GET writes no audit entry — rule 4 keeps reads side-effect-free"
@@ -292,6 +333,18 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 			exempt: "an author deleting their own writes nothing; the moderator path that does is " +
 				"asserted in the messages package, which can build two actors"},
 
+		// The report routes. Filing is exempt for M15's reason rather than a new one: a member filing
+		// exercises authority over nobody, so rule 2's narrowed wording does not reach it — and auditing
+		// it would put an unbounded write to this table within reach of @everyone, which is the specific
+		// hazard that narrowing was about.
+		//
+		// Closing one is the opposite: it is a decision taken about somebody else's report, by somebody
+		// exercising a moderation permission, and it is the case this test is for.
+		{route: "POST /api/v1/reports",
+			exempt: "performed above; filing is not administrative (rule 2, narrowed at M15)"},
+		{route: "GET /api/v1/guilds/{guild_id}/reports", exempt: readsWriteNothing},
+		{route: "GET /api/v1/guilds/{guild_id}/reports/{report_id}", exempt: readsWriteNothing},
+
 		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/roles", exempt: readsWriteNothing},
@@ -307,6 +360,12 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 		{route: "PATCH /api/v1/guilds/{guild_id}/roles", action: "role.reorder",
 			body: map[string]any{"roles": []map[string]any{{"id": roleID, "position": 1}}},
 			want: http.StatusOK},
+
+		// The one report route that writes an entry. `report.dismiss` is the verb its sibling would
+		// produce; both are covered for shape in the reports package, and this asserts the "exactly one,
+		// on this route" half the others cannot.
+		{route: "POST /api/v1/guilds/{guild_id}/reports/{report_id}/resolve", action: "report.resolve",
+			body: map[string]any{"status": "resolved"}, want: http.StatusOK},
 
 		{route: "PUT /api/v1/channels/{channel_id}/permissions/{overwrite_id}", action: "overwrite.set",
 			body: map[string]any{"type": 0, "allow": "0", "deny": "0"}, want: http.StatusOK},

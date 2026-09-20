@@ -19,6 +19,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
+	"github.com/Alexnex31/Norite/backend/internal/reports"
 )
 
 // apiBase is the versioned REST prefix every endpoint lives under (docs/architecture.md §2 "REST API").
@@ -36,6 +37,7 @@ type routerOptions struct {
 	AuthSvc  *auth.Service
 	Guilds   *guilds.Handler
 	Messages *messages.Handler
+	Reports  *reports.Handler
 }
 
 // authRateLimit is the stricter bucket the unauthenticated auth routes sit behind.
@@ -270,6 +272,21 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			// be, rather than making `guilds` the import root of every domain that acts inside a channel.
 			if opts.Messages != nil {
 				opts.Messages.Routes(r)
+			}
+
+			// Reports (M16), mounted the same way and in the same bucket.
+			//
+			// Filing sits at /reports rather than under a guild because the target vocabulary already
+			// spans objects that have none — a whisper and a plain DM file through this same endpoint at
+			// M74. Triage sits under /guilds/{guild_id}/reports because the guild is what is being
+			// authorized, and a guild in a query parameter would make the thing being checked an argument.
+			//
+			// Filing is rate-limited by the base bucket this group already carries, which is what M16's
+			// roadmap entry asks for. The per-*user* half §14.14 wants is 000021's partial unique index:
+			// the limiter groups by IP, and one open report per reporter per target is the bound that
+			// survives a shared NAT.
+			if opts.Reports != nil {
+				opts.Reports.Routes(r)
 			}
 
 			// The AGPL section 13 source offer. Public and unauthenticated by obligation rather than by

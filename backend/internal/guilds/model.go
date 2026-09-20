@@ -92,6 +92,15 @@ var allAuditActions = []string{
 	// coupling in the other direction. The two are pinned equal by a test in cmd/server, which already
 	// imports both packages and is where the route-surface tests live for the same reason.
 	"message.delete",
+
+	// Written by the `reports` package (M16), and here for the same reason and by the same mechanism.
+	// Two verbs rather than one because the outcome is the whole content of a triage decision — the split
+	// member.role_add/member.role_remove makes, not the one overwrite.set makes.
+	//
+	// **Filing a report writes no entry**, so there is deliberately no `report.create` here. A member
+	// filing exercises authority over nobody, and rule 2 has meant administrative mutations since M15.
+	"report.resolve",
+	"report.dismiss",
 }
 
 // AuditActions returns every action this build writes.

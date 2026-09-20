@@ -237,6 +237,8 @@ type Querier interface {
 	// holds in SQL rather than in whichever Go path remembered to check it.
 	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) (PasswordResetToken, error)
 	CreateRecoveryCode(ctx context.Context, arg CreateRecoveryCodeParams) error
+	// Milestone M16 — filing a report, and the guild-moderator triage queue that reads it.
+	CreateReport(ctx context.Context, arg CreateReportParams) (Report, error)
 	CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error)
 	// Refresh-session queries.
 	//
@@ -412,6 +414,31 @@ type Querier interface {
 	GetGuildForUpdate(ctx context.Context, id int64) (Guild, error)
 	GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error)
 	GetGuildMemberForUpdate(ctx context.Context, arg GetGuildMemberForUpdateParams) (GuildMember, error)
+	// One report in full: the only place this milestone returns reported content.
+	//
+	// Scoped by guild_id as well as id, so a report id from another guild is not reachable through this
+	// guild's path — the permission check covers the guild in the route, and M15's loadInChannel established
+	// that a mismatch answers 404 rather than disclosing that the id exists elsewhere.
+	//
+	// # Rule 13, and why it is two joins rather than a CASE
+	//
+	// `m` resolves the target and supplies the two facts about it. `mv` is the same row again behind
+	// `NOT mv.is_e2e`, and it is the only thing content is read from — so an encrypted message contributes a
+	// NULL content and a true `target_is_e2e`, which are different answers the service can tell apart.
+	//
+	// The exclusion is a **join predicate rather than a CASE expression** for two reasons that happen to
+	// agree. Rule 13 asks for it to be explicit and in the query, where a later reader of this join inherits
+	// it instead of having to remember it — the same argument that puts the @everyone delete guard in the
+	// statement. And an expression defeats sqlc's nullability inference: `CASE WHEN m.is_e2e THEN NULL ELSE
+	// m.content END` generated an `interface{}`, and casting it to text generated a non-nullable `string`
+	// that a NULL fails to scan into. A plain column through a LEFT JOIN types as `*string` correctly, which
+	// ListGuildMemberAuthority has relied on since M12.
+	//
+	// Today `is_e2e` is never true for a guild channel — E2E is DM-only, a DM has no guild, and this surface
+	// is guild-scoped. That is precisely why the exclusion is written rather than argued: M11a's lesson is
+	// that "closed by construction" stops being true quietly, and it was given a test anyway.
+	//
+	GetGuildReport(ctx context.Context, arg GetGuildReportParams) (GetGuildReportRow, error)
 	// The target's standing: the highest position among the roles one member holds (Milestone M13).
 	//
 	// The actor's standing comes free from ListGuildMemberAuthority above. This is the other side of every
@@ -453,6 +480,16 @@ type Querier interface {
 	// reading different rule sets is exactly what this query's comment above exists to prevent.
 	GetMemberHighestRolePosition(ctx context.Context, arg GetMemberHighestRolePositionParams) (int32, error)
 	GetMessage(ctx context.Context, id int64) (Message, error)
+	// The message a report is being filed against, deleted rows included.
+	//
+	// Deliberately not GetMessage, which filters `deleted_at IS NULL`. A message deleted seconds after it was
+	// posted is exactly what somebody reports, and refusing to file against one would make deleting fast the
+	// way to dodge a report. 000020 made the delete soft for this reason in as many words.
+	//
+	// Lives in this file rather than messages.sql because `reports` is its only caller and the difference from
+	// GetMessage is a reports decision, not a messages one — sqlc generates one package either way.
+	//
+	GetMessageForReport(ctx context.Context, id int64) (Message, error)
 	// Read for update, so an edit's prior-state read and its write are one atomic step.
 	//
 	// M14 learned this on audit_log_entries the hard way: a diff that reads prior state and then writes has a
@@ -735,6 +772,53 @@ type Querier interface {
 	// The join costs nothing measurable: the ids already restrict the scan to one guild's channels, so this
 	// adds a primary-key lookup per channel to a query that was already reading those rows.
 	ListGuildPermissionOverwrites(ctx context.Context, arg ListGuildPermissionOverwritesParams) ([]PermissionOverwrite, error)
+	// The same page across every status. See above for why this is a second query rather than a filter.
+	//
+	ListGuildReports(ctx context.Context, arg ListGuildReportsParams) ([]ListGuildReportsRow, error)
+	// One page of a guild's triage queue, filtered to a status.
+	//
+	// # The listing carries no content, and that is a decision rather than an omission
+	//
+	// It returns the report and two facts *about* the target — whether it is encrypted, and whether it has
+	// been deleted — so a queue can badge a row without disclosing anything. The reported text lives behind
+	// [GetGuildReport] alone.
+	//
+	// Three reasons, in the order they matter. It gives rule 13's exclusion exactly one place to be right
+	// instead of two, which is the M15 lesson about a bound enforced twice measuring two different things.
+	// It bounds the page: fifty reports carrying a 4,000-character message each is a 200 kB response on a
+	// surface somebody refreshes, which is rule 21 as much as §15. And no screen requires it — `6c` shows an
+	// excerpt in its table and `6c` is M74's instance queue, not this one.
+	//
+	// The earlier draft returned `left(content, $n)` here. Besides the above it would not type: an expression
+	// through a LEFT JOIN defeats sqlc's nullability inference, so the column came back as a non-nullable
+	// `string` that a missing target would fail to scan into at runtime.
+	//
+	// # Two queries rather than one with an optional filter
+	//
+	// The obvious shape is a single query with `status = $n OR $n IS NULL`. M14 measured the OR form on the
+	// audit log's cursor and it cannot become an index qual under a generic plan — and it recorded that
+	// COALESCE, which fixes that for a *range* bound, buys nothing for an equality filter, because the
+	// rewrite names the column on both sides. So an optional equality has no single-query answer that keeps
+	// the plan.
+	//
+	// 000021's measurement makes the split the honest one anyway: the two cases do not want the same plan.
+	// Filtered to a status the index serves the equality and the ordering together (0.101 ms, 21 buffers);
+	// unfiltered it falls to a bitmap heap scan and a quicksort (0.409 ms, 109 buffers), which is fine and is
+	// a different plan. One query that pretended otherwise would get the worse of the two for both.
+	//
+	// # The cursor
+	//
+	// `before` on the id, newest-first, the COALESCE spelling M14 measured at 9 buffers against 1,859 for the
+	// OR form. An id rather than created_at: a snowflake is time-ordered *and* unique, while nothing
+	// constrains created_at, so a page boundary inside a group of equal timestamps would skip or repeat a row.
+	//
+	// # The join
+	//
+	// LEFT, so a report whose target no longer resolves still appears — a moderator must be able to dismiss a
+	// report about something that is gone. It does **not** filter `deleted_at`: 000020 says the moderation
+	// surface reads deleted messages on purpose, and this is that surface.
+	//
+	ListGuildReportsByStatus(ctx context.Context, arg ListGuildReportsByStatusParams) ([]ListGuildReportsByStatusRow, error)
 	// Ordered by position, which the (guild_id, position) index serves.
 	ListGuildRoles(ctx context.Context, guildID int64) ([]Role, error)
 	// Everything outstanding, newest first.
@@ -894,6 +978,14 @@ type Querier interface {
 	// reservation, and either way the caller's answer is the same: it is not available. Nothing here needs to
 	// know which.
 	ReserveUsername(ctx context.Context, username string) error
+	// Close a report, with every guard in the statement.
+	//
+	// `status = 0` is the terminal-state guard: resolved and dismissed are terminal, so a second close finds
+	// no row and the service answers 409. Written here rather than as a read-then-write for the reason M10's
+	// invite redemption was rewritten this way — as a check-then-update, four of four concurrent racers got
+	// in. `guild_id` is in the WHERE for the cross-scope reason GetGuildReport states.
+	//
+	ResolveReport(ctx context.Context, arg ResolveReportParams) (Report, error)
 	// Scoped by user_id as well as id: an actor may only revoke their own tokens, and enforcing that in the
 	// statement means a handler cannot forget to check ownership (CLAUDE.md rule 1).
 	RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (ApiToken, error)
