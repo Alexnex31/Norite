@@ -136,6 +136,83 @@ func TestTheUnlockedEntryPointDoesNotLockTheChannelRow(t *testing.T) {
 			"serializes every member reading the same channel")
 }
 
+// TestIgnoringVisibilityLiftsTheRequirementAndNotTheRefusal is M16a's central guard, and it is here rather
+// than only in `messages` because the property it pins belongs to this package's contract.
+//
+// [guildauth.AuthorizeChannelIgnoringVisibility] does two things that sound like one. It stops *requiring*
+// PermViewChannel, so a moderator denied view still reaches content M16 already decided they may read. It
+// keeps the refusal *downgrade*, so somebody who fails and cannot view is answered 404 rather than 403 —
+// without which any member could probe for hidden channels in their own guild, the oracle M14 closed.
+//
+// The third assertion is the one worth having. Dropping the downgrade alongside the fold reads as a
+// two-line simplification, leaves the first two assertions passing, and is a disclosure.
+func TestIgnoringVisibilityLiftsTheRequirementAndNotTheRefusal(t *testing.T) {
+	t.Parallel()
+
+	q, pool, ctx := queries(t)
+
+	// A moderator who holds PermManageMessages and is denied PermViewChannel on the one channel — the state
+	// M13's bug and M16's manual pass both needed, and which no happy path constructs. The actor is never
+	// the owner: layer 2 short-circuits permission resolution, so an owner would pass every assertion here
+	// without exercising a single one of them.
+	const owner, moderator, plain = 9001, 9002, 9003
+	const guild, channel, everyone, modRole = 9010, 9011, 9012, 9013
+
+	for id, name := range map[int]string{owner: "iv-owner", moderator: "iv-mod", plain: "iv-plain"} {
+		mustExec(t, ctx, pool, `INSERT INTO users (id, username, email, display_name, created_at, updated_at)
+		                        VALUES ($1,$2,$3,$4,now(),now())`, id, name, name+"@example.test", name)
+	}
+	mustExec(t, ctx, pool, `INSERT INTO guilds (id, name, owner_id, created_at, updated_at)
+	                        VALUES ($1,'iv guild',$2,now(),now())`, guild, owner)
+	mustExec(t, ctx, pool, `INSERT INTO channels (id, guild_id, name, type, position, created_at, updated_at)
+	                        VALUES ($1,$2,'general',0,0,now(),now())`, channel, guild)
+	mustExec(t, ctx, pool, `INSERT INTO roles (id, guild_id, name, permissions, position, is_default,
+	                                           created_at, updated_at)
+	                        VALUES ($1,$2,'@everyone',$3,0,true,now(),now())`,
+		everyone, guild, int64(roles.PermViewChannel))
+	mustExec(t, ctx, pool, `INSERT INTO roles (id, guild_id, name, permissions, position, is_default,
+	                                           created_at, updated_at)
+	                        VALUES ($1,$2,'moderator',$3,1,false,now(),now())`,
+		modRole, guild, int64(roles.PermManageMessages))
+	for _, id := range []int{owner, moderator, plain} {
+		mustExec(t, ctx, pool, `INSERT INTO guild_members (guild_id, user_id, joined_at)
+		                        VALUES ($1,$2,now())`, guild, id)
+	}
+	mustExec(t, ctx, pool, `INSERT INTO guild_member_roles (guild_id, user_id, role_id)
+	                        VALUES ($1,$2,$3)`, guild, moderator, modRole)
+
+	// The deny is member-tier, which is the tier a role cannot lift: this is what "denied VIEW_CHANNEL"
+	// means in practice and what M16's blindmod account was built with.
+	for _, id := range []int{moderator, plain} {
+		mustExec(t, ctx, pool, `INSERT INTO permission_overwrites (channel_id, target_type, target_id,
+		                                                           allow, deny)
+		                        VALUES ($1,$2,$3,0,$4)`,
+			channel, roles.OverwriteTargetMember, id, int64(roles.PermViewChannel))
+	}
+
+	modActor := auth.Actor{UserID: snowflake.ID(moderator)}
+	plainActor := auth.Actor{UserID: snowflake.ID(plain)}
+
+	_, _, _, err := guildauth.AuthorizeChannelUnlocked(
+		ctx, q, modActor, snowflake.ID(channel), roles.PermManageMessages)
+	require.ErrorIs(t, err, httpx.ErrNotFound,
+		"the ordinary entry point must still fold in PermViewChannel and refuse as not-found — if this "+
+			"passes, the fold has been lost for every caller, not only for this one")
+
+	_, _, decision, err := guildauth.AuthorizeChannelIgnoringVisibility(
+		ctx, q, modActor, snowflake.ID(channel), roles.PermManageMessages)
+	require.NoError(t, err,
+		"a PermManageMessages holder denied only PermViewChannel must reach the content M16 already "+
+			"decided they may read — otherwise a moderator can read a reported message and not its history")
+	require.True(t, decision.Allows(roles.PermManageMessages))
+
+	_, _, _, err = guildauth.AuthorizeChannelIgnoringVisibility(
+		ctx, q, plainActor, snowflake.ID(channel), roles.PermManageMessages)
+	require.ErrorIs(t, err, httpx.ErrNotFound,
+		"a member who can neither view the channel nor moderate it must get 404 and never 403: the "+
+			"downgrade is a separate property from the fold, and a 403 here is a probe for hidden channels")
+}
+
 func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) {
 	t.Helper()
 	_, err := pool.Exec(ctx, sql, args...)
