@@ -375,7 +375,7 @@ dependency position without renumbering. Renumbering was the alternative and it 
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
 tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Twelve exist:
 `M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
-surface), `M16b` (opt-in per-guild message audit), `M17a` (guild administration verbs), `M20a` (first
+surface), `M16b` (opt-in per-guild message audit), `M17a` (Phase C's command-tree verbs), `M20a` (first
 usable client), `M56a` (message reactions), `M62a` (guild info and per-guild preferences), `M67a`
 (registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional) and
 `M76a` (self-service account export and deletion). `M72b` was the first `b`, which the convention already

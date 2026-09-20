@@ -731,8 +731,16 @@ of this section.
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and
   permission gating on shared-tag creation is enforced.
-- **M17a — Guild administration verbs**: the `norite guild`, `norite channel` and `norite role` command
+- **M17a — Phase C's command-tree verbs**: the `norite guild`, `norite channel` and `norite role` command
   groups over the REST surface M12, M13 and M14 built. Assigned 2026-09-15.
+
+  **Retitled 2026-09-20**, from "Guild administration verbs", because it had stopped being one: the report
+  verbs arrived from M16's planning and the message verbs from M16a's, and neither is guild
+  administration. The title now names what the milestone has become — every command-tree verb Phase C's
+  REST surface owes — which is also what keeps it true if a sixth surface lands here. The literal
+  alternative, enumerating the three groups, was declined for the reason the suffixed-milestone list in
+  `CLAUDE.md` is a standing warning: a name that lists its own members goes stale on the next addition,
+  silently, and that list said "seven" and omitted `M76a` for a whole milestone.
 
   **It closes the largest client gap in the plan, and the gap was invisible because nothing failed.**
   M12–M14 shipped twenty-one guild routes — guild CRUD, channels, roles, the position hierarchy, permission
@@ -765,18 +773,35 @@ of this section.
   untrusted input `termsafe` exists for — and the excerpt is the first place this CLI prints content the
   instance itself holds under a moderation permission.
 
+  **And the message verbs, assigned 2026-09-20 from M16a's planning.** The same reading found the same gap
+  a fourth time, and this time behind the oldest routes in Phase C: M15 shipped four message endpoints and
+  M16a adds a fifth, and **`norite message` appears nowhere in this file**. The only client that reads a
+  message anywhere in the plan is M20a's single pane. So `norite message` — list, send, edit, delete, and
+  `history` for M16a's moderation read — lands here, which makes this milestone the home of every
+  command-tree verb Phase C's REST surface owes rather than the fifth entry for one recurring gap.
+  Dependencies are satisfied by position: M15 and M16a both precede M17, which precedes this.
+
+  **It is not M20a's, and the two are not redundant.** M20a draws a TUI that reads its backlog from the
+  daemon's in-memory scrollback over the local socket; these are one-action-and-exit REST calls through
+  `apiclient`, pipeable and scriptable. ADR 0026 is what makes them complement rather than duplicate each
+  other: the CLI and TUI share one command tree, so a verb built here is a verb M20a's client inherits and
+  `M-x` can run, not one it reimplements. Rule 19 lands hardest here of the three groups — message content
+  is the untrusted text this CLI prints most of, and `norite message history` prints what somebody
+  deliberately edited out, which is the one output whose value depends on it being shown exactly as stored.
+
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
   `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
   Whoever assigns it should read this paragraph first, because a gap recorded as half-closed is one nobody
   looks at again.
 
-  Depends on M14 (the endpoints), M16 (the report endpoints) and M10 (`apiclient`, the transport). Done
-  when: a guild can be created, renamed, given a role and a channel, have an overwrite written and its
-  audit log read, entirely from the command line; a report can be filed and triaged the same way, with the
-  reporter absent from every triage output because M16's API never sends it; with `--json` output
-  validated against `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than
-  a crash.
+  Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read) and M10
+  (`apiclient`, the transport). Done when: a guild can be created, renamed, given a role and a channel,
+  have an overwrite written and its audit log read, entirely from the command line; a report can be filed
+  and triaged the same way, with the reporter absent from every triage output because M16's API never
+  sends it; a channel's backlog can be read, posted to, edited and deleted from the command line, and a
+  message's prior versions read by a moderator; with `--json` output validated against
+  `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
 
