@@ -538,7 +538,7 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   state no happy path constructs — a permission denied to somebody who already had messages, a channel
   that is not a text channel, eight senders in one channel, a message written in Japanese. That is the
   argument for the passes being separate skills with separate questions rather than one review.
-- **M16 — Guild-level reports**: done (tag pending). Migration `000021`, `backend/internal/reports`
+- **M16 — Guild-level reports**: done (tag `m16`). Migration `000021`, `backend/internal/reports`
   (the second package to reach `guildauth`), four endpoints — `POST /reports` plus the three under
   `/guilds/{guild_id}/reports` — the `reports.write`/`reports.moderate` scope pair, and the
   `report.resolve`/`report.dismiss` audit verbs. Decisions are in the roadmap entry, in `000021`, and in
