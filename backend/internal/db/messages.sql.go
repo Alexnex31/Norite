@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const appendMessageEditHistory = `-- name: AppendMessageEditHistory :exec
@@ -114,6 +116,64 @@ func (q *Queries) GetMessageForUpdate(ctx context.Context, id int64) (Message, e
 	return i, err
 }
 
+const getMessageWithHistoryTarget = `-- name: GetMessageWithHistoryTarget :one
+SELECT
+  m.id,
+  m.channel_id,
+  m.author_id,
+  m.is_e2e,
+  m.deleted_at,
+  m.edited_at,
+  mv.content AS current_content
+FROM messages m
+LEFT JOIN messages mv ON mv.id = m.id AND NOT mv.is_e2e
+WHERE m.id = $1
+`
+
+type GetMessageWithHistoryTargetRow struct {
+	ID             int64
+	ChannelID      int64
+	AuthorID       *int64
+	IsE2e          bool
+	DeletedAt      pgtype.Timestamptz
+	EditedAt       pgtype.Timestamptz
+	CurrentContent *string
+}
+
+// The message an edit history belongs to, deleted rows included (Milestone M16a).
+//
+// GetMessageForReport's twin, and deliberately a second query rather than a shared one: they differ in
+// what they mean, not only in what they select. That one answers "may this be reported"; this one answers
+// "what does this message say now", which the history envelope carries because there is no single-message
+// GET anywhere in the API — /channels/{id}/messages/{id} serves PATCH and DELETE only. Without the
+// current version a moderator reads every prior version and has no route that will tell them what the
+// message says today, which is the question a report is about.
+//
+// Deleted rows included for GetMessageForReport's reason, stated in 000020 in as many words: the soft
+// delete exists so a reported message still resolves, and a message deleted after it was reported is
+// exactly the one a moderator is reading the history of.
+//
+// Rule 13 is a LEFT JOIN predicate rather than a CASE, which is M16's shape for both its reasons. The
+// exclusion is inherited by whoever writes the next reader of this join, and sqlc cannot type an
+// expression through a LEFT JOIN — the CASE form generates interface{}, and casting it to text generates
+// a non-nullable string that a NULL fails to scan into at runtime. `mv` is this row again behind
+// NOT is_e2e, so an encrypted message yields NULL content beside a true flag rather than the same NULL a
+// vanished row would give.
+func (q *Queries) GetMessageWithHistoryTarget(ctx context.Context, id int64) (GetMessageWithHistoryTargetRow, error) {
+	row := q.db.QueryRow(ctx, getMessageWithHistoryTarget, id)
+	var i GetMessageWithHistoryTargetRow
+	err := row.Scan(
+		&i.ID,
+		&i.ChannelID,
+		&i.AuthorID,
+		&i.IsE2e,
+		&i.DeletedAt,
+		&i.EditedAt,
+		&i.CurrentContent,
+	)
+	return i, err
+}
+
 const listChannelMessages = `-- name: ListChannelMessages :many
 SELECT id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at FROM messages
 WHERE channel_id = $1
@@ -174,6 +234,67 @@ func (q *Queries) ListChannelMessages(ctx context.Context, arg ListChannelMessag
 			&i.DeletedAt,
 			&i.CreatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMessageEditHistory = `-- name: ListMessageEditHistory :many
+SELECT h.id, h.content, h.edited_at
+FROM message_edit_history h
+JOIN messages m ON m.id = h.message_id AND NOT m.is_e2e
+WHERE h.message_id = $1
+  AND h.id < COALESCE($3::bigint, 9223372036854775807)
+ORDER BY h.id DESC
+LIMIT $2
+`
+
+type ListMessageEditHistoryParams struct {
+	MessageID int64
+	Limit     int32
+	Before    *int64
+}
+
+type ListMessageEditHistoryRow struct {
+	ID       int64
+	Content  string
+	EditedAt pgtype.Timestamptz
+}
+
+// One page of a message's prior versions, newest first (Milestone M16a).
+//
+// # It pages, because nothing bounds how many versions a message has
+//
+// M12 settled that "a list that cannot be paginated is bounded at creation instead" — the channel and
+// role ceilings exist because of it. This table has neither half: Update carries no edit counter and no
+// cooldown, so a message accumulates versions without limit. Bounding *edits* was the alternative and it
+// is the wrong one, because a message that stops being editable after N corrections is a worse product
+// and a worse privacy story on the one table whose entries can never be erased.
+//
+// The cursor is an id and the COALESCE spelling is M14's, measured there at 9 buffers against 1,859.
+// Ordering by id rather than edited_at is what 000022's index replacement is for: nothing constrains
+// edited_at, which is transaction time, so two rows committing in the same microsecond would make a page
+// boundary skip or repeat.
+//
+// Rule 13 is an inner join here rather than the LEFT JOIN above, and the difference is deliberate: an
+// encrypted message has no readable versions at all, so the right answer is an empty page, while the
+// envelope's own is_e2e flag is what says why. Returning rows with NULL content would put the exclusion
+// in two places, which is the M15 lesson about a bound enforced twice.
+func (q *Queries) ListMessageEditHistory(ctx context.Context, arg ListMessageEditHistoryParams) ([]ListMessageEditHistoryRow, error) {
+	rows, err := q.db.Query(ctx, listMessageEditHistory, arg.MessageID, arg.Limit, arg.Before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMessageEditHistoryRow{}
+	for rows.Next() {
+		var i ListMessageEditHistoryRow
+		if err := rows.Scan(&i.ID, &i.Content, &i.EditedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

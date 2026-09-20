@@ -141,6 +141,13 @@ CREATE TABLE message_edit_history (
 -- Serves both readers, which is why it is composite rather than two indexes. M16a reads one message's
 -- versions in order; the CASCADE above needs the leading column to find them when a message is deleted.
 --
+-- **Superseded by 000022, which replaces this index with (message_id, id DESC).** The measurement below
+-- assumed M16a would order by edited_at and it does not — a cursor is an id (M14), so the ordering this
+-- index serves is not the one the shipped query asks for. The cascade figure is unaffected and was
+-- re-measured there; read 000022 for the comparison. Left in place rather than rewritten because an
+-- applied migration is not a document to edit, and the reasoning here is still why the column is indexed
+-- at all.
+--
 -- Measured against 200,000 history rows over 400,000 messages. Nothing writes this table until Part C of
 -- this milestone, so the rows were seeded to measure it — an index defended by an argument alone is the
 -- thing M13 disproved by checking, and an empty table cannot disprove anything.
