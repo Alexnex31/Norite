@@ -77,6 +77,21 @@ const (
 	ScopeMessagesRead  Scope = "messages.read"
 	ScopeMessagesWrite Scope = "messages.write"
 
+	// messages.moderate is a third on the same object, and it is guilds.audit's argument one level down.
+	//
+	// The permission layer already draws this line: `defaultEveryonePermissions` grants
+	// PermReadMessageHistory to @everyone and does not grant PermManageMessages to anybody. So
+	// messages.read is the conversation as it stands, which every member can read, and M16a's edit history
+	// is what somebody deliberately took *out* of it, readable only by a moderator. A scope that bundled
+	// the two would hand every backlog-reading bot the prior versions of every message in every guild it
+	// is in — the delegation model contradicting the permission model, which is the sentence M14 wrote
+	// when it split guilds.audit out of guilds.read.
+	//
+	// It gates the author's own read too, which reads oddly and does not matter: a user actor passes every
+	// scope check by design, so this only ever binds an API token reading its own bot's edit history, and
+	// widening a moderation scope for that is not a trade worth making. Scopes only ever restrict.
+	ScopeMessagesModerate Scope = "messages.moderate"
+
 	// Reports split by *audience* rather than by read and write, which is the one pair here that does.
 	//
 	// `reports.write` files a report; `reports.moderate` reads a guild's queue and closes what is in it.
@@ -108,7 +123,7 @@ const (
 var AllScopes = []Scope{
 	ScopeIdentify,
 	ScopeGuildsRead, ScopeGuildsWrite, ScopeGuildsAudit,
-	ScopeMessagesRead, ScopeMessagesWrite,
+	ScopeMessagesRead, ScopeMessagesWrite, ScopeMessagesModerate,
 	ScopeReportsWrite, ScopeReportsModerate,
 }
 
