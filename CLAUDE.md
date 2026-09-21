@@ -346,7 +346,21 @@ the exception; never fast-forward either way. **`main` is tagged at every milest
 
 The merge commit's **subject must be the PR title and its body the milestone summary** — GitHub's defaults
 ("Merge pull request #N from …") are not acceptable, because they are what turns the first-parent view into
-noise. Together the merge commit, the PR and the tag are how history stays navigable: **`git log main
+noise.
+
+**A milestone PR's title starts `M<N> — `, and therefore so does the merge commit's subject.** Derived from
+`git log main --oneline --first-parent`, where every milestone entry has carried it since M7 and the only
+subjects without one are the PRs that were not milestones (the AGPL relicensing, the M72a/M72b planning
+PR, the TUI split). The prefix is what makes the first-parent view answer "which milestone was that?"
+without opening anything, and it is the half of this convention that an agent drafting a PR keeps
+dropping — the rest of the title reads fine on its own, so nothing about the draft looks wrong. The
+≤72-character limit counts the prefix: the longest so far is M16's at 66.
+
+Written here because it was enforced by hand three times before it was written anywhere. The title after
+the prefix is a description, not a restatement of the milestone name — `M14 — the guild audit log, and
+what it records`, not `M14 — Guild audit log`.
+
+Together the merge commit, the PR and the tag are how history stays navigable: **`git log main
 --oneline --first-parent`** is the milestone-level view (plain `--oneline` now shows every sub-commit), the
 merged PR holds the review discussion, and a diff between two milestone tags (`git diff m4..m12`) jumps
 straight to "what changed between these two milestones." That first-parent view reads as one entry per
