@@ -1,0 +1,80 @@
+-- Milestone M16a — the index the edit-history read actually uses.
+--
+-- **This replaces an index rather than adding one, and the replacement is the whole migration.**
+--
+-- 000020 created `message_edit_history_message_id_edited_at_idx` and quoted a measurement for "M16a's
+-- read, one message's versions" taken against `ORDER BY edited_at`. M16a does not order by edited_at, and
+-- cannot: M14 settled that a cursor is an id and never a timestamp — not because timestamps collide here
+-- but because nothing *constrains* edited_at, which is `now()` and therefore transaction time, and a page
+-- boundary that loses a row rarely is one nobody reproduces from a report. So the shipped query pages on
+-- `id`, and 000020's index sorts by the wrong column.
+--
+-- That is 000021's mistake one milestone later: its index numbers were first taken without the LEFT JOIN
+-- the listing carries and were low by 2x to 3.6x, found by M16's optimization review. Both are the same
+-- error — a measurement describing a query that does not ship — and this one was caught at planning.
+--
+-- **Both shapes lead with message_id, so both serve the ON DELETE CASCADE identically**, and the cascade
+-- is what justified shipping an index at M15 at all. That is the safety property this migration had to
+-- prove rather than assume, and it is measured below.
+--
+-- A future retention prune (M125) is unaffected: a snowflake is time-sortable by construction (ADR 0003),
+-- so pruning by id and pruning by age are the same scan.
+
+DROP INDEX message_edit_history_message_id_edited_at_idx;
+
+-- Measured on PostgreSQL 16 against 220,036 history rows over 400,000 messages in 2,000 channels —
+-- 000020's scale, so the numbers are comparable to the ones it quotes. One page of 50, newest first,
+-- **with the join to `messages` that rule 13's exclusion puts in the shipped query**, because that is the
+-- correction 000021 had to make after the fact.
+--
+-- Three message sizes, because one would have answered wrongly. The median message with any history has
+-- one prior version; "common" is four; "heavy" is a message edited 20,001 times.
+--
+--                                 common (4)          middling (500)      heavy (20,001)
+--   (message_id, id DESC)      0.157 ms    226 buf   0.131 ms  217 buf   0.171 ms  241 buf
+--   (message_id, edited_at)    0.122 ms    253 buf   0.077 ms  231 buf   0.173 ms  255 buf
+--   neither                   10.616 ms 18,585 buf   0.113 ms  202 buf   0.168 ms  226 buf
+--
+-- **Read that table for what it does not say.** The two index shapes are indistinguishable in time — the
+-- edited_at row is *faster* in two of three columns, inside run-to-run noise — and this migration does not
+-- claim a speed-up. What separates them is the plan: at `common`, the id shape is an index scan with no
+-- sort node, while the edited_at shape is an index scan plus a quicksort, and at `middling` the planner
+-- abandons the edited_at index entirely for a primary-key backward walk. An index the shipped query either
+-- sorts on top of or declines to use is one paying its insert cost for less than it should.
+--
+-- **The middling and heavy rows argue for nothing and are quoted so nobody re-derives them.** A backward
+-- walk of the primary key filtering on message_id finds 50 rows quickly whenever a message holds a decent
+-- share of the table, so at those sizes every configuration including "neither" is fast. It is the same
+-- density artifact 000021 recorded for its heavy guild. The case that describes nearly every message is
+-- `common`, and there the absence of an index is a sequential scan: 82x the buffers, which is the ratio
+-- that matters because it grows with total instance traffic rather than with this message's history.
+--
+-- **The first seed measured nothing, twice, and both ways are 000021's own lessons re-lived.** Ids were
+-- assigned per message rather than interleaved, so the heavy and middling messages sat at the top of the
+-- range and a primary-key walk found them instantly — every candidate index looked unnecessary. And
+-- edited_at was seeded out of step with id, which would have let each index flatter whichever ordering it
+-- was asked for; in production the two agree by construction, both minted in the edit's own transaction.
+-- The final seed assigns every id in one global shuffle and derives edited_at from id order.
+CREATE INDEX message_edit_history_message_id_id_idx
+  ON message_edit_history (message_id, id DESC);
+
+-- What the swap costs on the write path: nothing measurable. 50,000 inserts, mean of three runs:
+--
+--   (message_id, id DESC)      9.23 us/row
+--   (message_id, edited_at)    9.04 us/row
+--   neither                    7.98 us/row
+--
+-- The two shapes are within 2% of each other, so this is a replacement in the honest sense rather than an
+-- index added under another name. Both cost about 15% of insert time against no index, which is the price
+-- M15 already accepted here and is well under the 26% three indexes cost on `messages`.
+--
+-- And the number that justified the index in the first place, preserved: deleting 500 messages that carry
+-- history, timing the FK cascade trigger alone, three runs each.
+--
+--   (message_id, id DESC)      11.2 / 11.8 / 11.6 ms
+--   (message_id, edited_at)    11.9 / 11.9 /  8.4 ms
+--   neither                 2,192  / 2,240  / 2,243  ms
+--
+-- ~190x either way, and 000020 measured 2,304.611 ms for the unindexed cascade on a comparable table —
+-- close enough to say this seed reproduces that one. The replacement does not regress it, which was the
+-- thing that could have made the swap a bad trade invisibly.

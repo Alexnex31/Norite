@@ -57,12 +57,16 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 func (h *Handler) Routes(r chi.Router) {
 	read := auth.RequireScope(auth.ScopeMessagesRead)
 	write := auth.RequireScope(auth.ScopeMessagesWrite)
+	// M16a. A third scope rather than messages.read, because the permission layer already separates the
+	// backlog from what was edited out of it — see auth.ScopeMessagesModerate.
+	moderate := auth.RequireScope(auth.ScopeMessagesModerate)
 
 	r.Route("/channels/{channel_id}/messages", func(r chi.Router) {
 		r.With(read).Get("/", h.list)
 		r.With(write).Post("/", h.send)
 		r.With(write).Patch("/{message_id}", h.update)
 		r.With(write).Delete("/{message_id}", h.delete)
+		r.With(moderate).Get("/{message_id}/history", h.history)
 	})
 }
 
@@ -214,6 +218,52 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.WriteError(w, r, httpx.ErrUnauthorized)
+		return
+	}
+
+	channelID, err := pathID(r, "channel_id")
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	messageID, err := pathID(r, "message_id")
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+
+	before, err := queryID(r, "before")
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+
+	var limit int32
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, convErr := strconv.ParseInt(raw, 10, 32)
+		if convErr != nil || n < 1 || n > maxPageSize {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest,
+				"limit must be between 1 and %d", maxPageSize))
+			return
+		}
+		limit = int32(n)
+	}
+
+	history, err := h.svc.History(r.Context(), actor, HistoryInput{
+		ChannelID: channelID, MessageID: messageID, Before: before, Limit: limit,
+	})
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, history)
 }
 
 // pathID parses a snowflake from the path, answering 404 rather than 400 on a malformed one.

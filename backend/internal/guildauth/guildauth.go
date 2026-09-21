@@ -155,7 +155,12 @@ func (d Decision) OutranksMember(targetID snowflake.ID, targetStanding int32) bo
 //     at a guild in their own sidebar would be a bug rather than a defense.
 //
 // Neither carries the permission that was missing. A message naming the bit is a small map of the guild's
-// configuration, and every caller of this function is a mutation that has already decided to refuse.
+// configuration, and a caller reaching either branch has already decided to refuse.
+//
+// That sentence said "every caller of this function is a mutation" until M16a. It stopped being true at
+// M16, whose triage listing is a GET, and M16a adds a second read caller — which is worth correcting
+// rather than leaving, because the claim reads as a reason the refusal may be terse and a reader would
+// take it as still holding.
 //
 // Rule 1 requires resolution "using data freshly loaded for the specific guild/channel in the request
 // path". A mutation that resolves permissions on the pool and then writes in a transaction reads a
@@ -277,7 +282,7 @@ func (d Decision) InstanceAdmin() bool { return d.instanceAdmin }
 func AuthorizeChannel(
 	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
 ) (db.Channel, snowflake.ID, Decision, error) {
-	return authorizeChannel(ctx, q, actor, channelID, need, true)
+	return authorizeChannel(ctx, q, actor, channelID, need, channelAuth{lock: true, requireView: true})
 }
 
 // AuthorizeChannelUnlocked is AuthorizeChannel without the row lock.
@@ -311,16 +316,67 @@ func AuthorizeChannel(
 func AuthorizeChannelUnlocked(
 	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
 ) (db.Channel, snowflake.ID, Decision, error) {
-	return authorizeChannel(ctx, q, actor, channelID, need, false)
+	return authorizeChannel(ctx, q, actor, channelID, need, channelAuth{requireView: true})
+}
+
+// AuthorizeChannelIgnoringVisibility is [AuthorizeChannelUnlocked] without the PermViewChannel fold.
+//
+// # What it lifts, and what it deliberately does not
+//
+// It lifts the *requirement*: a caller holding `need` in this channel is allowed even if an overwrite
+// denies them PermViewChannel. It does **not** lift the refusal downgrade — a caller who fails and also
+// cannot view the channel is still answered 404 rather than 403, so nothing here discloses a hidden
+// channel's existence to somebody who could not already see it. Those are two separate properties of
+// authorizeChannel and only the first is this function's; the second is load-bearing anti-enumeration and
+// is commented where it lives.
+//
+// # The one shape this is for
+//
+// A moderation read over *content* that the caller reached through a surface which already showed it to
+// them. M16 settled that a report's content is readable by a PermManageMessages holder regardless of
+// whether they can currently view the channel it came from, for M14's two reasons: filtering on present
+// visibility lets somebody hide their tracks by locking a channel down afterwards, and a report about a
+// channel the moderator is not in is exactly the report that most needs reading. M16a's edit-history read
+// is the same content reached by the same moderator one step later, so it answers the same way — and a
+// route that refused would mean a moderator could read what a reported message says now and not what it
+// said before, inside the flow that milestone exists to serve.
+//
+// # Why this is in guildauth rather than open-coded
+//
+// Because the alternative is worse in a way this project has paid for three times. A caller wanting this
+// would otherwise read the channel row itself and re-derive [guildOf]'s judgement that a DM answers 404 —
+// a second copy of a decision, in a package that has never touched a channel row, which is the drift
+// `termsafe`, ChannelGuildText and the audit verbs each had to be pinned against. Keeping it here also
+// keeps it greppable: `git grep AuthorizeChannelIgnoringVisibility` is the complete list of places
+// visibility was skipped on purpose, and an open-coded version would produce no such list.
+//
+// **The fold is a default, not a wall.** A default with no documented exit gets routed around, and the
+// routes around it are worse than the exit. Do not reach for this one to make a test pass or to "fix" a
+// 404 — if a caller manages the channel row, it wants [AuthorizeChannel]; if it acts inside a channel it
+// can see, it wants [AuthorizeChannelUnlocked]. This is for content a moderator was already shown.
+func AuthorizeChannelIgnoringVisibility(
+	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID, need roles.Permission,
+) (db.Channel, snowflake.ID, Decision, error) {
+	return authorizeChannel(ctx, q, actor, channelID, need, channelAuth{})
+}
+
+// channelAuth is how the three entry points differ, named rather than passed as bare booleans — two
+// unlabelled `true`s at a call site is how the wrong one gets picked.
+type channelAuth struct {
+	// lock reads the channel row FOR UPDATE. See [AuthorizeChannel] for the test of who needs it.
+	lock bool
+	// requireView adds PermViewChannel to the caller's need. True for every caller but one; see
+	// [AuthorizeChannelIgnoringVisibility] for the exception and why it is not a hole.
+	requireView bool
 }
 
 func authorizeChannel(
 	ctx context.Context, q db.Querier, actor auth.Actor, channelID snowflake.ID,
-	need roles.Permission, lock bool,
+	need roles.Permission, opts channelAuth,
 ) (db.Channel, snowflake.ID, Decision, error) {
 	var row db.Channel
 	var err error
-	if lock {
+	if opts.lock {
 		row, err = q.GetChannelForUpdate(ctx, int64(channelID))
 	} else {
 		row, err = q.GetChannel(ctx, int64(channelID))
@@ -337,7 +393,12 @@ func authorizeChannel(
 		return db.Channel{}, 0, Decision{}, err
 	}
 
-	allowed, err := Authorize(ctx, q, actor, guildID, channelID, need.Add(roles.PermViewChannel))
+	asked := need
+	if opts.requireView {
+		asked = need.Add(roles.PermViewChannel)
+	}
+
+	allowed, err := Authorize(ctx, q, actor, guildID, channelID, asked)
 	if err != nil {
 		// A member of the guild who cannot *see* this channel is refused as though it were not there.
 		//
@@ -349,6 +410,13 @@ func authorizeChannel(
 		//
 		// Only the view permission is consulted here. Somebody who can see the channel and merely lacks
 		// PermManageRoles still gets 403, because for them the channel's existence was never a secret.
+		//
+		// **This runs for every variant, including the one that does not require viewing.** Lifting the
+		// view *requirement* and lifting the refusal's *downgrade* are separate decisions, and only the
+		// first is [AuthorizeChannelIgnoringVisibility]'s. Dropping the second would answer 403 to a
+		// member who can neither see the channel nor moderate it, against 404 for an id naming nothing —
+		// which hands any member a probe for hidden channels in their own guild, the exact oracle M14
+		// closed. Getting this wrong would look like a two-line simplification.
 		if errors.Is(err, httpx.ErrForbidden) {
 			_, viewErr := Authorize(ctx, q, actor, guildID, channelID, roles.PermViewChannel)
 			switch {

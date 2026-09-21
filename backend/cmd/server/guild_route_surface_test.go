@@ -182,6 +182,9 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		"POST /api/v1/channels/{channel_id}/messages":                {body: map[string]any{"content": "intruding"}},
 		"PATCH /api/v1/channels/{channel_id}/messages/{message_id}":  {body: map[string]any{"content": "hijacked"}},
 		"DELETE /api/v1/channels/{channel_id}/messages/{message_id}": {},
+		// M16a. A stranger must be refused here exactly as they are on the backlog — the route authorizes
+		// without the PermViewChannel fold, which lifts a *requirement* and must not lift the refusal.
+		"GET /api/v1/channels/{channel_id}/messages/{message_id}/history": {},
 
 		// The report routes. Filing is the interesting one: a stranger naming a real message id must be
 		// refused exactly as though it did not exist, because whether that id names a message in a channel
@@ -325,6 +328,8 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 		// TestAModeratorDeletingSomebodyElsesMessageIsAudited — and its counterpart asserts that an author
 		// deleting their own writes nothing, which is the property with no other home.
 		{route: "GET /api/v1/channels/{channel_id}/messages", exempt: readsWriteNothing},
+		{route: "GET /api/v1/channels/{channel_id}/messages/{message_id}/history",
+			exempt: readsWriteNothing},
 		{route: "POST /api/v1/channels/{channel_id}/messages",
 			exempt: "sending is not administrative (rule 2, narrowed at M15) and writes no entry"},
 		{route: "PATCH /api/v1/channels/{channel_id}/messages/{message_id}",

@@ -341,14 +341,15 @@ func (e ResolveReportRequestStatus) Valid() bool {
 
 // Defines values for Scope.
 const (
-	GuildsAudit     Scope = "guilds.audit"
-	GuildsRead      Scope = "guilds.read"
-	GuildsWrite     Scope = "guilds.write"
-	Identify        Scope = "identify"
-	MessagesRead    Scope = "messages.read"
-	MessagesWrite   Scope = "messages.write"
-	ReportsModerate Scope = "reports.moderate"
-	ReportsWrite    Scope = "reports.write"
+	GuildsAudit      Scope = "guilds.audit"
+	GuildsRead       Scope = "guilds.read"
+	GuildsWrite      Scope = "guilds.write"
+	Identify         Scope = "identify"
+	MessagesModerate Scope = "messages.moderate"
+	MessagesRead     Scope = "messages.read"
+	MessagesWrite    Scope = "messages.write"
+	ReportsModerate  Scope = "reports.moderate"
+	ReportsWrite     Scope = "reports.write"
 )
 
 // Valid indicates whether the value is a known member of the Scope enum.
@@ -361,6 +362,8 @@ func (e Scope) Valid() bool {
 	case GuildsWrite:
 		return true
 	case Identify:
+		return true
+	case MessagesModerate:
 		return true
 	case MessagesRead:
 		return true
@@ -861,6 +864,47 @@ type Message struct {
 	Type int `json:"type"`
 }
 
+// MessageEditHistory A message's prior versions plus what it says now. The current text is here because no endpoint returns a single message on its own, so a caller reading this would otherwise have every version except the one that matters most.
+//
+// `current_content` is null exactly when `is_e2e` is true, and `versions` is empty in that case as well — the exclusion lives in the query rather than in the response mapping, so there is one place for it to be right instead of two. `deleted_at` is set for a soft-deleted message, whose history is still readable: deleting fast must not be the way to make a reported message's history vanish.
+type MessageEditHistory struct {
+	// AuthorId Null for a message whose author's account was hard-deleted.
+	AuthorId *Snowflake `json:"author_id"`
+
+	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	ChannelId      Snowflake  `json:"channel_id"`
+	CurrentContent *string    `json:"current_content"`
+	DeletedAt      *time.Time `json:"deleted_at"`
+
+	// EditedAt Null for a message that has never been edited, whose `versions` is empty.
+	EditedAt *time.Time `json:"edited_at"`
+
+	// IsE2e True when the message is E2E-encrypted, in which case no content is returned.
+	IsE2e bool `json:"is_e2e"`
+
+	// MessageId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	MessageId Snowflake            `json:"message_id"`
+	Versions  []MessageEditVersion `json:"versions"`
+}
+
+// MessageEditVersion One version a message had before the edit that replaced it. `edited_at` is when that replacement happened, so it is the moment this text stopped being current rather than when it was written.
+type MessageEditVersion struct {
+	Content  string    `json:"content"`
+	EditedAt time.Time `json:"edited_at"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+}
+
 // MintApiTokenRequest defines model for MintApiTokenRequest.
 type MintApiTokenRequest struct {
 	Name string `json:"name"`
@@ -1197,7 +1241,7 @@ type Role struct {
 //
 // There is deliberately no scope for managing API tokens: minting, listing and revoking all require a logged-in user, because a credential that can create credentials can escalate itself.
 //
-// `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both. `guilds.audit` is separate again, and for the same reason applied one level down. The read scope covers a guild's *current state*; the audit log is its history and attribution — who kicked whom, which permission changed, what a nickname used to be. The permission layer already draws that line with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`, so a scope that bundled the log with the channel listing would have the delegation model contradicting the permission model. `messages.read` and `messages.write` are separate from the guild pair, and from each other, for the same reasons one level down. `guilds.read` enumerates a guild's structure, which is metadata; message history is the conversation itself, and a credential that can read every word said in a guild is a different thing to hand out. A webhook-shaped bot that only posts needs `messages.write` and never a backlog.
+// `guilds.read` and `guilds.write` are separate rather than one `guilds` scope, because the two have very different blast radii and the common bot wants only the first — a status bot that lists channels should not be one compromise away from deleting the guild. **Write does not imply read**: a scope bounds a delegated credential, and holding one is not a reason to be granted another, so a token that needs both asks for both. `guilds.audit` is separate again, and for the same reason applied one level down. The read scope covers a guild's *current state*; the audit log is its history and attribution — who kicked whom, which permission changed, what a nickname used to be. The permission layer already draws that line with `VIEW_AUDIT_LOG`, which is granted to nobody by default and is not implied by `MANAGE_GUILD`, so a scope that bundled the log with the channel listing would have the delegation model contradicting the permission model. `messages.read` and `messages.write` are separate from the guild pair, and from each other, for the same reasons one level down. `guilds.read` enumerates a guild's structure, which is metadata; message history is the conversation itself, and a credential that can read every word said in a guild is a different thing to hand out. A webhook-shaped bot that only posts needs `messages.write` and never a backlog. `messages.moderate` is a third on the same object and the same argument one level down again. The permission layer already draws this line: `READ_MESSAGE_HISTORY` is in `@everyone`'s default grant and `MANAGE_MESSAGES` is in nobody's, so `messages.read` is the conversation as it stands while M16a's edit history is what somebody deliberately took out of it. Bundling them would hand every backlog-reading bot the prior versions of every message in every guild it is in.
 //
 // **The report pair splits by audience rather than by read and write**, and it is the one pair here that does. `reports.write` files a report; `reports.moderate` reads a guild's triage queue and closes what is in it. A read/write split would put those two in the same bucket, and they are the two most worth keeping apart — a token minted so a bot can file on its owner's behalf must not also be able to dismiss every report in a guild its owner moderates.
 type Scope string
@@ -1545,6 +1589,15 @@ type SendMessageJSONBody struct {
 // UpdateMessageJSONBody defines parameters for UpdateMessage.
 type UpdateMessageJSONBody struct {
 	Content string `json:"content"`
+}
+
+// GetMessageEditHistoryParams defines parameters for GetMessageEditHistory.
+type GetMessageEditHistoryParams struct {
+	// Before Resume before this version id, exclusive. Omit for the newest page.
+	Before *Snowflake `form:"before,omitempty" json:"before,omitempty"`
+
+	// Limit Versions per page, 1 to 100, default 50. The list is paginated because nothing bounds how many times a message may be edited — there is no edit ceiling and deliberately none, since a message that stops being editable after N corrections is the worse answer.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // GetDevicePageParams defines parameters for GetDevicePage.

@@ -40,11 +40,12 @@ tags:
       model these endpoints implement.
 
 
-      **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for
-      the mutating ones, `guilds.audit` for the audit log alone, and `messages.read` / `messages.write` for
-      the message routes. A user's own access token passes all of them by design, since a scope bounds a
-      *delegated* credential and never a person. Permission resolution still runs underneath, so a token
-      holding `guilds.write` can do exactly what its owner could and no more.
+      **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for the
+      mutating ones, `guilds.audit` for the audit log alone, `messages.read` / `messages.write` for the
+      message routes, and `messages.moderate` for a message's edit history. A user's own access token passes
+      all of them by design, since a scope bounds a *delegated* credential and never a person. Permission
+      resolution still runs underneath, so a token holding `guilds.write` can do exactly what its owner could
+      and no more.
 
 
       Messages are their own pair rather than folded into the guild scopes, because the blast radii
@@ -3281,6 +3282,91 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /channels/{channel_id}/messages/{message_id}/history:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: message_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: Read a message's prior versions
+      description: >
+        Every version a message has had before the one it has now, newest first, behind
+        `MANAGE_MESSAGES` — the gate M16 established for message-scoped moderation reads. A message's own
+        author may read theirs without that permission; nobody else may.
+
+
+        **The current version is on the response and that is deliberate.** There is no endpoint anywhere
+        that fetches a single message, so without it a caller reads what a message used to say with no way
+        to learn what it says now — which is the question a report about an edited message is actually
+        about.
+
+
+        **A moderator reads this whether or not they can currently view the channel.** That is M16's
+        disclosure decision applied one step later, and it is in `docs/security-ledger.md` with the
+        condition that would reopen it: filtering on present visibility would let somebody hide what they
+        did by locking a channel down afterwards, and a report about a channel the moderator is not in is
+        the one that most needs reading. Somebody who can neither view the channel nor moderate it is
+        answered 404 rather than 403, so nothing here discloses a hidden channel to anyone who could not
+        already see it.
+
+
+        **An E2E-encrypted message has no readable versions** (rule 13). `is_e2e` is true, `versions` is
+        empty and `current_content` is null. This is unreachable today by shape — encryption is DM-only, a
+        DM belongs to no guild, and this route is guild-scoped — and the exclusion is enforced in SQL
+        anyway, because a property that holds by construction stops holding quietly.
+
+
+        There is no editor on a version, and there cannot be: only an author may edit their own message,
+        so the editor is always the `author_id` already on the response.
+      operationId: getMessageEditHistory
+      tags: [messages]
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: Resume before this version id, exclusive. Omit for the newest page.
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Versions per page, 1 to 100, default 50. The list is paginated because nothing bounds how many
+            times a message may be edited — there is no edit ceiling and deliberately none, since a
+            message that stops being editable after N corrections is the worse answer.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The message's prior versions, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageEditHistory"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller can view the channel but is neither the author nor a `MANAGE_MESSAGES` holder, or
+            an API token lacks the `messages.moderate` scope — which `messages.read` does not confer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /guilds/{guild_id}/audit-log:
     parameters:
       - name: guild_id
@@ -3929,6 +4015,11 @@ components:
         message history is the conversation itself, and a credential that can read every word said in a
         guild is a different thing to hand out. A webhook-shaped bot that only posts needs
         `messages.write` and never a backlog.
+        `messages.moderate` is a third on the same object and the same argument one level down again. The
+        permission layer already draws this line: `READ_MESSAGE_HISTORY` is in `@everyone`'s default grant
+        and `MANAGE_MESSAGES` is in nobody's, so `messages.read` is the conversation as it stands while
+        M16a's edit history is what somebody deliberately took out of it. Bundling them would hand every
+        backlog-reading bot the prior versions of every message in every guild it is in.
 
 
         **The report pair splits by audience rather than by read and write**, and it is the one pair here
@@ -3937,7 +4028,7 @@ components:
         two most worth keeping apart — a token minted so a bot can file on its owner's behalf must not
         also be able to dismiss every report in a guild its owner moderates.
       enum: [identify, guilds.read, guilds.write, guilds.audit, messages.read, messages.write,
-             reports.write, reports.moderate]
+             messages.moderate, reports.write, reports.moderate]
 
     HealthResponse:
       type: object
@@ -5154,6 +5245,70 @@ components:
             - type: string
               format: date-time
             - type: "null"
+
+    MessageEditVersion:
+      type: object
+      description: >
+        One version a message had before the edit that replaced it. `edited_at` is when that replacement
+        happened, so it is the moment this text stopped being current rather than when it was written.
+      required: [id, content, edited_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        content:
+          type: string
+        edited_at:
+          type: string
+          format: date-time
+
+    MessageEditHistory:
+      type: object
+      description: >
+        A message's prior versions plus what it says now. The current text is here because no endpoint
+        returns a single message on its own, so a caller reading this would otherwise have every version
+        except the one that matters most.
+
+
+        `current_content` is null exactly when `is_e2e` is true, and `versions` is empty in that case as
+        well — the exclusion lives in the query rather than in the response mapping, so there is one place
+        for it to be right instead of two. `deleted_at` is set for a soft-deleted message, whose history
+        is still readable: deleting fast must not be the way to make a reported message's history vanish.
+      required: [message_id, channel_id, author_id, is_e2e, deleted_at, edited_at, current_content,
+                 versions]
+      additionalProperties: false
+      properties:
+        message_id:
+          $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+        author_id:
+          description: Null for a message whose author's account was hard-deleted.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
+        is_e2e:
+          type: boolean
+          description: True when the message is E2E-encrypted, in which case no content is returned.
+        deleted_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        edited_at:
+          description: Null for a message that has never been edited, whose `versions` is empty.
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        current_content:
+          oneOf:
+            - type: string
+            - type: "null"
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageEditVersion"
 
     TriageReportDetail:
       type: object

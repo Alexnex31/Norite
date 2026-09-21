@@ -661,35 +661,62 @@ of this section.
   a way to file or read a report, and the only report surface in `docs/design/tui/` is `6c`, which is
   M74's instance queue. A guild-moderator triage *screen* remains unassigned and M17a's entry says so
   rather than leaving the gap looking closed.
-- **M16a — Message edit history read surface**: `GET /channels/{channel_id}/messages/{message_id}/history`
-  over the `message_edit_history` table M15 writes and nothing reads. Assigned 2026-09-15, having had no
-  milestone since the table was first drawn; the gap was found the same way M76a's was, by reading
-  `architecture.md`'s DDL against this file.
+- **M16a — Message edit history read surface**: done. `GET /channels/{channel_id}/messages/{message_id}/history`
+  over the `message_edit_history` table M15 writes and nothing read, migration `000022`,
+  `backend/internal/messages/history.go`, the `messages.moderate` scope, and
+  `guildauth.AuthorizeChannelIgnoringVisibility` — a third channel entry point, added because this is the
+  first caller that must reach content without the `PermViewChannel` fold. Decisions are in this entry, in
+  `000022`, and in `docs/security-ledger.md`.
 
-  **Placed after M16 rather than beside M15 because M16 builds the consumer.** The dependency is only on
-  M15 — the rows exist from the moment an edit does — but a history nobody has a reason to open is a
-  surface with a disclosure cost and no use, and the reason is a moderator triaging a report on a message
-  that was edited after it was sent. M16 also establishes `PermManageMessages` as the gate for
-  message-scoped moderation reads, which is the gate this reuses rather than inventing a bit for.
+  **Three findings came out of reading the documents against each other, and all three changed what was
+  built.** §2 already carried the route and the permission, so unlike M16 there was no DDL to correct —
+  what was wrong was elsewhere.
 
-  **The disclosure decision is the milestone**, and it is M14's question asked about content rather than
-  metadata. Edit history is not offered to everyone who can read the channel: a typo correction, a
-  removed phone number and a retracted sentence are all permanently readable under that design, which
-  makes editing a trap rather than a repair. It is a moderation surface, `PermManageMessages`, with an
-  author-reads-their-own carve-out to decide explicitly rather than by omission. Whatever is chosen goes
-  in `docs/security-ledger.md` with its *reopens if*, as M14's did.
+  **There is no single-message `GET` anywhere in this API.** `/channels/{channel_id}/messages/{message_id}`
+  serves PATCH and DELETE only, and the sole read is the paginated backlog behind
+  `PermReadMessageHistory`. So a history endpoint returning prior versions alone would hand a moderator
+  every version a message used to have and no route that says what it says now — which is the question a
+  report about an edited message actually asks. The response carries the current version for that reason,
+  the same way M16's report detail resolves target content at read time. The missing `GET` is not this
+  milestone's to add and is named here rather than fixed in passing.
 
-  **Rule 13 applies and must be satisfied explicitly, not inferred.** E2E is `DM`-only, a DM has no guild,
-  and `PermManageMessages` is guild-scoped — so the endpoint looks unreachable for E2E content by shape.
-  That is the same "closed by construction" claim M11a made about password reset not bypassing the second
-  factor, and M11a's lesson is that such a claim stops being true quietly: it was given a test anyway.
-  Do both here — the explicit exclusion rule 13 asks for, and a test that fails if the shape argument ever
-  stops holding.
+  **The index 000020 shipped was measured for an ordering this milestone does not use.** It quoted a
+  figure for "M16a's read" taken against `ORDER BY edited_at`, and M14 settled that a cursor is an id —
+  nothing constrains a timestamp, `edited_at` is transaction time, and a page boundary that loses a row
+  rarely is one nobody reproduces from a report. That is M16's optimization-review finding one milestone
+  later, both being a measurement describing a query that does not ship, and this one was caught at
+  planning. `000022` **replaces** the index rather than adding one: both lead with `message_id` so both
+  serve the cascade identically, insert cost differs by 2%, and the id shape is the one the shipped query
+  uses without a sort node. The two are indistinguishable in *time* and the migration says so rather than
+  claiming a speed-up.
 
-  Depends on M15 (the table and its writer) and M16 (the triage flow and its permission gate). Done when:
-  a `PermManageMessages` holder can read a message's prior versions in order, somebody without it cannot,
-  an E2E-encrypted DM's history is never returned by any caller, and the disclosure decision is recorded
-  in the ledger.
+  **Nothing bounds how many times a message may be edited**, so the read paginates. M12's rule is that a
+  list which cannot be paginated is bounded at creation instead, and this table has neither half — there
+  is no edit ceiling and deliberately none, because a message that stops being editable after N
+  corrections is the worse product and the worse privacy story on the one table whose rows can never be
+  erased.
+
+  **The disclosure decision is the milestone, and it is wider than it first looked.** A
+  `PermManageMessages` holder reads the history whether or not they can currently view the channel —
+  M16's answer applied one step later, whose own reopening condition says a narrower gate here would be a
+  bug in whichever came second. What a code review then found is that the *reach* is not M16's: that
+  disclosure is bounded by a report existing, and this one takes a bare message id, so a moderator denied
+  view on a channel can read any message's current text in it with nobody having reported anything. It is
+  accepted, and it has its own ledger entry rather than inheriting one that does not fit.
+
+  **The author reads their own**, decided explicitly because this entry asked for that rather than letting
+  it fall out by omission. It discloses nothing to anybody new and widens only who may read, which is the
+  safe direction for a carve-out to be wrong in.
+
+  **Rule 13 is satisfied twice and tested both ways** — the exclusion in the SQL as a join predicate, and
+  the shape argument that makes it unreachable today, because M11a's lesson is that "closed by
+  construction" stops being true quietly.
+
+  Depended on M15 (the table and its writer) and M16 (the triage flow and its permission gate). Done
+  when: a `PermManageMessages` holder can read a message's prior versions in order, somebody without it
+  cannot, an E2E-encrypted DM's history is never returned by any caller, and the disclosure decision is
+  recorded in the ledger — all four met, the last by two entries rather than one, because the reach of the
+  first decision turned out not to be M16's to lend.
 - **M16b — Opt-in per-guild message audit**: a guild setting, owner-only, that records every message
   create/edit/delete to a table of its own — `message_audit_entries`, never `audit_log_entries` — plus the
   read surface for it. Off by default and documented as the expensive choice. Assigned 2026-09-15, from
@@ -731,8 +758,16 @@ of this section.
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and
   permission gating on shared-tag creation is enforced.
-- **M17a — Guild administration verbs**: the `norite guild`, `norite channel` and `norite role` command
+- **M17a — Phase C's command-tree verbs**: the `norite guild`, `norite channel` and `norite role` command
   groups over the REST surface M12, M13 and M14 built. Assigned 2026-09-15.
+
+  **Retitled 2026-09-20**, from "Guild administration verbs", because it had stopped being one: the report
+  verbs arrived from M16's planning and the message verbs from M16a's, and neither is guild
+  administration. The title now names what the milestone has become — every command-tree verb Phase C's
+  REST surface owes — which is also what keeps it true if a sixth surface lands here. The literal
+  alternative, enumerating the three groups, was declined for the reason the suffixed-milestone list in
+  `CLAUDE.md` is a standing warning: a name that lists its own members goes stale on the next addition,
+  silently, and that list said "seven" and omitted `M76a` for a whole milestone.
 
   **It closes the largest client gap in the plan, and the gap was invisible because nothing failed.**
   M12–M14 shipped twenty-one guild routes — guild CRUD, channels, roles, the position hierarchy, permission
@@ -765,18 +800,35 @@ of this section.
   untrusted input `termsafe` exists for — and the excerpt is the first place this CLI prints content the
   instance itself holds under a moderation permission.
 
+  **And the message verbs, assigned 2026-09-20 from M16a's planning.** The same reading found the same gap
+  a fourth time, and this time behind the oldest routes in Phase C: M15 shipped four message endpoints and
+  M16a adds a fifth, and **`norite message` appears nowhere in this file**. The only client that reads a
+  message anywhere in the plan is M20a's single pane. So `norite message` — list, send, edit, delete, and
+  `history` for M16a's moderation read — lands here, which makes this milestone the home of every
+  command-tree verb Phase C's REST surface owes rather than the fifth entry for one recurring gap.
+  Dependencies are satisfied by position: M15 and M16a both precede M17, which precedes this.
+
+  **It is not M20a's, and the two are not redundant.** M20a draws a TUI that reads its backlog from the
+  daemon's in-memory scrollback over the local socket; these are one-action-and-exit REST calls through
+  `apiclient`, pipeable and scriptable. ADR 0026 is what makes them complement rather than duplicate each
+  other: the CLI and TUI share one command tree, so a verb built here is a verb M20a's client inherits and
+  `M-x` can run, not one it reimplements. Rule 19 lands hardest here of the three groups — message content
+  is the untrusted text this CLI prints most of, and `norite message history` prints what somebody
+  deliberately edited out, which is the one output whose value depends on it being shown exactly as stored.
+
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
   `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
   Whoever assigns it should read this paragraph first, because a gap recorded as half-closed is one nobody
   looks at again.
 
-  Depends on M14 (the endpoints), M16 (the report endpoints) and M10 (`apiclient`, the transport). Done
-  when: a guild can be created, renamed, given a role and a channel, have an overwrite written and its
-  audit log read, entirely from the command line; a report can be filed and triaged the same way, with the
-  reporter absent from every triage output because M16's API never sends it; with `--json` output
-  validated against `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than
-  a crash.
+  Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read) and M10
+  (`apiclient`, the transport). Done when: a guild can be created, renamed, given a role and a channel,
+  have an overwrite written and its audit log read, entirely from the command line; a report can be filed
+  and triaged the same way, with the reporter absent from every triage output because M16's API never
+  sends it; a channel's backlog can be read, posted to, edited and deleted from the command line, and a
+  message's prior versions read by a moderator; with `--json` output validated against
+  `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
 

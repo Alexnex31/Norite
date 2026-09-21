@@ -417,7 +417,8 @@ func TestEveryAuditActionIsInTheContract(t *testing.T) {
 	}
 }
 
-// TestTheReportResponsesMatchTheContract pins the three report shapes against the document.
+// TestTheModerationResponsesMatchTheContract pins the three report shapes and M16a's edit-history pair
+// against the document.
 //
 // Three rather than one because they are written out flat rather than composed with `allOf` — which is
 // itself a decision this file's own history argues for: MintedApiToken composed that way and shipped a
@@ -427,7 +428,12 @@ func TestEveryAuditActionIsInTheContract(t *testing.T) {
 // The assertion that matters most is the one about absence. `reporter_id` is deliberately not on any of
 // these, and a contract that declared it would be advertising a field the server will never send — which
 // is the direction a generated client turns into a required property it waits forever for.
-func TestTheReportResponsesMatchTheContract(t *testing.T) {
+//
+// M16a added the edit-history pair here rather than to a test of its own, because the fixture is the same
+// four objects and the surfaces are the same kind of thing: a moderator reading content. That is why the
+// name says moderation rather than reports — it was TestTheReportResponsesMatchTheContract, and a name
+// that stops describing what a test covers is the one M15 renamed AuthorizeChannelForRead over.
+func TestTheModerationResponsesMatchTheContract(t *testing.T) {
 	a := newAPI(t, auth.RegistrationOpen)
 	schemas := contractSchemas(t)
 
@@ -460,6 +466,26 @@ func TestTheReportResponsesMatchTheContract(t *testing.T) {
 		withToken(owner.Tokens.AccessToken))
 	require.Equal(t, http.StatusOK, detail.Code, detail)
 
+	// M16a. An edit first, or the history comes back with an empty `versions` and the nested schema is
+	// never exercised — which is this test's own lesson about an enum only being seen if some response
+	// happens to carry the value.
+	channelID := channel.field(t, "id")
+	messageID := message.field(t, "id")
+	edited := a.call(http.MethodPatch, "/api/v1/channels/"+channelID+"/messages/"+messageID,
+		map[string]any{"content": "hello, corrected"}, withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, edited.Code, edited)
+
+	history := a.call(http.MethodGet,
+		"/api/v1/channels/"+channelID+"/messages/"+messageID+"/history", nil,
+		withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, history.Code, history)
+
+	var historyBody struct {
+		Versions []map[string]any `json:"versions"`
+	}
+	require.NoError(t, json.Unmarshal(history.Body, &historyBody))
+	require.Len(t, historyBody.Versions, 1, "one edit, so one prior version to validate the item schema")
+
 	var pageBody []map[string]any
 	require.NoError(t, json.Unmarshal(page.Body, &pageBody))
 	require.Len(t, pageBody, 1)
@@ -473,6 +499,8 @@ func TestTheReportResponsesMatchTheContract(t *testing.T) {
 		{what: "POST /reports", schema: "Report", body: filed.Body},
 		{what: "GET a guild's reports", schema: "TriageReport", object: pageBody[0]},
 		{what: "GET one report", schema: "TriageReportDetail", body: detail.Body},
+		{what: "GET a message's edit history", schema: "MessageEditHistory", body: history.Body},
+		{what: "one prior version", schema: "MessageEditVersion", object: historyBody.Versions[0]},
 	} {
 		t.Run(tc.schema, func(t *testing.T) {
 			object := tc.object
