@@ -366,7 +366,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M16 done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M16a done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -572,12 +572,54 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
 
   **Rule 2 asserted in both directions**: closing writes an entry, filing writes none, and the negative
   had no home until it was a test.
-- **M16a — Message edit history read surface**: next. `GET /channels/{channel_id}/messages/{message_id}/history`
-  over the `message_edit_history` table M15 writes and nothing reads. M16 built the consumer that makes it
-  worth opening — a moderator triaging a report on a message that was edited after it was sent — and
-  established `PermManageMessages` as the gate for message-scoped moderation reads, which this reuses
-  rather than inventing a bit for. Its own entry carries the disclosure decision it owes and the rule 13
-  obligation that comes with reading content.
+- **M16a — Message edit history read surface**: done (tag pending). Migration `000022`,
+  `backend/internal/messages/history.go`, `GET /channels/{channel_id}/messages/{message_id}/history`, the
+  `messages.moderate` scope, and a third channel entry point in `guildauth`. Decisions are in the roadmap
+  entry, in `000022`, and in `docs/security-ledger.md`.
+
+  **The schema was right and three other things were not**, which is the variation worth noting after
+  M16: §2 already carried this route and its permission, so for once there was no DDL to correct.
+
+  **The index M15 shipped was measured for an ordering this milestone does not use** — `000020` quoted a
+  figure for "M16a's read" against `ORDER BY edited_at`, and M14 settled that a cursor is an id. That is
+  M16's optimization-review finding one milestone later, both being a measurement describing a query that
+  does not ship. `000022` replaces the index rather than adding one, and states plainly that the two
+  shapes are indistinguishable in time: what it buys is a plan with no sort node and an index the shipped
+  query actually uses, for 2% of insert cost and no regression to the cascade.
+
+  **There is no single-message `GET` in this API**, so the response carries the current version as well as
+  the prior ones. Without it a moderator reads every version a message used to have and has no route that
+  says what it says now.
+
+  **A default with no documented exit gets routed around.** `AuthorizeChannelIgnoringVisibility` lives in
+  `guildauth` rather than being open-coded here, because the alternative was `messages` reading a channel
+  row for the first time and re-deriving `guildOf`'s judgement that a DM answers 404 — a second copy of a
+  decision, which is the drift `termsafe`, `ChannelGuildText` and the audit verbs each had to be pinned
+  against. Keeping it in the chokepoint also keeps it greppable, and that grep is the complete list of
+  places visibility was skipped on purpose.
+
+  **Lifting a requirement and lifting a refusal are two changes that look like one.** The new entry point
+  stops *requiring* `PermViewChannel` and keeps the 403-to-404 downgrade, because dropping both would
+  answer 403 to a member who can neither see nor moderate a channel against 404 for an id naming nothing
+  — a probe for hidden channels in their own guild. Each half has its own assertion.
+
+  **The disclosure turned out wider than the decision it borrowed.** M16 bounds content by a report
+  existing; this route takes a bare message id, so a moderator denied view reads any message's current
+  text with nobody having reported anything. Found by `/code-review` against the finished branch,
+  accepted, and given its own ledger entry rather than left inheriting one that no longer fits — and
+  M16's entry is annotated where its "one route and not two" bound stopped being true.
+
+  **Rule 1 and read consistency are different properties and satisfying the first hid the second.** The
+  envelope and the version list were two statements on separate snapshots, so an edit landing between them
+  showed the displaced text as both the current version and the newest prior one. Reproduced 5 times out
+  of 5 — not a narrow window — and fixed with one `REPEATABLE READ` read-only snapshot. The comment that
+  justified skipping a transaction cited rule 1, which is about resolving permissions against fresh data
+  and says nothing about two reads agreeing.
+- **M16b — Opt-in per-guild message audit**: next. A guild setting, owner-only, recording every message
+  create/edit/delete to `message_audit_entries` — never `audit_log_entries` — plus its read surface. M16a
+  established the moderation-read-over-content pattern and the disclosure shape it inherits; its own entry
+  carries the notice obligation and the rule 13 exclusion, which bites harder here because this one
+  *stores* content rather than reading it.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:

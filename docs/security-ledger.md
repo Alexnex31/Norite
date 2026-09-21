@@ -313,9 +313,17 @@ would flip them.
   reason `audit_log_entries` is never swept — and M16a gates who may read it behind `PermManageMessages`
   rather than making it public. Recorded because it is a privacy expectation somebody will raise as a bug.
 - **Reopens if**: an erasure obligation arrives that is legal rather than technical, which is the shape
-  that would actually force it — the same condition the audit-log growth entry names. Also reopens if
-  M16a's disclosure decision widens the reader beyond moderators, since the exposure this entry accepts is
-  bounded by who can see it.
+  that would actually force it — the same condition the audit-log growth entry names. Also reopens if the
+  set of people who can read somebody *else's* prior versions widens past `PermManageMessages`, since the
+  exposure this entry accepts is bounded by who can see it.
+
+  **That last clause was reworded at M16a and the original is worth keeping in view**: it said "if M16a's
+  disclosure decision widens the reader beyond moderators". M16a's reader does widen — an author reads
+  their own history without the moderation bit — and the condition as written fires on it, while the
+  exposure it was protecting is untouched, because somebody reading text they wrote themselves learns
+  nothing. A condition that fires on a decision it was not written to catch is one the next reader stops
+  trusting, which is the failure mode `architecture.md` §16 records for checks. The rewording names the
+  property rather than the milestone.
 
 ### Dropping the channel row lock lets one message land just after a channel-overwrite mute
 - **Raised**: M15, `/optimization-review`
@@ -407,6 +415,12 @@ carries the condition that would reopen it.
   Bounded in three ways rather than none: the queue listing carries no content at all, so this is one
   route and not two; the content is resolved at read time rather than snapshotted, so nothing is stored a
   second time; and E2E-encrypted content is excluded in the query regardless of any of the above.
+
+  **The first of those three stopped being true at M16a**, and it is recorded in that milestone's own
+  entry rather than edited away here. The edit-history read reaches a message's current content from a
+  bare message id, with no report involved, so content is no longer one route — and a reader arriving at
+  this entry to learn what bounds the disclosure would otherwise take a sentence that has been overtaken.
+  The other two bounds hold unchanged.
 - **Reopens if**: a guild-scoped surface ever becomes capable of carrying E2E content (the exclusion stops
   being redundant and becomes the only thing standing here), or if `PermManageMessages` is ever granted by
   default rather than deliberately — today it is not in `defaultEveryonePermissions`, which is what keeps
@@ -485,3 +499,63 @@ carries the condition that would reopen it.
   for. M74 owns those types and should weigh a per-reporter open-report cap at the same time as the
   per-user filing limit its entry now carries. Also reopens if the dedupe index is ever dropped or made
   non-unique, since it is the whole of this argument.
+
+---
+
+## M16a — message edit history read surface
+
+### The edit-history read hands a moderator any message's current text, with no report involved
+- **Raised**: M16a, `/code-review`, against the finished branch
+- **Verdict**: accepted, and deliberate — but it is **this** milestone's decision rather than M16's, which
+  is the correction that produced this entry
+- **Why**: `GET /channels/{channel_id}/messages/{message_id}/history` authorizes through
+  `guildauth.AuthorizeChannelIgnoringVisibility`, so a `PermManageMessages` holder reads it whether or not
+  an overwrite currently denies them `PermViewChannel`. That much is M16's answer applied one step later,
+  and deliberately so: its own reopening condition says a *narrower* gate here would be "a bug in
+  whichever came second".
+
+  What is new is the **reach**. M16's content disclosure is bounded by a report existing — its entry lists
+  that as one of three bounds, in the words "the queue listing carries no content at all, so this is one
+  route and not two". There are now two, and the second takes a bare message id. So a moderator denied
+  view on a channel can read the current text of *any* message in it, one id at a time, with nobody having
+  reported anything. `current_content` is the sharp edge rather than the versions: it is the live message,
+  and it makes this the single-message read the API otherwise deliberately does not offer.
+
+  Accepted because the alternative reintroduces the failure the field exists to prevent. There is no
+  `GET /channels/{id}/messages/{id}`, so dropping `current_content` leaves a moderator holding every
+  version a message used to have and no way to learn what it says now — which is precisely the question a
+  report about an edited message asks. The permission is therefore the boundary here as it is in M16's
+  entry, and `PermManageMessages` is not in `defaultEveryonePermissions`: a guild grants it on purpose, to
+  somebody it is already trusting to delete other people's messages in that guild.
+
+  Two things genuinely bound it and are worth stating so a later reader does not assume more. The refusal
+  downgrade is intact, so somebody who can neither view nor moderate is answered 404 and learns nothing —
+  that has its own test, because lifting the view *requirement* and lifting the *downgrade* look like one
+  change and are two. And rule 13's exclusion is in the query, so E2E content is unreachable here
+  regardless of everything above.
+- **Reopens if**: `PermManageMessages` is ever granted by default, which is the condition M16's entry
+  already names and which this route makes sharper, since it is reachable without a report. Or if a
+  single-message `GET` is ever added — at that point `current_content` is no longer the only way to answer
+  "what does it say now", the argument above dissolves, and this route should be narrowed to versions
+  alone rather than left as the widest reader by accident. Or if a guild-scoped surface becomes capable of
+  carrying E2E content, which is M16's third bound and is the one thing here that does not depend on the
+  permission model at all.
+
+### An author reads the prior versions of their own messages
+- **Raised**: M16a, at design time — the roadmap entry asked for it to be decided rather than defaulted
+- **Verdict**: accepted, and deliberate — the disclosing direction, for once
+- **Why**: `History` lets a message's author read its history without `PermManageMessages`. Refusing
+  somebody the prior versions of their own words is hard to defend, and the carve-out discloses nothing to
+  anybody new: they wrote every version in it. It is checked after the row is loaded, so it is an
+  authorization question rather than an input one (M12's "refuse before explaining"), and it only ever
+  *widens* who may read — a bug in that branch cannot turn into a disclosure to a stranger, which is why
+  it is the safe direction for a carve-out to fail in.
+
+  Recorded because it is the one place M16a's reader is not a moderator, and because M15's erasure entry
+  named "M16a's disclosure decision widens the reader beyond moderators" as its own reopening condition.
+  That condition was written before this decision existed and fires on it as literally worded; it is
+  reworded in the same commit as this entry rather than left to be argued about later. The exposure that
+  entry accepts is unchanged — an author reading their own text is not somebody else reading it.
+- **Reopens if**: the carve-out is ever widened past the author — to a channel's members, to everyone who
+  can read the backlog, or to a role — at which point M15's erasure entry genuinely does reopen, because
+  what nobody can erase would become readable by people who did not write it.

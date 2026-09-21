@@ -465,7 +465,14 @@ CREATE TABLE message_edit_history (            -- M15
 -- guild_member_roles.role_id, and M13 suspected a third and found the join already supplied the index —
 -- which is why this line says to check rather than to trust it. Verify with EXPLAIN ANALYZE before the
 -- migration merges; the second reason, the history read itself, may well be served by the same index.
-CREATE INDEX ON message_edit_history (message_id, edited_at DESC);   -- M15
+--
+-- **It was not, and the second half of that sentence is why this line now reads `id DESC`.** M15 created
+-- it as (message_id, edited_at DESC) and measured "M16a's read" against ORDER BY edited_at. M16a pages on
+-- id, because M14 settled that a cursor is an id and never a timestamp — nothing constrains edited_at,
+-- which is transaction time. 000022 replaced the index. Both shapes lead with message_id so both serve
+-- the cascade identically, and they are indistinguishable in time; what the id shape buys is a plan with
+-- no sort node and an index the shipped query actually uses.
+CREATE INDEX ON message_edit_history (message_id, id DESC);   -- M15, replaced at M16a (000022)
 
 -- M16b, and only written for guilds whose owner set guilds.message_audit_enabled. Deliberately a table of
 -- its own rather than rows in audit_log_entries: this is the product's highest-volume write, and folding it
@@ -1031,13 +1038,21 @@ GET    /guilds/{guild_id}/message-audit     -- M16b; the opt-in log, empty unles
                                            --   owner-only like deletion rather than PermManageGuild, and
                                            --   audited in the ordinary log in both directions.
 GET    /channels/{channel_id}/messages/{message_id}/history
-                                           -- M16a; PermManageMessages, not channel-read. M15 writes
-                                           --   message_edit_history and nothing reads it until here, the
-                                           --   shape audit_log_entries had from M12 to M14. Placed after
-                                           --   M16 because a moderator triaging a report is the consumer,
-                                           --   and rule 13 applies: E2E DM content must be excluded
-                                           --   explicitly, not left to the guild-scoped permission making
-                                           --   it unreachable by shape.
+                                           -- M16a; PermManageMessages, not channel-read — and not channel
+                                           --   *visibility* either: it authorizes through guildauth's
+                                           --   AuthorizeChannelIgnoringVisibility, so a moderator denied
+                                           --   VIEW_CHANNEL still reads it. Ledger, with the reach that
+                                           --   decision turned out to have. An author reads their own
+                                           --   without the bit.
+                                           --   Returns the current version as well as the prior ones,
+                                           --   because there is no single-message GET on the line above:
+                                           --   without it a caller learns what a message used to say and
+                                           --   has no route that says what it says now.
+                                           --   Paginated on id — nothing bounds how many times a message
+                                           --   may be edited. 000022 replaces 000020's index for that.
+                                           --   Rule 13 applies: E2E DM content is excluded in the query,
+                                           --   not left to the guild-scoped permission making it
+                                           --   unreachable by shape. Both are tested.
 PUT    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- react (M56a); idempotent
 DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- un-react; idempotent
 POST   /channels/{channel_id}/typing
