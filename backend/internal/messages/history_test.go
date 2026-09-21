@@ -5,6 +5,7 @@ package messages
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -321,4 +322,46 @@ func TestTheHistoryPagesOnIdAndTheCursorExcludesItsBoundary(t *testing.T) {
 		HistoryInput{ChannelID: f.channelID, MessageID: msg.ID, Limit: maxPageSize + 500})
 	require.NoError(t, err)
 	require.Len(t, all.Versions, 5, "there are only five, but the limit was clamped rather than honored")
+}
+
+// TestTheEnvelopeAndTheVersionsAgree pins the read-consistency property the two statements need.
+//
+// Without one snapshot the envelope and the version list take separate READ COMMITTED snapshots, so an
+// edit committing between them is visible to the second and not the first — the response then shows the
+// displaced text as both the current version and the newest prior one, and never shows what the message
+// actually says. A duplicate like that reads as a double-append in Update, which is the wrong place to go
+// looking.
+//
+// Driven rather than reasoned about, because the interleaving is narrow: an editor runs flat out while
+// this reads, and the invariant is checked on every response.
+func TestTheEnvelopeAndTheVersionsAgree(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	msg := f.send(t, f.member, "v0")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 60 {
+			_, err := f.svc.Update(f.ctx, actorOf(f.member),
+				UpdateInput{ChannelID: f.channelID, MessageID: msg.ID, Content: fmt.Sprintf("v%d", i+1)})
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for range 60 {
+		got, err := f.svc.History(f.ctx, actorOf(f.mod),
+			HistoryInput{ChannelID: f.channelID, MessageID: msg.ID})
+		require.NoError(t, err)
+		if len(got.Versions) == 0 || got.CurrentContent == nil {
+			continue
+		}
+		require.NotEqual(t, *got.CurrentContent, got.Versions[0].Content,
+			"the current version and the newest prior version must never be the same text: that is the "+
+				"envelope and the version list having been read from different snapshots")
+	}
+	<-done
 }

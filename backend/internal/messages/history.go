@@ -120,7 +120,37 @@ func (s *Service) History(ctx context.Context, actor auth.Actor, in HistoryInput
 		return MessageHistory{}, err
 	}
 
-	row, err := s.queries.GetMessageWithHistoryTarget(ctx, int64(in.MessageID))
+	// # Both reads take one snapshot, and the reason is a duplicate rather than a torn page
+	//
+	// The envelope and the version list are two statements. Under READ COMMITTED each takes its own
+	// snapshot, so an edit committing between them is visible to the second and not the first: the
+	// envelope still says the message reads "B" while the version list already carries the "B" that the
+	// edit just displaced. The moderator is then shown the same text as the current version *and* as the
+	// most recent prior one, and never sees what it actually says now. That reads as a bug in the writer,
+	// which is the worst kind of wrong answer for a moderation surface — it invites somebody to go looking
+	// at Update for a double-append that is not there.
+	//
+	// Reading them in the other order is not a fix, it is a worse one: the envelope would carry "C" and
+	// the version list would omit "B" entirely, so a moderation view would silently drop a version. A
+	// duplicate is visible; a gap is not.
+	//
+	// So: one REPEATABLE READ snapshot, read-only. Both statements then see the same instant and the two
+	// halves of the response agree. This is a moderation read rather than a hot path, so a transaction
+	// here costs a connection for two indexed lookups — note this is *not* the rule 1 question the
+	// authorize above answers, which is about resolving permissions against fresh data. Read consistency
+	// across two statements is a different property and neither implies the other.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return MessageHistory{}, fmt.Errorf("messages: begin history read: %w", err)
+	}
+	// Read-only and never committed: rolling back releases the snapshot, and there is nothing to persist.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	q := s.queries.WithTx(tx)
+
+	row, err := q.GetMessageWithHistoryTarget(ctx, int64(in.MessageID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return MessageHistory{}, httpx.ErrNotFound
@@ -163,7 +193,7 @@ func (s *Service) History(ctx context.Context, actor auth.Actor, in HistoryInput
 		limit = maxPageSize
 	}
 
-	versions, err := s.queries.ListMessageEditHistory(ctx, db.ListMessageEditHistoryParams{
+	versions, err := q.ListMessageEditHistory(ctx, db.ListMessageEditHistoryParams{
 		MessageID: row.ID,
 		Before:    idOrNil(in.Before),
 		Limit:     limit,

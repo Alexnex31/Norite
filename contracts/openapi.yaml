@@ -40,11 +40,12 @@ tags:
       model these endpoints implement.
 
 
-      **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for
-      the mutating ones, `guilds.audit` for the audit log alone, `messages.read` / `messages.write` for
-      the message routes and `messages.moderate` for a message's edit history. A user's own access token passes all of them by design, since a scope bounds a
-      *delegated* credential and never a person. Permission resolution still runs underneath, so a token
-      holding `guilds.write` can do exactly what its owner could and no more.
+      **An API token additionally needs a scope**: `guilds.read` for the read routes, `guilds.write` for the
+      mutating ones, `guilds.audit` for the audit log alone, `messages.read` / `messages.write` for the
+      message routes, and `messages.moderate` for a message's edit history. A user's own access token passes
+      all of them by design, since a scope bounds a *delegated* credential and never a person. Permission
+      resolution still runs underneath, so a token holding `guilds.write` can do exactly what its owner could
+      and no more.
 
 
       Messages are their own pair rather than folded into the guild scopes, because the blast radii
