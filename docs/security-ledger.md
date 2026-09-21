@@ -355,7 +355,7 @@ would flip them.
   monotonic, since `GREATEST` is what replaced the lock's other job and a plain assignment would walk the
   channel's unread pointer backwards — reproduced in psql, pointer 100 with message 101 present.
 
-### A 403-versus-404 on edit and delete tells a member whether a snowflake names a live message
+### A 403-versus-404 on edit, delete and edit-history tells a member whether a snowflake names a message here
 - **Raised**: M15, twice in one session — `/security-review`'s discovery pass and then `/code-review`,
   independently, within an hour of each other
 - **Verdict**: not a vulnerability — the fact it would disclose is published directly, for free
@@ -379,6 +379,14 @@ would flip them.
   this file exists for: the M13 403/404 oracle was filtered at confidence 6, vanished, was re-derived by
   the next pass, and was real. This one is not, and the next reviewer should be able to find that out by
   searching rather than by re-deriving it a third time.
+  **M16a added a third surface and widened the fact by one step, which is why the title no longer says
+  "live".** `Update` and `Delete` reach their row through `GetMessageForUpdate`, which filters
+  `deleted_at IS NULL`, so their oracle distinguishes live messages only. `GetMessageWithHistoryTarget`
+  deliberately does not filter — a moderator reads the history of a deleted message on purpose — so the
+  history route's 403 additionally means "an id that named a message here which has since been deleted".
+  Same audience, same probe cost, no content on the refusal path, and `last_message_id` still publishes
+  the timing half for free. Not a reopening; recorded because a reader comparing the two surfaces will
+  otherwise notice the difference and re-derive this entry from scratch.
 - **Reopens if**: `last_message_id` is ever withheld from members lacking `PermReadMessageHistory`, or
   M18's `MESSAGE_CREATE` dispatch is gated on the history bit rather than the view bit. Either would make
   message *existence* something the bit actually keeps, and at that point all three paths — `Update`,
@@ -518,7 +526,13 @@ carries the condition that would reopen it.
   that as one of three bounds, in the words "the queue listing carries no content at all, so this is one
   route and not two". There are now two, and the second takes a bare message id. So a moderator denied
   view on a channel can read the current text of *any* message in it, one id at a time, with nobody having
-  reported anything. `current_content` is the sharp edge rather than the versions: it is the live message,
+  reported anything.
+
+  **The envelope carries more than the text, and saying "content" understates it**: `author_id`,
+  `edited_at` and `deleted_at` come back too. For a reported message M16 already disclosed the author
+  (`target_author_id`), so the new part is that all of it is reachable for an *unreported* message —
+  including who wrote a message in a channel the reader cannot open. Listed explicitly because a reader
+  checking this entry against the code should not have to discover it from the struct. `current_content` is the sharp edge rather than the versions: it is the live message,
   and it makes this the single-message read the API otherwise deliberately does not offer.
 
   Accepted because the alternative reintroduces the failure the field exists to prevent. There is no
@@ -559,3 +573,55 @@ carries the condition that would reopen it.
 - **Reopens if**: the carve-out is ever widened past the author — to a channel's members, to everyone who
   can read the backlog, or to a role — at which point M15's erasure entry genuinely does reopen, because
   what nobody can erase would become readable by people who did not write it.
+
+### `message_edit_history` grows without bound, and a moderator cannot remove a row from it
+- **Raised**: M16a, `/security-sweep` (the unbounded-growth class `/security-review` cannot report at any
+  confidence)
+- **Verdict**: accepted risk
+- **Why**: nothing bounds how many versions a message accumulates. `Update` carries no edit counter and no
+  cooldown, `auth.RunSweeper` does not touch this table, and there is no delete query for it anywhere —
+  the only `ON DELETE CASCADE` fires on a *hard* message delete, and M15 made message deletion soft. So
+  every edit appends a row that nothing in the product can remove.
+
+  Per request the cost matches a send and the shape does not, which is the part worth recording. An edit
+  stores the content the edit *displaced*, so posting 4,000 characters and then editing repeatedly writes
+  up to 4,000 characters per request — 16 kB in an emoji-heavy script, since the bound counts runes
+  (M15). The same bytes sent as messages would be visible in a channel, enumerable by a listing, and
+  deletable by a moderator holding `PermManageMessages`. These are none of those: no surface enumerates
+  history rows across messages, and deleting the message leaves them in place because the delete is soft.
+  Filing the equivalent volume as *reports* is bounded by `000021`'s partial unique index; nothing
+  equivalent bounds this.
+
+  Accepted rather than fixed because both fixes are worse than the thing. An edit ceiling makes a message
+  uneditable after N corrections, which is the worse product and — on the one table whose rows can never
+  be erased — the worse privacy story. A retention window forgets exactly the version somebody opened the
+  history to look at, which is the argument `audit_log_entries` already carries for not being swept; M125
+  owns pruning if it is ever wanted. What holds today is the base rate limiter, which is the same thing
+  holding `messages` itself.
+- **Reopens if**: an automation path reaches `Update` without passing the per-IP limiter — webhooks (M60)
+  and bot automation (M22) are both that shape, and both would make edit volume cheap in a way a human
+  client is not. Also reopens if message deletion ever becomes hard rather than soft, since the cascade
+  would then be a real deletion path and this entry's premise inverts. Also if a per-guild storage quota
+  arrives (M125's territory), at which point this table needs to be inside it rather than beside it.
+
+### An Instance Admin reads any message's history on any instance guild, and no record is kept
+- **Raised**: M16a, `/security-sweep`
+- **Verdict**: not a vulnerability — pre-existing, and outside rule 14 as written
+- **Why**: `guildauth.Authorize` short-circuits on ADR 0008's layer 1, so an Instance Admin passes this
+  route's gate in a guild they are not a member of and in a channel no overwrite grants them. Rule 14
+  requires `instance_audit_log` for "bans, report resolution, license/entitlement changes, admin-tier
+  grants" — every one a *mutation*. A read is not named there, and no read is audited anywhere in this
+  codebase.
+
+  Not new here: an Instance Admin has read every channel's backlog through `messages.List` since M15 by
+  the same short-circuit, so this route widens *what* they reach (prior versions, and content in channels
+  hidden from ordinary moderators) rather than *whether* they reach it. Recorded because M16's audit found
+  the mutation half of exactly this shape and gave it a tripwire plus a home in M72, and the read half
+  would otherwise look covered by that when it is not — M72's instruction says "every guild-scoped path an
+  Instance Admin can reach", which reads as though it includes this and means actions.
+- **Reopens if**: M72 decides rule 14's "action" includes reads, which is the decision that would make
+  this a gap rather than a non-subject — and it is a live question, because an instance operator reading
+  private guild conversations unlogged is the case an audit log exists for. Also reopens if the Instance
+  Admin tier is ever granted to anyone but the operator, since the whole of this rejection rests on that
+  tier being the person who already holds the database.
+
