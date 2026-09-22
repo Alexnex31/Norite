@@ -816,18 +816,37 @@ of this section.
   is the untrusted text this CLI prints most of, and `norite message history` prints what somebody
   deliberately edited out, which is the one output whose value depends on it being shown exactly as stored.
 
+  **And M16b's recording log, assigned 2026-09-22 from its planning.** A fifth instance of the same gap,
+  and the first one caught in the same week the surface was designed rather than a milestone later. M16b
+  adds `GET /guilds/{guild_id}/message-audit` behind a permission bit of its own and puts the
+  `message_audit_enabled` toggle on `PATCH /guilds/{guild_id}`, and neither has a caller: the only client
+  surface anywhere in the plan that mentions recording is `6e` at M62a, which is member-facing, read-only
+  and deliberately holds nothing gated on a permission. So the log's read joins `norite guild` here, and
+  the toggle is a flag on the guild update verb rather than a group of its own — it is one boolean on an
+  existing endpoint, and a `norite guild record on|off` would be a second way to spell a field.
+
+  Two things make these verbs different from the other four groups rather than more of the same. The
+  toggle is **owner-only and refused to an Instance Admin** until M72 (M16b's decision), so this is the
+  first verb whose refusal a person holding the highest tier on the instance can hit — and reporting that
+  as a usage error rather than a crash is the done-when below applied to a case no other verb has. And
+  the read prints **every message in the guild**, including channels the caller cannot view, which makes
+  it the largest volume of untrusted text this CLI emits anywhere: rule 19 applies as it does to
+  `norite message`, and the paging matters more, because a guild's recording log has no ceiling where a
+  channel backlog at least has a page.
+
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
   `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
   Whoever assigns it should read this paragraph first, because a gap recorded as half-closed is one nobody
   looks at again.
 
-  Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read) and M10
-  (`apiclient`, the transport). Done when: a guild can be created, renamed, given a role and a channel,
-  have an overwrite written and its audit log read, entirely from the command line; a report can be filed
-  and triaged the same way, with the reporter absent from every triage output because M16's API never
-  sends it; a channel's backlog can be read, posted to, edited and deleted from the command line, and a
-  message's prior versions read by a moderator; with `--json` output validated against
+  Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read), M16b (the
+  recording toggle and its log) and M10 (`apiclient`, the transport). Done when: a guild can be created,
+  renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
+  command line; a report can be filed and triaged the same way, with the reporter absent from every triage
+  output because M16's API never sends it; a channel's backlog can be read, posted to, edited and deleted
+  from the command line, and a message's prior versions read by a moderator; a guild's recording can be
+  switched on and off by its owner and the resulting log paged; with `--json` output validated against
   `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
