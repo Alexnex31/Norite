@@ -48,7 +48,7 @@ import (
 // with no migration to review and no error to catch it. Add new bits at the end, and never renumber.
 //
 // uint64 in Go against a signed bigint in Postgres, so bit 63 is unavailable and the ceiling is 63
-// permissions. Stated here rather than discovered at bit 64; there are twenty-one today.
+// permissions. Stated here rather than discovered at bit 64; there are twenty-two today.
 type Permission uint64
 
 const (
@@ -106,16 +106,53 @@ const (
 	// positions, so inserting in the middle reassigns every permission every guild has already granted,
 	// with no migration and no compile error to notice it.
 	PermReadMessageHistory
+
+	// PermViewMessageAudit is M16b's: read the log a guild produces when its owner switches recording on.
+	//
+	// It is a bit of its own for M14's reason one surface later, and the three bits it could have reused
+	// are each wrong in a different way — which is the useful part, because "audit" in the name makes the
+	// first of them look obvious.
+	//
+	// **Not PermViewAuditLog.** That bit reads moderation *metadata*: who kicked whom, which permission
+	// changed, what a nickname used to be. This reads the conversations themselves. The ledger entry M14
+	// wrote for that surface ends with its own reopening condition — "the log ever carries message
+	// content, where the exposure stops being metadata about moderation and becomes the conversations
+	// themselves" — and reusing the bit here would answer the letter of it (this is a different table)
+	// while doing exactly the thing it names. Somebody granted the bit to see who kicked whom would find
+	// they had been granted every private channel in the guild.
+	//
+	// **Not PermManageMessages.** That is M16a's gate and it means "delete somebody else's message",
+	// which is moderation with a visible outcome on one message at a time. A guild that wants a moderator
+	// able to remove spam has not thereby decided that moderator reads the owner's private channel. M16a's
+	// own reach turned out wider than the decision it borrowed from M16; borrowing it again and widening
+	// it from one message's prior versions to every message in the guild is that mistake with a much
+	// larger radius.
+	//
+	// **Not folded into PermManageGuild**, which is the owner-delegated settings bit that flips the switch
+	// in the first place. Folding it in would mean the only way to let somebody read the log is to let
+	// them rename the guild, change its settings and turn the recording off again — verbatim the
+	// correction M12's UpdateMember needed, where a permission only ever OR'd into a base is not a
+	// grantable permission at all.
+	//
+	// Granted by default to nobody, implied by nothing, and un-grantable by somebody who does not hold it
+	// (refuseEscalation already covers every bit). That is the whole boundary on the widest disclosure
+	// this project has taken — see docs/security-ledger.md, which states it rather than leaving it to be
+	// inherited from M16's.
+	PermViewMessageAudit
 )
 
 // permAll is every defined bit, and what an owner or an administrator resolves to.
 //
 // Deliberately not ^Permission(0). A member who short-circuits would otherwise hold every one of the 64
-// bit positions, including the 43 nothing has defined — so a later milestone defining bit 21 would find it
+// bit positions, including the 42 nothing has defined — so a later milestone defining bit 22 would find it
 // already granted to owners in a way no code says out loud, and Has would answer true for a permission
 // that did not exist when the check was written. This value is derived from the last defined constant, so
 // adding one at the end extends it and adding one in the middle is still the renumbering hazard above.
-const permAll = Permission(PermReadMessageHistory<<1 - 1)
+//
+// The two numbers in that sentence move every time a bit is added, and they are written out rather than
+// computed because the whole point is that somebody has to edit them and notice. M14 moved them for
+// PermViewAuditLog, M15 for PermReadMessageHistory, M16b for PermViewMessageAudit.
+const permAll = Permission(PermViewMessageAudit<<1 - 1)
 
 // Known reports whether p sets only bits this build defines.
 //

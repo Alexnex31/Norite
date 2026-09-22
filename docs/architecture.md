@@ -807,6 +807,18 @@ const (
                            //   compose rather than nest — announcements is view+history without send, a
                            //   support thread opened to a reporter is view+send without history. In
                            //   @everyone's default grant, so withholding it is the deliberate setting.
+
+    PermViewMessageAudit   // M16b — ACTIVE; read the log a guild produces when its owner switches
+                           //   recording on. Its own bit, and the three it could have reused are each
+                           //   wrong differently: PermViewAuditLog reads moderation metadata where this
+                           //   reads the conversations themselves (and M14's ledger entry names exactly
+                           //   that as its reopening condition); PermManageMessages means "delete
+                           //   somebody else's message", which is one message at a time with a visible
+                           //   outcome; folding it into PermManageGuild would mean the only way to let
+                           //   somebody read the log is to let them turn the recording off. Granted to
+                           //   nobody by default and implied by nothing — it is the whole boundary on
+                           //   the widest disclosure in the schema, since the log holds content from
+                           //   channels its reader may not be able to view.
 )
 ```
 
