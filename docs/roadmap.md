@@ -2074,12 +2074,35 @@ annotated below with where it actually belongs.
   reflected as read when a second client (or a second daemon on another machine) next syncs, without a
   separate mark-as-read action.
 - **M125 — Data retention / audit-log pruning**: the configurable pruning seam from `architecture.md` §11,
-  wired into `norite instance init`/`norite config set`, default-disabled, scoped to `audit_log_entries` and
-  `instance_audit_log` only — message history and reports are explicitly not covered and stay permanent by
-  design. Conceptually belongs in Phase L (self-hosting ops polish) — depends on M14 (audit log) and M72
-  (instance audit log) existing, no other hard dependency. Done when: enabling a retention window on a test
-  instance prunes entries older than the window and leaves newer ones (and all message/report data,
-  unconditionally) untouched; leaving it disabled (the default) prunes nothing.
+  wired into `norite instance init`/`norite config set`, default-disabled, scoped to `audit_log_entries`,
+  `instance_audit_log` and `message_audit_entries` only — message history and reports are explicitly not
+  covered and stay permanent by design. Conceptually belongs in Phase L (self-hosting ops polish) —
+  depends on M14 (audit log), M72 (instance audit log) and M16b (the opt-in message audit) existing, no
+  other hard dependency.
+
+  **`message_audit_entries` was added to that list at M16b's planning (2026-09-22), and the omission is
+  the more interesting half.** Three documents already said this table would be prunable here — M16b's own
+  entry ("lets this one carry a retention policy the audit log deliberately refuses (M125 owns pruning)"),
+  `architecture.md` §2's DDL comment, and the M15 re-examination in `docs/security-ledger.md` — while this
+  entry enumerated two tables and its done-when required *all* message data left untouched
+  unconditionally, which would have forbidden exactly what those three promised. A deferral is not
+  deferred until the entry inheriting it says so; three pointers and no destination is the shape this
+  project's own rule exists to prevent, and it survived because nothing reads a done-when against the
+  entries that point at it.
+
+  **The distinction that makes three tables coherent where two were.** `audit_log_entries` and
+  `instance_audit_log` are accountability records written about people who never chose them, which is why
+  M14's migration says the first is never swept and why a retention window there is an operator's legal
+  decision rather than a convenience. `message_audit_entries` is a record a guild switched on for itself
+  and can switch off, so a guild that stops recording having no way to stop *holding* what it recorded is
+  the odd state, not the safe one. `messages` and `message_edit_history` are untouched by this and stay
+  permanent: an edit history with a retention window is one that forgets the edit somebody wants to look
+  at, which `000020` settles in as many words.
+
+  Done when: enabling a retention window on a test instance prunes entries older than the window from all
+  three tables and leaves newer ones (and all message-history and report data, unconditionally) untouched;
+  leaving it disabled (the default) prunes nothing. Note the index cost `000018` flags — a sweep by age
+  needs one, and neither the audit log's nor the message audit's current indexes serve it.
 
 **How a screen is scheduled:** `docs/design/tui/` draws every screen in its finished state, so a milestone
 that "carries" one builds only the parts whose features exist by then and leaves the rest **absent rather
@@ -2108,6 +2131,6 @@ Phase D's Redis-fan-out design to already exist as a seam, and on M58 (attachmen
 is a cross-track edge and therefore fine. **M113 no longer requires M115** — it backs up to volume
 snapshots — which removes what was the roadmap's only dependency running backwards against its own
 numbering. M124 depends on
-M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14 and M72, conceptually
-belonging in Phase L despite its number — the same "numerically-late, logically-earlier" treatment already
-established for Phase P above.
+M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14, M72 and M16b,
+conceptually belonging in Phase L despite its number — the same "numerically-late, logically-earlier"
+treatment already established for Phase P above.
