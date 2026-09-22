@@ -1,0 +1,192 @@
+-- Milestone M16b — the recording switch, and the table it fills.
+--
+-- Rule 2 was narrowed at M15: message content is not administrative, so a member posting, editing or
+-- deleting their own message writes no audit entry. That is the right default and it is not what every
+-- operator wants — a small private guild under a compliance obligation, or one that has had an incident,
+-- may genuinely want every message kept. This is the opt-in that pays its own cost, rather than a default
+-- everybody pays.
+--
+-- Everything below is measured on PostgreSQL 16.14 against 1,500,063 audit rows across 100 recording
+-- guilds, over 400,000 messages in 2,000 channels — the message scale 000020 and 000022 both used, so
+-- those figures stay comparable.
+
+-- Owner-only, off by default, and the default is the design.
+--
+-- **An Instance Admin may not set it, and that is the first place in this codebase where layer 1 is
+-- narrower than layer 2.** Rule 14 requires every Instance Admin action to be recorded in
+-- instance_audit_log, which is M72's table and does not exist — so the tier could otherwise switch
+-- recording on for a guild it has never joined and nothing anywhere would say so. The refusal is
+-- temporary by construction and the direction is the reversible one: lifting it when M72 lands is
+-- additive, while withdrawing a capability operators have built around is not. `docs/security-ledger.md`
+-- carries it with both reopening conditions — M72 arriving, and a *second* layer-1 exception appearing
+-- anywhere, at which point "layer 1 has exceptions" needs a mechanism rather than two comments that do
+-- not know about each other.
+--
+-- Flipping it either way is administrative and is audited in the ordinary log, under its own verb pair
+-- rather than inside guild.update's diff. Off-without-a-trace would make this the one setting to disable
+-- before acting and re-enable after; burying it in a changes payload would make the entry an
+-- investigation looks for first the one it has to page the whole log to find. That is M14's argument for
+-- member.role_add against member.update, on the setting where it matters most.
+--
+-- A non-volatile DEFAULT, so this is a catalogue update rather than a table rewrite.
+ALTER TABLE guilds ADD COLUMN message_audit_enabled boolean NOT NULL DEFAULT false;
+
+-- **A table of its own, and that is the whole performance argument.** Folding this into
+-- audit_log_entries would put the product's highest-volume write on the table GET
+-- /guilds/{id}/audit-log pages through, whose cursor and three indexes are sized for moderation traffic.
+-- Separate, the default log's shape does not depend on anybody's setting.
+--
+-- It also lets this table take a retention policy the audit log deliberately refuses. That was claimed
+-- in three places and owned nowhere until M16b's planning: M125's entry enumerated two tables and its
+-- done-when required all message data untouched unconditionally, which would have forbidden exactly what
+-- the roadmap, §2 and the ledger each promised. M125 names this table now.
+--
+-- **Rule 13 applies directly here, and harder than it did at M16a, because this stores content rather
+-- than reading it.** The exclusion is a join predicate in the writer (`NOT m.is_e2e`) rather than a Go
+-- check, so whoever writes the next writer inherits it. The structural half — E2E is DM-only, a DM has no
+-- guild, and guild_id below is NOT NULL, so there is no value a DM's audit row could carry — is the same
+-- argument audit_log_entries makes, and it is pinned by a test rather than left as an argument, because
+-- M11a's lesson is that "closed by construction" stops being true quietly.
+CREATE TABLE message_audit_entries (
+  id         bigint PRIMARY KEY,                                  -- snowflake (ADR 0003)
+  guild_id   bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  -- No REFERENCES, the same call channels.last_message_id makes: an audit record that vanishes when the
+  -- thing it records is deleted is not an audit record, and a cascade here would delete exactly the rows
+  -- an investigation wants. Message deletion is soft anyway (000020), but a channel deletion hard-deletes
+  -- its messages, and the create and edit rows must survive that.
+  message_id bigint NOT NULL,
+  channel_id bigint NOT NULL,
+  -- Who *acted*, which for a moderator deleting somebody else's message is the moderator and not the
+  -- author. NOT NULL, matching audit_log_entries.actor_id and unlike messages.author_id, which is
+  -- nullable for a message that genuinely has no author.
+  --
+  -- **That difference is a constraint M60 inherits and M16b cannot satisfy for it.** Every write reaching
+  -- this table today comes from an authenticated actor, so NOT NULL holds; a webhook message (M60) or a
+  -- system message has no user behind it and would violate it, answering 500 on an ordinary send in a
+  -- recording guild. M60's roadmap entry carries it, because a constraint recorded only in a migration
+  -- comment is one that milestone never reads.
+  actor_id   bigint NOT NULL REFERENCES users(id),
+  action     varchar(32) NOT NULL,                                -- create | edit | delete
+  -- The content as of this action. Recorded for a delete too, which §2 left open: the create row only
+  -- holds what a message said when it was posted, so a message written before the switch went on and
+  -- deleted after would otherwise have its content recorded nowhere — and that is the case an
+  -- investigation is most likely to be about.
+  --
+  -- Nullable rather than NOT NULL because an E2E message contributes no content and the writer's join
+  -- predicate is what makes that true; a NOT NULL column would turn rule 13's exclusion into an error
+  -- instead of an absence.
+  content    text NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- The read: one page of a guild's log, newest first, cursored on id.
+--
+-- **The measurement turns entirely on density, and density here is not what it is anywhere else in this
+-- schema.** This table holds rows only for guilds that record, so one guild's share of it is large when
+-- few record and small when many do — which means the index question is decided by how many guilds opt
+-- in, not by how big any one of them is. The first seed had ten recording guilds, the typical one held
+-- 5% of the table, and every candidate index measured as unnecessary. That is 000021's and 000022's
+-- lesson arriving by a third route: a seed can be wrong about the *shape of the population* as well as
+-- about the distribution of its ids.
+--
+-- One page of 50, newest first, at three densities (the sparse guild was produced by reassigning 1,500
+-- rows chosen at random, so its ids stay exactly where the global shuffle put them):
+--
+--                            without this index                 with it
+--   13.4% of the table     0.079 ms,    24 buffers       0.054 ms,  24 buffers  (planner keeps the PK)
+--    1.0%                  0.487 ms,   210 buffers       0.028 ms,  46 buffers
+--    0.1%                  2.375 ms, 2,008 buffers       0.074 ms,  52 buffers
+--
+-- Read the first row for what it does not say. At 13.4% the planner **declines this index** and walks the
+-- primary key backwards, because a guild holding an eighth of the table yields fifty rows almost
+-- immediately — the same density artifact 000022 recorded for its middling and heavy messages. An index
+-- is not justified by the case that does not need it.
+--
+-- The case that decides it is the sparse one, and the relationship is linear rather than incidental:
+-- without this index the work is the 50/density rows of the primary key that have to be read and
+-- discarded, so it grows with **the number of recording guilds on the instance** while the indexed form
+-- stays flat. 210 buffers at 1% and 2,008 at 0.1% is that line, measured at two points. It is 000020's
+-- argument for messages_channel_id_id_idx — work that scales with total instance traffic rather than with
+-- what the caller asked for — on the table where the scaling factor is the feature's own adoption.
+--
+-- Deep pages matter more than first pages here, which is the opposite of the channel backlog: a
+-- moderation read walks backwards through a log rather than glancing at its head. Typical guild, cursor
+-- well into the range: 0.736 ms and 254 buffers without, 0.076 ms and 48 buffers with.
+--
+-- The cursor is an id and never created_at (M14): a snowflake is time-ordered *and* unique, while nothing
+-- constrains created_at, so a page boundary inside a group of equal timestamps would skip or repeat a
+-- row. The bound is spelled COALESCE rather than `$n IS NULL OR id < $n`, which M14 measured at 9 buffers
+-- against 1,859 because the OR form cannot become an index qual under a generic plan.
+--
+-- guild_id leads, so this also serves the ON DELETE CASCADE above.
+CREATE INDEX message_audit_entries_guild_id_id_idx ON message_audit_entries (guild_id, id DESC);
+
+-- **Not in §2, and the omission would have cost 530x on account deletion.**
+--
+-- actor_id is the refusing direction rather than the cascading one, and it needs an index for exactly
+-- audit_log_entries_actor_id_idx's and messages_author_id_idx's reason: the FK has no ON DELETE, so
+-- deleting a user requires Postgres to prove no row references them, and proving a negative over an
+-- unindexed column is a full scan of this table — inside the transaction rule 17's revoke-everything is
+-- already holding open.
+--
+-- 200 deletions of accounts that have posted nothing, which is the cheapest possible case and therefore
+-- the honest one to quote, three runs each:
+--
+--   with     0.135 / 0.132 / 0.132 ms per delete
+--   without 71.46 / 71.96 / 72.96 ms per delete
+--
+-- **This project has now paid for an unindexed foreign key three times and caught it twice.** M11's
+-- replaced_by_id was 3,757 ms in a trigger, M12's guild_member_roles.role_id 4,566 ms on 500 deletions,
+-- M13 suspected a third and cleared it by measuring. §2 draws two indexes on this table and neither is
+-- this one; the DDL is corrected there rather than only here, because §2 is what somebody copies.
+CREATE INDEX message_audit_entries_actor_id_idx ON message_audit_entries (actor_id);
+
+-- **§2's second index, shipped as drawn, and it serves no query this milestone writes.**
+--
+-- Rule 7 says an index ships with the query it relies on, and by that rule this one should wait. It is
+-- shipped anyway, with the fact stated plainly rather than dressed up: what it is for is a per-message
+-- view — everything that happened to *one* message — which is the shape M16a's route has for edit history
+-- and which no milestone currently owns. Saying so is the point. An index with an honest comment is one a
+-- later reader can delete; an index with a measurement that describes nothing is what 000020 shipped for
+-- M16a's read and 000022 had to replace.
+--
+-- It costs nothing measurable to carry: 20,000 sends into a recording guild, two runs each, 43.7 us/send
+-- with the two indexes above against 43.5 us/send with all three — inside run-to-run noise.
+CREATE INDEX message_audit_entries_message_id_idx ON message_audit_entries (message_id);
+
+-- **What recording costs the write path, and why the obvious design was measured and rejected.**
+--
+-- The writer reads the boolean and branches, then carries the flag *again* as a join predicate on the
+-- insert that runs. The first draft of this milestone's plan did it entirely in the statement — one
+-- INSERT ... SELECT joining messages to channels to guilds, with the opt-in as a join predicate and no
+-- read at all — on the argument that a guard which can be raced belongs in the statement, the way
+-- ConsumePasswordResetToken's single-use guard and the @everyone delete guard do.
+--
+-- Measuring it is what took it out. 20,000 sends, us/send, the flag off — which is every guild on the
+-- instance until somebody opts in:
+--
+--   the insert Send does today                          17.75 / 18.02 / 18.37
+--   read the boolean, guarded insert  (shipped)         19.51 / 19.52 / 19.69   +9%
+--   one statement, joining messages -> channels -> guilds      34.08            +90%
+--   one statement, guild_id passed in from guildauth           29.08            +62%
+--
+-- A feature nobody has enabled must not cost 62-90% of the product's highest-volume insert, and the
+-- property that was supposed to buy it turns out to be illusory: both shapes read the flag at some
+-- instant *after* the message is written, so neither makes "sent while recording" well-defined. The race
+-- is inherent to a switch that can be flipped mid-transaction, not something the statement form closes.
+--
+-- Everything the statement form was genuinely buying is kept. Rule 13's exclusion is still a join
+-- predicate on the row rather than a Go check. The content is still read back out of the message row
+-- rather than passed as a parameter, so what is recorded cannot disagree with what was stored. And the
+-- flag is still a join predicate on every insert that runs, which is what makes "no row exists for a
+-- guild whose flag is false" structural rather than merely tested. That second guard costs 10.5% on a
+-- guild that opted in — 43.05 us/send against 38.95 without it — which is the milestone's own "documented
+-- as the expensive choice" applied to the guild that chose it rather than to everybody else.
+--
+-- A third option was available and refused. ListGuildMemberAuthority already reads the guild row and
+-- already returns owner_id from it, so message_audit_enabled could ride it for literally zero extra
+-- round trips. That puts a guild *setting* inside the query that feeds roles.Resolve, and threads it up
+-- through Resolution and Decision — which is the coupling guildauth.Authorize's own comment refuses for
+-- the instance-admin flag, and the "convenience bolted on" M12 refused when it declined to widen
+-- Resolve's return for owner_id. M13 widened it later for standing and was right to, because standing
+-- *is* layer 4. A recording policy is not any layer at all.

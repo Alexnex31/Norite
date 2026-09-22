@@ -285,7 +285,7 @@ const createGuild = `-- name: CreateGuild :one
 
 INSERT INTO guilds (id, name, owner_id, description)
 VALUES ($1, $2, $3, $4)
-RETURNING id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at
+RETURNING id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled
 `
 
 type CreateGuildParams struct {
@@ -315,6 +315,7 @@ func (q *Queries) CreateGuild(ctx context.Context, arg CreateGuildParams) (Guild
 		&i.SystemChannelID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
 	)
 	return i, err
 }
@@ -545,7 +546,7 @@ func (q *Queries) GetChannelForUpdate(ctx context.Context, id int64) (Channel, e
 }
 
 const getGuild = `-- name: GetGuild :one
-SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at FROM guilds WHERE id = $1
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1
 `
 
 func (q *Queries) GetGuild(ctx context.Context, id int64) (Guild, error) {
@@ -560,13 +561,14 @@ func (q *Queries) GetGuild(ctx context.Context, id int64) (Guild, error) {
 		&i.SystemChannelID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
 	)
 	return i, err
 }
 
 const getGuildForUpdate = `-- name: GetGuildForUpdate :one
 
-SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at FROM guilds WHERE id = $1 FOR UPDATE
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR UPDATE
 `
 
 // # The locking reads the audit diff needs (M14)
@@ -601,6 +603,7 @@ func (q *Queries) GetGuildForUpdate(ctx context.Context, id int64) (Guild, error
 		&i.SystemChannelID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
 	)
 	return i, err
 }
@@ -1382,7 +1385,7 @@ SET name        = COALESCE($1, name),
                        ELSE COALESCE($3, description) END,
     updated_at  = now()
 WHERE id = $4
-RETURNING id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at
+RETURNING id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled
 `
 
 type UpdateGuildParams struct {
@@ -1415,6 +1418,7 @@ func (q *Queries) UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild
 		&i.SystemChannelID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
 	)
 	return i, err
 }
