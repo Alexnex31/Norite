@@ -355,8 +355,21 @@ CREATE TABLE guilds (
   -- message create/edit/delete writes to message_audit_entries — never to audit_log_entries, which keeps
   -- the moderation log's shape and M14's cursor unchanged whether anybody opts in or not.
   --
-  -- Flipping it either way is itself administrative and is audited in the ordinary log. Off-without-a-trace
-  -- would make this the one setting to disable before acting and re-enable after.
+  -- Flipping it either way is itself administrative and is audited in the ordinary log, under its own verb
+  -- pair (guild.message_audit_enable / _disable) rather than inside guild.update's diff — M14's
+  -- member.role_add argument, on the setting where it matters most. Off-without-a-trace would make this
+  -- the one setting to disable before acting and re-enable after, so the entry an investigation looks for
+  -- first must not require paging the whole log to find.
+  --
+  -- **Owner-only, and refused to an Instance Admin until M72** (M16b). That is the first place in this
+  -- codebase where layer 1 is narrower than layer 2, and it is temporary by construction: rule 14 wants
+  -- every Instance Admin action in instance_audit_log, which M72 builds, so until then the tier could
+  -- start recording a guild it never joined and leave nothing that says so. Reading a recording guild's
+  -- log is a different question and the tier is not refused there.
+  --
+  -- Readable by any member, which is M16b's own structural obligation rather than a convenience: the flag
+  -- is on the Guild payload behind PermViewChannel, so screen 6e (M62a) can state the guild's status in
+  -- both directions rather than letting the absence of a warning carry a meaning nothing guarantees.
   message_audit_enabled boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -486,9 +499,18 @@ CREATE INDEX ON message_edit_history (message_id, id DESC);   -- M15, replaced a
 CREATE TABLE message_audit_entries (           -- M16b
   id bigint PRIMARY KEY, guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
   message_id bigint NOT NULL, channel_id bigint NOT NULL, actor_id bigint NOT NULL REFERENCES users(id),
-  action varchar(32) NOT NULL,                 -- create | edit | delete
-  content text NULL,                           -- the content as of this action; NULL for a delete if the
-                                               --   notice decision lands that way (see the roadmap entry)
+  action varchar(32) NOT NULL,                 -- create | edit | delete. A vocabulary of its own, and
+                                               --   deliberately disjoint from audit_log_entries.action:
+                                               --   a verb in both would make the audit-log reader accept
+                                               --   an `action` filter for rows that table never holds.
+                                               --   Pinned apart by a test in cmd/server (M16b).
+  content text NULL,                           -- the content as of this action, including for a delete.
+                                               --   M16b settled the open question that stood here: the
+                                               --   create row only holds what a message said when it was
+                                               --   posted, so one written before the switch went on and
+                                               --   deleted after would have its text recorded nowhere.
+                                               --   Nullable because rule 13's exclusion must arrive as an
+                                               --   absence rather than as a constraint violation.
   created_at timestamptz NOT NULL DEFAULT now()
 );
 -- message_id has no REFERENCES clause on purpose, the same call channels.last_message_id makes: an audit
@@ -496,6 +518,15 @@ CREATE TABLE message_audit_entries (           -- M16b
 -- would delete exactly the rows an investigation wants.
 CREATE INDEX ON message_audit_entries (guild_id, id DESC);
 CREATE INDEX ON message_audit_entries (message_id);
+-- **Added at M16b, and this block had two indexes until then.** actor_id references users(id) with no
+-- ON DELETE, which is messages_author_id_idx's exact shape: deleting an account requires Postgres to
+-- prove no row here references it, and proving a negative over an unindexed column is a full scan of this
+-- table — inside the transaction rule 17's revoke-everything is already holding open. Measured at M16b on
+-- 1.5M rows: 71.5 ms per account deletion without it against 0.135 ms with, on an account that has posted
+-- nothing, which is the cheapest case. That is the fourth unindexed foreign key this project has found
+-- and the third it has paid for (M11's replaced_by_id at 3,757 ms, M12's guild_member_roles.role_id at
+-- 4,566 ms, and one M13 cleared by measuring rather than assuming).
+CREATE INDEX ON message_audit_entries (actor_id);   -- M16b
 
 CREATE TABLE message_reactions (                -- M56a
   id bigint PRIMARY KEY, message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -1049,6 +1080,15 @@ GET    /guilds/{guild_id}/message-audit     -- M16b; the opt-in log, empty unles
                                            --   The toggle itself is a field on PATCH /guilds/{guild_id},
                                            --   owner-only like deletion rather than PermManageGuild, and
                                            --   audited in the ordinary log in both directions.
+                                           --
+                                           --   Behind PermViewMessageAudit (bit 21), which M16b added
+                                           --   rather than reusing a bit: this returns every message in
+                                           --   the guild including channels the caller cannot view, so
+                                           --   it is the widest read in the API and the bit is the whole
+                                           --   boundary. §2 said nothing about the read's gate until
+                                           --   then, and screen 6e had already promised members that
+                                           --   "moderators" can read it. Ledger, with the disclosure
+                                           --   stated rather than inherited from M16's.
 GET    /channels/{channel_id}/messages/{message_id}/history
                                            -- M16a; PermManageMessages, not channel-read — and not channel
                                            --   *visibility* either: it authorizes through guildauth's

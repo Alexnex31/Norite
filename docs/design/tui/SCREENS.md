@@ -377,7 +377,13 @@ and every member of the guild sees the same thing apart from their own settings.
 - Header: the guild's name, its owner, and `N members` in `text.dim`.
 - **Recording** block, and it is the reason this screen exists. When the guild has
   `message_audit_enabled` (`M16b`) it reads, in `warn`: *messages in this guild are recorded — every
-  message sent here is kept in a log its moderators can read, including edits and deletions*. When the
+  message sent here is kept in a log its moderators can read, including edits and deletions*. **"Its
+  moderators" is `VIEW_MESSAGE_AUDIT` in practice** — M16b's own bit, granted by default to nobody and
+  implied by no other permission, so the set may be empty or may be one account. The copy deliberately
+  over-warns rather than naming a permission a member cannot check: what a member needs to know is that
+  the guild keeps this and that somebody in it can be given the key, not the current membership of that
+  set. The flag itself is on the guild payload behind `VIEW_CHANNEL`, so this screen can read it with
+  nothing granted. When the
   guild does **not**, it reads in `text.dim`: *messages in this guild are not recorded beyond the normal
   history*. **Both states are stated; neither is silence.** A screen that showed a line only when
   recording was on would make its absence carry meaning it cannot be trusted to carry — a member who

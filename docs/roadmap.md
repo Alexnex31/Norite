@@ -750,10 +750,47 @@ of this section.
   the flag has to be readable by any member of the guild, not only by somebody holding a permission, or
   the screen cannot state either case honestly.
 
+  **The read's gate was specified nowhere, and one document had already promised an answer.** §2 settled
+  the *toggle*'s authority in the same breath as the route and said nothing about who may read; the
+  entry above says nothing; and screen `6e` tells every member their messages are "kept in a log its
+  moderators can read". So the milestone's central question arrived unowned, found by reading the three
+  against each other — the fourth milestone running where that was the productive move. The answer is
+  `PermViewMessageAudit` at bit 21, M14's argument for `PermViewAuditLog` one surface later, and the
+  three bits it could have reused are each wrong differently: `VIEW_AUDIT_LOG`'s own ledger entry names
+  "the log ever carries message content" as its reopening condition, so reusing it would satisfy that
+  condition's letter while doing exactly what it names.
+
+  **M125 forbade what three documents promised it would do.** Its entry scoped pruning to
+  `audit_log_entries` and `instance_audit_log` and required all message data untouched unconditionally,
+  while this entry, §2's DDL comment and the ledger each said `message_audit_entries` would take a
+  retention policy there. A deferral is not deferred until the entry inheriting it says so; this one had
+  three pointers and no destination, and it survived because nothing reads a done-when against the
+  entries pointing at it. M125 names the table now.
+
+  **The design the plan called for was measured and dropped.** It put the whole thing in one statement —
+  an `INSERT ... SELECT` joining messages to channels to guilds with the opt-in as a join predicate — on
+  the argument that a guard which can be raced belongs in the statement. It costs 62–90% of the message
+  insert in guilds that have *not* opted in, which is all of them until somebody does, against 9% for
+  reading the boolean and branching. And the unraceability it was buying is illusory: both shapes read
+  the flag after the message is written, so neither makes "sent while recording" well-defined. What the
+  statement form was genuinely buying is kept — the flag is still a join predicate on the insert that
+  runs, so no row can exist for a guild whose flag is false whatever the caller believes.
+
+  **§2's DDL was missing an index worth 530x.** `actor_id` references `users(id)` with no `ON DELETE`,
+  which is `messages_author_id_idx`'s exact shape: 71.5 ms per account deletion against 0.135 ms. The
+  fourth unindexed foreign key this project has found and the third it has paid for.
+
+  **An Instance Admin may not flip the switch**, which is the first place in the codebase where layer 1
+  is narrower than layer 2. Rule 14 wants the action in `instance_audit_log` and that is M72's, so until
+  then the tier could start recording a guild it never joined and leave no trace. Taken the other way
+  first and reversed on reversibility: lifting a refusal later is additive, withdrawing a capability
+  operators rely on is not. The tier still *reads* any recording guild's log — M16a's gap, unchanged.
+
   Depends on M15 (messages) and M16a (the moderation-read-over-content pattern and its disclosure
   decision). Done when: a guild with the setting off writes nothing to `message_audit_entries`, one with it
   on records every create/edit/delete, both toggles appear in the ordinary audit log, an E2E DM is never
-  recorded, and the notice decision is in the ledger.
+  recorded, and the notice decision is in the ledger — all five met, the last by four entries, one of
+  which records that members are told nothing until M62a draws the screen.
 - **M17 — Message tagging**: `message_tags` (plus its join table), guild-wide scope (not per-channel),
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and
