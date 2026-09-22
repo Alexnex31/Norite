@@ -4680,7 +4680,8 @@ components:
 
     Guild:
       type: object
-      required: [id, name, owner_id, icon_hash, description, created_at, updated_at]
+      required:
+        [id, name, owner_id, icon_hash, description, message_audit_enabled, created_at, updated_at]
       additionalProperties: false
       properties:
         id:
@@ -4698,6 +4699,22 @@ components:
           description: Reserved. No upload endpoint exists yet, so this is always null.
         description:
           type: [string, "null"]
+        message_audit_enabled:
+          type: boolean
+          description: >
+            Whether this guild records every message its members send to a log its moderators can read
+            (M16b), including edits and deletions. Off unless the guild's owner turned it on.
+
+
+            **Readable by any member**, deliberately: this endpoint is gated on `VIEW_CHANNEL`, which
+            every member holds by default, so being told whether you are recorded does not depend on
+            holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this
+            field needs the owner; neither is required to learn the answer.
+
+
+            Always present, in both states. A client must be able to say "this guild does not record"
+            as positively as it says the opposite — a field that appeared only when recording was on
+            would make its absence carry a meaning nothing guarantees.
         created_at:
           type: string
           format: date-time
@@ -4739,6 +4756,32 @@ components:
             Removes the description. A separate flag rather than a null `description`, because a JSON
             decoder cannot tell an explicit null from an absent field — and if absent meant "clear", every
             partial update would erase what it did not mention.
+        message_audit_enabled:
+          type: boolean
+          description: >
+            Turns this guild's message recording on or off (M16b). **Sending this field at all requires
+            the guild's owner**, where every other field on this request requires only `MANAGE_GUILD` — so
+            an administrator who can rename the guild is answered `403` if they include it, and the
+            setting is unchanged.
+
+
+            **An Instance Admin is refused too, which is the only place on this API where the instance
+            tier is narrower than a guild's owner.** Rule 14 requires every Instance Admin action to be
+            written to the instance audit log, and that log does not exist until M72 — so the tier could
+            otherwise start recording a guild it has never joined and leave no trace of having done it.
+            The refusal is temporary and lifts when M72 lands. Reading a recording guild's log is a
+            different question and the tier is *not* refused there.
+
+
+            Flipping it writes `guild.message_audit_enable` or `guild.message_audit_disable` to the
+            ordinary audit log — a verb of its own rather than a field inside `guild.update`'s diff,
+            because switching recording off is the entry an investigation looks for first and it must not
+            require paging the whole log to find. Sending the value it already has changes nothing and
+            writes neither verb.
+
+
+            Turning it on records nothing about what was said before; turning it off removes nothing
+            already recorded.
 
     Channel:
       type: object
@@ -5097,6 +5140,18 @@ components:
         - member.role_remove
         - overwrite.set
         - overwrite.delete
+        # M16b's recording switch, as a pair rather than a field inside `guild.update`'s diff. What an
+        # operator reads this log for is who turned recording on and who turned it off, and the reason
+        # the toggle is audited at all is that off-without-a-trace would make it the one setting to
+        # disable before acting and re-enable after — so the entry somebody goes looking for first must
+        # not be a key buried in a payload. Both directions, because enabling changes a member's
+        # expectations as much as disabling changes what the guild keeps.
+        #
+        # The recording rows themselves are not here: they carry `create`/`edit`/`delete` in a different
+        # table with a different reader, and this vocabulary is the one `GET /guilds/{id}/audit-log`
+        # validates an `action` filter against.
+        - guild.message_audit_enable
+        - guild.message_audit_disable
         # Written by the messages service, not by guilds, and only on the moderator path — an author
         # deleting their own message writes nothing (rule 2 covers administrative mutations). It is in
         # this enum because the audit-log reader accepts it as an `action` filter and returns entries

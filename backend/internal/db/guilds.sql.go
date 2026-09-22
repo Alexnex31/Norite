@@ -1380,19 +1380,21 @@ func (q *Queries) UpdateChannel(ctx context.Context, arg UpdateChannelParams) (C
 
 const updateGuild = `-- name: UpdateGuild :one
 UPDATE guilds
-SET name        = COALESCE($1, name),
-    description = CASE WHEN $2::boolean THEN NULL
-                       ELSE COALESCE($3, description) END,
-    updated_at  = now()
-WHERE id = $4
+SET name                  = COALESCE($1, name),
+    description           = CASE WHEN $2::boolean THEN NULL
+                                 ELSE COALESCE($3, description) END,
+    message_audit_enabled = COALESCE($4, message_audit_enabled),
+    updated_at            = now()
+WHERE id = $5
 RETURNING id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled
 `
 
 type UpdateGuildParams struct {
-	Name             *string
-	ClearDescription bool
-	Description      *string
-	ID               int64
+	Name                *string
+	ClearDescription    bool
+	Description         *string
+	MessageAuditEnabled *bool
+	ID                  int64
 }
 
 // Partial update through COALESCE, so a caller sends only the fields it means to change.
@@ -1401,11 +1403,19 @@ type UpdateGuildParams struct {
 // exists to avoid. NULL means "leave alone" rather than "set to NULL", which is why description clears
 // through a separate flag: without it there would be no way to remove a description at all, since the
 // value that means "clear this" and the value that means "do not touch this" would be the same.
+//
+// message_audit_enabled (M16b) is a nullable boolean through the same COALESCE, the shape
+// UpdateGuildMember already uses for deaf and mute. It is the one field here whose *authority* differs
+// from the others — the rest need PermManageGuild, this one needs the owner and is refused to an Instance
+// Admin until M72 — but that check belongs in the service, above this statement, and not in a WHERE
+// clause: a guard in the statement makes a refusal indistinguishable from a guild that vanished, and the
+// caller has to be able to tell 403 from 404.
 func (q *Queries) UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild, error) {
 	row := q.db.QueryRow(ctx, updateGuild,
 		arg.Name,
 		arg.ClearDescription,
 		arg.Description,
+		arg.MessageAuditEnabled,
 		arg.ID,
 	)
 	var i Guild

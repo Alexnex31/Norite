@@ -180,9 +180,67 @@ type UpdateGuildInput struct {
 	// ClearDescription distinguishes "remove the description" from "do not touch it", which a nil pointer
 	// alone cannot express — see UpdateGuild in guilds.sql.
 	ClearDescription bool
+	// MessageAuditEnabled is M16b's recording switch, and it is the one field on this struct that its
+	// holder needs more than PermManageGuild to set. See Service.Update.
+	MessageAuditEnabled *bool
+}
+
+// mayFlipMessageAudit reports whether this actor may turn a guild's message recording on or off.
+//
+// # Why this is a function and not `existing.OwnerID == actor.UserID` at the call site
+//
+// Because it departs from every other authority check in this package in two ways at once, and an
+// unexplained inequality reads as a caller that forgot the tier — which is the exact thing Decision's
+// four helpers (Allows, Outranks, AllowsInChannel, OutranksMember) exist to make impossible.
+//
+// # It does not take the Decision, and that is the subtle half
+//
+// Ownership here is read off the loaded guild row, never from [guildauth.Decision.Owns]. Authorize
+// short-circuits at layer 1 and returns a Decision with a *zero* resolution, deliberately, because an
+// Instance Admin is not a member and resolving them would be ADR 0008's conflation. So `decision.Owns()`
+// is false for an Instance Admin **even when they genuinely own the guild** — and a check written the
+// obvious way would refuse an instance operator the switch on a guild they created themselves. That
+// reads as a permission bug and invites the repair that hands the tier the capability this function
+// exists to withhold. It is the same failure shape M13 recorded for `highestPosition`, which reports the
+// owner at the bottom of their own hierarchy.
+//
+// RemoveMember makes the same move for the same reason: it asks whether the *target* owns the guild, and
+// on the path that most needs the answer there is no resolution to read it from. The row is already in
+// hand here — Update loads it for the diff — so this costs nothing.
+//
+// # An Instance Admin is refused, which is the first time layer 1 is narrower than layer 2
+//
+// Rule 14 requires every Instance Admin action to be written to instance_audit_log, and that table is
+// M72's and does not exist. So the tier could otherwise switch recording on for a guild it has never
+// joined, read everything the guild subsequently says, and leave no record anywhere that it did. The
+// refusal is temporary by construction and the direction is the reversible one: lifting it when M72
+// lands is additive, while withdrawing a capability operators have built around is not.
+//
+// **What it buys is narrow and should not be oversold.** Decision.Allows returns true for layer 1, so an
+// Instance Admin still *reads* any recording guild's log — that is M16a's already-ledgered gap and this
+// does not close it. What they cannot do is start the recording. The line is between reading what a
+// guild chose to collect and deciding what the instance collects about a guild that chose nothing.
+//
+// docs/security-ledger.md carries it with both reopening conditions: M72 arriving, and a *second* layer-1
+// exception appearing anywhere — at which point two comments that do not know about each other need to
+// become a mechanism, which is what this package has done four times rather than trust to memory.
+func mayFlipMessageAudit(actor auth.Actor, existing db.Guild) bool {
+	return snowflake.ID(existing.OwnerID) == actor.UserID
 }
 
 // Update changes a guild's own fields.
+//
+// # Two authorities in one request
+//
+// Everything here needs PermManageGuild, which is checked once below. M16b's recording switch needs the
+// guild's owner on top of that, so the authority is built from the fields actually present — M12's
+// correction to UpdateMember, where a permission only ever OR'd into a base made two moderation bits
+// undeliverable on their own. The difference is that ownership is not a bit, so the extra check is
+// [mayFlipMessageAudit] rather than a wider `need`.
+//
+// The order matters and is M12's "refuse before explaining": the ownership check runs *after* the guild
+// row loads and before anything is written, so a non-member still gets the 404 authorize produced and a
+// member who merely holds PermManageGuild gets 403 without learning what the setting currently is.
 func (s *Service) Update(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in UpdateGuildInput,
 ) (Guild, error) {
@@ -211,11 +269,20 @@ func (s *Service) Update(
 			return fmt.Errorf("guilds: get guild: %w", err)
 		}
 
+		// The recording switch needs more than the permission that got us here. Checked after the row
+		// loads, so the refusal is an authorization answer rather than an input one (M12's "refuse before
+		// explaining"), and before anything is written, so a refused request changes nothing.
+		if in.MessageAuditEnabled != nil && !mayFlipMessageAudit(actor, existing) {
+			return httpx.Errorf(httpx.ErrForbidden,
+				"only the guild's owner may change whether its messages are recorded")
+		}
+
 		row, err := q.UpdateGuild(ctx, db.UpdateGuildParams{
-			ID:               int64(guildID),
-			Name:             in.Name,
-			Description:      in.Description,
-			ClearDescription: in.ClearDescription,
+			ID:                  int64(guildID),
+			Name:                in.Name,
+			Description:         in.Description,
+			ClearDescription:    in.ClearDescription,
+			MessageAuditEnabled: in.MessageAuditEnabled,
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -234,10 +301,40 @@ func (s *Service) Update(
 			changes.changed("description", orNil(existing.Description), *in.Description)
 		}
 
-		if err := s.writeAudit(
-			ctx, q, guildID, actor.UserID, ActionGuildUpdate, &guildID, changes.payload(),
-		); err != nil {
-			return err
+		// **"Flipped" means the value actually moved.** M14 settled that a field sent with the value it
+		// already had is not a change, and it matters more here than anywhere else in this package: an
+		// entry announcing that recording was enabled when it was already enabled is exactly the noise a
+		// real one could be hidden in, on the log whose whole purpose is that this cannot be hidden.
+		recordingToggled := in.MessageAuditEnabled != nil &&
+			*in.MessageAuditEnabled != existing.MessageAuditEnabled
+		touchedUpdateFields := in.Name != nil || in.Description != nil || in.ClearDescription
+
+		// The toggle is its own verb and is deliberately absent from the diff above, so a request that
+		// *only* flips it writes one entry rather than a toggle plus a guild.update describing nothing.
+		// Everything else is as it has been since M12: a request touching a field guild.update owns
+		// writes one, and so does a request that changes nothing at all.
+		if touchedUpdateFields || !recordingToggled {
+			if err := s.writeAudit(
+				ctx, q, guildID, actor.UserID, ActionGuildUpdate, &guildID, changes.payload(),
+			); err != nil {
+				return err
+			}
+		}
+
+		if recordingToggled {
+			action := ActionGuildMessageAuditDisable
+			if *in.MessageAuditEnabled {
+				action = ActionGuildMessageAuditEnable
+			}
+
+			toggle := auditDiff{}
+			toggle.changed("message_audit_enabled", existing.MessageAuditEnabled, *in.MessageAuditEnabled)
+
+			if err := s.writeAudit(
+				ctx, q, guildID, actor.UserID, action, &guildID, toggle.payload(),
+			); err != nil {
+				return err
+			}
 		}
 
 		out = guildFromRow(row)

@@ -11,25 +11,27 @@ import (
 
 // Defines values for AuditLogAction.
 const (
-	ChannelCreate    AuditLogAction = "channel.create"
-	ChannelDelete    AuditLogAction = "channel.delete"
-	ChannelUpdate    AuditLogAction = "channel.update"
-	GuildCreate      AuditLogAction = "guild.create"
-	GuildDelete      AuditLogAction = "guild.delete"
-	GuildUpdate      AuditLogAction = "guild.update"
-	MemberRemove     AuditLogAction = "member.remove"
-	MemberRoleAdd    AuditLogAction = "member.role_add"
-	MemberRoleRemove AuditLogAction = "member.role_remove"
-	MemberUpdate     AuditLogAction = "member.update"
-	MessageDelete    AuditLogAction = "message.delete"
-	OverwriteDelete  AuditLogAction = "overwrite.delete"
-	OverwriteSet     AuditLogAction = "overwrite.set"
-	ReportDismiss    AuditLogAction = "report.dismiss"
-	ReportResolve    AuditLogAction = "report.resolve"
-	RoleCreate       AuditLogAction = "role.create"
-	RoleDelete       AuditLogAction = "role.delete"
-	RoleReorder      AuditLogAction = "role.reorder"
-	RoleUpdate       AuditLogAction = "role.update"
+	ChannelCreate            AuditLogAction = "channel.create"
+	ChannelDelete            AuditLogAction = "channel.delete"
+	ChannelUpdate            AuditLogAction = "channel.update"
+	GuildCreate              AuditLogAction = "guild.create"
+	GuildDelete              AuditLogAction = "guild.delete"
+	GuildMessageAuditDisable AuditLogAction = "guild.message_audit_disable"
+	GuildMessageAuditEnable  AuditLogAction = "guild.message_audit_enable"
+	GuildUpdate              AuditLogAction = "guild.update"
+	MemberRemove             AuditLogAction = "member.remove"
+	MemberRoleAdd            AuditLogAction = "member.role_add"
+	MemberRoleRemove         AuditLogAction = "member.role_remove"
+	MemberUpdate             AuditLogAction = "member.update"
+	MessageDelete            AuditLogAction = "message.delete"
+	OverwriteDelete          AuditLogAction = "overwrite.delete"
+	OverwriteSet             AuditLogAction = "overwrite.set"
+	ReportDismiss            AuditLogAction = "report.dismiss"
+	ReportResolve            AuditLogAction = "report.resolve"
+	RoleCreate               AuditLogAction = "role.create"
+	RoleDelete               AuditLogAction = "role.delete"
+	RoleReorder              AuditLogAction = "role.reorder"
+	RoleUpdate               AuditLogAction = "role.update"
 )
 
 // Valid indicates whether the value is a known member of the AuditLogAction enum.
@@ -44,6 +46,10 @@ func (e AuditLogAction) Valid() bool {
 	case GuildCreate:
 		return true
 	case GuildDelete:
+		return true
+	case GuildMessageAuditDisable:
+		return true
+	case GuildMessageAuditEnable:
 		return true
 	case GuildUpdate:
 		return true
@@ -735,8 +741,15 @@ type Guild struct {
 	//
 	//
 	// Examples: 7238829238972837423
-	Id   Snowflake `json:"id"`
-	Name string    `json:"name"`
+	Id Snowflake `json:"id"`
+
+	// MessageAuditEnabled Whether this guild records every message its members send to a log its moderators can read (M16b), including edits and deletions. Off unless the guild's owner turned it on.
+	//
+	// **Readable by any member**, deliberately: this endpoint is gated on `VIEW_CHANNEL`, which every member holds by default, so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this field needs the owner; neither is required to learn the answer.
+	//
+	// Always present, in both states. A client must be able to say "this guild does not record" as positively as it says the opposite — a field that appeared only when recording was on would make its absence carry a meaning nothing guarantees.
+	MessageAuditEnabled bool   `json:"message_audit_enabled"`
+	Name                string `json:"name"`
 
 	// OwnerId The account that bypasses every permission check within this guild (authority layer 2). Cannot be removed from the guild, and transferring it is not yet possible.
 	OwnerId   Snowflake `json:"owner_id"`
@@ -1434,7 +1447,16 @@ type UpdateGuildRequest struct {
 	// ClearDescription Removes the description. A separate flag rather than a null `description`, because a JSON decoder cannot tell an explicit null from an absent field — and if absent meant "clear", every partial update would erase what it did not mention.
 	ClearDescription *bool   `json:"clear_description,omitempty"`
 	Description      *string `json:"description,omitempty"`
-	Name             *string `json:"name,omitempty"`
+
+	// MessageAuditEnabled Turns this guild's message recording on or off (M16b). **Sending this field at all requires the guild's owner**, where every other field on this request requires only `MANAGE_GUILD` — so an administrator who can rename the guild is answered `403` if they include it, and the setting is unchanged.
+	//
+	// **An Instance Admin is refused too, which is the only place on this API where the instance tier is narrower than a guild's owner.** Rule 14 requires every Instance Admin action to be written to the instance audit log, and that log does not exist until M72 — so the tier could otherwise start recording a guild it has never joined and leave no trace of having done it. The refusal is temporary and lifts when M72 lands. Reading a recording guild's log is a different question and the tier is *not* refused there.
+	//
+	// Flipping it writes `guild.message_audit_enable` or `guild.message_audit_disable` to the ordinary audit log — a verb of its own rather than a field inside `guild.update`'s diff, because switching recording off is the entry an investigation looks for first and it must not require paging the whole log to find. Sending the value it already has changes nothing and writes neither verb.
+	//
+	// Turning it on records nothing about what was said before; turning it off removes nothing already recorded.
+	MessageAuditEnabled *bool   `json:"message_audit_enabled,omitempty"`
+	Name                *string `json:"name,omitempty"`
 }
 
 // UpdateMemberRequest The permission required depends on which fields are present — see the endpoint description.

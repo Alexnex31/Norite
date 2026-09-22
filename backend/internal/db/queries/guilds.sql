@@ -17,11 +17,19 @@ SELECT * FROM guilds WHERE id = $1;
 -- exists to avoid. NULL means "leave alone" rather than "set to NULL", which is why description clears
 -- through a separate flag: without it there would be no way to remove a description at all, since the
 -- value that means "clear this" and the value that means "do not touch this" would be the same.
+--
+-- message_audit_enabled (M16b) is a nullable boolean through the same COALESCE, the shape
+-- UpdateGuildMember already uses for deaf and mute. It is the one field here whose *authority* differs
+-- from the others — the rest need PermManageGuild, this one needs the owner and is refused to an Instance
+-- Admin until M72 — but that check belongs in the service, above this statement, and not in a WHERE
+-- clause: a guard in the statement makes a refusal indistinguishable from a guild that vanished, and the
+-- caller has to be able to tell 403 from 404.
 UPDATE guilds
-SET name        = COALESCE(sqlc.narg(name), name),
-    description = CASE WHEN sqlc.arg(clear_description)::boolean THEN NULL
-                       ELSE COALESCE(sqlc.narg(description), description) END,
-    updated_at  = now()
+SET name                  = COALESCE(sqlc.narg(name), name),
+    description           = CASE WHEN sqlc.arg(clear_description)::boolean THEN NULL
+                                 ELSE COALESCE(sqlc.narg(description), description) END,
+    message_audit_enabled = COALESCE(sqlc.narg(message_audit_enabled), message_audit_enabled),
+    updated_at            = now()
 WHERE id = sqlc.arg(id)
 RETURNING *;
 
