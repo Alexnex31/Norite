@@ -225,6 +225,27 @@ func (e HealthResponseStatus) Valid() bool {
 	}
 }
 
+// Defines values for MessageAuditAction.
+const (
+	Create MessageAuditAction = "create"
+	Delete MessageAuditAction = "delete"
+	Edit   MessageAuditAction = "edit"
+)
+
+// Valid indicates whether the value is a known member of the MessageAuditAction enum.
+func (e MessageAuditAction) Valid() bool {
+	switch e {
+	case Create:
+		return true
+	case Delete:
+		return true
+	case Edit:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PermissionOverwriteType.
 const (
 	PermissionOverwriteTypeN0 PermissionOverwriteType = 0
@@ -351,6 +372,7 @@ const (
 	GuildsRead       Scope = "guilds.read"
 	GuildsWrite      Scope = "guilds.write"
 	Identify         Scope = "identify"
+	MessagesAudit    Scope = "messages.audit"
 	MessagesModerate Scope = "messages.moderate"
 	MessagesRead     Scope = "messages.read"
 	MessagesWrite    Scope = "messages.write"
@@ -368,6 +390,8 @@ func (e Scope) Valid() bool {
 	case GuildsWrite:
 		return true
 	case Identify:
+		return true
+	case MessagesAudit:
 		return true
 	case MessagesModerate:
 		return true
@@ -875,6 +899,45 @@ type Message struct {
 
 	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
 	Type int `json:"type"`
+}
+
+// MessageAuditAction What a recorded entry describes. A separate, deliberately short vocabulary from `AuditLogAction` — different table, different reader, different permission — and the two are pinned disjoint by a test rather than by convention. Bare verbs, because the table is already about messages.
+//
+// Every message mutation is recorded, including an author editing or deleting their own. That is the opposite of the guild audit log's rule, and correct for the same reason: a recording that skipped self-deletions could be evaded by deleting your own messages, which is the thing a guild switches recording on to prevent.
+type MessageAuditAction string
+
+// MessageAuditEntry One recorded message action in a guild that opted into recording (M16b). Written to a table of its own and never to the guild audit log, whose entries record authority exercised over somebody — this records what was said.
+//
+// **There is no `is_e2e` field and its absence is the rule-13 answer**, not an omission: an encrypted message produces no row at all, because the exclusion is applied when the row would be written. That is deliberately unlike `MessageEditHistory`, which addresses one message and therefore has to say *why* it is empty. `content` is nullable all the same, because the column is.
+//
+// A delete records the content it removed. The create entry only holds what the message said when it was posted, so a message written before recording was switched on and deleted after would otherwise have its text recorded nowhere — which is the case an investigation is most likely to be about.
+type MessageAuditEntry struct {
+	// Action What a recorded entry describes. A separate, deliberately short vocabulary from `AuditLogAction` — different table, different reader, different permission — and the two are pinned disjoint by a test rather than by convention. Bare verbs, because the table is already about messages.
+	//
+	// Every message mutation is recorded, including an author editing or deleting their own. That is the opposite of the guild audit log's rule, and correct for the same reason: a recording that skipped self-deletions could be evaded by deleting your own messages, which is the thing a guild switches recording on to prevent.
+	Action MessageAuditAction `json:"action"`
+
+	// ActorId Who performed the action, which for a moderator deleting somebody else's message is the moderator rather than the author.
+	ActorId Snowflake `json:"actor_id"`
+
+	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	ChannelId Snowflake `json:"channel_id"`
+
+	// Content What the message said as of this action.
+	Content   *string   `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+
+	// MessageId The message this entry is about. Deliberately not a foreign key in the schema either: an audit record that vanished with the thing it records would not be one, and a delete entry naming a hard-deleted message is exactly the row somebody goes looking for.
+	MessageId Snowflake `json:"message_id"`
 }
 
 // MessageEditHistory A message's prior versions plus what it says now. The current text is here because no endpoint returns a single message on its own, so a caller reading this would otherwise have every version except the one that matters most.
@@ -1686,6 +1749,15 @@ type ListGuildMembersParams struct {
 	After *Snowflake `form:"after,omitempty" json:"after,omitempty"`
 
 	// Limit Page size. Defaults to 50, and values above 100 are **clamped rather than refused** — a client asking for more than the ceiling is not making an error worth failing a request over, and returning the ceiling communicates it more clearly than a 400 it has to parse.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListGuildMessageAuditParams defines parameters for ListGuildMessageAudit.
+type ListGuildMessageAuditParams struct {
+	// Before Resume before this entry id, exclusive. Omit for the newest page.
+	Before *Snowflake `form:"before,omitempty" json:"before,omitempty"`
+
+	// Limit Entries per page, 1 to 100, default 50. Every entry carries a full message body, so a page of 100 is a large response by design — prefer the default and page backwards.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 

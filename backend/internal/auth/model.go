@@ -92,6 +92,27 @@ const (
 	// widening a moderation scope for that is not a trade worth making. Scopes only ever restrict.
 	ScopeMessagesModerate Scope = "messages.moderate"
 
+	// messages.audit is a fourth on the same object, and the test for whether that is over-splitting is
+	// the one M14 wrote and M16a reused: do the blast radii differ, and does the common bot want only the
+	// narrow one?
+	//
+	// They differ by about as much as they can. `messages.moderate` reads one message's prior versions,
+	// reached through a message id its holder already had. This reads **every message in the guild** — a
+	// guild that opted in records all of them, including the channels its reader cannot view, including
+	// the private ones. A triage bot wants the first and must not be one compromise away from the second.
+	//
+	// The permission layer already draws exactly this line, which is what settles it: PermManageMessages
+	// and PermViewMessageAudit are separate bits, neither granted by default, and the second is not
+	// implied by the first. A scope that bundled them would be the delegation model contradicting the
+	// permission model — the sentence M14 wrote splitting guilds.audit out of guilds.read and M16a wrote
+	// splitting messages.moderate out of messages.read.
+	//
+	// Named for the object it reaches rather than the path it is mounted under. The route is
+	// guild-scoped (`GET /guilds/{guild_id}/message-audit`) and the scope is still `messages.audit`,
+	// because that is what every other scope here does: `POST /reports` is reports.write and the
+	// guild-scoped triage queue under /guilds/{id}/reports is reports.moderate.
+	ScopeMessagesAudit Scope = "messages.audit"
+
 	// Reports split by *audience* rather than by read and write, which is the one pair here that does.
 	//
 	// `reports.write` files a report; `reports.moderate` reads a guild's queue and closes what is in it.
@@ -123,7 +144,7 @@ const (
 var AllScopes = []Scope{
 	ScopeIdentify,
 	ScopeGuildsRead, ScopeGuildsWrite, ScopeGuildsAudit,
-	ScopeMessagesRead, ScopeMessagesWrite, ScopeMessagesModerate,
+	ScopeMessagesRead, ScopeMessagesWrite, ScopeMessagesModerate, ScopeMessagesAudit,
 	ScopeReportsWrite, ScopeReportsModerate,
 }
 

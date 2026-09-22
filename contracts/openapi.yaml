@@ -3367,6 +3367,87 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /guilds/{guild_id}/message-audit:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: Read a guild's recorded messages
+      description: >
+        Every message create, edit and delete in a guild whose owner switched recording on, newest first.
+        **Empty unless they did** — `message_audit_enabled` is off by default, nothing is recorded before
+        it is turned on, and this endpoint answers `200` with an empty array for a guild that has never
+        opted in rather than distinguishing that case.
+
+
+        **This is the widest read in the API and `VIEW_MESSAGE_AUDIT` is the whole boundary on it.** The
+        log spans every channel in the guild, including the ones the caller cannot view and the private
+        ones, and unlike the two moderation reads that precede it there is no per-object step: a report
+        must exist before its content can be read, a message id is needed to read that message's prior
+        versions, and this takes a guild id and returns the conversation. The permission is granted to
+        nobody by default, implied by nothing, and cannot be handed out by somebody who does not hold it.
+        `docs/security-ledger.md` states the disclosure rather than leaving it to be inherited.
+
+
+        **`MANAGE_MESSAGES` does not confer it and neither does `VIEW_AUDIT_LOG`.** The first means
+        "delete somebody else's message", which is one message at a time; the second reads moderation
+        metadata — who kicked whom, which permission changed — where this reads what people said.
+
+
+        **Content is on every entry**, unlike the report queue, which carries none and puts it behind a
+        single-report read. The content is what a guild switched recording on to keep, so a listing
+        without it would answer nothing; the bound is the page size instead.
+
+
+        **An E2E-encrypted message is never recorded** (rule 13), so there is no flag for one on these
+        entries: the exclusion happens when the row would be written, and a row that does not exist needs
+        no explanation. Unreachable today by shape — encryption is DM-only and a DM belongs to no guild.
+      operationId: listGuildMessageAudit
+      tags: [messages]
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: Resume before this entry id, exclusive. Omit for the newest page.
+          schema:
+            $ref: "#/components/schemas/Snowflake"
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Entries per page, 1 to 100, default 50. Every entry carries a full message body, so a page of
+            100 is a large response by design — prefer the default and page backwards.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: One page of the guild's recorded messages, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MessageAuditEntry"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller is a member without `VIEW_MESSAGE_AUDIT`, or an API token without the
+            `messages.audit` scope — which neither `messages.read` nor `messages.moderate` confers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /guilds/{guild_id}/audit-log:
     parameters:
       - name: guild_id
@@ -4028,7 +4109,7 @@ components:
         two most worth keeping apart — a token minted so a bot can file on its owner's behalf must not
         also be able to dismiss every report in a guild its owner moderates.
       enum: [identify, guilds.read, guilds.write, guilds.audit, messages.read, messages.write,
-             messages.moderate, reports.write, reports.moderate]
+             messages.moderate, messages.audit, reports.write, reports.moderate]
 
     HealthResponse:
       type: object
@@ -5364,6 +5445,70 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/MessageEditVersion"
+
+    MessageAuditEntry:
+      type: object
+      description: >
+        One recorded message action in a guild that opted into recording (M16b). Written to a table of
+        its own and never to the guild audit log, whose entries record authority exercised over somebody
+        — this records what was said.
+
+
+        **There is no `is_e2e` field and its absence is the rule-13 answer**, not an omission: an
+        encrypted message produces no row at all, because the exclusion is applied when the row would be
+        written. That is deliberately unlike `MessageEditHistory`, which addresses one message and
+        therefore has to say *why* it is empty. `content` is nullable all the same, because the column is.
+
+
+        A delete records the content it removed. The create entry only holds what the message said when
+        it was posted, so a message written before recording was switched on and deleted after would
+        otherwise have its text recorded nowhere — which is the case an investigation is most likely to
+        be about.
+      required: [id, message_id, channel_id, actor_id, action, content, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        message_id:
+          allOf:
+            - $ref: "#/components/schemas/Snowflake"
+          description: >
+            The message this entry is about. Deliberately not a foreign key in the schema either: an
+            audit record that vanished with the thing it records would not be one, and a delete entry
+            naming a hard-deleted message is exactly the row somebody goes looking for.
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+        actor_id:
+          allOf:
+            - $ref: "#/components/schemas/Snowflake"
+          description: >
+            Who performed the action, which for a moderator deleting somebody else's message is the
+            moderator rather than the author.
+        action:
+          $ref: "#/components/schemas/MessageAuditAction"
+        content:
+          description: What the message said as of this action.
+          oneOf:
+            - type: string
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+
+    MessageAuditAction:
+      type: string
+      description: >
+        What a recorded entry describes. A separate, deliberately short vocabulary from
+        `AuditLogAction` — different table, different reader, different permission — and the two are
+        pinned disjoint by a test rather than by convention. Bare verbs, because the table is already
+        about messages.
+
+
+        Every message mutation is recorded, including an author editing or deleting their own. That is
+        the opposite of the guild audit log's rule, and correct for the same reason: a recording that
+        skipped self-deletions could be evaded by deleting your own messages, which is the thing a guild
+        switches recording on to prevent.
+      enum: [create, edit, delete]
 
     TriageReportDetail:
       type: object
