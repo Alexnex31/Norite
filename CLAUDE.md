@@ -586,7 +586,7 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
 
   **Rule 2 asserted in both directions**: closing writes an entry, filing writes none, and the negative
   had no home until it was a test.
-- **M16a — Message edit history read surface**: done (tag pending). Migration `000022`,
+- **M16a — Message edit history read surface**: done (tag `m16a`). Migration `000022`,
   `backend/internal/messages/history.go`, `GET /channels/{channel_id}/messages/{message_id}/history`, the
   `messages.moderate` scope, and a third channel entry point in `guildauth`. Decisions are in the roadmap
   entry, in `000022`, and in `docs/security-ledger.md`.
