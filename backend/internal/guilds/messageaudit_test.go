@@ -205,3 +205,46 @@ func TestFlippingTheSwitchIsAuditedInBothDirections(t *testing.T) {
 		"a request that flips the switch writes the toggle verb alone; only the no-op request writes "+
 			"guild.update, as any no-op on this endpoint has since M12")
 }
+
+// TestAChangeArrivingBesideTheToggleIsStillAudited is the assertion the first version of Update's
+// entry-writing condition would have passed and its successor exists for.
+//
+// That condition began as a hand-maintained list of the fields `guild.update` owns —
+// `in.Name != nil || in.Description != nil || in.ClearDescription` — which is correct until somebody adds
+// a field, gives it a `changes.changed(...)` line, and does not think to extend the list. From then on any
+// request carrying that field *and* flipping recording writes the toggle verb alone and the real change
+// goes unaudited, which is rule 2 broken in the one request that is also switching the recording off.
+// M62a's per-guild preferences are the obvious next field.
+//
+// The condition is derived from the diff now, so it cannot drift from the diff. This test drives the
+// shape rather than the mechanism: a change and a flip in one request must produce both entries, whatever
+// the condition is written as.
+func TestAChangeArrivingBesideTheToggleIsStillAudited(t *testing.T) {
+	t.Parallel()
+	f := newOverwriteFixture(t, roles.PermViewChannel)
+	ctx := t.Context()
+	owner := userActor(f.owner)
+
+	name, on := "renamed while switching recording on", true
+	_, err := f.svc.Update(ctx, owner, f.guildID, UpdateGuildInput{Name: &name, MessageAuditEnabled: &on})
+	require.NoError(t, err)
+
+	entries, err := f.svc.ListAuditLog(ctx, owner, f.guildID, ListAuditLogInput{Limit: maxAuditLogPageSize})
+	require.NoError(t, err)
+
+	counts := map[string]int{}
+	var update AuditLogEntry
+	for _, e := range entries {
+		counts[e.Action]++
+		if e.Action == ActionGuildUpdate {
+			update = e
+		}
+	}
+
+	require.Equal(t, 1, counts[ActionGuildMessageAuditEnable], "the flip is recorded")
+	require.Equal(t, 1, counts[ActionGuildUpdate],
+		"and so is the rename — a change arriving alongside the toggle must never be the one that is "+
+			"dropped, which is what a hand-maintained field list would eventually do")
+	require.Contains(t, string(update.Changes), "renamed while switching recording on",
+		"the guild.update entry must carry the rename it is recording, not be an empty shell")
+}

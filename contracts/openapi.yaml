@@ -4103,6 +4103,16 @@ components:
         backlog-reading bot the prior versions of every message in every guild it is in.
 
 
+        `messages.audit` is a fourth on the same object and the widest of them. `messages.moderate` reads
+        one message's prior versions, reached through a message id its holder already had; this reads
+        **every message in the guild** a recording guild has kept, including the channels its holder
+        cannot view. A triage bot wants the first and must not be one compromise away from the second.
+        The permission layer already draws exactly that line — `MANAGE_MESSAGES` and `VIEW_MESSAGE_AUDIT`
+        are separate bits, neither granted by default and the second implied by nothing — so bundling the
+        two scopes would be the delegation model contradicting the permission model, which is the
+        sentence written twice above.
+
+
         **The report pair splits by audience rather than by read and write**, and it is the one pair here
         that does. `reports.write` files a report; `reports.moderate` reads a guild's triage queue and
         closes what is in it. A read/write split would put those two in the same bucket, and they are the

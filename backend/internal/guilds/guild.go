@@ -307,13 +307,25 @@ func (s *Service) Update(
 		// real one could be hidden in, on the log whose whole purpose is that this cannot be hidden.
 		recordingToggled := in.MessageAuditEnabled != nil &&
 			*in.MessageAuditEnabled != existing.MessageAuditEnabled
-		touchedUpdateFields := in.Name != nil || in.Description != nil || in.ClearDescription
 
 		// The toggle is its own verb and is deliberately absent from the diff above, so a request that
 		// *only* flips it writes one entry rather than a toggle plus a guild.update describing nothing.
-		// Everything else is as it has been since M12: a request touching a field guild.update owns
-		// writes one, and so does a request that changes nothing at all.
-		if touchedUpdateFields || !recordingToggled {
+		// Everything else is as it has been since M12: a request that changes nothing at all still writes
+		// a guild.update, because that is what this endpoint has always done with a no-op.
+		//
+		// **The condition is derived from the diff rather than from a list of fields**, and the first
+		// version of it was that list — `in.Name != nil || in.Description != nil || in.ClearDescription`.
+		// Correct today and a trap for the next field added here: one that gets a `changes.changed(...)`
+		// line above and no clause in the list would silently write *no* entry whenever the same request
+		// also flipped recording, so a real change would go unaudited (rule 2) in exactly the request
+		// that was also switching the recording off. M62a's per-guild preferences are the obvious
+		// candidate. Asking the diff cannot drift from the diff, which is the same move this package
+		// makes everywhere a rule could otherwise be remembered rather than enforced.
+		//
+		// One case differs from the list version and it is the better answer: a request sending a name
+		// it already has *and* flipping recording now writes the toggle alone, where the list wrote an
+		// empty guild.update beside it. A no-op is not a change, which is M14's rule.
+		if len(changes.payload()) > 0 || !recordingToggled {
 			if err := s.writeAudit(
 				ctx, q, guildID, actor.UserID, ActionGuildUpdate, &guildID, changes.payload(),
 			); err != nil {
