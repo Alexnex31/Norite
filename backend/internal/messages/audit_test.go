@@ -332,3 +332,68 @@ func TestTheRecordingLogPagesNewestFirst(t *testing.T) {
 	require.Equal(t, "one", *next[0].Content,
 		"the cursor is exclusive, so the row it names must not repeat on the next page")
 }
+
+// TestTheBitDoesNotCarryAcrossGuilds is the cross-scope case: holding PermViewMessageAudit in one guild
+// must say nothing about another, even for somebody who is a member of both.
+//
+// The existing cases cover a non-member (404) and a member without the bit (403). This is the third
+// shape, and it is the one a permission bit could plausibly get wrong — `roles.Resolve` is per guild by
+// construction, so the property holds because of where role rows live rather than because of a check
+// somebody wrote, which is exactly the kind of claim worth pinning before it becomes folklore.
+//
+// The refusal must also be a refusal rather than an empty page. A guild that records nothing legitimately
+// answers 200 with `[]`, so "no rows" is a real answer here — and if an out-of-scope read fell through to
+// the query it would be indistinguishable from that, which is how a leak hides in a surface whose empty
+// case is normal.
+func TestTheBitDoesNotCarryAcrossGuilds(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.record(t, true)
+	f.grantMessageAudit(t, f.member)
+	f.send(t, f.member, "recorded in the first guild")
+
+	// A second guild the same account belongs to, recording, where they hold nothing beyond @everyone.
+	other, err := f.ids.Next()
+	require.NoError(t, err)
+	otherEveryone, err := f.ids.Next()
+	require.NoError(t, err)
+	otherChannel, err := f.ids.Next()
+	require.NoError(t, err)
+
+	f.exec(t, `INSERT INTO guilds (id, name, owner_id, message_audit_enabled, created_at, updated_at)
+	           VALUES ($1,'other',$2,true,now(),now())`, int64(other), int64(f.owner))
+	f.exec(t, `INSERT INTO roles (id, guild_id, name, permissions, position, is_default,
+	                              created_at, updated_at)
+	           VALUES ($1,$2,'@everyone',$3,0,true,now(),now())`,
+		int64(otherEveryone), int64(other),
+		(roles.PermViewChannel | roles.PermReadMessageHistory | roles.PermSendMessages).Int64())
+	f.exec(t, `INSERT INTO channels (id, guild_id, name, type, position, created_at, updated_at)
+	           VALUES ($1,$2,'general',0,0,now(),now())`, int64(otherChannel), int64(other))
+	for _, u := range []snowflake.ID{f.owner, f.member} {
+		f.exec(t, `INSERT INTO guild_members (guild_id, user_id, joined_at) VALUES ($1,$2,now())`,
+			int64(other), int64(u))
+	}
+
+	// Something to leak, so an empty answer cannot be mistaken for a correct refusal.
+	_, err = f.svc.Send(f.ctx, actorOf(f.owner), SendInput{
+		ChannelID: otherChannel, Content: "recorded in the second guild",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, func() int {
+		var n int
+		require.NoError(t, f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM message_audit_entries WHERE guild_id = $1`, int64(other)).Scan(&n))
+		return n
+	}(), "the second guild must actually hold a row, or this test proves nothing")
+
+	_, err = f.svc.GuildMessageAudit(f.ctx, actorOf(f.member), GuildAuditInput{GuildID: other})
+	require.ErrorIs(t, err, httpx.ErrForbidden,
+		"the bit is granted in the first guild and must confer nothing in the second — and the answer "+
+			"must be a refusal, not the empty page a non-recording guild legitimately returns")
+
+	// And it still works where it was granted, so the test above is not passing because the bit stopped
+	// working everywhere.
+	entries, err := f.svc.GuildMessageAudit(f.ctx, actorOf(f.member), GuildAuditInput{GuildID: f.guildID})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+}
