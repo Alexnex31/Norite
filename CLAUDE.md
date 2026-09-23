@@ -384,6 +384,13 @@ Install and authenticate `gh` if you want that to change.
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 
+**A completed milestone's line says `done` and nothing about its tag.** Older entries below still carry
+`(tag mN)` and are left alone rather than rewritten, but nothing new adds one — and in particular nothing
+writes `(tag pending)`. That phrase was the shape being removed: it made every milestone leave a false
+statement behind for its successor's branch to correct, which is a chore that generated a commit per
+milestone and one more thing for a docs audit to catch. The tag is `git tag`'s to state and it is always
+the milestone number lowercased, so a copy here carries no information and only drifts.
+
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
@@ -629,7 +636,7 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   of 5 — not a narrow window — and fixed with one `REPEATABLE READ` read-only snapshot. The comment that
   justified skipping a transaction cited rule 1, which is about resolving permissions against fresh data
   and says nothing about two reads agreeing.
-- **M16b — Opt-in per-guild message audit**: done (tag pending). Migration `000023`,
+- **M16b — Opt-in per-guild message audit**: done. Migration `000023`,
   `PermViewMessageAudit` at bit 21, the recording switch on `PATCH /guilds/{guild_id}`,
   `backend/internal/messages/audit.go`, `GET /guilds/{guild_id}/message-audit`, and the `messages.audit`
   scope. Decisions are in the roadmap entry, in `000023`, and in `docs/security-ledger.md`.
