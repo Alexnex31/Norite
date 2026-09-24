@@ -31,6 +31,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/reports"
+	"github.com/Alexnex31/Norite/backend/internal/tags"
 	"github.com/Alexnex31/Norite/backend/migrations"
 )
 
@@ -226,6 +227,9 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	messagesSvc, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
 	require.NoError(t, err)
 
+	tagsSvc, err := tags.NewService(tags.ServiceOptions{Pool: pool, IDs: ids})
+	require.NoError(t, err)
+
 	reportsSvc, err := reports.NewService(reports.ServiceOptions{Pool: pool, IDs: ids})
 	require.NoError(t, err)
 
@@ -238,6 +242,7 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		Guilds:   guilds.NewHandler(guildsSvc),
 		Messages: messages.NewHandler(messagesSvc),
 		Reports:  reports.NewHandler(reportsSvc),
+		Tags:     tags.NewHandler(tagsSvc),
 	})
 	require.NoError(t, err)
 

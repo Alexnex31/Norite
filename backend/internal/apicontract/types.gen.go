@@ -32,6 +32,8 @@ const (
 	RoleDelete               AuditLogAction = "role.delete"
 	RoleReorder              AuditLogAction = "role.reorder"
 	RoleUpdate               AuditLogAction = "role.update"
+	TagDelete                AuditLogAction = "tag.delete"
+	TagRemove                AuditLogAction = "tag.remove"
 )
 
 // Valid indicates whether the value is a known member of the AuditLogAction enum.
@@ -78,6 +80,10 @@ func (e AuditLogAction) Valid() bool {
 	case RoleReorder:
 		return true
 	case RoleUpdate:
+		return true
+	case TagDelete:
+		return true
+	case TagRemove:
 		return true
 	default:
 		return false
@@ -378,6 +384,8 @@ const (
 	MessagesWrite    Scope = "messages.write"
 	ReportsModerate  Scope = "reports.moderate"
 	ReportsWrite     Scope = "reports.write"
+	TagsRead         Scope = "tags.read"
+	TagsWrite        Scope = "tags.write"
 )
 
 // Valid indicates whether the value is a known member of the Scope enum.
@@ -402,6 +410,10 @@ func (e Scope) Valid() bool {
 	case ReportsModerate:
 		return true
 	case ReportsWrite:
+		return true
+	case TagsRead:
+		return true
+	case TagsWrite:
 		return true
 	default:
 		return false
@@ -529,6 +541,40 @@ type ApiToken struct {
 	// Name Human label chosen at mint time, so a token can be recognised later in order to revoke it.
 	Name   string  `json:"name"`
 	Scopes []Scope `json:"scopes"`
+}
+
+// AppliedMessageTag A tag as it appears on a message — the tag itself, plus who put it there and when.
+//
+// `applied_by` is present deliberately. A tag on a message is an assertion somebody made about it, and a reader deciding whether to trust `spam` wants to know who said so, the same reason an audit entry names an actor. It discloses nothing: everybody named here is a member of a guild the reader is also in.
+type AppliedMessageTag struct {
+	AppliedAt time.Time `json:"applied_at"`
+
+	// AppliedBy A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	AppliedBy Snowflake `json:"applied_by"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// CreatedBy A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	CreatedBy Snowflake `json:"created_by"`
+
+	// GuildId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	GuildId Snowflake `json:"guild_id"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id       Snowflake `json:"id"`
+	IsShared bool      `json:"is_shared"`
+	Name     string    `json:"name"`
 }
 
 // AuditLogAction What an audit log entry records. A closed vocabulary owned by this codebase, `domain.verb`, and a stable string rather than a Postgres enum so that adding one is not a migration.
@@ -659,6 +705,15 @@ type CreateInviteRequest struct {
 
 	// MaxUses How many accounts may be created with this code. Omit for unlimited.
 	MaxUses *int `json:"max_uses,omitempty"`
+}
+
+// CreateMessageTagRequest defines model for CreateMessageTagRequest.
+type CreateMessageTagRequest struct {
+	// IsShared Absent means **false**. A request that forgets this field creates a private tag, which needs no permission and is visible to nobody else, rather than adding to the guild's shared vocabulary by accident.
+	IsShared *bool `json:"is_shared,omitempty"`
+
+	// Name Counted in characters, not bytes, so a name in a non-Latin script is not penalised — a 50-character ceiling is reached far sooner in Japanese than in English.
+	Name string `json:"name"`
 }
 
 // CreateRoleRequest defines model for CreateRoleRequest.
@@ -897,6 +952,13 @@ type Message struct {
 	Id        Snowflake `json:"id"`
 	ReplyToId Snowflake `json:"reply_to_id"`
 
+	// Tags The tags on the message this caller can see: every shared tag, plus the caller's own private ones. Somebody else's private tag never appears.
+	//
+	// **Null when the credential may not read tags** — an API token without the `tags.read` scope. Null rather than an empty array, because an empty array would claim the message has no tags when the answer is that they are not this credential's to see. A signed-in user always gets an array, empty for an untagged message.
+	//
+	// The channel listing resolves a whole page's tags at once, so a client drawing a channel needs no per-message request; `GET /channels/{channel_id}/messages/{message_id}/tags` remains for reading one message's tags on their own.
+	Tags []AppliedMessageTag `json:"tags"`
+
 	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
 	Type int `json:"type"`
 }
@@ -979,6 +1041,35 @@ type MessageEditVersion struct {
 	//
 	// Examples: 7238829238972837423
 	Id Snowflake `json:"id"`
+}
+
+// MessageTag A label a guild can put on its messages. **Guild-wide, not per-channel** — a tag created while looking at one channel applies to a message in any channel of the same guild, which is the point of tagging as a filing system rather than a per-room convention.
+//
+// **Shared versus private is the whole model.** A shared tag belongs to the guild: everybody sees it, and `MANAGE_MESSAGES` is needed to create one. A private tag belongs to its creator, needs no permission, and is invisible to everybody else — it never appears in another member's tag list nor on a message they read. What it does *not* do is make anything private: tags annotate, they do not restrict, and restricting who can see a message is what whispers (M61) are for.
+//
+// `created_by` is provenance for a shared tag and is always the caller for a private one, since a private tag reaches nobody else.
+type MessageTag struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// CreatedBy A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	CreatedBy Snowflake `json:"created_by"`
+
+	// GuildId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	GuildId Snowflake `json:"guild_id"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id       Snowflake `json:"id"`
+	IsShared bool      `json:"is_shared"`
+	Name     string    `json:"name"`
 }
 
 // MintApiTokenRequest defines model for MintApiTokenRequest.
@@ -1914,6 +2005,9 @@ type CreateGuildRoleJSONRequestBody = CreateRoleRequest
 
 // UpdateGuildRoleJSONRequestBody defines body for UpdateGuildRole for application/json ContentType.
 type UpdateGuildRoleJSONRequestBody = UpdateRoleRequest
+
+// CreateMessageTagJSONRequestBody defines body for CreateMessageTag for application/json ContentType.
+type CreateMessageTagJSONRequestBody = CreateMessageTagRequest
 
 // BootstrapInstanceJSONRequestBody defines body for BootstrapInstance for application/json ContentType.
 type BootstrapInstanceJSONRequestBody = BootstrapRequest

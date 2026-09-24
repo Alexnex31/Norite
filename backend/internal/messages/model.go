@@ -43,6 +43,36 @@ type Message struct {
 	ReplyToID *snowflake.ID `json:"reply_to_id"`
 	EditedAt  *time.Time    `json:"edited_at"`
 	CreatedAt time.Time     `json:"created_at"`
+
+	// Tags are the tags on the message this caller can see (M17): every shared one, plus their own
+	// private ones — somebody else's private tag never appears.
+	//
+	// **Null, not empty, when the credential may not read tags.** An API token without `tags.read` gets
+	// null, because an empty array would say "this message has no tags" when the truth is "that is not
+	// this credential's to see" — a scope bounds what a delegated credential reaches, and `messages.read`
+	// reaching tags would widen it. A user actor passes every scope and always gets an array.
+	//
+	// Resolved for a whole page in one statement (see Service.attachTags), never once per message —
+	// fetching them per message is what M17's optimization review found the API forcing on every client.
+	Tags []AppliedTag `json:"tags"`
+}
+
+// AppliedTag is a tag as it appears on a message, and it is the same wire shape as tags.AppliedTag.
+//
+// Duplicated rather than imported: `messages` and `tags` both reach `guildauth` and neither may import
+// the other, which is the M15 extraction's whole point. The two are one schema in the contract
+// (AppliedMessageTag), `contract_payload_test.go` validates responses from both packages against it, and
+// `TestTheAppliedTagShapeAgreesAcrossPackages` in cmd/server pins the JSON field sets equal — the
+// literal-plus-pin shape this codebase uses for every value written in two packages.
+type AppliedTag struct {
+	ID        snowflake.ID `json:"id"`
+	GuildID   snowflake.ID `json:"guild_id"`
+	Name      string       `json:"name"`
+	CreatedBy snowflake.ID `json:"created_by"`
+	IsShared  bool         `json:"is_shared"`
+	CreatedAt time.Time    `json:"created_at"`
+	AppliedBy snowflake.ID `json:"applied_by"`
+	AppliedAt time.Time    `json:"applied_at"`
 }
 
 // messageFromRow converts a stored row to the wire shape.

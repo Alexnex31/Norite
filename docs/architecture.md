@@ -653,7 +653,14 @@ CREATE TABLE blocks (
 );
 CREATE INDEX ON blocks (blocked_id);   -- "who has blocked me" — used to build the per-connection block-set
 
--- Message tags (ADR: guild-wide scope, not per-channel)
+-- Message tags. **Guild-wide scope, not per-channel**, and the reasoning lives in M17's roadmap entry and
+-- in migration 000024 rather than in an ADR.
+--
+-- This line cited "(ADR: guild-wide scope, not per-channel)" until M17's planning, unnumbered, and no ADR
+-- in docs/adr/ mentions message tags at all — so the one contested decision this table carries pointed at
+-- an authority nobody had written. Corrected rather than satisfied: an ADR is owed when a decision
+-- contradicts an existing one (CLAUDE.md's test), and nothing here does. A dangling citation is worse than
+-- no citation, because it reads as though the argument has been had.
 CREATE TABLE message_tags (
   id bigint PRIMARY KEY, guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
   name varchar(50) NOT NULL, created_by bigint NOT NULL REFERENCES users(id),
@@ -666,6 +673,16 @@ CREATE TABLE message_tag_applications (
   applied_by bigint NOT NULL REFERENCES users(id), applied_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tag_id, message_id)
 );
+-- Shared names unique per guild, private names unique per owner; both also serve the ceiling counts.
+CREATE UNIQUE INDEX ON message_tags (guild_id, lower(name)) WHERE is_shared;
+CREATE UNIQUE INDEX ON message_tags (guild_id, created_by, lower(name)) WHERE NOT is_shared;
+-- The cascade from guilds: the partial indexes above cannot serve `WHERE guild_id = $1` (000024).
+CREATE INDEX ON message_tags (guild_id);
+CREATE INDEX ON message_tags (created_by);                          -- refusing FK to users
+-- message_id is the PK's second column and serves nothing alone: the cascade from messages, and every
+-- read of a message's tags (the channel listing resolves a page with one `= ANY`).
+CREATE INDEX ON message_tag_applications (message_id);
+CREATE INDEX ON message_tag_applications (applied_by);              -- refusing FK to users
 
 -- Whispers — message-visibility restriction, not a new authority tier (ADR 0008)
 CREATE TABLE whispers (

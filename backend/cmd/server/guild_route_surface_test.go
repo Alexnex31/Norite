@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
+	"github.com/Alexnex31/Norite/backend/internal/tags"
 )
 
 // Two tests in this package claim to enumerate the guild route surface, and until M14 neither asked the
@@ -158,6 +160,14 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 	}, withToken(f.ownerToken))
 	require.Equal(t, http.StatusCreated, report.Code, "seeding a report: %s", report)
 
+	// A real tag, for the same reason as the message and the report above: a fabricated id answers 404
+	// for the wrong reason and passes the anti-enumeration assertion by accident. Shared, so the owner's
+	// MANAGE_MESSAGES is what creates it and the tag is one an ordinary member could also see — which is
+	// the harder case for a refusal to get right than a private tag nobody can see anyway.
+	tag := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/tags", f.guildID),
+		map[string]any{"name": "needs-review", "is_shared": true}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, tag.Code, "seeding a tag: %s", tag)
+
 	ids := map[string]string{
 		"{guild_id}":     f.guildID,
 		"{channel_id}":   channel.field(t, "id"),
@@ -166,6 +176,7 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		"{overwrite_id}": roleID,
 		"{message_id}":   message.field(t, "id"),
 		"{report_id}":    report.field(t, "id"),
+		"{tag_id}":       tag.field(t, "id"),
 	}
 
 	cases := map[string]refusalCase{
@@ -200,6 +211,19 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		// message is loaded. Nothing about this route's own permission is asserted by this test — that
 		// is TestARecordingGuildsLogIsBoundedByItsOwnBit, in the messages package.
 		"GET /api/v1/guilds/{guild_id}/message-audit": {},
+
+		// M17's tag routes. Every one names a real object — a real guild, channel, message and tag — so
+		// a stranger reaching any of them must be refused as though none of it existed. The apply pair
+		// matters most: they name three ids at once, and a refusal that checked only one of them would
+		// pass every other case here.
+		"GET /api/v1/guilds/{guild_id}/tags": {},
+		"POST /api/v1/guilds/{guild_id}/tags": {
+			body: map[string]any{"name": "intruding", "is_shared": false},
+		},
+		"DELETE /api/v1/guilds/{guild_id}/tags/{tag_id}":                           {},
+		"GET /api/v1/channels/{channel_id}/messages/{message_id}/tags":             {},
+		"PUT /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}":    {},
+		"DELETE /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}": {},
 		"POST /api/v1/guilds/{guild_id}/reports/{report_id}/resolve": {
 			body: map[string]any{"status": "dismissed"},
 		},
@@ -357,6 +381,30 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 		{route: "GET /api/v1/guilds/{guild_id}/reports/{report_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/message-audit", exempt: readsWriteNothing},
 
+		// M17's tag routes, and they split the way the message routes do. Applying a tag, removing your
+		// own, and creating one exercise authority over nobody — rule 2's M15 narrowing — and write
+		// nothing; the ledger carries why creating a *shared* one is not audited either.
+		//
+		// The two DELETEs are the message DELETE's shape: they write an entry only when the act is over
+		// somebody else's tagging — `tag.remove` when a moderator takes another member's application off
+		// a message, `tag.delete` when deleting a shared tag takes other members' applications with it.
+		// Both need a second actor this fixture's sequence has no room for, so they are asserted in the
+		// tags package, by TestModerationOverSomebodyElsesTaggingIsAudited, which also asserts the
+		// own-tagging paths write nothing.
+		{route: "GET /api/v1/guilds/{guild_id}/tags", exempt: readsWriteNothing},
+		{route: "GET /api/v1/channels/{channel_id}/messages/{message_id}/tags",
+			exempt: readsWriteNothing},
+		{route: "POST /api/v1/guilds/{guild_id}/tags",
+			exempt: "a tag is vocabulary, not authority over anybody; see the ledger"},
+		{route: "DELETE /api/v1/guilds/{guild_id}/tags/{tag_id}",
+			exempt: "writes tag.delete only when other members' applications go with it; asserted in " +
+				"the tags package, which can build two actors"},
+		{route: "PUT /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}",
+			exempt: "applying a tag annotates; it exercises authority over nobody"},
+		{route: "DELETE /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}",
+			exempt: "removing your own writes nothing; tag.remove, for somebody else's, is asserted in " +
+				"the tags package"},
+
 		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/roles", exempt: readsWriteNothing},
@@ -460,6 +508,44 @@ func TestTheMessageAuditVerbAgreesAcrossPackages(t *testing.T) {
 		"the messages package writes %q and the guilds audit-log reader does not accept it as a filter; "+
 			"a verb written to the table but missing from the vocabulary makes the reader refuse rows it "+
 			"already holds", messages.ActionMessageDelete)
+}
+
+// TestTheTagAuditVerbsAgreeAcrossPackages is the same pin for M17's two verbs, written by `tags` and
+// validated by `guilds`, which import neither each other. Added with the verbs, at M17's sweep.
+func TestTheTagAuditVerbsAgreeAcrossPackages(t *testing.T) {
+	t.Parallel()
+
+	for _, verb := range []string{tags.ActionTagRemove, tags.ActionTagDelete} {
+		require.Contains(t, guilds.AuditActions(), verb,
+			"the tags package writes %q and the guilds audit-log reader does not accept it as a filter", verb)
+	}
+}
+
+// TestTheAppliedTagShapeAgreesAcrossPackages pins the one wire type written in two packages.
+//
+// `tags` serves a message's tags on their own and `messages` nests the same shape in every Message
+// (M17's optimization review). Neither may import the other, so the struct is duplicated, and a field
+// added to one and not the other would make the same object differ by endpoint. Compared by the JSON
+// keys each marshals to, because that is what a client sees; contract_payload_test.go checks both against
+// the one schema as well.
+func TestTheAppliedTagShapeAgreesAcrossPackages(t *testing.T) {
+	t.Parallel()
+
+	keysOf := func(v any) []string {
+		raw, err := json.Marshal(v)
+		require.NoError(t, err)
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(raw, &m))
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+
+	require.Equal(t, keysOf(tags.AppliedTag{}), keysOf(messages.AppliedTag{}),
+		"tags.AppliedTag and messages.AppliedTag are one wire shape served by two endpoints")
 }
 
 // TestTheTextChannelTypeAgreesAcrossPackages pins the second value written in two places.

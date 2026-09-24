@@ -145,6 +145,22 @@ type MessageEditHistory struct {
 	EditedAt  pgtype.Timestamptz
 }
 
+type MessageTag struct {
+	ID        int64
+	GuildID   int64
+	Name      string
+	CreatedBy int64
+	IsShared  bool
+	CreatedAt pgtype.Timestamptz
+}
+
+type MessageTagApplication struct {
+	TagID     int64
+	MessageID int64
+	AppliedBy int64
+	AppliedAt pgtype.Timestamptz
+}
+
 type OauthExchangeCode struct {
 	ID            int64
 	CodeHash      []byte

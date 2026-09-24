@@ -791,10 +791,50 @@ of this section.
   on records every create/edit/delete, both toggles appear in the ordinary audit log, an E2E DM is never
   recorded, and the notice decision is in the ledger — all five met, the last by four entries, one of
   which records that members are told nothing until M62a draws the screen.
-- **M17 — Message tagging**: `message_tags` (plus its join table), guild-wide scope (not per-channel),
-  private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
-  tag created in one channel can be applied to a message in a different channel of the same guild, and
-  permission gating on shared-tag creation is enforced.
+- **M17 — Message tagging**: done. `message_tags` and `message_tag_applications` (migration `000024`),
+  `backend/internal/tags`, six REST routes, and the `tags.read`/`tags.write` scope pair. Guild-wide scope,
+  not per-channel; private tags need no permission, shared tags require `PermManageMessages`.
+
+  **This entry was four lines and the milestone was not.** That is M13's shape, where the entry said the
+  opposite of what the work turned out to be, and the reasons were again found by reading the documents
+  against each other rather than by anything failing.
+
+  **§2 drew both tables and no indexes at all** — every other table in that document carries explicit
+  `CREATE INDEX` lines. Six ship: the two partial unique indexes, `created_by`, `message_id`, `applied_by`,
+  and `guild_id` — which was retired by a measurement on too few rows and restored by M17's optimization
+  review at 600,000 (56 ms against 0.7 ms on the cascade from `guilds`). The costly one is the least
+  visible: the applications table's primary key is `(tag_id, message_id)`, so nothing serves `message_id`
+  alone, which is both the cascade from `messages` and the only way to render a tagged message. 23.5 ms
+  against 961.7 ms on 500 message deletions.
+
+  **§2 cited an ADR for the scope decision that was never written** — unnumbered, and no ADR mentions
+  message tags at all. Corrected to point at this entry and `000024` rather than satisfied with a new ADR:
+  CLAUDE.md's test is whether a decision contradicts an existing one, and guild-wide scope contradicts
+  nothing. A dangling citation is worse than none, because it reads as though the argument has been had.
+
+  **Nothing tied a tag application to the tag's guild**, so the schema as drawn permitted guild A's tag on
+  guild B's message while the done-when spoke only of the intra-guild case. Third milestone running for
+  that shape after M16's missing `reports.guild_id` and M16b's channel tie, and closed the same way — a
+  join predicate in the statement rather than a check in Go.
+
+  **The entry named one permission and the milestone has four verbs.** Applying needs
+  `PermReadMessageHistory` and deliberately not the moderation bit — plus `PermSendMessages` for a
+  *shared* tag, so a muted member cannot label messages in front of everybody; removing an application
+  takes whoever applied it or a moderator; a private tag may be deleted only by its creator, and a shared
+  one only by a moderator, its creator included. The last three were settled by the milestone's
+  `/security-sweep`, which found each looser rule reproducible — see CLAUDE.md's M17 entry. And
+  "private" needed defining: a private tag is invisible to everybody else, refused as **404** rather than
+  403 so a tag id cannot become a probe — the oracle M12, M13 and M16a each closed elsewhere.
+
+  **`C-c t` was a global reserved chord for a feature with no client.** `KEYMAP.md` binds it to "tag
+  message" and M74's timeout verb sits at `C-c C-t` *because* tag already held the shorter one — so
+  tagging had displaced another milestone's binding while no screen drew it and no milestone built a
+  caller. The verbs went to M17a on this branch's first commit.
+
+  Depended on M15 (messages). Done when: a tag created in one channel can be applied to a message in a
+  different channel of the same guild, and permission gating on shared-tag creation is enforced — both
+  met, and the cross-guild refusal that the done-when did not ask for is enforced in the statement and
+  proved in three runs, because it is guarded twice.
 - **M17a — Phase C's command-tree verbs**: the `norite guild`, `norite channel` and `norite role` command
   groups over the REST surface M12, M13 and M14 built. Assigned 2026-09-15.
 
@@ -871,6 +911,17 @@ of this section.
   `norite message`, and the paging matters more, because a guild's recording log has no ceiling where a
   channel backlog at least has a page.
 
+  **And the tag verbs, assigned 2026-09-24 from M17's planning.** The sixth instance, and this one arrived
+  with a keybinding already reserved for it: `KEYMAP.md` binds `C-c t` to "tag message" at **global**
+  scope, and M74's timeout verb sits at `C-c C-t` *because* tag already held the shorter chord. So tagging
+  has displaced another milestone's binding, and until this assignment no screen drew it, no milestone
+  built a client for it, and M17 was referenced exactly once in this whole file — its own entry. That is
+  §16's hazard running backwards: the keymap is a route through which scope enters without passing the
+  roadmap, and here it reserved a global chord for a feature with no caller.
+
+  So `norite tag` — create, list, apply, unapply, delete — lands here with the other five groups. Rule 19
+  applies as it does to the rest: a tag name is text a stranger chose, printed beside message content.
+
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
   `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
@@ -878,12 +929,13 @@ of this section.
   looks at again.
 
   Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read), M16b (the
-  recording toggle and its log) and M10 (`apiclient`, the transport). Done when: a guild can be created,
+  recording toggle and its log), M17 (tags) and M10 (`apiclient`, the transport). Done when: a guild can be created,
   renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
   command line; a report can be filed and triaged the same way, with the reporter absent from every triage
   output because M16's API never sends it; a channel's backlog can be read, posted to, edited and deleted
   from the command line, and a message's prior versions read by a moderator; a guild's recording can be
-  switched on and off by its owner and the resulting log paged; with `--json` output validated against
+  switched on and off by its owner and the resulting log paged; a tag can be created, applied to a message
+  in another channel of the same guild, and removed; with `--json` output validated against
   `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
@@ -1497,6 +1549,15 @@ of this section.
   `instance_audit_log` is created, with the instruction attached. Whoever builds this milestone should
   expect it to go red and should answer it for **every** guild-scoped path an Instance Admin can reach,
   not only for reports.
+
+  **And layer 1 never proves the guild exists**, found by M17's `/security-sweep` and older than M17.
+  `guildauth.Authorize` short-circuits for an Instance Admin before anything reads the guild row, so for a
+  guild id that names nothing, `GET /guilds/{id}` answers 404 while its channels, roles, audit-log and tag
+  listings answer `200 []`, and `POST /guilds/{id}/channels` and `POST /guilds/{id}/tags` answer 500 on
+  the foreign key. It is not a disclosure, since the tier can already see every guild, but it is the same
+  short-circuit this milestone has to walk for rule 14. So the fix belongs here: the layer-1 branch loads
+  the guild before answering, one row that every one of those paths needs anyway to name its target in
+  `instance_audit_log`.
 
   **M72a adds no statement to this transaction.** A ban and a guild's discoverability are independent
   actions an admin composes — see M72a, where that is decided and why.

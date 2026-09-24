@@ -154,6 +154,11 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 		}
 
 		out = messageFromRow(row)
+		// A message that did not exist a moment ago cannot carry a tag, so no query: the right array is
+		// empty, or null for a credential that may not read tags.
+		if actor.HasScope(auth.ScopeTagsRead) {
+			out.Tags = []AppliedTag{}
+		}
 		return nil
 	})
 	return out, err
@@ -287,7 +292,60 @@ func (s *Service) List(ctx context.Context, actor auth.Actor, in ListInput) ([]M
 	for _, row := range rows {
 		out = append(out, messageFromRow(row))
 	}
+	if err := s.attachTags(ctx, s.queries, actor, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// attachTags fills in each message's tags with one statement for the whole slice.
+//
+// **One round trip whatever the page size.** Before M17's optimization review the only way to read a
+// message's tags was a request of its own, so drawing a 50-message page cost 50 HTTP requests and 250
+// database round trips. ListTagsForMessages is the `= ANY` statement M17 wrote for exactly this and had
+// not yet exposed; it carries the private-tag visibility filter in its SQL, so this caller inherits it
+// rather than re-implementing it, and message_tag_applications_message_id_idx serves it (000024).
+//
+// Authorization is the caller's: every message here was read under an authorization of its channel for
+// PermReadMessageHistory, which is the bit reading a message's tags requires. Nothing is cached across
+// requests (rule 1). Tags carry no message content, so rule 13 has nothing to exclude.
+func (s *Service) attachTags(ctx context.Context, q *db.Queries, actor auth.Actor, msgs []Message) error {
+	if !actor.HasScope(auth.ScopeTagsRead) || len(msgs) == 0 {
+		return nil
+	}
+
+	ids := make([]int64, len(msgs))
+	index := make(map[int64]int, len(msgs))
+	for i := range msgs {
+		ids[i] = int64(msgs[i].ID)
+		index[ids[i]] = i
+		msgs[i].Tags = []AppliedTag{}
+	}
+
+	rows, err := q.ListTagsForMessages(ctx, db.ListTagsForMessagesParams{
+		MessageIds: ids,
+		ViewerID:   int64(actor.UserID),
+	})
+	if err != nil {
+		return fmt.Errorf("messages: list tags for messages: %w", err)
+	}
+	for _, row := range rows {
+		i, ok := index[row.MessageID]
+		if !ok {
+			continue
+		}
+		msgs[i].Tags = append(msgs[i].Tags, AppliedTag{
+			ID:        snowflake.ID(row.MessageTag.ID),
+			GuildID:   snowflake.ID(row.MessageTag.GuildID),
+			Name:      row.MessageTag.Name,
+			CreatedBy: snowflake.ID(row.MessageTag.CreatedBy),
+			IsShared:  row.MessageTag.IsShared,
+			CreatedAt: row.MessageTag.CreatedAt.Time,
+			AppliedBy: snowflake.ID(row.AppliedBy),
+			AppliedAt: row.AppliedAt.Time,
+		})
+	}
+	return nil
 }
 
 // UpdateInput is a request to edit a message's content.
@@ -383,6 +441,13 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 		}
 
 		out = messageFromRow(updated)
+		// An edit changes content, not tags, but the response is a whole Message and a client replaces
+		// its copy with it — so it carries the tags the message already has, read in this transaction.
+		single := []Message{out}
+		if err := s.attachTags(ctx, q, actor, single); err != nil {
+			return err
+		}
+		out = single[0]
 		return nil
 	})
 	return out, err
