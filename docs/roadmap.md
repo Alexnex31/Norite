@@ -871,6 +871,17 @@ of this section.
   `norite message`, and the paging matters more, because a guild's recording log has no ceiling where a
   channel backlog at least has a page.
 
+  **And the tag verbs, assigned 2026-09-24 from M17's planning.** The sixth instance, and this one arrived
+  with a keybinding already reserved for it: `KEYMAP.md` binds `C-c t` to "tag message" at **global**
+  scope, and M74's timeout verb sits at `C-c C-t` *because* tag already held the shorter chord. So tagging
+  has displaced another milestone's binding, and until this assignment no screen drew it, no milestone
+  built a client for it, and M17 was referenced exactly once in this whole file — its own entry. That is
+  §16's hazard running backwards: the keymap is a route through which scope enters without passing the
+  roadmap, and here it reserved a global chord for a feature with no caller.
+
+  So `norite tag` — create, list, apply, unapply, delete — lands here with the other five groups. Rule 19
+  applies as it does to the rest: a tag name is text a stranger chose, printed beside message content.
+
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
   `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
@@ -878,12 +889,13 @@ of this section.
   looks at again.
 
   Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read), M16b (the
-  recording toggle and its log) and M10 (`apiclient`, the transport). Done when: a guild can be created,
+  recording toggle and its log), M17 (tags) and M10 (`apiclient`, the transport). Done when: a guild can be created,
   renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
   command line; a report can be filed and triaged the same way, with the reporter absent from every triage
   output because M16's API never sends it; a channel's backlog can be read, posted to, edited and deleted
   from the command line, and a message's prior versions read by a moderator; a guild's recording can be
-  switched on and off by its owner and the resulting log paged; with `--json` output validated against
+  switched on and off by its owner and the resulting log paged; a tag can be created, applied to a message
+  in another channel of the same guild, and removed; with `--json` output validated against
   `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
