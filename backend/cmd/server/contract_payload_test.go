@@ -554,3 +554,97 @@ func TestTheModerationResponsesMatchTheContract(t *testing.T) {
 		})
 	}
 }
+
+// TestTheTagResponsesMatchTheContract is M17's entry in this file, added after /code-review found the
+// milestone had declared three schemas with additionalProperties: false and checked none of them — the gap
+// M15, M16, M16a and M16b each closed for their own shapes.
+//
+// It covers Message as well, which nothing here read before and which M17 changed: the channel listing
+// now carries each message's tags, nested as AppliedMessageTag. The tag is applied before the listing is
+// read, so the nested schema is exercised rather than validated against an empty array.
+func TestTheTagResponsesMatchTheContract(t *testing.T) {
+	a := newAPI(t, auth.RegistrationOpen)
+	schemas := contractSchemas(t)
+
+	owner := a.newAccount("owner", "owner@example.com", "laptop")
+	token := withToken(owner.Tokens.AccessToken)
+	guild := a.call(http.MethodPost, "/api/v1/guilds", map[string]any{"name": "Guild"}, token)
+	require.Equal(t, http.StatusCreated, guild.Code, guild)
+	guildID := guild.field(t, "id")
+
+	channel := a.call(http.MethodPost, "/api/v1/guilds/"+guildID+"/channels",
+		map[string]any{"name": "general", "type": 0}, token)
+	require.Equal(t, http.StatusCreated, channel.Code, channel)
+	channelID := channel.field(t, "id")
+
+	sent := a.call(http.MethodPost, "/api/v1/channels/"+channelID+"/messages",
+		map[string]any{"content": "hello"}, token)
+	require.Equal(t, http.StatusCreated, sent.Code, sent)
+	messageID := sent.field(t, "id")
+
+	created := a.call(http.MethodPost, "/api/v1/guilds/"+guildID+"/tags",
+		map[string]any{"name": "spam", "is_shared": true}, token)
+	require.Equal(t, http.StatusCreated, created.Code, created)
+
+	applied := a.call(http.MethodPut,
+		"/api/v1/channels/"+channelID+"/messages/"+messageID+"/tags/"+created.field(t, "id"), nil, token)
+	require.Equal(t, http.StatusNoContent, applied.Code, applied)
+
+	listed := a.call(http.MethodGet, "/api/v1/guilds/"+guildID+"/tags", nil, token)
+	require.Equal(t, http.StatusOK, listed.Code, listed)
+	onMessage := a.call(http.MethodGet,
+		"/api/v1/channels/"+channelID+"/messages/"+messageID+"/tags", nil, token)
+	require.Equal(t, http.StatusOK, onMessage.Code, onMessage)
+	backlog := a.call(http.MethodGet, "/api/v1/channels/"+channelID+"/messages", nil, token)
+	require.Equal(t, http.StatusOK, backlog.Code, backlog)
+	edited := a.call(http.MethodPatch, "/api/v1/channels/"+channelID+"/messages/"+messageID,
+		map[string]any{"content": "hello, corrected"}, token)
+	require.Equal(t, http.StatusOK, edited.Code, edited)
+
+	var listedBody, onMessageBody, backlogBody []map[string]any
+	require.NoError(t, json.Unmarshal(listed.Body, &listedBody))
+	require.NoError(t, json.Unmarshal(onMessage.Body, &onMessageBody))
+	require.NoError(t, json.Unmarshal(backlog.Body, &backlogBody))
+	require.Len(t, listedBody, 1)
+	require.Len(t, onMessageBody, 1)
+	require.Len(t, backlogBody, 1)
+
+	nested, ok := backlogBody[0]["tags"].([]any)
+	require.True(t, ok, "the listing carries tags as an array for a signed-in user: %v", backlogBody[0]["tags"])
+	require.Len(t, nested, 1, "the applied tag rides the listing")
+	nestedTag, ok := nested[0].(map[string]any)
+	require.True(t, ok)
+
+	for _, tc := range []struct {
+		what   string
+		schema string
+		body   []byte
+		object map[string]any
+	}{
+		{what: "POST a tag", schema: "MessageTag", body: created.Body},
+		{what: "GET a guild's tags", schema: "MessageTag", object: listedBody[0]},
+		{what: "GET a message's tags", schema: "AppliedMessageTag", object: onMessageBody[0]},
+		{what: "a tag nested in the channel listing", schema: "AppliedMessageTag", object: nestedTag},
+		{what: "POST a message", schema: "Message", body: sent.Body},
+		{what: "GET a channel's messages", schema: "Message", object: backlogBody[0]},
+		{what: "PATCH a message", schema: "Message", body: edited.Body},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			object := tc.object
+			if object == nil {
+				require.NoError(t, json.Unmarshal(tc.body, &object))
+			}
+
+			var got []string
+			for k := range object {
+				got = append(got, k)
+			}
+			sort.Strings(got)
+
+			declared, required := declaredProperties(t, schemas[tc.schema])
+			assert.Equal(t, declared, got, "%s sent %v; %s declares %v", tc.what, got, tc.schema, declared)
+			assert.Equal(t, declared, required,
+				"%s: every field is always present, so the contract should require all of them", tc.schema)
+		})
+	}
+}

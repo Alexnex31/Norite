@@ -952,6 +952,13 @@ type Message struct {
 	Id        Snowflake `json:"id"`
 	ReplyToId Snowflake `json:"reply_to_id"`
 
+	// Tags The tags on the message this caller can see: every shared tag, plus the caller's own private ones. Somebody else's private tag never appears.
+	//
+	// **Null when the credential may not read tags** — an API token without the `tags.read` scope. Null rather than an empty array, because an empty array would claim the message has no tags when the answer is that they are not this credential's to see. A signed-in user always gets an array, empty for an untagged message.
+	//
+	// The channel listing resolves a whole page's tags at once, so a client drawing a channel needs no per-message request; `GET /channels/{channel_id}/messages/{message_id}/tags` remains for reading one message's tags on their own.
+	Tags []AppliedMessageTag `json:"tags"`
+
 	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
 	Type int `json:"type"`
 }

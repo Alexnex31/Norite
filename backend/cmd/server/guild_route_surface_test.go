@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -518,6 +519,33 @@ func TestTheTagAuditVerbsAgreeAcrossPackages(t *testing.T) {
 		require.Contains(t, guilds.AuditActions(), verb,
 			"the tags package writes %q and the guilds audit-log reader does not accept it as a filter", verb)
 	}
+}
+
+// TestTheAppliedTagShapeAgreesAcrossPackages pins the one wire type written in two packages.
+//
+// `tags` serves a message's tags on their own and `messages` nests the same shape in every Message
+// (M17's optimization review). Neither may import the other, so the struct is duplicated, and a field
+// added to one and not the other would make the same object differ by endpoint. Compared by the JSON
+// keys each marshals to, because that is what a client sees; contract_payload_test.go checks both against
+// the one schema as well.
+func TestTheAppliedTagShapeAgreesAcrossPackages(t *testing.T) {
+	t.Parallel()
+
+	keysOf := func(v any) []string {
+		raw, err := json.Marshal(v)
+		require.NoError(t, err)
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(raw, &m))
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+
+	require.Equal(t, keysOf(tags.AppliedTag{}), keysOf(messages.AppliedTag{}),
+		"tags.AppliedTag and messages.AppliedTag are one wire shape served by two endpoints")
 }
 
 // TestTheTextChannelTypeAgreesAcrossPackages pins the second value written in two places.
