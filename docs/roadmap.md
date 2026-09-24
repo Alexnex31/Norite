@@ -791,10 +791,45 @@ of this section.
   on records every create/edit/delete, both toggles appear in the ordinary audit log, an E2E DM is never
   recorded, and the notice decision is in the ledger — all five met, the last by four entries, one of
   which records that members are told nothing until M62a draws the screen.
-- **M17 — Message tagging**: `message_tags` (plus its join table), guild-wide scope (not per-channel),
-  private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
-  tag created in one channel can be applied to a message in a different channel of the same guild, and
-  permission gating on shared-tag creation is enforced.
+- **M17 — Message tagging**: done. `message_tags` and `message_tag_applications` (migration `000024`),
+  `backend/internal/tags`, six REST routes, and the `tags.read`/`tags.write` scope pair. Guild-wide scope,
+  not per-channel; private tags need no permission, shared tags require `PermManageMessages`.
+
+  **This entry was four lines and the milestone was not.** That is M13's shape, where the entry said the
+  opposite of what the work turned out to be, and the reasons were again found by reading the documents
+  against each other rather than by anything failing.
+
+  **§2 drew both tables and no indexes at all** — every other table in that document carries explicit
+  `CREATE INDEX` lines. Four were needed and a fifth was retired by measuring. The costly one is the least
+  visible: the applications table's primary key is `(tag_id, message_id)`, so nothing serves `message_id`
+  alone, which is both the cascade from `messages` and the only way to render a tagged message. 23.5 ms
+  against 961.7 ms on 500 message deletions.
+
+  **§2 cited an ADR for the scope decision that was never written** — unnumbered, and no ADR mentions
+  message tags at all. Corrected to point at this entry and `000024` rather than satisfied with a new ADR:
+  CLAUDE.md's test is whether a decision contradicts an existing one, and guild-wide scope contradicts
+  nothing. A dangling citation is worse than none, because it reads as though the argument has been had.
+
+  **Nothing tied a tag application to the tag's guild**, so the schema as drawn permitted guild A's tag on
+  guild B's message while the done-when spoke only of the intra-guild case. Third milestone running for
+  that shape after M16's missing `reports.guild_id` and M16b's channel tie, and closed the same way — a
+  join predicate in the statement rather than a check in Go.
+
+  **The entry named one permission and the milestone has four verbs.** Applying needs
+  `PermReadMessageHistory` and deliberately not the moderation bit; removing an application takes whoever
+  applied it, the tag's owner, or a moderator; a private tag may be deleted only by its creator. And
+  "private" needed defining: a private tag is invisible to everybody else, refused as **404** rather than
+  403 so a tag id cannot become a probe — the oracle M12, M13 and M16a each closed elsewhere.
+
+  **`C-c t` was a global reserved chord for a feature with no client.** `KEYMAP.md` binds it to "tag
+  message" and M74's timeout verb sits at `C-c C-t` *because* tag already held the shorter one — so
+  tagging had displaced another milestone's binding while no screen drew it and no milestone built a
+  caller. The verbs went to M17a on this branch's first commit.
+
+  Depended on M15 (messages). Done when: a tag created in one channel can be applied to a message in a
+  different channel of the same guild, and permission gating on shared-tag creation is enforced — both
+  met, and the cross-guild refusal that the done-when did not ask for is enforced in the statement and
+  proved in three runs, because it is guarded twice.
 - **M17a — Phase C's command-tree verbs**: the `norite guild`, `norite channel` and `norite role` command
   groups over the REST surface M12, M13 and M14 built. Assigned 2026-09-15.
 

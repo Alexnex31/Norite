@@ -740,3 +740,46 @@ carries the condition that would reopen it.
   entry's condition and the only thing standing here — or if an export surface arrives that makes bulk
   reads a first-class operation, at which point the per-*user* throttle §14.14 wants for reports is the
   same question asked here.
+
+### "Private" describes the tag, not the message it is on
+- **Raised**: M17, at planning — the word needed defining before anything was built
+- **Verdict**: not a vulnerability — a naming hazard, closed by making the API say what it means
+- **Why**: a private tag is invisible to everybody but its creator: absent from their tag listing, absent
+  from the tags on any message they read, and refused as 404 by id. What it does **not** do is make the
+  message private. Somebody who privately tags a message `evidence` has annotated something the whole
+  guild can still read, and nothing about the tag changes who sees the message. That is the correct
+  design — tags annotate, restriction is M61's whispers — and it is written here because "private" is a
+  word members will read as stronger than it is. The contract says so in both schema descriptions.
+- **Reopens if**: a tag ever gates *visibility* of anything, at which point the privacy of the tag and the
+  privacy of what it marks stop being separable and the word has to mean one thing. Also reopens if tag
+  names become searchable across a guild, since a private tag's name would then be a channel for its
+  creator to leak through without anyone seeing the tag itself.
+
+### Creating a shared tag changes a guild's vocabulary and writes no audit entry
+- **Raised**: M17, at planning
+- **Verdict**: accepted risk — the alternative costs more than the entry is worth
+- **Why**: rule 2 covers guild-scoped *administrative* mutations, and applying or removing a tag
+  exercises authority over nobody, so those are outside it the way a message send is. Creating a **shared**
+  tag is closer to the line — it adds to something everybody sees and needs `PermManageMessages` — and it
+  is still not audited. Two reasons. The entry would carry a tag id and a name and nothing else, which is
+  a thin record to page a moderation log for. And the verb would have to join `guilds.AuditActions()`, and
+  therefore the vocabulary `GET /guilds/{id}/audit-log` validates an `action` filter against, which M14's
+  tripwire exists to make a decision rather than a reflex. Bounded instead: 200 shared tags per guild, and
+  the permission is granted to nobody by default.
+- **Reopens if**: a tag gains a *consequence* — one that hides a message, routes it, or changes who can
+  see it — at which point creating one is an administrative act with an outcome and belongs in the log.
+  Also reopens if the shared ceiling is raised far enough that "bounded" stops being the answer to why
+  nobody needs to audit it.
+
+### `message_tag_applications` grows with tagging and nothing sweeps it
+- **Raised**: M17, `/security-sweep`'s category rather than `/security-review`'s
+- **Verdict**: accepted risk — bounded per message, unbounded in total, and the totals are small
+- **Why**: a row per (tag, message) pair, cascading away with either. The per-message bound is real: a
+  message can carry at most the guild's tag count, which the ceilings cap at 200 shared plus 100 private
+  per member. The total is not bounded — it grows with messages tagged — but each row is four bigints and
+  a timestamp with no content, which is the difference from `message_audit_entries`, where the same
+  argument had to accept a full copy of every message. Applying is permission-gated and rate-limited like
+  any mutation.
+- **Reopens if**: tags gain a payload — a note, a colour, anything that makes a row more than a pairing —
+  or if an automation path reaches `Apply` without passing the per-IP limiter, which is M22's and M60's
+  territory and the same condition `message_edit_history`'s entry carries.

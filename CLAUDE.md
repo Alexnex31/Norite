@@ -380,7 +380,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M16b done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M17 done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -676,6 +676,33 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   2. Answered the other way first and reversed on reversibility — lifting a refusal when M72 lands is
   additive, withdrawing a capability operators rely on is not. The tier still reads any recording guild's
   log, which is M16a's gap and unchanged.
+
+- **M17 — Message tagging**: done. Migration `000024`, `backend/internal/tags` (the third package to reach
+  `guildauth`), six routes under `/guilds/{id}/tags` and `/channels/{id}/messages/{id}/tags`, and the
+  `tags.read`/`tags.write` pair. Decisions are in the roadmap entry, in `000024`, and in
+  `docs/security-ledger.md`.
+
+  **The entry was four lines and the milestone was not**, which is M13's shape. §2 drew both tables and
+  **zero indexes** — four were needed and a fifth was retired by measuring, because the two partial unique
+  indexes have complementary predicates and already cover `guild_id`. It also cited an ADR for the scope
+  decision that was never written.
+
+  **The primary key hid the index that mattered.** `(tag_id, message_id)` serves no lookup on
+  `message_id`, which is both the cascade from `messages` and the only way to render a tagged message —
+  M12's `guild_member_roles.role_id` exactly, at 961.7 ms against 23.5 ms on 500 deletions.
+
+  **"Private" had to be defined, and the definition is a 404.** A private tag is invisible to everybody
+  else; refusing it on authority would give 403, and 403-versus-404 turns a list of snowflake ids into a
+  map of which private tags exist. Enforced on three paths — two in SQL, one in Go — and pinned by a test
+  that drives all three with the same actor.
+
+  **A guard held twice needs three runs to prove.** The cross-guild predicate and `loadInGuild`'s check
+  each catch the other's case, so removing either alone leaves the test green. Only removing both fails
+  it, and only removing the Go half shows the statement earns its place.
+
+  **A keybinding had reserved scope the roadmap never granted.** `C-c t` is global, and M74's timeout verb
+  was moved to `C-c C-t` because tag held it — for a feature with no screen, no client and one mention in
+  the whole roadmap. §16's hazard running backwards.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:

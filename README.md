@@ -16,7 +16,7 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
-[![Milestone](https://img.shields.io/badge/milestone-M16b%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M17%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 > [!WARNING]
 > **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work, so
@@ -48,8 +48,8 @@ software.
 ## Status
 
 **Foundation, auth, the permission core, messages, guild-level reports, the moderation read over a
-message's edit history and a guild's opt-in message recording are done — `M0` through `M16b`. `M20a` is
-the first thing a person can actually use.**
+message's edit history, a guild's opt-in message recording and message tagging are done — `M0` through
+`M17`. `M20a` is the first thing a person can actually use.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -76,6 +76,7 @@ the first thing a person can actually use.**
 | `M16` | Guild-level reports — anyone who can see a message can report it, moderators triage and close a queue of them, closing is audited and filing deliberately is not, and the reporter's identity is never shown to the moderators of the guild being reported |
 | `M16a` | Message edit history — a moderator reads every version a message had before the one it has now, an author reads their own, and the response carries what it says today because nothing else in the API will tell them |
 | `M16b` | Opt-in message recording — a guild's owner can have every message create, edit and delete kept in a log of its own, off by default, readable only by a permission granted to nobody until somebody grants it, with both flips of the switch recorded in the ordinary audit log and the setting visible to every member of the guild |
+| `M17` | Message tagging — a guild-wide vocabulary of labels that follow a message across channels, split into shared tags a moderator curates and private ones visible to nobody but the member who made them |
 
 </details>
 
