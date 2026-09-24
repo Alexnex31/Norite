@@ -653,7 +653,14 @@ CREATE TABLE blocks (
 );
 CREATE INDEX ON blocks (blocked_id);   -- "who has blocked me" — used to build the per-connection block-set
 
--- Message tags (ADR: guild-wide scope, not per-channel)
+-- Message tags. **Guild-wide scope, not per-channel**, and the reasoning lives in M17's roadmap entry and
+-- in migration 000024 rather than in an ADR.
+--
+-- This line cited "(ADR: guild-wide scope, not per-channel)" until M17's planning, unnumbered, and no ADR
+-- in docs/adr/ mentions message tags at all — so the one contested decision this table carries pointed at
+-- an authority nobody had written. Corrected rather than satisfied: an ADR is owed when a decision
+-- contradicts an existing one (CLAUDE.md's test), and nothing here does. A dangling citation is worse than
+-- no citation, because it reads as though the argument has been had.
 CREATE TABLE message_tags (
   id bigint PRIMARY KEY, guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
   name varchar(50) NOT NULL, created_by bigint NOT NULL REFERENCES users(id),
