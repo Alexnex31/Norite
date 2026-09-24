@@ -800,7 +800,9 @@ of this section.
   against each other rather than by anything failing.
 
   **§2 drew both tables and no indexes at all** — every other table in that document carries explicit
-  `CREATE INDEX` lines. Four were needed and a fifth was retired by measuring. The costly one is the least
+  `CREATE INDEX` lines. Six ship: the two partial unique indexes, `created_by`, `message_id`, `applied_by`,
+  and `guild_id` — which was retired by a measurement on too few rows and restored by M17's optimization
+  review at 600,000 (56 ms against 0.7 ms on the cascade from `guilds`). The costly one is the least
   visible: the applications table's primary key is `(tag_id, message_id)`, so nothing serves `message_id`
   alone, which is both the cascade from `messages` and the only way to render a tagged message. 23.5 ms
   against 961.7 ms on 500 message deletions.
@@ -816,8 +818,11 @@ of this section.
   join predicate in the statement rather than a check in Go.
 
   **The entry named one permission and the milestone has four verbs.** Applying needs
-  `PermReadMessageHistory` and deliberately not the moderation bit; removing an application takes whoever
-  applied it, the tag's owner, or a moderator; a private tag may be deleted only by its creator. And
+  `PermReadMessageHistory` and deliberately not the moderation bit — plus `PermSendMessages` for a
+  *shared* tag, so a muted member cannot label messages in front of everybody; removing an application
+  takes whoever applied it or a moderator; a private tag may be deleted only by its creator, and a shared
+  one only by a moderator, its creator included. The last three were settled by the milestone's
+  `/security-sweep`, which found each looser rule reproducible — see CLAUDE.md's M17 entry. And
   "private" needed defining: a private tag is invisible to everybody else, refused as **404** rather than
   403 so a tag id cannot become a probe — the oracle M12, M13 and M16a each closed elsewhere.
 
@@ -1544,6 +1549,15 @@ of this section.
   `instance_audit_log` is created, with the instruction attached. Whoever builds this milestone should
   expect it to go red and should answer it for **every** guild-scoped path an Instance Admin can reach,
   not only for reports.
+
+  **And layer 1 never proves the guild exists**, found by M17's `/security-sweep` and older than M17.
+  `guildauth.Authorize` short-circuits for an Instance Admin before anything reads the guild row, so for a
+  guild id that names nothing, `GET /guilds/{id}` answers 404 while its channels, roles, audit-log and tag
+  listings answer `200 []`, and `POST /guilds/{id}/channels` and `POST /guilds/{id}/tags` answer 500 on
+  the foreign key. It is not a disclosure, since the tier can already see every guild, but it is the same
+  short-circuit this milestone has to walk for rule 14. So the fix belongs here: the layer-1 branch loads
+  the guild before answering, one row that every one of those paths needs anyway to name its target in
+  `instance_audit_log`.
 
   **M72a adds no statement to this transaction.** A ban and a guild's discoverability are independent
   actions an admin composes — see M72a, where that is decided and why.

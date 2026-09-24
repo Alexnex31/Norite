@@ -770,6 +770,15 @@ carries the condition that would reopen it.
   see it — at which point creating one is an administrative act with an outcome and belongs in the log.
   Also reopens if the shared ceiling is raised far enough that "bounded" stops being the answer to why
   nobody needs to audit it.
+- **Amended at M17's `/security-sweep`, verdict unchanged for creation, and its first sentence was too
+  broad.** "Applying or removing a tag exercises authority over nobody" holds for your *own* applications
+  and not for somebody else's: a moderator taking another member's label off a message is authority over
+  that member, and deleting a shared tag cascades away every other member's applications of it. Rule 2
+  says administrative "whoever performs it", and the sweep reproduced a moderator removal writing no entry
+  while the same moderator deleting that member's message wrote one. Both are now audited — `tag.remove`
+  and `tag.delete`, written only when the act reaches somebody else's tagging. Creating a shared tag, and
+  deleting one only its deleter ever applied, remain unaudited for the reasons above: vocabulary, not
+  authority over anybody.
 
 ### `message_tag_applications` grows with tagging and nothing sweeps it
 - **Raised**: M17, `/security-sweep`'s category rather than `/security-review`'s
@@ -783,3 +792,34 @@ carries the condition that would reopen it.
 - **Reopens if**: tags gain a payload — a note, a colour, anything that makes a row more than a pairing —
   or if an automation path reaches `Apply` without passing the per-IP limiter, which is M22's and M60's
   territory and the same condition `message_edit_history`'s entry carries.
+
+### The private-tag ceiling is a count and an insert, and two requests can both pass it
+- **Raised**: M17, `/code-review` and then `/security-sweep`
+- **Verdict**: accepted risk — the overshoot is bounded by one burst, and the ceiling is a nuisance bound
+  rather than an authority one
+- **Why**: `checkCeiling` counts a member's private tags and `CreateMessageTag` inserts, in one READ
+  COMMITTED transaction with no lock, so two creates can each see 99 and both commit. Shown by hand in
+  psql: two sessions interleaved with the second committing between the first's count and its insert, both
+  counted 94 and both inserted. It did **not** reproduce under load (30 concurrent requests landed exactly
+  at 100), which is M15's point about races that are real and too rare to hit by racing. The overshoot is
+  bounded by how many requests land inside one window, never cumulative: once the count is at or over the
+  cap every later create is refused. What the ceiling defends against is one member writing rows without
+  limit, and a burst-sized overshoot does not reopen that. M12's role-position race took an advisory lock
+  because position is the hierarchy M13 enforces over, and a collision there is a wrong answer; one tag
+  too many is not.
+- **Reopens if**: anything reaches `Create` without passing the per-IP limiter (a bulk import, M22's
+  automation, M60's webhooks), which widens the window from a burst to a loop; or the ceiling starts to
+  mean something beyond nuisance, such as a quota an instance bills or sizes against.
+
+### Near-identical tag names get past the uniqueness indexes
+- **Raised**: M17, `/code-review`
+- **Verdict**: not a vulnerability
+- **Why**: the partial unique indexes key on `lower(name)` and `checkName` trims and normalizes nothing,
+  so `spam`, `spam `, ` spam` and an NFD or zero-width-joined `spam` are distinct tags that look the same
+  in a picker. That is a legibility problem only among people who can already create shared tags, because
+  a **shared** name needs `PermManageMessages`, and a **private** name is seen by nobody but its creator.
+  Nobody without the moderation bit can put a lookalike in front of anybody else. Normalizing would also
+  mean the instance deciding what counts as the same word in every script, which is the argument
+  `checkName`'s comment makes for leaving names alone.
+- **Reopens if**: creating a shared tag stops needing the moderation bit, or a private tag becomes visible
+  or searchable by anyone else. Both would put a lookalike in front of somebody who did not choose it.

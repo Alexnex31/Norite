@@ -683,8 +683,10 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   `docs/security-ledger.md`.
 
   **The entry was four lines and the milestone was not**, which is M13's shape. §2 drew both tables and
-  **zero indexes** — four were needed and a fifth was retired by measuring, because the two partial unique
-  indexes have complementary predicates and already cover `guild_id`. It also cited an ADR for the scope
+  **zero indexes** — six ship. A `guild_id` index was retired by measuring and then restored by measuring
+  again: the migration claimed the two partial unique indexes, having complementary predicates, cover
+  `guild_id` together, which Postgres never does for a query not naming `is_shared` — and the cascade from
+  `guilds` does not. 12,800 rows hid it; 600,000 showed a 56 ms sequential scan against 0.7 ms. It also cited an ADR for the scope
   decision that was never written.
 
   **The primary key hid the index that mattered.** `(tag_id, message_id)` serves no lookup on
@@ -699,6 +701,43 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   **A guard held twice needs three runs to prove.** The cross-guild predicate and `loadInGuild`'s check
   each catch the other's case, so removing either alone leaves the test green. Only removing both fails
   it, and only removing the Go half shows the statement earns its place.
+
+  **The manual pass found what every test and the guild predicate had walked past**: the two write routes
+  authorized the route's channel and never checked the message was in it. Tagging a message in a hidden
+  channel through a visible one answered 204 against 404 for an id naming nothing, and removing a
+  moderator's tag from it answered 403 against 404 — which messages exist behind a hidden channel, and
+  what they have been labelled. `ForMessage` had M15's `loadInChannel` check; `Apply` and `Unapply` did
+  not, and no test sent a message through a route other than its own. Now `loadMessageInChannel` runs
+  first on all three, and `ApplyMessageTag` carries `m.channel_id` as well. **Guarding the statement alone
+  would not have closed it**: a refused insert falls through to the repeat detection, which finds
+  somebody else's row and reports success.
+
+  **A removal whose mutation breaks the statement proves nothing, even when it fails.** Deleting the
+  predicate outright dropped `$3`, and the test failed on Postgres refusing the parameter rather than on
+  the property; neutralizing it as `$3::bigint = $3::bigint` kept the statement valid and showed the Go
+  check covering it. M15's "fails to build" lesson, one layer down: the harness has to fail for the
+  reason under test.
+
+  **`/security-sweep` then found four authority rules looser than the milestone meant, each reproduced
+  live.** An Instance Admin passed the single-row visibility check while both listings filtered the tag,
+  so an operator could apply, remove and delete members' private tags they could never enumerate, with
+  nothing recording it — refused now, which leaves the tier exactly as far as a guild owner rather than
+  creating a second layer-1 exception. A muted member could not post and could still put a shared tag on
+  anybody's message; a shared tag now needs `PermSendMessages`, a private one does not. A shared tag's
+  creator kept the power to delete it and strip other people's applications after losing the moderation
+  bit; a shared tag is now the guild's, reachable only through the bit. And a moderator removing another
+  member's label wrote no audit entry while deleting that member's message wrote one — rule 2 says
+  "whoever performs it", so `tag.remove` and `tag.delete` exist, written only when the act reaches
+  somebody else's tagging. Every one of them passed the suite before it was fixed, because the moderator
+  in every test was also the tag's creator: **a test whose actors overlap cannot see the branch that tells
+  them apart.**
+
+  **`/optimization-review` found the milestone had built the batch read and exposed it one id at a
+  time**, so drawing a channel cost a request per message — 50 requests and 250 round trips for one page.
+  Every `Message` now carries `tags`, resolved for the page in one `= ANY`. It is **nullable**: an API
+  token without `tags.read` gets null, because `messages.read` reaching tags would widen a delegated
+  credential and an empty array would claim the message has none. The same review restored the
+  `guild_id` index the migration had argued away (above).
 
   **A keybinding had reserved scope the roadmap never granted.** `C-c t` is global, and M74's timeout verb
   was moved to `C-c C-t` because tag held it — for a feature with no screen, no client and one mention in
