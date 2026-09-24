@@ -9,7 +9,8 @@
 --
 -- Everything measured below is on PostgreSQL 16.14 against 12,800 tags and 95,826 applications over
 -- 47,967 tagged messages, inside the 400,000 messages across 2,000 channels that 000020, 000022 and 000023
--- all used — so these numbers sit beside those rather than beside nothing.
+-- all used — so these numbers sit beside those rather than beside nothing. The guild_id cascade below is
+-- the exception, measured at 600,000 tags, because 12,800 was too few to show it.
 
 CREATE TABLE message_tags (
   id         bigint PRIMARY KEY,                               -- snowflake (ADR 0003)
@@ -41,24 +42,31 @@ CREATE TABLE message_tags (
 -- confusing in exactly the way uniqueness exists to prevent — the same call `users.username` makes with
 -- citext. The type stays varchar(50) as §2 draws it; the functional index is the smaller deviation.
 --
--- **These two turn out to do a third job, which is why there is no separate guild_id index below.** Their
--- predicates are complementary — `is_shared` and `NOT is_shared` partition the table — so together they
--- cover every row by guild_id, and the planner bitmap-ORs them for both the guild's tag listing and the
--- ON DELETE CASCADE from guilds. Measured, because the opposite was assumed first:
---
---   listing a guild's tags     0.171 ms with a (guild_id, id DESC) index *dropped*, 0.332 ms with it —
---                              the planner declines it and reaches for these instead
---   deleting a guild's 640 tags  3.97 / 4.42 ms without it, 6.07 ms with it
---
--- So the index that looked obviously required is not merely unnecessary, it is slightly worse: one more
--- structure to maintain on every insert for a path that never chooses it. That is M13's result on
--- DeleteOverwritesForTarget reproduced — a suspected missing index retired by measuring rather than added
--- by reasoning — and it is the reason rule 7 says the index ships with the query rather than with the
--- table.
+-- Both also serve the two ceiling counts in `tags.Service` as index-only scans (3-6 buffers at 600,000
+-- tags), and the shared one serves the shared half of the guild's tag listing. The private half of that
+-- listing is `created_by = $2`, which implies nothing about `is_shared`, so it is served by
+-- message_tags_created_by_idx below — not by the private index.
 CREATE UNIQUE INDEX message_tags_shared_name_idx
   ON message_tags (guild_id, lower(name)) WHERE is_shared;
 CREATE UNIQUE INDEX message_tags_private_name_idx
   ON message_tags (guild_id, created_by, lower(name)) WHERE NOT is_shared;
+
+-- **The ON DELETE CASCADE from guilds needs its own index, and this migration first argued it did not.** It
+-- claimed the two partial indexes above, having complementary predicates, together cover every row by
+-- guild_id. They do not, for any query that does not name `is_shared`: Postgres uses a partial index only
+-- when the query's WHERE implies its predicate, and the cascade runs `DELETE ... WHERE guild_id = $1`,
+-- which implies neither. The "measurement" behind the claim was 12,800 rows, where a sequential scan is
+-- cheap and the planner prefers it — M16's lesson about a seed that measures nothing, exactly.
+--
+-- Measured by M17's optimization review on a DELETE FROM guilds, at 600,000 tags across 2,000 guilds with
+-- each guild's rows scattered through the id range:
+--
+--   message_tags cascade trigger   56.286 ms, 5,608 buffers, Parallel Seq Scan over every tag   without
+--                                  0.723 / 0.499 ms, index scan (two guilds)                   with
+--
+-- Every other cascade from guilds costs 1-1.5 ms, and this one grows with the instance's total tag count
+-- rather than with the guild being deleted. The guild listing's plan is identical either way.
+CREATE INDEX message_tags_guild_id_idx ON message_tags (guild_id);
 
 -- The refusing foreign key to users, which needs an index for messages_author_id_idx's reason: deleting an
 -- account requires Postgres to prove no tag references it, and proving a negative over an unindexed column

@@ -673,6 +673,16 @@ CREATE TABLE message_tag_applications (
   applied_by bigint NOT NULL REFERENCES users(id), applied_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tag_id, message_id)
 );
+-- Shared names unique per guild, private names unique per owner; both also serve the ceiling counts.
+CREATE UNIQUE INDEX ON message_tags (guild_id, lower(name)) WHERE is_shared;
+CREATE UNIQUE INDEX ON message_tags (guild_id, created_by, lower(name)) WHERE NOT is_shared;
+-- The cascade from guilds: the partial indexes above cannot serve `WHERE guild_id = $1` (000024).
+CREATE INDEX ON message_tags (guild_id);
+CREATE INDEX ON message_tags (created_by);                          -- refusing FK to users
+-- message_id is the PK's second column and serves nothing alone: the cascade from messages, and every
+-- read of a message's tags (the channel listing resolves a page with one `= ANY`).
+CREATE INDEX ON message_tag_applications (message_id);
+CREATE INDEX ON message_tag_applications (applied_by);              -- refusing FK to users
 
 -- Whispers — message-visibility restriction, not a new authority tier (ADR 0008)
 CREATE TABLE whispers (
