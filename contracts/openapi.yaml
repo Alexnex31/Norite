@@ -3451,6 +3451,258 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /guilds/{guild_id}/tags:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: List a guild's message tags
+      description: >
+        Every **shared** tag in the guild, plus the caller's own **private** ones. Somebody else's private
+        tag never appears here, which is the whole of what "private" means — see `MessageTag`.
+
+
+        Not paginated, and bounded at creation instead (a guild holds at most 200 shared tags and each
+        member at most 100 private ones). A client needs the whole set to draw a picker, so paging would
+        make it fetch in a loop.
+      operationId: listGuildMessageTags
+      tags: [tags]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The tags this caller can see in the guild, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MessageTag"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: An API token without the `tags.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      summary: Create a message tag
+      description: >
+        **A shared tag requires `MANAGE_MESSAGES`; a private one requires only membership.** That split is
+        the milestone's stated decision: a shared tag adds to a vocabulary everybody sees, and a private
+        one is visible to nobody but its creator.
+
+
+        `is_shared` defaults to **false** when absent, deliberately — a request that forgets the field
+        creates the harmless kind rather than quietly adding to the guild's shared vocabulary.
+
+
+        Names are unique case-insensitively: shared names per guild, private names per member per guild.
+        So two members may each keep a private `todo` and neither blocks the guild from having a shared
+        one.
+      operationId: createMessageTag
+      tags: [tags]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMessageTagRequest"
+      responses:
+        "201":
+          description: The tag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageTag"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            A shared tag was requested by a member without `MANAGE_MESSAGES`, or an API token lacks the
+            `tags.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >
+            A tag with that name already exists here, or the guild's shared ceiling (200) or the caller's
+            private ceiling (100) is full.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /guilds/{guild_id}/tags/{tag_id}:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: tag_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    delete:
+      summary: Delete a message tag
+      description: >
+        Removes the tag and, by cascade, every application of it.
+
+
+        A **private** tag may be deleted by its creator and by nobody else — not a moderator, not the
+        owner — because it is invisible to them, and a permission to delete what you cannot see is a
+        permission to delete at random. A **shared** tag may be deleted by its creator or by a
+        `MANAGE_MESSAGES` holder, so a bad one can still be removed after its author has left.
+
+
+        A tag this caller cannot see answers **404**, never 403: tag ids are snowflakes, and a 403 would
+        tell anybody holding one whether it named somebody's private tag.
+      operationId: deleteMessageTag
+      tags: [tags]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Deleted.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller may see the tag but is neither its creator nor a `MANAGE_MESSAGES` holder, or an
+            API token lacks the `tags.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /channels/{channel_id}/messages/{message_id}/tags:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: message_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: Read the tags on a message
+      description: >
+        Every tag on the message that this caller can see, with who applied each one and when. Requires
+        `READ_MESSAGE_HISTORY`, the bit that lets you read the channel's backlog at all.
+
+
+        Somebody else's private tag is absent, on a message you can read like any other.
+      operationId: listMessageTags
+      tags: [tags]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The tags on the message.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AppliedMessageTag"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller can see the channel but lacks `READ_MESSAGE_HISTORY`, or an API token lacks the
+            `tags.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /channels/{channel_id}/messages/{message_id}/tags/{tag_id}:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: message_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+      - name: tag_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    put:
+      summary: Apply a tag to a message
+      description: >
+        Requires `READ_MESSAGE_HISTORY` and **not** `MANAGE_MESSAGES`: a tag is an annotation, and a guild
+        that lets everybody post has already decided they may say things about the conversation. The
+        permission sits on creating a *shared* tag instead.
+
+
+        **A tag and a message must belong to the same guild**, which the database enforces as a join
+        predicate rather than the service checking it — so it holds for any future writer too. A pair that
+        crosses a guild answers 404, as does a message that does not exist or has been deleted.
+
+
+        **Idempotent.** Applying a tag that is already on the message answers 204 exactly as the first
+        application does, so a client retrying a request it is unsure landed is never told it failed.
+      operationId: applyMessageTag
+      tags: [tags]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Applied, or already was.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller can see the channel but lacks `READ_MESSAGE_HISTORY`, or an API token lacks the
+            `tags.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      summary: Remove a tag from a message
+      description: >
+        Whoever applied the tag, the tag's owner, or a `MANAGE_MESSAGES` holder. Three, because they
+        answer different questions: undoing your own action needs no permission, a tag is its owner's to
+        withdraw, and somebody has to be able to remove a wrong label after both of them have gone.
+      operationId: unapplyMessageTag
+      tags: [tags]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Removed.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller is none of the three above, or an API token lacks the `tags.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /guilds/{guild_id}/audit-log:
     parameters:
       - name: guild_id
@@ -4122,7 +4374,8 @@ components:
         two most worth keeping apart — a token minted so a bot can file on its owner's behalf must not
         also be able to dismiss every report in a guild its owner moderates.
       enum: [identify, guilds.read, guilds.write, guilds.audit, messages.read, messages.write,
-             messages.moderate, messages.audit, reports.write, reports.moderate]
+             messages.moderate, messages.audit, reports.write, reports.moderate, tags.read,
+             tags.write]
 
     HealthResponse:
       type: object
@@ -5458,6 +5711,96 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/MessageEditVersion"
+
+    MessageTag:
+      type: object
+      description: >
+        A label a guild can put on its messages. **Guild-wide, not per-channel** — a tag created while
+        looking at one channel applies to a message in any channel of the same guild, which is the point
+        of tagging as a filing system rather than a per-room convention.
+
+
+        **Shared versus private is the whole model.** A shared tag belongs to the guild: everybody sees
+        it, and `MANAGE_MESSAGES` is needed to create one. A private tag belongs to its creator, needs no
+        permission, and is invisible to everybody else — it never appears in another member's tag list nor
+        on a message they read. What it does *not* do is make anything private: tags annotate, they do not
+        restrict, and restricting who can see a message is what whispers (M61) are for.
+
+
+        `created_by` is provenance for a shared tag and is always the caller for a private one, since a
+        private tag reaches nobody else.
+      required: [id, guild_id, name, created_by, is_shared, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          $ref: "#/components/schemas/Snowflake"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 50
+        created_by:
+          $ref: "#/components/schemas/Snowflake"
+        is_shared:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    AppliedMessageTag:
+      type: object
+      description: >
+        A tag as it appears on a message — the tag itself, plus who put it there and when.
+
+
+        `applied_by` is present deliberately. A tag on a message is an assertion somebody made about it,
+        and a reader deciding whether to trust `spam` wants to know who said so, the same reason an audit
+        entry names an actor. It discloses nothing: everybody named here is a member of a guild the reader
+        is also in.
+      required: [id, guild_id, name, created_by, is_shared, created_at, applied_by, applied_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          $ref: "#/components/schemas/Snowflake"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 50
+        created_by:
+          $ref: "#/components/schemas/Snowflake"
+        is_shared:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        applied_by:
+          $ref: "#/components/schemas/Snowflake"
+        applied_at:
+          type: string
+          format: date-time
+
+    CreateMessageTagRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: >
+            Counted in characters, not bytes, so a name in a non-Latin script is not penalised — a
+            50-character ceiling is reached far sooner in Japanese than in English.
+        is_shared:
+          type: boolean
+          default: false
+          description: >
+            Absent means **false**. A request that forgets this field creates a private tag, which needs
+            no permission and is visible to nobody else, rather than adding to the guild's shared
+            vocabulary by accident.
 
     MessageAuditEntry:
       type: object

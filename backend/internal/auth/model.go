@@ -125,6 +125,21 @@ const (
 	// The naming asymmetry against the pairs above is the signal, not an inconsistency to smooth over.
 	ScopeReportsWrite    Scope = "reports.write"
 	ScopeReportsModerate Scope = "reports.moderate"
+
+	// Tags are their own pair (M17), and the axis is read/write rather than reports' by-audience split,
+	// because tagging has no moderation half — creating a *shared* tag needs PermManageMessages and that
+	// is a permission question, not a delegation one.
+	//
+	// Not folded into the messages pair, for the reason that pair is not folded into guilds': a tag is
+	// metadata *about* a conversation rather than the conversation. A bot that files things — the obvious
+	// consumer, an automation that labels support threads — needs to create and apply tags and has no
+	// business reading a word anybody said, which `messages.read` would hand it. The reverse is just as
+	// lopsided: a backlog-reading bot does not need to be able to relabel the guild's whole filing system.
+	//
+	// `tags.read` covers a guild's tag list and the tags on a message; `tags.write` covers creating,
+	// deleting, applying and unapplying. Write does not imply read, as everywhere else here.
+	ScopeTagsRead  Scope = "tags.read"
+	ScopeTagsWrite Scope = "tags.write"
 )
 
 // Token management — minting, listing and revoking — has no scope at all: every one of those operations
@@ -146,6 +161,7 @@ var AllScopes = []Scope{
 	ScopeGuildsRead, ScopeGuildsWrite, ScopeGuildsAudit,
 	ScopeMessagesRead, ScopeMessagesWrite, ScopeMessagesModerate, ScopeMessagesAudit,
 	ScopeReportsWrite, ScopeReportsModerate,
+	ScopeTagsRead, ScopeTagsWrite,
 }
 
 // ValidScope reports whether s is a scope this build understands.

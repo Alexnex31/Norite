@@ -158,6 +158,14 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 	}, withToken(f.ownerToken))
 	require.Equal(t, http.StatusCreated, report.Code, "seeding a report: %s", report)
 
+	// A real tag, for the same reason as the message and the report above: a fabricated id answers 404
+	// for the wrong reason and passes the anti-enumeration assertion by accident. Shared, so the owner's
+	// MANAGE_MESSAGES is what creates it and the tag is one an ordinary member could also see — which is
+	// the harder case for a refusal to get right than a private tag nobody can see anyway.
+	tag := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/tags", f.guildID),
+		map[string]any{"name": "needs-review", "is_shared": true}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, tag.Code, "seeding a tag: %s", tag)
+
 	ids := map[string]string{
 		"{guild_id}":     f.guildID,
 		"{channel_id}":   channel.field(t, "id"),
@@ -166,6 +174,7 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		"{overwrite_id}": roleID,
 		"{message_id}":   message.field(t, "id"),
 		"{report_id}":    report.field(t, "id"),
+		"{tag_id}":       tag.field(t, "id"),
 	}
 
 	cases := map[string]refusalCase{
@@ -200,6 +209,19 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		// message is loaded. Nothing about this route's own permission is asserted by this test — that
 		// is TestARecordingGuildsLogIsBoundedByItsOwnBit, in the messages package.
 		"GET /api/v1/guilds/{guild_id}/message-audit": {},
+
+		// M17's tag routes. Every one names a real object — a real guild, channel, message and tag — so
+		// a stranger reaching any of them must be refused as though none of it existed. The apply pair
+		// matters most: they name three ids at once, and a refusal that checked only one of them would
+		// pass every other case here.
+		"GET /api/v1/guilds/{guild_id}/tags": {},
+		"POST /api/v1/guilds/{guild_id}/tags": {
+			body: map[string]any{"name": "intruding", "is_shared": false},
+		},
+		"DELETE /api/v1/guilds/{guild_id}/tags/{tag_id}":                           {},
+		"GET /api/v1/channels/{channel_id}/messages/{message_id}/tags":             {},
+		"PUT /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}":    {},
+		"DELETE /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}": {},
 		"POST /api/v1/guilds/{guild_id}/reports/{report_id}/resolve": {
 			body: map[string]any{"status": "dismissed"},
 		},
@@ -356,6 +378,25 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 		{route: "GET /api/v1/guilds/{guild_id}/reports", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/reports/{report_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/message-audit", exempt: readsWriteNothing},
+
+		// M17's tag routes write no audit entry, and the three mutations among them are the interesting
+		// exemption rather than the reads. Applying or removing a tag is an annotation somebody makes
+		// about a message, which exercises authority over nobody — rule 2's M15 narrowing. Creating a
+		// *shared* tag is closer to administrative, and is still not audited: the entry would name a tag
+		// and nothing else, and the verb would have to join guilds.AuditActions() and therefore the
+		// audit-log reader's filter vocabulary. The ledger carries that decision with what would reopen
+		// it.
+		{route: "GET /api/v1/guilds/{guild_id}/tags", exempt: readsWriteNothing},
+		{route: "GET /api/v1/channels/{channel_id}/messages/{message_id}/tags",
+			exempt: readsWriteNothing},
+		{route: "POST /api/v1/guilds/{guild_id}/tags",
+			exempt: "a tag is vocabulary, not authority over anybody; see the ledger"},
+		{route: "DELETE /api/v1/guilds/{guild_id}/tags/{tag_id}",
+			exempt: "deleting a tag removes a label, not a message; writes no entry"},
+		{route: "PUT /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}",
+			exempt: "applying a tag annotates; it exercises authority over nobody"},
+		{route: "DELETE /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}",
+			exempt: "removing a tag application is the same, in reverse"},
 
 		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},

@@ -20,6 +20,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/reports"
+	"github.com/Alexnex31/Norite/backend/internal/tags"
 )
 
 // apiBase is the versioned REST prefix every endpoint lives under (docs/architecture.md §2 "REST API").
@@ -37,6 +38,7 @@ type routerOptions struct {
 	AuthSvc  *auth.Service
 	Guilds   *guilds.Handler
 	Messages *messages.Handler
+	Tags     *tags.Handler
 	Reports  *reports.Handler
 }
 
@@ -272,6 +274,17 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			// be, rather than making `guilds` the import root of every domain that acts inside a channel.
 			if opts.Messages != nil {
 				opts.Messages.Routes(r)
+			}
+
+			// Message tags (M17), mounted the same way and in the same bucket.
+			//
+			// Its own handler rather than more routes on the messages one, because `tags` is its own
+			// package — the third of the four the M15 guildauth extraction was done for. It mounts under
+			// *two* prefixes, /guilds for the vocabulary and /channels for what it has been applied to,
+			// which is the same split `reports` makes and for the same reason: the guild is what is
+			// authorized for one and the channel for the other.
+			if opts.Tags != nil {
+				opts.Tags.Routes(r)
 			}
 
 			// Reports (M16), mounted the same way and in the same bucket.
