@@ -1313,6 +1313,22 @@ of this section.
   revoked token is rejected; regenerating a webhook's token invalidates the old one without deleting the
   webhook; and a burst of posts against one valid token is throttled independently of the owning user's own
   REST rate limit.
+
+  **It inherits a constraint from M16b that it cannot satisfy as written, assigned 2026-09-24.**
+  `message_audit_entries.actor_id` is `NOT NULL REFERENCES users(id)`, matching `audit_log_entries` and
+  deliberately unlike `messages.author_id`, which is nullable precisely so a webhook or system message can
+  have no author. Every write reaching that table today comes from an authenticated person, so the
+  constraint holds — and the first webhook post into a guild that has switched recording on violates it
+  and answers 500 on an ordinary send. So this milestone owes a decision before it ships: give the column
+  the nullable shape `messages.author_id` has and teach the reader that a null actor means automation, or
+  give webhooks a synthetic actor and accept that the log names a row in `users` that is not a person.
+  The second is how `audit_log_entries` would have to answer the same question, so answering both together
+  is worth a moment.
+
+  Recorded here rather than only in `000023`'s comment, because a constraint written in a migration is one
+  this milestone never reads — which is M16b's own finding about M125 applied to M16b's own deferral, and
+  it was caught by a security sweep after that migration comment had already claimed this entry carried
+  it.
 - **M61 — Whispers**: the private, message-visibility-restricted-to-selected-recipients feature; not
   guild-audit-logged; excluded from E2E scope (enforced later once E2E exists, at M99); the break-glass
   schema exists now (a whisper is queryable by internal tooling) even though the Instance-Admin-facing

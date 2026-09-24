@@ -690,6 +690,19 @@ carries the condition that would reopen it.
   one exception is a documented departure, two that do not know about each other are a rule enforced by
   nobody, and at that point it needs a mechanism the way `revokeEverything`, `RequireLiveSession`,
   `factorProof` and the `guildauth` chokepoint each did.
+- **Amended at M16b's `/security-sweep`, verdict unchanged, consequence added.** The refusal is
+  **symmetric** and the entry above only argued the "on" direction. `UpdateGuild` is the only writer of
+  the column and there is no instance-admin guild surface at all (`/instance` is operator-token bootstrap
+  and invites), so an Instance Admin can no more switch a guild's recording **off** than on. An operator
+  taking a complaint — "this guild is recording us and we want it stopped" — has no lever short of
+  deleting the guild, which destroys every channel and message in it and punishes the members for the
+  owner's choice. That is heavier than the situation usually warrants, and it is a real cost of choosing
+  the reversible direction. Accepted rather than fixed because the alternative reintroduces exactly what
+  the entry withholds: a tier that can reach into a guild's recording setting while rule 14 has nowhere to
+  record that it did. M72 should settle both directions together rather than lifting only the one this
+  entry names, and the banning and unpublishing levers `guilds.discoverable_locked_at` already models —
+  an admin lock the owner's own toggle is refused against — is the shape worth copying if it wants a
+  narrower answer than "delete it".
 
 ### `message_audit_entries` grows without bound and a recording guild roughly doubles its message storage
 - **Raised**: M16b, at planning — the class `/security-review` structurally excludes
@@ -708,3 +721,22 @@ carries the condition that would reopen it.
   all. Also reopens if a per-guild storage quota arrives, at which point the ceiling belongs beside the
   channel and role ones rather than here — and this table, not `messages`, is what a recording guild fills
   first.
+
+### A recording log's read is a bulk-export primitive and sits in the ordinary rate-limit bucket
+- **Raised**: M16b, `/security-sweep`
+- **Verdict**: not a vulnerability — consistent with the surface it most resembles, and the bit is the
+  boundary
+- **Why**: `GET /guilds/{guild_id}/message-audit` returns up to 100 full message bodies per request and
+  pages backwards without limit, so a `VIEW_MESSAGE_AUDIT` holder can pull a recording guild's entire
+  conversation as fast as the base limiter allows. There is no stricter bucket, and it carries the
+  highest-value payload per request in the API. That is deliberate and matches `GET
+  /guilds/{id}/audit-log`, which is the same shape — a paginated moderation read in the base bucket whose
+  gate is a permission granted to nobody by default. A stricter bucket would throttle the legitimate use
+  (an investigation reads a lot, quickly) without bounding the illegitimate one, because the holder can
+  simply read slower; what bounds this is who holds the bit, which is the disclosure entry above. Recorded
+  because rate limiting is a class `/security-review` cannot report at any confidence and this is exactly
+  the surface somebody will raise it about.
+- **Reopens if**: the bit is ever granted by default or implied by another, which is the disclosure
+  entry's condition and the only thing standing here — or if an export surface arrives that makes bulk
+  reads a first-class operation, at which point the per-*user* throttle §14.14 wants for reports is the
+  same question asked here.
