@@ -14,6 +14,29 @@ type Querier interface {
 	// answer.
 	AddGuildMember(ctx context.Context, arg AddGuildMemberParams) (GuildMember, error)
 	AppendMessageEditHistory(ctx context.Context, arg AppendMessageEditHistoryParams) error
+	// Apply a tag to a message, refusing a pair that crosses a guild boundary.
+	//
+	// # The cross-guild predicate is the whole point of the statement's shape
+	//
+	// A tag knows its guild; a message reaches one only through channels. So `c.guild_id = t.guild_id` is what
+	// stops guild A's tag landing on guild B's message — written here rather than checked in Go, because a
+	// guard in the statement cannot be skipped by the next writer and cannot race. That is the answer M16b's
+	// security review arrived at for the recording log, and the shape M16 needed when `reports` had no
+	// guild_id at all.
+	//
+	// It is not defence against a confused client. Both ids come from an authorized request, and the service
+	// checks the caller may see the message and may use the tag. It is defence against the *next* writer —
+	// a bulk importer, an automation path (M22), a webhook (M60) — which will not be holding the authorize
+	// result this one does.
+	//
+	// `deleted_at IS NULL` refuses a tag on a soft-deleted message: the moderation surfaces read deleted
+	// messages on purpose (000020), but adding a *new* fact to something already removed is a different act,
+	// and a tag applied after deletion would surface a deleted message in a tag listing.
+	//
+	// ON CONFLICT DO NOTHING makes applying twice idempotent rather than an error, which is what a client
+	// retrying a request wants. The service distinguishes "already applied" from "refused" by the row count.
+	//
+	ApplyMessageTag(ctx context.Context, arg ApplyMessageTagParams) (int64, error)
 	// Records who authorized this device.
 	//
 	// `user_id IS NULL` is what makes an approval single-use, and it is the reason the approval token needs
@@ -161,6 +184,7 @@ type Querier interface {
 	// Same access path as the channel count above: bitmap index scan on roles_guild_id_position_idx, 10
 	// buffers on a 25,000-role instance.
 	CountGuildRoles(ctx context.Context, guildID int64) (int64, error)
+	CountGuildSharedTags(ctx context.Context, guildID int64) (int64, error)
 	// How many guilds an account owns, for the creation cap.
 	//
 	// Served by guilds_owner_id_idx, which 000015 added for the account-deletion FK check and which answers
@@ -181,6 +205,7 @@ type Querier interface {
 	// the codes an account has left rather than with every set it has ever had.
 	CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error)
 	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
+	CountMemberPrivateTags(ctx context.Context, arg CountMemberPrivateTagsParams) (int64, error)
 	// Scoped API token queries.
 	//
 	// These are the long-lived, narrow-privilege credentials bots and local automation use, as opposed to the
@@ -212,6 +237,11 @@ type Querier interface {
 	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
 	CreateInstanceInvite(ctx context.Context, arg CreateInstanceInviteParams) (InstanceInvite, error)
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
+	// Message tags (Milestone M17).
+	// The uniqueness guards are the two partial indexes in 000024, not a check here: a read-then-insert races
+	// under READ COMMITTED the way M10's invite redemption did, where four of four concurrent racers got in.
+	// A collision arrives as a unique violation and the service maps it.
+	CreateMessageTag(ctx context.Context, arg CreateMessageTagParams) (MessageTag, error)
 	CreateOAuthExchangeCode(ctx context.Context, arg CreateOAuthExchangeCodeParams) (OauthExchangeCode, error)
 	CreateOAuthIdentity(ctx context.Context, arg CreateOAuthIdentityParams) (OauthIdentity, error)
 	// OAuth sign-in queries.
@@ -328,6 +358,10 @@ type Querier interface {
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
+	// Applications cascade with it (000024). The authority check is the service's; this is scoped by guild as
+	// well as id so a tag id from another guild is not reachable through this guild's path — M15's
+	// loadInChannel discipline, one object over.
+	DeleteMessageTag(ctx context.Context, arg DeleteMessageTagParams) (int64, error)
 	// Removes the permission overwrites that named a role or a member, across the whole guild.
 	//
 	// target_id is polymorphic — it names a role or a user depending on target_type — so it cannot be a
@@ -498,6 +532,11 @@ type Querier interface {
 	// the same window would file a history row against content that was already gone.
 	//
 	GetMessageForUpdate(ctx context.Context, id int64) (Message, error)
+	GetMessageTag(ctx context.Context, id int64) (MessageTag, error)
+	// Reads one application by its primary key. Two callers want it for different reasons: Unapply needs
+	// `applied_by` to decide authority, and Apply uses its presence to tell "already applied" from "refused",
+	// which the insert's row count cannot distinguish because ON CONFLICT DO NOTHING also reports zero.
+	GetMessageTagApplication(ctx context.Context, arg GetMessageTagApplicationParams) (MessageTagApplication, error)
 	// The message an edit history belongs to, deleted rows included (Milestone M16a).
 	//
 	// GetMessageForReport's twin, and deliberately a second query rather than a shared one: they differ in
@@ -789,6 +828,19 @@ type Querier interface {
 	// and the index it needs turns on how many guilds record rather than on how large any one of them is.
 	//
 	ListGuildMessageAudit(ctx context.Context, arg ListGuildMessageAuditParams) ([]MessageAuditEntry, error)
+	// One guild's tags: every shared one, plus the caller's own private ones.
+	//
+	// **The visibility filter is what makes "private" mean anything**, and it is in the SQL rather than in a
+	// Go loop for the reason rule 13's exclusion is: the next reader of this table inherits it instead of
+	// having to remember it. A private tag is its creator's alone — not the guild's, not a moderator's — so
+	// the predicate is `is_shared OR created_by = $2` and there is deliberately no variant without it.
+	//
+	// Served by the two partial unique indexes bitmap-OR'd together rather than by a guild_id index, which
+	// 000024 measured as unnecessary and slightly worse. Bounded at creation rather than paginated (M12's
+	// rule): `tags.Service` caps a guild's shared tags and each member's private ones, so this list has a
+	// ceiling and does not need a cursor.
+	//
+	ListGuildMessageTags(ctx context.Context, arg ListGuildMessageTagsParams) ([]MessageTag, error)
 	// Every overwrite on a set of channels, for the channel listing's per-channel view filter (Milestone M13).
 	//
 	// # This must not be written as a join on guild_id, and that is measured rather than argued
@@ -936,6 +988,18 @@ type Querier interface {
 	// these is the one I am still using" is the question somebody scanning this list is asking.
 	// Served by sessions_live_by_device_idx (000013).
 	ListSessionDevicesForUser(ctx context.Context, userID int64) ([]ListSessionDevicesForUserRow, error)
+	// Every tag on each of a set of messages, with the caller's visibility filter applied.
+	//
+	// **One statement for a whole page, never one per message.** Fifty messages resolved one at a time is
+	// §15.2's N+1 on the path every client hits to draw a channel; `= ANY($1)` is one round trip whatever the
+	// page size. 000024 measures the index this leans on at 245 buffers against 837, and 2.1 ms against
+	// 10.5 ms, because without it the scan is over every application on the instance rather than over the
+	// page.
+	//
+	// The same `is_shared OR created_by` filter as the listing, for the same reason: somebody else's private
+	// tag must not appear on a message you can read, or "private" describes only who may apply it.
+	//
+	ListTagsForMessages(ctx context.Context, arg ListTagsForMessagesParams) ([]ListTagsForMessagesRow, error)
 	// Serializes role creation within one guild, for the whole of the calling transaction.
 	//
 	// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and
@@ -1245,6 +1309,9 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
+	// No guild predicate needed: the pair is the primary key, and a pair that crosses a guild could never have
+	// been written by the statement above. The authority check is the service's.
+	UnapplyMessageTag(ctx context.Context, arg UnapplyMessageTagParams) (int64, error)
 	// Take a role away. Zero rows means the member did not hold it, which is an idempotent DELETE succeeding
 	// rather than an error — the caller has already established that the member exists, because the hierarchy
 	// check reads their standing first and GetMemberHighestRolePosition returns no row for a non-member.
