@@ -210,3 +210,12 @@ CREATE INDEX message_audit_entries_message_id_idx ON message_audit_entries (mess
 -- the instance-admin flag, and the "convenience bolted on" M12 refused when it declined to widen
 -- Resolve's return for owner_id. M13 widened it later for standing and was right to, because standing
 -- *is* layer 4. A recording policy is not any layer at all.
+--
+-- **And a fourth that will be proposed, so it is answered here.** Caching the flag per guild removes the
+-- read entirely, and rule 1 does not forbid it the way it forbids caching permissions — this is a
+-- setting, not an authority. It is still wrong, for the reason the permission cache is: there is nothing
+-- to invalidate it until the gateway exists (M18), so the window is a TTL rather than a transaction. A
+-- stale permission is a demotion that lands late; a stale flag here is a stretch of conversation that a
+-- guild believed it was recording and was not, on a feature whose entire purpose is that the record is
+-- complete. The inherent race is already microseconds wide — see above — and a cache would widen it to
+-- whatever the TTL is, which is the difference between "the message in flight" and "the last minute".

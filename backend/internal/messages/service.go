@@ -512,21 +512,25 @@ func (s *Service) writeModerationAudit(
 // content still comes off that row rather than from a parameter, so what is recorded cannot disagree with
 // what was stored.
 //
-// # The id is minted unconditionally
+// # The id is minted only if a row is going to be written
 //
-// Before the flag is known, on every message mutation on the instance. That is a process-local counter
-// increment and no allocation, and the alternative — minting inside the branch — would put a fallible
-// call in the middle of a transaction for no saving. Said out loud because an unused id otherwise reads
-// as a leak.
+// It was minted before the flag was read, on every message mutation on the instance, and the comment here
+// defended that on two grounds that an optimization review found were both wrong. It is not "a
+// process-local counter increment": [snowflake.Generator.Next] takes a package-global mutex, reads the
+// clock, and **consumes one of the 4,096 ids that node can issue in a millisecond** — past which it
+// busy-waits for the clock to advance. Minting one per message mutation and discarding it in essentially
+// every guild halved the id headroom of the product's highest-volume write for nothing. And "a fallible
+// call in the middle of a transaction" describes what this function already is: every other call in it
+// can fail the same way, in the same place.
+//
+// Measured at the ceiling, which is the shape that matters: 330 ns/op, zero allocations — a tight loop
+// exceeds 4,096/ms, so what that number reports is `waitPast` rather than the mutex. Below the ceiling it
+// is a lock and a clock read, which is small; the reason to move it is that it is free to move and it is
+// on the one path rule 7 names.
 func (s *Service) record(
 	ctx context.Context, q *db.Queries, guildID snowflake.ID, actorID snowflake.ID,
 	messageID snowflake.ID, action string,
 ) error {
-	id, err := s.ids.Next()
-	if err != nil {
-		return fmt.Errorf("messages: mint audit entry id: %w", err)
-	}
-
 	recording, err := q.GuildRecordsMessages(ctx, int64(guildID))
 	if err != nil {
 		// Not pgx.ErrNoRows-tolerant on purpose: the guild was resolved by guildauth moments ago, in this
@@ -535,6 +539,11 @@ func (s *Service) record(
 	}
 	if !recording {
 		return nil
+	}
+
+	id, err := s.ids.Next()
+	if err != nil {
+		return fmt.Errorf("messages: mint audit entry id: %w", err)
 	}
 
 	if err := q.RecordMessageAudit(ctx, db.RecordMessageAuditParams{
