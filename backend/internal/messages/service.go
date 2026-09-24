@@ -102,7 +102,7 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 		// longer blocks an in-flight send). The permission read is unaffected either way: Authorize reads
 		// guild_members, roles and permission_overwrites unlocked in *both* variants, so this lock never
 		// protected rule 1's freshness.
-		channel, _, _, err := guildauth.AuthorizeChannelUnlocked(
+		channel, guildID, _, err := guildauth.AuthorizeChannelUnlocked(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
 		)
 		if err != nil {
@@ -144,6 +144,13 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 			ID: int64(in.ChannelID), LastMessageID: &row.ID,
 		}); err != nil {
 			return fmt.Errorf("messages: set last message: %w", err)
+		}
+
+		// M16b. Nothing for the overwhelming majority of guilds, which have not opted in — see record.
+		if err := s.record(
+			ctx, q, guildID, actor.UserID, snowflake.ID(row.ID), AuditCreate,
+		); err != nil {
+			return err
 		}
 
 		out = messageFromRow(row)
@@ -327,9 +334,10 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 		// loadInChannel takes it below with GetMessageForUpdate — which also closes the cascade race Send
 		// has to map an FK error for: a channel deleted mid-edit cannot remove this message while that
 		// row lock is held, and if it commits first the locking read simply finds nothing and answers 404.
-		if _, _, _, err := guildauth.AuthorizeChannelUnlocked(
+		_, guildID, _, err := guildauth.AuthorizeChannelUnlocked(
 			ctx, q, actor, in.ChannelID, roles.PermSendMessages,
-		); err != nil {
+		)
+		if err != nil {
 			return err
 		}
 
@@ -362,6 +370,16 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 		})
 		if err != nil {
 			return fmt.Errorf("messages: update message: %w", err)
+		}
+
+		// After the update, so the recorded content is what the message now says. The version it
+		// replaced is not lost — it went to message_edit_history a few lines above, which is M16a's
+		// surface and a different permission. Recording the prior text here as well would put the same
+		// content in two tables under two gates.
+		if err := s.record(
+			ctx, q, guildID, actor.UserID, snowflake.ID(updated.ID), AuditEdit,
+		); err != nil {
+			return err
 		}
 
 		out = messageFromRow(updated)
@@ -407,6 +425,26 @@ func (s *Service) Delete(
 			return fmt.Errorf("messages: soft delete message: %w", err)
 		}
 
+		// M16b, and it records the content it is deleting.
+		//
+		// §2 left that open ("NULL for a delete if the notice decision lands that way") and this is the
+		// answer: the create row only holds what a message said when it was posted, so a message written
+		// before the switch went on and deleted after would otherwise have its content recorded nowhere —
+		// which is the case an investigation is most likely to be about. The delete is soft, so the row is
+		// still there to read it from.
+		//
+		// **Recorded for an author deleting their own message too**, unlike the audit entry below. The two
+		// tables answer different questions: rule 2's log records authority exercised over somebody, and
+		// deleting your own message is authority over nobody — while a guild that switched recording on
+		// asked for what was said here, and "somebody removed their own message" is squarely that. A
+		// recording that skipped self-deletions would be one anybody could evade by deleting their own
+		// messages, which is the whole thing the guild opted in to prevent.
+		if err := s.record(
+			ctx, q, guildID, actor.UserID, snowflake.ID(row.ID), AuditDelete,
+		); err != nil {
+			return err
+		}
+
 		if isAuthor {
 			return nil
 		}
@@ -446,6 +484,76 @@ func (s *Service) writeModerationAudit(
 		Changes:  encoded,
 	}); err != nil {
 		return fmt.Errorf("messages: write audit entry: %w", err)
+	}
+	return nil
+}
+
+// record writes one row to a guild's message-audit log, if that guild records at all (M16b).
+//
+// Called from Send, Update and Delete, inside each one's existing transaction, so a mutation that commits
+// without its recording row is not a state the code can reach — the property rule 2 asks of
+// `audit_log_entries`, here by the same mechanism on a table rule 2 deliberately does not cover.
+//
+// # It reads the flag and branches, and the whole-thing-in-one-statement version was measured and dropped
+//
+// The plan for this milestone had no read at all: one INSERT ... SELECT joining messages to channels to
+// guilds with the opt-in as a join predicate, on the argument that a guard which can be raced belongs in
+// the statement. It costs 62-90% of the message insert in every guild that has *not* opted in, which is
+// all of them until somebody does, against 9% for this. 000023 carries the numbers.
+//
+// The property that was supposed to justify it turned out to be illusory, which is the part worth
+// keeping: both shapes read the flag at some instant *after* the message is written, so neither makes
+// "sent while recording" well-defined. The race belongs to a switch that can be flipped mid-transaction
+// and no statement shape closes it.
+//
+// What the statement form was genuinely buying is kept in [db.Queries.RecordMessageAudit]: the flag is
+// still a join predicate on the insert that runs, so no row can exist for a guild whose flag is false
+// whatever this function believes; rule 13's exclusion is still `NOT m.is_e2e` on the message row; and
+// content still comes off that row rather than from a parameter, so what is recorded cannot disagree with
+// what was stored.
+//
+// # The id is minted only if a row is going to be written
+//
+// It was minted before the flag was read, on every message mutation on the instance, and the comment here
+// defended that on two grounds that an optimization review found were both wrong. It is not "a
+// process-local counter increment": [snowflake.Generator.Next] takes a package-global mutex, reads the
+// clock, and **consumes one of the 4,096 ids that node can issue in a millisecond** — past which it
+// busy-waits for the clock to advance. Minting one per message mutation and discarding it in essentially
+// every guild halved the id headroom of the product's highest-volume write for nothing. And "a fallible
+// call in the middle of a transaction" describes what this function already is: every other call in it
+// can fail the same way, in the same place.
+//
+// Measured at the ceiling, which is the shape that matters: 330 ns/op, zero allocations — a tight loop
+// exceeds 4,096/ms, so what that number reports is `waitPast` rather than the mutex. Below the ceiling it
+// is a lock and a clock read, which is small; the reason to move it is that it is free to move and it is
+// on the one path rule 7 names.
+func (s *Service) record(
+	ctx context.Context, q *db.Queries, guildID snowflake.ID, actorID snowflake.ID,
+	messageID snowflake.ID, action string,
+) error {
+	recording, err := q.GuildRecordsMessages(ctx, int64(guildID))
+	if err != nil {
+		// Not pgx.ErrNoRows-tolerant on purpose: the guild was resolved by guildauth moments ago, in this
+		// transaction, so a missing row here is a real failure rather than a race to report as 404.
+		return fmt.Errorf("messages: read recording flag: %w", err)
+	}
+	if !recording {
+		return nil
+	}
+
+	id, err := s.ids.Next()
+	if err != nil {
+		return fmt.Errorf("messages: mint audit entry id: %w", err)
+	}
+
+	if err := q.RecordMessageAudit(ctx, db.RecordMessageAuditParams{
+		ID:        int64(id),
+		GuildID:   int64(guildID),
+		MessageID: int64(messageID),
+		ActorID:   int64(actorID),
+		Action:    action,
+	}); err != nil {
+		return fmt.Errorf("messages: record message audit: %w", err)
 	}
 	return nil
 }

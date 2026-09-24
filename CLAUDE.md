@@ -380,9 +380,16 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M16a done.** Full dependency-ordered roadmap (`M0` through
+**Phase B complete through M11a; Phase C open, M16b done.** Full dependency-ordered roadmap (`M0` through
 `M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
 running as an explicitly parallel track) is in `docs/roadmap.md`.
+
+**A completed milestone's line says `done` and nothing about its tag.** Older entries below still carry
+`(tag mN)` and are left alone rather than rewritten, but nothing new adds one — and in particular nothing
+writes `(tag pending)`. That phrase was the shape being removed: it made every milestone leave a false
+statement behind for its successor's branch to correct, which is a chore that generated a commit per
+milestone and one more thing for a docs audit to catch. The tag is `git tag`'s to state and it is always
+the milestone number lowercased, so a copy here carries no information and only drifts.
 
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
@@ -586,7 +593,7 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
 
   **Rule 2 asserted in both directions**: closing writes an entry, filing writes none, and the negative
   had no home until it was a test.
-- **M16a — Message edit history read surface**: done (tag pending). Migration `000022`,
+- **M16a — Message edit history read surface**: done (tag `m16a`). Migration `000022`,
   `backend/internal/messages/history.go`, `GET /channels/{channel_id}/messages/{message_id}/history`, the
   `messages.moderate` scope, and a third channel entry point in `guildauth`. Decisions are in the roadmap
   entry, in `000022`, and in `docs/security-ledger.md`.
@@ -629,11 +636,46 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   of 5 — not a narrow window — and fixed with one `REPEATABLE READ` read-only snapshot. The comment that
   justified skipping a transaction cited rule 1, which is about resolving permissions against fresh data
   and says nothing about two reads agreeing.
-- **M16b — Opt-in per-guild message audit**: next. A guild setting, owner-only, recording every message
-  create/edit/delete to `message_audit_entries` — never `audit_log_entries` — plus its read surface. M16a
-  established the moderation-read-over-content pattern and the disclosure shape it inherits; its own entry
-  carries the notice obligation and the rule 13 exclusion, which bites harder here because this one
-  *stores* content rather than reading it.
+- **M16b — Opt-in per-guild message audit**: done. Migration `000023`,
+  `PermViewMessageAudit` at bit 21, the recording switch on `PATCH /guilds/{guild_id}`,
+  `backend/internal/messages/audit.go`, `GET /guilds/{guild_id}/message-audit`, and the `messages.audit`
+  scope. Decisions are in the roadmap entry, in `000023`, and in `docs/security-ledger.md`.
+
+  **The milestone's central question was specified nowhere and one document had already answered it.**
+  §2 settles the toggle's authority in the same clause as the route and says nothing about who may
+  *read*; the roadmap entry says nothing; screen `6e` tells every member their messages are "kept in a
+  log its moderators can read". Found by reading the three against each other, which is now four
+  milestones running.
+
+  **A new permission bit, because each bit it could have reused is wrong differently.**
+  `PermViewAuditLog` reads moderation metadata and its own ledger entry names "the log ever carries
+  message content" as the condition that reopens it — so reusing it satisfies that condition's letter
+  while doing what it names. `PermManageMessages` means "delete somebody else's message", and a guild
+  wanting spam removed has not decided that moderator reads its private channels. `PermManageGuild` is
+  the bit that flips the switch, so folding the read in would mean the only way to let somebody read the
+  log is to let them turn it off.
+
+  **The plan's writer design was measured and dropped, and the property it was buying was illusory.** One
+  statement with the opt-in as a join predicate costs 62–90% of the message insert in guilds that have
+  not opted in — all of them, until somebody does — against 9% for reading the boolean and branching. And
+  both shapes read the flag *after* the message is written, so neither makes "sent while recording"
+  well-defined; the race belongs to a switch that can be flipped mid-transaction. The flag stays a join
+  predicate on the insert that actually runs, which is what makes "no row exists for a guild whose flag
+  is false" structural rather than tested.
+
+  **Proved by removal in three legs, because one would have proved the wrong thing.** Removing the
+  statement guard leaves the off case passing, because the Go branch catches it first. Removing the Go
+  branch instead *also* leaves it passing — which is what shows the statement guard is load-bearing.
+  Removing both fails it, which is what shows the test can see the property at all.
+
+  **§2's DDL was missing an index worth 530x**: `actor_id` is a refusing foreign key with no index, the
+  fourth this project has found and the third it has paid for. 71.5 ms per account deletion against
+  0.135 ms.
+
+  **An Instance Admin may not start a guild's recording**, the first place layer 1 is narrower than layer
+  2. Answered the other way first and reversed on reversibility — lifting a refusal when M72 lands is
+  additive, withdrawing a capability operators rely on is not. The tier still reads any recording guild's
+  log, which is M16a's gap and unchanged.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -1659,6 +1701,50 @@ And on reports, from M16:
   and status distributions sharing one modulus so the heavy guild held every open report. Before trusting
   a plan, check that the seed's conditions are independent and that its ids are distributed the way the ID
   scheme actually produces them.
+
+And on the opt-in recording log, from M16b:
+
+- **Two vocabularies on one subject, pinned *apart* rather than equal.** `messages` writes
+  `create`/`edit`/`delete` to `message_audit_entries`; `guilds.AuditActions()` is the audit log's
+  vocabulary and must not contain them. Adding them there is the tidy-looking move and breaks two things:
+  that slice is what `GET /guilds/{id}/audit-log` validates an `action` filter against, so a verb the
+  table never holds makes the filter *validate* and match nothing — M14's "an unknown filter value is
+  refused, not answered with an empty page" inverted into a typo that reads as evidence of absence — and
+  `TestTheOnlyMessageVerbIsDeleteAndItCarriesNoContent` iterates that slice precisely to stop a message
+  verb arriving unreasoned. M15 and M16 each needed a cross-package pin holding two literals *equal*;
+  this is the third and the first that holds two sets apart.
+- **A guard can be redundant on purpose, and then it needs a three-legged proof.** The writer checks the
+  recording flag in Go *and* carries it as a join predicate on the insert. Removing either one alone
+  leaves the "records nothing" test passing, which looks like the test being weak and is actually the
+  redundancy working — so proving it means three runs: statement guard removed (passes, Go branch
+  catches it), Go branch removed (passes, statement catches it), both removed (fails). Only the third
+  shows the test can see the property; only the second shows the statement guard is load-bearing.
+- **Measure the *off* path before designing the on path.** The design that reads best here — one
+  statement, opt-in as a join predicate, no read at all — costs 62–90% of the message insert in every
+  guild that has not opted in, against 9% for reading a boolean. A feature nobody has enabled must not be
+  paid for by everybody, and the thing that made the expensive version attractive (an unraceable guard)
+  turned out not to exist: both shapes read the flag after the message is written.
+- **Rule 2 and a recording log disagree about self-deletion, and both are right.** An author deleting
+  their own message writes no `audit_log_entries` row, because rule 2 covers authority exercised over
+  somebody else. The same deletion *is* recorded here, because a recording that skipped self-deletions
+  could be evaded by deleting your own messages — which is the thing the guild switched it on to
+  prevent. Two tables answering two questions is the reason they can differ.
+- **The first place layer 1 is narrower than layer 2**, and it is deliberately temporary. An Instance
+  Admin may not start a guild's recording, because rule 14 has nowhere to record that they did until M72
+  builds `instance_audit_log`. The tier still *reads* any recording guild's log. If a second layer-1
+  exception ever appears, the ledger entry says the pair needs a mechanism rather than two comments that
+  do not know about each other — which is what this codebase has done four times rather than trust to
+  memory.
+- **`Decision.Owns()` is false for an Instance Admin who genuinely owns the guild.** Layer 1
+  short-circuits to a zero resolution, so any ownership check written against the Decision locks an
+  instance operator out of a guild they created. Read ownership off the loaded row instead, as
+  `RemoveMember` does. The test that catches this asserts the *fact* — that `Owns()` is false for that
+  actor — rather than describing it, so the case cannot decay into "an owner may do the thing", which is
+  already covered elsewhere.
+- **A milestone's central decision can be specified nowhere while a screen has already promised it.**
+  §2 settled the toggle's authority and said nothing about the read's; `SCREENS.md` had told members
+  their messages are "kept in a log its moderators can read". When a surface has a screen, read the
+  screen before deciding what the API allows — it may already have answered on the product's behalf.
 
 ## Project-specific skills
 

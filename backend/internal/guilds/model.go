@@ -49,6 +49,23 @@ const (
 	// endpoint is a PUT and does not distinguish them either. What changed is in the entry's `changes`.
 	ActionOverwriteSet    = "overwrite.set"
 	ActionOverwriteDelete = "overwrite.delete"
+
+	// M16b's recording switch, as a *pair* of verbs rather than a field inside guild.update's diff.
+	//
+	// That is the member.role_add/member.role_remove decision applied where it matters most. What an
+	// operator reads this log for is "who turned this on, and who turned it off" — and the reason the
+	// toggle is audited at all is that off-without-a-trace would make it the one setting to disable
+	// before acting and re-enable after. So the entry somebody goes looking for first must not be a key
+	// buried in a changes payload, findable only by paging the whole log and parsing every guild.update.
+	//
+	// Both directions, for symmetry and because enabling changes a member's expectations about who reads
+	// their messages just as much as disabling changes what the guild keeps.
+	//
+	// These are the guild's verbs. The recording rows themselves carry create/edit/delete and are written
+	// by `messages` to a different table entirely — see messages.AuditActions and the test in cmd/server
+	// that pins the two vocabularies *disjoint*.
+	ActionGuildMessageAuditEnable  = "guild.message_audit_enable"
+	ActionGuildMessageAuditDisable = "guild.message_audit_disable"
 )
 
 // allAuditActions is every verb above, which is the list the block's own comment says M14 would need.
@@ -81,6 +98,8 @@ var allAuditActions = []string{
 	ActionMemberRoleRemove,
 	ActionOverwriteSet,
 	ActionOverwriteDelete,
+	ActionGuildMessageAuditEnable,
+	ActionGuildMessageAuditDisable,
 
 	// Written by the `messages` package (M15), not by this one, and listed here because this is the
 	// vocabulary the *reader* validates against: an `action` filter naming a verb absent from this slice
@@ -132,8 +151,25 @@ type Guild struct {
 	OwnerID     snowflake.ID `json:"owner_id"`
 	IconHash    *string      `json:"icon_hash"`
 	Description *string      `json:"description"`
-	CreatedAt   time.Time    `json:"created_at"`
-	UpdatedAt   time.Time    `json:"updated_at"`
+
+	// MessageAuditEnabled is whether this guild records every message its members send (M16b).
+	//
+	// **It is on this payload specifically so that any member can read it**, which is the milestone's own
+	// structural obligation rather than a convenience. Get authorizes on PermViewChannel, which every
+	// member holds by default, so being a field here means "readable by anyone in the guild" — and that
+	// is what screen `6e` needs in order to state the guild's recording status in *both* directions. A
+	// screen that could only report the positive case would make the absence of a warning carry a meaning
+	// nothing guarantees.
+	//
+	// Non-pointer and always present for the same reason. A field a client might not receive cannot
+	// support the negative case: "not recording" and "this build does not tell you" would arrive
+	// identically.
+	//
+	// Writing it is a different question from reading it, and a much narrower one — see Service.Update.
+	MessageAuditEnabled bool `json:"message_audit_enabled"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func guildFromRow(row db.Guild) Guild {
@@ -141,13 +177,14 @@ func guildFromRow(row db.Guild) Guild {
 	// compiles only while the two types keep identical fields in identical order, and starts silently
 	// mis-assigning the moment either gains one.
 	return Guild{
-		ID:          snowflake.ID(row.ID),
-		Name:        row.Name,
-		OwnerID:     snowflake.ID(row.OwnerID),
-		IconHash:    row.IconHash,
-		Description: row.Description,
-		CreatedAt:   row.CreatedAt.Time,
-		UpdatedAt:   row.UpdatedAt.Time,
+		ID:                  snowflake.ID(row.ID),
+		Name:                row.Name,
+		OwnerID:             snowflake.ID(row.OwnerID),
+		IconHash:            row.IconHash,
+		Description:         row.Description,
+		MessageAuditEnabled: row.MessageAuditEnabled,
+		CreatedAt:           row.CreatedAt.Time,
+		UpdatedAt:           row.UpdatedAt.Time,
 	}
 }
 

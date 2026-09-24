@@ -163,6 +163,11 @@ type updateGuildRequest struct {
 	// decoder cannot tell an explicit null from an absent field, and absent must mean "leave alone" or
 	// every partial update would erase everything it did not mention.
 	ClearDescription bool `json:"clear_description"`
+	// MessageAuditEnabled is M16b's recording switch, and a pointer for the reason every other field
+	// here is one: absent means "leave alone", so a client renaming a guild cannot silently turn its
+	// recording off. Sending it at all requires the guild's owner — the service decides that, not this
+	// struct.
+	MessageAuditEnabled *bool `json:"message_audit_enabled"`
 }
 
 func (h *Handler) updateGuild(w http.ResponseWriter, r *http.Request) {
@@ -181,9 +186,10 @@ func (h *Handler) updateGuild(w http.ResponseWriter, r *http.Request) {
 	// identical order, and starts silently mis-assigning the moment either gains one.
 	//nolint:staticcheck // S1016: the coupling a conversion introduces is not wanted here
 	guild, err := h.svc.Update(r.Context(), actor, guildID, UpdateGuildInput{
-		Name:             req.Name,
-		Description:      req.Description,
-		ClearDescription: req.ClearDescription,
+		Name:                req.Name,
+		Description:         req.Description,
+		ClearDescription:    req.ClearDescription,
+		MessageAuditEnabled: req.MessageAuditEnabled,
 	})
 	if err != nil {
 		h.writeErr(w, r, err)

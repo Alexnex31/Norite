@@ -138,3 +138,88 @@ WHERE h.message_id = $1
   AND h.id < COALESCE(sqlc.narg(before)::bigint, 9223372036854775807)
 ORDER BY h.id DESC
 LIMIT $2;
+
+-- The opt-in message audit (Milestone M16b).
+--
+-- These three live in messages.sql rather than guilds.sql because `messages` is the only package that
+-- calls them — the writer is Send/Update/Delete and the reader is mounted from the same handler — and the
+-- decisions they carry are message decisions rather than guild ones. Same call reports.sql makes for
+-- GetMessageForReport; sqlc generates one package either way.
+
+-- Whether this guild records its messages.
+--
+-- Read once per message mutation, inside the mutation's own transaction, and the branch is in Go. The
+-- whole-thing-in-one-statement alternative was measured and rejected — see 000023, which has the numbers:
+-- it costs 62-90% of the message insert for a feature that is off in every guild until somebody turns it
+-- on, and the unraceability it was supposed to buy is illusory, because either shape reads the flag after
+-- the message is already written.
+--
+-- A primary-key lookup on a table holding one row per guild. Deliberately *not* folded into
+-- ListGuildMemberAuthority, which already reads this row and could carry the column for free: that query
+-- feeds roles.Resolve, and a recording policy is not one of ADR 0008's layers. See 000023.
+--
+-- name: GuildRecordsMessages :one
+SELECT message_audit_enabled FROM guilds WHERE id = $1;
+
+-- Record one action against one message.
+--
+-- # Three predicates, none of which trusts the caller
+--
+-- Deliberate redundancy, and each one turns a property of the *callers* into a property of the schema.
+-- Together they cost something only on a guild that opted in, and nothing at all on one that did not,
+-- because this statement does not run there — see 000023 for the numbers.
+--
+--   * `g.message_audit_enabled` is the milestone's first done-when clause: no row can reach this table
+--     for a guild whose flag is false, whatever the Go branch that just read it believes.
+--   * `g.id = c.guild_id` ties the message's own channel to the guild being written. **Unreachable
+--     today** — all three callers take `guild_id` and `message_id` from the same guildauth call, and
+--     `loadInChannel` refuses a message from another channel — which is exactly why it is written rather
+--     than argued. A fourth writer passing an inconsistent pair would otherwise file one guild's content
+--     into another guild's log, silently; M60's webhook ingest is the named candidate, and it will not be
+--     holding the same authorize result these three do.
+--   * `NOT m.is_e2e` is rule 13, on the row rather than in Go, so the next writer inherits it.
+--
+-- # Content and channel come off the message row, never from parameters
+--
+-- Two reasons that agree. What is recorded cannot disagree with what was stored, which is the whole value
+-- of an audit row. And rule 13's exclusion is `NOT m.is_e2e` on that same row — a join predicate rather
+-- than a Go check, so whoever writes the next writer inherits it instead of having to remember it, which
+-- is the form M16 settled on and M16a reused.
+--
+-- An E2E message therefore records *nothing* rather than a row with NULL content. That is the right
+-- answer for the same reason ListMessageEditHistory returns an empty page: a row saying "something was
+-- said here and we cannot tell you what" is an exclusion written twice.
+--
+-- name: RecordMessageAudit :exec
+INSERT INTO message_audit_entries (id, guild_id, message_id, channel_id, actor_id, action, content)
+SELECT
+  sqlc.arg(id)::bigint,
+  g.id,
+  m.id,
+  m.channel_id,
+  sqlc.arg(actor_id)::bigint,
+  sqlc.arg(action)::varchar,
+  m.content
+FROM messages m
+JOIN channels c ON c.id = m.channel_id
+JOIN guilds   g ON g.id = c.guild_id
+               AND g.id = sqlc.arg(guild_id)::bigint
+               AND g.message_audit_enabled
+WHERE m.id = sqlc.arg(message_id)::bigint AND NOT m.is_e2e;
+
+-- One page of a guild's recording log, newest first.
+--
+-- No rule-13 predicate here and that is not an omission: the exclusion happened at write time, so there
+-- is nothing in this table to exclude. Repeating it on the read would be the bound-enforced-twice mistake
+-- M15 recorded, where the two copies measured different things — and the structural half is pinned by a
+-- test asserting guild_id is NOT NULL, since a DM has no guild and could never have produced a row.
+--
+-- The cursor is an id and the COALESCE spelling is M14's. 000023 measures this query at three densities
+-- and the index it needs turns on how many guilds record rather than on how large any one of them is.
+--
+-- name: ListGuildMessageAudit :many
+SELECT * FROM message_audit_entries
+WHERE guild_id = $1
+  AND id < COALESCE(sqlc.narg(before)::bigint, 9223372036854775807)
+ORDER BY id DESC
+LIMIT $2;

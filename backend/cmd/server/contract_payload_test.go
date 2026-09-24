@@ -490,6 +490,25 @@ func TestTheModerationResponsesMatchTheContract(t *testing.T) {
 	require.NoError(t, json.Unmarshal(page.Body, &pageBody))
 	require.Len(t, pageBody, 1)
 
+	// M16b. Recording has to be switched on before there is anything to record, and it has to happen
+	// after the edit above, or this guild's history assertions would be measuring a guild that records —
+	// which is not the state the rest of this test is about.
+	recording := a.call(http.MethodPatch, "/api/v1/guilds/"+guildID,
+		map[string]any{"message_audit_enabled": true}, withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, recording.Code, recording)
+
+	recorded := a.call(http.MethodPost, "/api/v1/channels/"+channelID+"/messages",
+		map[string]any{"content": "recorded"}, withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusCreated, recorded.Code, recorded)
+
+	audit := a.call(http.MethodGet, "/api/v1/guilds/"+guildID+"/message-audit", nil,
+		withToken(owner.Tokens.AccessToken))
+	require.Equal(t, http.StatusOK, audit.Code, audit)
+
+	var auditBody []map[string]any
+	require.NoError(t, json.Unmarshal(audit.Body, &auditBody))
+	require.Len(t, auditBody, 1, "one message sent while recording, so one entry to validate")
+
 	for _, tc := range []struct {
 		what   string
 		schema string
@@ -501,6 +520,15 @@ func TestTheModerationResponsesMatchTheContract(t *testing.T) {
 		{what: "GET one report", schema: "TriageReportDetail", body: detail.Body},
 		{what: "GET a message's edit history", schema: "MessageEditHistory", body: history.Body},
 		{what: "one prior version", schema: "MessageEditVersion", object: historyBody.Versions[0]},
+		// M16b. The schema declares additionalProperties: false and a full required list, and until this
+		// case existed it was checked against nothing — which is the gap M15 recorded after eight error
+		// codes and one unsatisfiable schema accumulated behind it, and the reason M16a added its own
+		// pair here rather than trusting the route-set test.
+		{what: "GET a guild's recorded messages", schema: "MessageAuditEntry", object: auditBody[0]},
+		// The guild payload is here because *this* milestone changed its shape. `message_audit_enabled`
+		// is declared required and non-nullable so a client can state the negative case as positively as
+		// the positive one, and nothing else in this suite reads a guild response against its schema.
+		{what: "the guild the recording flag is on", schema: "Guild", body: recording.Body},
 	} {
 		t.Run(tc.schema, func(t *testing.T) {
 			object := tc.object

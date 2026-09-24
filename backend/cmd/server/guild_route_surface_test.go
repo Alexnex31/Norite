@@ -194,6 +194,12 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		}},
 		"GET /api/v1/guilds/{guild_id}/reports":             {},
 		"GET /api/v1/guilds/{guild_id}/reports/{report_id}": {},
+
+		// M16b. The widest read in the API, so the non-member refusal matters most here: a stranger
+		// naming a real guild id must be answered as though it did not exist, before any recorded
+		// message is loaded. Nothing about this route's own permission is asserted by this test — that
+		// is TestARecordingGuildsLogIsBoundedByItsOwnBit, in the messages package.
+		"GET /api/v1/guilds/{guild_id}/message-audit": {},
 		"POST /api/v1/guilds/{guild_id}/reports/{report_id}/resolve": {
 			body: map[string]any{"status": "dismissed"},
 		},
@@ -349,6 +355,7 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 			exempt: "performed above; filing is not administrative (rule 2, narrowed at M15)"},
 		{route: "GET /api/v1/guilds/{guild_id}/reports", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/reports/{report_id}", exempt: readsWriteNothing},
+		{route: "GET /api/v1/guilds/{guild_id}/message-audit", exempt: readsWriteNothing},
 
 		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},
@@ -471,4 +478,41 @@ func TestTheTextChannelTypeAgreesAcrossPackages(t *testing.T) {
 	require.Equal(t, guilds.ChannelGuildText, messages.ChannelGuildText,
 		"messages gates sending on its own copy of the text channel type; if the two disagree, sending "+
 			"is either refused everywhere or allowed into a channel type no client renders")
+}
+
+// TestTheMessageAuditVerbsAreNotGuildAuditVerbs is the third cross-package pin and the first that asserts
+// two vocabularies stay **apart** rather than equal.
+//
+// M15 and M16 each needed a literal on both sides of the guilds/messages boundary and a test here holding
+// them identical. M16b's three verbs are the opposite case: they are written to `message_audit_entries`,
+// read by a different endpoint under a different permission, and adding them to `guilds.AuditActions()`
+// would be wrong in two ways that both look like tidiness.
+//
+// That slice is what `GET /guilds/{guild_id}/audit-log` validates an `action` filter against, so a verb
+// in it that the table never holds makes the filter *validate* and return nothing — which is M14's "an
+// unknown filter value is refused, not answered with an empty page" inverted into a typo that reads as
+// evidence of absence. And `TestTheOnlyMessageVerbIsDeleteAndItCarriesNoContent` iterates that slice and
+// fails on any `message.*` verb but delete, with instructions to re-reason about rule 13 first: adding
+// these and then relaxing that test would disarm the one tripwire M14 built for this exact milestone.
+//
+// Written here because this is the package that imports both, which is where the other two live for the
+// same reason.
+func TestTheMessageAuditVerbsAreNotGuildAuditVerbs(t *testing.T) {
+	t.Parallel()
+
+	guildVerbs := guilds.AuditActions()
+	for _, verb := range messages.MessageAuditActions() {
+		require.NotContainsf(t, guildVerbs, verb,
+			"%q records a message in a guild that opted into recording and belongs to "+
+				"message_audit_entries. In the guild vocabulary it would make the audit-log reader accept "+
+				"an `action` filter for rows that table never holds — a query matching nothing, which is "+
+				"indistinguishable from a guild that never did it", verb)
+	}
+
+	// The negative alone would pass against an empty vocabulary, which is the shape M16's
+	// requireForeignAuditActionsExist was added to catch: a list that only ever skips goes stale silently
+	// and a stale exemption reads exactly like coverage.
+	require.Len(t, messages.MessageAuditActions(), 3,
+		"the recording vocabulary is create/edit/delete; if it grew, decide whether the new verb belongs "+
+			"in this assertion before changing the count")
 }

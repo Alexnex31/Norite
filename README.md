@@ -16,7 +16,7 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
-[![Milestone](https://img.shields.io/badge/milestone-M16a%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M16b%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 > [!WARNING]
 > **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work, so
@@ -47,9 +47,9 @@ software.
 
 ## Status
 
-**Foundation, auth, the permission core, messages, guild-level reports and the moderation read over a
-message's edit history are done — `M0` through `M16a`. `M20a` is the first thing a person can actually
-use.**
+**Foundation, auth, the permission core, messages, guild-level reports, the moderation read over a
+message's edit history and a guild's opt-in message recording are done — `M0` through `M16b`. `M20a` is
+the first thing a person can actually use.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -75,6 +75,7 @@ use.**
 | `M15` | Messages — send, read, edit and delete, with a cursor-paginated backlog, an edit history written in the same transaction as the edit, and a moderator's deletion audited where an author's own is deliberately not |
 | `M16` | Guild-level reports — anyone who can see a message can report it, moderators triage and close a queue of them, closing is audited and filing deliberately is not, and the reporter's identity is never shown to the moderators of the guild being reported |
 | `M16a` | Message edit history — a moderator reads every version a message had before the one it has now, an author reads their own, and the response carries what it says today because nothing else in the API will tell them |
+| `M16b` | Opt-in message recording — a guild's owner can have every message create, edit and delete kept in a log of its own, off by default, readable only by a permission granted to nobody until somebody grants it, with both flips of the switch recorded in the ordinary audit log and the setting visible to every member of the guild |
 
 </details>
 
@@ -86,8 +87,14 @@ is not something anybody can use — there is no client, so there is nothing to 
 type into. The honest threshold is when two people can hold a text conversation, and as of `M15` the only
 thing still missing for that is `M20a`'s first client. What `M12` through `M14` built is the permission
 model those conversations happen inside and the record of who changed it; `M15` is the conversation
-itself, `M16` is how it gets moderated and `M16a` is what a moderator reads when the message was edited
-after it was reported — all reachable today only with an HTTP client and a token.
+itself, `M16` is how it gets moderated, `M16a` is what a moderator reads when the message was edited
+after it was reported, and `M16b` is what a guild can choose to keep — all reachable today only with an
+HTTP client and a token.
+
+One consequence of `M16b` is worth stating plainly rather than leaving in the changelog: a guild whose
+owner switches recording on keeps every message sent in it, including edits and deletions, and the
+member-facing screen that would tell people so is `M62a`. Until then the setting is readable through the
+API by anyone in the guild and rendered by nothing, because there is no client to render it in.
 
 > [!NOTE]
 > **On releases.** Nothing ships as a release before the milestone sequence is complete. At each phase

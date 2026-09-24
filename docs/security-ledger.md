@@ -625,3 +625,118 @@ carries the condition that would reopen it.
   Admin tier is ever granted to anyone but the operator, since the whole of this rejection rests on that
   tier being the person who already holds the database.
 
+
+### A guild's recording log hands its reader every message in the guild, including channels they cannot view
+- **Raised**: M16b, at planning — the question the milestone turns on, and nothing in the doc set answered it
+- **Verdict**: accepted, and it is the feature rather than a consequence of it
+- **Why**: `GET /guilds/{guild_id}/message-audit` returns the content of every message a recording guild
+  has produced. There is no per-object step of the kind the two surfaces before it had — M16 bounds
+  content by a report existing, M16a takes a bare message id — so this is the widest read in the API, and
+  it deliberately does not filter by what the caller can currently see. Filtering on present visibility is
+  the tempting answer and fails for M14's reasons one level up: it would let somebody hide what was said
+  by locking a channel down afterwards, and a recording a moderator cannot read in the channel that most
+  needs reading is not a recording. The boundary is therefore the permission alone, which is why
+  `PermViewMessageAudit` is a **bit of its own** (position 21) rather than a reuse. Each of the three
+  candidates was rejected for a different reason, recorded in `roles/permissions.go`: `VIEW_AUDIT_LOG`
+  reads moderation metadata and its own ledger entry names "the log ever carries message content" as its
+  reopening condition, so reusing it would satisfy that condition's letter while doing what it names;
+  `MANAGE_MESSAGES` means "delete somebody else's message", and a guild wanting spam removed has not
+  decided that moderator reads its private channels; folding it into `MANAGE_GUILD` would mean the only
+  way to let somebody read the log is to let them switch the recording off. The bit is granted by default
+  to nobody, implied by no other bit, and un-grantable by somebody who does not hold it
+  (`refuseEscalation`). `PermAdministrator` confers it, as layer 3 confers every bit in the guild that
+  granted it — stated because "implied by nothing" was the original wording here and is not true of the
+  one bit whose whole meaning is that it implies the rest.
+  Members are told the guild records them — the flag is on the guild payload behind `PermViewChannel`,
+  readable by anybody in the guild.
+- **Reopens if**: `PermViewMessageAudit` is ever granted by default, implied by another bit, or added to
+  `defaultEveryonePermissions` — the same condition M16's entry carries for `PermManageMessages`, and the
+  whole of what bounds this. Also reopens if the recording flag stops being readable by ordinary members,
+  since the disclosure is accepted on the basis that the people being recorded can find out.
+
+### Members of a recording guild are told nothing until M62a draws the screen
+- **Raised**: M16b, at planning — the notice decision its done-when requires
+- **Verdict**: accepted risk, with a named home and a gap that is real in the meantime
+- **Why**: the notice belongs on screen `6e`, which states the guild's recording status in **both**
+  directions and belongs to M62a — settled at M15's planning and recorded in that entry. M16b's own
+  obligation is the structural half and is met: `message_audit_enabled` is on the guild payload behind
+  `PermViewChannel`, so any member can read it and a client can state either case positively rather than
+  letting the absence of a warning carry a meaning nothing guarantees. **The gap is the interval.** No
+  client renders that field today, so between this milestone and M62a a guild can record its members with
+  nothing telling them. That is stated here rather than discovered at M62a, because a done-when satisfied
+  by an API field reads as though the product tells people, and it does not yet.
+- **Reopens if**: M62a ships without the negative case, which is the half that makes the positive one
+  trustworthy. Also reopens if recording ever becomes settable by anybody other than the guild's owner,
+  since "the person who decides is the person who answers for it" is part of why one screen is enough.
+  M62a additionally owns the question of whether a member is told at the moment they *join*, which is
+  recorded in its entry and will land here with its own reopening condition.
+
+### An Instance Admin cannot start a guild's recording, which is the first place layer 1 is narrower than layer 2
+- **Raised**: M16b, at planning
+- **Verdict**: deliberate narrowing, not an accepted risk — and temporary by construction
+- **Why**: ADR 0008 makes the Instance Admin tier an instance-wide authority that acts on guilds it is not
+  in, and `guildauth.Authorize` short-circuits on it everywhere. `guilds.mayFlipMessageAudit` refuses it
+  for this one field, because rule 14 requires every Instance Admin action to reach `instance_audit_log`
+  and that table is M72's: the tier could otherwise switch recording on for a guild it has never joined,
+  read everything said afterwards, and leave nothing anywhere that says it did. The answer was first taken
+  the other way — allow it, ledger the gap, as M16a did for the read — and reversed on reversibility:
+  lifting a refusal when M72 lands is additive, while withdrawing a capability operators have built around
+  is not. **What it buys is narrow and should not be oversold**: `Decision.Allows` still answers for layer
+  1 on the *read*, so an Instance Admin reads any recording guild's log, which is M16a's entry above and
+  stays open. The line drawn here is between reading what a guild chose to collect and deciding what the
+  instance collects about a guild that chose nothing.
+- **Reopens if**: M72 lands, at which point the action becomes recordable and the refusal should be
+  lifted rather than left as folklore. **Also reopens if a second layer-1 exception appears anywhere** —
+  one exception is a documented departure, two that do not know about each other are a rule enforced by
+  nobody, and at that point it needs a mechanism the way `revokeEverything`, `RequireLiveSession`,
+  `factorProof` and the `guildauth` chokepoint each did.
+- **Amended at M16b's `/security-sweep`, verdict unchanged, consequence added.** The refusal is
+  **symmetric** and the entry above only argued the "on" direction. `UpdateGuild` is the only writer of
+  the column and there is no instance-admin guild surface at all (`/instance` is operator-token bootstrap
+  and invites), so an Instance Admin can no more switch a guild's recording **off** than on. An operator
+  taking a complaint — "this guild is recording us and we want it stopped" — has no lever short of
+  deleting the guild, which destroys every channel and message in it and punishes the members for the
+  owner's choice. That is heavier than the situation usually warrants, and it is a real cost of choosing
+  the reversible direction. Accepted rather than fixed because the alternative reintroduces exactly what
+  the entry withholds: a tier that can reach into a guild's recording setting while rule 14 has nowhere to
+  record that it did. M72 should settle both directions together rather than lifting only the one this
+  entry names, and the banning and unpublishing levers `guilds.discoverable_locked_at` already models —
+  an admin lock the owner's own toggle is refused against — is the shape worth copying if it wants a
+  narrower answer than "delete it".
+
+### `message_audit_entries` grows without bound and a recording guild roughly doubles its message storage
+- **Raised**: M16b, at planning — the class `/security-review` structurally excludes
+- **Verdict**: accepted risk — it is what the guild asked for, and the alternative defeats the feature
+- **Why**: a recording guild writes one row per message, one per edit and one per delete, each carrying a
+  full copy of the content, on a table nothing sweeps. Growth is therefore faster than `messages` itself
+  and unbounded, and it is gated only at the *toggle*: once recording is on, every member with
+  `SEND_MESSAGES` adds rows at the send rate limit. That is the shape the `audit_log_entries` entry
+  accepts and this one is wider, which is why the roadmap calls it "the expensive choice" and why the
+  default is off. A recording you can exhaust, or one that refuses writes when full, is not a recording.
+  **Unlike the audit log, this one has a lever**: M125 now names this table in its pruning scope, which
+  M16b's planning found it had never been told about despite three documents promising it. A guild that
+  switched recording on for itself and can switch it off is not the accountability record
+  `audit_log_entries` is, so a retention window is coherent here where it is not there.
+- **Reopens if**: M125 ships without this table after all, which would leave the growth with no lever at
+  all. Also reopens if a per-guild storage quota arrives, at which point the ceiling belongs beside the
+  channel and role ones rather than here — and this table, not `messages`, is what a recording guild fills
+  first.
+
+### A recording log's read is a bulk-export primitive and sits in the ordinary rate-limit bucket
+- **Raised**: M16b, `/security-sweep`
+- **Verdict**: not a vulnerability — consistent with the surface it most resembles, and the bit is the
+  boundary
+- **Why**: `GET /guilds/{guild_id}/message-audit` returns up to 100 full message bodies per request and
+  pages backwards without limit, so a `VIEW_MESSAGE_AUDIT` holder can pull a recording guild's entire
+  conversation as fast as the base limiter allows. There is no stricter bucket, and it carries the
+  highest-value payload per request in the API. That is deliberate and matches `GET
+  /guilds/{id}/audit-log`, which is the same shape — a paginated moderation read in the base bucket whose
+  gate is a permission granted to nobody by default. A stricter bucket would throttle the legitimate use
+  (an investigation reads a lot, quickly) without bounding the illegitimate one, because the holder can
+  simply read slower; what bounds this is who holds the bit, which is the disclosure entry above. Recorded
+  because rate limiting is a class `/security-review` cannot report at any confidence and this is exactly
+  the surface somebody will raise it about.
+- **Reopens if**: the bit is ever granted by default or implied by another, which is the disclosure
+  entry's condition and the only thing standing here — or if an export surface arrives that makes bulk
+  reads a first-class operation, at which point the per-*user* throttle §14.14 wants for reports is the
+  same question asked here.

@@ -575,6 +575,25 @@ type Querier interface {
 	GetTOTPForUser(ctx context.Context, userID int64) (UserTotp, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	// The opt-in message audit (Milestone M16b).
+	//
+	// These three live in messages.sql rather than guilds.sql because `messages` is the only package that
+	// calls them — the writer is Send/Update/Delete and the reader is mounted from the same handler — and the
+	// decisions they carry are message decisions rather than guild ones. Same call reports.sql makes for
+	// GetMessageForReport; sqlc generates one package either way.
+	// Whether this guild records its messages.
+	//
+	// Read once per message mutation, inside the mutation's own transaction, and the branch is in Go. The
+	// whole-thing-in-one-statement alternative was measured and rejected — see 000023, which has the numbers:
+	// it costs 62-90% of the message insert for a feature that is off in every guild until somebody turns it
+	// on, and the unraceability it was supposed to buy is illusory, because either shape reads the flag after
+	// the message is already written.
+	//
+	// A primary-key lookup on a table holding one row per guild. Deliberately *not* folded into
+	// ListGuildMemberAuthority, which already reads this row and could carry the column for free: that query
+	// feeds roles.Resolve, and a recording policy is not one of ADR 0008's layers. See 000023.
+	//
+	GuildRecordsMessages(ctx context.Context, id int64) (bool, error)
 	// Requesting a new reset spends every older one for that account, so the most recent link is the only one
 	// that works. Without this, every request an anxious user makes leaves another live token behind, and the
 	// window a leaked one is redeemable in becomes the union of all of them.
@@ -759,6 +778,17 @@ type Querier interface {
 	// key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
 	// 15,000-member guild.
 	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]GuildMember, error)
+	// One page of a guild's recording log, newest first.
+	//
+	// No rule-13 predicate here and that is not an omission: the exclusion happened at write time, so there
+	// is nothing in this table to exclude. Repeating it on the read would be the bound-enforced-twice mistake
+	// M15 recorded, where the two copies measured different things — and the structural half is pinned by a
+	// test asserting guild_id is NOT NULL, since a DM has no guild and could never have produced a row.
+	//
+	// The cursor is an id and the COALESCE spelling is M14's. 000023 measures this query at three densities
+	// and the index it needs turns on how many guilds record rather than on how large any one of them is.
+	//
+	ListGuildMessageAudit(ctx context.Context, arg ListGuildMessageAuditParams) ([]MessageAuditEntry, error)
 	// Every overwrite on a set of channels, for the channel listing's per-channel view filter (Milestone M13).
 	//
 	// # This must not be written as a join on guild_id, and that is measured rather than argued
@@ -992,6 +1022,36 @@ type Querier interface {
 	//
 	// Expired and already-spent rows match nothing, which the service reports as one answer.
 	PollDeviceCode(ctx context.Context, arg PollDeviceCodeParams) (PollDeviceCodeRow, error)
+	// Record one action against one message.
+	//
+	// # Three predicates, none of which trusts the caller
+	//
+	// Deliberate redundancy, and each one turns a property of the *callers* into a property of the schema.
+	// Together they cost something only on a guild that opted in, and nothing at all on one that did not,
+	// because this statement does not run there — see 000023 for the numbers.
+	//
+	//   * `g.message_audit_enabled` is the milestone's first done-when clause: no row can reach this table
+	//     for a guild whose flag is false, whatever the Go branch that just read it believes.
+	//   * `g.id = c.guild_id` ties the message's own channel to the guild being written. **Unreachable
+	//     today** — all three callers take `guild_id` and `message_id` from the same guildauth call, and
+	//     `loadInChannel` refuses a message from another channel — which is exactly why it is written rather
+	//     than argued. A fourth writer passing an inconsistent pair would otherwise file one guild's content
+	//     into another guild's log, silently; M60's webhook ingest is the named candidate, and it will not be
+	//     holding the same authorize result these three do.
+	//   * `NOT m.is_e2e` is rule 13, on the row rather than in Go, so the next writer inherits it.
+	//
+	// # Content and channel come off the message row, never from parameters
+	//
+	// Two reasons that agree. What is recorded cannot disagree with what was stored, which is the whole value
+	// of an audit row. And rule 13's exclusion is `NOT m.is_e2e` on that same row — a join predicate rather
+	// than a Go check, so whoever writes the next writer inherits it instead of having to remember it, which
+	// is the form M16 settled on and M16a reused.
+	//
+	// An E2E message therefore records *nothing* rather than a row with NULL content. That is the right
+	// answer for the same reason ListMessageEditHistory returns an empty page: a row saying "something was
+	// said here and we cannot tell you what" is an exclusion written twice.
+	//
+	RecordMessageAudit(ctx context.Context, arg RecordMessageAuditParams) error
 	// Instance invite queries.
 	//
 	// The codes that gate account creation while registration_mode = "invite". Distinct from the per-guild
@@ -1202,6 +1262,13 @@ type Querier interface {
 	// exists to avoid. NULL means "leave alone" rather than "set to NULL", which is why description clears
 	// through a separate flag: without it there would be no way to remove a description at all, since the
 	// value that means "clear this" and the value that means "do not touch this" would be the same.
+	//
+	// message_audit_enabled (M16b) is a nullable boolean through the same COALESCE, the shape
+	// UpdateGuildMember already uses for deaf and mute. It is the one field here whose *authority* differs
+	// from the others — the rest need PermManageGuild, this one needs the owner and is refused to an Instance
+	// Admin until M72 — but that check belongs in the service, above this statement, and not in a WHERE
+	// clause: a guard in the statement makes a refusal indistinguishable from a guild that vanished, and the
+	// caller has to be able to tell 403 from 404.
 	UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild, error)
 	UpdateGuildMember(ctx context.Context, arg UpdateGuildMemberParams) (GuildMember, error)
 	UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (Message, error)

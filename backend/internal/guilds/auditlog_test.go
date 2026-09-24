@@ -359,6 +359,16 @@ func driveEveryMutation(t *testing.T, f *overwriteFixture, ctx context.Context) 
 
 	require.NoError(t, f.svc.RemoveMember(ctx, owner, f.guildID, f.plain), "member.remove")
 
+	// Both directions of M16b's recording switch, because both are verbs and a vocabulary entry no
+	// mutation produces looks identical to one whose writer was removed. The fixture's actor is the
+	// guild's owner, which is what this field requires — an administrator holding PermManageGuild is
+	// refused, and that half is asserted in guild_test.go rather than here.
+	on, off := true, false
+	_, err = f.svc.Update(ctx, owner, f.guildID, UpdateGuildInput{MessageAuditEnabled: &on})
+	require.NoError(t, err, "guild.message_audit_enable")
+	_, err = f.svc.Update(ctx, owner, f.guildID, UpdateGuildInput{MessageAuditEnabled: &off})
+	require.NoError(t, err, "guild.message_audit_disable")
+
 	// The guild's whole log, in pages, because there are more than the default page size by now.
 	var all []AuditLogEntry
 	var cursor *snowflake.ID

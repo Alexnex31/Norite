@@ -73,14 +73,15 @@ type EmailVerificationToken struct {
 }
 
 type Guild struct {
-	ID              int64
-	Name            string
-	OwnerID         int64
-	IconHash        *string
-	Description     *string
-	SystemChannelID *int64
-	CreatedAt       pgtype.Timestamptz
-	UpdatedAt       pgtype.Timestamptz
+	ID                  int64
+	Name                string
+	OwnerID             int64
+	IconHash            *string
+	Description         *string
+	SystemChannelID     *int64
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+	MessageAuditEnabled bool
 }
 
 type GuildMember struct {
@@ -123,6 +124,17 @@ type Message struct {
 	IsE2e     bool
 	EditedAt  pgtype.Timestamptz
 	DeletedAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
+type MessageAuditEntry struct {
+	ID        int64
+	GuildID   int64
+	MessageID int64
+	ChannelID int64
+	ActorID   int64
+	Action    string
+	Content   *string
 	CreatedAt pgtype.Timestamptz
 }
 

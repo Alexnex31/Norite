@@ -91,6 +91,42 @@ func messageFromRow(row db.Message) Message {
 // table of its own, never this one.
 const ActionMessageDelete = "message.delete"
 
+// The recording vocabulary (M16b), and it is a *different* vocabulary from the one above.
+//
+// These three are written to `message_audit_entries` and never to `audit_log_entries`. That is not merely
+// a different table — it is a different question, asked by a different reader, under a different
+// permission, in guilds that opted in. The audit log answers "what did somebody with authority do here";
+// this answers "what was said here", for a guild that decided it wants that kept.
+//
+// **They must never be added to `guilds.AuditActions()`**, and the temptation is real, because that slice
+// already carries `message.delete` as a literal for the cross-package reason. Two things would break.
+// That slice is what `GET /guilds/{id}/audit-log` validates an `action` filter against, so a verb in it
+// that the table never holds makes the filter *validate* and match nothing — which is M14's "an unknown
+// filter value is refused, not answered with an empty page" inverted into a typo that reads as evidence
+// of absence. And `TestTheOnlyMessageVerbIsDeleteAndItCarriesNoContent` iterates that slice and fails on
+// any `message.*` verb other than delete, with instructions to re-reason about rule 13 before changing
+// it: adding these and then editing that test to allow them would disarm the one guard M14 built for
+// exactly this milestone.
+//
+// TestTheMessageAuditVerbsAreNotGuildAuditVerbs in `cmd/server` pins the two vocabularies **disjoint**.
+// That is the same mechanism as the M15 and M16 cross-package pins with the assertion inverted — they
+// hold two literals equal, this one holds two sets apart.
+//
+// Bare verbs rather than `message.create` and so on: the table is already about messages, and the prefix
+// would only invite somebody to grep for it and find the guild vocabulary.
+const (
+	AuditCreate = "create"
+	AuditEdit   = "edit"
+	AuditDelete = "delete"
+)
+
+// MessageAuditActions is every action the recording log records.
+//
+// A copy, for the reason guilds.AuditActions returns one: an exported slice is not a closed vocabulary,
+// and the cross-package test that pins these disjoint from the guild verbs would otherwise be asserting
+// something any importer could change.
+func MessageAuditActions() []string { return []string{AuditCreate, AuditEdit, AuditDelete} }
+
 // ChannelGuildText is the one channel type that holds messages, and it is guilds.ChannelGuildText.
 //
 // # Why the value is duplicated rather than imported

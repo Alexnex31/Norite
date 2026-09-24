@@ -60,6 +60,9 @@ func (h *Handler) Routes(r chi.Router) {
 	// M16a. A third scope rather than messages.read, because the permission layer already separates the
 	// backlog from what was edited out of it — see auth.ScopeMessagesModerate.
 	moderate := auth.RequireScope(auth.ScopeMessagesModerate)
+	// M16b. A fourth, and the widest: messages.moderate reads one message's prior versions, this reads
+	// every message in the guild. See auth.ScopeMessagesAudit.
+	audit := auth.RequireScope(auth.ScopeMessagesAudit)
 
 	r.Route("/channels/{channel_id}/messages", func(r chi.Router) {
 		r.With(read).Get("/", h.list)
@@ -68,6 +71,16 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(write).Delete("/{message_id}", h.delete)
 		r.With(moderate).Get("/{message_id}/history", h.history)
 	})
+
+	// Mounted under /guilds rather than /channels, because the guild *is* the authorization scope here —
+	// the log spans every channel in it, and there is no channel in the path to resolve. Same placement
+	// and same reasoning as `reports`' triage queue, which is the other guild-scoped surface a
+	// non-`guilds` package serves.
+	//
+	// Note this is the second prefix this handler mounts under, which matters for the route-surface
+	// tests: `guildSurfaceRoutes` matches both /guilds and /channels, so unlike M16's `POST /reports`
+	// this route cannot hide from them.
+	r.With(audit).Get("/guilds/{guild_id}/message-audit", h.guildMessageAudit)
 }
 
 type sendRequest struct {
@@ -264,6 +277,47 @@ func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, r, http.StatusOK, history)
+}
+
+func (h *Handler) guildMessageAudit(w http.ResponseWriter, r *http.Request) {
+	actor, ok := auth.ActorFrom(r.Context())
+	if !ok {
+		httpx.WriteError(w, r, httpx.ErrUnauthorized)
+		return
+	}
+
+	guildID, err := pathID(r, "guild_id")
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+
+	before, err := queryID(r, "before")
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+
+	var limit int32
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, convErr := strconv.ParseInt(raw, 10, 32)
+		if convErr != nil || n < 1 || n > maxPageSize {
+			httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest,
+				"limit must be between 1 and %d", maxPageSize))
+			return
+		}
+		limit = int32(n)
+	}
+
+	entries, err := h.svc.GuildMessageAudit(r.Context(), actor, GuildAuditInput{
+		GuildID: guildID, Before: before, Limit: limit,
+	})
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, entries)
 }
 
 // pathID parses a snowflake from the path, answering 404 rather than 400 on a malformed one.

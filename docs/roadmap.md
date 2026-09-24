@@ -750,10 +750,47 @@ of this section.
   the flag has to be readable by any member of the guild, not only by somebody holding a permission, or
   the screen cannot state either case honestly.
 
+  **The read's gate was specified nowhere, and one document had already promised an answer.** §2 settled
+  the *toggle*'s authority in the same breath as the route and said nothing about who may read; the
+  entry above says nothing; and screen `6e` tells every member their messages are "kept in a log its
+  moderators can read". So the milestone's central question arrived unowned, found by reading the three
+  against each other — the fourth milestone running where that was the productive move. The answer is
+  `PermViewMessageAudit` at bit 21, M14's argument for `PermViewAuditLog` one surface later, and the
+  three bits it could have reused are each wrong differently: `VIEW_AUDIT_LOG`'s own ledger entry names
+  "the log ever carries message content" as its reopening condition, so reusing it would satisfy that
+  condition's letter while doing exactly what it names.
+
+  **M125 forbade what three documents promised it would do.** Its entry scoped pruning to
+  `audit_log_entries` and `instance_audit_log` and required all message data untouched unconditionally,
+  while this entry, §2's DDL comment and the ledger each said `message_audit_entries` would take a
+  retention policy there. A deferral is not deferred until the entry inheriting it says so; this one had
+  three pointers and no destination, and it survived because nothing reads a done-when against the
+  entries pointing at it. M125 names the table now.
+
+  **The design the plan called for was measured and dropped.** It put the whole thing in one statement —
+  an `INSERT ... SELECT` joining messages to channels to guilds with the opt-in as a join predicate — on
+  the argument that a guard which can be raced belongs in the statement. It costs 62–90% of the message
+  insert in guilds that have *not* opted in, which is all of them until somebody does, against 9% for
+  reading the boolean and branching. And the unraceability it was buying is illusory: both shapes read
+  the flag after the message is written, so neither makes "sent while recording" well-defined. What the
+  statement form was genuinely buying is kept — the flag is still a join predicate on the insert that
+  runs, so no row can exist for a guild whose flag is false whatever the caller believes.
+
+  **§2's DDL was missing an index worth 530x.** `actor_id` references `users(id)` with no `ON DELETE`,
+  which is `messages_author_id_idx`'s exact shape: 71.5 ms per account deletion against 0.135 ms. The
+  fourth unindexed foreign key this project has found and the third it has paid for.
+
+  **An Instance Admin may not flip the switch**, which is the first place in the codebase where layer 1
+  is narrower than layer 2. Rule 14 wants the action in `instance_audit_log` and that is M72's, so until
+  then the tier could start recording a guild it never joined and leave no trace. Taken the other way
+  first and reversed on reversibility: lifting a refusal later is additive, withdrawing a capability
+  operators rely on is not. The tier still *reads* any recording guild's log — M16a's gap, unchanged.
+
   Depends on M15 (messages) and M16a (the moderation-read-over-content pattern and its disclosure
   decision). Done when: a guild with the setting off writes nothing to `message_audit_entries`, one with it
   on records every create/edit/delete, both toggles appear in the ordinary audit log, an E2E DM is never
-  recorded, and the notice decision is in the ledger.
+  recorded, and the notice decision is in the ledger — all five met, the last by four entries, one of
+  which records that members are told nothing until M62a draws the screen.
 - **M17 — Message tagging**: `message_tags` (plus its join table), guild-wide scope (not per-channel),
   private/solo tags need no permission, shared tags require `PermManageMessages`. Depends on M15. Done when: a
   tag created in one channel can be applied to a message in a different channel of the same guild, and
@@ -816,18 +853,37 @@ of this section.
   is the untrusted text this CLI prints most of, and `norite message history` prints what somebody
   deliberately edited out, which is the one output whose value depends on it being shown exactly as stored.
 
+  **And M16b's recording log, assigned 2026-09-22 from its planning.** A fifth instance of the same gap,
+  and the first one caught in the same week the surface was designed rather than a milestone later. M16b
+  adds `GET /guilds/{guild_id}/message-audit` behind a permission bit of its own and puts the
+  `message_audit_enabled` toggle on `PATCH /guilds/{guild_id}`, and neither has a caller: the only client
+  surface anywhere in the plan that mentions recording is `6e` at M62a, which is member-facing, read-only
+  and deliberately holds nothing gated on a permission. So the log's read joins `norite guild` here, and
+  the toggle is a flag on the guild update verb rather than a group of its own — it is one boolean on an
+  existing endpoint, and a `norite guild record on|off` would be a second way to spell a field.
+
+  Two things make these verbs different from the other four groups rather than more of the same. The
+  toggle is **owner-only and refused to an Instance Admin** until M72 (M16b's decision), so this is the
+  first verb whose refusal a person holding the highest tier on the instance can hit — and reporting that
+  as a usage error rather than a crash is the done-when below applied to a case no other verb has. And
+  the read prints **every message in the guild**, including channels the caller cannot view, which makes
+  it the largest volume of untrusted text this CLI emits anywhere: rule 19 applies as it does to
+  `norite message`, and the paging matters more, because a guild's recording log has no ceiling where a
+  channel backlog at least has a page.
+
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
   `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
   Whoever assigns it should read this paragraph first, because a gap recorded as half-closed is one nobody
   looks at again.
 
-  Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read) and M10
-  (`apiclient`, the transport). Done when: a guild can be created, renamed, given a role and a channel,
-  have an overwrite written and its audit log read, entirely from the command line; a report can be filed
-  and triaged the same way, with the reporter absent from every triage output because M16's API never
-  sends it; a channel's backlog can be read, posted to, edited and deleted from the command line, and a
-  message's prior versions read by a moderator; with `--json` output validated against
+  Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read), M16b (the
+  recording toggle and its log) and M10 (`apiclient`, the transport). Done when: a guild can be created,
+  renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
+  command line; a report can be filed and triaged the same way, with the reporter absent from every triage
+  output because M16's API never sends it; a channel's backlog can be read, posted to, edited and deleted
+  from the command line, and a message's prior versions read by a moderator; a guild's recording can be
+  switched on and off by its owner and the resulting log paged; with `--json` output validated against
   `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than a crash.
 
 #### Phase D — Real-time gateway and daemon
@@ -1257,6 +1313,22 @@ of this section.
   revoked token is rejected; regenerating a webhook's token invalidates the old one without deleting the
   webhook; and a burst of posts against one valid token is throttled independently of the owning user's own
   REST rate limit.
+
+  **It inherits a constraint from M16b that it cannot satisfy as written, assigned 2026-09-24.**
+  `message_audit_entries.actor_id` is `NOT NULL REFERENCES users(id)`, matching `audit_log_entries` and
+  deliberately unlike `messages.author_id`, which is nullable precisely so a webhook or system message can
+  have no author. Every write reaching that table today comes from an authenticated person, so the
+  constraint holds — and the first webhook post into a guild that has switched recording on violates it
+  and answers 500 on an ordinary send. So this milestone owes a decision before it ships: give the column
+  the nullable shape `messages.author_id` has and teach the reader that a null actor means automation, or
+  give webhooks a synthetic actor and accept that the log names a row in `users` that is not a person.
+  The second is how `audit_log_entries` would have to answer the same question, so answering both together
+  is worth a moment.
+
+  Recorded here rather than only in `000023`'s comment, because a constraint written in a migration is one
+  this milestone never reads — which is M16b's own finding about M125 applied to M16b's own deferral, and
+  it was caught by a security sweep after that migration comment had already claimed this entry carried
+  it.
 - **M61 — Whispers**: the private, message-visibility-restricted-to-selected-recipients feature; not
   guild-audit-logged; excluded from E2E scope (enforced later once E2E exists, at M99); the break-glass
   schema exists now (a whisper is queryable by internal tooling) even though the Instance-Admin-facing
@@ -2055,12 +2127,35 @@ annotated below with where it actually belongs.
   reflected as read when a second client (or a second daemon on another machine) next syncs, without a
   separate mark-as-read action.
 - **M125 — Data retention / audit-log pruning**: the configurable pruning seam from `architecture.md` §11,
-  wired into `norite instance init`/`norite config set`, default-disabled, scoped to `audit_log_entries` and
-  `instance_audit_log` only — message history and reports are explicitly not covered and stay permanent by
-  design. Conceptually belongs in Phase L (self-hosting ops polish) — depends on M14 (audit log) and M72
-  (instance audit log) existing, no other hard dependency. Done when: enabling a retention window on a test
-  instance prunes entries older than the window and leaves newer ones (and all message/report data,
-  unconditionally) untouched; leaving it disabled (the default) prunes nothing.
+  wired into `norite instance init`/`norite config set`, default-disabled, scoped to `audit_log_entries`,
+  `instance_audit_log` and `message_audit_entries` only — message history and reports are explicitly not
+  covered and stay permanent by design. Conceptually belongs in Phase L (self-hosting ops polish) —
+  depends on M14 (audit log), M72 (instance audit log) and M16b (the opt-in message audit) existing, no
+  other hard dependency.
+
+  **`message_audit_entries` was added to that list at M16b's planning (2026-09-22), and the omission is
+  the more interesting half.** Three documents already said this table would be prunable here — M16b's own
+  entry ("lets this one carry a retention policy the audit log deliberately refuses (M125 owns pruning)"),
+  `architecture.md` §2's DDL comment, and the M15 re-examination in `docs/security-ledger.md` — while this
+  entry enumerated two tables and its done-when required *all* message data left untouched
+  unconditionally, which would have forbidden exactly what those three promised. A deferral is not
+  deferred until the entry inheriting it says so; three pointers and no destination is the shape this
+  project's own rule exists to prevent, and it survived because nothing reads a done-when against the
+  entries that point at it.
+
+  **The distinction that makes three tables coherent where two were.** `audit_log_entries` and
+  `instance_audit_log` are accountability records written about people who never chose them, which is why
+  M14's migration says the first is never swept and why a retention window there is an operator's legal
+  decision rather than a convenience. `message_audit_entries` is a record a guild switched on for itself
+  and can switch off, so a guild that stops recording having no way to stop *holding* what it recorded is
+  the odd state, not the safe one. `messages` and `message_edit_history` are untouched by this and stay
+  permanent: an edit history with a retention window is one that forgets the edit somebody wants to look
+  at, which `000020` settles in as many words.
+
+  Done when: enabling a retention window on a test instance prunes entries older than the window from all
+  three tables and leaves newer ones (and all message-history and report data, unconditionally) untouched;
+  leaving it disabled (the default) prunes nothing. Note the index cost `000018` flags — a sweep by age
+  needs one, and neither the audit log's nor the message audit's current indexes serve it.
 
 **How a screen is scheduled:** `docs/design/tui/` draws every screen in its finished state, so a milestone
 that "carries" one builds only the parts whose features exist by then and leaves the rest **absent rather
@@ -2089,6 +2184,6 @@ Phase D's Redis-fan-out design to already exist as a seam, and on M58 (attachmen
 is a cross-track edge and therefore fine. **M113 no longer requires M115** — it backs up to volume
 snapshots — which removes what was the roadmap's only dependency running backwards against its own
 numbering. M124 depends on
-M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14 and M72, conceptually
-belonging in Phase L despite its number — the same "numerically-late, logically-earlier" treatment already
-established for Phase P above.
+M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14, M72 and M16b,
+conceptually belonging in Phase L despite its number — the same "numerically-late, logically-earlier"
+treatment already established for Phase P above.
