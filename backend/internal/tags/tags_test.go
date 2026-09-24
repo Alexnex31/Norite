@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
-	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
@@ -184,8 +183,10 @@ func TestASharedTagNeedsThePermissionAndAPrivateOneDoesNot(t *testing.T) {
 // asserted through both paths that can reach a tag because they enforce it separately.
 //
 // The listing filters in SQL; the single-row read filters in Go. Two copies of one rule is the shape M15
-// warns about, so the pin is a test that drives both with the same actor rather than a comment promising
-// they agree.
+// warns about, so the pin is a test that drives both with the same actors rather than a comment promising
+// they agree. It said that from the start and drove only the listing, which is how the two copies came to
+// disagree for an Instance Admin without anything noticing — found by /code-review, closed by M17's sweep,
+// and the tier is among the actors below for that reason.
 func TestAPrivateTagIsInvisibleToEverybodyElse(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -193,11 +194,19 @@ func TestAPrivateTagIsInvisibleToEverybodyElse(t *testing.T) {
 	mine, err := f.svc.Create(f.ctx, actorOf(f.member), CreateInput{GuildID: f.guildID, Name: "mine"})
 	require.NoError(t, err)
 
-	// The listing: the owner and a moderator see nothing of it.
-	for _, who := range []snowflake.ID{f.owner, f.mod} {
+	// Both paths, for everybody but the owner of the tag: the guild's owner, a moderator, and the tier.
+	operator := f.newInstanceAdmin(t)
+	for _, who := range []snowflake.ID{f.owner, f.mod, operator} {
 		list, err := f.svc.List(f.ctx, actorOf(who), f.guildID)
 		require.NoError(t, err)
 		require.Empty(t, list, "somebody else's private tag must not appear in the listing")
+
+		// The single-row path: Apply loads the tag by id through loadInGuild, and so does every other
+		// route naming one.
+		err = f.svc.Apply(f.ctx, actorOf(who), ApplyInput{
+			ChannelID: f.channelID, MessageID: f.messageID, TagID: mine.ID,
+		})
+		require.ErrorIs(t, err, httpx.ErrNotFound, "nor be reachable by its id")
 	}
 
 	list, err := f.svc.List(f.ctx, actorOf(f.member), f.guildID)
@@ -531,11 +540,6 @@ func TestDeletingATagRemovesItsApplications(t *testing.T) {
 		`SELECT count(*) FROM message_tag_applications WHERE tag_id = $1`, int64(tag.ID)).Scan(&n))
 	require.Zero(t, n)
 }
-
-// TestTheQuerierIsUsedThroughTheTransaction is a compile-time reminder rather than a behavior test: the
-// db import is needed by the fixture helpers above, and dropping it silently would mean the service's
-// transaction plumbing had changed shape without anybody noticing here.
-var _ = db.Queries{}
 
 // TestAMessageIsReachedOnlyThroughItsOwnChannel is the manual pass's finding, pinned.
 //

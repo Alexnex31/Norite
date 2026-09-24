@@ -67,7 +67,9 @@ DELETE FROM message_tags WHERE id = $1 AND guild_id = $2;
 -- the one the next writer inherits.
 --
 -- ON CONFLICT DO NOTHING makes applying twice idempotent rather than an error, which is what a client
--- retrying a request wants. The service distinguishes "already applied" from "refused" by the row count.
+-- retrying a request wants. The row count **cannot** tell "already applied" from "refused" — both are
+-- zero — so the service reads the application back (GetMessageTagApplication) to tell them apart. This
+-- comment said the row count did until M17's /code-review.
 --
 -- name: ApplyMessageTag :execrows
 INSERT INTO message_tag_applications (tag_id, message_id, applied_by)

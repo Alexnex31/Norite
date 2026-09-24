@@ -41,7 +41,9 @@ type Querier interface {
 	// the one the next writer inherits.
 	//
 	// ON CONFLICT DO NOTHING makes applying twice idempotent rather than an error, which is what a client
-	// retrying a request wants. The service distinguishes "already applied" from "refused" by the row count.
+	// retrying a request wants. The row count **cannot** tell "already applied" from "refused" — both are
+	// zero — so the service reads the application back (GetMessageTagApplication) to tell them apart. This
+	// comment said the row count did until M17's /code-review.
 	//
 	ApplyMessageTag(ctx context.Context, arg ApplyMessageTagParams) (int64, error)
 	// Records who authorized this device.
