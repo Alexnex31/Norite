@@ -397,7 +397,10 @@ SELECT
   $3::varchar,
   m.content
 FROM messages m
-JOIN guilds g ON g.id = $4::bigint AND g.message_audit_enabled
+JOIN channels c ON c.id = m.channel_id
+JOIN guilds   g ON g.id = c.guild_id
+               AND g.id = $4::bigint
+               AND g.message_audit_enabled
 WHERE m.id = $5::bigint AND NOT m.is_e2e
 `
 
@@ -411,13 +414,21 @@ type RecordMessageAuditParams struct {
 
 // Record one action against one message.
 //
-// # The flag is a join predicate even though the caller already checked it
+// # Three predicates, none of which trusts the caller
 //
-// Deliberate redundancy, and it is what makes the milestone's first done-when clause — a guild with the
-// setting off writes nothing — a property of the schema rather than of a Go branch somebody could
-// rearrange. No row can reach this table for a guild whose flag is false, whatever the caller believes.
-// It costs 10.5% on a guild that opted in and nothing at all on one that did not, because this statement
-// does not run there.
+// Deliberate redundancy, and each one turns a property of the *callers* into a property of the schema.
+// Together they cost something only on a guild that opted in, and nothing at all on one that did not,
+// because this statement does not run there — see 000023 for the numbers.
+//
+//   - `g.message_audit_enabled` is the milestone's first done-when clause: no row can reach this table
+//     for a guild whose flag is false, whatever the Go branch that just read it believes.
+//   - `g.id = c.guild_id` ties the message's own channel to the guild being written. **Unreachable
+//     today** — all three callers take `guild_id` and `message_id` from the same guildauth call, and
+//     `loadInChannel` refuses a message from another channel — which is exactly why it is written rather
+//     than argued. A fourth writer passing an inconsistent pair would otherwise file one guild's content
+//     into another guild's log, silently; M60's webhook ingest is the named candidate, and it will not be
+//     holding the same authorize result these three do.
+//   - `NOT m.is_e2e` is rule 13, on the row rather than in Go, so the next writer inherits it.
 //
 // # Content and channel come off the message row, never from parameters
 //

@@ -179,9 +179,29 @@ CREATE INDEX message_audit_entries_message_id_idx ON message_audit_entries (mess
 -- predicate on the row rather than a Go check. The content is still read back out of the message row
 -- rather than passed as a parameter, so what is recorded cannot disagree with what was stored. And the
 -- flag is still a join predicate on every insert that runs, which is what makes "no row exists for a
--- guild whose flag is false" structural rather than merely tested. That second guard costs 10.5% on a
--- guild that opted in — 43.05 us/send against 38.95 without it — which is the milestone's own "documented
--- as the expensive choice" applied to the guild that chose it rather than to everybody else.
+-- guild whose flag is false" structural rather than merely tested.
+--
+-- **What those kept predicates cost, re-measured — and the first figure here was wrong.** This block
+-- said the flag predicate cost 10.5% on a guild that opted in, from a single run of each shape. Three
+-- interleaved runs say it is free, and a third predicate added later by a security review is what is
+-- actually worth something. 20,000 sends into a recording guild, us/send, the three shapes run in one
+-- session so the numbers are comparable to each other and to nothing else:
+--
+--   no guard on the insert                  72.52 / 74.82 / 74.57
+--   the flag re-asserted                    69.41 / 76.68 / 76.54     free, inside noise
+--   the flag plus the channel-guild tie     85.18 / 84.75 / 85.92     about 15%
+--
+-- The correction is the useful part. A single-run A/B on a path this noisy measures the machine, and
+-- quoting one is how 000020 came to carry a figure for a query that did not ship. The rule this project
+-- already had — measure, do not assert — turns out to have a second half: measure *more than once*, and
+-- interleave, or the first number is just the first number.
+--
+-- The 15% is the price of `g.id = c.guild_id`, which ties the message's own channel to the guild the row
+-- is filed under. It buys the one failure this feature must not have: one guild's private conversation
+-- appearing in another guild's log. Unreachable today, since all three callers take both ids from the
+-- same authorize call — and that is exactly why it is written down rather than left to the next writer
+-- to remember, M60's webhook ingest being the named candidate that will not hold the same authorize
+-- result. Charged only to guilds that opted into what the roadmap already calls the expensive choice.
 --
 -- A third option was available and refused. ListGuildMemberAuthority already reads the guild row and
 -- already returns owner_id from it, so message_audit_enabled could ride it for literally zero extra

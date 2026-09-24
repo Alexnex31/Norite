@@ -134,7 +134,8 @@ const (
 	// correction M12's UpdateMember needed, where a permission only ever OR'd into a base is not a
 	// grantable permission at all.
 	//
-	// Granted by default to nobody, implied by nothing, and un-grantable by somebody who does not hold it
+	// Granted by default to nobody, implied by no other *bit*, and un-grantable by somebody who does not
+	// hold it
 	// (refuseEscalation already covers every bit). That is the whole boundary on the widest disclosure
 	// this project has taken — see docs/security-ledger.md, which states it rather than leaving it to be
 	// inherited from M16's.

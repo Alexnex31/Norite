@@ -643,7 +643,10 @@ carries the condition that would reopen it.
   `MANAGE_MESSAGES` means "delete somebody else's message", and a guild wanting spam removed has not
   decided that moderator reads its private channels; folding it into `MANAGE_GUILD` would mean the only
   way to let somebody read the log is to let them switch the recording off. The bit is granted by default
-  to nobody, implied by nothing, and un-grantable by somebody who does not hold it (`refuseEscalation`).
+  to nobody, implied by no other bit, and un-grantable by somebody who does not hold it
+  (`refuseEscalation`). `PermAdministrator` confers it, as layer 3 confers every bit in the guild that
+  granted it — stated because "implied by nothing" was the original wording here and is not true of the
+  one bit whose whole meaning is that it implies the rest.
   Members are told the guild records them — the flag is on the guild payload behind `PermViewChannel`,
   readable by anybody in the guild.
 - **Reopens if**: `PermViewMessageAudit` is ever granted by default, implied by another bit, or added to

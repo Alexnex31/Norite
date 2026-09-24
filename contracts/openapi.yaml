@@ -3388,7 +3388,10 @@ paths:
         ones, and unlike the two moderation reads that precede it there is no per-object step: a report
         must exist before its content can be read, a message id is needed to read that message's prior
         versions, and this takes a guild id and returns the conversation. The permission is granted to
-        nobody by default, implied by nothing, and cannot be handed out by somebody who does not hold it.
+        nobody by default, implied by no other permission bit, and cannot be handed out by somebody who
+        does not hold it. `ADMINISTRATOR` confers it as it confers everything within a guild (authority
+        layer 3) — that is what that bit means, and it is the one thing "implied by nothing" does not
+        cover.
         `docs/security-ledger.md` states the disclosure rather than leaving it to be inherited.
 
 
@@ -4108,7 +4111,7 @@ components:
         **every message in the guild** a recording guild has kept, including the channels its holder
         cannot view. A triage bot wants the first and must not be one compromise away from the second.
         The permission layer already draws exactly that line — `MANAGE_MESSAGES` and `VIEW_MESSAGE_AUDIT`
-        are separate bits, neither granted by default and the second implied by nothing — so bundling the
+        are separate bits, neither granted by default and neither implying the other — so bundling the
         two scopes would be the delegation model contradicting the permission model, which is the
         sentence written twice above.
 
