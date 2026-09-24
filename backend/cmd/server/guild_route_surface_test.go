@@ -15,6 +15,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
+	"github.com/Alexnex31/Norite/backend/internal/tags"
 )
 
 // Two tests in this package claim to enumerate the guild route surface, and until M14 neither asked the
@@ -379,24 +380,29 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 		{route: "GET /api/v1/guilds/{guild_id}/reports/{report_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/message-audit", exempt: readsWriteNothing},
 
-		// M17's tag routes write no audit entry, and the three mutations among them are the interesting
-		// exemption rather than the reads. Applying or removing a tag is an annotation somebody makes
-		// about a message, which exercises authority over nobody — rule 2's M15 narrowing. Creating a
-		// *shared* tag is closer to administrative, and is still not audited: the entry would name a tag
-		// and nothing else, and the verb would have to join guilds.AuditActions() and therefore the
-		// audit-log reader's filter vocabulary. The ledger carries that decision with what would reopen
-		// it.
+		// M17's tag routes, and they split the way the message routes do. Applying a tag, removing your
+		// own, and creating one exercise authority over nobody — rule 2's M15 narrowing — and write
+		// nothing; the ledger carries why creating a *shared* one is not audited either.
+		//
+		// The two DELETEs are the message DELETE's shape: they write an entry only when the act is over
+		// somebody else's tagging — `tag.remove` when a moderator takes another member's application off
+		// a message, `tag.delete` when deleting a shared tag takes other members' applications with it.
+		// Both need a second actor this fixture's sequence has no room for, so they are asserted in the
+		// tags package, by TestModerationOverSomebodyElsesTaggingIsAudited, which also asserts the
+		// own-tagging paths write nothing.
 		{route: "GET /api/v1/guilds/{guild_id}/tags", exempt: readsWriteNothing},
 		{route: "GET /api/v1/channels/{channel_id}/messages/{message_id}/tags",
 			exempt: readsWriteNothing},
 		{route: "POST /api/v1/guilds/{guild_id}/tags",
 			exempt: "a tag is vocabulary, not authority over anybody; see the ledger"},
 		{route: "DELETE /api/v1/guilds/{guild_id}/tags/{tag_id}",
-			exempt: "deleting a tag removes a label, not a message; writes no entry"},
+			exempt: "writes tag.delete only when other members' applications go with it; asserted in " +
+				"the tags package, which can build two actors"},
 		{route: "PUT /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}",
 			exempt: "applying a tag annotates; it exercises authority over nobody"},
 		{route: "DELETE /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}",
-			exempt: "removing a tag application is the same, in reverse"},
+			exempt: "removing your own writes nothing; tag.remove, for somebody else's, is asserted in " +
+				"the tags package"},
 
 		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},
@@ -501,6 +507,17 @@ func TestTheMessageAuditVerbAgreesAcrossPackages(t *testing.T) {
 		"the messages package writes %q and the guilds audit-log reader does not accept it as a filter; "+
 			"a verb written to the table but missing from the vocabulary makes the reader refuse rows it "+
 			"already holds", messages.ActionMessageDelete)
+}
+
+// TestTheTagAuditVerbsAgreeAcrossPackages is the same pin for M17's two verbs, written by `tags` and
+// validated by `guilds`, which import neither each other. Added with the verbs, at M17's sweep.
+func TestTheTagAuditVerbsAgreeAcrossPackages(t *testing.T) {
+	t.Parallel()
+
+	for _, verb := range []string{tags.ActionTagRemove, tags.ActionTagDelete} {
+		require.Contains(t, guilds.AuditActions(), verb,
+			"the tags package writes %q and the guilds audit-log reader does not accept it as a filter", verb)
+	}
 }
 
 // TestTheTextChannelTypeAgreesAcrossPackages pins the second value written in two places.

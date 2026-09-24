@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/jackc/pgerrcode"
@@ -136,6 +137,13 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateInput) 
 			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
 				return httpx.Errorf(httpx.ErrConflict, "a tag with that name already exists here")
 			}
+			if isForeignKeyViolation(err) {
+				// The guild is gone. A member cannot reach this — Authorize read their membership in this
+				// transaction — but an Instance Admin short-circuits layer 1 without reading the guild
+				// row, so a guild id naming nothing arrives here. M72 owns making layer 1 prove the guild
+				// exists; until then this is the answer that path should give, rather than a 500.
+				return httpx.ErrNotFound
+			}
 			return fmt.Errorf("tags: create tag: %w", err)
 		}
 
@@ -185,10 +193,16 @@ func (s *Service) checkCeiling(
 // A name is trimmed of nothing and validated for emptiness only. Tag names are user vocabulary, and the
 // instance deciding which characters a guild may file things under is not its business — rule 19 is what
 // makes them safe to print, at the client, where the renderer is.
+//
+// **With one exception, and it is Postgres's rather than a policy.** A `text` column cannot hold U+0000,
+// and JSON decodes `\u0000` happily, so a NUL passed both checks and failed the insert as a 500 until
+// M17's sweep. Refused here as the input error it is.
 func checkName(name string) error {
 	switch {
 	case name == "":
 		return httpx.Errorf(httpx.ErrBadRequest, "name is required")
+	case strings.ContainsRune(name, 0):
+		return httpx.Errorf(httpx.ErrBadRequest, "name must not contain a NUL character")
 	case utf8.RuneCountInString(name) > MaxTagNameLength:
 		return httpx.Errorf(httpx.ErrBadRequest, "name must be at most %d characters", MaxTagNameLength)
 	}
@@ -224,14 +238,19 @@ func (s *Service) List(ctx context.Context, actor auth.Actor, guildID snowflake.
 //
 // # Who may
 //
-// A private tag: its creator, and nobody else — not a moderator, not the owner. It is invisible to them,
-// and a permission to delete what you cannot see is a permission to delete at random.
+// A private tag: its creator, and nobody else — not a moderator, not the owner, not an Instance Admin. It
+// is invisible to all of them, and a permission to delete what you cannot see is a permission to delete
+// at random.
 //
-// A shared tag: its creator, or a PermManageMessages holder. The creator is included because taking back
-// something you added to a shared vocabulary is not moderation; the bit is included because a shared tag
-// is the guild's and somebody has to be able to remove a bad one after its author leaves.
+// A shared tag: a PermManageMessages holder, and nobody else. **The creator is not an exception**, which
+// it was until M17's sweep: a shared tag is the guild's the moment it exists, other people apply it, and
+// deleting it cascades their labels away. A creator who has since lost the bit kept that power over
+// everybody else's work, which is M13's "removing is not the safe direction" arriving at a tag.
 //
-// An Instance Admin passes by layer 1 as everywhere else.
+// # When it is audited
+//
+// Only when the cascade takes somebody else's application with it — see ActionTagDelete. The tag row is
+// locked first so the count cannot miss an application committed between the count and the delete.
 func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID, tagID snowflake.ID) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
 		decision, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermViewChannel)
@@ -239,7 +258,7 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID, tagID s
 			return err
 		}
 
-		tag, err := s.loadInGuild(ctx, q, actor, decision, guildID, tagID)
+		tag, err := s.loadInGuild(ctx, q, actor, guildID, tagID)
 		if err != nil {
 			return err
 		}
@@ -248,6 +267,21 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID, tagID s
 		// — M12's "refuse before explaining". Somebody who is not in the guild never reached this line.
 		if !mayDeleteTag(actor, decision, tag) {
 			return httpx.Errorf(httpx.ErrForbidden, "you may not delete that tag")
+		}
+
+		// A private tag is applied only by its owner, who is the only one who may delete it, so its
+		// cascade can never take somebody else's label. The lock and the count are for shared tags.
+		var others int64
+		if tag.IsShared {
+			if err := q.LockMessageTag(ctx, int64(tagID)); err != nil {
+				return fmt.Errorf("tags: lock tag: %w", err)
+			}
+			others, err = q.CountMessageTagApplicationsByOthers(ctx, db.CountMessageTagApplicationsByOthersParams{
+				TagID: int64(tagID), AppliedBy: int64(actor.UserID),
+			})
+			if err != nil {
+				return fmt.Errorf("tags: count applications: %w", err)
+			}
 		}
 
 		affected, err := q.DeleteMessageTag(ctx, db.DeleteMessageTagParams{
@@ -259,7 +293,14 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID, tagID s
 		if affected == 0 {
 			return httpx.ErrNotFound
 		}
-		return nil
+
+		if others == 0 {
+			return nil
+		}
+		return s.writeAudit(ctx, q, guildID, actor.UserID, ActionTagDelete, tagID, map[string]any{
+			"name":                 map[string]any{"from": tag.Name},
+			"applications_removed": others,
+		})
 	})
 }
 
@@ -267,16 +308,15 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID, tagID s
 // guilds.mayFlipMessageAudit is: it mixes ownership with a permission, and an unexplained compound
 // boolean in a handler reads as a caller that forgot one of them.
 func mayDeleteTag(actor auth.Actor, decision guildauth.Decision, tag db.MessageTag) bool {
-	if snowflake.ID(tag.CreatedBy) == actor.UserID {
-		return true
-	}
-	// A private tag somebody else owns is invisible, so no authority reaches it — PermManageMessages
-	// included. Unreachable in practice, because loadInGuild has already refused it as not-found; kept
-	// because this function is the one that answers "may they", and a caller that reached it another way
-	// must get the same answer.
+	// A private tag is its creator's alone. Somebody else's is invisible, so no authority reaches it —
+	// PermManageMessages and layer 1 included. Unreachable in practice for anybody else, because
+	// loadInGuild has already refused it as not-found; kept because this function is the one that answers
+	// "may they", and a caller that reached it another way must get the same answer.
 	if !tag.IsShared {
-		return decision.InstanceAdmin()
+		return snowflake.ID(tag.CreatedBy) == actor.UserID
 	}
+	// A shared tag is the guild's, and only the moderation bit reaches it — its creator included. See
+	// Delete.
 	return decision.Allows(roles.PermManageMessages)
 }
 
@@ -300,10 +340,14 @@ func mayDeleteTag(actor auth.Actor, decision guildauth.Decision, tag db.MessageT
 // nothing" without becoming a listing, and pushing the check into the query would put the caller's
 // identity into a lookup by primary key. The pin is a test that drives both paths with the same actor.
 //
-// An Instance Admin sees everything, by layer 1, as they do everywhere else.
+// **An Instance Admin does not see somebody else's private tag**, and that is deliberate rather than an
+// exception to layer 1. Until M17's sweep this function let the tier through while both listings did not,
+// so an operator could apply, remove and delete private tags they could never enumerate, with nothing
+// recording it — `instance_audit_log` is M72's. Refusing is the reversible direction, M16b's reasoning.
+// It is also not a place where layer 1 is narrower than layer 2: a guild owner cannot see a member's
+// private tag either, so the tier is exactly as far as the owner, which is layer 1's ordinary shape.
 func (s *Service) loadInGuild(
-	ctx context.Context, q *db.Queries, actor auth.Actor, decision guildauth.Decision,
-	guildID, tagID snowflake.ID,
+	ctx context.Context, q *db.Queries, actor auth.Actor, guildID, tagID snowflake.ID,
 ) (db.MessageTag, error) {
 	tag, err := q.GetMessageTag(ctx, int64(tagID))
 	if err != nil {
@@ -315,7 +359,7 @@ func (s *Service) loadInGuild(
 	if snowflake.ID(tag.GuildID) != guildID {
 		return db.MessageTag{}, httpx.ErrNotFound
 	}
-	if !tagVisibleTo(actor, decision, tag) {
+	if !tagVisibleTo(actor, tag) {
 		return db.MessageTag{}, httpx.ErrNotFound
 	}
 	return tag, nil
@@ -323,10 +367,17 @@ func (s *Service) loadInGuild(
 
 // tagVisibleTo reports whether this caller may know the tag exists at all.
 //
-// Shared tags are the guild's, so every member sees them. A private tag is its creator's alone. This is
-// the single-row half of the `is_shared OR created_by = $n` predicate the listing carries.
-func tagVisibleTo(actor auth.Actor, decision guildauth.Decision, tag db.MessageTag) bool {
-	return tag.IsShared ||
-		snowflake.ID(tag.CreatedBy) == actor.UserID ||
-		decision.InstanceAdmin()
+// Shared tags are the guild's, so every member sees them. A private tag is its creator's alone — for every
+// actor, the Instance Admin included (see loadInGuild). This is the single-row half of the
+// `is_shared OR created_by = $n` predicate both listings carry, and the two now agree for every caller.
+func tagVisibleTo(actor auth.Actor, tag db.MessageTag) bool {
+	return tag.IsShared || snowflake.ID(tag.CreatedBy) == actor.UserID
+}
+
+// isForeignKeyViolation reports whether a write lost to a concurrent deletion of what it referenced — a
+// tag, a message or a guild removed between this transaction's read of it and its insert. The referenced
+// row is gone, so the answer is the one a request naming it afterwards would get.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation
 }

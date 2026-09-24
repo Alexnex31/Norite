@@ -512,6 +512,8 @@ var foreignAuditActions = map[string]string{
 	"message.delete": "messages.TestAModeratorDeletingSomebodyElsesMessageIsAudited",
 	"report.resolve": "reports.TestClosingAReportIsAudited",
 	"report.dismiss": "reports.TestClosingAReportIsAudited",
+	"tag.remove":     "tags.TestModerationOverSomebodyElsesTaggingIsAudited",
+	"tag.delete":     "tags.TestModerationOverSomebodyElsesTaggingIsAudited",
 }
 
 // requireForeignAuditActionsExist fails when an exemption above names a verb the vocabulary no longer has.

@@ -32,6 +32,8 @@ const (
 	RoleDelete               AuditLogAction = "role.delete"
 	RoleReorder              AuditLogAction = "role.reorder"
 	RoleUpdate               AuditLogAction = "role.update"
+	TagDelete                AuditLogAction = "tag.delete"
+	TagRemove                AuditLogAction = "tag.remove"
 )
 
 // Valid indicates whether the value is a known member of the AuditLogAction enum.
@@ -78,6 +80,10 @@ func (e AuditLogAction) Valid() bool {
 	case RoleReorder:
 		return true
 	case RoleUpdate:
+		return true
+	case TagDelete:
+		return true
+	case TagRemove:
 		return true
 	default:
 		return false

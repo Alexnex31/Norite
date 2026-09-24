@@ -338,6 +338,18 @@ func TestApplyingToAMessageThatIsNotThereAnswersNotFound(t *testing.T) {
 		ChannelID: f.channelID, MessageID: deleted, TagID: tag.ID,
 	})
 	require.ErrorIs(t, err, httpx.ErrNotFound, "a soft-deleted message takes no new tags")
+
+	// And gives none up either. Before M17's manual pass, removing a tag from a deleted message worked
+	// while adding one and reading them both answered 404; the three routes now agree that a deleted
+	// message is not there. The row itself stays until the message is hard-deleted and it cascades.
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), ApplyInput{
+		ChannelID: f.channelID, MessageID: f.messageID, TagID: tag.ID,
+	}))
+	f.exec(t, `UPDATE messages SET deleted_at = now() WHERE id = $1`, int64(f.messageID))
+	err = f.svc.Unapply(f.ctx, actorOf(f.member), ApplyInput{
+		ChannelID: f.channelID, MessageID: f.messageID, TagID: tag.ID,
+	})
+	require.ErrorIs(t, err, httpx.ErrNotFound, "a soft-deleted message's tags cannot be removed either")
 }
 
 // TestWhoMayRemoveATagApplication drives all three authorities and the one actor who holds none.
@@ -524,3 +536,321 @@ func TestDeletingATagRemovesItsApplications(t *testing.T) {
 // db import is needed by the fixture helpers above, and dropping it silently would mean the service's
 // transaction plumbing had changed shape without anybody noticing here.
 var _ = db.Queries{}
+
+// TestAMessageIsReachedOnlyThroughItsOwnChannel is the manual pass's finding, pinned.
+//
+// The route names a channel and a message, and the channel is what gets authorized — so a message from
+// another channel must answer exactly as a message that does not exist, on every route, or the check
+// covered one channel while the act landed in another. M15's loadInChannel, which ForMessage had and
+// Apply and Unapply did not.
+//
+// The message sits in a channel the member cannot view, because that is where it stops being tidiness:
+// before the fix, tagging it through a channel they *can* read answered 204 against 404 for an id naming
+// nothing — which message ids exist behind a hidden channel — and removing a moderator's tag from it
+// answered 403 against 404, which shared tags had been put on something the member cannot read.
+//
+// The already-applied case is deliberate. A statement predicate alone refuses the insert, and then
+// Apply's repeat-detection finds the moderator's row and reports success — the same oracle one step
+// later. That is why the channel check is in Go ahead of everything as well as in the statement.
+//
+// Proved by removal in three legs, M16b's shape. Without the Go check in Apply this fails at the
+// already-applied assertion and *passes* the fresh one — the statement predicate holding on its own.
+// Without the statement predicate it passes, the Go check covering both. Without both it fails at the
+// first assertion. Neutralize the predicate as `$3::bigint = $3::bigint` rather than deleting it: dropping
+// the parameter fails the statement with "could not determine data type of parameter $3", which is a
+// failure that proves nothing.
+func TestAMessageIsReachedOnlyThroughItsOwnChannel(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	hidden := f.next(t)
+	f.exec(t, `INSERT INTO channels (id, guild_id, name, type, position, created_at, updated_at)
+	           VALUES ($1,$2,'staff',0,1,now(),now())`, int64(hidden), int64(f.guildID))
+	// Target type 1 is a member: this one member is denied view, and nobody else is touched.
+	f.exec(t, `INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+	           VALUES ($1,1,$2,0,$3)`, int64(hidden), int64(f.member), roles.PermViewChannel.Int64())
+	secret := f.newMessage(t, hidden, f.owner)
+
+	spam, err := f.svc.Create(f.ctx, actorOf(f.mod), CreateInput{
+		GuildID: f.guildID, Name: "spam", IsShared: true,
+	})
+	require.NoError(t, err)
+	keep, err := f.svc.Create(f.ctx, actorOf(f.mod), CreateInput{
+		GuildID: f.guildID, Name: "keep", IsShared: true,
+	})
+	require.NoError(t, err)
+	mine, err := f.svc.Create(f.ctx, actorOf(f.member), CreateInput{GuildID: f.guildID, Name: "mine"})
+	require.NoError(t, err)
+
+	// The moderator can see the channel and tags the message through its own route — which is also the
+	// control that the message is a perfectly ordinary target.
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.mod), ApplyInput{
+		ChannelID: hidden, MessageID: secret, TagID: spam.ID,
+	}))
+
+	count := func() int {
+		var n int
+		require.NoError(t, f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM message_tag_applications WHERE message_id = $1`, int64(secret)).Scan(&n))
+		return n
+	}
+
+	viaVisible := func(tag snowflake.ID) ApplyInput {
+		return ApplyInput{ChannelID: f.channelID, MessageID: secret, TagID: tag}
+	}
+	member := actorOf(f.member)
+
+	require.ErrorIs(t, f.svc.Apply(f.ctx, member, viaVisible(mine.ID)), httpx.ErrNotFound,
+		"a fresh tag through the wrong channel")
+	require.ErrorIs(t, f.svc.Apply(f.ctx, member, viaVisible(spam.ID)), httpx.ErrNotFound,
+		"a tag already on the message, through the wrong channel — the repeat path must not report it")
+	require.ErrorIs(t, f.svc.Unapply(f.ctx, member, viaVisible(spam.ID)), httpx.ErrNotFound,
+		"removing a tag that is there must answer as removing one that is not")
+	require.ErrorIs(t, f.svc.Unapply(f.ctx, member, viaVisible(keep.ID)), httpx.ErrNotFound)
+	_, err = f.svc.ForMessage(f.ctx, member, f.channelID, secret)
+	require.ErrorIs(t, err, httpx.ErrNotFound)
+
+	require.Equal(t, 1, count(), "the member wrote nothing and removed nothing")
+
+	// The binding is about the channel, not about visibility: the moderator, who can see both channels,
+	// is refused through the wrong one too.
+	require.ErrorIs(t, f.svc.Unapply(f.ctx, actorOf(f.mod), viaVisible(spam.ID)), httpx.ErrNotFound,
+		"even for somebody who could reach the message through its own route")
+	require.Equal(t, 1, count())
+}
+
+// newInstanceAdmin adds an account holding ADR 0008's layer 1, belonging to no guild.
+func (f *fixture) newInstanceAdmin(t *testing.T) snowflake.ID {
+	t.Helper()
+	id := f.next(t)
+	f.exec(t, `INSERT INTO users (id, username, email, display_name, created_at, updated_at)
+	           VALUES ($1,'operator','operator@example.test','operator',now(),now())`, int64(id))
+	f.exec(t, `INSERT INTO instance_admins (user_id) VALUES ($1)`, int64(id))
+	return id
+}
+
+// auditEntries returns the actions written to this guild's audit log, oldest first.
+func (f *fixture) auditEntries(t *testing.T) []string {
+	t.Helper()
+	rows, err := f.pool.Query(f.ctx,
+		`SELECT action FROM audit_log_entries WHERE guild_id = $1 ORDER BY id`, int64(f.guildID))
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		require.NoError(t, rows.Scan(&a))
+		out = append(out, a)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestAnInstanceAdminCannotReachSomebodyElsesPrivateTag is M17's sweep finding, pinned.
+//
+// The tier passed loadInGuild by layer 1 while both SQL listings filtered the tag out, so an operator
+// could apply a member's private tag — which the member then saw on a message they never tagged — and
+// remove or delete it, all on a tag they could never enumerate, and with nothing recording it. Every path
+// now answers 404, exactly as it does for the guild's owner.
+func TestAnInstanceAdminCannotReachSomebodyElsesPrivateTag(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	operator := actorOf(f.newInstanceAdmin(t))
+
+	private, err := f.svc.Create(f.ctx, actorOf(f.member), CreateInput{GuildID: f.guildID, Name: "mine"})
+	require.NoError(t, err)
+	in := ApplyInput{ChannelID: f.channelID, MessageID: f.messageID, TagID: private.ID}
+
+	require.ErrorIs(t, f.svc.Apply(f.ctx, operator, in), httpx.ErrNotFound, "apply")
+
+	// Applied by its owner, so there is something to remove.
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), in))
+	require.ErrorIs(t, f.svc.Unapply(f.ctx, operator, in), httpx.ErrNotFound, "remove")
+	require.ErrorIs(t, f.svc.Delete(f.ctx, operator, f.guildID, private.ID), httpx.ErrNotFound, "delete")
+
+	var n int
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT count(*) FROM message_tag_applications WHERE tag_id = $1`, int64(private.ID)).Scan(&n))
+	require.Equal(t, 1, n, "the member's own application is untouched")
+
+	// And the tier still reaches everything shared, which is layer 1's ordinary reach.
+	shared, err := f.svc.Create(f.ctx, operator, CreateInput{GuildID: f.guildID, Name: "ops", IsShared: true})
+	require.NoError(t, err)
+	require.NoError(t, f.svc.Delete(f.ctx, operator, f.guildID, shared.ID))
+}
+
+// TestAMutedMemberCannotPutASharedTagOnAMessage is the second sweep finding.
+//
+// Applying needed only the right to read, so a member denied PermSendMessages — the mute every guild
+// uses — could not post and could still label other people's messages in front of everybody. A private
+// tag is invisible to everybody else and stays open to them, and removing their own shared application
+// stays open too, because redaction is what a mute wants.
+func TestAMutedMemberCannotPutASharedTagOnAMessage(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	shared, err := f.svc.Create(f.ctx, actorOf(f.mod), CreateInput{
+		GuildID: f.guildID, Name: "spam", IsShared: true,
+	})
+	require.NoError(t, err)
+	private, err := f.svc.Create(f.ctx, actorOf(f.member), CreateInput{GuildID: f.guildID, Name: "later"})
+	require.NoError(t, err)
+
+	earlier := f.newMessage(t, f.channelID, f.owner)
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), ApplyInput{
+		ChannelID: f.channelID, MessageID: earlier, TagID: shared.ID,
+	}), "before the mute, a member may apply a shared tag")
+
+	// Target type 1 is a member: this one member is muted in this one channel.
+	f.exec(t, `INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+	           VALUES ($1,1,$2,0,$3)`, int64(f.channelID), int64(f.member), roles.PermSendMessages.Int64())
+
+	target := f.newMessage(t, f.channelID, f.owner)
+	require.ErrorIs(t, f.svc.Apply(f.ctx, actorOf(f.member), ApplyInput{
+		ChannelID: f.channelID, MessageID: target, TagID: shared.ID,
+	}), httpx.ErrForbidden, "a muted member must not label a message in front of everybody")
+
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), ApplyInput{
+		ChannelID: f.channelID, MessageID: target, TagID: private.ID,
+	}), "a private tag is a bookmark nobody else sees, and needs only the right to read")
+
+	require.NoError(t, f.svc.Unapply(f.ctx, actorOf(f.member), ApplyInput{
+		ChannelID: f.channelID, MessageID: earlier, TagID: shared.ID,
+	}), "taking back your own label is redaction, which a mute does not forbid")
+}
+
+// newPlainMember adds a member holding nothing but @everyone's grant.
+func (f *fixture) newPlainMember(t *testing.T, name string) snowflake.ID {
+	t.Helper()
+	id := f.next(t)
+	f.exec(t, `INSERT INTO users (id, username, email, display_name, created_at, updated_at)
+	           VALUES ($1,$2::text,$2::text||'@example.test',$2::text,now(),now())`, int64(id), name)
+	f.exec(t, `INSERT INTO guild_members (guild_id, user_id, joined_at) VALUES ($1,$2,now())`,
+		int64(f.guildID), int64(id))
+	return id
+}
+
+// TestASharedTagIsTheGuildsNotItsCreators is the third sweep finding, and the test gap /code-review
+// named: nothing reached the PermManageMessages branch of either path, because the moderator in every
+// existing test was also the tag's creator.
+//
+// A demoted creator kept the power to delete the tag — cascading away everybody else's applications of
+// it — and to strip other people's applications. Now both need the bit, for the creator as for anyone,
+// and a moderator who did not create the tag holds both.
+func TestASharedTagIsTheGuildsNotItsCreators(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	bystander := actorOf(f.newPlainMember(t, "bystander"))
+
+	shared, err := f.svc.Create(f.ctx, actorOf(f.mod), CreateInput{
+		GuildID: f.guildID, Name: "needs-review", IsShared: true,
+	})
+	require.NoError(t, err)
+	in := ApplyInput{ChannelID: f.channelID, MessageID: f.messageID, TagID: shared.ID}
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), in))
+
+	// Somebody with no bit, who neither applied nor created it, reaches neither path.
+	require.ErrorIs(t, f.svc.Unapply(f.ctx, bystander, in), httpx.ErrForbidden)
+	require.ErrorIs(t, f.svc.Delete(f.ctx, bystander, f.guildID, shared.ID), httpx.ErrForbidden)
+
+	// The creator loses the moderation bit.
+	f.exec(t, `DELETE FROM guild_member_roles WHERE guild_id = $1 AND user_id = $2`,
+		int64(f.guildID), int64(f.mod))
+
+	require.ErrorIs(t, f.svc.Unapply(f.ctx, actorOf(f.mod), in), httpx.ErrForbidden,
+		"a demoted creator must not strip a label somebody else applied")
+	require.ErrorIs(t, f.svc.Delete(f.ctx, actorOf(f.mod), f.guildID, shared.ID), httpx.ErrForbidden,
+		"a demoted creator must not delete a tag, and with it everybody else's applications")
+
+	// A moderator who did not create the tag holds both — the branch nothing reached before.
+	other := f.newPlainMember(t, "second-mod")
+	role := f.next(t)
+	f.exec(t, `INSERT INTO roles (id, guild_id, name, permissions, position, is_default, created_at, updated_at)
+	           VALUES ($1,$2,'mod2',$3,2,false,now(),now())`,
+		int64(role), int64(f.guildID), roles.PermManageMessages.Int64())
+	f.exec(t, `INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES ($1,$2,$3)`,
+		int64(f.guildID), int64(other), int64(role))
+
+	require.NoError(t, f.svc.Unapply(f.ctx, actorOf(other), in))
+	require.NoError(t, f.svc.Delete(f.ctx, actorOf(other), f.guildID, shared.ID))
+}
+
+// TestModerationOverSomebodyElsesTaggingIsAudited is the fourth sweep finding: rule 2 counts acting over
+// somebody else as administrative whoever does it, and a moderator removing a member's label wrote no
+// entry while deleting that member's message wrote one.
+//
+// Asserted in both directions, as M16 asserted filing: each act on your own tagging writes nothing, each
+// act over somebody else's writes exactly one entry, and none of them carries message content.
+func TestModerationOverSomebodyElsesTaggingIsAudited(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	shared, err := f.svc.Create(f.ctx, actorOf(f.mod), CreateInput{
+		GuildID: f.guildID, Name: "spam", IsShared: true,
+	})
+	require.NoError(t, err)
+	in := ApplyInput{ChannelID: f.channelID, MessageID: f.messageID, TagID: shared.ID}
+
+	// A member applying and removing their own label: nothing.
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), in))
+	require.NoError(t, f.svc.Unapply(f.ctx, actorOf(f.member), in))
+	require.Empty(t, f.auditEntries(t), "tagging your own way is not administrative")
+
+	// A moderator removing the member's label: one entry, naming whose it was.
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), in))
+	require.NoError(t, f.svc.Unapply(f.ctx, actorOf(f.mod), in))
+	require.Equal(t, []string{ActionTagRemove}, f.auditEntries(t))
+
+	var changes map[string]any
+	var target int64
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT target_id, changes FROM audit_log_entries WHERE guild_id = $1 AND action = $2`,
+		int64(f.guildID), ActionTagRemove).Scan(&target, &changes))
+	require.Equal(t, int64(f.messageID), target)
+	require.Equal(t, f.member.String(), changes["applied_by"], "the entry must say whose label was removed")
+	require.NotContains(t, changes, "content", "rule 13: ids and a tag name, never message content")
+
+	// A moderator deleting a shared tag only they ever applied: vocabulary, not authority over anybody.
+	solo, err := f.svc.Create(f.ctx, actorOf(f.mod), CreateInput{
+		GuildID: f.guildID, Name: "solo", IsShared: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.mod), ApplyInput{
+		ChannelID: f.channelID, MessageID: f.messageID, TagID: solo.ID,
+	}))
+	require.NoError(t, f.svc.Delete(f.ctx, actorOf(f.mod), f.guildID, solo.ID))
+	require.Equal(t, []string{ActionTagRemove}, f.auditEntries(t), "no entry for deleting your own vocabulary")
+
+	// A moderator deleting a shared tag that carries somebody else's label: one entry, with the count.
+	require.NoError(t, f.svc.Apply(f.ctx, actorOf(f.member), in))
+	require.NoError(t, f.svc.Delete(f.ctx, actorOf(f.mod), f.guildID, shared.ID))
+	require.Equal(t, []string{ActionTagRemove, ActionTagDelete}, f.auditEntries(t))
+
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT changes FROM audit_log_entries WHERE guild_id = $1 AND action = $2`,
+		int64(f.guildID), ActionTagDelete).Scan(&changes))
+	require.Equal(t, map[string]any{"from": "spam"}, changes["name"])
+	require.EqualValues(t, 1, changes["applications_removed"])
+}
+
+// TestANameMustNotCarryANul is the fifth: Postgres cannot store U+0000 in text, JSON decodes it, and the
+// insert failed as a 500.
+func TestANameMustNotCarryANul(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	_, err := f.svc.Create(f.ctx, actorOf(f.member), CreateInput{GuildID: f.guildID, Name: "a\x00b"})
+	require.ErrorIs(t, err, httpx.ErrBadRequest)
+}
+
+// TestCreatingInAGuildThatIsGoneIsNotFound covers the foreign-key half of the fifth finding. An Instance
+// Admin short-circuits layer 1 without reading the guild row (M72 owns changing that), so a guild id
+// naming nothing reached the insert and failed as a 500.
+func TestCreatingInAGuildThatIsGoneIsNotFound(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	operator := actorOf(f.newInstanceAdmin(t))
+
+	_, err := f.svc.Create(f.ctx, operator, CreateInput{GuildID: f.next(t), Name: "ghost", IsShared: true})
+	require.ErrorIs(t, err, httpx.ErrNotFound)
+}

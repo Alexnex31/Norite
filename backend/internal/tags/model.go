@@ -81,3 +81,25 @@ type AppliedTag struct {
 	AppliedBy snowflake.ID `json:"applied_by"`
 	AppliedAt time.Time    `json:"applied_at"`
 }
+
+// The two verbs this package writes to `audit_log_entries`, and when (rule 2).
+//
+// Tagging is mostly outside rule 2: applying a tag, or removing one you applied, exercises authority over
+// nobody, the way sending a message does. Two acts are over somebody else, and those are these verbs:
+//
+//   - `tag.remove`: taking an application off a message when somebody *else* applied it. After M17's
+//     sweep that is only ever a PermManageMessages holder, since a private tag can be applied by nobody
+//     but its owner.
+//   - `tag.delete`: deleting a shared tag while other people's applications of it exist, because the
+//     cascade takes their labels with it. A shared tag nobody else has used is vocabulary and nothing
+//     more, and its deletion is recorded no more than its creation is (docs/security-ledger.md).
+//
+// Neither payload carries message content: ids, the tag's name and a count. Rule 13 is satisfied the way
+// messages.writeModerationAudit satisfies it, by there being nothing to exclude.
+//
+// Written here and validated by the reader in `guilds`, which cannot import this package. The two sides
+// are pinned equal by a test in cmd/server, the shape M15 established for `message.delete`.
+const (
+	ActionTagRemove = "tag.remove"
+	ActionTagDelete = "tag.delete"
+)

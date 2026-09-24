@@ -33,6 +33,13 @@ type Querier interface {
 	// messages on purpose (000020), but adding a *new* fact to something already removed is a different act,
 	// and a tag applied after deletion would surface a deleted message in a tag listing.
 	//
+	// `m.channel_id = channel_id` binds the message to the channel the route named, which is the channel that
+	// was authorized. The guild predicate alone let a member reach a message in a channel they cannot see
+	// through one they can — found by M17's manual pass, answering 204 where an id naming nothing answered
+	// 404. The service checks the same thing first (tags.loadMessageInChannel), because the repeat-detection
+	// after a refused insert would otherwise report an application on that message as success; this copy is
+	// the one the next writer inherits.
+	//
 	// ON CONFLICT DO NOTHING makes applying twice idempotent rather than an error, which is what a client
 	// retrying a request wants. The service distinguishes "already applied" from "refused" by the row count.
 	//
@@ -206,6 +213,11 @@ type Querier interface {
 	CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error)
 	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
 	CountMemberPrivateTags(ctx context.Context, arg CountMemberPrivateTagsParams) (int64, error)
+	// How many of a tag's applications somebody other than the actor made. Deleting a shared tag cascades
+	// every application of it, and a deletion that takes other people's labels with it is authority over
+	// them (rule 2), which is what decides whether `tag.delete` is written. Served by the primary key's
+	// leading tag_id.
+	CountMessageTagApplicationsByOthers(ctx context.Context, arg CountMessageTagApplicationsByOthersParams) (int64, error)
 	// Scoped API token queries.
 	//
 	// These are the long-lived, narrow-privilege credentials bots and local automation use, as opposed to the
@@ -1041,6 +1053,11 @@ type Querier interface {
 	// recognizable in pg_locks. Slot 1 is the migration lock; this is slot 2. Written in decimal because
 	// sqlc parses the literal, and the value is 0x4E4F524954450002 — "NORITE" then 0x0002.
 	LockInstanceBootstrap(ctx context.Context) error
+	// Holds a tag still while its deletion decides whether to write an audit entry. FOR UPDATE conflicts with
+	// the FOR KEY SHARE lock the foreign-key check on message_tag_applications takes, so an application
+	// inserted concurrently waits for this transaction rather than slipping in after the count below and
+	// being cascaded away unrecorded.
+	LockMessageTag(ctx context.Context, id int64) error
 	// Records that the address is confirmed.
 	//
 	// The WHERE guards against a race with an address change: the account's current email must still be the

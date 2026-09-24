@@ -120,6 +120,12 @@ var allAuditActions = []string{
 	// filing exercises authority over nobody, and rule 2 has meant administrative mutations since M15.
 	"report.resolve",
 	"report.dismiss",
+
+	// Written by the `tags` package (M17), by the same mechanism. Only acts over somebody else's tagging
+	// are audited — removing another member's application, and deleting a shared tag that carries one —
+	// so there is no `tag.create` or `tag.apply` here, for the reason there is no `report.create`.
+	"tag.remove",
+	"tag.delete",
 }
 
 // AuditActions returns every action this build writes.
