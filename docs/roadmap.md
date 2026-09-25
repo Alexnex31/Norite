@@ -920,8 +920,9 @@ of this section.
   result from the start (ADR 0026 — a verb without one is a verb the TUI's `M-x` cannot run), each with its
   schema in `contracts/cli-json/` (rule 15):
 
-  - **`norite guild`** — create, show, rename, delete, and the audit-log read (M12, M14); **`channel`**,
-    **`role`**, **`member`** and **`overwrite`** over the rest of M12 and M13, role reorder included.
+  - **`norite guild`** — create, show, rename, delete, transfer (M13a), and the audit-log read (M12,
+    M14); **`channel`**, **`role`**, **`member`** and **`overwrite`** over the rest of M12 and M13, role
+    reorder included.
     These close the largest client gap in the plan: twenty-one routes that no screen and no verb could
     call, found at M15's planning by reading one document against another rather than by anything
     failing.
