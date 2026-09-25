@@ -334,8 +334,8 @@ func (s *Service) RemoveMember(
 		// candidate users, which is precisely the oracle roles.ErrNotAMember, authorize's two refusals and
 		// even pathID's 404-on-unparseable exist to close. Found by a security review of this milestone.
 		//
-		// Nothing grants this: ownership transfer is the operation that makes removing an owner reachable,
-		// and it is not this milestone.
+		// Nothing grants this. Ownership transfer (TransferOwnership, M13a) is what makes removing a former
+		// owner reachable: after it they are an ordinary member.
 		if snowflake.ID(guild.OwnerID) == userID {
 			return httpx.Errorf(ErrCannotRemoveOwner,
 				"transfer ownership before leaving a guild you own")

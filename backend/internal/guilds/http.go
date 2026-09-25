@@ -23,10 +23,15 @@ import (
 type Handler struct {
 	svc      *Service
 	validate *validator.Validate
+
+	// authSvc is what RequireLiveSession asks whether the caller's device is still signed in, for the one
+	// guild route that needs it (the ownership transfer). Nil on the route-set test's service-less router,
+	// where RequireLiveSession fails closed rather than declining to mount — M10's lesson.
+	authSvc *auth.Service
 }
 
 // NewHandler builds the guild HTTP handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc *Service, authSvc *auth.Service) *Handler {
 	validate := validator.New(validator.WithRequiredStructEnabled())
 
 	// Report the wire name, not the Go field name — the same registration auth.NewHandler makes, for the
@@ -39,7 +44,7 @@ func NewHandler(svc *Service) *Handler {
 		return name
 	})
 
-	return &Handler{svc: svc, validate: validate}
+	return &Handler{svc: svc, validate: validate, authSvc: authSvc}
 }
 
 // Routes mounts the guild endpoints.
@@ -71,6 +76,14 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(read).Get("/", h.getGuild)
 		r.With(write).Patch("/", h.updateGuild)
 		r.With(write).Delete("/", h.deleteGuild)
+
+		// Transferring ownership is never delegable, which is the difference from deletion above. Deleting
+		// destroys; transferring hands layer 2 to somebody, and a token able to do that can hand it to its
+		// attacker's account — escalation rather than damage, the reason token minting needs a user actor.
+		// A live session too, because an access token outlives its sign-out by up to fifteen minutes and
+		// giving a guild away is not something a signed-out device should still be able to do (§17.10).
+		r.With(write, auth.RequireUserActor, auth.RequireLiveSession(h.authSvc)).
+			Post("/owner", h.transferOwnership)
 
 		r.With(read).Get("/channels", h.listChannels)
 		r.With(write).Post("/channels", h.createChannel)
@@ -211,6 +224,38 @@ func (h *Handler) deleteGuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type transferOwnershipRequest struct {
+	UserID string `json:"user_id" validate:"required"`
+}
+
+func (h *Handler) transferOwnership(w http.ResponseWriter, r *http.Request) {
+	var req transferOwnershipRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+
+	// An id in the body is input, so a malformed one is a 400 naming the field — the parent_id rule, not
+	// the path rule. "0" parses and no generator mints it, so it is refused the same way.
+	to, err := snowflake.Parse(req.UserID)
+	if err != nil || to == 0 {
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "user_id is not a valid id"))
+		return
+	}
+
+	guild, err := h.svc.TransferOwnership(r.Context(), actor, guildID, to)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, guild)
 }
 
 // --- channels ---

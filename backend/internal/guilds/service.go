@@ -75,8 +75,8 @@ var (
 	// ErrCannotRemoveOwner reports an attempt to remove the guild owner from their own guild.
 	//
 	// Not a permission question: nothing in ADR 0008 grants the authority, because the owner *is* layer 2
-	// and a guild whose owner is not a member has no layer 2 at all. Ownership transfer is the operation
-	// that would make this reachable, and it is not this milestone.
+	// and a guild whose owner is not a member has no layer 2 at all. Ownership transfer (M13a) is the way
+	// out: once somebody else owns the guild, the former owner is an ordinary member and may leave.
 	ErrCannotRemoveOwner = errors.New("guilds: the owner cannot be removed from their own guild")
 )
 

@@ -239,7 +239,7 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		Health:   health,
 		Auth:     auth.NewHandler(svc),
 		AuthSvc:  svc,
-		Guilds:   guilds.NewHandler(guildsSvc),
+		Guilds:   guilds.NewHandler(guildsSvc, svc),
 		Messages: messages.NewHandler(messagesSvc),
 		Reports:  reports.NewHandler(reportsSvc),
 		Tags:     tags.NewHandler(tagsSvc),

@@ -82,6 +82,41 @@ RETURNING *;
 -- nicety — it is the invariant guild creation establishes in its transaction.
 DELETE FROM roles WHERE id = $1 AND guild_id = $2 AND NOT is_default;
 
+-- name: TransferGuildOwnership :one
+-- Hands a guild to another member (M13a), with every guard that can be raced in the statement rather than
+-- in a check before it — the discipline ConsumePasswordResetToken and RedeemInstanceInvite set:
+--
+--   * `owner_id = from_owner` — the caller read the owner a moment ago and authorized on it, and a transfer
+--     that committed in between must make this one match nothing rather than hand the guild on from
+--     somebody who no longer holds it;
+--   * the recipient is a member *now* — a kick committed after the service's own read must not leave a
+--     guild owned by a non-member, which has no layer 2 at all;
+--   * the recipient's account is not deleted, for the reason M76a gives: a guild whose owner is deleted is
+--     not a guild with a NULL owner, and handing one to a deleted account manufactures exactly that.
+--
+-- The UPDATE takes the row lock RemoveMember's FOR SHARE waits on, so a kick in flight sees this result.
+-- Zero rows means one of the guards refused; the service reads nothing back to tell which, because each is
+-- the same answer to the caller.
+UPDATE guilds
+SET owner_id = sqlc.arg(to_owner), updated_at = now()
+WHERE guilds.id = sqlc.arg(guild_id)
+  AND guilds.owner_id = sqlc.arg(from_owner)
+  AND EXISTS (
+    SELECT 1 FROM guild_members gm
+    JOIN users u ON u.id = gm.user_id
+    WHERE gm.guild_id = sqlc.arg(guild_id) AND gm.user_id = sqlc.arg(to_owner) AND u.deleted_at IS NULL
+  )
+RETURNING *;
+
+-- name: IsLiveGuildMember :one
+-- Whether an account is a member of a guild and not deleted — the transfer's recipient check, read before
+-- the owned-guild ceiling so the ceiling is never measured for somebody outside the guild.
+SELECT EXISTS (
+  SELECT 1 FROM guild_members gm
+  JOIN users u ON u.id = gm.user_id
+  WHERE gm.guild_id = $1 AND gm.user_id = $2 AND u.deleted_at IS NULL
+);
+
 -- name: CountGuildsOwnedBy :one
 -- How many guilds an account owns, for the creation cap.
 --

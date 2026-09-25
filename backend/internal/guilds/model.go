@@ -66,6 +66,11 @@ const (
 	// that pins the two vocabularies *disjoint*.
 	ActionGuildMessageAuditEnable  = "guild.message_audit_enable"
 	ActionGuildMessageAuditDisable = "guild.message_audit_disable"
+
+	// ActionGuildOwnerTransfer is its own verb rather than a key in guild.update's diff, for the reason the
+	// recording switch above is: who handed a guild to whom is the entry somebody goes looking for first,
+	// and it must not be a field buried in a payload (M13a).
+	ActionGuildOwnerTransfer = "guild.owner_transfer"
 )
 
 // allAuditActions is every verb above, which is the list the block's own comment says M14 would need.
@@ -100,6 +105,7 @@ var allAuditActions = []string{
 	ActionOverwriteDelete,
 	ActionGuildMessageAuditEnable,
 	ActionGuildMessageAuditDisable,
+	ActionGuildOwnerTransfer,
 
 	// Written by the `messages` package (M15), not by this one, and listed here because this is the
 	// vocabulary the *reader* validates against: an `action` filter naming a verb absent from this slice

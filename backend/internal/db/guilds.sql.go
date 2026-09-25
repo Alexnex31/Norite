@@ -820,6 +820,28 @@ func (q *Queries) GetRoleForUpdate(ctx context.Context, arg GetRoleForUpdatePara
 	return i, err
 }
 
+const isLiveGuildMember = `-- name: IsLiveGuildMember :one
+SELECT EXISTS (
+  SELECT 1 FROM guild_members gm
+  JOIN users u ON u.id = gm.user_id
+  WHERE gm.guild_id = $1 AND gm.user_id = $2 AND u.deleted_at IS NULL
+)
+`
+
+type IsLiveGuildMemberParams struct {
+	GuildID int64
+	UserID  int64
+}
+
+// Whether an account is a member of a guild and not deleted — the transfer's recipient check, read before
+// the owned-guild ceiling so the ceiling is never measured for somebody outside the guild.
+func (q *Queries) IsLiveGuildMember(ctx context.Context, arg IsLiveGuildMemberParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isLiveGuildMember, arg.GuildID, arg.UserID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const listGuildAuditLog = `-- name: ListGuildAuditLog :many
 SELECT id, guild_id, actor_id, action, target_id, changes, created_at
 FROM audit_log_entries
@@ -1316,6 +1338,56 @@ WHERE r.id = ranked.id
 func (q *Queries) ShiftRolePositionsUp(ctx context.Context, guildID int64) error {
 	_, err := q.db.Exec(ctx, shiftRolePositionsUp, guildID)
 	return err
+}
+
+const transferGuildOwnership = `-- name: TransferGuildOwnership :one
+UPDATE guilds
+SET owner_id = $1, updated_at = now()
+WHERE guilds.id = $2
+  AND guilds.owner_id = $3
+  AND EXISTS (
+    SELECT 1 FROM guild_members gm
+    JOIN users u ON u.id = gm.user_id
+    WHERE gm.guild_id = $2 AND gm.user_id = $1 AND u.deleted_at IS NULL
+  )
+RETURNING id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled
+`
+
+type TransferGuildOwnershipParams struct {
+	ToOwner   int64
+	GuildID   int64
+	FromOwner int64
+}
+
+// Hands a guild to another member (M13a), with every guard that can be raced in the statement rather than
+// in a check before it — the discipline ConsumePasswordResetToken and RedeemInstanceInvite set:
+//
+//   - `owner_id = from_owner` — the caller read the owner a moment ago and authorized on it, and a transfer
+//     that committed in between must make this one match nothing rather than hand the guild on from
+//     somebody who no longer holds it;
+//   - the recipient is a member *now* — a kick committed after the service's own read must not leave a
+//     guild owned by a non-member, which has no layer 2 at all;
+//   - the recipient's account is not deleted, for the reason M76a gives: a guild whose owner is deleted is
+//     not a guild with a NULL owner, and handing one to a deleted account manufactures exactly that.
+//
+// The UPDATE takes the row lock RemoveMember's FOR SHARE waits on, so a kick in flight sees this result.
+// Zero rows means one of the guards refused; the service reads nothing back to tell which, because each is
+// the same answer to the caller.
+func (q *Queries) TransferGuildOwnership(ctx context.Context, arg TransferGuildOwnershipParams) (Guild, error) {
+	row := q.db.QueryRow(ctx, transferGuildOwnership, arg.ToOwner, arg.GuildID, arg.FromOwner)
+	var i Guild
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.OwnerID,
+		&i.IconHash,
+		&i.Description,
+		&i.SystemChannelID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
+	)
+	return i, err
 }
 
 const unassignRoleFromMember = `-- name: UnassignRoleFromMember :execrows

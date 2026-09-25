@@ -668,6 +668,9 @@ type Querier interface {
 	// "Deleted User", and this row is one of them. Without the join, deleting an admin's account would leave
 	// their tier intact and usable by any credential still outstanding on it.
 	IsInstanceAdmin(ctx context.Context, userID int64) (bool, error)
+	// Whether an account is a member of a guild and not deleted — the transfer's recipient check, read before
+	// the owned-guild ceiling so the ceiling is never measured for somebody outside the guild.
+	IsLiveGuildMember(ctx context.Context, arg IsLiveGuildMemberParams) (bool, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
 	// One page of a channel's backlog (Milestone M15).
 	//
@@ -1334,6 +1337,21 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
+	// Hands a guild to another member (M13a), with every guard that can be raced in the statement rather than
+	// in a check before it — the discipline ConsumePasswordResetToken and RedeemInstanceInvite set:
+	//
+	//   * `owner_id = from_owner` — the caller read the owner a moment ago and authorized on it, and a transfer
+	//     that committed in between must make this one match nothing rather than hand the guild on from
+	//     somebody who no longer holds it;
+	//   * the recipient is a member *now* — a kick committed after the service's own read must not leave a
+	//     guild owned by a non-member, which has no layer 2 at all;
+	//   * the recipient's account is not deleted, for the reason M76a gives: a guild whose owner is deleted is
+	//     not a guild with a NULL owner, and handing one to a deleted account manufactures exactly that.
+	//
+	// The UPDATE takes the row lock RemoveMember's FOR SHARE waits on, so a kick in flight sees this result.
+	// Zero rows means one of the guards refused; the service reads nothing back to tell which, because each is
+	// the same answer to the caller.
+	TransferGuildOwnership(ctx context.Context, arg TransferGuildOwnershipParams) (Guild, error)
 	// No guild predicate needed: the pair is the primary key, and a pair that crosses a guild could never have
 	// been written by the statement above. The authority check is the service's.
 	UnapplyMessageTag(ctx context.Context, arg UnapplyMessageTagParams) (int64, error)

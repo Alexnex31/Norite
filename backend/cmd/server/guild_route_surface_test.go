@@ -228,6 +228,10 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 			body: map[string]any{"status": "dismissed"},
 		},
 
+		// M13a. The stranger names themselves as the recipient, which is the takeover attempt, and must be
+		// refused as though the guild did not exist — before anything asks whether they are a member.
+		"POST /api/v1/guilds/{guild_id}/owner": {body: map[string]any{"user_id": f.strangerID}},
+
 		"GET /api/v1/guilds/{guild_id}":                    {},
 		"PATCH /api/v1/guilds/{guild_id}":                  {body: map[string]any{"name": "hijacked"}},
 		"DELETE /api/v1/guilds/{guild_id}":                 {},
@@ -446,6 +450,11 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 			want: http.StatusNoContent},
 		{route: "DELETE /api/v1/channels/{channel_id}", action: "channel.delete",
 			want: http.StatusNoContent},
+
+		{route: "POST /api/v1/guilds/{guild_id}/owner",
+			exempt: "hands the fixture's guild to another account, so every case after it would run as " +
+				"a non-owner; the entry is asserted in the guilds package by " +
+				"TestTransferringOwnershipWritesOneEntryNamingBothOwners"},
 
 		{route: "DELETE /api/v1/guilds/{guild_id}", action: "guild.delete",
 			exempt: "the entry is written in the transaction and removed by the cascade it records — " +

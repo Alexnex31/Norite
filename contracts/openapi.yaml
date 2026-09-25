@@ -2446,6 +2446,73 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /guilds/{guild_id}/owner:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    post:
+      summary: Transfer a guild's ownership
+      description: >
+        Hands the guild to another member (M13a). **The owner only**, or an Instance Admin, who is the way
+        out for a guild whose owner has gone. Not `MANAGE_GUILD` and not `ADMINISTRATOR`: ownership is the
+        tier no permission reaches, which is why deleting a guild is the owner's too.
+
+
+        **Never an API token, and never a signed-out session.** Deleting a guild destroys it; transferring
+        hands its highest authority to somebody, and a delegated credential able to do that could hand it
+        to its attacker's account. A token answers 403 whatever scopes it holds; an access token whose
+        session has been signed out answers 401.
+
+
+        The recipient must be a current member whose account is not deleted, and must be below the
+        owned-guild limit, which this is otherwise the one way past. They are not asked to accept. A
+        recipient who is not a member answers **404**, the same as a guild that does not exist. The former
+        owner stays a member, with whatever roles they held, and may then leave.
+
+
+        Writes a `guild.owner_transfer` audit entry in the same transaction, with `owner_id` as the changed
+        field.
+      operationId: transferGuildOwnership
+      tags: [guilds]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              additionalProperties: false
+              properties:
+                user_id:
+                  $ref: "#/components/schemas/Snowflake"
+      responses:
+        "200":
+          description: The guild, now owned by the recipient.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Guild"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            The caller is not the owner or an Instance Admin, or authenticated with an API token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The recipient already owns as many guilds as an account may.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /guilds/{guild_id}/channels:
     parameters:
       - name: guild_id
@@ -5524,6 +5591,9 @@ components:
         # validates an `action` filter against.
         - guild.message_audit_enable
         - guild.message_audit_disable
+        # M13a. Its own verb rather than an `owner_id` key in `guild.update`'s diff, for the reason the
+        # recording switch has its own: who handed a guild to whom is the entry somebody looks for first.
+        - guild.owner_transfer
         # Written by the messages service, not by guilds, and only on the moderator path — an author
         # deleting their own message writes nothing (rule 2 covers administrative mutations). It is in
         # this enum because the audit-log reader accepts it as an `action` filter and returns entries
