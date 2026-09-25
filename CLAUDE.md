@@ -380,9 +380,9 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M17 done.** Full dependency-ordered roadmap (`M0` through
-`M125` plus suffixed insertions, phase-grouped, with Phase P — the flagship Kubernetes deployment —
-running as an explicitly parallel track) is in `docs/roadmap.md`.
+**Phase B complete through M11a; Phase C open, M17 done, M13a its one remaining entry.** Full
+dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
+flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
 **A completed milestone's line says `done` and nothing about its tag.** Older entries below still carry
 `(tag mN)` and are left alone rather than rewritten, but nothing new adds one — and in particular nothing
@@ -394,13 +394,19 @@ the milestone number lowercased, so a copy here carries no information and only 
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Twelve exist:
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Eleven exist:
 `M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
-surface), `M16b` (opt-in per-guild message audit), `M17a` (Phase C's command-tree verbs), `M20a` (first
-usable client), `M56a` (message reactions), `M62a` (guild info and per-guild preferences), `M67a`
+surface), `M16b` (opt-in per-guild message audit), `M20a` (first usable client), `M56a` (message
+reactions), `M62a` (guild info and per-guild preferences), `M67a`
 (registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional) and
 `M76a` (self-service account export and deletion). `M72b` was the first `b`, which the convention already
 allowed — letters run `a`, `b`, `c` in insertion order after the same number.
+
+**A suffixed milestone can be retired, and its number is then never reused.** `M17a` (Phase C's
+command-tree verbs) was the first, folded into M20 on 2026-09-25 when its planning found the verbs could
+not authenticate before M20's socket exists. Retiring rather than renumbering is the convention's own
+argument applied in reverse: nothing else moves, and a reference to `M17a` in history still means what it
+meant. Reusing the letter would make that reference ambiguous.
 
 **This list said "seven" and omitted `M76a` until M15's planning**, because M14 inserted that milestone
 and did not come back here. A list enumerating its own members is one that drifts silently on the next
@@ -686,8 +692,8 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   **zero indexes** — six ship. A `guild_id` index was retired by measuring and then restored by measuring
   again: the migration claimed the two partial unique indexes, having complementary predicates, cover
   `guild_id` together, which Postgres never does for a query not naming `is_shared` — and the cascade from
-  `guilds` does not. 12,800 rows hid it; 600,000 showed a 56 ms sequential scan against 0.7 ms. It also cited an ADR for the scope
-  decision that was never written.
+  `guilds` does not. 12,800 rows hid it; 600,000 showed a 56 ms sequential scan against 0.7 ms. It also
+  cited an ADR for the scope decision that was never written.
 
   **The primary key hid the index that mattered.** `(tag_id, message_id)` serves no lookup on
   `message_id`, which is both the cascade from `messages` and the only way to render a tagged message —
