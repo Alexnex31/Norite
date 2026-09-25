@@ -535,6 +535,14 @@ WHERE c.guild_id = sqlc.arg(guild_id)::bigint
 -- name: GetGuildForUpdate :one
 SELECT * FROM guilds WHERE id = $1 FOR UPDATE;
 
+-- name: GetGuildForShare :one
+-- The guild row held still for a *reader of owner_id* that then acts on it: RemoveMember, whose refusal to
+-- remove the owner is a check followed by a delete. FOR SHARE rather than FOR UPDATE because the removal
+-- does not write this row, and two concurrent kicks in one guild have no reason to queue behind each
+-- other — but it conflicts with the FOR NO KEY UPDATE an ownership transfer's UPDATE takes, so a kick waits
+-- for a transfer in flight and reads the owner it committed (M13a).
+SELECT * FROM guilds WHERE id = $1 FOR SHARE;
+
 -- name: GetRoleForUpdate :one
 SELECT * FROM roles WHERE id = $1 AND guild_id = $2 FOR UPDATE;
 

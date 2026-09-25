@@ -265,7 +265,12 @@ func (s *Service) RemoveMember(
 	ctx context.Context, actor auth.Actor, guildID, userID snowflake.ID,
 ) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		guild, err := q.GetGuild(ctx, int64(guildID))
+		// Locked, because the owner check below is a check followed by a delete and M13a made its input
+		// change. Read unlocked, a kick could see the old owner, pass, and then delete the member a
+		// concurrent transfer had just made owner — a guild owned by a non-member, which has no layer 2.
+		// FOR SHARE waits for a transfer in flight and reads what it committed; it does not make two
+		// kicks in one guild queue behind each other. TestAKickWaitsForAnOwnershipChangeAndSeesItsResult.
+		guild, err := q.GetGuildForShare(ctx, int64(guildID))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound

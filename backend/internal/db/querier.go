@@ -439,6 +439,12 @@ type Querier interface {
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	GetGuild(ctx context.Context, id int64) (Guild, error)
+	// The guild row held still for a *reader of owner_id* that then acts on it: RemoveMember, whose refusal to
+	// remove the owner is a check followed by a delete. FOR SHARE rather than FOR UPDATE because the removal
+	// does not write this row, and two concurrent kicks in one guild have no reason to queue behind each
+	// other — but it conflicts with the FOR NO KEY UPDATE an ownership transfer's UPDATE takes, so a kick waits
+	// for a transfer in flight and reads the owner it committed (M13a).
+	GetGuildForShare(ctx context.Context, id int64) (Guild, error)
 	// # The locking reads the audit diff needs (M14)
 	//
 	// Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is

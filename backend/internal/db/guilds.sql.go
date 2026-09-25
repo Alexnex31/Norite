@@ -566,6 +566,32 @@ func (q *Queries) GetGuild(ctx context.Context, id int64) (Guild, error) {
 	return i, err
 }
 
+const getGuildForShare = `-- name: GetGuildForShare :one
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR SHARE
+`
+
+// The guild row held still for a *reader of owner_id* that then acts on it: RemoveMember, whose refusal to
+// remove the owner is a check followed by a delete. FOR SHARE rather than FOR UPDATE because the removal
+// does not write this row, and two concurrent kicks in one guild have no reason to queue behind each
+// other — but it conflicts with the FOR NO KEY UPDATE an ownership transfer's UPDATE takes, so a kick waits
+// for a transfer in flight and reads the owner it committed (M13a).
+func (q *Queries) GetGuildForShare(ctx context.Context, id int64) (Guild, error) {
+	row := q.db.QueryRow(ctx, getGuildForShare, id)
+	var i Guild
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.OwnerID,
+		&i.IconHash,
+		&i.Description,
+		&i.SystemChannelID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
+	)
+	return i, err
+}
+
 const getGuildForUpdate = `-- name: GetGuildForUpdate :one
 
 SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR UPDATE
