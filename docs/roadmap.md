@@ -657,10 +657,10 @@ of this section.
   and M74 do not renumber, and both are refused at the boundary — an accepted-but-unroutable report is
   filed into a queue that never shows it, which is M14's unknown-filter lesson pointed at a write.
 
-  The client half is **M17a's**, assigned during this milestone's planning: nothing anywhere gave a client
-  a way to file or read a report, and the only report surface in `docs/design/tui/` is `6c`, which is
-  M74's instance queue. A guild-moderator triage *screen* remains unassigned and M17a's entry says so
-  rather than leaving the gap looking closed.
+  The client half is **M20's**, assigned during this milestone's planning (to M17a, folded into M20 on
+  2026-09-25): nothing anywhere gave a client a way to file or read a report, and the only report surface
+  in `docs/design/tui/` is `6c`, which is M74's instance queue. A guild-moderator triage *screen* remains
+  unassigned and M20's entry says so rather than leaving the gap looking closed.
 - **M16a — Message edit history read surface**: done. `GET /channels/{channel_id}/messages/{message_id}/history`
   over the `message_edit_history` table M15 writes and nothing read, migration `000022`,
   `backend/internal/messages/history.go`, the `messages.moderate` scope, and
@@ -829,115 +829,12 @@ of this section.
   **`C-c t` was a global reserved chord for a feature with no client.** `KEYMAP.md` binds it to "tag
   message" and M74's timeout verb sits at `C-c C-t` *because* tag already held the shorter one — so
   tagging had displaced another milestone's binding while no screen drew it and no milestone built a
-  caller. The verbs went to M17a on this branch's first commit.
+  caller. The verbs went to M17a on this branch's first commit, and with M17a to M20 on 2026-09-25.
 
   Depended on M15 (messages). Done when: a tag created in one channel can be applied to a message in a
   different channel of the same guild, and permission gating on shared-tag creation is enforced — both
   met, and the cross-guild refusal that the done-when did not ask for is enforced in the statement and
   proved in three runs, because it is guarded twice.
-- **M17a — Phase C's command-tree verbs**: the `norite guild`, `norite channel` and `norite role` command
-  groups over the REST surface M12, M13 and M14 built. Assigned 2026-09-15.
-
-  **Retitled 2026-09-20**, from "Guild administration verbs", because it had stopped being one: the report
-  verbs arrived from M16's planning and the message verbs from M16a's, and neither is guild
-  administration. The title now names what the milestone has become — every command-tree verb Phase C's
-  REST surface owes — which is also what keeps it true if a sixth surface lands here. The literal
-  alternative, enumerating the three groups, was declined for the reason the suffixed-milestone list in
-  `CLAUDE.md` is a standing warning: a name that lists its own members goes stale on the next addition,
-  silently, and that list said "seven" and omitted `M76a` for a whole milestone.
-
-  **It closes the largest client gap in the plan, and the gap was invisible because nothing failed.**
-  M12–M14 shipped twenty-one guild routes — guild CRUD, channels, roles, the position hierarchy, permission
-  overwrites, member role assignment and the audit log — and **no milestone anywhere gave a client a way to
-  call any of them**: not a TUI screen (the 27 in `docs/design/tui/` include none for guild settings), not a
-  CLI verb (no entry mentioned `norite guild`), nothing. M48 standardizes `--json` output for "every
-  data-printing verb" and never says who creates these; ADR 0026 requires every verb to be `M-x`-invocable
-  and so assumes they exist. Found at M15's planning, the same way M76a and M16a were: by reading one
-  document against another rather than by anything breaking.
-
-  **Placed here because this is where its dependencies complete**, not for convenience: the verbs need the
-  REST endpoints (M14) and the command tree (M2), and nothing from Phase D. Every verb is a `--json`
-  structured result from the start rather than printed text retrofitted at M48 — that is ADR 0026's
-  requirement, and M48's own entry says a verb without one is a verb the TUI cannot run.
-
-  **It also makes Phase C hand-testable.** M13's channel-visibility bug was found by driving a real guild by
-  hand and M14's compose breakage the same way; today that means curl against a snowflake id copied out of
-  psql. Rule 19 applies throughout — every guild name, channel name, role name and audit entry these print
-  is text a stranger's instance chose, so it goes through `cli/internal/termsafe` (M7).
-
-  **It takes the report verbs too, assigned 2026-09-17 from M16's planning.** M16 builds four report
-  routes and the same reading that produced this milestone found the same gap behind them: no entry
-  anywhere gave a client a way to file a report or read a triage queue, and the only report surface in
-  `docs/design/tui/` is `6c`, which is explicitly M74's instance-admin queue. So `norite report` — file,
-  list, resolve, dismiss — lands here rather than becoming the third instance of a gap this project has
-  now found twice. The dependency is already satisfied by position: M16 precedes M17, which precedes this.
-
-  Rule 19 bites harder on these than on the guild verbs. A report's `detail` is free text written by a
-  stranger and its excerpt is message content written by whoever was reported, so both are exactly the
-  untrusted input `termsafe` exists for — and the excerpt is the first place this CLI prints content the
-  instance itself holds under a moderation permission.
-
-  **And the message verbs, assigned 2026-09-20 from M16a's planning.** The same reading found the same gap
-  a fourth time, and this time behind the oldest routes in Phase C: M15 shipped four message endpoints and
-  M16a adds a fifth, and **`norite message` appears nowhere in this file**. The only client that reads a
-  message anywhere in the plan is M20a's single pane. So `norite message` — list, send, edit, delete, and
-  `history` for M16a's moderation read — lands here, which makes this milestone the home of every
-  command-tree verb Phase C's REST surface owes rather than the fifth entry for one recurring gap.
-  Dependencies are satisfied by position: M15 and M16a both precede M17, which precedes this.
-
-  **It is not M20a's, and the two are not redundant.** M20a draws a TUI that reads its backlog from the
-  daemon's in-memory scrollback over the local socket; these are one-action-and-exit REST calls through
-  `apiclient`, pipeable and scriptable. ADR 0026 is what makes them complement rather than duplicate each
-  other: the CLI and TUI share one command tree, so a verb built here is a verb M20a's client inherits and
-  `M-x` can run, not one it reimplements. Rule 19 lands hardest here of the three groups — message content
-  is the untrusted text this CLI prints most of, and `norite message history` prints what somebody
-  deliberately edited out, which is the one output whose value depends on it being shown exactly as stored.
-
-  **And M16b's recording log, assigned 2026-09-22 from its planning.** A fifth instance of the same gap,
-  and the first one caught in the same week the surface was designed rather than a milestone later. M16b
-  adds `GET /guilds/{guild_id}/message-audit` behind a permission bit of its own and puts the
-  `message_audit_enabled` toggle on `PATCH /guilds/{guild_id}`, and neither has a caller: the only client
-  surface anywhere in the plan that mentions recording is `6e` at M62a, which is member-facing, read-only
-  and deliberately holds nothing gated on a permission. So the log's read joins `norite guild` here, and
-  the toggle is a flag on the guild update verb rather than a group of its own — it is one boolean on an
-  existing endpoint, and a `norite guild record on|off` would be a second way to spell a field.
-
-  Two things make these verbs different from the other four groups rather than more of the same. The
-  toggle is **owner-only and refused to an Instance Admin** until M72 (M16b's decision), so this is the
-  first verb whose refusal a person holding the highest tier on the instance can hit — and reporting that
-  as a usage error rather than a crash is the done-when below applied to a case no other verb has. And
-  the read prints **every message in the guild**, including channels the caller cannot view, which makes
-  it the largest volume of untrusted text this CLI emits anywhere: rule 19 applies as it does to
-  `norite message`, and the paging matters more, because a guild's recording log has no ceiling where a
-  channel backlog at least has a page.
-
-  **And the tag verbs, assigned 2026-09-24 from M17's planning.** The sixth instance, and this one arrived
-  with a keybinding already reserved for it: `KEYMAP.md` binds `C-c t` to "tag message" at **global**
-  scope, and M74's timeout verb sits at `C-c C-t` *because* tag already held the shorter chord. So tagging
-  has displaced another milestone's binding, and until this assignment no screen drew it, no milestone
-  built a client for it, and M17 was referenced exactly once in this whole file — its own entry. That is
-  §16's hazard running backwards: the keymap is a route through which scope enters without passing the
-  roadmap, and here it reserved a global chord for a feature with no caller.
-
-  So `norite tag` — create, list, apply, unapply, delete — lands here with the other five groups. Rule 19
-  applies as it does to the rest: a tag name is text a stranger chose, printed beside message content.
-
-  **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
-  a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
-  `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
-  Whoever assigns it should read this paragraph first, because a gap recorded as half-closed is one nobody
-  looks at again.
-
-  Depends on M14 (the endpoints), M16 (the report endpoints), M16a (the edit-history read), M16b (the
-  recording toggle and its log), M17 (tags) and M10 (`apiclient`, the transport). Done when: a guild can be created,
-  renamed, given a role and a channel, have an overwrite written and its audit log read, entirely from the
-  command line; a report can be filed and triaged the same way, with the reporter absent from every triage
-  output because M16's API never sends it; a channel's backlog can be read, posted to, edited and deleted
-  from the command line, and a message's prior versions read by a moderator; a guild's recording can be
-  switched on and off by its owner and the resulting log paged; a tag can be created, applied to a message
-  in another channel of the same guild, and removed; with `--json` output validated against
-  `contracts/cli-json/` and a non-member's refusal reported as a usage error rather than a crash.
-
 #### Phase D — Real-time gateway and daemon
 
 - **M18 — Gateway protocol core (backend)**: op-codes, the HELLO/IDENTIFY/READY handshake (carrying the
@@ -997,9 +894,86 @@ of this section.
   semver MAJOR-must-match/MINOR-window version-compatibility handshake. The daemon's write path to each
   attach client is asynchronous and bounded (a per-connection outbound channel with fixed capacity, fed by its
   own writer goroutine); a client whose socket buffer fills gets dropped rather than blocking the daemon.
-  Done when: a CLI-side test client attaches to the daemon's socket and receives the same DISPATCH events the
-  daemon itself gets from the real gateway; a deliberately frozen test client gets dropped without stalling
-  delivery to a second, healthy attached client.
+  **The socket also relays authenticated requests, which this entry did not say until 2026-09-25.** ADR
+  0011 makes the daemon the sole holder of its account's tokens and says every authenticated action an
+  attach client triggers "is relayed through the daemon over the local IPC socket" — and this entry
+  described only DISPATCH flowing *to* clients, with nothing letting one ask the daemon to *perform* a
+  request. No milestone owned that operation, and every client that sends anything needs it: M20a's
+  composer, and every verb below. Found by M17a's planning: a requirement an ADR states and no milestone
+  owns, which is the shape M76a and M16a each were. So the socket carries a request/response operation: the
+  attach client names a method, a path and a body; the daemon attaches the account's access token,
+  performs the call, and returns the status and body. The token never crosses the socket. This is the
+  OS-permission-protected tier (rule 16), and the daemon keeps its session live for it — refreshing
+  before expiry against M19's clock offset — rather than spending the refresh token once at startup as it
+  has since M7.
+
+  **And Phase C's command-tree verbs, folded in 2026-09-25 from M17a, which is retired rather than
+  renumbered.** M17a assigned six command groups over the 37 routes M12–M17 built and placed them in
+  Phase C "because this is where its dependencies complete" — and its planning found they could not be
+  built there: every verb needs an account's access token, the only designed way to get one is the relay
+  above, and the shortcut of the CLI refreshing the stored token itself would sign an account out of its
+  device the first time a script ran two verbs at once (M4's reuse detection reads a token presented
+  twice as theft). So the verbs live where their transport is. `M17a` is no longer a milestone; its
+  number is not reused.
+
+  The groups, each a one-action-and-exit verb relayed through the daemon, each a `--json` structured
+  result from the start (ADR 0026 — a verb without one is a verb the TUI's `M-x` cannot run), each with its
+  schema in `contracts/cli-json/` (rule 15):
+
+  - **`norite guild`** — create, show, rename, delete, and the audit-log read (M12, M14); **`channel`**,
+    **`role`**, **`member`** and **`overwrite`** over the rest of M12 and M13, role reorder included.
+    These close the largest client gap in the plan: twenty-one routes that no screen and no verb could
+    call, found at M15's planning by reading one document against another rather than by anything
+    failing.
+  - **`norite report`** — file, list, show, resolve, dismiss (M16). The reporter is absent from every
+    triage output because M16's API never sends it. A report's `detail` is a stranger's free text and its
+    excerpt is content the instance holds under a moderation permission, so rule 19 bites harder here than
+    on the names above.
+  - **`norite message`** — list, send, edit, delete, and `history` for M16a's moderation read. Distinct from
+    M20a, not redundant with it: M20a draws a pane over the daemon's scrollback; these are pipeable
+    one-shot calls, and because the CLI and TUI share one command tree (ADR 0026) they are verbs M20a's
+    client inherits rather than reimplements. `history` prints what somebody deliberately edited out, the
+    one output whose value depends on being shown exactly as stored.
+  - **M16b's recording**: the toggle is a flag on the guild update verb rather than a group of its own —
+    one boolean on an existing endpoint, where `norite guild record on|off` would be a second way to spell
+    a field — and the log is read under `norite guild`. The toggle is owner-only and refused to an Instance
+    Admin until M72, so it is the first verb whose refusal the highest tier on the instance can hit; the
+    log prints every message in the guild, channels the caller cannot view included, and has no ceiling,
+    so its paging matters more than any other list's.
+  - **`norite tag`** — create, list, apply, unapply, delete (M17), with `C-c t` already reserved for it in
+    `KEYMAP.md` at global scope.
+
+  Rule 19 applies throughout: every guild, channel and role name, audit entry, report, message and tag
+  name these print is text a stranger's instance chose, so it goes through `termsafe`. That now includes
+  `--json`: `encoding/json` writes C1 controls and bidi overrides raw, so a JSON listing printed to a
+  terminal can drive it; every rune `termsafe` would remove is written as a `\u` escape instead, which is
+  lossless and inert. Four more questions M17a's planning raised are this milestone's to settle rather
+  than settled here: an exit code for an instance's refusal distinct from a crash; one confirmation helper
+  for the six verbs that destroy something (guild, channel, role, member, tag, message); ids rather than
+  names, since names are not unique and matching them can pick the wrong object silently; and paging
+  without an unbounded `--all`, because the recording log has no ceiling.
+
+  **It builds `GET /users/@me/guilds`, which §2 lists and nothing owned.** Without it no verb can tell a
+  person which guilds they are in, and every other verb takes a guild id. Uncursored and bounded, like the
+  channel and role lists: accounts own at most 50 guilds (M12), joining does not exist until M57, and M72a's
+  joined cap of 100 is already the READY payload bound. M18's READY is its second consumer.
+
+  **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
+  a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
+  `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
+
+  Depends on M14, M15, M16, M16a, M16b and M17 (the endpoints) as well as M19. Done when: a CLI-side test
+  client attaches to the daemon's socket and receives the same DISPATCH events the daemon itself gets from
+  the real gateway; a deliberately frozen test client gets dropped without stalling delivery to a second,
+  healthy attached client; an attach client's request is performed with the daemon's credential and
+  answered, with no token ever crossing the socket, and two verbs run concurrently leave the account signed
+  in; and, entirely from the command line, a guild can be created, renamed, given a role and a channel,
+  have an overwrite written and its audit log read — a report filed and triaged with the reporter absent
+  from every triage output — a channel's backlog read, posted to, edited and deleted, and a message's prior
+  versions read by a moderator — a guild's recording switched on and off by its owner and its log paged —
+  a tag created, applied to a message in another channel of the same guild, and removed; with `--json`
+  output validated against `contracts/cli-json/` and a non-member's refusal reported as a usage error
+  rather than a crash.
 - **M20a — First usable client, end to end**: the smallest thing a person can actually read and send a
   message in — one pane, a message list, a composer, and quit. No guild rail, no channel list, no panes or
   splits, no chords beyond quit, no theming, no scrollback search. Depends on M20 (the daemon socket the
@@ -1395,7 +1369,7 @@ of this section.
 - **M62a — Guild info and per-guild preferences** (`6e`): the member-facing guild screen — what this guild
   is, whether it records messages, and the notification filters you have scoped to it. Assigned
   2026-09-15. **Not an administration screen**: it holds nothing gated on a permission, which is what
-  distinguishes it from M17a's verbs.
+  distinguishes it from M20's command-tree verbs.
 
   **It owns the question M16b could not answer: whether members are told the guild records them.** The
   answer is yes, and on this screen, and **in both directions** — a guild that records says so in `warn`,

@@ -69,8 +69,8 @@ CREATE TABLE reports (
   -- sorts into no bucket in any triage view. varchar(32) matches audit_log_entries.action's width.
   reason_category varchar(32) NOT NULL,
   -- The reporter's own words, optional. **Untrusted free text**, and the first this backend stores that a
-  -- moderator reads rather than a renderer: rule 19 applies to every client that prints it (M17a now says
-  -- so), and rule 9 to every one that renders it.
+  -- moderator reads rather than a renderer: rule 19 applies to every client that prints it (M20's entry
+  -- says so, since M17a folded into it), and rule 9 to every one that renders it.
   detail      text NULL,
   -- 0 open, 2 resolved, 3 dismissed. **1 under_review is reserved and unreachable at M16**: the done-when
   -- is "see and resolve", a third state exercises authority over nobody, and it would add an audit verb
