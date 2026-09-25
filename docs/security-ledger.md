@@ -823,3 +823,20 @@ carries the condition that would reopen it.
   `checkName`'s comment makes for leaving names alone.
 - **Reopens if**: creating a shared tag stops needing the moderation bit, or a private tag becomes visible
   or searchable by anyone else. Both would put a lookalike in front of somebody who did not choose it.
+
+### An ownership transfer does not ask the recipient
+- **Raised**: M13a, at planning
+- **Verdict**: accepted risk — the refusal at the ceiling bounds it, and consent would double the milestone
+- **Why**: `POST /guilds/{guild_id}/owner` makes the recipient owner immediately. Two harms follow from not
+  asking. A guild's owner answers for it — its moderation, and whatever it holds — and somebody can be
+  made that without agreeing. And ownership counts against the owned-guild ceiling, so handing a victim
+  unwanted guilds eats the allowance they would use to create their own. The second is bounded where it
+  matters: a recipient at the ceiling is refused, so a transfer can never push somebody past it, and a
+  recipient below it can delete or transfer the guild away again — owner-only actions they now hold. An
+  offer-and-accept flow closes both, and costs a second endpoint and a table of pending offers with a TTL
+  and a sweep, which is roughly the milestone again.
+- **Reopens if**: ownership starts to carry a cost the recipient cannot shed by deleting — billing, a
+  paid tier, legal responsibility an instance attaches to ownership, a moderation duty with a deadline —
+  or if M72a's entitlements make the ceiling large enough that exhausting it stops being the bound it is
+  now. Also reopens if transfers show up in abuse reports, which is the evidence this reasoning predicts
+  will not arrive.

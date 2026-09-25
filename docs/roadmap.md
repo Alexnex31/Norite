@@ -449,8 +449,10 @@ of this section.
   member whose highest role is above their own**; a channel created under a category inherits that
   category's overwrites and cannot be created there by somebody the category denies; and the channel
   listing reflects per-channel view permission.
-- **M13a — Guild ownership transfer**: `POST /guilds/{guild_id}/owner`, moving ownership to another
-  member. Small, and scheduled here because M12 left two dead ends that only this closes.
+- **M13a — Guild ownership transfer**: done. `POST /guilds/{guild_id}/owner`, moving ownership to
+  another member. Small, and scheduled here because M12 left two dead ends that only this closes. Built
+  after M17 rather than here: it was skipped when M14–M17 were built, and found when M17a's retirement
+  left it as Phase C's one open entry.
 
   **A guild whose owner is gone is stuck.** M12 makes deletion owner-only — deliberately, because it
   cascades with no undo and is not a permission an owner should be able to delegate — and refuses to
@@ -466,6 +468,16 @@ of this section.
   Placed after M13 rather than inside M12 because it is a new endpoint rather than a correction, and after
   the hierarchy work because "who may become owner" reads naturally alongside "who may manage whom" — but
   it depends on neither, and could move earlier if the dead end starts to matter.
+
+  **What building it settled.** The owner or an Instance Admin, never a `PermManageGuild` or
+  `PermAdministrator` holder — ownership is layer 2 and no permission reaches it. Never an API token and
+  never a signed-out session: deletion only destroys, while a transfer hands layer 2 to somebody, and a
+  delegated credential able to do that can hand it to its attacker. The recipient is a current,
+  undeleted member below the owned-guild ceiling, which a transfer would otherwise be the one way past;
+  a non-member answers 404. The recipient is **not asked** — a direct transfer, with the consent question
+  in the ledger. And `RemoveMember` now reads the guild row `FOR SHARE`, because its owner check was safe
+  only while `owner_id` never changed, and this milestone is what changes it: unlocked, a kick could land
+  on the member a concurrent transfer had just made owner.
 
   Done when: an owner can transfer to another member of the same guild and not to a non-member; the former
   owner becomes an ordinary member and can then leave; the new owner passes ADR 0008 layer 2; and an
@@ -1523,7 +1535,8 @@ of this section.
   `reports.TestAnInstanceAdminsCloseIsRecordedOnlyInTheGuildLog` fails the moment
   `instance_audit_log` is created, with the instruction attached. Whoever builds this milestone should
   expect it to go red and should answer it for **every** guild-scoped path an Instance Admin can reach,
-  not only for reports.
+  not only for reports. **M13a's ownership transfer is one**, and the sharpest after deletion: the tier
+  hands a guild's layer 2 to somebody, recorded only in that guild's own log.
 
   **And layer 1 never proves the guild exists**, found by M17's `/security-sweep` and older than M17.
   `guildauth.Authorize` short-circuits for an Instance Admin before anything reads the guild row, so for a
