@@ -47,24 +47,49 @@ func TestAKickWaitsForAnOwnershipChangeAndSeesItsResult(t *testing.T) {
 	guildID := f.newGuild(ctx, owner, roles.PermViewChannel)
 	f.join(ctx, guildID, target)
 
-	// The ownership change, held open. A plain UPDATE is what a transfer's statement does to this row.
+	err := f.raceOwnershipChange(t, guildID, target, func() error {
+		return f.svc.RemoveMember(ctx, userActor(operator), guildID, target)
+	})
+	require.ErrorIs(t, err, ErrCannotRemoveOwner,
+		"having waited for the change, the kick must see the target is now the owner")
+
+	var member bool
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM guild_members WHERE guild_id = $1 AND user_id = $2)`,
+		int64(guildID), int64(target)).Scan(&member))
+	require.True(t, member, "the new owner is still a member of the guild they own")
+}
+
+// raceOwnershipChange runs op while an ownership change of guildID to newOwner is held open, and returns
+// op's result once the change has committed.
+//
+// It does not race (M15's lesson): it holds the change, starts op, waits until Postgres reports a backend
+// blocked on a lock, and only then commits. An op that reads the owner without a lock never blocks — it
+// finishes while the change is uncommitted, acting on the old owner — and this fails naming that rather
+// than timing out quietly.
+func (f *fixture) raceOwnershipChange(
+	t *testing.T, guildID, newOwner snowflake.ID, op func() error,
+) error {
+	t.Helper()
+	ctx := t.Context()
+
+	// A plain UPDATE is what a transfer's statement does to this row.
 	tx, err := f.pool.Begin(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	_, err = tx.Exec(ctx, `UPDATE guilds SET owner_id = $1 WHERE id = $2`, int64(target), int64(guildID))
+	_, err = tx.Exec(ctx, `UPDATE guilds SET owner_id = $1 WHERE id = $2`, int64(newOwner), int64(guildID))
 	require.NoError(t, err)
 
-	// The target is an ordinary member as far as any committed state says.
 	done := make(chan error, 1)
-	go func() { done <- f.svc.RemoveMember(ctx, userActor(operator), guildID, target) }()
+	go func() { done <- op() }()
 
 	blocked := false
 	deadline := time.Now().Add(10 * time.Second)
 	for !blocked && time.Now().Before(deadline) {
 		select {
 		case err := <-done:
-			t.Fatalf("the kick finished (err=%v) while an ownership change was uncommitted: it read the "+
-				"guild row without a lock, so it acted on the old owner and could remove the new one", err)
+			t.Fatalf("the operation finished (err=%v) while an ownership change was uncommitted: it read the "+
+				"owner without a lock, so it acted on the old one", err)
 		default:
 		}
 		require.NoError(t, f.pool.QueryRow(ctx,
@@ -75,23 +100,53 @@ func TestAKickWaitsForAnOwnershipChangeAndSeesItsResult(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	require.True(t, blocked, "the kick never blocked on the guild row")
+	require.True(t, blocked, "the operation never blocked on the guild row")
 
 	require.NoError(t, tx.Commit(ctx))
 
 	select {
 	case err := <-done:
-		require.ErrorIs(t, err, ErrCannotRemoveOwner,
-			"having waited for the change, the kick must see the target is now the owner")
+		return err
 	case <-time.After(10 * time.Second):
-		t.Fatal("the kick did not finish after the ownership change committed")
+		t.Fatal("the operation did not finish after the ownership change committed")
+		return nil
 	}
+}
 
-	var member bool
+// TestAFormerOwnerCannotDeleteOrRenameAGuildTransferredMidRequest is /code-review's first M13a finding.
+// Delete decided ownership through an unlocked resolve and then ran a bare DELETE; Update's rename
+// authorized the same way. So a transfer committing between the check and the write let the former owner
+// destroy, or rename, a guild that now belonged to somebody else — RemoveMember's race, on the two paths
+// M13a did not look at.
+func TestAFormerOwnerCannotDeleteOrRenameAGuildTransferredMidRequest(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+
+	owner := f.newUser(ctx, "owner")
+	heir := f.newUser(ctx, "heir")
+	guildID := f.newGuild(ctx, owner, roles.PermViewChannel)
+	f.join(ctx, guildID, heir)
+
+	err := f.raceOwnershipChange(t, guildID, heir, func() error {
+		return f.svc.Delete(ctx, userActor(owner), guildID)
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden, "the delete must see it no longer comes from the owner")
+
+	var exists bool
 	require.NoError(t, f.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM guild_members WHERE guild_id = $1 AND user_id = $2)`,
-		int64(guildID), int64(target)).Scan(&member))
-	require.True(t, member, "the new owner is still a member of the guild they own")
+		`SELECT EXISTS (SELECT 1 FROM guilds WHERE id = $1)`, int64(guildID)).Scan(&exists))
+	require.True(t, exists, "and the heir's guild survives")
+
+	// Back to the owner, then the rename. PermManageGuild is not granted to anybody here, so the owner's
+	// authority to rename is layer 2 alone — the one a transfer takes away.
+	f.exec(ctx, `UPDATE guilds SET owner_id = $1 WHERE id = $2`, int64(owner), int64(guildID))
+	renamed := "taken back"
+	err = f.raceOwnershipChange(t, guildID, heir, func() error {
+		_, err := f.svc.Update(ctx, userActor(owner), guildID, UpdateGuildInput{Name: &renamed})
+		return err
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden, "a rename authorized by ownership must see it has gone")
 }
 
 // transferFixture is a guild with an owner, an ordinary member, an administrator and a stranger.
