@@ -60,8 +60,8 @@ func (h *Handler) Routes(r chi.Router) {
 	// do — and M12 is the first milestone to put a mutating surface within reach of one. Shipped without
 	// this, an `identify`-only token deleted a guild, which was reproduced before it was fixed.
 	//
-	// Permission resolution still runs underneath (rule 1). A token holding guilds.write can do exactly
-	// what its owner could and no more.
+	// Permission resolution still runs underneath (rule 1). A token holding guilds.write can do what its
+	// owner could and no more — with one route it cannot do at all, the ownership transfer below.
 	read := auth.RequireScope(auth.ScopeGuildsRead)
 	write := auth.RequireScope(auth.ScopeGuildsWrite)
 
@@ -82,7 +82,11 @@ func (h *Handler) Routes(r chi.Router) {
 		// attacker's account — escalation rather than damage, the reason token minting needs a user actor.
 		// A live session too, because an access token outlives its sign-out by up to fifteen minutes and
 		// giving a guild away is not something a signed-out device should still be able to do (§17.10).
-		r.With(write, auth.RequireUserActor, auth.RequireLiveSession(h.authSvc)).
+		//
+		// RequireUserActor first, so a token is told the true reason. After the scope check, a token
+		// lacking guilds.write was told to get that scope — and a token holding it was then refused anyway.
+		// The scope check stays for uniformity with every other route here; no user actor fails it.
+		r.With(auth.RequireUserActor, write, auth.RequireLiveSession(h.authSvc)).
 			Post("/owner", h.transferOwnership)
 
 		r.With(read).Get("/channels", h.listChannels)

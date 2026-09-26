@@ -228,9 +228,12 @@ func (d Decision) Owns() bool {
 // InstanceAdmin reports whether this decision came from layer 1 rather than from a guild resolution.
 //
 // Exported reluctantly, and only because two callers in `guilds` genuinely ask this rather than asking
-// about authority. Delete needs it twice: once for "may act as the guild's own authority", which is
-// `InstanceAdmin() || Owns()` and is the form Owns's own comment prescribes, and once for "the resolution
-// was skipped, so nothing has yet established that this guild exists".
+// about authority: Delete and TransferOwnership (M13a), each asking "is this the guild's owner, or the
+// tier". Both read ownership off a guild row they locked, not off Owns() — the resolution is read
+// unlocked, and once a transfer can change the owner it can be stale by the time the caller acts, which
+// /code-review found Delete doing on the M13a branch. Delete asked a second question here until then,
+// whether the resolution was skipped so nothing had established the guild exists; its locked read now
+// answers that for every actor.
 //
 // Prefer Allows, Outranks, AllowsInChannel and OutranksMember. Each exists so a caller cannot forget the
 // tier, and this accessor is the one way back to forgetting it — a check written as

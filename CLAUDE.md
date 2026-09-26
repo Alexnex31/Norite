@@ -1051,8 +1051,10 @@ And on session revocation, from M11 (decisions in ADR 0030):
   credential holding either could lock its owner out. Same rule minting obeys.
 - **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10) —
   **except where a signed-out credential would change the account's security state**, which
-  `RequireLiveSession` refuses: revoking sessions, minting, listing or revoking API tokens, and — since
-  M11a — enrolling, confirming, disabling or regenerating the second factor. Written
+  `RequireLiveSession` refuses: revoking sessions; minting, listing or revoking API tokens; since M11a,
+  enrolling, confirming, disabling or regenerating the second factor; and since M13a, transferring a
+  guild's ownership — the one guild route on the list, because it hands layer 2 to somebody and no
+  later sign-in takes it back. Written
   first as per-handler checks, it missed `POST /auth/tokens` — and an API token is not session-scoped, so
   one minted inside the window outlives the sign-out for good. **Guards belong in middleware for the same
   reason the revocation list belongs in one function**: a rule written as N call sites has N chances to

@@ -40,6 +40,17 @@ func TestTransferringOwnershipNeedsAPersonWithALiveSession(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, res.Code, "an API token, whatever its scopes: %s", res)
 	require.Equal(t, f.ownerID, ownerNow())
 
+	// A token without guilds.write is told the true reason — that no API token may do this — rather than
+	// to go and get a scope that would not help (/code-review on the M13a branch).
+	readOnly := f.api.call(http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+		"name": "reader", "scopes": []string{"guilds.read"},
+	}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, readOnly.Code, readOnly)
+	res = f.api.call(http.MethodPost, path, toMember, withToken(readOnly.field(t, "value")))
+	require.Equal(t, http.StatusForbidden, res.Code, res)
+	require.Contains(t, string(res.Body), "logged-in session",
+		"the refusal names the credential's kind, not a scope: %s", res)
+
 	res = f.api.call(http.MethodPost, path, map[string]any{"user_id": "not-an-id"}, withToken(f.ownerToken))
 	require.Equal(t, http.StatusBadRequest, res.Code, "an id in the body is input: %s", res)
 
