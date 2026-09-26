@@ -1824,6 +1824,21 @@ of this section.
   Rule 17 applies in full: deletion invokes the general-purpose revoke-all-sessions primitive rather than
   assembling its own cleanup, exactly as a ban does.
 
+  **It inherits a constraint M13a deferred: a guild's owner must always be one of its members.** Today
+  that holds by lock discipline on the one path that deletes a membership while ownership can change —
+  `RemoveMember` reads the guild row `FOR SHARE` before its owner check, and a transfer takes
+  `FOR NO KEY UPDATE` — and every future path that deletes `guild_members` rows has to remember the same
+  lock or bring the race back silently: a membership deleted while a transfer makes that member owner,
+  leaving a guild with no layer 2. This milestone is the first such path, since deleting an account has
+  to answer for the memberships it holds. The structural answer, proposed by `/code-review` on the M13a
+  branch and deferred there rather than widening that milestone, is a composite foreign key from
+  `guilds (id, owner_id)` to `guild_members (guild_id, user_id)`, `DEFERRABLE INITIALLY DEFERRED` so a
+  transfer's single `UPDATE` and guild creation's three inserts still commit. With it the database refuses
+  the state on every path at once and the locks become defence in depth. Build it here or before, and
+  check first that nothing already deletes an owner's membership row. **Until it exists, any milestone
+  that deletes a membership takes the guild row `FOR SHARE` first** — guild bans included, which
+  `PermBanMembers` anticipates and no entry yet builds.
+
   Done when: an account can export its own data and delete itself; deletion goes through
   `revokeEverything`; the placeholder rename is atomic with the soft-delete rather than a second statement
   that can fail; a deleted account's messages still render as "Deleted User" rather than vanishing or
