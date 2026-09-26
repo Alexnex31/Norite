@@ -435,3 +435,57 @@ func TestATransfersLockDoesNotStallTheGuildsInserts(t *testing.T) {
 		int64(tf.next()), int64(tf.guildID))
 	require.NoError(t, err, "a channel created while a transfer holds the guild row must not wait for it")
 }
+
+// TestAnInstanceAdminsTransferIsRecordedOnlyInTheGuildLog is M16's tripwire, for the transfer.
+//
+// Rule 14 wants every Instance Admin action in `instance_audit_log`, which is M72's and does not exist.
+// M16b refused its surface to the tier for that reason; the transfer cannot, because the tier unsticking a
+// guild whose owner has gone is the case the milestone exists for. So it follows M16 instead: the guild's
+// own log is the record, and this test fails the moment the instance log exists — when somebody can act on
+// it. It is the sharpest of these paths after deletion: the tier hands a guild's layer 2 to somebody, and
+// the only entry saying so cascades away if the new owner deletes the guild. /code-review found the plan's
+// "follow M16" carried out in prose alone, with no tripwire.
+func TestAnInstanceAdminsTransferIsRecordedOnlyInTheGuildLog(t *testing.T) {
+	t.Parallel()
+	tf := newTransferFixture(t)
+	ctx := t.Context()
+
+	operator := tf.newUser(ctx, "operator")
+	tf.makeInstanceAdmin(ctx, operator)
+	_, err := tf.svc.TransferOwnership(ctx, userActor(operator), tf.guildID, tf.member)
+	require.NoError(t, err, "the tier unsticking a guild it is not in is the milestone's point")
+
+	var actorID int64
+	require.NoError(t, tf.pool.QueryRow(ctx,
+		`SELECT actor_id FROM audit_log_entries WHERE guild_id = $1 AND action = $2`,
+		int64(tf.guildID), ActionGuildOwnerTransfer).Scan(&actorID))
+	require.Equal(t, int64(operator), actorID, "the guild's log names them, which is all there is today")
+
+	var instanceLogExists bool
+	require.NoError(t, tf.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+		                 WHERE table_schema = 'public' AND table_name = 'instance_audit_log')`,
+	).Scan(&instanceLogExists))
+	require.False(t, instanceLogExists,
+		"instance_audit_log now exists, so rule 14 applies to this path: an Instance Admin transferring a "+
+			"guild's ownership must write there as well as to the guild's log, whose entry cascades away "+
+			"if the new owner deletes the guild. Wire it up and replace this tripwire with the assertion "+
+			"that it happened.")
+}
+
+// TestTheStatementRefusesADeletedRecipient pins the statement's `deleted_at` guard on its own — the fourth
+// /code-review finding. The service refuses a deleted account first, so the guard in the SQL, which is
+// what holds when an account is deleted between that check and the write, could be removed with every
+// test green. Same reason TestTheStatementRefusesARecipientWhoIsNotAMember calls the query directly.
+func TestTheStatementRefusesADeletedRecipient(t *testing.T) {
+	t.Parallel()
+	tf := newTransferFixture(t)
+	ctx := t.Context()
+
+	tf.exec(ctx, `UPDATE users SET deleted_at = now() WHERE id = $1`, int64(tf.member))
+	_, err := tf.q().TransferGuildOwnership(ctx, db.TransferGuildOwnershipParams{
+		GuildID: int64(tf.guildID), FromOwner: int64(tf.owner), ToOwner: int64(tf.member),
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "a member whose account is deleted must not receive a guild")
+	require.Equal(t, tf.owner, tf.ownerOf(t))
+}
