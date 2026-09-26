@@ -411,6 +411,13 @@ func TestARefusedCallerTakesNoLockOnTheGuild(t *testing.T) {
 		return err
 	})
 	require.ErrorIs(t, err, httpx.ErrForbidden, "a member who is not the owner is refused at once")
+
+	// Delete's lock is FOR UPDATE, which also stalls every insert into the guild's child tables, so a
+	// member able to take it by asking to delete could stall the guild (/security-sweep).
+	err = withDeadline(func(ctx context.Context) error {
+		return tf.svc.Delete(ctx, userActor(tf.member), tf.guildID)
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden, "a member deleting a guild they do not own is refused at once")
 }
 
 // TestATransfersLockDoesNotStallTheGuildsInserts pins why the transfer's lock is FOR NO KEY UPDATE rather

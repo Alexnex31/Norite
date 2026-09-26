@@ -406,10 +406,18 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 		// somebody else. Found by /code-review on the M13a branch — RemoveMember's race, on a path the
 		// milestone did not look at. TestAFormerOwnerCannotDeleteOrRenameAGuildTransferredMidRequest.
 		//
-		// Taken *after* the resolve, so a stranger is refused without ever holding the lock. For an
-		// Instance Admin, whom layer 1 did not resolve against the guild, it is also what establishes the
-		// guild exists: otherwise the first statement to touch it would be the audit write, whose foreign
-		// key answers a missing guild with a 500 where everybody else gets 404.
+		// Taken only once the caller could be the owner. The unlocked refusal below is what keeps every
+		// other member from holding the lock: FOR UPDATE blocks the key-share lock each insert into a child
+		// table takes, so a member looping a delete they would be refused stalled the guild's channel
+		// creates, joins and audited writes. /security-sweep on the M13a branch — the same shape as
+		// TransferOwnership's two reads; TestARefusedCallerTakesNoLockOnTheGuild.
+		if !allowed.InstanceAdmin() && !allowed.Owns() {
+			return httpx.ErrForbidden
+		}
+
+		// For an Instance Admin, whom layer 1 did not resolve against the guild, the locked read is also
+		// what establishes the guild exists: otherwise the first statement to touch it would be the audit
+		// write, whose foreign key answers a missing guild with a 500 where everybody else gets 404.
 		guild, err := q.GetGuildForUpdate(ctx, int64(guildID))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -418,8 +426,9 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 			return fmt.Errorf("guilds: get guild: %w", err)
 		}
 
-		// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
-		// PermManageGuild is not — so this cannot be a plain permission check.
+		// Not the owner, asked again on the locked row: a transfer that committed while this waited moved
+		// it. An Instance Admin is still allowed through, and a member who merely holds PermManageGuild is
+		// not — so this cannot be a plain permission check.
 		if !allowed.InstanceAdmin() && snowflake.ID(guild.OwnerID) != actor.UserID {
 			return httpx.ErrForbidden
 		}

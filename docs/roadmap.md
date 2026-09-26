@@ -1511,6 +1511,12 @@ of this section.
   DISPATCH stream, not just client rendering; a load test confirms the per-connection block-set check does not
   regress message fan-out latency; blocking removes any existing friendship; and an account export includes
   who the user blocked but not who blocked them.
+
+  **M13a's ownership transfer needs a decision here**, deferred by M13a's `/security-sweep`: whether an
+  account can make somebody who blocked it the owner of a guild. The recipient is already a member, so
+  this is not delivery in rule 20's sense, but ownership makes them answerable for the guild. If it is
+  refused, the refusal must be indistinguishable from the transfer's other refusals, for the reason every
+  other block refusal here is.
 - **M71 — Instance Admin tier, schema**: the boolean/flag-based tier (supports multiple admins per instance),
   sitting outside `roles.Resolve` entirely, with the last-admin-removal safety rail. Done when: granting or
   revoking the tier works, and removing the last remaining admin is blocked.
@@ -1655,6 +1661,13 @@ of this section.
 
   ADR 0007 and ADR 0032 both describe `user_entitlements` as inert and unused by any v1 code path. This is
   the milestone that stops being true, and both say so.
+
+  **The ownership transfer's ceiling refusal must stop quoting a number** (M13a, deferred by its
+  `/security-sweep`). It says "may own (50)" today, which is harmless while the ceiling is one constant.
+  Once it resolves per account, the refusal describes the *recipient's* entitlement to the guild's owner:
+  quoting their limit discloses their tier outright, and even the bare refusal at an ordinary account's
+  limit says they are not a subscriber. Word it without the limit, and decide whether the refusal itself
+  is acceptable to show a third party.
 
   **It opens with a migration**, which is worth saying because the columns are already in §2's DDL and a
   reader could take them for built: `discoverable`, `discoverable_locked_at` and `member_count` are three

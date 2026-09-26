@@ -842,3 +842,15 @@ carries the condition that would reopen it.
   or if M72a's entitlements make the ceiling large enough that exhausting it stops being the bound it is
   now. Also reopens if transfers show up in abuse reports, which is the evidence this reasoning predicts
   will not arrive.
+
+### A former owner's in-flight request can still act as owner for one transaction
+- **Raised**: M13a, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the transfer holds the guild row against every path that reads `owner_id` off it — `Delete`,
+  `Update`, `RemoveMember`, the transfer itself — but role and member management decide layer 2 through
+  `guildauth.Authorize`, which resolves unlocked. A grant authorized a millisecond before a transfer
+  commits can land after it. That is every demotion's window, and the M15 mute-race entry's reasoning:
+  ownership is the strongest demotion, not a new class of race.
+- **Reopens if**: something takes a guild *from* an owner acting against it — M72's enforcement
+  transferring an abusive owner's guild is the likely one — where the owner racing the transfer is the
+  expected case rather than a contrived one.
