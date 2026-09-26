@@ -102,6 +102,11 @@ type Service struct {
 	// limit, and it does that whether the number is 500 or 502. A lock on every channel creation would cost
 	// more than the property is worth. Role *position* is the opposite case and does take one, because a
 	// collision there corrupts an ordering rather than overshooting a limit.
+	//
+	// The owned-guild ceiling stopped being one of these at M13a. A transfer made a second writer of the
+	// same count, driven by another account, so an account could be handed guilds past its limit by
+	// concurrent transfers; that count is now taken under a per-account advisory lock
+	// (LockAccountOwnership), by Create and TransferOwnership both.
 	maxChannelsPerGuild int32
 	maxRolesPerGuild    int32
 	maxGuildsPerAccount int32

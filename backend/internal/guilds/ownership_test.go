@@ -71,14 +71,24 @@ func (f *fixture) raceOwnershipChange(
 	t *testing.T, guildID, newOwner snowflake.ID, op func() error,
 ) error {
 	t.Helper()
+	// A plain UPDATE is what a transfer's statement does to this row.
+	return f.holdAndRace(t, func(tx pgx.Tx) {
+		_, err := tx.Exec(t.Context(), `UPDATE guilds SET owner_id = $1 WHERE id = $2`,
+			int64(newOwner), int64(guildID))
+		require.NoError(t, err)
+	}, op)
+}
+
+// holdAndRace is raceOwnershipChange with the held-open work supplied by the caller: hold runs inside a
+// transaction left uncommitted while op starts, and the transaction commits only once op is blocked.
+func (f *fixture) holdAndRace(t *testing.T, hold func(tx pgx.Tx), op func() error) error {
+	t.Helper()
 	ctx := t.Context()
 
-	// A plain UPDATE is what a transfer's statement does to this row.
 	tx, err := f.pool.Begin(ctx)
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	_, err = tx.Exec(ctx, `UPDATE guilds SET owner_id = $1 WHERE id = $2`, int64(newOwner), int64(guildID))
-	require.NoError(t, err)
+	hold(tx)
 
 	done := make(chan error, 1)
 	go func() { done <- op() }()
@@ -88,8 +98,8 @@ func (f *fixture) raceOwnershipChange(
 	for !blocked && time.Now().Before(deadline) {
 		select {
 		case err := <-done:
-			t.Fatalf("the operation finished (err=%v) while an ownership change was uncommitted: it read the "+
-				"owner without a lock, so it acted on the old one", err)
+			t.Fatalf("the operation finished (err=%v) while a conflicting change was uncommitted: it read "+
+				"what that change writes without a lock, so it acted on the state before it", err)
 		default:
 		}
 		require.NoError(t, f.pool.QueryRow(ctx,
@@ -100,7 +110,7 @@ func (f *fixture) raceOwnershipChange(
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	require.True(t, blocked, "the operation never blocked on the guild row")
+	require.True(t, blocked, "the operation never blocked on the held change")
 
 	require.NoError(t, tx.Commit(ctx))
 
@@ -108,7 +118,7 @@ func (f *fixture) raceOwnershipChange(
 	case err := <-done:
 		return err
 	case <-time.After(10 * time.Second):
-		t.Fatal("the operation did not finish after the ownership change committed")
+		t.Fatal("the operation did not finish after the held change committed")
 		return nil
 	}
 }
@@ -321,4 +331,44 @@ func decodeChanges(t *testing.T, raw json.RawMessage) map[string]any {
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(raw, &out))
 	return out
+}
+
+// TestTwoTransfersToOneAccountCannotBothPassTheCeiling is /code-review's second M13a finding. Transfers
+// from different guilds lock only their own guild rows, so two aimed at one account both counted it below
+// the ceiling and both committed — past the limit the ledger said a transfer could never exceed.
+//
+// The held transaction is the other transfer, mid-flight: it has taken the account's ownership lock and
+// handed it a guild, which puts the account at its ceiling of one. The second transfer must wait for it,
+// then count what it committed.
+func TestTwoTransfersToOneAccountCannotBothPassTheCeiling(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+
+	tiny, err := NewService(ServiceOptions{
+		Pool: f.pool, IDs: f.svc.ids,
+		MaxChannelsPerGuild: 500, MaxRolesPerGuild: 250, MaxGuildsPerAccount: 1,
+	})
+	require.NoError(t, err)
+
+	first, second, heir := f.newUser(ctx, "first"), f.newUser(ctx, "second"), f.newUser(ctx, "heir")
+	g1 := f.newGuild(ctx, first, roles.PermViewChannel)
+	g2 := f.newGuild(ctx, second, roles.PermViewChannel)
+	f.join(ctx, g1, heir)
+	f.join(ctx, g2, heir)
+
+	err = f.holdAndRace(t, func(tx pgx.Tx) {
+		require.NoError(t, db.New(tx).LockAccountOwnership(ctx, int64(heir)))
+		_, err := tx.Exec(ctx, `UPDATE guilds SET owner_id = $1 WHERE id = $2`, int64(heir), int64(g2))
+		require.NoError(t, err)
+	}, func() error {
+		_, err := tiny.TransferOwnership(ctx, userActor(first), g1, heir)
+		return err
+	})
+	require.ErrorIs(t, err, ErrGuildFull, "the second transfer must count the guild the first one gave")
+
+	var owned int
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM guilds WHERE owner_id = $1`, int64(heir)).Scan(&owned))
+	require.Equal(t, 1, owned, "and the heir owns exactly the ceiling")
 }

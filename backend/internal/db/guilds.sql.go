@@ -1191,6 +1191,26 @@ func (q *Queries) ListOverwritesForTarget(ctx context.Context, arg ListOverwrite
 	return items, nil
 }
 
+const lockAccountOwnership = `-- name: LockAccountOwnership :exec
+SELECT pg_advisory_xact_lock(1313033476, ($1::bigint & 2147483647)::int)
+`
+
+// Serializes everything that changes how many guilds one account owns: Create, for the creating account,
+// and TransferOwnership, for the recipient. Each counts owned guilds against the ceiling and then writes;
+// without this, two of them for the same account both read the count below the ceiling and both commit —
+// transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
+// by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
+// account past the ceiling.
+//
+// Slot 4 of the advisory namespace, beside slot 3's role-position lock below. The key is 0x4E434D04 —
+// the same prefix slot 3's key actually carries (0x4E434D03), which that lock's comment describes as
+// "NOR" plus a slot. Keyed per account; two accounts whose low 31 bits collide serialize unnecessarily and
+// stay correct.
+func (q *Queries) LockAccountOwnership(ctx context.Context, userID int64) error {
+	_, err := q.db.Exec(ctx, lockAccountOwnership, userID)
+	return err
+}
+
 const lockGuildRolePositions = `-- name: LockGuildRolePositions :exec
 SELECT pg_advisory_xact_lock(1313033475, ($1::bigint & 2147483647)::int)
 `

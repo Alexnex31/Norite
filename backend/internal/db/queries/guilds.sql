@@ -117,6 +117,20 @@ SELECT EXISTS (
   WHERE gm.guild_id = $1 AND gm.user_id = $2 AND u.deleted_at IS NULL
 );
 
+-- name: LockAccountOwnership :exec
+-- Serializes everything that changes how many guilds one account owns: Create, for the creating account,
+-- and TransferOwnership, for the recipient. Each counts owned guilds against the ceiling and then writes;
+-- without this, two of them for the same account both read the count below the ceiling and both commit —
+-- transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
+-- by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
+-- account past the ceiling.
+--
+-- Slot 4 of the advisory namespace, beside slot 3's role-position lock below. The key is 0x4E434D04 —
+-- the same prefix slot 3's key actually carries (0x4E434D03), which that lock's comment describes as
+-- "NOR" plus a slot. Keyed per account; two accounts whose low 31 bits collide serialize unnecessarily and
+-- stay correct.
+SELECT pg_advisory_xact_lock(1313033476, (sqlc.arg(user_id)::bigint & 2147483647)::int);
+
 -- name: CountGuildsOwnedBy :one
 -- How many guilds an account owns, for the creation cap.
 --

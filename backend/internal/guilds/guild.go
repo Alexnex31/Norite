@@ -73,9 +73,15 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 	err = s.inTx(ctx, func(q *db.Queries) error {
 		// The ceiling. No permission is checked on this path, so this is the only bound on it — see
-		// Service.maxGuildsPerAccount. Racy under READ COMMITTED in the same way and for the same reason the
-		// channel and role ceilings are, and acceptable for the same reason: the consequence is one guild
-		// over a soft limit, not a corrupted ordering.
+		// Service.maxGuildsPerAccount.
+		//
+		// Counted under the account's ownership lock since M13a. Before, this was racy and accepted, like
+		// the channel and role ceilings: two creates by one account could both pass. M13a's transfer made
+		// a second writer of the same count, and made the race something another account can drive —
+		// handing guilds to somebody while they create one — so both writers now take one lock per account.
+		if err := q.LockAccountOwnership(ctx, int64(actor.UserID)); err != nil {
+			return fmt.Errorf("guilds: lock account ownership: %w", err)
+		}
 		owned, err := q.CountGuildsOwnedBy(ctx, int64(actor.UserID))
 		if err != nil {
 			return fmt.Errorf("guilds: count owned guilds: %w", err)

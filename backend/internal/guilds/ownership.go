@@ -100,8 +100,13 @@ func (s *Service) TransferOwnership(
 		}
 
 		// The ceiling Create enforces, applied to the account receiving a guild, which would otherwise be
-		// the one way past it. Racy under READ COMMITTED as Create's is, and acceptable for Create's
-		// reason: the consequence is one guild over a soft limit.
+		// the one way past it — and counted under the account's ownership lock, which Create takes too.
+		// This guild's row lock serializes nothing across guilds, so without it two transfers to one
+		// account from different guilds both counted it below the ceiling and both committed. Found by
+		// /code-review on this branch; TestTwoTransfersToOneAccountCannotBothPassTheCeiling.
+		if err := q.LockAccountOwnership(ctx, int64(to)); err != nil {
+			return fmt.Errorf("guilds: lock recipient's ownership: %w", err)
+		}
 		owned, err := q.CountGuildsOwnedBy(ctx, int64(to))
 		if err != nil {
 			return fmt.Errorf("guilds: count recipient's owned guilds: %w", err)

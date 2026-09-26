@@ -831,7 +831,9 @@ carries the condition that would reopen it.
   asking. A guild's owner answers for it — its moderation, and whatever it holds — and somebody can be
   made that without agreeing. And ownership counts against the owned-guild ceiling, so handing a victim
   unwanted guilds eats the allowance they would use to create their own. The second is bounded where it
-  matters: a recipient at the ceiling is refused, so a transfer can never push somebody past it, and a
+  matters: a recipient at the ceiling is refused, so a transfer can never push somebody past it — true
+  because the count is taken under a per-account lock that Create takes too, which /code-review found
+  missing on the first draft, where concurrent transfers from different guilds could — and a
   recipient below it can delete or transfer the guild away again — owner-only actions they now hold. An
   offer-and-accept flow closes both, and costs a second endpoint and a table of pending offers with a TTL
   and a sweep, which is roughly the milestone again.
