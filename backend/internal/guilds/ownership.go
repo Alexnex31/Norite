@@ -54,9 +54,9 @@ import (
 //
 // # The race with a kick
 //
-// GetGuildForUpdate here and GetGuildForShare in RemoveMember conflict, so the two serialize on the guild
-// row; the statement's own guards (still the owner, recipient still a member) make whichever loses the race
-// match nothing rather than write a guild owned by a non-member.
+// GetGuildForNoKeyUpdate here and GetGuildForShare in RemoveMember conflict, so the two serialize on the
+// guild row; the statement's own guards (still the owner, recipient still a member) make whichever loses
+// the race match nothing rather than write a guild owned by a non-member.
 func (s *Service) TransferOwnership(
 	ctx context.Context, actor auth.Actor, guildID, to snowflake.ID,
 ) (Guild, error) {
@@ -70,9 +70,27 @@ func (s *Service) TransferOwnership(
 			return err
 		}
 
-		// Locked, and read for every actor: the owner comparison needs the row, and an Instance Admin was
-		// not resolved against the guild, so for them this is also what proves it exists.
-		guild, err := q.GetGuildForUpdate(ctx, int64(guildID))
+		// Two reads of the owner: unlocked to refuse, then locked to act.
+		//
+		// The first is what keeps a caller who will be refused from taking any lock. It was one locked read
+		// at first, FOR UPDATE, so any member could hold the guild's exclusive lock by posting a transfer
+		// they would be refused — and FOR UPDATE blocks the key-share lock every insert into a child table
+		// takes, so the guild's sends waited behind it. Found by /code-review;
+		// TestARefusedCallerTakesNoLockOnTheGuild.
+		unlocked, err := q.GetGuild(ctx, int64(guildID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: get guild: %w", err)
+		}
+		if snowflake.ID(unlocked.OwnerID) != actor.UserID && !allowed.InstanceAdmin() {
+			return httpx.Errorf(httpx.ErrForbidden, "only the guild's owner may transfer it")
+		}
+
+		// The second holds the row, FOR NO KEY UPDATE (see the query), and is the owner this acts on: a
+		// transfer that committed between the two reads moved it, and the caller is asked again.
+		guild, err := q.GetGuildForNoKeyUpdate(ctx, int64(guildID))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound

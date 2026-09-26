@@ -265,19 +265,6 @@ func (s *Service) RemoveMember(
 	ctx context.Context, actor auth.Actor, guildID, userID snowflake.ID,
 ) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		// Locked, because the owner check below is a check followed by a delete and M13a made its input
-		// change. Read unlocked, a kick could see the old owner, pass, and then delete the member a
-		// concurrent transfer had just made owner — a guild owned by a non-member, which has no layer 2.
-		// FOR SHARE waits for a transfer in flight and reads what it committed; it does not make two
-		// kicks in one guild queue behind each other. TestAKickWaitsForAnOwnershipChangeAndSeesItsResult.
-		guild, err := q.GetGuildForShare(ctx, int64(guildID))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return httpx.ErrNotFound
-			}
-			return fmt.Errorf("guilds: get guild: %w", err)
-		}
-
 		if userID == actor.UserID {
 			// Leaving. It needs membership and nothing else, which is why the permission asked for is the
 			// empty set: resolving at all is what establishes membership, and Permission.Has(0) is true by
@@ -336,6 +323,23 @@ func (s *Service) RemoveMember(
 		//
 		// Nothing grants this. Ownership transfer (TransferOwnership, M13a) is what makes removing a former
 		// owner reachable: after it they are an ordinary member.
+		// Locked, because this is a check followed by a delete and M13a made its input change. Read
+		// unlocked, a kick could see the old owner, pass, and then delete the member a concurrent transfer
+		// had just made owner — a guild owned by a non-member, which has no layer 2. FOR SHARE waits for a
+		// transfer in flight and reads what it committed, without making two kicks in one guild queue
+		// behind each other. TestAKickWaitsForAnOwnershipChangeAndSeesItsResult.
+		//
+		// **Below the authorization, not above it.** It opened the function at first, so any stranger could
+		// hold a share lock on any guild by looping a leave they would be refused — stalling that guild's
+		// updates and transfers. Found by /code-review; TestARefusedCallerTakesNoLockOnTheGuild. For an
+		// Instance Admin, whom layer 1 did not resolve against the guild, this is also the 404.
+		guild, err := q.GetGuildForShare(ctx, int64(guildID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: get guild: %w", err)
+		}
 		if snowflake.ID(guild.OwnerID) == userID {
 			return httpx.Errorf(ErrCannotRemoveOwner,
 				"transfer ownership before leaving a guild you own")

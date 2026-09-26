@@ -372,3 +372,66 @@ func TestTwoTransfersToOneAccountCannotBothPassTheCeiling(t *testing.T) {
 		`SELECT count(*) FROM guilds WHERE owner_id = $1`, int64(heir)).Scan(&owned))
 	require.Equal(t, 1, owned, "and the heir owns exactly the ceiling")
 }
+
+// TestARefusedCallerTakesNoLockOnTheGuild is /code-review's fifth and sixth M13a findings together.
+//
+// Both paths locked the guild row before knowing who was asking. RemoveMember took FOR SHARE before
+// authorizing, so any stranger looping DELETE /guilds/{id}/members/{self} held share locks on an arbitrary
+// guild that stalled its updates and transfers; TransferOwnership took FOR UPDATE before its owner check,
+// so any member could take the exclusive lock by posting a transfer they would be refused — and FOR UPDATE
+// also blocks the key-share lock every insert into a child table takes, so the guild's message sends
+// waited behind it.
+//
+// Held here: the strongest lock there is, on the guild row, released only after the request returns. A
+// refused caller that tries to lock anything waits for it, runs into its own timeout, and fails this test
+// with a deadline rather than the refusal it should have given at once.
+func TestARefusedCallerTakesNoLockOnTheGuild(t *testing.T) {
+	t.Parallel()
+	tf := newTransferFixture(t)
+
+	tx, err := tf.pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, err = tx.Exec(t.Context(), `SELECT 1 FROM guilds WHERE id = $1 FOR UPDATE`, int64(tf.guildID))
+	require.NoError(t, err)
+
+	withDeadline := func(op func(ctx context.Context) error) error {
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		return op(ctx)
+	}
+
+	err = withDeadline(func(ctx context.Context) error {
+		return tf.svc.RemoveMember(ctx, userActor(tf.stranger), tf.guildID, tf.stranger)
+	})
+	require.ErrorIs(t, err, httpx.ErrNotFound, "a stranger leaving a guild they are not in is refused at once")
+
+	err = withDeadline(func(ctx context.Context) error {
+		_, err := tf.svc.TransferOwnership(ctx, userActor(tf.member), tf.guildID, tf.member)
+		return err
+	})
+	require.ErrorIs(t, err, httpx.ErrForbidden, "a member who is not the owner is refused at once")
+}
+
+// TestATransfersLockDoesNotStallTheGuildsInserts pins why the transfer's lock is FOR NO KEY UPDATE rather
+// than FOR UPDATE. Every insert into a table referencing guilds — a channel, an audit entry, a recorded
+// message — takes FOR KEY SHARE on the guild row, which FOR UPDATE blocks and FOR NO KEY UPDATE does not.
+// Held for the length of a transfer, the stronger lock would stall the guild's writes behind it.
+func TestATransfersLockDoesNotStallTheGuildsInserts(t *testing.T) {
+	t.Parallel()
+	tf := newTransferFixture(t)
+	ctx := t.Context()
+
+	tx, err := tf.pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, err = db.New(tx).GetGuildForNoKeyUpdate(ctx, int64(tf.guildID))
+	require.NoError(t, err)
+
+	insertCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, err = tf.pool.Exec(insertCtx,
+		`INSERT INTO channels (id, guild_id, name, type, position) VALUES ($1, $2, 'during', 0, 0)`,
+		int64(tf.next()), int64(tf.guildID))
+	require.NoError(t, err, "a channel created while a transfer holds the guild row must not wait for it")
+}

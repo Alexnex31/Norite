@@ -566,6 +566,33 @@ func (q *Queries) GetGuild(ctx context.Context, id int64) (Guild, error) {
 	return i, err
 }
 
+const getGuildForNoKeyUpdate = `-- name: GetGuildForNoKeyUpdate :one
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points
+// at. FOR NO KEY UPDATE rather than FOR UPDATE, which is the difference that matters: FOR UPDATE also
+// conflicts with the FOR KEY SHARE lock every insert into a child table takes on its parent, so holding
+// it would stall the guild's message sends, audit writes and channel creation for the length of the
+// transfer. It still conflicts with RemoveMember's FOR SHARE and with the FOR UPDATE that Delete and
+// Update take, which are the paths that must wait for a transfer (M13a, /code-review).
+func (q *Queries) GetGuildForNoKeyUpdate(ctx context.Context, id int64) (Guild, error) {
+	row := q.db.QueryRow(ctx, getGuildForNoKeyUpdate, id)
+	var i Guild
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.OwnerID,
+		&i.IconHash,
+		&i.Description,
+		&i.SystemChannelID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
+	)
+	return i, err
+}
+
 const getGuildForShare = `-- name: GetGuildForShare :one
 SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR SHARE
 `
@@ -573,8 +600,9 @@ SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at
 // The guild row held still for a *reader of owner_id* that then acts on it: RemoveMember, whose refusal to
 // remove the owner is a check followed by a delete. FOR SHARE rather than FOR UPDATE because the removal
 // does not write this row, and two concurrent kicks in one guild have no reason to queue behind each
-// other — but it conflicts with the FOR NO KEY UPDATE an ownership transfer's UPDATE takes, so a kick waits
-// for a transfer in flight and reads the owner it committed (M13a).
+// other — but it conflicts with the FOR NO KEY UPDATE an ownership transfer takes (GetGuildForNoKeyUpdate,
+// then its UPDATE), so a kick waits for a transfer in flight and reads the owner it committed (M13a).
+// Taken only after the caller is authorized, so a stranger cannot hold it.
 func (q *Queries) GetGuildForShare(ctx context.Context, id int64) (Guild, error) {
 	row := q.db.QueryRow(ctx, getGuildForShare, id)
 	var i Guild
