@@ -1377,6 +1377,15 @@ of this section.
   this milestone never reads — which is M16b's own finding about M125 applied to M16b's own deferral, and
   it was caught by a security sweep after that migration comment had already claimed this entry carried
   it.
+
+  **And it is the first writer that can outrun the busy-channel row, noted 2026-09-30.** Every send
+  rewrites `channels.last_message_id` in its own transaction (M15). Measured at M13a, that holds at any
+  rate a person produces — 40 messages a second for three minutes kept 10,808 of 10,816 updates in their
+  page, and reading the row cost what it did fresh — and degrades only above ~1,000 a second into one
+  channel, where updates stop fitting in the page, the primary key fills with entries for dead versions
+  and the row read rises to ~200 µs until vacuum. The per-client REST limit keeps a person far below that;
+  a webhook has its own limit, and bulk ingest has none. If this milestone's limit lets one channel take
+  that rate, lower `channels`' `fillfactor` in the same migration.
 - **M61 — Whispers**: the private, message-visibility-restricted-to-selected-recipients feature; not
   guild-audit-logged; excluded from E2E scope (enforced later once E2E exists, at M99); the break-glass
   schema exists now (a whisper is queryable by internal tooling) even though the Instance-Admin-facing
@@ -2099,6 +2108,16 @@ does not appear to disagree with them.
 
 - **M112 — Helm chart skeleton and API pods**: the base chart structure, the API/gateway `Deployment` behind
   an Ingress.
+
+  **Size the database pool by round trips, not cores, assigned 2026-09-30.** §15.3 sizes `pgxpool` from
+  the CPU count, which assumes a checked-out connection is busy — true when Postgres is on the same
+  machine and false across a network, where most of that time is spent waiting on round trips. Measured
+  at M13a against a real server with a 263 µs round trip: raising the pool from 4 to 16 gave +74–82%
+  throughput at 8 concurrent clients and +136–171% at 32, and median send latency at 32 fell from 38.9 to
+  14.2 ms. The default stays small, because a self-hosted instance beside its database is the case it is
+  right for; what this milestone owes is the chart's pool value and the PgBouncer guidance derived from
+  latency and target throughput (Little's law) rather than from cores. `GOGC=200` measured +9–15% on the
+  read paths for ~5 MB more resident memory, and belongs in the same values file as a documented knob.
 
   Done when: `helm install` against an empty cluster brings the API up behind an Ingress and
   `/api/v1/healthz` answers 200 from outside the cluster.
