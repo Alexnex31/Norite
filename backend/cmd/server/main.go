@@ -45,6 +45,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/messages"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
+	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/reports"
 	"github.com/Alexnex31/Norite/backend/internal/tags"
@@ -220,16 +221,31 @@ func run() error {
 		return err
 	}
 
+	// Memory unless configured otherwise, which is every single-process instance. Connected, and verified,
+	// before the listener exists: a limiter that cannot reach its store fails open (see
+	// ratelimit.onStoreFailure), so an unreachable Redis at startup would otherwise mean an instance serving
+	// with no limits at all until somebody read the logs.
+	rateLimitBackend := ratelimit.MemoryBackend()
+	if cfg.RateLimitStore == "redis" {
+		rateLimitBackend, err = ratelimit.NewRedisBackend(ctx, cfg.RedisURL, cfg.DBConnectTimeout)
+		if err != nil {
+			logger.Error().Err(err).Msg("could not connect the rate-limit store")
+			return err
+		}
+		defer func() { _ = rateLimitBackend.Close() }()
+	}
+
 	router, err := newRouter(routerOptions{
-		Config:   cfg,
-		Logger:   logger,
-		Health:   health,
-		Auth:     auth.NewHandler(authService),
-		AuthSvc:  authService,
-		Guilds:   guilds.NewHandler(guildService, authService),
-		Messages: messages.NewHandler(messageService),
-		Reports:  reports.NewHandler(reportService),
-		Tags:     tags.NewHandler(tagService),
+		Config:           cfg,
+		Logger:           logger,
+		Health:           health,
+		Auth:             auth.NewHandler(authService),
+		AuthSvc:          authService,
+		Guilds:           guilds.NewHandler(guildService, authService),
+		Messages:         messages.NewHandler(messageService),
+		Reports:          reports.NewHandler(reportService),
+		Tags:             tags.NewHandler(tagService),
+		RateLimitBackend: rateLimitBackend,
 	})
 	if err != nil {
 		return err

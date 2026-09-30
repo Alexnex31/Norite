@@ -83,8 +83,17 @@ type fileConfig struct {
 	} `toml:"log"`
 
 	RateLimit struct {
-		REST *string `toml:"rest"`
+		REST  *string `toml:"rest"`
+		Store *string `toml:"store"`
 	} `toml:"rate_limit"`
+
+	Events struct {
+		Backend *string `toml:"backend"`
+	} `toml:"events"`
+
+	Redis struct {
+		URL *string `toml:"url"`
+	} `toml:"redis"`
 
 	Storage struct {
 		Backend   *string `toml:"backend"`

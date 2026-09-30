@@ -88,6 +88,22 @@ type Config struct {
 	// one of S, M, H, D — e.g. "600-M" is 600 requests per minute.
 	RateLimit string `validate:"required"`
 
+	// RateLimitStore is where rate-limit counters live: "memory" (the default, and correct for a single
+	// process) or "redis", which the flagship needs once it runs more than one replica (M114) — with a
+	// store per process, every limit would be multiplied by the replica count.
+	RateLimitStore string `validate:"required,oneof=memory redis"`
+
+	// EventsBackend carries gateway events between the code that commits a change and the connections
+	// that hear about it: "inproc" (the default, and what every single-process instance runs) or "redis",
+	// which lets an event committed on one replica reach connections held by another (M114).
+	EventsBackend string `validate:"required,oneof=inproc redis"`
+
+	// RedisURL addresses the Redis (or Valkey) server both of the above use when set to "redis". Required
+	// exactly then, which Validate checks because a tag cannot say "if either".
+	//
+	// Never log this value (rule 8): a redis:// URL carries the server's password when it has one.
+	RedisURL string `validate:"omitempty,startswith=redis"`
+
 	// TrustProxyHeaders decides whether forwarded headers are honored: X-Forwarded-For for the client
 	// address, X-Forwarded-Proto for the HSTS decision.
 	//
@@ -325,6 +341,12 @@ func Load(configPath string) (Config, error) {
 		LogFormat:   getEnvString("LOG_FORMAT", fileString(file.Log.Format, defaultLogFormat(env))),
 		RateLimit:   getEnvString("RATELIMIT", fileString(file.RateLimit.REST, "600-M")),
 
+		RateLimitStore: getEnvString("RATELIMIT_STORE", fileString(file.RateLimit.Store, "memory")),
+		EventsBackend:  getEnvString("EVENTS_BACKEND", fileString(file.Events.Backend, "inproc")),
+		// No default: a Redis server is deployment-specific, and one is needed only when a setting above
+		// asks for it.
+		RedisURL: getEnvString("REDIS_URL", fileString(file.Redis.URL, "")),
+
 		StorageBackend:   getEnvString("STORAGE_BACKEND", fileString(file.Storage.Backend, "local")),
 		StorageLocalPath: getEnvString("STORAGE_LOCAL_PATH", fileString(file.Storage.LocalPath, defaultStorageLocalPath())),
 
@@ -485,6 +507,17 @@ func (c Config) Validate() error {
 			"configured, because the provider redirects back to it", name)
 	}
 
+	// RedisURL is required by two independent settings, and a tag cannot say "or" — the same shape as
+	// PublicBaseURL above.
+	if c.RedisURL == "" && c.UsesRedis() {
+		name := envVarFor("RedisURL")
+		if c.SourcePath != "" {
+			name = fmt.Sprintf("%s (%s in %s)", name, fileKeyFor("RedisURL"), c.SourcePath)
+		}
+		return fmt.Errorf("config: invalid configuration: %s: required when %s or %s is \"redis\"", name,
+			envVarFor("EventsBackend"), envVarFor("RateLimitStore"))
+	}
+
 	// And when it is set, it has to be a scheme a browser and a mail client will follow.
 	//
 	// The `url` struct tag accepts any parseable absolute URL, which is every scheme there is. This value's
@@ -509,6 +542,11 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// UsesRedis reports whether any setting needs the Redis server.
+func (c Config) UsesRedis() bool {
+	return c.EventsBackend == "redis" || c.RateLimitStore == "redis"
 }
 
 // IsProduction reports whether production-flavored defaults apply.
@@ -594,6 +632,12 @@ func fileKeyFor(field string) string {
 		return "[log].format"
 	case "RateLimit":
 		return "[rate_limit].rest"
+	case "RateLimitStore":
+		return "[rate_limit].store"
+	case "EventsBackend":
+		return "[events].backend"
+	case "RedisURL":
+		return "[redis].url"
 	case "StorageBackend":
 		return "[storage].backend"
 	case "StorageLocalPath":
@@ -678,6 +722,12 @@ func envVarFor(field string) string {
 		return envPrefix + "LOG_FORMAT"
 	case "RateLimit":
 		return envPrefix + "RATELIMIT"
+	case "RateLimitStore":
+		return envPrefix + "RATELIMIT_STORE"
+	case "EventsBackend":
+		return envPrefix + "EVENTS_BACKEND"
+	case "RedisURL":
+		return envPrefix + "REDIS_URL"
 	case "TrustedProxyHops":
 		return envPrefix + "TRUSTED_PROXY_HOPS"
 	case "ShutdownTimeout":

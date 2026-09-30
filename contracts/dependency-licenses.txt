@@ -60,6 +60,7 @@ github.com/pelletier/go-toml/v2,https://github.com/pelletier/go-toml/blob/v2.4.3
 github.com/pkg/errors,https://github.com/pkg/errors/blob/v0.9.1/LICENSE,BSD-2-Clause
 github.com/pmezard/go-difflib/difflib,https://github.com/pmezard/go-difflib/blob/5d4384ee4fb2/LICENSE,BSD-3-Clause
 github.com/pquerna/otp,https://github.com/pquerna/otp/blob/v1.5.0/LICENSE,Apache-2.0
+github.com/redis/go-redis/v9,https://github.com/redis/go-redis/blob/v9.22.0/LICENSE,BSD-2-Clause
 github.com/rs/zerolog,https://github.com/rs/zerolog/blob/v1.35.1/LICENSE,MIT
 github.com/shirou/gopsutil/v4,https://github.com/shirou/gopsutil/blob/v4.26.6/LICENSE,BSD-3-Clause
 github.com/sirupsen/logrus,https://github.com/sirupsen/logrus/blob/v1.9.4/LICENSE,MIT
@@ -82,6 +83,7 @@ go.opentelemetry.io/otel/metric,https://github.com/open-telemetry/opentelemetry-
 go.opentelemetry.io/otel/metric,https://github.com/open-telemetry/opentelemetry-go/blob/metric/v1.44.0/metric/LICENSE,BSD-3-Clause
 go.opentelemetry.io/otel/trace,https://github.com/open-telemetry/opentelemetry-go/blob/trace/v1.44.0/trace/LICENSE,Apache-2.0
 go.opentelemetry.io/otel/trace,https://github.com/open-telemetry/opentelemetry-go/blob/trace/v1.44.0/trace/LICENSE,BSD-3-Clause
+go.uber.org/atomic,https://github.com/uber-go/atomic/blob/v1.11.0/LICENSE.txt,MIT
 golang.org/x/crypto,https://cs.opensource.google/go/x/crypto/+/v0.56.0:LICENSE,BSD-3-Clause
 golang.org/x/oauth2,https://cs.opensource.google/go/x/oauth2/+/v0.36.0:LICENSE,BSD-3-Clause
 golang.org/x/sync/semaphore,https://cs.opensource.google/go/x/sync/+/v0.22.0:LICENSE,BSD-3-Clause

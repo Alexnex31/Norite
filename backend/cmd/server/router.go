@@ -40,6 +40,10 @@ type routerOptions struct {
 	Messages *messages.Handler
 	Tags     *tags.Handler
 	Reports  *reports.Handler
+
+	// RateLimitBackend is where every limiter below counts. The zero value is the in-memory store, which is
+	// what the test routers get; main passes the configured one.
+	RateLimitBackend ratelimit.Backend
 }
 
 // authRateLimit is the stricter bucket the unauthenticated auth routes sit behind.
@@ -80,24 +84,27 @@ const devicePollRateLimit = "120-M"
 // AuthenticateBearer slots in below RateLimit at Milestone M4; there is nothing to authenticate yet.
 func newRouter(opts routerOptions) (http.Handler, error) {
 	rateLimiter, err := ratelimit.Middleware(ratelimit.Options{
-		Rate:   opts.Config.RateLimit,
-		Bucket: "rest",
+		Rate:    opts.Config.RateLimit,
+		Bucket:  "rest",
+		Backend: opts.RateLimitBackend,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	authLimiter, err := ratelimit.Middleware(ratelimit.Options{
-		Rate:   authRateLimit,
-		Bucket: "auth",
+		Rate:    authRateLimit,
+		Bucket:  "auth",
+		Backend: opts.RateLimitBackend,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	devicePollLimiter, err := ratelimit.Middleware(ratelimit.Options{
-		Rate:   devicePollRateLimit,
-		Bucket: "device-poll",
+		Rate:    devicePollRateLimit,
+		Bucket:  "device-poll",
+		Backend: opts.RateLimitBackend,
 	})
 	if err != nil {
 		return nil, err
