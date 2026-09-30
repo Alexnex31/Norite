@@ -80,7 +80,7 @@ func (s *Service) Bootstrap(ctx context.Context, in BootstrapInput) (db.User, er
 	}
 
 	var user db.User
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// Taken first, so the count below is a decision rather than an observation. See the query's own

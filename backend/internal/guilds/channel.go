@@ -228,7 +228,7 @@ func (s *Service) CreateChannel(
 
 	var out Channel
 
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageChannels); err != nil {
 			return err
 		}
@@ -447,7 +447,7 @@ func (s *Service) UpdateChannel(
 ) (Channel, error) {
 	var out Channel
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The same resolve-and-authorize the overwrite endpoints use, and it carries the refusal that
 		// matters here: a member who cannot *see* this channel is answered as though it were not there.
 		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
@@ -551,7 +551,7 @@ func (s *Service) UpdateChannel(
 // DeleteChannel removes a channel. Its children, if it is a category, are orphaned to the top level
 // rather than deleted — see channels.parent_id ON DELETE SET NULL in migration 000015.
 func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID snowflake.ID) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The same resolve-and-authorize the overwrite endpoints use, and it carries the refusal that
 		// matters here: a member who cannot *see* this channel is answered as though it were not there.
 		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one

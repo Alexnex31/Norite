@@ -61,7 +61,7 @@ type SetOverwriteInput struct {
 func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOverwriteInput) (Overwrite, error) {
 	var out Overwrite
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		_, guildID, allowed, err := guildauth.AuthorizeChannel(ctx, q, actor, in.ChannelID, roles.PermManageRoles)
 		if err != nil {
 			return err
@@ -180,7 +180,7 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 func (s *Service) DeleteOverwrite(
 	ctx context.Context, actor auth.Actor, channelID snowflake.ID, targetType int16, targetID snowflake.ID,
 ) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		_, guildID, allowed, err := guildauth.AuthorizeChannel(ctx, q, actor, channelID, roles.PermManageRoles)
 		if err != nil {
 			return err

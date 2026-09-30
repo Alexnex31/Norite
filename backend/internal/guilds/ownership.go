@@ -62,7 +62,7 @@ func (s *Service) TransferOwnership(
 ) (Guild, error) {
 	var out Guild
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// PermViewChannel is what a non-member fails, so a stranger gets the ordinary 404 rather than a
 		// 403 that would confirm the guild exists — Delete's opening, for Delete's reason.
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermViewChannel)

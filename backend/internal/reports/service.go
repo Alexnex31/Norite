@@ -61,9 +61,9 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{pool: opts.Pool, queries: db.New(opts.Pool), ids: opts.IDs}, nil
 }
 
-func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) error) error {
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(s.queries.WithTx(tx))
+func (s *Service) inTx(ctx context.Context, fn func(ctx context.Context, q *db.Queries) error) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return fn(ctx, s.queries.WithTx(tx))
 	})
 }
 
@@ -140,7 +140,7 @@ func (s *Service) File(ctx context.Context, actor auth.Actor, in FileInput) (Rep
 	}
 
 	var out Report
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		message, err := q.GetMessageForReport(ctx, int64(in.TargetID))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -395,7 +395,7 @@ func (s *Service) Resolve(
 	}
 
 	var out Report
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		if _, err := guildauth.Authorize(
 			ctx, q, actor, guildID, 0, roles.PermManageMessages,
 		); err != nil {

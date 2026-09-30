@@ -64,9 +64,9 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{pool: opts.Pool, queries: db.New(opts.Pool), ids: opts.IDs}, nil
 }
 
-func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) error) error {
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(s.queries.WithTx(tx))
+func (s *Service) inTx(ctx context.Context, fn func(ctx context.Context, q *db.Queries) error) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return fn(ctx, s.queries.WithTx(tx))
 	})
 }
 
@@ -110,7 +110,7 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateInput) 
 	}
 
 	var out Tag
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// Authorized on the transaction's querier so the permissions that allow the write are read in the
 		// same snapshot the write happens in (rule 1).
 		if _, err := guildauth.Authorize(ctx, q, actor, in.GuildID, 0, need); err != nil {
@@ -252,7 +252,7 @@ func (s *Service) List(ctx context.Context, actor auth.Actor, guildID snowflake.
 // Only when the cascade takes somebody else's application with it — see ActionTagDelete. The tag row is
 // locked first so the count cannot miss an application committed between the count and the delete.
 func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID, tagID snowflake.ID) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		decision, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermViewChannel)
 		if err != nil {
 			return err

@@ -59,7 +59,7 @@ type ApplyInput struct {
 // raced or forgotten. That is M16b's answer to the same shape, and M16's correction to `reports` is what
 // happens when nobody asks the question at all.
 func (s *Service) Apply(ctx context.Context, actor auth.Actor, in ApplyInput) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		_, guildID, decision, err := guildauth.AuthorizeChannelUnlocked(
 			ctx, q, actor, in.ChannelID, roles.PermReadMessageHistory,
 		)
@@ -144,7 +144,7 @@ func (s *Service) Apply(ctx context.Context, actor auth.Actor, in ApplyInput) er
 // When the application was somebody else's. That is a moderator acting on another member's label, which
 // rule 2 counts as administrative whoever performs it — the same line `message.delete` draws.
 func (s *Service) Unapply(ctx context.Context, actor auth.Actor, in ApplyInput) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		_, guildID, decision, err := guildauth.AuthorizeChannelUnlocked(
 			ctx, q, actor, in.ChannelID, roles.PermReadMessageHistory,
 		)

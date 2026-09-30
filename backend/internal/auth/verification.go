@@ -129,7 +129,7 @@ func (s *Service) RequestEmailVerification(ctx context.Context, rawEmail string)
 	}
 
 	var msg mail.Message
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		msg, err = s.buildVerification(ctx, s.queries.WithTx(tx), user)
 		return err
@@ -161,7 +161,7 @@ func (s *Service) ConfirmEmailVerification(ctx context.Context, rawToken string)
 		return fmt.Errorf("looking up verification token: %w", err)
 	}
 
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// Single-use and expiry live in this statement's WHERE clause, so two people following the same
@@ -400,7 +400,7 @@ func (s *Service) remindToVerify(ctx context.Context, user db.User) {
 	log := logging.FromContext(ctx)
 
 	var msg mail.Message
-	err := database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		msg, err = s.buildVerification(ctx, s.queries.WithTx(tx), user)
 		return err

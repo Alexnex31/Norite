@@ -704,7 +704,7 @@ func (s *Service) CompleteOAuthSignup(ctx context.Context, signupToken, rawUsern
 		user db.User
 		msg  mail.Message
 	)
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// The account and its identity are created together or not at all. An account with no identity

@@ -102,7 +102,7 @@ func (s *Service) UpdateMember(
 ) (Member, error) {
 	var out Member
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// Each field brings its own permission, and only its own.
 		//
 		// The first version started `need` at PermManageGuild and added the moderation bits to it, which
@@ -248,7 +248,7 @@ func (s *Service) UpdateMember(
 func (s *Service) RemoveMember(
 	ctx context.Context, actor auth.Actor, guildID, userID snowflake.ID,
 ) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		if userID == actor.UserID {
 			// Leaving. It needs membership and nothing else, which is why the permission asked for is the
 			// empty set: resolving at all is what establishes membership, and Permission.Has(0) is true by

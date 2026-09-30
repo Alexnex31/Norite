@@ -284,7 +284,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		user db.User
 		msg  mail.Message
 	)
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// Redeemed *before* the address is looked at, which is the ordering a review found wrong the
@@ -569,7 +569,7 @@ func (s *Service) startSession(ctx context.Context, userID snowflake.ID, deviceI
 		return TokenPair{}, fmt.Errorf("generating session ID: %w", err)
 	}
 
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return s.writeSession(ctx, s.queries.WithTx(tx), sessionID, userID, deviceID, deviceName, ip, hash)
 	})
 	if err != nil {
@@ -677,7 +677,7 @@ func (s *Service) Refresh(ctx context.Context, rawToken string) (TokenPair, erro
 		return TokenPair{}, fmt.Errorf("generating session ID: %w", err)
 	}
 
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// The successor is inserted first so the old row can point at it. Same device_id, so the family

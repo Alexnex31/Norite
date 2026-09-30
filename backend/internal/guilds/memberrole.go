@@ -85,7 +85,7 @@ func (s *Service) changeMemberRole(
 ) (Member, error) {
 	var out Member
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err

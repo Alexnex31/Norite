@@ -151,9 +151,9 @@ func NewService(opts ServiceOptions) (*Service, error) {
 //
 // Every mutation in this package uses it, because rule 2 requires the mutation and its audit entry to
 // share a transaction — and the shortest way to keep that true is for there to be no other way to write.
-func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) error) error {
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(s.queries.WithTx(tx))
+func (s *Service) inTx(ctx context.Context, fn func(ctx context.Context, q *db.Queries) error) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return fn(ctx, s.queries.WithTx(tx))
 	})
 }
 

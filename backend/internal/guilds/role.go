@@ -85,7 +85,7 @@ func (s *Service) CreateRole(
 
 	var out Role
 
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
@@ -192,7 +192,7 @@ func (s *Service) UpdateRole(
 ) (Role, error) {
 	var out Role
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
@@ -295,7 +295,7 @@ func (s *Service) UpdateRole(
 
 // DeleteRole removes a role. @everyone is refused, in SQL — see DeleteRole in guilds.sql.
 func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, roleID snowflake.ID) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
@@ -434,7 +434,7 @@ func (s *Service) ReorderRoles(
 ) ([]Role, error) {
 	var out []Role
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err

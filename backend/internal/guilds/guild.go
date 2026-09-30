@@ -71,7 +71,7 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 	var out Guild
 
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The ceiling. No permission is checked on this path, so this is the only bound on it — see
 		// Service.maxGuildsPerAccount.
 		//
@@ -252,7 +252,7 @@ func (s *Service) Update(
 ) (Guild, error) {
 	var out Guild
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// Authorized on the transaction's querier, not the pool, so the permissions that allow the write
 		// are read in the same snapshot the write happens in (rule 1). See guildauth.Authorize.
 		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
@@ -384,7 +384,7 @@ func (s *Service) Update(
 // exactly this kind of decision, and an Instance Admin passes by layer 1 because operating the instance
 // includes removing what is on it.
 func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflake.ID) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// One query, not two. This used to read the guild for its owner id and then authorize, which ran
 		// ListGuildMemberAuthority — a query whose first column is that same owner id. M12 measured the
 		// redundancy and kept it rather than widen roles.Resolve's return for it; M13 widened that return

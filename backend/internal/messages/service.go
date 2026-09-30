@@ -53,9 +53,9 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{pool: opts.Pool, queries: db.New(opts.Pool), ids: opts.IDs}, nil
 }
 
-func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) error) error {
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(s.queries.WithTx(tx))
+func (s *Service) inTx(ctx context.Context, fn func(ctx context.Context, q *db.Queries) error) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return fn(ctx, s.queries.WithTx(tx))
 	})
 }
 
@@ -85,7 +85,7 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 	}
 
 	var out Message
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The non-locking variant, deliberately, on the product's highest-volume write.
 		//
 		// AuthorizeChannel reads the channel FOR UPDATE and holds it to commit, which is right for the
@@ -384,7 +384,7 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 	}
 
 	var out Message
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// PermSendMessages, not merely the view bit the authorize folds in. An edit is a write into this
 		// channel and a mute must bound every one of them — see the paragraph above.
 		//
@@ -468,7 +468,7 @@ func (s *Service) Delete(
 		return fmt.Errorf("messages: mint audit entry id: %w", err)
 	}
 
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// Non-locking, for the reason Update is: loadInChannel locks the message row, which is the lock
 		// this operation actually needs.
 		_, guildID, decision, err := guildauth.AuthorizeChannelUnlocked(ctx, q, actor, channelID, 0)

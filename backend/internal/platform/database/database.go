@@ -72,13 +72,21 @@ func New(ctx context.Context, opts PoolOptions) (*pgxpool.Pool, error) {
 //
 // Every mutating service method goes through this. It is what makes the project's
 // mutation-and-audit-log-in-one-transaction rule (CLAUDE.md rule 2) expressible as a single fn, and what
-// gives the gateway its "dispatch only after commit" ordering (rule 5): callers publish events after
-// RunInTx returns nil, never inside fn.
-func RunInTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) (err error) {
+// gives the gateway its "dispatch only after commit" ordering (rule 5): whatever must happen only once the
+// change is durable is registered with AfterCommit on the ctx fn receives, and runs after Commit returns
+// nil — never if the transaction rolls back.
+//
+// fn's ctx is the caller's with the transaction's hook list added. Closures conventionally name it ctx and
+// shadow the outer one, so every call made inside fn carries the list without being edited; a call that
+// reaches past the shadow to the outer ctx and registers a hook panics rather than losing it (see
+// AfterCommit).
+func RunInTx(ctx context.Context, pool *pgxpool.Pool, fn func(ctx context.Context, tx pgx.Tx) error) (err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("database: begin transaction: %w", err)
 	}
+	hooks := &afterCommit{}
+	txCtx := context.WithValue(ctx, afterCommitKey{}, hooks)
 
 	defer func() {
 		if p := recover(); p != nil {
@@ -98,14 +106,62 @@ func RunInTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) (er
 		}
 	}()
 
-	if err = fn(tx); err != nil {
+	if err = fn(txCtx, tx); err != nil {
 		return err
 	}
 
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("database: commit transaction: %w", err)
 	}
+
+	// Detached from cancellation: the change is committed, and a client hanging up after that must not stop
+	// the event describing it from being published or a revoked session's connection from being closed.
+	hooks.run(context.WithoutCancel(ctx))
 	return nil
+}
+
+// AfterCommit registers fn to run once the transaction ctx belongs to has committed, in registration order.
+//
+// It panics when ctx carries no transaction. The two quiet alternatives are both wrong in a way no test
+// would notice: running fn at once is exactly the before-commit dispatch rule 5 forbids, and dropping it
+// loses an event or leaves a revoked session's connection open. A panic is found the first time the path
+// runs, which is always in a test.
+func AfterCommit(ctx context.Context, fn func(ctx context.Context)) {
+	hooks, ok := ctx.Value(afterCommitKey{}).(*afterCommit)
+	if !ok {
+		panic("database.AfterCommit called outside a RunInTx transaction")
+	}
+	hooks.fns = append(hooks.fns, fn)
+}
+
+type afterCommitKey struct{}
+
+// afterCommit is one transaction's hook list. Not synchronized: fn runs on one goroutine, and registering
+// from a goroutine fn started would be a transaction used concurrently, which pgx does not support either.
+type afterCommit struct {
+	fns []func(ctx context.Context)
+}
+
+// run calls every hook, even after one panics, then re-raises the first panic.
+//
+// Every hook runs because they are independent and the transaction is already committed: a panic while
+// publishing one event must not be what stops a revoked session's connection from being closed. The panic
+// still surfaces afterwards, because it is a bug and swallowing it would hide one.
+func (a *afterCommit) run(ctx context.Context) {
+	var first any
+	for _, fn := range a.fns {
+		func() {
+			defer func() {
+				if p := recover(); p != nil && first == nil {
+					first = p
+				}
+			}()
+			fn(ctx)
+		}()
+	}
+	if first != nil {
+		panic(first)
+	}
 }
 
 // logFrom returns a logger for use inside this package, tolerating a nil one from callers that don't

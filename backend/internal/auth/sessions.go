@@ -141,7 +141,7 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID, currentSessio
 	// revokeEverything takes a *db.Queries precisely so it can be composed like this. The reset path always
 	// did; this one shipped without, which is the sort of thing only a second reader notices.
 	var out RevocationResult
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		out, err = revokeEverything(ctx, s.queries.WithTx(tx), int64(userID),
 			RevocationScope{KeepDeviceID: currentDevice})
