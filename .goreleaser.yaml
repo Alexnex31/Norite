@@ -1,7 +1,12 @@
-# M0 skeleton: builds/packages the four current binaries. No signing wired in yet — Sigstore/cosign release
-# signing lands at Milestone M24 (docs/architecture.md §13, ADR 0020). voiceworker/ joins once it exists
-# (Phase E); frontend/ is never a goreleaser artifact (it's embedded into the backend binary, or served by
-# the later web SPA's own build, per docs/architecture.md §1).
+# Builds and packages the four current binaries. No signing wired in yet — Sigstore/cosign release signing
+# lands at Milestone M24 (docs/architecture.md §13, ADR 0020), so a release cut before it carries only
+# checksums.txt. voiceworker/ joins once it exists (Phase E); frontend/ is never a goreleaser artifact (it's
+# embedded into the backend binary, or served by the later web SPA's own build, per docs/architecture.md §1).
+#
+# Releases are published only by .github/workflows/release.yml, on a `v*` tag (ADR 0033). The repository
+# also carries `m<N>` milestone tags, which are not versions and which goreleaser's own tag discovery cannot
+# tell apart from one — a phase's last milestone commit carries both — so the workflow names the tag
+# explicitly rather than letting goreleaser pick it.
 version: 2
 
 project_name: norite
@@ -126,6 +131,13 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+# `auto` marks any version with a pre-release suffix (v0.1.0-alpha, v0.2.0-beta.1, v1.0.0-rc.1) as a
+# pre-release on GitHub, so the "latest release" a self-hoster is pointed at is never one. Every 0.x release
+# is still a *release* here, not a pre-release: SemVer's pre-release is the suffix, and ADR 0033 states the
+# 0.x instability in the docs rather than by flagging every version before 1.0.0.
+release:
+  prerelease: auto
 
 changelog:
   disable: true
