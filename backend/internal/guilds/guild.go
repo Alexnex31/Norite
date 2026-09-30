@@ -127,7 +127,7 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 			// minted; wired up because M13's join endpoint is the caller that will meet it.
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
-				return ErrAlreadyAMember
+				return httpx.Errorf(ErrAlreadyAMember, "already a member of this guild")
 			}
 			return fmt.Errorf("guilds: add owner membership: %w", err)
 		}

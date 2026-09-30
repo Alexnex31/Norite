@@ -915,11 +915,19 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// messageOf prefers the contextual message a StatusError carries over the bare sentinel's text.
+// messageOf returns the contextual message a StatusError carries, and the bare sentinel's text only when
+// there is none.
+//
+// **The message, not Error().** StatusError.Error() is the message followed by the wrapped sentinel's own
+// text, which is right for a log line and wrong for a client. This returned it from M12 to the M13a
+// manual pass, so every refusal through writeErr's switch ended in an internal string, package prefix
+// included — and the transfer's ceiling refusal told an owner that *the guild* was at its limit, when the
+// limit is the recipient's account's. The status and code were right throughout, which is why no test that
+// checked them could see it. TestRefusalsCarryOnlyTheirOwnMessage.
 func messageOf(err error) string {
 	var se *httpx.StatusError
-	if errors.As(err, &se) && se.Error() != "" {
-		return se.Error()
+	if errors.As(err, &se) && se.Message != "" {
+		return se.Message
 	}
 	return err.Error()
 }
