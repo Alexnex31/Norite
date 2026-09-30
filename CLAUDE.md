@@ -521,8 +521,9 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   it.
 - **M13a — Guild ownership transfer**: done, after M17 rather than after M13 — it was skipped when
   M14–M17 were built and found by planning what came next. `POST /guilds/{guild_id}/owner`, the
-  `guild.owner_transfer` verb, and a lock on `RemoveMember`'s owner check. Decisions are in the roadmap
-  entry and in `docs/security-ledger.md`.
+  `guild.owner_transfer` verb, a locked guild row under every owner check (`RemoveMember`, `Delete`,
+  `Update`), and the owned-guild ceiling counted under a per-account advisory lock (slot 4). Decisions are
+  in the roadmap entry and in `docs/security-ledger.md`.
 
   **A guard that is safe because a value never changes stops being safe the day something changes it.**
   `RemoveMember` refused to remove the owner by reading `owner_id` unlocked, then deleting — correct for
@@ -537,6 +538,50 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   transferring hands layer 2 to somebody, and a token able to do that hands it to its attacker. Same
   line token minting draws. `RequireLiveSession` too, and testing it needed a *second* device:
   `logout/all` spares the caller's own, which is M11's design and made the first test pass for nothing.
+
+  **The first owner check was one of four, and the review passes found the other three.** `Delete` and
+  `Update` took ownership from a resolution read unlocked, so a former owner could delete or rename a
+  guild transferred mid-request; both now decide from the locked row. And the ceiling was a
+  read-modify-write across *two* guilds: two transfers to one account, each locking only its own guild,
+  both counted the recipient below the limit and both committed. A lock on the row being changed does not
+  cover a count over rows it does not touch — hence slot 4, keyed per account, shared with `Create`.
+  When a value that never changed starts changing, enumerate every reader of it; the first one found is
+  not the list.
+
+  **Refuse on unlocked data, then lock.** The first draft let any member take the guild's exclusive lock
+  by posting a transfer they would be refused, and `FOR UPDATE` conflicts with the `FOR KEY SHARE` every
+  insert into a child table takes — so one refused request stalled the guild's writes. The transfer takes
+  `FOR NO KEY UPDATE`, which still orders kicks, deletes and renames behind it without blocking inserts.
+  `/security-sweep` then found `Delete` doing it again, introduced by the fix for `Delete` above: **a fix
+  that adds a lock is a new place for this bug**, and `TestARefusedCallerTakesNoLockOnTheGuild` walks
+  every refusal with the row held rather than trusting the next one to remember.
+
+  **A plan measured with literal values is not the plan pgx runs.** pgx caches prepared statements, and
+  after five executions Postgres may switch to a generic plan costed for an *average* guild. For
+  `guild_id = $1 AND user_id = ANY($2)` that plan used `guild_id` as the index condition and filtered the
+  rest, so in a guild of 13,659 role grants the member list scanned all of them to keep 319 — 3,382 µs a
+  call, and the endpoint fell from ~3,000 to ~600 requests a second. Every `EXPLAIN ANALYZE` anyone had
+  run used literals and got the good plan. The fix matches both key columns per member in a subquery, so
+  no plan can widen it, and `TestMemberRoleReadsCannotScanTheWholeGuild` explains the statements pgx
+  actually prepared under `plan_cache_mode = force_generic_plan` on a skewed fixture. M14's `COALESCE`
+  note is the same hazard; this is the first time it was live. **Skew is the ordinary shape of an
+  instance** — many small guilds and a few large ones — and the large ones are where rule 7's hot paths
+  matter.
+
+  **Every refusal the guild handler mapped had leaked its sentinel's text since M12**: `messageOf`
+  returned `StatusError.Error()`, which appends the wrapped error, so a client read "you cannot act on a
+  member above you: guilds: the target stands at or above the actor". Status and code were right, and
+  every test asserted those or a phrase with `Contains`, so none could see it; the manual pass found it by
+  reading a response. The transfer made it wrong rather than untidy — its ceiling refusal claimed *the
+  guild* was full. `TestRefusalsCarryOnlyTheirOwnMessage` asserts whole messages, because `Contains` is
+  what let it through.
+
+  **The optimization review measured end to end rather than per function**, and how is worth reusing: a
+  real server under HTTP load on pinned cores, a calibrated delay proxy for a networked database, and
+  paired A/B runs alternating every few seconds, because this machine's power limits moved throughput
+  20% across three identical runs. An A/A control first sets the noise floor (±1% median here). Three
+  further findings — batched authorization reads, a batched send, allocation-free id encoding — are
+  measured and left for their own branch, since they reach `guildauth` and the send path.
 
 - **M14 — Guild audit log**: done (tag `m14`). The read surface over the table M12 created and every
   milestone since has written to: `GET /guilds/{guild_id}/audit-log` behind the new `PermViewAuditLog`

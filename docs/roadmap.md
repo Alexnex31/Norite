@@ -479,6 +479,15 @@ of this section.
   only while `owner_id` never changed, and this milestone is what changes it: unlocked, a kick could land
   on the member a concurrent transfer had just made owner.
 
+  **The review passes found that guard was one of four.** `Delete` and `Update` now decide from the
+  locked row too, and the ceiling is counted under a per-account advisory lock shared with `Create`,
+  because two transfers from two guilds each locked only their own and both slipped under it. Every
+  path refuses on unlocked data before locking, so a refused caller cannot stall the guild's writes, and
+  the transfer's own lock is `FOR NO KEY UPDATE` for the same reason. Two defects reaching past the
+  transfer were fixed on the branch: the member list's generic plan scanned a large guild's every role
+  grant (3,382 µs a call under load), and every refusal the guild handler mapped had carried its internal
+  error text since M12. `CLAUDE.md` carries the reasoning.
+
   Done when: an owner can transfer to another member of the same guild and not to a non-member; the former
   owner becomes an ordinary member and can then leave; the new owner passes ADR 0008 layer 2; and an
   Instance Admin can perform the transfer for a guild whose owner is gone, which is the case that motivates
