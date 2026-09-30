@@ -35,6 +35,11 @@ screen `6c` — read whisper content attached to a report. That authority is rea
 There are no users. Nothing is exposed: ADR 0032's release posture means the flagship accepts no
 non-developer account before v1. So this is not a response to risk in the present tense.
 
+*[That posture is superseded by [ADR 0033](0033-semver-release-progression.md): self-hostable `0.x`
+releases start at `M20a`, and the flagship stays closed until the feature set is well advanced and Phase P
+is ready rather than until v1. The argument here does not change. When this ADR was written nothing was
+exposed, and by `v0.1.0-alpha` this factor already exists.]*
+
 It is scheduled here because of what a second factor has to be threaded through: `POST /auth/login`, the
 refresh path, the device-code approval page, the OAuth exchange, and password reset. Those five took M4
 through M11 to get right, and **each carries an anti-enumeration property that a factor prompt can undo

@@ -152,7 +152,10 @@ Kubernetes via the Helm chart in `deploy/helm/` — see §12.
 > Collapsing them into a single `000001_init` at v1 is a legitimate and common practice, and the argument
 > for it grows as the count does. It should happen *at* v1 rather than before — doing it earlier pays the
 > cost twice, since every milestone from here adds more — and whoever does it has to carry the per-file
-> reasoning into the squashed file or into this section, or it is lost. The `down` files are the weakest
+> reasoning into the squashed file or into this section, or it is lost. **Once `v0.1.0-alpha` ships (ADR
+> 0033), self-hosted instances run these migrations too**, so a squash at `1.0.0` has to ship with an upgrade
+> path from the last `0.x` schema or say plainly that `0.x` instances start over. `0.x` carries no migration
+> guarantee, which permits either answer; it does not make the choice. The `down` files are the weakest
 > part of the set today and are explicitly dev-reset tools rather than supported rollbacks; `000020`'s
 > says so in as many words.
 >
@@ -1512,7 +1515,8 @@ start — breaking the single-instance invariant with no error anywhere.
   secret needed — only the owning OS user can open it). Reuses the gateway's exact op-code/DISPATCH protocol
   over 4-byte-length-prefixed JSON framing, so every attach client shares one client-side event parser. The
   shared HELLO/IDENTIFY handshake carries a semver field (MAJOR must match exactly; a defined
-  MINOR-version-back window is tolerated). **The daemon's write path to each attach client is asynchronous
+  MINOR-version-back window is tolerated; during `0.x`, MINOR must match too — see "Protocol version
+  compatibility" below). **The daemon's write path to each attach client is asynchronous
   and bounded** — a per-connection outbound channel with fixed capacity, fed by its own writer goroutine
   (see "Concurrency model" below); a client whose buffer fills gets **dropped**, never allowed to block the
   daemon's core loop, since that would also stall E2E ratchet advancement and voice signaling for everyone
@@ -1572,7 +1576,10 @@ plugin's per-invocation wall-clock timeout (§8). One shape throughout: isolate 
 run unboundedly behind a goroutine and a bounded channel.
 
 **Protocol version compatibility**: the shared HELLO/IDENTIFY handshake (real gateway and local socket alike)
-carries a semver field; MAJOR must match exactly, a defined MINOR-version-back window is tolerated.
+carries a semver field; MAJOR must match exactly, a defined MINOR-version-back window is tolerated. **While
+MAJOR is 0, MINOR is the breaking component**: MAJOR and MINOR must match exactly, only PATCH may differ, and
+a pre-release matches only the identical version string (ADR 0033; the full rule is in M20's roadmap
+entry).
 
 ---
 
@@ -2160,6 +2167,13 @@ are usable, rather than following the feature phases; and `M124`/`M125` sit at t
 logically much earlier, each annotated with where.
 
 Completion status is tracked in `CLAUDE.md` and `README.md`, not in the roadmap.
+
+Versions are cut from it under Semantic Versioning ([ADR 0033](adr/0033-semver-release-progression.md)):
+- `v0.1.0-alpha` when `M20a` is done;
+- a MINOR version at the end of each sequential feature phase from D onward;
+- `0.x` until every milestone is done, then a release-candidate stage, then `v1.0.0`.
+
+Phase P and `M124`/`M125` move no version.
 
 ---
 

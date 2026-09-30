@@ -8,6 +8,13 @@ below, so nothing in 0007 remains authoritative and no file should cite it as li
 rationale is adopted wholesale rather than merely revived and whose "no per-file license headers"
 consequence is reversed. The chain stays linear: 0005 → 0007 → 0032.
 
+**Partially superseded by [ADR 0033](0033-semver-release-progression.md)**, in one section only:
+"Release posture: phase betas, and exactly one release" below. Norite now releases `0.x` versions from
+`M20a` on, under Semantic Versioning, with `v1.0.0` after every milestone is done and a release-candidate
+stage. Everything else in this ADR stands: the license, the dependency-licensing split, the deployment
+shapes, the §5(d) and §13 obligations and the `user_entitlements` seam. The section is kept intact below as
+the record of what 0033 replaced.
+
 ## Context
 ADR 0007 published no public license at all. The repository was visible under default copyright, all rights
 reserved, and the only way anyone outside the copyright holder acquired the right to run Norite was an
@@ -171,6 +178,11 @@ which under AGPL does not exist because there is no bespoke text to review.
 stay as they are.
 
 ## Release posture: phase betas, and exactly one release
+*[Superseded by [ADR 0033](0033-semver-release-progression.md). Releases are `0.x` versions from `M20a`
+on, testers are not gated, and the flagship stays closed until the feature set is well advanced and Phase P
+is ready rather than "before v1". The attribution deadline below moves from "the first phase beta" to
+`v0.1.0-alpha`. Kept as written.]*
+
 Carried across from ADR 0007 essentially intact, because it is still the decision:
 
 - **Nothing ships as a release before the milestone sequence is complete.** The roadmap is a dependency

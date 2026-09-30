@@ -46,7 +46,8 @@ reserved under §7(e) by declining to grant it, not by a trademark claim. See
   codegens from) + `docker/` (local dev compose stack) + `frontend/` (the later, tertiary web SPA).
 - **Real-time**: a WebSocket "gateway" modeled directly on Discord's real protocol (op-codes, HELLO/
   IDENTIFY/READY handshake, heartbeats, RESUME, DISPATCH events), carrying a semver version field
-  (MAJOR must match exactly, a defined MINOR-version-back window is tolerated). REST is used for all CRUD;
+  (MAJOR must match exactly, a defined MINOR-version-back window is tolerated; while MAJOR is 0, MINOR
+  must match too — M20's entry). REST is used for all CRUD;
   the gateway is used for live push plus a handful of gateway-only client ops (typing, presence, voice
   state). The same protocol is reused, unmodified, over the local daemon↔CLI/TUI/GUI socket.
 - **IDs**: Discord-style Snowflakes (`bigint`, time-sortable), not UUIDs, not serial — see
@@ -413,9 +414,29 @@ and did not come back here. A list enumerating its own members is one that drift
 insertion, so check it against the roadmap rather than trusting it:
 `grep -cE '^- \*\*M[0-9]+[a-z] — ' docs/roadmap.md`.
 
-**Nothing ships as a release before the whole sequence is done.** A beta build goes to a small group of
-testers at each phase boundary; there is exactly one official v1, at the end, after everything is reviewed
-and tested. Recorded in ADR 0032 — the absence of any release marker otherwise reads as an oversight.
+**Releases follow Semantic Versioning, and a milestone tag is not a version.** `v0.1.0-alpha` is cut when
+M20a is done, `v0.1.0` at the end of Phase D, and the next MINOR at the end of each later feature phase
+through Phase O (`v0.12.0`). Phase P and M124–M125 move no version.
+
+- **PATCH releases** may be cut at any time.
+- **Other pre-releases are optional.** An alpha, beta or rc is the author's option at any milestone, and
+  no document assigns one to a future milestone.
+- **The version stays `0.x` until every milestone is done.** While MAJOR is 0, any MINOR may break
+  compatibility.
+- **`1.0.0` comes last**: a `v1.0.0-rc.N` stage for a full review and test, then `v1.0.0`, meaning "the
+  planned scope exists".
+- **Self-hosting is open from the first release**, without a support commitment before `1.0.0`, and
+  testers are not gated.
+- **The flagship stays closed to non-developer accounts** until the feature set is well advanced and
+  Phase P is ready.
+
+Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and nothing else of 0032.
+
+**Tag formats:**
+- **Release tags** are always three components: `v0.1.0-alpha`, never `v0.1-alpha`.
+- **Release automation fires on `v*` tags only.** `m<N>` stays the internal milestone marker, and a
+  commit that completes a phase carries both.
+- **Tagging is the author's step.** An agent never creates a `v*` tag or bumps a version.
 
 - **M0 — monorepo scaffolding**: done (tag `m0`).
 - **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
@@ -482,8 +503,9 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   (`CompleteTwoFactorLogin`) and `http.go` (`writeTokenPairErr`, the `revocationCountsResponse` rename, and
   `two_factor_enabled`/`recovery_codes_remaining` on the user response). Decisions in ADR 0031, which also
   amends ADR 0014: device linking is authorized by the primary device, so whatever protects a sign-in
-  protects the E2E trust chain. Built here rather than later not because it is urgent — nothing is exposed
-  before v1 — but because the five paths it threads through took M4 through M11 to get right, and each
+  protects the E2E trust chain. Built here rather than later not because it was urgent — nothing was
+  exposed then, and the first release is M20a's — but because the five paths it threads through took M4
+  through M11 to get right, and each
   carries an anti-enumeration property a factor prompt can undo silently.
 
   The CLI half landed here too, after a review found the milestone had shipped a backend that made

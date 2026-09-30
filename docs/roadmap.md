@@ -20,13 +20,30 @@ buys a clean sequence and pays for it with two schemes that disagree. A suffixed
 milestone in every other respect: same scope discipline, same "done when", same place in the dependency
 order. Letters run `a`, `b`, `c` in insertion order after the same number.
 
-**Releases.** Nothing ships as a release before the whole sequence is complete. At each phase boundary a
-**beta build** goes to a small group of testers — enough of the product to exercise what that phase added,
-not a public launch and not a support commitment. The official **v1** comes after every milestone is done
-and the whole thing has been reviewed and tested. This is what `architecture.md`'s "no scope described in
-this document is removable" means in practice: the sequence is the plan, the betas are how it gets
-exercised before the end, and there is exactly one release. Recorded because the absence of any release
-marker otherwise reads as an oversight rather than a decision — see ADR 0032.
+**Releases.** Norite follows Semantic Versioning 2.0.0, with tags `vMAJOR.MINOR.PATCH` and always three
+numeric components. **`v0.1.0-alpha` is cut when M20a is done**, the first milestone a person can use.
+**`v0.1.0` is cut at the end of Phase D**, and **each later sequential feature phase ends with a MINOR
+bump**: Phase E → `v0.2.0` and so on, through Phase O → `v0.12.0`. Phase P, and M124–M125 alongside it, move
+no version; their work ships inside whatever version is current.
+
+Between those points:
+- PATCH releases may be cut at any time.
+- An alpha, beta or rc of the next version is the author's option at any milestone, and never a schedule
+  this file assigns.
+
+**The version stays `0.x` until every milestone is done, however large a breaking change is**, and while
+MAJOR is 0 any MINOR may be incompatible with the one before it. When the last milestone is done, a
+`1.0.0` pre-release stage (`v1.0.0-rc.N`, optionally preceded by `v1.0.0-beta.N`) carries the full review
+and test. **`v1.0.0` follows that stage and means one thing: the planned scope exists.** This is what
+`architecture.md`'s "no scope described in this document is removable" means in practice: the sequence is
+the plan, the `0.x` releases are how it gets exercised on the way, and `1.0.0` waits for all of it.
+
+**Self-hosting is open from the first release, with no support or stability commitment before `1.0.0`.**
+Testers are not gated. **The public flagship stays closed to non-developer accounts** until the feature set
+is well advanced and the Phase P deployment track is ready. See ADR 0033.
+
+**Milestone tags are not versions.** `m<N>` marks a completed milestone and stays; release automation fires
+only on `v*`.
 
 Read as a long-term, dependency-ordered critical path, not a near-term v1 promise — the accumulated scope
 (custom SFU, custom crypto, native GUI, plugin sandbox, a Kubernetes deployment) is realistically multi-year
@@ -912,9 +929,29 @@ of this section.
   keyring unlocks reaches the keyring afterwards.
 - **M20 — Daemon↔client local IPC**: the Unix domain socket / named pipe, 4-byte-length-prefixed JSON
   framing, reusing the gateway's op-code/DISPATCH shape and one shared client-side event parser, and the
-  semver MAJOR-must-match/MINOR-window version-compatibility handshake. The daemon's write path to each
-  attach client is asynchronous and bounded (a per-connection outbound channel with fixed capacity, fed by its
-  own writer goroutine); a client whose socket buffer fills gets dropped rather than blocking the daemon.
+  semver MAJOR-must-match/MINOR-window version-compatibility handshake (read with the `0.x` rule below).
+  The daemon's write path to each attach client is asynchronous and bounded (a per-connection outbound
+  channel with fixed capacity, fed by its own writer goroutine); a client whose socket buffer fills gets
+  dropped rather than blocking the daemon.
+
+  **While MAJOR is 0, MINOR is the breaking component, specified 2026-09-30 with ADR 0033.** "MAJOR must
+  match" protects nothing during `0.x`, because every version has MAJOR 0 and SemVer lets any `0.y`
+  change break the one before it. So the handshake compares the release versions the two sides report
+  (the same `vMAJOR.MINOR.PATCH` a binary is tagged with):
+  - **MAJOR ≥ 1**: MAJOR must match exactly, and the defined MINOR-back window is tolerated, as before.
+  - **MAJOR = 0**: MAJOR *and* MINOR must match exactly, and any PATCH difference is tolerated, since a
+    PATCH carries fixes only. There is no MINOR window before `1.0.0`.
+  - **A pre-release** (`0.2.0-alpha.1`, `1.0.0-rc.2`) is compatible only with the **identical** version
+    string, pre-release identifiers included. SemVer §9 says a pre-release does not have to satisfy the
+    compatibility its core version promises, and two alphas of one MINOR may differ in exactly the way
+    this handshake exists to catch.
+  - **Build metadata is ignored**, as SemVer §10 requires.
+  - **`0.x` against `1.x`** fails the MAJOR check like any other MAJOR mismatch.
+
+  A refusal names both versions and which side to upgrade, because this is the error a self-hoster
+  meets after upgrading one binary and not the other. The same rule governs the gateway's handshake
+  (M18/M19), where the two sides are the backend and the daemon, and M24's updater relies on it.
+
   **The socket also relays authenticated requests, which this entry did not say until 2026-09-25.** ADR
   0011 makes the daemon the sole holder of its account's tokens and says every authenticated action an
   attach client triggers "is relayed through the daemon over the local IPC socket" — and this entry
@@ -1014,7 +1051,10 @@ of this section.
   completion demonstrates nothing; this milestone is what makes partial completion a working, narrow
   product. For a multi-year solo build that difference is not aesthetic.
 
-  It is also what the phase-boundary beta builds are for: from here on there is something to hand a tester.
+  **Its completion cuts `v0.1.0-alpha`**, the first release (ADR 0033): from here on there is something to
+  hand a tester and something a self-hoster can run by name. It is the only milestone the release policy
+  fixes to a pre-release label. The README's `pre-alpha` status badge changes when that tag ships, not
+  before.
 
   **It also carries the license notice, in its plain-text form.** This is the first milestone at which a
   person can open a client at all, so it is the first at which AGPL §5(d)'s notice has anywhere to go —
@@ -1071,6 +1111,26 @@ of this section.
   "bad" release triggers automatic rollback to the previous binary. Once Phase E exists, this milestone's
   guard additionally defers applying a downloaded update while the daemon is tracking an active voice
   session, applying it only once the call ends (`architecture.md` §6).
+
+  **Versions are compared by SemVer precedence, noted 2026-09-30 with ADR 0033**, which makes the three
+  guards above consistent rather than changing any of them.
+  - **Downgrade.** "Downgrade" means lower precedence under SemVer §11: a pre-release sorts below its
+    release (`0.2.0-rc.1` < `0.2.0`), build metadata is ignored, and moving from `0.2.0-beta.1` to
+    `0.2.0` is an upgrade while the reverse is refused.
+  - **Rollback.** Auto-rollback is not an exception to anti-downgrade, because it is not an update: it
+    restores the binary this installation already ran and kept, and never accepts an offered one. It
+    records the crashing version so that version is not offered again.
+  - **Channels.** A stable install is **never offered a pre-release**. Receiving alphas, betas and rcs is an
+    explicit opt-in, and an opted-in install takes whichever candidate has the highest precedence, stable
+    releases included.
+  - **The instance's version.** While MAJOR is 0 every MINOR may be incompatible (ADR 0033), and the backend
+    is not auto-updated (ADR 0020). So a client **never installs a version its own instance's handshake
+    would refuse** (M20's rule): a daemon signed in to a `0.2.x` instance is not moved to `0.3.0` by the
+    update check.
+
+  **This is the last milestone of Phase D, so its completion cuts `v0.1.0`** (ADR 0033), unless the
+  phase's last milestone changes. It is also the milestone that wires release signing: `v0.1.0-alpha`,
+  cut at M20a, precedes it and ships with checksums and no signature.
 
 #### Phase E — Voice
 
@@ -1498,8 +1558,11 @@ of this section.
   delivered as a response state on the existing registration call rather than as a `GET .../challenge`
   a client would fetch first. M67a inherits that shape.
 
-  Not urgent in the release plan's terms — nothing is publicly open before v1 — which is precisely why it
-  is scheduled rather than left as a gap somebody discovers on launch day.
+  Not urgent in the release plan's terms, because the flagship stays closed to non-developer accounts until
+  the feature set is well advanced and Phase P is ready (ADR 0033). That is precisely why it is scheduled
+  rather than left as a gap somebody discovers on launch day. **Self-hosted `0.x` releases exist from M20a,
+  though**, so an operator who opens registration before this milestone does so without anti-automation,
+  and the self-hosting documentation should say so.
 
   **M72a raises the stakes and the dependency runs backwards.** A guild discovery directory makes bulk
   account creation *profitable* in a way nothing before it does: an account exists to own guilds, and
@@ -2272,23 +2335,22 @@ M99. A badge claiming a guarantee the build does not yet make is worse than no b
 **Dependency notes:** M11a (two-factor authentication) must exist before M71 (Instance Admin tier), whose
 authority is otherwise reachable with one factor, and before M100 (E2E device linking), which is authorized
 by the primary device and therefore inherits whatever protects a sign-in. M20a (first usable client) depends
-on M20 and M15 and is what makes every phase-boundary beta from Phase D onward something a tester can
-actually open. M56a (reactions) depends on M15 and M18, and wants to be decided before M12 wires
+on M20 and M15 and is what makes every release from `v0.1.0-alpha` onward something a tester can actually
+open. M56a (reactions) depends on M15 and M18, and wants to be decided before M12 wires
 `oapi-codegen` even though it is built much later, because the message payload it extends is codegen'd by
 four clients. M67a (registration anti-automation) protects M66/M70 and is not urgent in release terms —
-nothing is publicly open before v1 — but its *contract shape* is reserved at M12 rather than at M67a, for
-the same rule-6 reason. M37 (voice opt-out) must exist before M66 (public matchmaking, which needs the
-voice+text pair to degrade gracefully). M61 (whispers) must exist before M74 (its Instance-Admin-facing
-break-glass view) and before M99 (which excludes whispers from E2E scope). M68 (recently-met) must exist
-before M69 (friends). M57 (DMs), M68 (recently-met), and M69 (friends) must exist before M70 (blocks). M11
-(revoke-all-sessions) must exist before M72 (bans) and M101 (device revocation↔E2E trust). M58 (attachments)
-must exist before M59 (custom emoji). M97 must land before any further work in Phase M proceeds — its
-former license-compatibility gate is answered by ADR 0032, and what it leaves behind is the standing
-constraint that libsignal is imported only from `daemon/`. Phase P (Kubernetes) depends on M114 requiring
-Phase D's Redis-fan-out design to already exist as a seam, and on M58 (attachments) preceding M115, which
-is a cross-track edge and therefore fine. **M113 no longer requires M115** — it backs up to volume
-snapshots — which removes what was the roadmap's only dependency running backwards against its own
-numbering. M124 depends on
-M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14, M72 and M16b,
-conceptually belonging in Phase L despite its number — the same "numerically-late, logically-earlier"
-treatment already established for Phase P above.
+the flagship stays closed until Phase P is ready (ADR 0033) — but its *contract shape* is reserved at M12
+rather than at M67a, for the same rule-6 reason. M37 (voice opt-out) must exist before M66 (public
+matchmaking, which needs the voice+text pair to degrade gracefully). M61 (whispers) must exist before M74 (its
+Instance-Admin-facing break-glass view) and before M99 (which excludes whispers from E2E scope). M68
+(recently-met) must exist before M69 (friends). M57 (DMs), M68 (recently-met), and M69 (friends) must exist
+before M70 (blocks). M11 (revoke-all-sessions) must exist before M72 (bans) and M101 (device revocation↔E2E
+trust). M58 (attachments) must exist before M59 (custom emoji). M97 must land before any further work in Phase
+M proceeds — its former license-compatibility gate is answered by ADR 0032, and what it leaves behind is the
+standing constraint that libsignal is imported only from `daemon/`. Phase P (Kubernetes) depends on M114
+requiring Phase D's Redis-fan-out design to already exist as a seam, and on M58 (attachments) preceding M115,
+which is a cross-track edge and therefore fine. **M113 no longer requires M115** — it backs up to volume
+snapshots — which removes what was the roadmap's only dependency running backwards against its own numbering.
+M124 depends on M12 and M18, conceptually belonging in Phase D/G despite its number; M125 depends on M14, M72
+and M16b, conceptually belonging in Phase L despite its number — the same "numerically-late,
+logically-earlier" treatment already established for Phase P above.

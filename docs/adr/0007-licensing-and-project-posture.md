@@ -12,6 +12,10 @@ with a rewritten rationale and an allow-list that now splits by module). The ope
 is answered there, and so is the premise that parked it — under AGPL the signed license file grants nothing,
 because the license text already granted it publicly. Cite 0032, not this file.
 
+*[The release posture 0032 carried across from here is itself superseded by
+[ADR 0033](0033-semver-release-progression.md): `0.x` releases from `M20a`, then `v1.0.0`. For releases,
+cite 0033.]*
+
 The body below is kept intact as the historical record of why the all-rights-reserved posture was chosen,
 which is the reasoning 0032 had to argue against rather than merely replace. It supersedes
 [ADR 0005](0005-agpl-license.md), and is itself superseded.

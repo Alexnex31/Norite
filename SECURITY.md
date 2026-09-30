@@ -51,10 +51,11 @@ So, for anything reported through the private channel above:
   commit subjects to obscure a security fix are not a substitute for the timing above — they delay
   discovery by defenders and self-hosters more than by anyone reading the diff.
 
-Nothing here is live yet: no release has shipped and the flagship accepts no non-developer account before
-v1 (ADR 0032's release posture), so there is currently nobody to coordinate with. This section is written
-now rather than at the first phase beta because that is the point at which a build first reaches somebody
-else, and it is a bad moment to be designing a disclosure process.
+Nothing here is live yet: no release has shipped, and the flagship stays closed to non-developer accounts
+until its deployment is ready ([ADR 0033](docs/adr/0033-semver-release-progression.md)), so there is
+currently nobody to coordinate with. That changes at `v0.1.0-alpha`, the first release, which anyone may
+self-host. This section is written now rather than then because that is the point at which a build first
+reaches somebody else, and it is a bad moment to be designing a disclosure process.
 
 ## Scope
 

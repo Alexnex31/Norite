@@ -99,11 +99,24 @@ member-facing screen that would tell people so is `M62a`. Until then the setting
 API by anyone in the guild and rendered by nothing, because there is no client to render it in.
 
 > [!NOTE]
-> **On releases.** Nothing ships as a release before the milestone sequence is complete. At each phase
-> boundary a beta build goes to a small group of testers: enough to exercise what that phase added, not a
-> public launch and not a support commitment. There is exactly one official v1, after every milestone is
-> done and the whole thing has been reviewed and tested. The public flagship accepts no non-developer
-> account before then.
+> **On releases.** Norite uses [Semantic Versioning](https://semver.org/). No release exists yet.
+>
+> **When versions are cut:**
+> - **`v0.1.0-alpha`** ships when `M20a`, the first usable client, is done.
+> - **`v0.1.0`** ships at the end of Phase D.
+> - **A MINOR version** follows at the end of each feature phase after that: `v0.2.0`, `v0.3.0`, and so on.
+> - **`v1.0.0`** comes only after every milestone is done and a release-candidate stage has reviewed and
+>   tested the whole thing. `1.0.0` means the planned scope exists.
+>
+> **What a `0.x` release promises: nothing about stability.** Anyone may self-host any tagged version.
+> Before `1.0.0` there is no support commitment, any MINOR version may break compatibility with the one
+> before it, there is no guaranteed migration path between them, and no third party has reviewed the code.
+>
+> **The public flagship is not open yet.** It stays closed to non-developer accounts until the feature set
+> is well advanced and its Kubernetes deployment is ready.
+>
+> The status badge above says `pre-alpha` and will until `v0.1.0-alpha` ships. See
+> [ADR 0033](docs/adr/0033-semver-release-progression.md).
 
 [`docs/roadmap.md`](docs/roadmap.md) is the dependency-ordered sequence, `M0` through `M125`, each with a
 checkable "done when" condition. Read it as a long-term critical path, not a near-term promise.
