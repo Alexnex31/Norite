@@ -334,8 +334,9 @@ func TestEveryRefusalHasItsCloseCode(t *testing.T) {
 	}
 }
 
-// A RESUME with nothing to resume is answered "not resumable", which a client handles by identifying.
-func TestAResumeBeforeResumeExistsIsAnsweredNotResumable(t *testing.T) {
+// A RESUME naming a session that does not exist is answered "not resumable", which a client handles by
+// identifying on the same connection.
+func TestAResumeOfNoSessionIsAnsweredNotResumable(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
 	c := dialGateway(t, serveGateway(t, f.api.handler), nil)

@@ -149,7 +149,7 @@
     },
     "InvalidSession": {
       "type": "object",
-      "description": "op 9: a RESUME that cannot be honoured.",
+      "description": "op 9: a RESUME that cannot be honoured. IDENTIFY afresh on the same connection.",
       "required": [
         "op",
         "d",
@@ -178,6 +178,9 @@
       "oneOf": [
         {
           "$ref": "#/$defs/ReadyDispatch"
+        },
+        {
+          "$ref": "#/$defs/ResumedDispatch"
         },
         {
           "$ref": "#/$defs/GuildCreateDispatch"
@@ -366,7 +369,7 @@
     },
     "Resume": {
       "type": "object",
-      "description": "op 6, continuing a session after a disconnect. Answered with op 9 false until RESUME lands (M18 part 4).",
+      "description": "op 6, continuing a session after a disconnect: the token again, the session id, and the last sequence number received. Answered by every missed frame in order and then RESUMED; by op 9 false when the session is unknown, expired, somebody else's or too far behind to replay; and by close 4007 for a sequence number the server never sent.",
       "required": [
         "op",
         "d",
@@ -1412,6 +1415,38 @@
         },
         "t": {
           "const": "MESSAGE_DELETE"
+        }
+      }
+    },
+    "Resumed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "description": "RESUMED's payload is empty: its sequence number, after every replayed frame, is the message."
+    },
+    "ResumedDispatch": {
+      "type": "object",
+      "description": "Sent after a RESUME has replayed every frame the client missed, in order. Events that arrive after it are live.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Resumed"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "RESUMED"
         }
       }
     }

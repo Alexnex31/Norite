@@ -21,16 +21,18 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
-	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
 
 // conn is one client's socket, from the upgrade until it closes.
 //
-// Three goroutines touch it: serve reads frames and answers them, writeLoop drains out onto the socket,
-// and the watchdog timer closes it when a deadline passes. Anything they share is behind mu, and closing is
-// once-only, so any of them may end the connection.
+// It owns the socket and nothing that outlives it: control frames, deadlines and limits. The event stream
+// belongs to a session, which a connection is attached to by IDENTIFY or RESUME and detached from when it
+// closes, so a reconnecting client can pick the stream up where it left off.
+//
+// Three goroutines touch it: serve reads frames and answers them, writeLoop drains out onto the socket, and
+// the watchdog timer closes it when a deadline passes. Closing is once-only, so any of them may end it.
 type conn struct {
 	srv *Server
 	ws  *websocket.Conn
@@ -54,15 +56,8 @@ type conn struct {
 	closeOnce sync.Once
 	watchdog  *time.Timer
 
-	mu        sync.Mutex
-	seq       int64
-	userID    snowflake.ID
-	deviceID  string
-	sessionID string
-	// guilds is what READY listed, kept current by GUILD_CREATE and GUILD_DELETE. It chooses which events
-	// this connection is a candidate for and nothing more: whether it may receive one is decided against
-	// the database at fan-out (see onEvent), because this is exactly what goes stale.
-	guilds map[snowflake.ID]struct{}
+	mu   sync.Mutex
+	sess *session
 }
 
 func newConn(s *Server, ws *websocket.Conn, log *zerolog.Logger) *conn {
@@ -76,11 +71,10 @@ func newConn(s *Server, ws *websocket.Conn, log *zerolog.Logger) *conn {
 	}
 }
 
-// identity is the account this connection identified as, or 0 before IDENTIFY.
-func (c *conn) identity() snowflake.ID {
+func (c *conn) session() *session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.userID
+	return c.sess
 }
 
 func (c *conn) serve(ctx context.Context) {
@@ -97,6 +91,13 @@ func (c *conn) serve(ctx context.Context) {
 		if p := recover(); p != nil {
 			c.log.Error().Interface("panic", p).Msg("gateway connection panicked")
 			c.closeWith(gatewayproto.CloseUnknownError, "internal error")
+		}
+	}()
+
+	// Whatever the connection was attached to keeps its stream, for ResumeWindow.
+	defer func() {
+		if s := c.session(); s != nil {
+			s.detach(c)
 		}
 	}()
 
@@ -138,7 +139,7 @@ func (c *conn) serve(ctx context.Context) {
 
 // handle answers one frame, reporting whether the connection stays open.
 func (c *conn) handle(ctx context.Context, f gatewayproto.Frame) bool {
-	identified := c.identity() != 0
+	identified := c.session() != nil
 
 	switch f.Op {
 	case gatewayproto.OpHeartbeat:
@@ -162,10 +163,7 @@ func (c *conn) handle(ctx context.Context, f gatewayproto.Frame) bool {
 			c.closeWith(gatewayproto.CloseAlreadyAuthenticated, "already identified")
 			return false
 		}
-		// There is nothing to resume yet: sessions do not outlive their connection until RESUME lands.
-		// "Not resumable" is the answer a client already handles, by identifying afresh.
-		c.send(gatewayproto.OpInvalidSess, false)
-		return true
+		return c.resume(ctx, f.D)
 	}
 
 	if !identified {
@@ -179,7 +177,43 @@ func (c *conn) handle(ctx context.Context, f gatewayproto.Frame) bool {
 	return false
 }
 
-// identify authenticates the connection and sends READY, or closes it saying why not.
+// authenticate is what IDENTIFY and RESUME both ask of a token: that it is an access token, that its
+// account has not identified too often, and that its device is still signed in. It closes the connection
+// saying why when the answer is no.
+//
+// Shared, so the two cannot drift apart. RESUME skipping any of these would make it the easier door: a
+// signed-out device resuming a stream it had before the sign-out is the case the liveness check exists for.
+func (c *conn) authenticate(ctx context.Context, token string) (auth.Actor, string, bool) {
+	// An access token only. An API token is not a JWT and fails here, which is the intent: the gateway
+	// carries everything an account can see, and a delegated credential reaching it would need a scope
+	// check on every event type (M18 plan, finding 12).
+	actor, err := c.srv.opts.Accounts.AuthenticateAccessToken(ctx, token)
+	if err != nil || actor.Kind != auth.ActorUser {
+		c.closeWith(gatewayproto.CloseAuthenticationFailed, "invalid token")
+		return auth.Actor{}, "", false
+	}
+
+	// Counted per account and fail-open like the HTTP limiter: a store that cannot answer must not become
+	// every daemon on the instance failing to connect.
+	if res, err := c.srv.identifyLimiter.Allow(ctx, "account:"+actor.UserID.String()); err == nil && !res.Allowed {
+		c.closeWith(gatewayproto.CloseRateLimited, "identifying too often")
+		return auth.Actor{}, "", false
+	}
+
+	device, err := c.srv.opts.Accounts.LiveDevice(ctx, actor.UserID, actor.SessionID)
+	if err != nil {
+		if errors.Is(err, auth.ErrSessionSignedOut) {
+			c.closeWith(gatewayproto.CloseAuthenticationFailed, auth.ErrSessionSignedOut.Error())
+			return auth.Actor{}, "", false
+		}
+		c.log.Error().Err(err).Msg("gateway could not check the session")
+		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
+		return auth.Actor{}, "", false
+	}
+	return actor, device, true
+}
+
+// identify authenticates the connection, starts a session, and sends READY, or closes it saying why not.
 //
 // The order is cheapest refusal first, and nothing about an account is consulted before its token
 // verifies. The version is checked before the token because HELLO has already told anybody who connects
@@ -205,53 +239,41 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 			Msg("gateway version check skipped: a development build is on one side")
 	}
 
-	// An access token only. An API token is not a JWT and fails here, which is the intent: the gateway
-	// carries everything an account can see, and a delegated credential reaching it would need a scope
-	// check on every event type (M18 plan, finding 12).
-	actor, err := c.srv.opts.Accounts.AuthenticateAccessToken(ctx, id.Token)
-	if err != nil || actor.Kind != auth.ActorUser {
-		c.closeWith(gatewayproto.CloseAuthenticationFailed, "invalid token")
+	actor, device, ok := c.authenticate(ctx, id.Token)
+	if !ok {
 		return false
 	}
 
-	// Counted per account and fail-open like the HTTP limiter: a store that cannot answer must not become
-	// every daemon on the instance failing to connect.
-	if res, err := c.srv.identifyLimiter.Allow(ctx, "account:"+actor.UserID.String()); err == nil && !res.Allowed {
-		c.closeWith(gatewayproto.CloseRateLimited, "identifying too often")
-		return false
-	}
-
-	device, err := c.srv.opts.Accounts.LiveDevice(ctx, actor.UserID, actor.SessionID)
+	sessionID, err := newSessionID()
 	if err != nil {
-		if errors.Is(err, auth.ErrSessionSignedOut) {
-			c.closeWith(gatewayproto.CloseAuthenticationFailed, auth.ErrSessionSignedOut.Error())
-			return false
-		}
-		c.log.Error().Err(err).Msg("gateway could not check the session")
+		c.log.Error().Err(err).Msg("gateway could not mint a session id")
 		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return false
 	}
+	s, ok := c.srv.newSession(sessionID, actor.UserID, device)
+	if !ok {
+		c.closeWith(gatewayproto.CloseRateLimited, "too many connections for this account")
+		return false
+	}
+	s.attach(c)
+	c.mu.Lock()
+	c.sess = s
+	c.mu.Unlock()
 
+	// The session is a fan-out candidate from here, before READY's data is read, and holds what arrives
+	// meanwhile (session.pending). Read first and register second, and an event committed in between
+	// would be missed with nothing to say so.
 	user, err := c.srv.opts.Accounts.ReadyUser(ctx, actor.UserID)
 	if err != nil {
 		c.log.Error().Err(err).Msg("gateway could not load the account for READY")
+		c.srv.dropSession(s)
 		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return false
 	}
 	memberOf, err := c.srv.opts.Guilds.ListForMember(ctx, actor.UserID)
 	if err != nil {
 		c.log.Error().Err(err).Msg("gateway could not list guilds for READY")
-		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
-		return false
-	}
-
-	if !c.srv.claim(actor.UserID) {
-		c.closeWith(gatewayproto.CloseRateLimited, "too many connections for this account")
-		return false
-	}
-	sessionID, err := newSessionID()
-	if err != nil {
-		c.log.Error().Err(err).Msg("gateway could not mint a session id")
+		c.srv.dropSession(s)
 		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return false
 	}
@@ -260,14 +282,51 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 	for _, g := range memberOf {
 		set[g.ID] = struct{}{}
 	}
+	s.becomeReady(ready{SessionID: sessionID, User: user, Guilds: memberOf}, set)
+	c.watchdog.Reset(c.heartbeatDeadline())
+	return true
+}
 
-	// One critical section for the identity and READY, because setting the identity is what makes this
-	// connection a fan-out candidate. With the two apart, an event committed in between would be queued
-	// first and take sequence number 1, and READY would arrive second, describing a state older than an
-	// event the client has already applied.
+// resume continues a session after a disconnect: the frames the client missed, in order, then RESUMED.
+//
+// The token is checked exactly as IDENTIFY checks it, and must belong to the account and device the session
+// was started by. A session id is half of what resumes a stream and never the whole: with the id alone,
+// anybody who read one from a log line would resume somebody else's (docs/architecture.md §2). Every failure
+// that is not the token's is answered "not resumable", which a client handles by identifying afresh.
+func (c *conn) resume(ctx context.Context, raw json.RawMessage) bool {
+	var r gatewayproto.Resume
+	if err := strictDecode(raw, &r); err != nil || r.Token == "" || r.SessionID == "" || r.Seq < 0 {
+		c.closeWith(gatewayproto.CloseDecodeError, "RESUME needs a token, a session id and a sequence number")
+		return false
+	}
+
+	actor, device, ok := c.authenticate(ctx, r.Token)
+	if !ok {
+		return false
+	}
+
+	// Somebody else's session, one on another device, and one that has expired all get the same answer.
+	// A different answer for a session that exists but is not yours would confirm session ids.
+	s := c.srv.lookupSession(r.SessionID)
+	if s == nil || s.userID != actor.UserID || s.deviceID != device {
+		c.send(gatewayproto.OpInvalidSess, false)
+		return true
+	}
+
+	switch s.resume(c, r.Seq) {
+	case resumeInvalidSeq:
+		c.closeWith(gatewayproto.CloseInvalidSeq, "that sequence number was never sent")
+		return false
+	case resumeGap:
+		// Too far behind to replay. The session is of no further use to anybody, so it goes now rather
+		// than holding its buffer until it expires.
+		c.srv.dropSession(s)
+		c.send(gatewayproto.OpInvalidSess, false)
+		return true
+	}
+
 	c.mu.Lock()
-	c.userID, c.deviceID, c.sessionID, c.guilds = actor.UserID, device, sessionID, set
-	c.enqueueLocked(gatewayproto.OpDispatch, ready{SessionID: sessionID, User: user, Guilds: memberOf}, "READY")
+	c.sess = s
 	c.mu.Unlock()
 	c.watchdog.Reset(c.heartbeatDeadline())
 	return true
@@ -290,47 +349,32 @@ func (c *conn) heartbeatDeadline() time.Duration {
 	return c.srv.opts.HeartbeatInterval * 3 / 2
 }
 
-// send queues a control frame.
+// send queues a control frame: anything but a dispatch, which the session numbers.
 func (c *conn) send(op gatewayproto.Opcode, payload any) {
-	c.enqueue(op, payload, "")
-}
-
-func (c *conn) enqueue(op gatewayproto.Opcode, payload any, event string) {
-	// The sequence number is taken and the frame queued under one lock, so frames reach the socket in the
-	// order of their numbers. Taken outside it, two dispatches racing could queue 8 before 7, and a client
-	// resuming from 7 would skip 8.
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.enqueueLocked(op, payload, event)
-}
-
-// enqueueLocked is enqueue for a caller already holding mu.
-func (c *conn) enqueueLocked(op gatewayproto.Opcode, payload any, event string) {
 	d, err := json.Marshal(payload)
 	if err != nil {
 		c.log.Error().Err(err).Int("op", int(op)).Msg("gateway could not encode a frame")
 		go c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return
 	}
-	f := gatewayproto.Frame{Op: op, D: d}
-	if op == gatewayproto.OpDispatch {
-		c.seq++
-		seq, t := c.seq, event
-		f.S, f.T = &seq, &t
-	}
-	frame, err := json.Marshal(f)
+	frame, err := json.Marshal(gatewayproto.Frame{Op: op, D: d})
 	if err != nil {
 		c.log.Error().Err(err).Msg("gateway could not encode a frame envelope")
 		go c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return
 	}
+	c.enqueueFrame(frame)
+}
+
+// enqueueFrame queues an encoded frame without blocking.
+func (c *conn) enqueueFrame(frame []byte) {
 	c.unwritten.Add(1)
 	select {
 	case c.out <- frame:
 	default:
 		c.unwritten.Add(-1)
 		// §15.4: a client that cannot keep up is dropped, never allowed to hold the server's memory or
-		// delay anybody else's events. It reconnects and resyncs.
+		// delay anybody else's events. Its session keeps buffering, so it can resume.
 		go c.closeWith(gatewayproto.CloseTooSlow, "not reading fast enough")
 	}
 }
@@ -395,28 +439,4 @@ func newSessionID() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-// inGuild reports whether READY, or an event since, told this connection about guildID.
-func (c *conn) inGuild(guildID snowflake.ID) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, ok := c.guilds[guildID]
-	return ok
-}
-
-// deliver sends one permitted event, keeping the guild set current first: GUILD_CREATE adds the guild it
-// announces and GUILD_DELETE removes it, so later events for that guild find, or stop finding, this
-// connection as a candidate.
-func (c *conn) deliver(ev dispatch.Event) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	switch ev.Type {
-	case "GUILD_CREATE":
-		c.guilds[ev.GuildID] = struct{}{}
-	case "GUILD_DELETE":
-		delete(c.guilds, ev.GuildID)
-	}
-	// The payload was encoded once by the publisher and is the same bytes for every recipient.
-	c.enqueueLocked(gatewayproto.OpDispatch, ev.Data, ev.Type)
 }

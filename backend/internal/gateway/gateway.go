@@ -75,7 +75,26 @@ type Options struct {
 	IdentifyTimeout time.Duration
 	// Now is the clock HELLO reports. Zero means time.Now.
 	Now func() time.Time
+
+	// ResumeWindow is how long a session outlives its connection, buffering events, waiting to be resumed.
+	// Zero means DefaultResumeWindow.
+	ResumeWindow time.Duration
+	// ResumeBuffer is how many frames a session keeps for replay. Zero means DefaultResumeBuffer.
+	ResumeBuffer int
 }
+
+// DefaultResumeWindow is how long a disconnected session waits to be resumed. Long enough for a laptop
+// changing networks or a daemon restarting; short enough that a client which is not coming back does not
+// hold a buffer for long.
+const DefaultResumeWindow = 2 * time.Minute
+
+// DefaultResumeBuffer is how many frames a session keeps for replay, alongside maxResumeBytes. A client that
+// missed more than this identifies afresh and resyncs over REST, which is always correct and only slower.
+const DefaultResumeBuffer = 512
+
+// maxResumeBytes bounds one session's replay buffer in bytes, whatever its frame count: a few large payloads
+// must not let one detached session hold megabytes.
+const maxResumeBytes = 1 << 20
 
 // DefaultHeartbeatInterval is Discord's value, which docs/architecture.md §2 shows in its HELLO example.
 const DefaultHeartbeatInterval = 41250 * time.Millisecond
@@ -91,8 +110,9 @@ const (
 	// fan-out every other connection shares.
 	outboundBuffer = 1024
 
-	// maxConnectionsPerAccount bounds how many connections one account may hold on this process. A daemon
-	// holds one; several devices hold several. Sixteen is room for an unusual person and not for a script.
+	// maxConnectionsPerAccount bounds how many sessions one account may hold on this process, attached or
+	// waiting to be resumed: a detached session holds a buffer, so it counts. A daemon holds one; several
+	// devices hold several. Sixteen is room for an unusual person and not for a script.
 	maxConnectionsPerAccount = 16
 
 	// identifyRate bounds IDENTIFY per account. A daemon reconnecting after a network drop identifies
@@ -120,11 +140,12 @@ type Server struct {
 
 	sub events.Subscription
 
-	mu      sync.Mutex
-	conns   map[*conn]struct{}
-	perUser map[snowflake.ID]int
-	closing bool
-	active  sync.WaitGroup
+	mu       sync.Mutex
+	conns    map[*conn]struct{}
+	sessions map[string]*session
+	perUser  map[snowflake.ID]int
+	closing  bool
+	active   sync.WaitGroup
 
 	nextConnID atomic.Uint64
 }
@@ -142,6 +163,12 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
+	}
+	if opts.ResumeWindow <= 0 {
+		opts.ResumeWindow = DefaultResumeWindow
+	}
+	if opts.ResumeBuffer <= 0 {
+		opts.ResumeBuffer = DefaultResumeBuffer
 	}
 
 	identifyLimiter, err := ratelimit.New(ratelimit.Options{
@@ -164,6 +191,7 @@ func New(opts Options) (*Server, error) {
 		identifyLimiter: identifyLimiter,
 		frameLimiter:    frameLimiter,
 		conns:           map[*conn]struct{}{},
+		sessions:        map[string]*session{},
 		perUser:         map[snowflake.ID]int{},
 	}
 	if opts.Bus != nil {
@@ -237,6 +265,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	done := make(chan struct{})
 	go func() { s.active.Wait(); close(done) }()
+	// Sessions die with the process: there is nothing to resume on a server that is going away, and a
+	// client told to reconnect resumes against whichever server answers, or identifies afresh (M114).
+	s.mu.Lock()
+	var sessions []*session
+	for _, sess := range s.sessions {
+		sessions = append(sessions, sess)
+	}
+	s.mu.Unlock()
+	for _, sess := range sessions {
+		s.dropSession(sess)
+	}
+
 	select {
 	case <-done:
 		return nil
@@ -259,24 +299,81 @@ func (s *Server) track(c *conn) bool {
 func (s *Server) untrack(c *conn) {
 	s.mu.Lock()
 	delete(s.conns, c)
-	if id := c.identity(); id != 0 {
-		if s.perUser[id]--; s.perUser[id] <= 0 {
-			delete(s.perUser, id)
-		}
-	}
 	s.mu.Unlock()
 	s.active.Done()
 }
 
-// claim reserves one of userID's connection slots on this process.
-func (s *Server) claim(userID snowflake.ID) bool {
+// newSession registers a session for userID, if the account has a slot left on this process. From here it
+// is a fan-out candidate.
+//
+// A fresh IDENTIFY from a device supersedes that device's detached sessions first: a client that identifies
+// rather than resuming has given its earlier stream up, and leaving it to expire would let a daemon that
+// reconnects by identifying fill its account's slots within minutes and lock itself out. Only detached
+// ones: a session with a connection attached is in use, by this device or by one sharing its id.
+func (s *Server) newSession(id string, userID snowflake.ID, device string) (*session, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var superseded []*session
+	for _, old := range s.sessions {
+		if old.userID != userID || old.deviceID != device {
+			continue
+		}
+		old.mu.Lock()
+		detached := old.conn == nil
+		old.mu.Unlock()
+		if detached {
+			delete(s.sessions, old.id)
+			s.perUser[userID]--
+			superseded = append(superseded, old)
+		}
+	}
 	if s.perUser[userID] >= maxConnectionsPerAccount {
-		return false
+		s.mu.Unlock()
+		stopAll(superseded)
+		return nil, false
 	}
 	s.perUser[userID]++
-	return true
+	sess := &session{srv: s, id: id, userID: userID, deviceID: device}
+	s.sessions[id] = sess
+	s.mu.Unlock()
+	stopAll(superseded)
+	return sess, true
+}
+
+func stopAll(sessions []*session) {
+	for _, sess := range sessions {
+		sess.stop()
+	}
+}
+
+func (s *Server) lookupSession(id string) *session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[id]
+}
+
+// dropSession forgets a session and frees its account's slot. Idempotent, since an expiry and an explicit
+// drop can race.
+func (s *Server) dropSession(sess *session) {
+	s.mu.Lock()
+	if s.sessions[sess.id] == sess {
+		delete(s.sessions, sess.id)
+		if s.perUser[sess.userID]--; s.perUser[sess.userID] <= 0 {
+			delete(s.perUser, sess.userID)
+		}
+	}
+	s.mu.Unlock()
+	sess.stop()
+}
+
+// expireSession is the resume window's timer: the session goes unless it was resumed while the timer was
+// firing, which is the race a plain drop would lose.
+func (s *Server) expireSession(sess *session) {
+	sess.mu.Lock()
+	attached := sess.conn != nil
+	sess.mu.Unlock()
+	if !attached {
+		s.dropSession(sess)
+	}
 }
 
 func (s *Server) count() int {

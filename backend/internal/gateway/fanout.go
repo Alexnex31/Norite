@@ -39,8 +39,8 @@ func (s *Server) onEvent(payload []byte) {
 		return
 	}
 
-	conns := s.candidates(ev)
-	if len(conns) == 0 {
+	sessions := s.candidates(ev)
+	if len(sessions) == 0 {
 		return
 	}
 
@@ -48,7 +48,7 @@ func (s *Server) onEvent(payload []byte) {
 		s.opts.Logger.Error().Str("type", ev.Type).Msg("gateway has no audience resolver; dropping an event")
 		return
 	}
-	users := distinctUsers(conns)
+	users := distinctUsers(sessions)
 	allowed, err := s.opts.Audience.Allowed(context.Background(), ev, users)
 	if err != nil {
 		// Dropped, not delivered unchecked: an event nobody could authorize is one nobody receives. The
@@ -62,16 +62,18 @@ func (s *Server) onEvent(payload []byte) {
 		permitted[id] = struct{}{}
 	}
 
-	for _, c := range withoutBlocked(ev, conns) {
-		if _, ok := permitted[c.identity()]; !ok {
+	for _, sess := range withoutBlocked(ev, sessions) {
+		if _, ok := permitted[sess.userID]; !ok {
 			continue
 		}
-		c.deliver(ev)
+		sess.deliver(ev)
 	}
 }
 
-// candidates is step 1: the connections on this process an event could be for.
-func (s *Server) candidates(ev dispatch.Event) []*conn {
+// candidates is step 1: the sessions on this process an event could be for. Sessions rather than
+// connections, so one whose client has disconnected keeps receiving into its buffer and can be resumed
+// without a gap.
+func (s *Server) candidates(ev dispatch.Event) []*session {
 	var named map[snowflake.ID]struct{}
 	if ev.Audience == dispatch.Users {
 		named = make(map[snowflake.ID]struct{}, len(ev.Users))
@@ -82,20 +84,16 @@ func (s *Server) candidates(ev dispatch.Event) []*conn {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []*conn
-	for c := range s.conns {
-		id := c.identity()
-		if id == 0 {
-			continue // not identified: nothing is delivered before READY
-		}
+	var out []*session
+	for _, sess := range s.sessions {
 		if named != nil {
-			if _, ok := named[id]; ok {
-				out = append(out, c)
+			if _, ok := named[sess.userID]; ok {
+				out = append(out, sess)
 			}
 			continue
 		}
-		if c.inGuild(ev.GuildID) {
-			out = append(out, c)
+		if sess.candidate(ev.GuildID) {
+			out = append(out, sess)
 		}
 	}
 	return out
@@ -105,15 +103,15 @@ func (s *Server) candidates(ev dispatch.Event) []*conn {
 // is M70's (ADR 0013, docs/architecture.md §14.13). M70's entry names this function as where the
 // per-connection block set is applied, so a blocked author's messages never reach the blocker's socket.
 // Until then every connection passes, which is correct only because no block can exist.
-func withoutBlocked(_ dispatch.Event, conns []*conn) []*conn {
-	return conns
+func withoutBlocked(_ dispatch.Event, sessions []*session) []*session {
+	return sessions
 }
 
-func distinctUsers(conns []*conn) []snowflake.ID {
-	seen := make(map[snowflake.ID]struct{}, len(conns))
-	out := make([]snowflake.ID, 0, len(conns))
-	for _, c := range conns {
-		id := c.identity()
+func distinctUsers(sessions []*session) []snowflake.ID {
+	seen := make(map[snowflake.ID]struct{}, len(sessions))
+	out := make([]snowflake.ID, 0, len(sessions))
+	for _, sess := range sessions {
+		id := sess.userID
 		if _, ok := seen[id]; ok {
 			continue
 		}
