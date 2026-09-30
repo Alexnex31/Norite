@@ -279,6 +279,15 @@ type Member struct {
 	Roles []snowflake.ID `json:"roles"`
 }
 
+// snowflakes converts a column of ids. Never nil, so a member holding no roles marshals as [].
+func snowflakes(ids []int64) []snowflake.ID {
+	out := make([]snowflake.ID, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, snowflake.ID(id))
+	}
+	return out
+}
+
 func memberFromRow(row db.GuildMember, roleIDs []snowflake.ID) Member {
 	if roleIDs == nil {
 		// An empty array rather than null. A client that has to handle both writes the check once per

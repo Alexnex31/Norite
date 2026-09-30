@@ -269,10 +269,37 @@ SELECT * FROM guild_members WHERE guild_id = $1 AND user_id = $2;
 -- cursor costs one index descent regardless of depth and is stable under concurrent writes. The primary
 -- key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
 -- 15,000-member guild.
-SELECT * FROM guild_members
-WHERE guild_id = $1 AND user_id > $2
-ORDER BY user_id
+--
+-- **Each member's role ids come back in this statement, correlated on both key columns.** They were a
+-- second statement, `guild_id = $1 AND user_id = ANY($2)`, and that shape has a generic plan that is only
+-- right for small guilds. pgx runs cached prepared statements, so after a few executions Postgres may plan
+-- once without the parameters: `guild_id = $1` is then estimated at an average guild's handful of grants,
+-- which makes scanning the guild and filtering on user_id look cheap. In a guild of 13,659 grants it read
+-- all of them to keep 319 — 3,382 us per call under load against about 100 us, and the member list fell
+-- from ~3,000 to ~600 requests a second. An instance of many small guilds and a few large ones is the
+-- ordinary shape, and the large ones are where this list is read. Found by the M13a optimization review,
+-- measured end to end; TestMemberRoleReadsCannotScanTheWholeGuild pins it.
+--
+-- Equality on both columns leaves the plan no whole-guild alternative, and it saves the round trip.
+SELECT gm.guild_id, gm.user_id, gm.nickname, gm.joined_at, gm.deaf, gm.mute,
+       ARRAY(
+         SELECT r.role_id FROM guild_member_roles r
+         WHERE r.guild_id = gm.guild_id AND r.user_id = gm.user_id
+         ORDER BY r.role_id
+       )::bigint[] AS role_ids
+FROM guild_members gm
+WHERE gm.guild_id = $1 AND gm.user_id > $2
+ORDER BY gm.user_id
 LIMIT $3;
+
+-- name: ListRoleIDsOfMember :many
+-- The role ids one member holds, for a response that returns that member after changing them.
+--
+-- Equality on both key columns, for ListGuildMembers' reason: the `= ANY` form it replaces had a generic
+-- plan that scanned every grant in the guild to find one member's.
+SELECT role_id FROM guild_member_roles
+WHERE guild_id = $1 AND user_id = $2
+ORDER BY role_id;
 
 -- name: UpdateGuildMember :one
 UPDATE guild_members
@@ -295,16 +322,6 @@ DELETE FROM guild_members WHERE guild_id = $1 AND user_id = $2;
 -- fields; M14 owns the diffing that produces a richer one.
 INSERT INTO audit_log_entries (id, guild_id, actor_id, action, target_id, changes)
 VALUES ($1, $2, $3, $4, $5, $6);
-
--- name: ListMemberRoleIDs :many
--- The role ids held by each of a set of members, in one query rather than one per member.
---
--- The member listing returns up to 100 members and each carries its roles, so the obvious shape — a query
--- per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
--- whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
-SELECT guild_id, user_id, role_id
-FROM guild_member_roles
-WHERE guild_id = $1 AND user_id = ANY(sqlc.arg(user_ids)::bigint[]);
 
 --
 -- Role assignment, role positions and permission overwrites (Milestone M13) follow. This separator is a

@@ -1050,9 +1050,15 @@ func (q *Queries) ListGuildChannels(ctx context.Context, guildID *int64) ([]List
 }
 
 const listGuildMembers = `-- name: ListGuildMembers :many
-SELECT guild_id, user_id, nickname, joined_at, deaf, mute FROM guild_members
-WHERE guild_id = $1 AND user_id > $2
-ORDER BY user_id
+SELECT gm.guild_id, gm.user_id, gm.nickname, gm.joined_at, gm.deaf, gm.mute,
+       ARRAY(
+         SELECT r.role_id FROM guild_member_roles r
+         WHERE r.guild_id = gm.guild_id AND r.user_id = gm.user_id
+         ORDER BY r.role_id
+       )::bigint[] AS role_ids
+FROM guild_members gm
+WHERE gm.guild_id = $1 AND gm.user_id > $2
+ORDER BY gm.user_id
 LIMIT $3
 `
 
@@ -1062,6 +1068,16 @@ type ListGuildMembersParams struct {
 	Limit   int32
 }
 
+type ListGuildMembersRow struct {
+	GuildID  int64
+	UserID   int64
+	Nickname *string
+	JoinedAt pgtype.Timestamptz
+	Deaf     bool
+	Mute     bool
+	RoleIds  []int64
+}
+
 // Cursor pagination on user_id, never offset.
 //
 // §2 specifies cursor-only everywhere, and the member list is one of rule 7's named hot paths. An OFFSET
@@ -1069,15 +1085,27 @@ type ListGuildMembersParams struct {
 // cursor costs one index descent regardless of depth and is stable under concurrent writes. The primary
 // key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
 // 15,000-member guild.
-func (q *Queries) ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]GuildMember, error) {
+//
+// **Each member's role ids come back in this statement, correlated on both key columns.** They were a
+// second statement, `guild_id = $1 AND user_id = ANY($2)`, and that shape has a generic plan that is only
+// right for small guilds. pgx runs cached prepared statements, so after a few executions Postgres may plan
+// once without the parameters: `guild_id = $1` is then estimated at an average guild's handful of grants,
+// which makes scanning the guild and filtering on user_id look cheap. In a guild of 13,659 grants it read
+// all of them to keep 319 — 3,382 us per call under load against about 100 us, and the member list fell
+// from ~3,000 to ~600 requests a second. An instance of many small guilds and a few large ones is the
+// ordinary shape, and the large ones are where this list is read. Found by the M13a optimization review,
+// measured end to end; TestMemberRoleReadsCannotScanTheWholeGuild pins it.
+//
+// Equality on both columns leaves the plan no whole-guild alternative, and it saves the round trip.
+func (q *Queries) ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]ListGuildMembersRow, error) {
 	rows, err := q.db.Query(ctx, listGuildMembers, arg.GuildID, arg.UserID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []GuildMember{}
+	items := []ListGuildMembersRow{}
 	for rows.Next() {
-		var i GuildMember
+		var i ListGuildMembersRow
 		if err := rows.Scan(
 			&i.GuildID,
 			&i.UserID,
@@ -1085,6 +1113,7 @@ func (q *Queries) ListGuildMembers(ctx context.Context, arg ListGuildMembersPara
 			&i.JoinedAt,
 			&i.Deaf,
 			&i.Mute,
+			&i.RoleIds,
 		); err != nil {
 			return nil, err
 		}
@@ -1123,42 +1152,6 @@ func (q *Queries) ListGuildRoles(ctx context.Context, guildID int64) ([]Role, er
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listMemberRoleIDs = `-- name: ListMemberRoleIDs :many
-SELECT guild_id, user_id, role_id
-FROM guild_member_roles
-WHERE guild_id = $1 AND user_id = ANY($2::bigint[])
-`
-
-type ListMemberRoleIDsParams struct {
-	GuildID int64
-	UserIds []int64
-}
-
-// The role ids held by each of a set of members, in one query rather than one per member.
-//
-// The member listing returns up to 100 members and each carries its roles, so the obvious shape — a query
-// per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
-// whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
-func (q *Queries) ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsParams) ([]GuildMemberRole, error) {
-	rows, err := q.db.Query(ctx, listMemberRoleIDs, arg.GuildID, arg.UserIds)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []GuildMemberRole{}
-	for rows.Next() {
-		var i GuildMemberRole
-		if err := rows.Scan(&i.GuildID, &i.UserID, &i.RoleID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1212,6 +1205,41 @@ func (q *Queries) ListOverwritesForTarget(ctx context.Context, arg ListOverwrite
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRoleIDsOfMember = `-- name: ListRoleIDsOfMember :many
+SELECT role_id FROM guild_member_roles
+WHERE guild_id = $1 AND user_id = $2
+ORDER BY role_id
+`
+
+type ListRoleIDsOfMemberParams struct {
+	GuildID int64
+	UserID  int64
+}
+
+// The role ids one member holds, for a response that returns that member after changing them.
+//
+// Equality on both key columns, for ListGuildMembers' reason: the `= ANY` form it replaces had a generic
+// plan that scanned every grant in the guild to find one member's.
+func (q *Queries) ListRoleIDsOfMember(ctx context.Context, arg ListRoleIDsOfMemberParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, listRoleIDsOfMember, arg.GuildID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var role_id int64
+		if err := rows.Scan(&role_id); err != nil {
+			return nil, err
+		}
+		items = append(items, role_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

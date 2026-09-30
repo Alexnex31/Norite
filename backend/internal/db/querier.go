@@ -847,7 +847,19 @@ type Querier interface {
 	// cursor costs one index descent regardless of depth and is stable under concurrent writes. The primary
 	// key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
 	// 15,000-member guild.
-	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]GuildMember, error)
+	//
+	// **Each member's role ids come back in this statement, correlated on both key columns.** They were a
+	// second statement, `guild_id = $1 AND user_id = ANY($2)`, and that shape has a generic plan that is only
+	// right for small guilds. pgx runs cached prepared statements, so after a few executions Postgres may plan
+	// once without the parameters: `guild_id = $1` is then estimated at an average guild's handful of grants,
+	// which makes scanning the guild and filtering on user_id look cheap. In a guild of 13,659 grants it read
+	// all of them to keep 319 — 3,382 us per call under load against about 100 us, and the member list fell
+	// from ~3,000 to ~600 requests a second. An instance of many small guilds and a few large ones is the
+	// ordinary shape, and the large ones are where this list is read. Found by the M13a optimization review,
+	// measured end to end; TestMemberRoleReadsCannotScanTheWholeGuild pins it.
+	//
+	// Equality on both columns leaves the plan no whole-guild alternative, and it saves the round trip.
+	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]ListGuildMembersRow, error)
 	// One page of a guild's recording log, newest first.
 	//
 	// No rule-13 predicate here and that is not an omission: the exclusion happened at write time, so there
@@ -966,12 +978,6 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
-	// The role ids held by each of a set of members, in one query rather than one per member.
-	//
-	// The member listing returns up to 100 members and each carries its roles, so the obvious shape — a query
-	// per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
-	// whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
-	ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsParams) ([]GuildMemberRole, error)
 	// One page of a message's prior versions, newest first (Milestone M16a).
 	//
 	// # It pages, because nothing bounds how many versions a message has
@@ -1003,6 +1009,11 @@ type Querier interface {
 	// Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
 	// to the guild.
 	ListOverwritesForTarget(ctx context.Context, arg ListOverwritesForTargetParams) ([]PermissionOverwrite, error)
+	// The role ids one member holds, for a response that returns that member after changing them.
+	//
+	// Equality on both key columns, for ListGuildMembers' reason: the `= ANY` form it replaces had a generic
+	// plan that scanned every grant in the guild to find one member's.
+	ListRoleIDsOfMember(ctx context.Context, arg ListRoleIDsOfMemberParams) ([]int64, error)
 	// The devices signed in to an account: one row per device family, not one per session row.
 	//
 	// A session row is one generation of a rotating family, replaced every time the client refreshes. Listing
