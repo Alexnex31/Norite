@@ -163,7 +163,7 @@ func (s *Service) SetOverwrite(ctx context.Context, actor auth.Actor, in SetOver
 		}
 
 		out = overwriteFromRow(row)
-		return nil
+		return s.queuePermissions(ctx, guildID)
 	})
 	if err != nil {
 		return Overwrite{}, err
@@ -240,7 +240,7 @@ func (s *Service) DeleteOverwrite(
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		return s.queuePermissions(ctx, guildID)
 	})
 }
 

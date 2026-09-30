@@ -24,7 +24,9 @@ import (
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/gateway"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
@@ -225,16 +227,21 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	// gives: every HTTP test drives the assembly the composition root builds.
 	// The ceilings come from config in production; the harness takes them from the same testConfig() the
 	// router does, so a test never disagrees with the instance it is running against.
+	bus := events.NewInProc(nil)
+	t.Cleanup(func() { _ = bus.Close() })
+	publisher := dispatch.NewPublisher(bus, nil)
+
 	guildsSvc, err := guilds.NewService(guilds.ServiceOptions{
 		Pool:                pool,
 		IDs:                 ids,
 		MaxChannelsPerGuild: testConfig().MaxChannelsPerGuild,
 		MaxRolesPerGuild:    testConfig().MaxRolesPerGuild,
 		MaxGuildsPerAccount: testConfig().MaxGuildsPerAccount,
+		Events:              publisher,
 	})
 	require.NoError(t, err)
 
-	messagesSvc, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
+	messagesSvc, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids, Events: publisher})
 	require.NoError(t, err)
 
 	tagsSvc, err := tags.NewService(tags.ServiceOptions{Pool: pool, IDs: ids})
@@ -243,12 +250,11 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	reportsSvc, err := reports.NewService(reports.ServiceOptions{Pool: pool, IDs: ids})
 	require.NoError(t, err)
 
-	bus := events.NewInProc(nil)
-	t.Cleanup(func() { _ = bus.Close() })
 	gw, err := gateway.New(gateway.Options{
 		Accounts: svc,
 		Guilds:   guildsSvc,
 		Bus:      bus,
+		Audience: guildauth.NewAudience(db.New(pool)),
 		Version:  gatewayproto.DevVersion,
 		Logger:   zerolog.New(io.Discard),
 	})

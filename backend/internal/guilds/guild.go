@@ -14,6 +14,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -147,7 +148,11 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 		}
 
 		out = guildFromRow(row)
-		return nil
+		// To the creator alone: nobody else is a member yet, and the event is what adds the guild to their
+		// connections' sets so its later events find them.
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_CREATE", Audience: dispatch.Users, GuildID: out.ID, Users: []snowflake.ID{out.OwnerID},
+		}, out)
 	})
 	if err != nil {
 		return Guild{}, err
@@ -365,7 +370,7 @@ func (s *Service) Update(
 		}
 
 		out = guildFromRow(row)
-		return nil
+		return s.events.Queue(ctx, dispatch.Event{Type: "GUILD_UPDATE", Audience: dispatch.Guild, GuildID: out.ID}, out)
 	})
 	if err != nil {
 		return Guild{}, err
@@ -460,7 +465,11 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		// FormerMembers, because by fan-out time there are no membership rows left to check a recipient
+		// against. What it discloses is the id of a guild each recipient's READY already listed.
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_DELETE", Audience: dispatch.FormerMembers, GuildID: guildID,
+		}, guildDeleted{ID: guildID})
 	})
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -231,7 +232,9 @@ func (s *Service) UpdateMember(
 		}
 
 		out = memberFromRow(row, snowflakes(held))
-		return nil
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_MEMBER_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
+		}, out)
 	})
 	if err != nil {
 		return Member{}, err
@@ -382,6 +385,16 @@ func (s *Service) RemoveMember(
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		// The removed account first, by name: it is no longer a member, so a guild-audience event could
+		// not reach it, and this is what drops the guild from its connections. Queued before the event to
+		// the others so no later event for this guild is still aimed at those connections.
+		if err := s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_DELETE", Audience: dispatch.Users, GuildID: guildID, Users: []snowflake.ID{userID},
+		}, guildDeleted{ID: guildID}); err != nil {
+			return err
+		}
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_MEMBER_REMOVE", Audience: dispatch.Guild, GuildID: guildID,
+		}, memberRemoved{GuildID: guildID, UserID: userID})
 	})
 }

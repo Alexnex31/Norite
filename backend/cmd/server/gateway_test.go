@@ -22,9 +22,12 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/gateway"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 )
 
 // gatewaySchemaID is the schema's $id, which is how the compiler addresses its definitions.
@@ -204,6 +207,7 @@ func customGateway(t *testing.T, f *guildFixture, mutate func(*gateway.Options))
 		Accounts: f.api.authSvc,
 		Guilds:   f.api.guildsSvc,
 		Bus:      f.api.bus,
+		Audience: guildauth.NewAudience(db.New(f.api.pool)),
 		Version:  gatewayproto.DevVersion,
 		Logger:   zerolog.New(os.Stderr).Level(zerolog.Disabled),
 	}
@@ -513,24 +517,90 @@ func TestACrossOriginUpgradeIsRefused(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, res.StatusCode)
 }
 
-// READY's user and guilds are GET /users/@me's and GET /guilds/{id}'s bodies. The gateway schema carries
-// its own copy of each, because a JSON Schema cannot reference a YAML document; this holds the copies to
-// the originals, field for field, so one cannot gain a property the other lacks.
+// The gateway's objects are REST's objects: READY's user and guilds, and every dispatch carrying a channel,
+// a role, a member or a message. A JSON Schema cannot reference a YAML document, so the gateway schema
+// carries copies generated from contracts/openapi.yaml's components. This holds each copy deep-equal to its
+// original, with references rewritten and only the top-level description allowed to differ, so a field
+// added to REST and not to the gateway, or the reverse, fails here rather than in a client.
 func TestTheGatewaySchemaMirrorsTheRESTShapes(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "gateway-events.schema.json"))
 	require.NoError(t, err)
 	var gw struct {
-		Defs map[string]map[string]any `json:"$defs"`
+		Defs map[string]any `json:"$defs"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &gw))
-	rest := contractSchemas(t)
 
-	for _, name := range []string{"User", "Guild"} {
-		gwAll, gwRequired := declaredProperties(t, gw.Defs[name])
-		restAll, restRequired := declaredProperties(t, rest[name])
-		assert.ElementsMatch(t, restAll, gwAll, "%s: the gateway schema's properties must be the REST schema's", name)
-		assert.ElementsMatch(t, restRequired, gwRequired, "%s: and so must its required list", name)
+	var doc struct {
+		Components struct {
+			Schemas map[string]any `yaml:"schemas"`
+		} `yaml:"components"`
 	}
+	body, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "openapi.yaml"))
+	require.NoError(t, err)
+	require.NoError(t, yaml.Unmarshal(body, &doc))
+
+	for _, name := range []string{
+		"User", "Guild", "Channel", "PermissionOverwrite", "Role", "Permissions", "Member", "Message",
+		"AppliedMessageTag", "Snowflake",
+	} {
+		rest, ok := doc.Components.Schemas[name]
+		require.True(t, ok, "openapi.yaml has no %s", name)
+		mirror, ok := gw.Defs[name]
+		require.True(t, ok, "gateway-events.schema.json has no %s", name)
+
+		want := withoutTopDescription(rewriteRefs(normalizeJSON(t, rest)))
+		got := withoutTopDescription(normalizeJSON(t, mirror))
+		assert.Equal(t, want, got, "%s: the gateway's copy has drifted from openapi.yaml's", name)
+	}
+}
+
+// normalizeJSON round-trips a decoded YAML or JSON value through JSON, so both sides compare as the same Go
+// types (YAML decodes integers as int, JSON as float64).
+func normalizeJSON(t *testing.T, v any) any {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	var out any
+	require.NoError(t, json.Unmarshal(b, &out))
+	return out
+}
+
+func rewriteRefs(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			if k == "$ref" {
+				if ref, ok := val.(string); ok {
+					out[k] = "#/$defs/" + ref[strings.LastIndex(ref, "/")+1:]
+					continue
+				}
+			}
+			out[k] = rewriteRefs(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = rewriteRefs(val)
+		}
+		return out
+	}
+	return v
+}
+
+func withoutTopDescription(v any) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	out := make(map[string]any, len(m))
+	for k, val := range m {
+		if k != "description" {
+			out[k] = val
+		}
+	}
+	return out
 }
 
 // The validator every test above leans on has to be able to fail, or it proves nothing.

@@ -439,6 +439,10 @@ type Querier interface {
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	GetGuild(ctx context.Context, id int64) (Guild, error)
+	// The guild-wide half of resolving many members at once (M18's fan-out): the owner, and @everyone, which
+	// every member holds and which ListMemberRolesForUsers therefore does not repeat per member. roles is read
+	// through roles_guild_id_position_idx, bounded by the guild's role ceiling.
+	GetGuildAuthorityBase(ctx context.Context, id int64) (GetGuildAuthorityBaseRow, error)
 	// The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points
 	// at. FOR NO KEY UPDATE rather than FOR UPDATE, which is the difference that matters: FOR UPDATE also
 	// conflicts with the FOR KEY SHARE lock every insert into a child table takes on its parent, so holding
@@ -986,6 +990,19 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
+	// Whether each of a list of accounts is a member of one guild, and every role it holds there beyond
+	// @everyone: the per-recipient half of resolving who receives a gateway event (M18).
+	//
+	// Driven from the recipient list rather than filtered by it, and that shape is chosen against a plan
+	// rather than for style. `guild_id = $1 AND user_id = ANY($2)` is the query M13a found collapsing: under a
+	// cached generic plan Postgres used guild_id as the index condition and scanned every role grant in a large
+	// guild to keep the page's. Here each recipient is its own probe, matching guild_member_roles' primary key
+	// on both leading columns, so no plan can widen it into a scan of the guild; a test reads the generic plan
+	// pgx actually prepares.
+	//
+	// A non-member comes back once with is_member false and no role; a member holding nothing but @everyone
+	// comes back once with no role.
+	ListMemberRolesForUsers(ctx context.Context, arg ListMemberRolesForUsersParams) ([]ListMemberRolesForUsersRow, error)
 	// One page of a message's prior versions, newest first (Milestone M16a).
 	//
 	// # It pages, because nothing bounds how many versions a message has

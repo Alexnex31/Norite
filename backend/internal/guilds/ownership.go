@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -156,7 +157,8 @@ func (s *Service) TransferOwnership(
 		}
 
 		out = guildFromRow(row)
-		return nil
+		// A new owner is a change to the guild object (owner_id), which every member's client shows.
+		return s.events.Queue(ctx, dispatch.Event{Type: "GUILD_UPDATE", Audience: dispatch.Guild, GuildID: out.ID}, out)
 	})
 	return out, err
 }

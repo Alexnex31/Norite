@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -409,7 +410,11 @@ func (s *Service) CreateChannel(
 			}
 		}
 
-		return nil
+		// To members who can view the new channel, which the gateway resolves against the overwrites just
+		// copied into it: a channel created inside a locked category reaches only those the category admits.
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_CREATE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
+		}, out)
 	})
 	if err != nil {
 		return Channel{}, err
@@ -539,7 +544,9 @@ func (s *Service) UpdateChannel(
 			out.PermissionOverwrites = append(out.PermissionOverwrites, overwriteFromRow(ow))
 		}
 
-		return nil
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_UPDATE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
+		}, out)
 	})
 	if err != nil {
 		return Channel{}, err
@@ -580,6 +587,17 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 			return err
 		}
 
+		// Read before the delete takes them with it. By fan-out time the channel's overwrites are gone, and
+		// resolving against none would send a hidden channel's deletion to every member, naming a channel
+		// they were never shown; the event carries them instead (dispatch.Event.Overwrites).
+		overwrites, err := q.ListChannelPermissionOverwrites(ctx, db.ListChannelPermissionOverwritesParams{
+			ChannelID: int64(channelID),
+			GuildID:   int64(guildID),
+		})
+		if err != nil {
+			return fmt.Errorf("guilds: list overwrites of the channel being deleted: %w", err)
+		}
+
 		guild := int64(guildID)
 		affected, err := q.DeleteChannel(ctx, db.DeleteChannelParams{ID: int64(channelID), GuildID: &guild})
 		if err != nil {
@@ -589,6 +607,9 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_DELETE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
+			Overwrites: overwrites,
+		}, channelDeleted{ID: channelID, GuildID: guildID})
 	})
 }

@@ -40,7 +40,9 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/gateway"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
@@ -198,18 +200,33 @@ func run() error {
 		return err
 	}
 
+	// The event bus: in-process unless configured otherwise, and connected before anything can publish, for
+	// the rate-limit store's reason — a Redis the process could not reach would otherwise surface as events
+	// silently going nowhere.
+	var bus events.Bus = events.NewInProc(&logger)
+	if cfg.EventsBackend == "redis" {
+		bus, err = events.NewRedis(ctx, events.RedisOptions{URL: cfg.RedisURL, ConnectTimeout: cfg.DBConnectTimeout})
+		if err != nil {
+			logger.Error().Err(err).Msg("could not connect the event bus")
+			return err
+		}
+	}
+	defer func() { _ = bus.Close() }()
+	publisher := dispatch.NewPublisher(bus, &logger)
+
 	guildService, err := guilds.NewService(guilds.ServiceOptions{
 		Pool:                pool,
 		IDs:                 ids,
 		MaxChannelsPerGuild: cfg.MaxChannelsPerGuild,
 		MaxRolesPerGuild:    cfg.MaxRolesPerGuild,
 		MaxGuildsPerAccount: cfg.MaxGuildsPerAccount,
+		Events:              publisher,
 	})
 	if err != nil {
 		return err
 	}
 
-	messageService, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
+	messageService, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids, Events: publisher})
 	if err != nil {
 		return err
 	}
@@ -238,23 +255,11 @@ func run() error {
 		defer func() { _ = rateLimitBackend.Close() }()
 	}
 
-	// The event bus: in-process unless configured otherwise, and connected before anything can publish, for
-	// the rate-limit store's reason — a Redis the process could not reach would otherwise surface as events
-	// silently going nowhere.
-	var bus events.Bus = events.NewInProc(&logger)
-	if cfg.EventsBackend == "redis" {
-		bus, err = events.NewRedis(ctx, events.RedisOptions{URL: cfg.RedisURL, ConnectTimeout: cfg.DBConnectTimeout})
-		if err != nil {
-			logger.Error().Err(err).Msg("could not connect the event bus")
-			return err
-		}
-	}
-	defer func() { _ = bus.Close() }()
-
 	gw, err := gateway.New(gateway.Options{
 		Accounts:         authService,
 		Guilds:           guildService,
 		Bus:              bus,
+		Audience:         guildauth.NewAudience(db.New(pool)),
 		RateLimitBackend: rateLimitBackend,
 		Version:          meta.Version,
 		Logger:           logger,

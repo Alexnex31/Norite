@@ -32,6 +32,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
@@ -56,8 +57,10 @@ type Guilds interface {
 type Options struct {
 	Accounts Accounts
 	Guilds   Guilds
-	// Bus carries events and revocations to this server's connections (parts 5 and 6).
+	// Bus carries events and revocations to this server's connections.
 	Bus events.Bus
+	// Audience decides which connections may receive each event (guildauth.Audience).
+	Audience AudienceResolver
 	// RateLimitBackend counts IDENTIFY attempts per account, across replicas when it is Redis.
 	RateLimitBackend ratelimit.Backend
 	// Version is this server's release version, sent in HELLO and checked against every client's.
@@ -115,6 +118,8 @@ type Server struct {
 	identifyLimiter *ratelimit.Limiter
 	frameLimiter    *ratelimit.Limiter
 
+	sub events.Subscription
+
 	mu      sync.Mutex
 	conns   map[*conn]struct{}
 	perUser map[snowflake.ID]int
@@ -154,13 +159,19 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{
+	s := &Server{
 		opts:            opts,
 		identifyLimiter: identifyLimiter,
 		frameLimiter:    frameLimiter,
 		conns:           map[*conn]struct{}{},
 		perUser:         map[snowflake.ID]int{},
-	}, nil
+	}
+	if opts.Bus != nil {
+		if s.sub, err = opts.Bus.Subscribe(dispatch.Topic, s.onEvent); err != nil {
+			return nil, fmt.Errorf("gateway: subscribing to events: %w", err)
+		}
+	}
+	return s, nil
 }
 
 // ServeHTTP upgrades GET /gateway and runs the connection until it ends.
@@ -206,6 +217,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // entirely, and a WebSocket is a hijacked connection, so without this every client would simply be cut
 // off with nothing telling it to come back (M118's rollout depends on this op-code existing).
 func (s *Server) Shutdown(ctx context.Context) error {
+	// No new events first: a connection being told to reconnect should not be handed one more frame.
+	if s.sub != nil {
+		s.sub.Unsubscribe()
+	}
 	s.mu.Lock()
 	s.closing = true
 	all := make([]*conn, 0, len(s.conns))

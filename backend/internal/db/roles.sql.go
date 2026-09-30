@@ -9,6 +9,29 @@ import (
 	"context"
 )
 
+const getGuildAuthorityBase = `-- name: GetGuildAuthorityBase :one
+SELECT g.owner_id, r.id AS everyone_role_id, r.permissions AS everyone_permissions
+FROM guilds g
+JOIN roles r ON r.guild_id = g.id AND r.is_default
+WHERE g.id = $1
+`
+
+type GetGuildAuthorityBaseRow struct {
+	OwnerID             int64
+	EveryoneRoleID      int64
+	EveryonePermissions int64
+}
+
+// The guild-wide half of resolving many members at once (M18's fan-out): the owner, and @everyone, which
+// every member holds and which ListMemberRolesForUsers therefore does not repeat per member. roles is read
+// through roles_guild_id_position_idx, bounded by the guild's role ceiling.
+func (q *Queries) GetGuildAuthorityBase(ctx context.Context, id int64) (GetGuildAuthorityBaseRow, error) {
+	row := q.db.QueryRow(ctx, getGuildAuthorityBase, id)
+	var i GetGuildAuthorityBaseRow
+	err := row.Scan(&i.OwnerID, &i.EveryoneRoleID, &i.EveryonePermissions)
+	return i, err
+}
+
 const getMemberHighestRolePosition = `-- name: GetMemberHighestRolePosition :one
 SELECT GREATEST(COALESCE(MAX(r.position), 0), 0)::integer AS highest_position
 FROM guild_members gm
@@ -304,6 +327,70 @@ func (q *Queries) ListGuildPermissionOverwrites(ctx context.Context, arg ListGui
 			&i.TargetID,
 			&i.Allow,
 			&i.Deny,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMemberRolesForUsers = `-- name: ListMemberRolesForUsers :many
+SELECT
+    u.user_id::bigint AS user_id,
+    (gm.user_id IS NOT NULL)::boolean AS is_member,
+    r.id AS role_id,
+    r.permissions AS role_permissions
+FROM unnest($1::bigint[]) AS u(user_id)
+LEFT JOIN guild_members gm
+    ON gm.guild_id = $2::bigint AND gm.user_id = u.user_id
+LEFT JOIN guild_member_roles gmr
+    ON gmr.guild_id = $2::bigint AND gmr.user_id = gm.user_id
+LEFT JOIN roles r
+    ON r.id = gmr.role_id
+`
+
+type ListMemberRolesForUsersParams struct {
+	UserIds []int64
+	GuildID int64
+}
+
+type ListMemberRolesForUsersRow struct {
+	UserID          int64
+	IsMember        bool
+	RoleID          *int64
+	RolePermissions *int64
+}
+
+// Whether each of a list of accounts is a member of one guild, and every role it holds there beyond
+// @everyone: the per-recipient half of resolving who receives a gateway event (M18).
+//
+// Driven from the recipient list rather than filtered by it, and that shape is chosen against a plan
+// rather than for style. `guild_id = $1 AND user_id = ANY($2)` is the query M13a found collapsing: under a
+// cached generic plan Postgres used guild_id as the index condition and scanned every role grant in a large
+// guild to keep the page's. Here each recipient is its own probe, matching guild_member_roles' primary key
+// on both leading columns, so no plan can widen it into a scan of the guild; a test reads the generic plan
+// pgx actually prepares.
+//
+// A non-member comes back once with is_member false and no role; a member holding nothing but @everyone
+// comes back once with no role.
+func (q *Queries) ListMemberRolesForUsers(ctx context.Context, arg ListMemberRolesForUsersParams) ([]ListMemberRolesForUsersRow, error) {
+	rows, err := q.db.Query(ctx, listMemberRolesForUsers, arg.UserIds, arg.GuildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMemberRolesForUsersRow{}
+	for rows.Next() {
+		var i ListMemberRolesForUsersRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.IsMember,
+			&i.RoleID,
+			&i.RolePermissions,
 		); err != nil {
 			return nil, err
 		}

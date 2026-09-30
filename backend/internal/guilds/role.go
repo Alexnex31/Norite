@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -164,7 +165,8 @@ func (s *Service) CreateRole(
 		}
 
 		out = roleFromRow(row)
-		return nil
+		// Every role below it moved up one, so the whole list goes, not the new role alone.
+		return s.queueRoles(ctx, q, guildID, false)
 	})
 	if err != nil {
 		return Role{}, err
@@ -284,7 +286,7 @@ func (s *Service) UpdateRole(
 		}
 
 		out = roleFromRow(row)
-		return nil
+		return s.queueRoles(ctx, q, guildID, in.Permissions != nil)
 	})
 	if err != nil {
 		return Role{}, err
@@ -363,7 +365,8 @@ func (s *Service) DeleteRole(ctx context.Context, actor auth.Actor, guildID, rol
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		// Its holders lose what it granted, and its overwrites went with it.
+		return s.queueRoles(ctx, q, guildID, true)
 	})
 }
 
@@ -558,11 +561,55 @@ func (s *Service) ReorderRoles(
 			out = append(out, roleFromRow(row))
 		}
 
-		return nil
+		// The list just read is the event: a reorder moves positions, which govern hierarchy and never
+		// permissions, so no permissions update follows.
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_ROLES_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
+		}, guildRoles{GuildID: guildID, Roles: out})
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return out, nil
+}
+
+// queueRoles publishes the guild's whole role list as GUILD_ROLES_UPDATE, and GUILD_PERMISSIONS_UPDATE when
+// the change could alter what members may do.
+//
+// The whole list rather than one role, because the role mutations move each other: creating a role
+// renumbers every position above it, and a reorder moves any number of them. An event per role would leave
+// a client's positions stale for all but one; the list, bounded by the role ceiling, is what the client
+// replaces. Position governs hierarchy, never permissions, so a reorder alone sends no permissions update.
+func (s *Service) queueRoles(ctx context.Context, q *db.Queries, guildID snowflake.ID, permissionsChanged bool) error {
+	if s.events == nil {
+		return nil
+	}
+	rows, err := q.ListGuildRoles(ctx, int64(guildID))
+	if err != nil {
+		return fmt.Errorf("guilds: list roles for GUILD_ROLES_UPDATE: %w", err)
+	}
+	list := guildRoles{GuildID: guildID, Roles: make([]Role, 0, len(rows))}
+	for _, row := range rows {
+		list.Roles = append(list.Roles, roleFromRow(row))
+	}
+	if err := s.events.Queue(ctx, dispatch.Event{
+		Type: "GUILD_ROLES_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
+	}, list); err != nil {
+		return err
+	}
+	if !permissionsChanged {
+		return nil
+	}
+	return s.queuePermissions(ctx, guildID)
+}
+
+// queuePermissions publishes GUILD_PERMISSIONS_UPDATE: something changed which channels some members may see
+// or what they may do there, and their client refetches rather than being told the diff (M18 plan, finding
+// 7). Computing each connected member's exact before and after would mean resolving everyone twice on every
+// administrative change; this costs each of them one GET, at the rate administrators act.
+func (s *Service) queuePermissions(ctx context.Context, guildID snowflake.ID) error {
+	return s.events.Queue(ctx, dispatch.Event{
+		Type: "GUILD_PERMISSIONS_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
+	}, permissionsUpdated{GuildID: guildID})
 }

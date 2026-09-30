@@ -178,6 +178,45 @@
       "oneOf": [
         {
           "$ref": "#/$defs/ReadyDispatch"
+        },
+        {
+          "$ref": "#/$defs/GuildCreateDispatch"
+        },
+        {
+          "$ref": "#/$defs/GuildUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/GuildDeleteDispatch"
+        },
+        {
+          "$ref": "#/$defs/ChannelCreateDispatch"
+        },
+        {
+          "$ref": "#/$defs/ChannelUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/ChannelDeleteDispatch"
+        },
+        {
+          "$ref": "#/$defs/GuildRolesUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/GuildMemberUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/GuildMemberRemoveDispatch"
+        },
+        {
+          "$ref": "#/$defs/GuildPermissionsUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/MessageCreateDispatch"
+        },
+        {
+          "$ref": "#/$defs/MessageUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/MessageDeleteDispatch"
         }
       ]
     },
@@ -435,10 +474,13 @@
     "Snowflake": {
       "type": "string",
       "pattern": "^[0-9]+$",
-      "description": "A Snowflake id as a decimal string (ADR 0003)."
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/Snowflake; a test holds the two equal. A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).",
+      "examples": [
+        "7238829238972837423"
+      ]
     },
     "User": {
-      "description": "Identical to contracts/openapi.yaml's User, which GET /users/@me returns; a test holds the two equal.",
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/User; a test holds the two equal. An account. Never carries `password_hash` or any other credential material — this shape is built field-by-field from the database row rather than serialised from it, so a column added later cannot leak onto the wire by default.",
       "type": "object",
       "required": [
         "id",
@@ -453,11 +495,13 @@
           "$ref": "#/$defs/Snowflake"
         },
         "username": {
-          "type": "string"
+          "type": "string",
+          "description": "Unique, case-insensitively."
         },
         "email": {
           "type": "string",
-          "format": "email"
+          "format": "email",
+          "description": "Unique, case-insensitively."
         },
         "display_name": {
           "type": "string"
@@ -473,27 +517,29 @@
             "string",
             "null"
           ],
-          "format": "date-time"
+          "format": "date-time",
+          "description": "Null while the address is unconfirmed. Set when a confirmation link is followed (M10), when a provider vouched for the address, or on creation for an account made by `/instance/bootstrap` or on an instance with no mail relay. An account with this null cannot sign in."
         },
         "created_at": {
           "type": "string",
           "format": "date-time"
         },
         "two_factor_enabled": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "True only for a *confirmed* enrollment. An enrollment somebody started and abandoned is not a factor and must not read as one, or the account looks protected when it is not.\n"
         },
         "recovery_codes_remaining": {
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "format": "int64",
+          "description": "How many unspent recovery codes the account has. Null rather than zero when there is no factor at all — zero would read as \"you have run out\" rather than \"there is nothing to run out of\".\n"
         }
       }
     },
     "Guild": {
-      "description": "Identical to contracts/openapi.yaml's Guild, which GET /guilds/{guild_id} returns; a test holds the two equal.",
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "id",
         "name",
@@ -504,6 +550,7 @@
         "created_at",
         "updated_at"
       ],
+      "additionalProperties": false,
       "properties": {
         "id": {
           "$ref": "#/$defs/Snowflake"
@@ -512,13 +559,19 @@
           "type": "string"
         },
         "owner_id": {
-          "$ref": "#/$defs/Snowflake"
+          "allOf": [
+            {
+              "$ref": "#/$defs/Snowflake"
+            }
+          ],
+          "description": "The account that bypasses every permission check within this guild (authority layer 2). Cannot be removed from the guild, and transferring it is not yet possible.\n"
         },
         "icon_hash": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Reserved. No upload endpoint exists yet, so this is always null."
         },
         "description": {
           "type": [
@@ -527,7 +580,8 @@
           ]
         },
         "message_audit_enabled": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Whether this guild records every message its members send to a log its moderators can read (M16b), including edits and deletions. Off unless the guild's owner turned it on.\n\n**Readable by any member**, deliberately: this endpoint is gated on `VIEW_CHANNEL`, which every member holds by default, so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this field needs the owner; neither is required to learn the answer.\n\nAlways present, in both states. A client must be able to say \"this guild does not record\" as positively as it says the opposite — a field that appeared only when recording was on would make its absence carry a meaning nothing guarantees.\n"
         },
         "created_at": {
           "type": "string",
@@ -536,6 +590,828 @@
         "updated_at": {
           "type": "string",
           "format": "date-time"
+        }
+      },
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/Guild; a test holds the two equal. "
+    },
+    "Channel": {
+      "type": "object",
+      "required": [
+        "id",
+        "guild_id",
+        "type",
+        "parent_id",
+        "name",
+        "topic",
+        "position",
+        "nsfw",
+        "last_message_id",
+        "bitrate",
+        "user_limit",
+        "created_at",
+        "updated_at",
+        "permission_overwrites"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "permission_overwrites": {
+          "type": "array",
+          "description": "Every overwrite configured on this channel — as configured, not as resolved for the caller.\n\nRequired and never null, on every route that returns a channel. An omitted array and an empty one would be one schema meaning two things depending on which route produced it, and a client refreshing its cache from a response is entitled to read this as the whole truth.\n\nPresent on the listing because a permission editor cannot be drawn without it and there is no single-channel `GET` to ask instead. The listing already reads every channel in the guild, so one further query answers the whole sidebar rather than one request per tab opened.\n",
+          "items": {
+            "$ref": "#/$defs/PermissionOverwrite"
+          }
+        },
+        "guild_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Snowflake"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null for a DM or group DM, which belong to no guild."
+        },
+        "type": {
+          "type": "integer",
+          "description": "`0` text, `1` DM, `2` voice, `3` group DM, `4` category, `5` announcement (reserved), `6` stage voice (reserved), `7` public matchmaking.\n\nOnly `0`, `2` and `4` can be created through the guild-channel endpoint. The reserved values are part of the schema and stay there; voice is active v1 functionality, video and stage voice are the deferred-but-seamed parts.\n"
+        },
+        "parent_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Snowflake"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The category this channel sits under. Deleting a category sets this to null on its children rather than deleting them — losing a category must not lose the conversations in it.\n"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "topic": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "position": {
+          "type": "integer"
+        },
+        "nsfw": {
+          "type": "boolean"
+        },
+        "last_message_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Snowflake"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The newest message in the channel, or null if none has been sent. Maintained in the send's own transaction (M15) rather than derived with `max(id)` on every channel listing, which would be an N+1 across the sidebar.\n\n**View-gated, not history-gated.** It is returned to anyone who can see the channel, including a member denied `READ_MESSAGE_HISTORY` — it is the unread-state primitive, and a client cannot render an unread marker without it. What that discloses is a snowflake, and therefore a timestamp: that somebody posted, and when. The content stays withheld. Discord exposes the same field under the same conditions. Recorded as a decision because it reads like an oversight otherwise.\n"
+        },
+        "bitrate": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Voice channels only; null on every other type."
+        },
+        "user_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Voice channels only; null on every other type."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/Channel; a test holds the two equal. "
+    },
+    "Role": {
+      "type": "object",
+      "required": [
+        "id",
+        "guild_id",
+        "name",
+        "color",
+        "permissions",
+        "position",
+        "hoist",
+        "mentionable",
+        "is_default",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "name": {
+          "type": "string"
+        },
+        "color": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215,
+          "description": "24-bit RGB. `0` means no colour, which renders as inherited rather than as black."
+        },
+        "permissions": {
+          "$ref": "#/$defs/Permissions"
+        },
+        "position": {
+          "type": "integer",
+          "description": "Higher is higher in the hierarchy. `@everyone` is always 0. Not settable through these endpoints — reordering is a multi-row operation, and role hierarchy arrives with the permission-overwrite endpoints.\n"
+        },
+        "hoist": {
+          "type": "boolean",
+          "description": "Whether members holding this role are shown in their own section of the member list."
+        },
+        "mentionable": {
+          "type": "boolean"
+        },
+        "is_default": {
+          "type": "boolean",
+          "description": "True for exactly one role per guild, `@everyone`. It is the floor every other role stacks on, it cannot be deleted or renamed, and every member holds it without appearing in any grant.\n"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/Role; a test holds the two equal. "
+    },
+    "Member": {
+      "type": "object",
+      "required": [
+        "guild_id",
+        "user_id",
+        "nickname",
+        "joined_at",
+        "deaf",
+        "mute",
+        "roles"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "user_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "nickname": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A per-guild display name. Null means the account's own display name is used."
+        },
+        "joined_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deaf": {
+          "type": "boolean",
+          "description": "Server-side deafen, set by a moderator. Distinct from the self-deafen a client sets on itself, which lives in voice state.\n"
+        },
+        "mute": {
+          "type": "boolean",
+          "description": "Server-side mute, set by a moderator. See `deaf`."
+        },
+        "roles": {
+          "type": "array",
+          "description": "The roles this member holds, excluding `@everyone` — which every member holds and which appears in no grant. An empty array rather than null when there are none: a client that has to handle both writes the check once per field and forgets it somewhere.\n",
+          "items": {
+            "$ref": "#/$defs/Snowflake"
+          }
+        }
+      },
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/Member; a test holds the two equal. "
+    },
+    "Message": {
+      "type": "object",
+      "required": [
+        "id",
+        "channel_id",
+        "author_id",
+        "content",
+        "type",
+        "reply_to_id",
+        "edited_at",
+        "created_at",
+        "tags"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "channel_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "author_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Snowflake"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.\n"
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "type": {
+          "type": "integer",
+          "description": "0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved."
+        },
+        "reply_to_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Snowflake"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "edited_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tags": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AppliedMessageTag"
+          },
+          "description": "The tags on the message this caller can see: every shared tag, plus the caller's own private ones. Somebody else's private tag never appears.\n\n**Null when the credential may not read tags** — an API token without the `tags.read` scope. Null rather than an empty array, because an empty array would claim the message has no tags when the answer is that they are not this credential's to see. A signed-in user always gets an array, empty for an untagged message.\n\nThe channel listing resolves a whole page's tags at once, so a client drawing a channel needs no per-message request; `GET /channels/{channel_id}/messages/{message_id}/tags` remains for reading one message's tags on their own.\n"
+        }
+      },
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/Message; a test holds the two equal. "
+    },
+    "PermissionOverwrite": {
+      "type": "object",
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/PermissionOverwrite; a test holds the two equal. One channel permission overwrite — ADR 0008 layer 5.\n\n`target_id` is polymorphic: a role id when `type` is 0, a user id when it is 1. It carries no foreign key for that reason, which is why deleting a role or removing a member deletes their overwrites explicitly rather than leaving the database to cascade.",
+      "additionalProperties": false,
+      "required": [
+        "channel_id",
+        "type",
+        "target_id",
+        "allow",
+        "deny"
+      ],
+      "properties": {
+        "channel_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "type": {
+          "type": "integer",
+          "format": "int32",
+          "enum": [
+            0,
+            1
+          ],
+          "description": "0 role, 1 member."
+        },
+        "target_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "allow": {
+          "$ref": "#/$defs/Permissions"
+        },
+        "deny": {
+          "$ref": "#/$defs/Permissions"
+        }
+      }
+    },
+    "Permissions": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/Permissions; a test holds the two equal. A permission bitfield, as a **decimal string** rather than a number.\n\nThe same decision snowflake ids take, for the same reason: this is a 63-bit value and JavaScript's number type is a float64, so anything above 2^53 loses precision silently in a browser. Twenty-two bits are defined today, so the hazard is years away — which is exactly why the representation is fixed now, while changing it costs nothing.\n\nBit positions, low to high: `VIEW_CHANNEL`, `SEND_MESSAGES`, `MANAGE_MESSAGES`, `MANAGE_CHANNELS`, `MANAGE_ROLES`, `KICK_MEMBERS`, `BAN_MEMBERS`, `CREATE_INVITE`, `MANAGE_GUILD`, `ADMINISTRATOR`, `CONNECT_VOICE`, `SPEAK_VOICE`, `VIDEO_VOICE`, `MUTE_MEMBERS`, `DEAFEN_MEMBERS`, `MENTION_EVERYONE`, `MANAGE_WEBHOOKS`, `MANAGE_EMOJIS`, `MODERATE_MEMBERS`, `VIEW_AUDIT_LOG`, `READ_MESSAGE_HISTORY`, `VIEW_MESSAGE_AUDIT`.\n\n**The order is data, not documentation.** What the database stores is bit positions, so renumbering reassigns every permission every guild has already granted. `VIDEO_VOICE` is reserved and granted by nothing; it is listed because removing it would renumber the six bits above it.",
+      "examples": [
+        "3075",
+        "0"
+      ]
+    },
+    "AppliedMessageTag": {
+      "type": "object",
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/AppliedMessageTag; a test holds the two equal. A tag as it appears on a message — the tag itself, plus who put it there and when.\n\n`applied_by` is present deliberately. A tag on a message is an assertion somebody made about it, and a reader deciding whether to trust `spam` wants to know who said so, the same reason an audit entry names an actor. It discloses nothing: everybody named here is a member of a guild the reader is also in.",
+      "required": [
+        "id",
+        "guild_id",
+        "name",
+        "created_by",
+        "is_shared",
+        "created_at",
+        "applied_by",
+        "applied_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "created_by": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "is_shared": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "applied_by": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "applied_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "GuildDeleted": {
+      "type": "object",
+      "description": "GUILD_DELETE: the guild is gone, or this account is no longer in it. The client drops it either way.",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "ChannelDeleted": {
+      "type": "object",
+      "description": "CHANNEL_DELETE, sent only to members who could view the channel.",
+      "required": [
+        "id",
+        "guild_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "GuildRoles": {
+      "type": "object",
+      "description": "GUILD_ROLES_UPDATE: the guild`s whole role list, which the client replaces. Whole because creating or reordering one role moves the others.",
+      "required": [
+        "guild_id",
+        "roles"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Role"
+          }
+        }
+      }
+    },
+    "MemberRemoved": {
+      "type": "object",
+      "description": "GUILD_MEMBER_REMOVE, to the members who remain.",
+      "required": [
+        "guild_id",
+        "user_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "user_id": {
+          "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "PermissionsUpdated": {
+      "type": "object",
+      "description": "GUILD_PERMISSIONS_UPDATE: which channels you may see, or what you may do, may have changed. Refetch the guild`s channels.",
+      "required": [
+        "guild_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "MessageDeleted": {
+      "type": "object",
+      "description": "MESSAGE_DELETE, to members who can view the channel.",
+      "required": [
+        "id",
+        "channel_id",
+        "guild_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "channel_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "GuildCreateDispatch": {
+      "type": "object",
+      "description": "To the account that created it; adds the guild to its connections.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Guild"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_CREATE"
+        }
+      }
+    },
+    "GuildUpdateDispatch": {
+      "type": "object",
+      "description": "To members, including after an ownership transfer.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Guild"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_UPDATE"
+        }
+      }
+    },
+    "GuildDeleteDispatch": {
+      "type": "object",
+      "description": "To members of a deleted guild, and to an account removed from one.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/GuildDeleted"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_DELETE"
+        }
+      }
+    },
+    "ChannelCreateDispatch": {
+      "type": "object",
+      "description": "To members who can view the new channel.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Channel"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "CHANNEL_CREATE"
+        }
+      }
+    },
+    "ChannelUpdateDispatch": {
+      "type": "object",
+      "description": "To members who can view the channel.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Channel"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "CHANNEL_UPDATE"
+        }
+      }
+    },
+    "ChannelDeleteDispatch": {
+      "type": "object",
+      "description": "To members who could view the channel.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/ChannelDeleted"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "CHANNEL_DELETE"
+        }
+      }
+    },
+    "GuildRolesUpdateDispatch": {
+      "type": "object",
+      "description": "To members, after any role is created, edited, deleted or reordered.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/GuildRoles"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_ROLES_UPDATE"
+        }
+      }
+    },
+    "GuildMemberUpdateDispatch": {
+      "type": "object",
+      "description": "To members, after a member is edited or given or relieved of a role.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Member"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_MEMBER_UPDATE"
+        }
+      }
+    },
+    "GuildMemberRemoveDispatch": {
+      "type": "object",
+      "description": "To the members who remain.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/MemberRemoved"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_MEMBER_REMOVE"
+        }
+      }
+    },
+    "GuildPermissionsUpdateDispatch": {
+      "type": "object",
+      "description": "To members, after anything that can change what they may see or do.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/PermissionsUpdated"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_PERMISSIONS_UPDATE"
+        }
+      }
+    },
+    "MessageCreateDispatch": {
+      "type": "object",
+      "description": "To members who can view the channel. tags is always null on the gateway: private tags differ per reader, so they are read over REST.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Message"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "MESSAGE_CREATE"
+        }
+      }
+    },
+    "MessageUpdateDispatch": {
+      "type": "object",
+      "description": "To members who can view the channel. tags is always null, as for MESSAGE_CREATE.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Message"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "MESSAGE_UPDATE"
+        }
+      }
+    },
+    "MessageDeleteDispatch": {
+      "type": "object",
+      "description": "To members who can view the channel.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/MessageDeleted"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "MESSAGE_DELETE"
         }
       }
     }

@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
@@ -85,6 +86,7 @@ type Service struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
 	ids     *snowflake.Generator
+	events  *dispatch.Publisher
 
 	// The creation ceilings, from instance config rather than constants.
 	//
@@ -117,6 +119,10 @@ type ServiceOptions struct {
 	Pool *pgxpool.Pool
 	IDs  *snowflake.Generator
 
+	// Events publishes gateway events after commit (M18). Nil drops them, which is what this package's own
+	// tests get; cmd/server always passes one, and the gateway's tests prove what arrives.
+	Events *dispatch.Publisher
+
 	// The creation ceilings. Required — a zero would mean no guild could hold a channel, which is a
 	// misconfiguration that should fail at startup rather than at the first POST.
 	MaxChannelsPerGuild int32
@@ -141,6 +147,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		pool:                opts.Pool,
 		queries:             db.New(opts.Pool),
 		ids:                 opts.IDs,
+		events:              opts.Events,
 		maxChannelsPerGuild: opts.MaxChannelsPerGuild,
 		maxRolesPerGuild:    opts.MaxRolesPerGuild,
 		maxGuildsPerAccount: opts.MaxGuildsPerAccount,

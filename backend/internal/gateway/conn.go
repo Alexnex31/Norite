@@ -21,6 +21,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
@@ -58,6 +59,10 @@ type conn struct {
 	userID    snowflake.ID
 	deviceID  string
 	sessionID string
+	// guilds is what READY listed, kept current by GUILD_CREATE and GUILD_DELETE. It chooses which events
+	// this connection is a candidate for and nothing more: whether it may receive one is decided against
+	// the database at fan-out (see onEvent), because this is exactly what goes stale.
+	guilds map[snowflake.ID]struct{}
 }
 
 func newConn(s *Server, ws *websocket.Conn, log *zerolog.Logger) *conn {
@@ -251,12 +256,20 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 		return false
 	}
 
+	set := make(map[snowflake.ID]struct{}, len(memberOf))
+	for _, g := range memberOf {
+		set[g.ID] = struct{}{}
+	}
+
+	// One critical section for the identity and READY, because setting the identity is what makes this
+	// connection a fan-out candidate. With the two apart, an event committed in between would be queued
+	// first and take sequence number 1, and READY would arrive second, describing a state older than an
+	// event the client has already applied.
 	c.mu.Lock()
-	c.userID, c.deviceID, c.sessionID = actor.UserID, device, sessionID
+	c.userID, c.deviceID, c.sessionID, c.guilds = actor.UserID, device, sessionID, set
+	c.enqueueLocked(gatewayproto.OpDispatch, ready{SessionID: sessionID, User: user, Guilds: memberOf}, "READY")
 	c.mu.Unlock()
 	c.watchdog.Reset(c.heartbeatDeadline())
-
-	c.dispatch("READY", ready{SessionID: sessionID, User: user, Guilds: memberOf})
 	return true
 }
 
@@ -282,24 +295,23 @@ func (c *conn) send(op gatewayproto.Opcode, payload any) {
 	c.enqueue(op, payload, "")
 }
 
-// dispatch queues an op 0 frame with the connection's next sequence number.
-func (c *conn) dispatch(event string, payload any) {
-	c.enqueue(gatewayproto.OpDispatch, payload, event)
-}
-
 func (c *conn) enqueue(op gatewayproto.Opcode, payload any, event string) {
-	d, err := json.Marshal(payload)
-	if err != nil {
-		c.log.Error().Err(err).Int("op", int(op)).Msg("gateway could not encode a frame")
-		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
-		return
-	}
-
 	// The sequence number is taken and the frame queued under one lock, so frames reach the socket in the
 	// order of their numbers. Taken outside it, two dispatches racing could queue 8 before 7, and a client
 	// resuming from 7 would skip 8.
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.enqueueLocked(op, payload, event)
+}
+
+// enqueueLocked is enqueue for a caller already holding mu.
+func (c *conn) enqueueLocked(op gatewayproto.Opcode, payload any, event string) {
+	d, err := json.Marshal(payload)
+	if err != nil {
+		c.log.Error().Err(err).Int("op", int(op)).Msg("gateway could not encode a frame")
+		go c.closeWith(gatewayproto.CloseUnknownError, "internal error")
+		return
+	}
 	f := gatewayproto.Frame{Op: op, D: d}
 	if op == gatewayproto.OpDispatch {
 		c.seq++
@@ -383,4 +395,28 @@ func newSessionID() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// inGuild reports whether READY, or an event since, told this connection about guildID.
+func (c *conn) inGuild(guildID snowflake.ID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.guilds[guildID]
+	return ok
+}
+
+// deliver sends one permitted event, keeping the guild set current first: GUILD_CREATE adds the guild it
+// announces and GUILD_DELETE removes it, so later events for that guild find, or stop finding, this
+// connection as a candidate.
+func (c *conn) deliver(ev dispatch.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch ev.Type {
+	case "GUILD_CREATE":
+		c.guilds[ev.GuildID] = struct{}{}
+	case "GUILD_DELETE":
+		delete(c.guilds, ev.GuildID)
+	}
+	// The payload was encoded once by the publisher and is the same bytes for every recipient.
+	c.enqueueLocked(gatewayproto.OpDispatch, ev.Data, ev.Type)
 }
