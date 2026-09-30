@@ -30,6 +30,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/roles"
 )
 
 // Topic is the bus topic every gateway event travels on. One topic rather than one per guild, so a process
@@ -60,8 +61,12 @@ type Event struct {
 	Audience Audience     `json:"audience"`
 	GuildID  snowflake.ID `json:"guild_id"`
 	// ChannelID, when set on a Guild event, narrows it to members who can view that channel.
-	ChannelID snowflake.ID   `json:"channel_id,omitempty"`
-	Users     []snowflake.ID `json:"users,omitempty"`
+	ChannelID snowflake.ID `json:"channel_id,omitempty"`
+	// Need, on a Guild event, is what a recipient must hold beyond view, resolved like view is: in the
+	// channel when ChannelID is set. MESSAGE_UPDATE is the case, needing PermReadMessageHistory, because an
+	// edit can reach a message that predates the recipient's access and REST refuses them that message.
+	Need  roles.Permission `json:"need,omitempty"`
+	Users []snowflake.ID   `json:"users,omitempty"`
 	// Overwrites, when set, are the channel's overwrites as they stood before the change, for an event
 	// about a channel whose rows are gone by fan-out time. CHANNEL_DELETE is the case: without them the
 	// gateway would have no overwrites to resolve against and would send a hidden channel's deletion to

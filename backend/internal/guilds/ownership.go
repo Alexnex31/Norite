@@ -157,8 +157,13 @@ func (s *Service) TransferOwnership(
 		}
 
 		out = guildFromRow(row)
-		// A new owner is a change to the guild object (owner_id), which every member's client shows.
-		return s.events.Queue(ctx, dispatch.Event{Type: "GUILD_UPDATE", Audience: dispatch.Guild, GuildID: out.ID}, out)
+		// A new owner is a change to the guild object (owner_id), which every member's client shows, and to
+		// two members' permissions: layer 2 moves from one to the other, so the old owner loses whatever
+		// only ownership gave them and the new one gains it.
+		if err := s.events.Queue(ctx, dispatch.Event{Type: "GUILD_UPDATE", Audience: dispatch.Guild, GuildID: out.ID}, out); err != nil {
+			return err
+		}
+		return s.queuePermissions(ctx, out.ID)
 	})
 	return out, err
 }

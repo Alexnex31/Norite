@@ -673,13 +673,17 @@ func idOrNil(id *snowflake.ID) *int64 {
 // Filtering per recipient on a second axis would be the one place fan-out made a disclosure decision of its
 // own rather than asking guildauth (M18 plan, D6).
 //
-// View permission is the whole test, as Discord draws it: history governs the backlog, and a message sent
-// while you are connected is not backlog.
+// History governs the backlog, and a message sent while you are connected is not backlog, so a new message
+// needs view alone. An edit is different: it can rewrite a message posted before the recipient could read the
+// channel's history, and delivering its new text would hand them what REST refuses. So MESSAGE_UPDATE needs
+// PermReadMessageHistory too, which is the bit every REST read of an existing message requires.
 func (s *Service) queueMessage(ctx context.Context, event string, guildID snowflake.ID, m Message) error {
 	m.Tags = nil
-	return s.events.Queue(ctx, dispatch.Event{
-		Type: event, Audience: dispatch.Guild, GuildID: guildID, ChannelID: m.ChannelID,
-	}, m)
+	ev := dispatch.Event{Type: event, Audience: dispatch.Guild, GuildID: guildID, ChannelID: m.ChannelID}
+	if event == "MESSAGE_UPDATE" {
+		ev.Need = roles.PermReadMessageHistory
+	}
+	return s.events.Queue(ctx, ev, m)
 }
 
 // messageDeleted is MESSAGE_DELETE's payload.

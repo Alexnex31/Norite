@@ -43,9 +43,15 @@ UPDATE sessions
 SET revoked_at = now()
 WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL;
 
--- name: CountLiveSessionsForDevice :one
+-- name: CountLiveSessionsInFamily :one
+-- Whether one sign-in is still live: its device's live rows, narrowed to the family that started at
+-- first_seen. It replaced a count over the device's live rows at M18, because a device signed out and then
+-- signed in again is live while the sign-in that ended is not: a token stolen from that sign-in passed
+-- RequireLiveSession again, and a gateway connection opened with it had no expiry at all. first_seen is the
+-- family's key: a fresh sign-in takes now(), and rotation carries it forward (000013). Served by
+-- sessions_live_by_device_idx, which holds about one row per device.
 SELECT count(*) FROM sessions
-WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL AND expires_at > now();
+WHERE user_id = $1 AND device_id = $2 AND first_seen = $3 AND revoked_at IS NULL AND expires_at > now();
 
 -- name: GetSessionByID :one
 -- Deliberately returns revoked and rotated rows, exactly as GetSessionByRefreshTokenHash does.

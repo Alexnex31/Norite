@@ -599,6 +599,16 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 		}
 
 		guild := int64(guildID)
+		// A category's children lose their parent with it. Detached here rather than by the foreign key, so
+		// the rows come back and every client that shows them nested is told they are not any more.
+		var children []db.Channel
+		if existing.Type == ChannelGuildCategory {
+			parent := int64(channelID)
+			if children, err = q.DetachChildChannels(ctx, db.DetachChildChannelsParams{ParentID: &parent, GuildID: &guild}); err != nil {
+				return fmt.Errorf("guilds: detach the category's channels: %w", err)
+			}
+		}
+
 		affected, err := q.DeleteChannel(ctx, db.DeleteChannelParams{ID: int64(channelID), GuildID: &guild})
 		if err != nil {
 			return fmt.Errorf("guilds: delete channel: %w", err)
@@ -607,9 +617,48 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 			return httpx.ErrNotFound
 		}
 
-		return s.events.Queue(ctx, dispatch.Event{
+		if err := s.events.Queue(ctx, dispatch.Event{
 			Type: "CHANNEL_DELETE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
 			Overwrites: overwrites,
-		}, channelDeleted{ID: channelID, GuildID: guildID})
+		}, channelDeleted{ID: channelID, GuildID: guildID}); err != nil {
+			return err
+		}
+		return s.queueDetached(ctx, q, guildID, children)
 	})
+}
+
+// queueDetached dispatches CHANNEL_UPDATE for each channel a category deletion left without a parent, each
+// to the members who can view that channel, and each in the shape every other CHANNEL_UPDATE has: the whole
+// channel, overwrites included. One read for all their overwrites, grouped once, as the listing does.
+func (s *Service) queueDetached(ctx context.Context, q *db.Queries, guildID snowflake.ID, children []db.Channel) error {
+	if len(children) == 0 || s.events == nil {
+		return nil
+	}
+	ids := make([]int64, len(children))
+	for i, ch := range children {
+		ids[i] = ch.ID
+	}
+	rows, err := q.ListGuildPermissionOverwrites(ctx, db.ListGuildPermissionOverwritesParams{
+		ChannelIds: ids,
+		GuildID:    int64(guildID),
+	})
+	if err != nil {
+		return fmt.Errorf("guilds: list overwrites of detached channels: %w", err)
+	}
+	byChannel := make(map[int64][]db.PermissionOverwrite, len(children))
+	for _, ow := range rows {
+		byChannel[ow.ChannelID] = append(byChannel[ow.ChannelID], ow)
+	}
+	for _, row := range children {
+		ch := channelFromRow(row)
+		for _, ow := range byChannel[row.ID] {
+			ch.PermissionOverwrites = append(ch.PermissionOverwrites, overwriteFromRow(ow))
+		}
+		if err := s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_UPDATE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: ch.ID,
+		}, ch); err != nil {
+			return err
+		}
+	}
+	return nil
 }

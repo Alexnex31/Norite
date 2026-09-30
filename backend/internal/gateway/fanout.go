@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -16,6 +17,10 @@ import (
 type AudienceResolver interface {
 	Allowed(ctx context.Context, ev dispatch.Event, candidates []snowflake.ID) ([]snowflake.ID, error)
 }
+
+// audienceTimeout bounds one event's audience resolution: three indexed reads, milliseconds when the
+// database is well.
+const audienceTimeout = 5 * time.Second
 
 // onEvent fans one published event out to this process's connections.
 //
@@ -49,7 +54,12 @@ func (s *Server) onEvent(payload []byte) {
 		return
 	}
 	users := distinctUsers(sessions)
-	allowed, err := s.opts.Audience.Allowed(context.Background(), ev, users)
+	// Bounded, because this is the one goroutine every event on the process passes through: a query left to
+	// hang on a lock or a wedged pooled connection would stop all fan-out here, and the bus would drop what
+	// queued behind it. A timeout drops this event instead, the at-most-once the bus already promises.
+	ctx, cancel := context.WithTimeout(context.Background(), audienceTimeout)
+	defer cancel()
+	allowed, err := s.opts.Audience.Allowed(ctx, ev, users)
 	if err != nil {
 		// Dropped, not delivered unchecked: an event nobody could authorize is one nobody receives. The
 		// connections that miss it resync on their next READY, which is what the bus's at-most-once

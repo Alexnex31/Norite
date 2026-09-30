@@ -58,9 +58,11 @@ func TestCheckAppliesTheStrictRule(t *testing.T) {
 		// A dev build on either side is compatible and unchecked.
 		{"dev", "0.2.0", true, false},
 		{"0.2.0", "dev", true, false},
-		{"", "0.2.0", true, false},
 
-		// A garbled version is not "dev": it makes no promise at all.
+		// A garbled version is not "dev": it makes no promise at all. Nor is a missing one, or a client
+		// leaving it out would skip the check against every release.
+		{"0.2.0", "", false, true},
+		{"", "0.2.0", false, true},
 		{"0.2.0", "0.2", false, true},
 		{"0.2.0", "latest", false, true},
 	}

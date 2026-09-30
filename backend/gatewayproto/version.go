@@ -77,8 +77,9 @@ type Compatibility struct {
 
 // Check applies ADR 0033's strict rule to a server and a client version.
 //
-//   - Either side "dev" (or empty): compatible, unchecked. Only a source build reports it, and refusing
-//     would lock a self-hoster's own server out of every released client.
+//   - Either side "dev": compatible, unchecked. Only a source build reports it, and refusing would lock a
+//     self-hoster's own server out of every released client. An empty version is not "dev": a client
+//     that sent none would otherwise skip the check against every release (M18 review).
 //   - A pre-release on either side: compatible only with the identical version, pre-release included.
 //     SemVer §9 lets a pre-release break what its core version promises, and two alphas of one MINOR may
 //     differ in exactly the way this check exists to catch.
@@ -133,7 +134,7 @@ func Check(server, client string) Compatibility {
 }
 
 func isDev(s string) bool {
-	return s == "" || strings.EqualFold(s, DevVersion)
+	return strings.EqualFold(s, DevVersion)
 }
 
 // older names the side to upgrade when two releases differ.

@@ -12,18 +12,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countLiveSessionsForDevice = `-- name: CountLiveSessionsForDevice :one
+const countLiveSessionsInFamily = `-- name: CountLiveSessionsInFamily :one
 SELECT count(*) FROM sessions
-WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL AND expires_at > now()
+WHERE user_id = $1 AND device_id = $2 AND first_seen = $3 AND revoked_at IS NULL AND expires_at > now()
 `
 
-type CountLiveSessionsForDeviceParams struct {
-	UserID   int64
-	DeviceID string
+type CountLiveSessionsInFamilyParams struct {
+	UserID    int64
+	DeviceID  string
+	FirstSeen pgtype.Timestamptz
 }
 
-func (q *Queries) CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countLiveSessionsForDevice, arg.UserID, arg.DeviceID)
+// Whether one sign-in is still live: its device's live rows, narrowed to the family that started at
+// first_seen. It replaced a count over the device's live rows at M18, because a device signed out and then
+// signed in again is live while the sign-in that ended is not: a token stolen from that sign-in passed
+// RequireLiveSession again, and a gateway connection opened with it had no expiry at all. first_seen is the
+// family's key: a fresh sign-in takes now(), and rotation carries it forward (000013). Served by
+// sessions_live_by_device_idx, which holds about one row per device.
+func (q *Queries) CountLiveSessionsInFamily(ctx context.Context, arg CountLiveSessionsInFamilyParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countLiveSessionsInFamily, arg.UserID, arg.DeviceID, arg.FirstSeen)
 	var count int64
 	err := row.Scan(&count)
 	return count, err

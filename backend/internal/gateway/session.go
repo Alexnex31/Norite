@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
@@ -35,7 +36,10 @@ type session struct {
 	// closes the streams opened with a sign-in from before it (dispatch.Revocation), and a resume with a
 	// newer token moves the stream onto the newer sign-in.
 	signIn snowflake.ID
-	seq    int64
+	// since is when that sign-in's session family started, which with deviceID is what the liveness checks
+	// ask about (auth.SignIn).
+	since time.Time
+	seq   int64
 	// guilds is what READY listed, kept current by GUILD_CREATE and GUILD_DELETE. It picks which events
 	// this session is a candidate for and nothing more: whether it may receive one is decided against the
 	// database at fan-out (see onEvent), because this is exactly what goes stale.
@@ -88,6 +92,15 @@ func (s *session) deliver(ev dispatch.Event) {
 // applyLocked keeps the guild set current, then numbers and sends the event: GUILD_CREATE adds its guild
 // and GUILD_DELETE removes it, so later events for that guild find, or stop finding, this session.
 func (s *session) applyLocked(ev dispatch.Event) {
+	// A FormerMembers event is checked against nothing but this set, since its guild's rows are gone. A
+	// session that was not READY when it arrived was a candidate for it regardless of guild, so it is
+	// dropped here unless READY listed the guild: otherwise an account identifying while some other guild was
+	// deleted would be told that guild's id, and that it had just been deleted.
+	if ev.Audience == dispatch.FormerMembers {
+		if _, ok := s.guilds[ev.GuildID]; !ok {
+			return
+		}
+	}
 	switch ev.Type {
 	case "GUILD_CREATE":
 		s.guilds[ev.GuildID] = struct{}{}
@@ -160,7 +173,7 @@ const (
 //
 // A connection still attached is replaced and closed: the client has evidently moved to the new one, and two
 // sockets for one stream would each see half of it.
-func (s *session) resume(c *conn, signIn snowflake.ID, afterSeq int64) resumeResult {
+func (s *session) resume(c *conn, signIn snowflake.ID, in auth.SignIn, afterSeq int64) resumeResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -187,7 +200,7 @@ func (s *session) resume(c *conn, signIn snowflake.ID, afterSeq int64) resumeRes
 		go old.closeWith(gatewayproto.CloseSessionTimedOut, "resumed on another connection")
 	}
 	s.conn = c
-	s.signIn = signIn
+	s.signIn, s.since = signIn, in.Since
 	for _, b := range s.buf {
 		if b.seq > afterSeq {
 			c.enqueueFrame(b.frame)
@@ -213,6 +226,11 @@ func (s *session) detach(c *conn) {
 		return
 	}
 	s.conn = nil
+	// A session already dropped, by a revocation or an IDENTIFY that failed after registering it, has no
+	// window to open.
+	if s.ended {
+		return
+	}
 	s.expiry = time.AfterFunc(s.srv.opts.ResumeWindow, func() { s.srv.expireSession(s) })
 }
 
@@ -221,6 +239,13 @@ func (s *session) revokedBy(r dispatch.Revocation) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return r.Matches(s.userID, s.signIn, s.deviceID)
+}
+
+// signInNow is the sign-in the stream currently runs on, which a resume can move.
+func (s *session) signInNow() auth.SignIn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return auth.SignIn{Device: s.deviceID, Since: s.since}
 }
 
 // takeConn unbinds and returns the attached connection, if any, for a session being ended from outside.

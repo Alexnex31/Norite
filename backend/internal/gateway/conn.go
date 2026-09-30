@@ -59,8 +59,21 @@ type conn struct {
 	mu   sync.Mutex
 	sess *session
 
-	// checkedAt is when the device last answered that it is signed in. Touched only by serve's goroutine.
+	// checkedAt is when the sign-in last answered that it is live. Touched only by serve's goroutine.
 	checkedAt time.Time
+
+	// addr is the address key holding one of the server's unidentified slots for this connection, until
+	// markIdentified gives it back, once.
+	addr         string
+	slotReleased atomic.Bool
+}
+
+// markIdentified gives back this connection's unidentified slot. Idempotent, since identifying and closing
+// both call it.
+func (c *conn) markIdentified() {
+	if c.slotReleased.CompareAndSwap(false, true) {
+		c.srv.identified(c.addr)
+	}
 }
 
 func newConn(s *Server, ws *websocket.Conn, log *zerolog.Logger) *conn {
@@ -184,47 +197,47 @@ func (c *conn) handle(ctx context.Context, f gatewayproto.Frame) bool {
 }
 
 // authenticate is what IDENTIFY and RESUME both ask of a token: that it is an access token, that its
-// account has not identified too often, and which device it belongs to. It closes the connection saying why
-// when the answer is no. Whether that device is still signed in is checkLive's, asked separately so IDENTIFY
-// can register the session in between.
+// account has not identified too often, and which sign-in it belongs to. It closes the connection saying why
+// when the answer is no. Whether that sign-in is still live is checkLive's, asked separately so IDENTIFY can
+// register the session in between.
 //
 // Shared, so the two cannot drift apart. RESUME skipping any of these would make it the easier door.
-func (c *conn) authenticate(ctx context.Context, token string) (auth.Actor, string, bool) {
+func (c *conn) authenticate(ctx context.Context, token string) (auth.Actor, auth.SignIn, bool) {
 	// An access token only. An API token is not a JWT and fails here, which is the intent: the gateway
 	// carries everything an account can see, and a delegated credential reaching it would need a scope
 	// check on every event type (M18 plan, finding 12).
 	actor, err := c.srv.opts.Accounts.AuthenticateAccessToken(ctx, token)
 	if err != nil || actor.Kind != auth.ActorUser {
 		c.closeWith(gatewayproto.CloseAuthenticationFailed, "invalid token")
-		return auth.Actor{}, "", false
+		return auth.Actor{}, auth.SignIn{}, false
 	}
 
 	// Counted per account and fail-open like the HTTP limiter: a store that cannot answer must not become
 	// every daemon on the instance failing to connect.
 	if res, err := c.srv.identifyLimiter.Allow(ctx, "account:"+actor.UserID.String()); err == nil && !res.Allowed {
 		c.closeWith(gatewayproto.CloseRateLimited, "identifying too often")
-		return auth.Actor{}, "", false
+		return auth.Actor{}, auth.SignIn{}, false
 	}
 
-	device, err := c.srv.opts.Accounts.DeviceOf(ctx, actor.UserID, actor.SessionID)
+	in, err := c.srv.opts.Accounts.SignInOf(ctx, actor.UserID, actor.SessionID)
 	if err != nil {
 		c.log.Error().Err(err).Msg("gateway could not look up the session")
 		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
-		return auth.Actor{}, "", false
+		return auth.Actor{}, auth.SignIn{}, false
 	}
-	if device == "" {
+	if in.Device == "" {
 		// A token naming a session this account does not hold: not one this instance minted, so the same
 		// answer as a device that has signed out.
 		c.closeWith(gatewayproto.CloseAuthenticationFailed, auth.ErrSessionSignedOut.Error())
-		return auth.Actor{}, "", false
+		return auth.Actor{}, auth.SignIn{}, false
 	}
-	return actor, device, true
+	return actor, in, true
 }
 
-// checkLive asks whether device is still signed in, closing the connection when it is not. A token outlives
+// checkLive asks whether the sign-in is still live, closing the connection when it is not. A token outlives
 // its session by up to fifteen minutes, which a request can afford and a connection cannot.
-func (c *conn) checkLive(ctx context.Context, userID snowflake.ID, device string) bool {
-	err := c.srv.opts.Accounts.RequireLiveDevice(ctx, userID, device)
+func (c *conn) checkLive(ctx context.Context, userID snowflake.ID, in auth.SignIn) bool {
+	err := c.srv.opts.Accounts.RequireLiveSignIn(ctx, userID, in)
 	if err == nil {
 		return true
 	}
@@ -263,7 +276,7 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 			Msg("gateway version check skipped: a development build is on one side")
 	}
 
-	actor, device, ok := c.authenticate(ctx, id.Token)
+	actor, in, ok := c.authenticate(ctx, id.Token)
 	if !ok {
 		return false
 	}
@@ -274,7 +287,7 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return false
 	}
-	s, ok := c.srv.newSession(sessionID, actor.UserID, actor.SessionID, device)
+	s, ok := c.srv.newSession(sessionID, actor.UserID, actor.SessionID, in)
 	if !ok {
 		c.closeWith(gatewayproto.CloseRateLimited, "too many connections for this account")
 		return false
@@ -288,7 +301,7 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 	// fall into. One committed before this read is refused by it; one committed after it publishes its
 	// revocation after commit, finds this session registered, and closes it. Asked before registering, a
 	// sign-out landing between the two would be seen by neither.
-	if !c.checkLive(ctx, actor.UserID, device) {
+	if !c.checkLive(ctx, actor.UserID, in) {
 		c.srv.dropSession(s)
 		return false
 	}
@@ -317,6 +330,7 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 		set[g.ID] = struct{}{}
 	}
 	s.becomeReady(ready{SessionID: sessionID, User: user, Guilds: memberOf}, set)
+	c.markIdentified()
 	c.watchdog.Reset(c.heartbeatDeadline())
 	return true
 }
@@ -334,20 +348,20 @@ func (c *conn) resume(ctx context.Context, raw json.RawMessage) bool {
 		return false
 	}
 
-	actor, device, ok := c.authenticate(ctx, r.Token)
-	if !ok || !c.checkLive(ctx, actor.UserID, device) {
+	actor, in, ok := c.authenticate(ctx, r.Token)
+	if !ok || !c.checkLive(ctx, actor.UserID, in) {
 		return false
 	}
 
 	// Somebody else's session, one on another device, and one that has expired all get the same answer.
 	// A different answer for a session that exists but is not yours would confirm session ids.
 	s := c.srv.lookupSession(r.SessionID)
-	if s == nil || s.userID != actor.UserID || s.deviceID != device {
+	if s == nil || s.userID != actor.UserID || s.deviceID != in.Device {
 		c.send(gatewayproto.OpInvalidSess, false)
 		return true
 	}
 
-	switch s.resume(c, actor.SessionID, r.Seq) {
+	switch s.resume(c, actor.SessionID, in, r.Seq) {
 	case resumeEnded:
 		// Revoked or expired between the lookup and here: the same answer as a session that was never found.
 		c.send(gatewayproto.OpInvalidSess, false)
@@ -367,31 +381,35 @@ func (c *conn) resume(ctx context.Context, raw json.RawMessage) bool {
 	c.sess = s
 	c.mu.Unlock()
 	c.checkedAt = time.Now()
+	c.markIdentified()
 	c.watchdog.Reset(c.heartbeatDeadline())
 	return true
 }
 
-// stillSignedIn is the periodic half of revocation: once LivenessInterval has passed since the device last
+// stillSignedIn is the periodic half of revocation: once LivenessInterval has passed since the sign-in last
 // answered, a heartbeat asks again. A revocation's close normally arrives over the bus within moments, but
 // the bus is at-most-once, and without this a lost one would leave the connection open for as long as its
 // client kept it. This bounds that at the interval.
 //
 // A database that cannot answer keeps the connection and asks again on the next heartbeat. Closing instead
 // would turn a database blip into every connection on the process reconnecting at once, into the same
-// blip.
+// blip. So the read is bounded well inside the heartbeat deadline: this runs on the read loop ahead of the
+// watchdog's reset, and a read left to hang would let the watchdog close the connection anyway.
 func (c *conn) stillSignedIn(ctx context.Context) bool {
 	if time.Since(c.checkedAt) < c.srv.opts.LivenessInterval {
 		return true
 	}
 	s := c.session()
-	err := c.srv.opts.Accounts.RequireLiveDevice(ctx, s.userID, s.deviceID)
+	ctx, cancel := context.WithTimeout(ctx, c.srv.opts.HeartbeatInterval/4)
+	defer cancel()
+	err := c.srv.opts.Accounts.RequireLiveSignIn(ctx, s.userID, s.signInNow())
 	switch {
 	case err == nil:
 		c.checkedAt = time.Now()
 		return true
 	case errors.Is(err, auth.ErrSessionSignedOut):
+		// revoke drops the session and closes this connection with CloseSessionRevoked.
 		c.srv.revoke(s)
-		c.closeWith(gatewayproto.CloseSessionRevoked, "signed out")
 		return false
 	default:
 		c.log.Warn().Err(err).Msg("gateway could not re-check a connection's sign-in; keeping it until the next heartbeat")

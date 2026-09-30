@@ -228,3 +228,63 @@ func TestARevokedSessionIsNotLeftToBeResumed(t *testing.T) {
 	back.resume(again.AccessToken, sessionID, 1)
 	back.notResumable()
 }
+
+// Liveness belongs to the sign-in, not the device. Signed out and then signed in again on the same machine,
+// the device is live, and a token from the sign-in that ended must still not open a stream: on REST it would
+// lapse within fifteen minutes, and a connection would not lapse at all.
+func TestATokenFromAnEndedSignInCannotConnectAfterTheDeviceSignsInAgain(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	url := serveGateway(t, f.api.handler)
+
+	ended := f.api.login("member@example.com", "member-laptop")
+	res := f.api.call(http.MethodPost, "/api/v1/auth/logout", map[string]string{"refresh_token": ended.RefreshToken})
+	require.Equal(t, http.StatusNoContent, res.Code, res)
+	current := f.api.login("member@example.com", "member-laptop")
+
+	stale := dialGateway(t, url, nil)
+	stale.hello()
+	stale.identify(ended.AccessToken, "dev")
+	assert.Contains(t, stale.expectClose(gatewayproto.CloseAuthenticationFailed), "signed out")
+
+	connected(t, url, current.AccessToken)
+}
+
+// And the periodic check asks the same question, so a connection whose revocation was lost is caught even
+// when the device has signed in again since.
+func TestTheLivenessCheckAsksAboutTheSignInNotTheDevice(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	url, _ := customGateway(t, f, func(o *gateway.Options) {
+		o.Bus = droppingBus{f.api.bus}
+		o.LivenessInterval = time.Millisecond
+	})
+
+	ended := f.api.login("member@example.com", "member-laptop")
+	stale := connected(t, url, ended.AccessToken)
+	res := f.api.call(http.MethodPost, "/api/v1/auth/logout", map[string]string{"refresh_token": ended.RefreshToken})
+	require.Equal(t, http.StatusNoContent, res.Code, res)
+	f.api.login("member@example.com", "member-laptop")
+
+	time.Sleep(10 * time.Millisecond)
+	stale.send(gatewayproto.OpHeartbeat, nil)
+	revokedClose(stale)
+}
+
+// RequireLiveSession asks the gateway's question too. It asked about the device, so a token stolen from a
+// sign-in that ended passed it again the moment its owner signed back in on that machine — and one route it
+// guards mints an API token, which would outlive every sign-out that followed.
+func TestASignInThatEndedStaysEndedWhenTheDeviceSignsInAgain(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+
+	stolen := f.api.login("member@example.com", "member-laptop")
+	phone := f.api.login("member@example.com", "member-phone")
+	res := f.api.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(phone.AccessToken))
+	require.Equal(t, http.StatusOK, res.Code, res)
+	f.api.login("member@example.com", "member-laptop")
+
+	minted := f.api.call(http.MethodPost, "/api/v1/auth/tokens",
+		map[string]any{"name": "persistence", "scopes": []string{"identify"}}, withToken(stolen.AccessToken))
+	assert.Equal(t, http.StatusUnauthorized, minted.Code, "%s", minted)
+}

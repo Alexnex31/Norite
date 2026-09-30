@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
@@ -173,33 +174,18 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID, currentSessio
 // So the rule is narrow and statable: an endpoint whose purpose is revocation does not accept a credential
 // whose own session has been revoked. It costs one indexed lookup on an endpoint called approximately
 // never, and nothing on the path §17.10 is about.
+//
+// **Live means the sign-in, not the device**, since M18. It asked about the device at first, which is right
+// for a rotated session and wrong once the device signs in again: a token stolen from a sign-in that ended
+// then passed the check on the strength of the sign-in that replaced it, and POST /auth/tokens, which this
+// guards, turned fifteen minutes into an API token with no expiry. Asking about the family the token was
+// minted in keeps the rotated case live and the ended one ended.
 func (s *Service) requireLiveDevice(ctx context.Context, userID, sessionID snowflake.ID) error {
-	device, err := s.currentDeviceID(ctx, userID, sessionID)
+	in, err := s.SignInOf(ctx, userID, sessionID)
 	if err != nil {
 		return err
 	}
-	return s.requireLiveDeviceNamed(ctx, userID, device)
-}
-
-// requireLiveDeviceNamed is requireLiveDevice for a caller that has already resolved the device.
-func (s *Service) requireLiveDeviceNamed(ctx context.Context, userID snowflake.ID, device string) error {
-	// No device at all: an access token naming a session this instance has no record of. Not reachable in
-	// ordinary use — the row outlives the token that names it by weeks — so refusing is the safe reading.
-	if device == "" {
-		return ErrSessionSignedOut
-	}
-
-	live, err := s.queries.CountLiveSessionsForDevice(ctx, db.CountLiveSessionsForDeviceParams{
-		UserID:   int64(userID),
-		DeviceID: device,
-	})
-	if err != nil {
-		return fmt.Errorf("counting live sessions for the acting device: %w", err)
-	}
-	if live == 0 {
-		return ErrSessionSignedOut
-	}
-	return nil
+	return s.RequireLiveSignIn(ctx, userID, in)
 }
 
 // currentDeviceID resolves the access token's session claim to the device it belongs to.
@@ -231,22 +217,63 @@ func (s *Service) currentDeviceID(ctx context.Context, userID, sessionID snowfla
 	return session.DeviceID, nil
 }
 
-// DeviceOf reports the device behind an access token's session, or "" when the session names nothing this
-// account holds. It says nothing about whether that device is still signed in; RequireLiveDevice does.
-//
-// Two methods rather than one because the gateway needs the device before it asks the question: it
-// registers a connection under its device, *then* checks liveness, so a revocation committing in between
-// finds the connection registered and closes it (M18). Asked in the other order, a sign-out landing between
-// the check and the registration would miss the connection entirely.
-func (s *Service) DeviceOf(ctx context.Context, userID, sessionID snowflake.ID) (string, error) {
-	return s.currentDeviceID(ctx, userID, sessionID)
+// SignIn names one sign-in: the device it was made on, and the time its session family started. Rotation
+// keeps both, so every token a sign-in's refreshes produce names the same SignIn, and signing in again on the
+// same device starts a different one.
+type SignIn struct {
+	Device string
+	Since  time.Time
 }
 
-// RequireLiveDevice refuses with ErrSessionSignedOut when device has no live session left on the account.
+// SignInOf reports the sign-in behind an access token's session, or the zero SignIn when the session names
+// nothing this account holds. It says nothing about whether that sign-in is still live; RequireLiveSignIn
+// does.
 //
-// The gateway asks it at IDENTIFY and RESUME, and again periodically on every connection, for the reason
-// RequireLiveSession asks it on REST: an access token outlives its session by up to AccessTokenTTL, which a
-// single request can afford and a connection cannot.
-func (s *Service) RequireLiveDevice(ctx context.Context, userID snowflake.ID, device string) error {
-	return s.requireLiveDeviceNamed(ctx, userID, device)
+// Two methods rather than one because the gateway needs the sign-in before it asks the question: it
+// registers a connection under it, *then* checks liveness, so a revocation committing in between finds the
+// connection registered and closes it (M18). Asked in the other order, a sign-out landing between the check
+// and the registration would miss the connection entirely.
+func (s *Service) SignInOf(ctx context.Context, userID, sessionID snowflake.ID) (SignIn, error) {
+	if sessionID == 0 {
+		return SignIn{}, nil
+	}
+	// A revoked row is accepted, for currentDeviceID's reason: a refresh inside the token's life revokes
+	// the row the token names while the sign-in goes on.
+	session, err := s.queries.GetSessionByID(ctx, int64(sessionID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SignIn{}, nil
+		}
+		return SignIn{}, fmt.Errorf("looking up the session: %w", err)
+	}
+	if session.UserID != int64(userID) || !session.FirstSeen.Valid {
+		return SignIn{}, nil
+	}
+	return SignIn{Device: session.DeviceID, Since: session.FirstSeen.Time}, nil
+}
+
+// RequireLiveSignIn refuses with ErrSessionSignedOut when in has no live session left.
+//
+// RequireLiveSession asks it on REST, and the gateway at IDENTIFY and RESUME and again periodically on every
+// connection. It asks about the sign-in rather than the device: a device signed out and then signed in again
+// is live, and a token minted before the sign-out would otherwise pass on the strength of the sign-in that
+// replaced it — opening a stream nothing ever closes, or minting an API token nothing ever expires.
+func (s *Service) RequireLiveSignIn(ctx context.Context, userID snowflake.ID, in SignIn) error {
+	// No sign-in at all: an access token naming a session this instance has no record of. Not reachable in
+	// ordinary use — the row outlives the token that names it by weeks — so refusing is the safe reading.
+	if in.Device == "" {
+		return ErrSessionSignedOut
+	}
+	live, err := s.queries.CountLiveSessionsInFamily(ctx, db.CountLiveSessionsInFamilyParams{
+		UserID:    int64(userID),
+		DeviceID:  in.Device,
+		FirstSeen: pgtype.Timestamptz{Time: in.Since, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("counting the sign-in's live sessions: %w", err)
+	}
+	if live == 0 {
+		return ErrSessionSignedOut
+	}
+	return nil
 }

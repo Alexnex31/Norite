@@ -36,6 +36,8 @@ func NewAudience(q db.Querier) *Audience {
 //   - With a channel, it reaches members who can view that channel, and nobody else: the same
 //     PermViewChannel every REST read of the channel requires. The owner and administrators bypass the
 //     overwrites, as layers 2 and 3 do everywhere.
+//   - With Need set, it reaches only members who also hold that, resolved the same way. Chosen by the
+//     publisher, which knows what reading the event's object costs over REST.
 //   - A Users event reaches exactly its named accounts, which the publisher chose because the event is
 //     about the account itself.
 //   - A FormerMembers event reaches every candidate, because the guild is gone and there are no rows left
@@ -63,6 +65,9 @@ func (a *Audience) Allowed(ctx context.Context, ev dispatch.Event, candidates []
 			continue
 		}
 		if ev.ChannelID != 0 && !p.Has(roles.PermViewChannel) {
+			continue
+		}
+		if !p.Has(ev.Need) {
 			continue
 		}
 		out = append(out, id)

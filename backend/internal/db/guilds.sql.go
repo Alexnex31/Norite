@@ -487,6 +487,56 @@ func (q *Queries) DeleteRole(ctx context.Context, arg DeleteRoleParams) (int64, 
 	return result.RowsAffected(), nil
 }
 
+const detachChildChannels = `-- name: DetachChildChannels :many
+UPDATE channels SET parent_id = NULL, updated_at = now()
+WHERE parent_id = $1 AND guild_id = $2
+RETURNING id, guild_id, type, parent_id, name, topic, position, nsfw, last_message_id, bitrate, user_limit, topic_search, created_at, updated_at
+`
+
+type DetachChildChannelsParams struct {
+	ParentID *int64
+	GuildID  *int64
+}
+
+// What deleting a category does to its children, done explicitly rather than left to channels_parent_id_fkey's
+// ON DELETE SET NULL, so the rows it changes come back to be dispatched as CHANNEL_UPDATE (M18): left to the
+// foreign key, every connected client kept the children nested under a category that no longer exists.
+// Served by channels_parent_id_idx; bounded by the guild's channel ceiling.
+func (q *Queries) DetachChildChannels(ctx context.Context, arg DetachChildChannelsParams) ([]Channel, error) {
+	rows, err := q.db.Query(ctx, detachChildChannels, arg.ParentID, arg.GuildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Channel{}
+	for rows.Next() {
+		var i Channel
+		if err := rows.Scan(
+			&i.ID,
+			&i.GuildID,
+			&i.Type,
+			&i.ParentID,
+			&i.Name,
+			&i.Topic,
+			&i.Position,
+			&i.Nsfw,
+			&i.LastMessageID,
+			&i.Bitrate,
+			&i.UserLimit,
+			&i.TopicSearch,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getChannel = `-- name: GetChannel :one
 SELECT id, guild_id, type, parent_id, name, topic, position, nsfw, last_message_id, bitrate, user_limit, topic_search, created_at, updated_at FROM channels WHERE id = $1
 `

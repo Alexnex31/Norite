@@ -70,9 +70,9 @@ paths:
       summary: Open a gateway connection
       description: >
         Upgrades to a WebSocket (RFC 6455). The server sends HELLO at once; the client then sends IDENTIFY,
-        carrying an access token, within the heartbeat interval. Authentication happens in that frame rather
-        than in a header, because a browser cannot set a header on a WebSocket and the same protocol serves
-        every client.
+        carrying an access token, within ten seconds. Authentication happens in that frame rather than in a
+        header, because a browser cannot set a header on a WebSocket and the same protocol serves every
+        client.
 
 
         An API token is refused, as is an access token whose session has been signed out — a connection
@@ -81,7 +81,8 @@ paths:
 
 
         Cross-origin upgrades are refused, and the per-address rate limit counts the upgrade like any
-        request.
+        request. An address already holding sixty-four connections that have not yet identified is refused
+        with 429 before the upgrade.
       operationId: connectGateway
       tags: [gateway]
       security: []

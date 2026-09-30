@@ -213,7 +213,13 @@ type Querier interface {
 	// Served by user_recovery_codes_live_idx (000014). One caller — the profile response — so it scales with
 	// the codes an account has left rather than with every set it has ever had.
 	CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error)
-	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
+	// Whether one sign-in is still live: its device's live rows, narrowed to the family that started at
+	// first_seen. It replaced a count over the device's live rows at M18, because a device signed out and then
+	// signed in again is live while the sign-in that ended is not: a token stolen from that sign-in passed
+	// RequireLiveSession again, and a gateway connection opened with it had no expiry at all. first_seen is the
+	// family's key: a fresh sign-in takes now(), and rotation carries it forward (000013). Served by
+	// sessions_live_by_device_idx, which holds about one row per device.
+	CountLiveSessionsInFamily(ctx context.Context, arg CountLiveSessionsInFamilyParams) (int64, error)
 	CountMemberPrivateTags(ctx context.Context, arg CountMemberPrivateTagsParams) (int64, error)
 	// How many of a tag's applications somebody other than the actor made. Deleting a shared tag cascades
 	// every application of it, and a deletion that takes other people's labels with it is authority over
@@ -405,6 +411,11 @@ type Querier interface {
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
 	// the waiting client stops immediately instead of polling for another twenty minutes.
 	DenyDeviceCode(ctx context.Context, id int64) (DeviceCode, error)
+	// What deleting a category does to its children, done explicitly rather than left to channels_parent_id_fkey's
+	// ON DELETE SET NULL, so the rows it changes come back to be dispatched as CHANNEL_UPDATE (M18): left to the
+	// foreign key, every connected client kept the children nested under a category that no longer exists.
+	// Served by channels_parent_id_idx; bounded by the guild's channel ceiling.
+	DetachChildChannels(ctx context.Context, arg DetachChildChannelsParams) ([]Channel, error)
 	// Runs on every request authenticated with an API token, which is why the hash column is indexed.
 	//
 	// One statement, not three: the owning account's liveness is joined in rather than fetched separately, and

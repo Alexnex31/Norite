@@ -9,7 +9,7 @@
 // lasts as long as the client keeps it. So everything a request can leave to "the next request will be
 // checked" has to be checked here instead, or closed from outside when it stops being true.
 //
-//   - **IDENTIFY asks whether the device is still signed in**, not only whether the token verifies. A token
+//   - **IDENTIFY asks whether the sign-in is still live**, not only whether the token verifies. A token
 //     outlives its session by up to fifteen minutes, which a request can afford and a connection cannot.
 //   - **Nothing here decides who may see what.** READY carries only what the account is a member of; which
 //     events reach a connection is a fresh permission check per event, never a cached one.
@@ -37,6 +37,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/platform/events"
+	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -46,8 +47,8 @@ import (
 // protocol without a database, while cmd/server wires the real service.
 type Accounts interface {
 	AuthenticateAccessToken(ctx context.Context, raw string) (auth.Actor, error)
-	DeviceOf(ctx context.Context, userID, sessionID snowflake.ID) (string, error)
-	RequireLiveDevice(ctx context.Context, userID snowflake.ID, device string) error
+	SignInOf(ctx context.Context, userID, sessionID snowflake.ID) (auth.SignIn, error)
+	RequireLiveSignIn(ctx context.Context, userID snowflake.ID, in auth.SignIn) error
 	ReadyUser(ctx context.Context, userID snowflake.ID) (any, error)
 }
 
@@ -73,9 +74,12 @@ type Options struct {
 	// HeartbeatInterval is what HELLO asks clients to keep. Zero means DefaultHeartbeatInterval; tests set
 	// it small so a missed heartbeat takes milliseconds to observe rather than a minute.
 	HeartbeatInterval time.Duration
-	// IdentifyTimeout is how long a connection may stay open without identifying. Zero means the
-	// heartbeat interval.
+	// IdentifyTimeout is how long a connection may stay open without identifying. Zero means
+	// DefaultIdentifyTimeout.
 	IdentifyTimeout time.Duration
+	// MaxUnidentifiedPerAddress bounds how many connections one address may hold open before they identify.
+	// Zero means DefaultMaxUnidentifiedPerAddress.
+	MaxUnidentifiedPerAddress int
 	// Now is the clock HELLO reports. Zero means time.Now.
 	Now func() time.Time
 
@@ -84,7 +88,7 @@ type Options struct {
 	ResumeWindow time.Duration
 	// ResumeBuffer is how many frames a session keeps for replay. Zero means DefaultResumeBuffer.
 	ResumeBuffer int
-	// LivenessInterval is how often a connection's device is asked again whether it is still signed in.
+	// LivenessInterval is how often a connection's sign-in is asked again whether it is still live.
 	// Zero means DefaultLivenessInterval.
 	LivenessInterval time.Duration
 }
@@ -96,6 +100,20 @@ type Options struct {
 // nothing on a connection that is about to be closed for missing heartbeats anyway. Five minutes is a third
 // of the access token's life, the window §17.10 already accepts for REST.
 const DefaultLivenessInterval = 5 * time.Minute
+
+// DefaultIdentifyTimeout is how long a connection may go without identifying. A client identifies the
+// moment HELLO arrives, so ten seconds is generous for a slow network and short for a socket held open by
+// somebody who never meant to authenticate. It is not the heartbeat interval, which it was first: a
+// connection nobody has authenticated has not earned the deadline an identified one gets.
+const DefaultIdentifyTimeout = 10 * time.Second
+
+// DefaultMaxUnidentifiedPerAddress bounds the connections one address holds before they identify, grouped
+// as the rate limiter groups addresses (IPv6 by /64). The upgrade is rate-limited, but a rate bounds how fast
+// sockets open and not how many stay open: at the default REST rate and the identify timeout, one address
+// could otherwise hold about a hundred sockets that no credential stands behind. Sixty-four leaves room for a
+// large office behind one NAT reconnecting at once after a rollout, each socket identifying within
+// milliseconds of opening.
+const DefaultMaxUnidentifiedPerAddress = 64
 
 // DefaultResumeWindow is how long a disconnected session waits to be resumed. Long enough for a laptop
 // changing networks or a daemon restarting; short enough that a client which is not coming back does not
@@ -159,8 +177,10 @@ type Server struct {
 	conns    map[*conn]struct{}
 	sessions map[string]*session
 	perUser  map[snowflake.ID]int
-	closing  bool
-	active   sync.WaitGroup
+	// unidentified counts, per address key, the connections that have not yet identified or resumed.
+	unidentified map[string]int
+	closing      bool
+	active       sync.WaitGroup
 
 	nextConnID atomic.Uint64
 }
@@ -174,7 +194,10 @@ func New(opts Options) (*Server, error) {
 		opts.HeartbeatInterval = DefaultHeartbeatInterval
 	}
 	if opts.IdentifyTimeout <= 0 {
-		opts.IdentifyTimeout = opts.HeartbeatInterval
+		opts.IdentifyTimeout = DefaultIdentifyTimeout
+	}
+	if opts.MaxUnidentifiedPerAddress <= 0 {
+		opts.MaxUnidentifiedPerAddress = DefaultMaxUnidentifiedPerAddress
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -211,6 +234,7 @@ func New(opts Options) (*Server, error) {
 		conns:           map[*conn]struct{}{},
 		sessions:        map[string]*session{},
 		perUser:         map[snowflake.ID]int{},
+		unidentified:    map[string]int{},
 	}
 	if opts.Bus != nil {
 		if s.sub, err = opts.Bus.Subscribe(dispatch.Topic, s.onEvent); err != nil {
@@ -237,8 +261,15 @@ func New(opts Options) (*Server, error) {
 // Compression stays off. It is simpler, and it keeps attacker-influenced content and anything sensitive
 // out of one compression context; turning it on is a decision to make with a measurement.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Refused before the upgrade, as an ordinary 429, so a refused socket costs nothing past the handshake.
+	addr := ratelimit.ClientKey(r)
+	if !s.admit(addr) {
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrRateLimited, "too many unidentified gateway connections"))
+		return
+	}
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
+		s.identified(addr)
 		// Accept has already answered: a failed handshake is the client's error, reported to it.
 		logging.FromContext(r.Context()).Debug().Err(err).Msg("gateway upgrade refused")
 		return
@@ -246,7 +277,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(maxInboundFrame)
 
 	c := newConn(s, ws, logging.FromContext(r.Context()))
+	c.addr = addr
 	if !s.track(c) {
+		c.markIdentified()
 		// Shutting down: the same instruction every open connection is about to get, so a client
 		// reconnecting mid-rollout goes somewhere that is staying up.
 		_ = ws.Close(websocket.StatusServiceRestart, "server restarting")
@@ -322,10 +355,31 @@ func (s *Server) track(c *conn) bool {
 }
 
 func (s *Server) untrack(c *conn) {
+	c.markIdentified()
 	s.mu.Lock()
 	delete(s.conns, c)
 	s.mu.Unlock()
 	s.active.Done()
+}
+
+// admit takes one of addr's unidentified slots, if it has one left.
+func (s *Server) admit(addr string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unidentified[addr] >= s.opts.MaxUnidentifiedPerAddress {
+		return false
+	}
+	s.unidentified[addr]++
+	return true
+}
+
+// identified gives addr's slot back: the connection identified, resumed or closed.
+func (s *Server) identified(addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unidentified[addr]--; s.unidentified[addr] <= 0 {
+		delete(s.unidentified, addr)
+	}
 }
 
 // newSession registers a session for userID, if the account has a slot left on this process. From here it
@@ -335,7 +389,8 @@ func (s *Server) untrack(c *conn) {
 // rather than resuming has given its earlier stream up, and leaving it to expire would let a daemon that
 // reconnects by identifying fill its account's slots within minutes and lock itself out. Only detached
 // ones: a session with a connection attached is in use, by this device or by one sharing its id.
-func (s *Server) newSession(id string, userID, signIn snowflake.ID, device string) (*session, bool) {
+func (s *Server) newSession(id string, userID, signIn snowflake.ID, in auth.SignIn) (*session, bool) {
+	device := in.Device
 	s.mu.Lock()
 	var superseded []*session
 	for _, old := range s.sessions {
@@ -357,7 +412,7 @@ func (s *Server) newSession(id string, userID, signIn snowflake.ID, device strin
 		return nil, false
 	}
 	s.perUser[userID]++
-	sess := &session{srv: s, id: id, userID: userID, deviceID: device, signIn: signIn}
+	sess := &session{srv: s, id: id, userID: userID, deviceID: device, signIn: signIn, since: in.Since}
 	s.sessions[id] = sess
 	s.mu.Unlock()
 	stopAll(superseded)

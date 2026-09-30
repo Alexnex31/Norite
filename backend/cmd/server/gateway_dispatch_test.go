@@ -266,3 +266,74 @@ func TestRoleAndPermissionChangesAreDispatched(t *testing.T) {
 	assert.Equal(t, []any{role.field(t, "id")}, updated.field(t, "roles"))
 	assert.Equal(t, f.guildID, member.expect("GUILD_PERMISSIONS_UPDATE").field(t, "guild_id"))
 }
+
+// History governs the backlog, and an edit reaches into it: rewriting a message posted before a member could
+// read the channel's history would otherwise hand them its new text over the gateway, while REST refuses them
+// the same message. So MESSAGE_UPDATE needs the history bit as well as view, and MESSAGE_CREATE, which is new
+// rather than backlog, needs view alone.
+func TestAnEditDoesNotReachAMemberWhoCannotReadHistory(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	url := serveGateway(t, f.api.handler)
+	desk := createChannel(t, f, map[string]any{"name": "desk", "type": 0})
+
+	old := send(t, f, f.ownerToken, desk, "written before you arrived")
+	res := f.api.call(http.MethodPut, fmt.Sprintf("/api/v1/channels/%s/permissions/%s", desk, f.memberID),
+		map[string]any{"type": 1, "allow": "0", "deny": fmt.Sprint(roles.PermReadMessageHistory.Int64())},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, res.Code, res)
+	listed := f.api.call(http.MethodGet, "/api/v1/channels/"+desk+"/messages", nil, withToken(f.memberToken))
+	require.Equal(t, http.StatusForbidden, listed.Code, "REST refuses the backlog: %s", listed)
+
+	member := connected(t, url, f.memberToken)
+	res = f.api.call(http.MethodPatch, "/api/v1/channels/"+desk+"/messages/"+old,
+		map[string]any{"content": "rewritten"}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, res.Code, res)
+	send(t, f, f.ownerToken, desk, "new, and so not backlog")
+
+	got := member.expect("MESSAGE_CREATE")
+	assert.Equal(t, "new, and so not backlog", got.field(t, "content"), "the edit must not have been delivered")
+}
+
+// A transfer moves layer 2 from one member to another, so both are told their permissions changed, as every
+// other path that changes permissions tells them.
+func TestAnOwnershipTransferTellsMembersTheirPermissionsChanged(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	url := serveGateway(t, f.api.handler)
+	owner, member := connected(t, url, f.ownerToken), connected(t, url, f.memberToken)
+
+	res := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/owner", f.guildID),
+		map[string]any{"user_id": f.memberID}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, res.Code, res)
+
+	for _, c := range []*gatewayClient{owner, member} {
+		assert.Equal(t, f.memberID, c.expect("GUILD_UPDATE").field(t, "owner_id"))
+		assert.Equal(t, f.guildID, c.expect("GUILD_PERMISSIONS_UPDATE").field(t, "guild_id"))
+	}
+}
+
+// Deleting a category leaves its channels at the top level, and a client showing them nested under it is
+// told so, each channel only to those who can view it.
+func TestDeletingACategoryUpdatesTheChannelsItHeld(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	url := serveGateway(t, f.api.handler)
+	category := createChannel(t, f, map[string]any{"name": "cat", "type": 4})
+	open := createChannel(t, f, map[string]any{"name": "open", "type": 0, "parent_id": category})
+	hidden := createChannel(t, f, map[string]any{"name": "hidden", "type": 0, "parent_id": category})
+	denyView(t, f, hidden, 1, f.memberID)
+	member := connected(t, url, f.memberToken)
+
+	res := f.api.call(http.MethodDelete, "/api/v1/channels/"+category, nil, withToken(f.ownerToken))
+	require.Equal(t, http.StatusNoContent, res.Code, res)
+
+	assert.Equal(t, category, member.expect("CHANNEL_DELETE").field(t, "id"))
+	updated := member.expect("CHANNEL_UPDATE")
+	assert.Equal(t, open, updated.field(t, "id"))
+	assert.Nil(t, updated.field(t, "parent_id"))
+
+	// The hidden child's update never came: the next event is the sentinel.
+	send(t, f, f.ownerToken, open, "sentinel")
+	assert.Equal(t, "sentinel", member.expect("MESSAGE_CREATE").field(t, "content"))
+}

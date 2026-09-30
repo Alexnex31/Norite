@@ -618,3 +618,43 @@ func TestTheFrameValidatorRejectsWhatTheContractDoesNot(t *testing.T) {
 		assert.Error(t, serverFrames(t).Validate(inst), bad)
 	}
 }
+
+// dialStatus attempts an upgrade and reports the HTTP status of a refused one, or 101.
+func dialStatus(t *testing.T, url string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, res, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(url, "http")+gatewayPath, nil)
+	if res != nil && res.Body != nil {
+		_ = res.Body.Close()
+	}
+	if err == nil {
+		t.Cleanup(func() { _ = ws.CloseNow() })
+		return http.StatusSwitchingProtocols
+	}
+	require.NotNil(t, res, "dial failed without a response: %v", err)
+	return res.StatusCode
+}
+
+// A rate bounds how fast sockets open, not how many stay open, so the sockets one address holds before
+// identifying are capped. Identifying gives the slot back, and so does closing.
+func TestAnAddressHoldsBoundedlyManyUnidentifiedConnections(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	url, _ := customGateway(t, f, func(o *gateway.Options) { o.MaxUnidentifiedPerAddress = 2 })
+
+	first := dialGateway(t, url, nil)
+	first.hello()
+	second := dialGateway(t, url, nil)
+	second.hello()
+	assert.Equal(t, http.StatusTooManyRequests, dialStatus(t, url), "a third unidentified socket is refused")
+
+	first.identify(f.ownerToken, "dev")
+	first.ready()
+	assert.Equal(t, http.StatusSwitchingProtocols, dialStatus(t, url), "identifying gave its slot back")
+
+	_ = second.ws.CloseNow()
+	assert.Eventually(t, func() bool {
+		return dialStatus(t, url) == http.StatusSwitchingProtocols
+	}, 5*time.Second, 20*time.Millisecond, "closing gave its slot back")
+}

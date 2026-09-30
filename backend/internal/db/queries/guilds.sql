@@ -250,6 +250,15 @@ RETURNING *;
 -- name: DeleteChannel :execrows
 DELETE FROM channels WHERE id = $1 AND guild_id = $2;
 
+-- name: DetachChildChannels :many
+-- What deleting a category does to its children, done explicitly rather than left to channels_parent_id_fkey's
+-- ON DELETE SET NULL, so the rows it changes come back to be dispatched as CHANNEL_UPDATE (M18): left to the
+-- foreign key, every connected client kept the children nested under a category that no longer exists.
+-- Served by channels_parent_id_idx; bounded by the guild's channel ceiling.
+UPDATE channels SET parent_id = NULL, updated_at = now()
+WHERE parent_id = sqlc.arg(parent_id) AND guild_id = sqlc.arg(guild_id)
+RETURNING *;
+
 -- name: AddGuildMember :one
 -- ON CONFLICT DO NOTHING would make a second join silently succeed and return no row, which the caller
 -- cannot distinguish from a failed insert. Left to conflict instead, so the unique violation is the
