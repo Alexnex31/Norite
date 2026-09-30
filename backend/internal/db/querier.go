@@ -439,6 +439,20 @@ type Querier interface {
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	GetGuild(ctx context.Context, id int64) (Guild, error)
+	// The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points
+	// at. FOR NO KEY UPDATE rather than FOR UPDATE, which is the difference that matters: FOR UPDATE also
+	// conflicts with the FOR KEY SHARE lock every insert into a child table takes on its parent, so holding
+	// it would stall the guild's message sends, audit writes and channel creation for the length of the
+	// transfer. It still conflicts with RemoveMember's FOR SHARE and with the FOR UPDATE that Delete and
+	// Update take, which are the paths that must wait for a transfer (M13a, /code-review).
+	GetGuildForNoKeyUpdate(ctx context.Context, id int64) (Guild, error)
+	// The guild row held still for a *reader of owner_id* that then acts on it: RemoveMember, whose refusal to
+	// remove the owner is a check followed by a delete. FOR SHARE rather than FOR UPDATE because the removal
+	// does not write this row, and two concurrent kicks in one guild have no reason to queue behind each
+	// other — but it conflicts with the FOR NO KEY UPDATE an ownership transfer takes (GetGuildForNoKeyUpdate,
+	// then its UPDATE), so a kick waits for a transfer in flight and reads the owner it committed (M13a).
+	// Taken only after the caller is authorized, so a stranger cannot hold it.
+	GetGuildForShare(ctx context.Context, id int64) (Guild, error)
 	// # The locking reads the audit diff needs (M14)
 	//
 	// Each of these is the non-locking query above it plus FOR UPDATE, and the reason is not contention: it is
@@ -662,6 +676,9 @@ type Querier interface {
 	// "Deleted User", and this row is one of them. Without the join, deleting an admin's account would leave
 	// their tier intact and usable by any credential still outstanding on it.
 	IsInstanceAdmin(ctx context.Context, userID int64) (bool, error)
+	// Whether an account is a member of a guild and not deleted — the transfer's recipient check, read before
+	// the owned-guild ceiling so the ceiling is never measured for somebody outside the guild.
+	IsLiveGuildMember(ctx context.Context, arg IsLiveGuildMemberParams) (bool, error)
 	ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error)
 	// One page of a channel's backlog (Milestone M15).
 	//
@@ -830,7 +847,19 @@ type Querier interface {
 	// cursor costs one index descent regardless of depth and is stable under concurrent writes. The primary
 	// key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
 	// 15,000-member guild.
-	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]GuildMember, error)
+	//
+	// **Each member's role ids come back in this statement, correlated on both key columns.** They were a
+	// second statement, `guild_id = $1 AND user_id = ANY($2)`, and that shape has a generic plan that is only
+	// right for small guilds. pgx runs cached prepared statements, so after a few executions Postgres may plan
+	// once without the parameters: `guild_id = $1` is then estimated at an average guild's handful of grants,
+	// which makes scanning the guild and filtering on user_id look cheap. In a guild of 13,659 grants it read
+	// all of them to keep 319 — 3,382 us per call under load against about 100 us, and the member list fell
+	// from ~3,000 to ~600 requests a second. An instance of many small guilds and a few large ones is the
+	// ordinary shape, and the large ones are where this list is read. Found by the M13a optimization review,
+	// measured end to end; TestMemberRoleReadsCannotScanTheWholeGuild pins it.
+	//
+	// Equality on both columns leaves the plan no whole-guild alternative, and it saves the round trip.
+	ListGuildMembers(ctx context.Context, arg ListGuildMembersParams) ([]ListGuildMembersRow, error)
 	// One page of a guild's recording log, newest first.
 	//
 	// No rule-13 predicate here and that is not an omission: the exclusion happened at write time, so there
@@ -949,12 +978,6 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
-	// The role ids held by each of a set of members, in one query rather than one per member.
-	//
-	// The member listing returns up to 100 members and each carries its roles, so the obvious shape — a query
-	// per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
-	// whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
-	ListMemberRoleIDs(ctx context.Context, arg ListMemberRoleIDsParams) ([]GuildMemberRole, error)
 	// One page of a message's prior versions, newest first (Milestone M16a).
 	//
 	// # It pages, because nothing bounds how many versions a message has
@@ -986,6 +1009,11 @@ type Querier interface {
 	// Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
 	// to the guild.
 	ListOverwritesForTarget(ctx context.Context, arg ListOverwritesForTargetParams) ([]PermissionOverwrite, error)
+	// The role ids one member holds, for a response that returns that member after changing them.
+	//
+	// Equality on both key columns, for ListGuildMembers' reason: the `= ANY` form it replaces had a generic
+	// plan that scanned every grant in the guild to find one member's.
+	ListRoleIDsOfMember(ctx context.Context, arg ListRoleIDsOfMemberParams) ([]int64, error)
 	// The devices signed in to an account: one row per device family, not one per session row.
 	//
 	// A session row is one generation of a rotating family, replaced every time the client refreshes. Listing
@@ -1014,6 +1042,18 @@ type Querier interface {
 	// tag must not appear on a message you can read, or "private" describes only who may apply it.
 	//
 	ListTagsForMessages(ctx context.Context, arg ListTagsForMessagesParams) ([]ListTagsForMessagesRow, error)
+	// Serializes everything that changes how many guilds one account owns: Create, for the creating account,
+	// and TransferOwnership, for the recipient. Each counts owned guilds against the ceiling and then writes;
+	// without this, two of them for the same account both read the count below the ceiling and both commit —
+	// transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
+	// by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
+	// account past the ceiling.
+	//
+	// Slot 4 of the advisory namespace, beside slot 3's role-position lock below. The key is 0x4E434D04 —
+	// the same prefix slot 3's key actually carries (0x4E434D03), which that lock's comment describes as
+	// "NOR" plus a slot. Keyed per account; two accounts whose low 31 bits collide serialize unnecessarily and
+	// stay correct.
+	LockAccountOwnership(ctx context.Context, userID int64) error
 	// Serializes role creation within one guild, for the whole of the calling transaction.
 	//
 	// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and
@@ -1328,6 +1368,21 @@ type Querier interface {
 	//
 	// Still fire-and-forget: bookkeeping must never be able to fail an otherwise-valid request.
 	TouchAPIToken(ctx context.Context, id int64) error
+	// Hands a guild to another member (M13a), with every guard that can be raced in the statement rather than
+	// in a check before it — the discipline ConsumePasswordResetToken and RedeemInstanceInvite set:
+	//
+	//   * `owner_id = from_owner` — the caller read the owner a moment ago and authorized on it, and a transfer
+	//     that committed in between must make this one match nothing rather than hand the guild on from
+	//     somebody who no longer holds it;
+	//   * the recipient is a member *now* — a kick committed after the service's own read must not leave a
+	//     guild owned by a non-member, which has no layer 2 at all;
+	//   * the recipient's account is not deleted, for the reason M76a gives: a guild whose owner is deleted is
+	//     not a guild with a NULL owner, and handing one to a deleted account manufactures exactly that.
+	//
+	// The UPDATE takes the row lock RemoveMember's FOR SHARE waits on, so a kick in flight sees this result.
+	// Zero rows means one of the guards refused; the service reads nothing back to tell which, because each is
+	// the same answer to the caller.
+	TransferGuildOwnership(ctx context.Context, arg TransferGuildOwnershipParams) (Guild, error)
 	// No guild predicate needed: the pair is the primary key, and a pair that crosses a guild could never have
 	// been written by the statement above. The authority check is the service's.
 	UnapplyMessageTag(ctx context.Context, arg UnapplyMessageTagParams) (int64, error)

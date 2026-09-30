@@ -393,8 +393,26 @@ func driveEveryMutation(t *testing.T, f *overwriteFixture, ctx context.Context) 
 	require.Equal(t, ActionGuildCreate, created[0].Action)
 	all = append(all, created...)
 
+	// M13a's transfer, on this guild rather than the fixture's, because afterwards the fixture's actor is no
+	// longer its owner and every read above runs as that actor. The recipient has to be a member first, and
+	// reading the entry back has to be done by the new owner — the former one no longer holds layer 2, and
+	// holds no PermViewAuditLog either. The delete below is theirs for the same reason, which also shows
+	// the new owner passing layer 2 on the one action no permission reaches.
+	_, err = f.pool.Exec(ctx, `INSERT INTO guild_members (guild_id, user_id) VALUES ($1, $2)`,
+		int64(ownGuild.ID), int64(f.mod))
+	require.NoError(t, err)
+	_, err = f.svc.TransferOwnership(ctx, owner, ownGuild.ID, f.mod)
+	require.NoError(t, err, "guild.owner_transfer")
+	newOwner := userActor(f.mod)
+
+	transferred, err := f.svc.ListAuditLog(ctx, newOwner, ownGuild.ID,
+		ListAuditLogInput{Action: ActionGuildOwnerTransfer})
+	require.NoError(t, err)
+	require.Len(t, transferred, 1, "a transfer writes exactly one entry")
+	all = append(all, transferred...)
+
 	// And the exception, asserted rather than skipped: a deleted guild takes its own entries with it.
-	require.NoError(t, f.svc.Delete(ctx, owner, ownGuild.ID), "guild.delete")
+	require.NoError(t, f.svc.Delete(ctx, newOwner, ownGuild.ID), "guild.delete")
 
 	var remaining int
 	require.NoError(t, f.pool.QueryRow(ctx,

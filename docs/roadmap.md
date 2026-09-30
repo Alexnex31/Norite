@@ -449,8 +449,10 @@ of this section.
   member whose highest role is above their own**; a channel created under a category inherits that
   category's overwrites and cannot be created there by somebody the category denies; and the channel
   listing reflects per-channel view permission.
-- **M13a — Guild ownership transfer**: `POST /guilds/{guild_id}/owner`, moving ownership to another
-  member. Small, and scheduled here because M12 left two dead ends that only this closes.
+- **M13a — Guild ownership transfer**: done. `POST /guilds/{guild_id}/owner`, moving ownership to
+  another member. Small, and scheduled here because M12 left two dead ends that only this closes. Built
+  after M17 rather than here: it was skipped when M14–M17 were built, and found when M17a's retirement
+  left it as Phase C's one open entry.
 
   **A guild whose owner is gone is stuck.** M12 makes deletion owner-only — deliberately, because it
   cascades with no undo and is not a permission an owner should be able to delegate — and refuses to
@@ -466,6 +468,16 @@ of this section.
   Placed after M13 rather than inside M12 because it is a new endpoint rather than a correction, and after
   the hierarchy work because "who may become owner" reads naturally alongside "who may manage whom" — but
   it depends on neither, and could move earlier if the dead end starts to matter.
+
+  **What building it settled.** The owner or an Instance Admin, never a `PermManageGuild` or
+  `PermAdministrator` holder — ownership is layer 2 and no permission reaches it. Never an API token and
+  never a signed-out session: deletion only destroys, while a transfer hands layer 2 to somebody, and a
+  delegated credential able to do that can hand it to its attacker. The recipient is a current,
+  undeleted member below the owned-guild ceiling, which a transfer would otherwise be the one way past;
+  a non-member answers 404. The recipient is **not asked** — a direct transfer, with the consent question
+  in the ledger. And `RemoveMember` now reads the guild row `FOR SHARE`, because its owner check was safe
+  only while `owner_id` never changed, and this milestone is what changes it: unlocked, a kick could land
+  on the member a concurrent transfer had just made owner.
 
   Done when: an owner can transfer to another member of the same guild and not to a non-member; the former
   owner becomes an ordinary member and can then leave; the new owner passes ADR 0008 layer 2; and an
@@ -920,8 +932,9 @@ of this section.
   result from the start (ADR 0026 — a verb without one is a verb the TUI's `M-x` cannot run), each with its
   schema in `contracts/cli-json/` (rule 15):
 
-  - **`norite guild`** — create, show, rename, delete, and the audit-log read (M12, M14); **`channel`**,
-    **`role`**, **`member`** and **`overwrite`** over the rest of M12 and M13, role reorder included.
+  - **`norite guild`** — create, show, rename, delete, transfer (M13a), and the audit-log read (M12,
+    M14); **`channel`**, **`role`**, **`member`** and **`overwrite`** over the rest of M12 and M13, role
+    reorder included.
     These close the largest client gap in the plan: twenty-one routes that no screen and no verb could
     call, found at M15's planning by reading one document against another rather than by anything
     failing.
@@ -1498,6 +1511,12 @@ of this section.
   DISPATCH stream, not just client rendering; a load test confirms the per-connection block-set check does not
   regress message fan-out latency; blocking removes any existing friendship; and an account export includes
   who the user blocked but not who blocked them.
+
+  **M13a's ownership transfer needs a decision here**, deferred by M13a's `/security-sweep`: whether an
+  account can make somebody who blocked it the owner of a guild. The recipient is already a member, so
+  this is not delivery in rule 20's sense, but ownership makes them answerable for the guild. If it is
+  refused, the refusal must be indistinguishable from the transfer's other refusals, for the reason every
+  other block refusal here is.
 - **M71 — Instance Admin tier, schema**: the boolean/flag-based tier (supports multiple admins per instance),
   sitting outside `roles.Resolve` entirely, with the last-admin-removal safety rail. Done when: granting or
   revoking the tier works, and removing the last remaining admin is blocked.
@@ -1522,7 +1541,8 @@ of this section.
   `reports.TestAnInstanceAdminsCloseIsRecordedOnlyInTheGuildLog` fails the moment
   `instance_audit_log` is created, with the instruction attached. Whoever builds this milestone should
   expect it to go red and should answer it for **every** guild-scoped path an Instance Admin can reach,
-  not only for reports.
+  not only for reports. **M13a's ownership transfer is one**, and the sharpest after deletion: the tier
+  hands a guild's layer 2 to somebody, recorded only in that guild's own log.
 
   **And layer 1 never proves the guild exists**, found by M17's `/security-sweep` and older than M17.
   `guildauth.Authorize` short-circuits for an Instance Admin before anything reads the guild row, so for a
@@ -1641,6 +1661,13 @@ of this section.
 
   ADR 0007 and ADR 0032 both describe `user_entitlements` as inert and unused by any v1 code path. This is
   the milestone that stops being true, and both say so.
+
+  **The ownership transfer's ceiling refusal must stop quoting a number** (M13a, deferred by its
+  `/security-sweep`). It says "may own (50)" today, which is harmless while the ceiling is one constant.
+  Once it resolves per account, the refusal describes the *recipient's* entitlement to the guild's owner:
+  quoting their limit discloses their tier outright, and even the bare refusal at an ordinary account's
+  limit says they are not a subscriber. Word it without the limit, and decide whether the refusal itself
+  is acceptable to show a third party.
 
   **It opens with a migration**, which is worth saying because the columns are already in §2's DDL and a
   reader could take them for built: `discoverable`, `discoverable_locked_at` and `member_count` are three
@@ -1809,6 +1836,21 @@ of this section.
 
   Rule 17 applies in full: deletion invokes the general-purpose revoke-all-sessions primitive rather than
   assembling its own cleanup, exactly as a ban does.
+
+  **It inherits a constraint M13a deferred: a guild's owner must always be one of its members.** Today
+  that holds by lock discipline on the one path that deletes a membership while ownership can change —
+  `RemoveMember` reads the guild row `FOR SHARE` before its owner check, and a transfer takes
+  `FOR NO KEY UPDATE` — and every future path that deletes `guild_members` rows has to remember the same
+  lock or bring the race back silently: a membership deleted while a transfer makes that member owner,
+  leaving a guild with no layer 2. This milestone is the first such path, since deleting an account has
+  to answer for the memberships it holds. The structural answer, proposed by `/code-review` on the M13a
+  branch and deferred there rather than widening that milestone, is a composite foreign key from
+  `guilds (id, owner_id)` to `guild_members (guild_id, user_id)`, `DEFERRABLE INITIALLY DEFERRED` so a
+  transfer's single `UPDATE` and guild creation's three inserts still commit. With it the database refuses
+  the state on every path at once and the locks become defence in depth. Build it here or before, and
+  check first that nothing already deletes an owner's membership row. **Until it exists, any milestone
+  that deletes a membership takes the guild row `FOR SHARE` first** — guild bans included, which
+  `PermBanMembers` anticipates and no entry yet builds.
 
   Done when: an account can export its own data and delete itself; deletion goes through
   `revokeEverything`; the placeholder rename is atomic with the soft-delete rather than a second statement

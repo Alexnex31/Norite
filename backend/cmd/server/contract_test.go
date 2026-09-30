@@ -218,7 +218,7 @@ func newTestRouterWithAuth(t *testing.T) http.Handler {
 		Logger:   zerolog.New(io.Discard),
 		Health:   newHealth(&stubPinger{}),
 		Auth:     auth.NewHandler(nil),
-		Guilds:   guilds.NewHandler(nil),
+		Guilds:   guilds.NewHandler(nil, nil),
 		Messages: messages.NewHandler(nil),
 		Reports:  reports.NewHandler(nil),
 		Tags:     tags.NewHandler(nil),

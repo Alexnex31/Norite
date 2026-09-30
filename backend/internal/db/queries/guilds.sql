@@ -82,6 +82,55 @@ RETURNING *;
 -- nicety — it is the invariant guild creation establishes in its transaction.
 DELETE FROM roles WHERE id = $1 AND guild_id = $2 AND NOT is_default;
 
+-- name: TransferGuildOwnership :one
+-- Hands a guild to another member (M13a), with every guard that can be raced in the statement rather than
+-- in a check before it — the discipline ConsumePasswordResetToken and RedeemInstanceInvite set:
+--
+--   * `owner_id = from_owner` — the caller read the owner a moment ago and authorized on it, and a transfer
+--     that committed in between must make this one match nothing rather than hand the guild on from
+--     somebody who no longer holds it;
+--   * the recipient is a member *now* — a kick committed after the service's own read must not leave a
+--     guild owned by a non-member, which has no layer 2 at all;
+--   * the recipient's account is not deleted, for the reason M76a gives: a guild whose owner is deleted is
+--     not a guild with a NULL owner, and handing one to a deleted account manufactures exactly that.
+--
+-- The UPDATE takes the row lock RemoveMember's FOR SHARE waits on, so a kick in flight sees this result.
+-- Zero rows means one of the guards refused; the service reads nothing back to tell which, because each is
+-- the same answer to the caller.
+UPDATE guilds
+SET owner_id = sqlc.arg(to_owner), updated_at = now()
+WHERE guilds.id = sqlc.arg(guild_id)
+  AND guilds.owner_id = sqlc.arg(from_owner)
+  AND EXISTS (
+    SELECT 1 FROM guild_members gm
+    JOIN users u ON u.id = gm.user_id
+    WHERE gm.guild_id = sqlc.arg(guild_id) AND gm.user_id = sqlc.arg(to_owner) AND u.deleted_at IS NULL
+  )
+RETURNING *;
+
+-- name: IsLiveGuildMember :one
+-- Whether an account is a member of a guild and not deleted — the transfer's recipient check, read before
+-- the owned-guild ceiling so the ceiling is never measured for somebody outside the guild.
+SELECT EXISTS (
+  SELECT 1 FROM guild_members gm
+  JOIN users u ON u.id = gm.user_id
+  WHERE gm.guild_id = $1 AND gm.user_id = $2 AND u.deleted_at IS NULL
+);
+
+-- name: LockAccountOwnership :exec
+-- Serializes everything that changes how many guilds one account owns: Create, for the creating account,
+-- and TransferOwnership, for the recipient. Each counts owned guilds against the ceiling and then writes;
+-- without this, two of them for the same account both read the count below the ceiling and both commit —
+-- transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
+-- by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
+-- account past the ceiling.
+--
+-- Slot 4 of the advisory namespace, beside slot 3's role-position lock below. The key is 0x4E434D04 —
+-- the same prefix slot 3's key actually carries (0x4E434D03), which that lock's comment describes as
+-- "NOR" plus a slot. Keyed per account; two accounts whose low 31 bits collide serialize unnecessarily and
+-- stay correct.
+SELECT pg_advisory_xact_lock(1313033476, (sqlc.arg(user_id)::bigint & 2147483647)::int);
+
 -- name: CountGuildsOwnedBy :one
 -- How many guilds an account owns, for the creation cap.
 --
@@ -220,10 +269,37 @@ SELECT * FROM guild_members WHERE guild_id = $1 AND user_id = $2;
 -- cursor costs one index descent regardless of depth and is stable under concurrent writes. The primary
 -- key (guild_id, user_id) serves it directly — measured as an Index Scan with no sort node on a
 -- 15,000-member guild.
-SELECT * FROM guild_members
-WHERE guild_id = $1 AND user_id > $2
-ORDER BY user_id
+--
+-- **Each member's role ids come back in this statement, correlated on both key columns.** They were a
+-- second statement, `guild_id = $1 AND user_id = ANY($2)`, and that shape has a generic plan that is only
+-- right for small guilds. pgx runs cached prepared statements, so after a few executions Postgres may plan
+-- once without the parameters: `guild_id = $1` is then estimated at an average guild's handful of grants,
+-- which makes scanning the guild and filtering on user_id look cheap. In a guild of 13,659 grants it read
+-- all of them to keep 319 — 3,382 us per call under load against about 100 us, and the member list fell
+-- from ~3,000 to ~600 requests a second. An instance of many small guilds and a few large ones is the
+-- ordinary shape, and the large ones are where this list is read. Found by the M13a optimization review,
+-- measured end to end; TestMemberRoleReadsCannotScanTheWholeGuild pins it.
+--
+-- Equality on both columns leaves the plan no whole-guild alternative, and it saves the round trip.
+SELECT gm.guild_id, gm.user_id, gm.nickname, gm.joined_at, gm.deaf, gm.mute,
+       ARRAY(
+         SELECT r.role_id FROM guild_member_roles r
+         WHERE r.guild_id = gm.guild_id AND r.user_id = gm.user_id
+         ORDER BY r.role_id
+       )::bigint[] AS role_ids
+FROM guild_members gm
+WHERE gm.guild_id = $1 AND gm.user_id > $2
+ORDER BY gm.user_id
 LIMIT $3;
+
+-- name: ListRoleIDsOfMember :many
+-- The role ids one member holds, for a response that returns that member after changing them.
+--
+-- Equality on both key columns, for ListGuildMembers' reason: the `= ANY` form it replaces had a generic
+-- plan that scanned every grant in the guild to find one member's.
+SELECT role_id FROM guild_member_roles
+WHERE guild_id = $1 AND user_id = $2
+ORDER BY role_id;
 
 -- name: UpdateGuildMember :one
 UPDATE guild_members
@@ -246,16 +322,6 @@ DELETE FROM guild_members WHERE guild_id = $1 AND user_id = $2;
 -- fields; M14 owns the diffing that produces a richer one.
 INSERT INTO audit_log_entries (id, guild_id, actor_id, action, target_id, changes)
 VALUES ($1, $2, $3, $4, $5, $6);
-
--- name: ListMemberRoleIDs :many
--- The role ids held by each of a set of members, in one query rather than one per member.
---
--- The member listing returns up to 100 members and each carries its roles, so the obvious shape — a query
--- per member inside the loop — is the N+1 §15.2 names as the canonical risk. `= ANY($2)` resolves the
--- whole page in one round trip, and the primary key's (guild_id, user_id) prefix serves it.
-SELECT guild_id, user_id, role_id
-FROM guild_member_roles
-WHERE guild_id = $1 AND user_id = ANY(sqlc.arg(user_ids)::bigint[]);
 
 --
 -- Role assignment, role positions and permission overwrites (Milestone M13) follow. This separator is a
@@ -534,6 +600,24 @@ WHERE c.guild_id = sqlc.arg(guild_id)::bigint
 
 -- name: GetGuildForUpdate :one
 SELECT * FROM guilds WHERE id = $1 FOR UPDATE;
+
+-- name: GetGuildForNoKeyUpdate :one
+-- The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points
+-- at. FOR NO KEY UPDATE rather than FOR UPDATE, which is the difference that matters: FOR UPDATE also
+-- conflicts with the FOR KEY SHARE lock every insert into a child table takes on its parent, so holding
+-- it would stall the guild's message sends, audit writes and channel creation for the length of the
+-- transfer. It still conflicts with RemoveMember's FOR SHARE and with the FOR UPDATE that Delete and
+-- Update take, which are the paths that must wait for a transfer (M13a, /code-review).
+SELECT * FROM guilds WHERE id = $1 FOR NO KEY UPDATE;
+
+-- name: GetGuildForShare :one
+-- The guild row held still for a *reader of owner_id* that then acts on it: RemoveMember, whose refusal to
+-- remove the owner is a check followed by a delete. FOR SHARE rather than FOR UPDATE because the removal
+-- does not write this row, and two concurrent kicks in one guild have no reason to queue behind each
+-- other — but it conflicts with the FOR NO KEY UPDATE an ownership transfer takes (GetGuildForNoKeyUpdate,
+-- then its UPDATE), so a kick waits for a transfer in flight and reads the owner it committed (M13a).
+-- Taken only after the caller is authorized, so a stranger cannot hold it.
+SELECT * FROM guilds WHERE id = $1 FOR SHARE;
 
 -- name: GetRoleForUpdate :one
 SELECT * FROM roles WHERE id = $1 AND guild_id = $2 FOR UPDATE;

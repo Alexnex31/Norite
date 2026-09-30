@@ -23,10 +23,15 @@ import (
 type Handler struct {
 	svc      *Service
 	validate *validator.Validate
+
+	// authSvc is what RequireLiveSession asks whether the caller's device is still signed in, for the one
+	// guild route that needs it (the ownership transfer). Nil on the route-set test's service-less router,
+	// where RequireLiveSession fails closed rather than declining to mount — M10's lesson.
+	authSvc *auth.Service
 }
 
 // NewHandler builds the guild HTTP handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc *Service, authSvc *auth.Service) *Handler {
 	validate := validator.New(validator.WithRequiredStructEnabled())
 
 	// Report the wire name, not the Go field name — the same registration auth.NewHandler makes, for the
@@ -39,7 +44,7 @@ func NewHandler(svc *Service) *Handler {
 		return name
 	})
 
-	return &Handler{svc: svc, validate: validate}
+	return &Handler{svc: svc, validate: validate, authSvc: authSvc}
 }
 
 // Routes mounts the guild endpoints.
@@ -55,8 +60,8 @@ func (h *Handler) Routes(r chi.Router) {
 	// do — and M12 is the first milestone to put a mutating surface within reach of one. Shipped without
 	// this, an `identify`-only token deleted a guild, which was reproduced before it was fixed.
 	//
-	// Permission resolution still runs underneath (rule 1). A token holding guilds.write can do exactly
-	// what its owner could and no more.
+	// Permission resolution still runs underneath (rule 1). A token holding guilds.write can do what its
+	// owner could and no more — with one route it cannot do at all, the ownership transfer below.
 	read := auth.RequireScope(auth.ScopeGuildsRead)
 	write := auth.RequireScope(auth.ScopeGuildsWrite)
 
@@ -71,6 +76,18 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(read).Get("/", h.getGuild)
 		r.With(write).Patch("/", h.updateGuild)
 		r.With(write).Delete("/", h.deleteGuild)
+
+		// Transferring ownership is never delegable, which is the difference from deletion above. Deleting
+		// destroys; transferring hands layer 2 to somebody, and a token able to do that can hand it to its
+		// attacker's account — escalation rather than damage, the reason token minting needs a user actor.
+		// A live session too, because an access token outlives its sign-out by up to fifteen minutes and
+		// giving a guild away is not something a signed-out device should still be able to do (§17.10).
+		//
+		// RequireUserActor first, so a token is told the true reason. After the scope check, a token
+		// lacking guilds.write was told to get that scope — and a token holding it was then refused anyway.
+		// The scope check stays for uniformity with every other route here; no user actor fails it.
+		r.With(auth.RequireUserActor, write, auth.RequireLiveSession(h.authSvc)).
+			Post("/owner", h.transferOwnership)
 
 		r.With(read).Get("/channels", h.listChannels)
 		r.With(write).Post("/channels", h.createChannel)
@@ -211,6 +228,38 @@ func (h *Handler) deleteGuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type transferOwnershipRequest struct {
+	UserID string `json:"user_id" validate:"required"`
+}
+
+func (h *Handler) transferOwnership(w http.ResponseWriter, r *http.Request) {
+	var req transferOwnershipRequest
+	if !h.decode(w, r, &req) {
+		return
+	}
+
+	actor, guildID, ok := h.actorAndID(w, r, "guild_id")
+	if !ok {
+		return
+	}
+
+	// An id in the body is input, so a malformed one is a 400 naming the field — the parent_id rule, not
+	// the path rule. "0" parses and no generator mints it, so it is refused the same way.
+	to, err := snowflake.Parse(req.UserID)
+	if err != nil || to == 0 {
+		httpx.WriteError(w, r, httpx.Errorf(httpx.ErrBadRequest, "user_id is not a valid id"))
+		return
+	}
+
+	guild, err := h.svc.TransferOwnership(r.Context(), actor, guildID, to)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, guild)
 }
 
 // --- channels ---
@@ -866,11 +915,19 @@ func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// messageOf prefers the contextual message a StatusError carries over the bare sentinel's text.
+// messageOf returns the contextual message a StatusError carries, and the bare sentinel's text only when
+// there is none.
+//
+// **The message, not Error().** StatusError.Error() is the message followed by the wrapped sentinel's own
+// text, which is right for a log line and wrong for a client. This returned it from M12 to the M13a
+// manual pass, so every refusal through writeErr's switch ended in an internal string, package prefix
+// included — and the transfer's ceiling refusal told an owner that *the guild* was at its limit, when the
+// limit is the recipient's account's. The status and code were right throughout, which is why no test that
+// checked them could see it. TestRefusalsCarryOnlyTheirOwnMessage.
 func messageOf(err error) string {
 	var se *httpx.StatusError
-	if errors.As(err, &se) && se.Error() != "" {
-		return se.Error()
+	if errors.As(err, &se) && se.Message != "" {
+		return se.Message
 	}
 	return err.Error()
 }

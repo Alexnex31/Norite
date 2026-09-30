@@ -73,9 +73,15 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 	err = s.inTx(ctx, func(q *db.Queries) error {
 		// The ceiling. No permission is checked on this path, so this is the only bound on it — see
-		// Service.maxGuildsPerAccount. Racy under READ COMMITTED in the same way and for the same reason the
-		// channel and role ceilings are, and acceptable for the same reason: the consequence is one guild
-		// over a soft limit, not a corrupted ordering.
+		// Service.maxGuildsPerAccount.
+		//
+		// Counted under the account's ownership lock since M13a. Before, this was racy and accepted, like
+		// the channel and role ceilings: two creates by one account could both pass. M13a's transfer made
+		// a second writer of the same count, and made the race something another account can drive —
+		// handing guilds to somebody while they create one — so both writers now take one lock per account.
+		if err := q.LockAccountOwnership(ctx, int64(actor.UserID)); err != nil {
+			return fmt.Errorf("guilds: lock account ownership: %w", err)
+		}
 		owned, err := q.CountGuildsOwnedBy(ctx, int64(actor.UserID))
 		if err != nil {
 			return fmt.Errorf("guilds: count owned guilds: %w", err)
@@ -121,7 +127,7 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 			// minted; wired up because M13's join endpoint is the caller that will meet it.
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
-				return ErrAlreadyAMember
+				return httpx.Errorf(ErrAlreadyAMember, "already a member of this guild")
 			}
 			return fmt.Errorf("guilds: add owner membership: %w", err)
 		}
@@ -269,6 +275,15 @@ func (s *Service) Update(
 			return fmt.Errorf("guilds: get guild: %w", err)
 		}
 
+		// Authorized again, now that the row is held (M13a). The first resolve ran unlocked and may have
+		// passed the caller as layer 2 — the owner — just before a transfer committed and made them an
+		// ordinary member; nothing below would notice, and they would rename a guild that is no longer
+		// theirs. The first resolve stays because it is what keeps a stranger from ever taking the lock.
+		// A second resolve on a rare, human-paced mutation, against a wrong write to somebody else's guild.
+		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
+			return err
+		}
+
 		// The recording switch needs more than the permission that got us here. Checked after the row
 		// loads, so the refusal is an authorization answer rather than an input one (M12's "refuse before
 		// explaining"), and before anything is written, so a refused request changes nothing.
@@ -382,32 +397,40 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 			return err
 		}
 
-		// Not the owner. An Instance Admin is still allowed through, and a member who merely holds
-		// PermManageGuild is not — so this cannot be a plain permission check.
+		// The row, locked, for every actor — and ownership is read off it rather than off the resolution.
+		//
+		// **M13a made this necessary.** Ownership came from `allowed.Owns()`, which the resolve above read
+		// unlocked, and the delete below is a bare `WHERE id = $1`. Correct while owner_id never changed;
+		// once a transfer can change it, a delete checked against the old owner could wait on the
+		// transfer's row lock, resume after it committed, and destroy a guild that now belonged to
+		// somebody else. Found by /code-review on the M13a branch — RemoveMember's race, on a path the
+		// milestone did not look at. TestAFormerOwnerCannotDeleteOrRenameAGuildTransferredMidRequest.
+		//
+		// Taken only once the caller could be the owner. The unlocked refusal below is what keeps every
+		// other member from holding the lock: FOR UPDATE blocks the key-share lock each insert into a child
+		// table takes, so a member looping a delete they would be refused stalled the guild's channel
+		// creates, joins and audited writes. /security-sweep on the M13a branch — the same shape as
+		// TransferOwnership's two reads; TestARefusedCallerTakesNoLockOnTheGuild.
 		if !allowed.InstanceAdmin() && !allowed.Owns() {
 			return httpx.ErrForbidden
 		}
 
-		// Layer 1 skipped the resolution, so nothing has established that this guild exists.
-		//
-		// Every other actor reaching this line was resolved against the guild and would have been refused
-		// with 404 if it were not there. An Instance Admin is deliberately not resolved — the tier acts on
-		// guilds it is not in, so checking membership first would answer 404 for every guild on the
-		// instance — and the consequence is that for this one actor the first statement to touch the guild
-		// is the audit write, which carries a foreign key to it. Without this read that is a constraint
-		// violation and a 500, where everybody else gets 404.
-		//
-		// M12 had it by accident: Delete opened with a GetGuild whose ErrNoRows branch answered 404, and
-		// the owner comparison happened to want the same row. Removing that read for the resolved paths
-		// removed the existence check along with it. Paid only on the tier that skipped the resolution,
-		// which is the one place it is not redundant.
-		if allowed.InstanceAdmin() {
-			if _, err := q.GetGuild(ctx, int64(guildID)); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return httpx.ErrNotFound
-				}
-				return fmt.Errorf("guilds: get guild: %w", err)
+		// For an Instance Admin, whom layer 1 did not resolve against the guild, the locked read is also
+		// what establishes the guild exists: otherwise the first statement to touch it would be the audit
+		// write, whose foreign key answers a missing guild with a 500 where everybody else gets 404.
+		guild, err := q.GetGuildForUpdate(ctx, int64(guildID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
 			}
+			return fmt.Errorf("guilds: get guild: %w", err)
+		}
+
+		// Not the owner, asked again on the locked row: a transfer that committed while this waited moved
+		// it. An Instance Admin is still allowed through, and a member who merely holds PermManageGuild is
+		// not — so this cannot be a plain permission check.
+		if !allowed.InstanceAdmin() && snowflake.ID(guild.OwnerID) != actor.UserID {
+			return httpx.ErrForbidden
 		}
 
 		// The audit entry is written before the delete, in the same transaction. It has to be: guild_id

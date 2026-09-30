@@ -226,7 +226,7 @@ func run() error {
 		Health:   health,
 		Auth:     auth.NewHandler(authService),
 		AuthSvc:  authService,
-		Guilds:   guilds.NewHandler(guildService),
+		Guilds:   guilds.NewHandler(guildService, authService),
 		Messages: messages.NewHandler(messageService),
 		Reports:  reports.NewHandler(reportService),
 		Tags:     tags.NewHandler(tagService),

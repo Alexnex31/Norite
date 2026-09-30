@@ -380,7 +380,7 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C open, M17 done, M13a its one remaining entry.** Full
+**Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -519,6 +519,25 @@ and tested. Recorded in ADR 0032 — the absence of any release marker otherwise
   Two decisions outlive the milestone: a new role is created at the **bottom**, as Discord does; and
   **assignment is escalation-checked**, a deliberate departure from Discord, where hierarchy alone gates
   it.
+- **M13a — Guild ownership transfer**: done, after M17 rather than after M13 — it was skipped when
+  M14–M17 were built and found by planning what came next. `POST /guilds/{guild_id}/owner`, the
+  `guild.owner_transfer` verb, and a lock on `RemoveMember`'s owner check. Decisions are in the roadmap
+  entry and in `docs/security-ledger.md`.
+
+  **A guard that is safe because a value never changes stops being safe the day something changes it.**
+  `RemoveMember` refused to remove the owner by reading `owner_id` unlocked, then deleting — correct for
+  every milestone since M12, because nothing wrote `owner_id` after creation. The transfer is that
+  write, and with it a kick could read the old owner and delete the member just made owner. It landed as
+  its own commit before the transfer, with a test that does not race: it holds the change open, waits for
+  Postgres to report the kick blocked, commits, and asserts the membership survived. **Whose kick matters**:
+  the first version used the old owner as the kicker, who loses the authority to kick when the change
+  commits and is refused before the owner check is asked — a test that passed for the wrong reason.
+
+  **Deletion is delegable and transfer is not, and the difference is escalation.** Deleting destroys;
+  transferring hands layer 2 to somebody, and a token able to do that hands it to its attacker. Same
+  line token minting draws. `RequireLiveSession` too, and testing it needed a *second* device:
+  `logout/all` spares the caller's own, which is M11's design and made the first test pass for nothing.
+
 - **M14 — Guild audit log**: done (tag `m14`). The read surface over the table M12 created and every
   milestone since has written to: `GET /guilds/{guild_id}/audit-log` behind the new `PermViewAuditLog`
   (bit 19), migrations `000017` and `000018`, `guilds/auditlog.go` and `guilds/auditdiff.go`, the
@@ -1032,8 +1051,10 @@ And on session revocation, from M11 (decisions in ADR 0030):
   credential holding either could lock its owner out. Same rule minting obeys.
 - **Access tokens stay stateless and the fifteen-minute residual window is accepted** (§17.10) —
   **except where a signed-out credential would change the account's security state**, which
-  `RequireLiveSession` refuses: revoking sessions, minting, listing or revoking API tokens, and — since
-  M11a — enrolling, confirming, disabling or regenerating the second factor. Written
+  `RequireLiveSession` refuses: revoking sessions; minting, listing or revoking API tokens; since M11a,
+  enrolling, confirming, disabling or regenerating the second factor; and since M13a, transferring a
+  guild's ownership — the one guild route on the list, because it hands layer 2 to somebody and no
+  later sign-in takes it back. Written
   first as per-handler checks, it missed `POST /auth/tokens` — and an API token is not session-scoped, so
   one minted inside the window outlives the sign-out for good. **Guards belong in middleware for the same
   reason the revocation list belongs in one function**: a rule written as N call sites has N chances to

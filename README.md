@@ -71,6 +71,7 @@ message's edit history, a guild's opt-in message recording and message tagging a
 | `M11a` | Two-factor authentication — TOTP enrollment and verification, single-use recovery codes, threaded through every path that establishes a session: login, the OAuth exchange, and device-code approval |
 | `M12` | Guilds, channels, roles and membership — the schema, fifteen REST endpoints, the permission bitfield, and one chokepoint every mutating route resolves through |
 | `M13` | Permission overwrites and role hierarchy — who may act on whom, per-channel permission overrides, role assignment and reordering, and a channel listing that hides what you cannot see |
+| `M13a` | Guild ownership transfer — an owner hands the guild to another member and may then leave, and an Instance Admin can unstick a guild whose owner has gone |
 | `M14` | The guild audit log — every mutation already recorded who did what, in the same transaction; this reads it back, behind its own permission, with a before-and-after diff of what actually changed |
 | `M15` | Messages — send, read, edit and delete, with a cursor-paginated backlog, an edit history written in the same transaction as the edit, and a moderator's deletion audited where an author's own is deliberately not |
 | `M16` | Guild-level reports — anyone who can see a message can report it, moderators triage and close a queue of them, closing is audited and filing deliberately is not, and the reporter's identity is never shown to the moderators of the guild being reported |

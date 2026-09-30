@@ -18,6 +18,7 @@ const (
 	GuildDelete              AuditLogAction = "guild.delete"
 	GuildMessageAuditDisable AuditLogAction = "guild.message_audit_disable"
 	GuildMessageAuditEnable  AuditLogAction = "guild.message_audit_enable"
+	GuildOwnerTransfer       AuditLogAction = "guild.owner_transfer"
 	GuildUpdate              AuditLogAction = "guild.update"
 	MemberRemove             AuditLogAction = "member.remove"
 	MemberRoleAdd            AuditLogAction = "member.role_add"
@@ -52,6 +53,8 @@ func (e AuditLogAction) Valid() bool {
 	case GuildMessageAuditDisable:
 		return true
 	case GuildMessageAuditEnable:
+		return true
+	case GuildOwnerTransfer:
 		return true
 	case GuildUpdate:
 		return true
@@ -1854,6 +1857,15 @@ type ListGuildMessageAuditParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// TransferGuildOwnershipJSONBody defines parameters for TransferGuildOwnership.
+type TransferGuildOwnershipJSONBody struct {
+	// UserId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	UserId Snowflake `json:"user_id"`
+}
+
 // ListGuildReportsParams defines parameters for ListGuildReports.
 type ListGuildReportsParams struct {
 	// Status Return only reports in this status. Omit for every status, which is a different query and a different plan. A value outside the vocabulary is a 400 rather than an empty page — a query matching nothing is indistinguishable from a guild that has none, so a typo would read as evidence.
@@ -1993,6 +2005,9 @@ type CreateGuildChannelJSONRequestBody = CreateChannelRequest
 
 // UpdateGuildMemberJSONRequestBody defines body for UpdateGuildMember for application/json ContentType.
 type UpdateGuildMemberJSONRequestBody = UpdateMemberRequest
+
+// TransferGuildOwnershipJSONRequestBody defines body for TransferGuildOwnership for application/json ContentType.
+type TransferGuildOwnershipJSONRequestBody TransferGuildOwnershipJSONBody
 
 // ResolveGuildReportJSONRequestBody defines body for ResolveGuildReport for application/json ContentType.
 type ResolveGuildReportJSONRequestBody = ResolveReportRequest

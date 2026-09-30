@@ -58,6 +58,8 @@ func (s *Service) ListMembers(
 		limit = maxMemberPageSize
 	}
 
+	// Each row carries the member's role ids, read in the same statement — see ListGuildMembers for why
+	// that is a plan-stability fix and not only a saved round trip.
 	rows, err := s.queries.ListGuildMembers(ctx, db.ListGuildMembersParams{
 		GuildID: int64(guildID),
 		UserID:  int64(in.After),
@@ -67,29 +69,16 @@ func (s *Service) ListMembers(
 		return nil, fmt.Errorf("guilds: list members: %w", err)
 	}
 
-	// One query for the whole page's role grants, not one per member — the N+1 §15.2 names.
-	userIDs := make([]int64, 0, len(rows))
-	for _, row := range rows {
-		userIDs = append(userIDs, row.UserID)
-	}
-
-	byUser := map[int64][]snowflake.ID{}
-	if len(userIDs) > 0 {
-		grants, err := s.queries.ListMemberRoleIDs(ctx, db.ListMemberRoleIDsParams{
-			GuildID: int64(guildID),
-			UserIds: userIDs,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("guilds: list member roles: %w", err)
-		}
-		for _, g := range grants {
-			byUser[g.UserID] = append(byUser[g.UserID], snowflake.ID(g.RoleID))
-		}
-	}
-
 	out := make([]Member, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, memberFromRow(row, byUser[row.UserID]))
+		out = append(out, memberFromRow(db.GuildMember{
+			GuildID:  row.GuildID,
+			UserID:   row.UserID,
+			Nickname: row.Nickname,
+			JoinedAt: row.JoinedAt,
+			Deaf:     row.Deaf,
+			Mute:     row.Mute,
+		}, snowflakes(row.RoleIds)))
 	}
 
 	return out, nil
@@ -233,20 +222,15 @@ func (s *Service) UpdateMember(
 		// the ordinary REST pattern the required `roles` field invites, would drop every role the member
 		// holds. Unobservable at M12 only because nothing can grant a role yet; live the moment M13 can,
 		// in an endpoint M13 does not touch.
-		grants, err := q.ListMemberRoleIDs(ctx, db.ListMemberRoleIDsParams{
+		held, err := q.ListRoleIDsOfMember(ctx, db.ListRoleIDsOfMemberParams{
 			GuildID: int64(guildID),
-			UserIds: []int64{int64(userID)},
+			UserID:  int64(userID),
 		})
 		if err != nil {
 			return fmt.Errorf("guilds: list member roles: %w", err)
 		}
 
-		held := make([]snowflake.ID, 0, len(grants))
-		for _, g := range grants {
-			held = append(held, snowflake.ID(g.RoleID))
-		}
-
-		out = memberFromRow(row, held)
+		out = memberFromRow(row, snowflakes(held))
 		return nil
 	})
 	if err != nil {
@@ -265,14 +249,6 @@ func (s *Service) RemoveMember(
 	ctx context.Context, actor auth.Actor, guildID, userID snowflake.ID,
 ) error {
 	return s.inTx(ctx, func(q *db.Queries) error {
-		guild, err := q.GetGuild(ctx, int64(guildID))
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return httpx.ErrNotFound
-			}
-			return fmt.Errorf("guilds: get guild: %w", err)
-		}
-
 		if userID == actor.UserID {
 			// Leaving. It needs membership and nothing else, which is why the permission asked for is the
 			// empty set: resolving at all is what establishes membership, and Permission.Has(0) is true by
@@ -329,8 +305,25 @@ func (s *Service) RemoveMember(
 		// candidate users, which is precisely the oracle roles.ErrNotAMember, authorize's two refusals and
 		// even pathID's 404-on-unparseable exist to close. Found by a security review of this milestone.
 		//
-		// Nothing grants this: ownership transfer is the operation that makes removing an owner reachable,
-		// and it is not this milestone.
+		// Nothing grants this. Ownership transfer (TransferOwnership, M13a) is what makes removing a former
+		// owner reachable: after it they are an ordinary member.
+		// Locked, because this is a check followed by a delete and M13a made its input change. Read
+		// unlocked, a kick could see the old owner, pass, and then delete the member a concurrent transfer
+		// had just made owner — a guild owned by a non-member, which has no layer 2. FOR SHARE waits for a
+		// transfer in flight and reads what it committed, without making two kicks in one guild queue
+		// behind each other. TestAKickWaitsForAnOwnershipChangeAndSeesItsResult.
+		//
+		// **Below the authorization, not above it.** It opened the function at first, so any stranger could
+		// hold a share lock on any guild by looping a leave they would be refused — stalling that guild's
+		// updates and transfers. Found by /code-review; TestARefusedCallerTakesNoLockOnTheGuild. For an
+		// Instance Admin, whom layer 1 did not resolve against the guild, this is also the 404.
+		guild, err := q.GetGuildForShare(ctx, int64(guildID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: get guild: %w", err)
+		}
 		if snowflake.ID(guild.OwnerID) == userID {
 			return httpx.Errorf(ErrCannotRemoveOwner,
 				"transfer ownership before leaving a guild you own")

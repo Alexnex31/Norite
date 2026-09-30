@@ -75,8 +75,8 @@ var (
 	// ErrCannotRemoveOwner reports an attempt to remove the guild owner from their own guild.
 	//
 	// Not a permission question: nothing in ADR 0008 grants the authority, because the owner *is* layer 2
-	// and a guild whose owner is not a member has no layer 2 at all. Ownership transfer is the operation
-	// that would make this reachable, and it is not this milestone.
+	// and a guild whose owner is not a member has no layer 2 at all. Ownership transfer (M13a) is the way
+	// out: once somebody else owns the guild, the former owner is an ordinary member and may leave.
 	ErrCannotRemoveOwner = errors.New("guilds: the owner cannot be removed from their own guild")
 )
 
@@ -102,6 +102,11 @@ type Service struct {
 	// limit, and it does that whether the number is 500 or 502. A lock on every channel creation would cost
 	// more than the property is worth. Role *position* is the opposite case and does take one, because a
 	// collision there corrupts an ordering rather than overshooting a limit.
+	//
+	// The owned-guild ceiling stopped being one of these at M13a. A transfer made a second writer of the
+	// same count, driven by another account, so an account could be handed guilds past its limit by
+	// concurrent transfers; that count is now taken under a per-account advisory lock
+	// (LockAccountOwnership), by Create and TransferOwnership both.
 	maxChannelsPerGuild int32
 	maxRolesPerGuild    int32
 	maxGuildsPerAccount int32

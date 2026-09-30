@@ -228,20 +228,15 @@ func (s *Service) changeMemberRole(
 			return fmt.Errorf("guilds: get member: %w", err)
 		}
 
-		grants, err := q.ListMemberRoleIDs(ctx, db.ListMemberRoleIDsParams{
+		held, err := q.ListRoleIDsOfMember(ctx, db.ListRoleIDsOfMemberParams{
 			GuildID: int64(guildID),
-			UserIds: []int64{int64(userID)},
+			UserID:  int64(userID),
 		})
 		if err != nil {
 			return fmt.Errorf("guilds: list member roles: %w", err)
 		}
 
-		held := make([]snowflake.ID, 0, len(grants))
-		for _, g := range grants {
-			held = append(held, snowflake.ID(g.RoleID))
-		}
-
-		out = memberFromRow(member, held)
+		out = memberFromRow(member, snowflakes(held))
 		return nil
 	})
 	if err != nil {

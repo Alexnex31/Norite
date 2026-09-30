@@ -141,9 +141,12 @@ func RequireUserActor(next http.Handler) http.Handler {
 // Access tokens are stateless and are not checked against session state (docs/architecture.md §17.10),
 // because doing so means a database lookup on every authenticated request. That trade buys the ability to
 // *read* inside the window. It does not extend to changing the account's security state: revoking
-// sessions, or minting and revoking the credentials that outlive them. Mount this on those, and nowhere
-// else — every route it guards costs one indexed lookup, and the point of §17.10 is that the hot path
-// pays nothing.
+// sessions, or minting and revoking the credentials that outlive them. Nor, since M13a, to giving a guild
+// away — `POST /guilds/{guild_id}/owner` hands layer 2 to somebody else, which a device signed out a
+// minute ago should not be able to do and which no later sign-in can take back. Mount this on those, and
+// nowhere else — every route it guards costs one indexed lookup, and the point of §17.10 is that the hot
+// path pays nothing. A route is a candidate when a signed-out credential could make a change its owner
+// cannot undo, not merely one that is important.
 //
 // A *rotated* session is live. Rotation revokes the row an access token names, so liveness is asked of the
 // device, never of the row — see Service.requireLiveDevice.

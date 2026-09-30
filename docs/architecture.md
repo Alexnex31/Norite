@@ -1017,6 +1017,11 @@ GET    /guilds/{guild_id}                  -- M12
 PATCH  /guilds/{guild_id}                  -- M12; PermManageGuild
 DELETE /guilds/{guild_id}                  -- M12; *owner or Instance Admin only*, not PermManageGuild —
                                            --   a cascading destroy is not a delegable permission
+POST   /guilds/{guild_id}/owner            -- M13a; owner or Instance Admin only, a user actor with a live
+                                           --   session (never an API token: a credential that can give a
+                                           --   guild away can give it to its attacker). To a current,
+                                           --   undeleted member below the owned-guild cap; the former
+                                           --   owner stays a member. Audited as guild.owner_transfer
 GET    /guilds/{guild_id}/channels         -- M12; M13 filters it by per-channel view permission, and
                                            --   embeds each channel's overwrites. Two queries whatever
                                            --   the channel count: resolved once at guild level, every
@@ -1029,7 +1034,9 @@ PATCH  /guilds/{guild_id}/members/{user_id}
                                            --   nickname is PermManageGuild, mute/deaf add their own bits
 DELETE /guilds/{guild_id}/members/{user_id}
                                            -- M12; PermKickMembers, or none when removing yourself.
-                                           --   The owner cannot be removed by anyone, themselves included
+                                           --   The owner cannot be removed by anyone, themselves included;
+                                           --   transfer first (M13a). Reads the guild row locked, so a
+                                           --   kick cannot land on somebody a transfer just made owner
 GET    /guilds/{guild_id}/roles            -- M12
 POST   /guilds/{guild_id}/roles            -- M12; PermManageRoles, and refuses to grant a permission the
                                            --   caller does not hold — without that, PermManageRoles *is*
