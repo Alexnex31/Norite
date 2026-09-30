@@ -3283,9 +3283,9 @@ paths:
                   minLength: 1
                   maxLength: 4000
                 reply_to_id:
-                  allOf:
+                  oneOf:
                     - $ref: "#/components/schemas/Snowflake"
-                  nullable: true
+                    - type: "null"
       responses:
         "201":
           description: The message as stored.
@@ -6113,9 +6113,9 @@ components:
         channel_id:
           $ref: "#/components/schemas/Snowflake"
         author_id:
-          allOf:
+          oneOf:
             - $ref: "#/components/schemas/Snowflake"
-          nullable: true
+            - type: "null"
           description: >
             Null for a message with no author — a system or webhook message. Never null because the
             author's account was deleted: a deleted account is soft-deleted and its messages survive
@@ -6127,19 +6127,17 @@ components:
           type: integer
           description: 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
         reply_to_id:
-          allOf:
+          oneOf:
             - $ref: "#/components/schemas/Snowflake"
-          nullable: true
+            - type: "null"
         edited_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
         created_at:
           type: string
           format: date-time
         tags:
-          type: array
-          nullable: true
+          type: [array, "null"]
           items:
             $ref: "#/components/schemas/AppliedMessageTag"
           description: >

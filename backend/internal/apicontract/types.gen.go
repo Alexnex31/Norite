@@ -937,30 +937,30 @@ type Member struct {
 // Message defines model for Message.
 type Message struct {
 	// AuthorId Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
-	AuthorId Snowflake `json:"author_id"`
+	AuthorId *Snowflake `json:"author_id"`
 
 	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
 	//
 	//
 	// Examples: 7238829238972837423
-	ChannelId Snowflake `json:"channel_id"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
-	EditedAt  time.Time `json:"edited_at"`
+	ChannelId Snowflake  `json:"channel_id"`
+	Content   string     `json:"content"`
+	CreatedAt time.Time  `json:"created_at"`
+	EditedAt  *time.Time `json:"edited_at"`
 
 	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
 	//
 	//
 	// Examples: 7238829238972837423
-	Id        Snowflake `json:"id"`
-	ReplyToId Snowflake `json:"reply_to_id"`
+	Id        Snowflake  `json:"id"`
+	ReplyToId *Snowflake `json:"reply_to_id"`
 
 	// Tags The tags on the message this caller can see: every shared tag, plus the caller's own private ones. Somebody else's private tag never appears.
 	//
 	// **Null when the credential may not read tags** — an API token without the `tags.read` scope. Null rather than an empty array, because an empty array would claim the message has no tags when the answer is that they are not this credential's to see. A signed-in user always gets an array, empty for an untagged message.
 	//
 	// The channel listing resolves a whole page's tags at once, so a client drawing a channel needs no per-message request; `GET /channels/{channel_id}/messages/{message_id}/tags` remains for reading one message's tags on their own.
-	Tags []AppliedMessageTag `json:"tags"`
+	Tags *[]AppliedMessageTag `json:"tags"`
 
 	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
 	Type int `json:"type"`
