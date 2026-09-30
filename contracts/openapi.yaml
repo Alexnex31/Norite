@@ -30,6 +30,10 @@ tags:
       directly in the JSON body, never as cookies — the CLI, GUI and daemon have no cookie jar
       (docs/adr/0011-token-based-client-auth.md). A future web SPA gets cookies from a BFF layer in front of
       this same API, not from these endpoints.
+  - name: gateway
+    description: >
+      The real-time WebSocket. Only the upgrade is an HTTP request; everything after it is the frame protocol
+      in `contracts/gateway-events.schema.json`, which is the source of truth for it.
   - name: users
     description: Account profile surfaces.
   - name: guilds
@@ -55,6 +59,41 @@ tags:
       need never see a backlog.
 
 paths:
+  /gateway:
+    # Served at the instance root, as docs/architecture.md §2 places it: a WebSocket's protocol version
+    # travels in its handshake (ADR 0033), not its path. Documented here because it is a route the backend
+    # serves, and cmd/server/contract_test.go holds the router and this file to the same set; what happens
+    # after the upgrade is gateway-events.schema.json's to describe, not this file's.
+    servers:
+      - url: /
+    get:
+      summary: Open a gateway connection
+      description: >
+        Upgrades to a WebSocket (RFC 6455). The server sends HELLO at once; the client then sends IDENTIFY,
+        carrying an access token, within the heartbeat interval. Authentication happens in that frame rather
+        than in a header, because a browser cannot set a header on a WebSocket and the same protocol serves
+        every client.
+
+
+        An API token is refused, as is an access token whose session has been signed out — a connection
+        outlives a request, so the gateway asks what `RequireLiveSession` asks. Every refusal after the
+        upgrade is a WebSocket close code listed in the schema, never an HTTP status.
+
+
+        Cross-origin upgrades are refused, and the per-address rate limit counts the upgrade like any
+        request.
+      operationId: connectGateway
+      tags: [gateway]
+      security: []
+      responses:
+        "101":
+          description: Switching Protocols. The connection is now a WebSocket.
+        "403":
+          description: The upgrade came from a disallowed origin.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /meta:
     get:
       summary: Instance metadata and the AGPL source offer

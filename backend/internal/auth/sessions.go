@@ -226,3 +226,22 @@ func (s *Service) currentDeviceID(ctx context.Context, userID, sessionID snowfla
 	}
 	return session.DeviceID, nil
 }
+
+// LiveDevice reports the device behind an access token's session, and refuses with ErrSessionSignedOut when
+// that device has no live session left.
+//
+// The gateway asks it at IDENTIFY and RESUME (M18), for the reason RequireLiveSession asks it on REST: an
+// access token outlives its session by up to AccessTokenTTL, which a single request can afford and a
+// connection cannot. Without it a token from a device signed out five minutes ago would open a stream that
+// nothing ever closes. The device is returned because revocation closes connections by device, so the
+// gateway has to know which one each connection belongs to.
+func (s *Service) LiveDevice(ctx context.Context, userID, sessionID snowflake.ID) (string, error) {
+	device, err := s.currentDeviceID(ctx, userID, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if err := s.requireLiveDeviceNamed(ctx, userID, device); err != nil {
+		return "", err
+	}
+	return device, nil
+}

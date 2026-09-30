@@ -1162,6 +1162,51 @@ func (q *Queries) ListGuildRoles(ctx context.Context, guildID int64) ([]Role, er
 	return items, nil
 }
 
+const listGuildsForMember = `-- name: ListGuildsForMember :many
+SELECT g.id, g.name, g.owner_id, g.icon_hash, g.description, g.system_channel_id, g.created_at, g.updated_at, g.message_audit_enabled
+FROM guilds g
+JOIN guild_members gm ON gm.guild_id = g.id
+WHERE gm.user_id = $1
+ORDER BY g.id
+`
+
+// Every guild an account is a member of: what the gateway's READY carries, one summary per guild (M18), and
+// what M20's GET /users/@me/guilds will serve.
+//
+// Unpaginated, like the channel and role lists, and bounded the same way: at creation rather than at read.
+// An account owns at most [limits].guilds_per_account (M12), nothing adds a membership except creating a
+// guild until M57, and M72a caps joined guilds at 100. guild_members_user_id_idx serves the lookup, and the
+// join reaches each guild through its primary key.
+func (q *Queries) ListGuildsForMember(ctx context.Context, userID int64) ([]Guild, error) {
+	rows, err := q.db.Query(ctx, listGuildsForMember, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Guild{}
+	for rows.Next() {
+		var i Guild
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.IconHash,
+			&i.Description,
+			&i.SystemChannelID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.MessageAuditEnabled,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOverwritesForTarget = `-- name: ListOverwritesForTarget :many
 SELECT po.channel_id, po.target_type, po.target_id, po.allow, po.deny
 FROM permission_overwrites po

@@ -967,6 +967,14 @@ type Querier interface {
 	ListGuildReportsByStatus(ctx context.Context, arg ListGuildReportsByStatusParams) ([]ListGuildReportsByStatusRow, error)
 	// Ordered by position, which the (guild_id, position) index serves.
 	ListGuildRoles(ctx context.Context, guildID int64) ([]Role, error)
+	// Every guild an account is a member of: what the gateway's READY carries, one summary per guild (M18), and
+	// what M20's GET /users/@me/guilds will serve.
+	//
+	// Unpaginated, like the channel and role lists, and bounded the same way: at creation rather than at read.
+	// An account owns at most [limits].guilds_per_account (M12), nothing adds a membership except creating a
+	// guild until M57, and M72a caps joined guilds at 100. guild_members_user_id_idx serves the lookup, and the
+	// join reaches each guild through its primary key.
+	ListGuildsForMember(ctx context.Context, userID int64) ([]Guild, error)
 	// Everything outstanding, newest first.
 	//
 	// Deliberately includes exhausted and expired rows. An administrator asking "what invites exist" is

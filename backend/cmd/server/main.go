@@ -40,10 +40,13 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/gateway"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
+	"github.com/Alexnex31/Norite/backend/internal/meta"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
+	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -235,6 +238,31 @@ func run() error {
 		defer func() { _ = rateLimitBackend.Close() }()
 	}
 
+	// The event bus: in-process unless configured otherwise, and connected before anything can publish, for
+	// the rate-limit store's reason — a Redis the process could not reach would otherwise surface as events
+	// silently going nowhere.
+	var bus events.Bus = events.NewInProc(&logger)
+	if cfg.EventsBackend == "redis" {
+		bus, err = events.NewRedis(ctx, events.RedisOptions{URL: cfg.RedisURL, ConnectTimeout: cfg.DBConnectTimeout})
+		if err != nil {
+			logger.Error().Err(err).Msg("could not connect the event bus")
+			return err
+		}
+	}
+	defer func() { _ = bus.Close() }()
+
+	gw, err := gateway.New(gateway.Options{
+		Accounts:         authService,
+		Guilds:           guildService,
+		Bus:              bus,
+		RateLimitBackend: rateLimitBackend,
+		Version:          meta.Version,
+		Logger:           logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := newRouter(routerOptions{
 		Config:           cfg,
 		Logger:           logger,
@@ -246,6 +274,7 @@ func run() error {
 		Reports:          reports.NewHandler(reportService),
 		Tags:             tags.NewHandler(tagService),
 		RateLimitBackend: rateLimitBackend,
+		Gateway:          gw,
 	})
 	if err != nil {
 		return err
@@ -283,7 +312,7 @@ func run() error {
 	// Blocking, before the instance reports ready. See the package comment.
 	if err := database.Migrate(ctx, migrateOpts); err != nil {
 		logger.Error().Err(err).Msg("migrations failed — shutting down without serving")
-		shutdown(srv, cfg.ShutdownTimeout, &logger)
+		shutdown(srv, gw, cfg.ShutdownTimeout, &logger)
 		return err
 	}
 
@@ -322,7 +351,7 @@ func run() error {
 	// Stop reporting ready before draining, so a load balancer stops sending new work while in-flight
 	// requests finish.
 	health.MarkStopping()
-	shutdown(srv, cfg.ShutdownTimeout, &logger)
+	shutdown(srv, gw, cfg.ShutdownTimeout, &logger)
 
 	// The sweeper observes the same canceled context, so this is a join rather than a wait. Joined at all
 	// so the process does not exit with a DELETE still in flight against a pool that is about to close.
@@ -367,11 +396,20 @@ func newMailQueue(cfg config.Config, logger zerolog.Logger) (*mail.Queue, error)
 	return mail.NewQueue(mail.Options{Sender: sender, Logger: logger}), nil
 }
 
-// shutdown drains in-flight requests, giving up after timeout.
-func shutdown(srv *http.Server, timeout time.Duration, logger *zerolog.Logger) {
+// shutdown drains in-flight requests and gateway connections, giving up after timeout.
+//
+// The gateway is shut down explicitly because srv.Shutdown ignores hijacked connections, and a WebSocket is
+// one: without this every client would be cut off with nothing telling it to reconnect (M118 depends on the
+// Reconnect this sends). Both share one deadline, so a stuck socket cannot stretch shutdown past the
+// configured timeout.
+func shutdown(srv *http.Server, gw *gateway.Server, timeout time.Duration, logger *zerolog.Logger) {
 	// Detached from the signal context, which is already canceled by the time we get here.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	if err := gw.Shutdown(ctx); err != nil {
+		logger.Error().Err(err).Msg("gateway connections did not close in time")
+	}
 
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error().Err(err).Dur("timeout", timeout).Msg("graceful shutdown did not finish in time")

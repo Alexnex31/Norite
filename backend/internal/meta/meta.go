@@ -45,6 +45,15 @@ const License = "AGPL-3.0-or-later"
 // it, because the whole value of the field is that somebody can fetch that exact source.
 var Revision = "unknown"
 
+// Version is the release version this binary was built as, set at link time the same way:
+//
+//	-ldflags "-X github.com/Alexnex31/Norite/backend/internal/meta.Version=<version>"
+//
+// goreleaser stamps it from the tag (ADR 0033); anything else reports "dev". The gateway's HELLO carries it,
+// and the handshake treats "dev" as compatible with anything and says so in the log
+// (gatewayproto.Check), because only a source build reports it.
+var Version = "dev"
+
 // Response is the body of GET /api/v1/meta. Contract: contracts/openapi.yaml, schema InstanceMeta.
 type Response struct {
 	License        string `json:"license"`

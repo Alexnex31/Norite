@@ -21,13 +21,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/gateway"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
+	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/reports"
@@ -70,6 +73,13 @@ type api struct {
 	// mail captures what the reset flow would have sent. The raw token exists nowhere else — that is the
 	// point of it — so this is the only way a test can follow a reset link.
 	mail *captureMailer
+
+	// The services and the gateway behind handler, for the gateway tests: some need a gateway built with
+	// their own options (a short heartbeat, a pinned version) over the same services and database.
+	authSvc   *auth.Service
+	guildsSvc *guilds.Service
+	bus       events.Bus
+	gateway   *gateway.Server
 }
 
 // captureMailer stands in for the real queue: it records messages instead of delivering them, and can
@@ -233,6 +243,17 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	reportsSvc, err := reports.NewService(reports.ServiceOptions{Pool: pool, IDs: ids})
 	require.NoError(t, err)
 
+	bus := events.NewInProc(nil)
+	t.Cleanup(func() { _ = bus.Close() })
+	gw, err := gateway.New(gateway.Options{
+		Accounts: svc,
+		Guilds:   guildsSvc,
+		Bus:      bus,
+		Version:  gatewayproto.DevVersion,
+		Logger:   zerolog.New(io.Discard),
+	})
+	require.NoError(t, err)
+
 	handler, err := newRouter(routerOptions{
 		Config:   testConfig(),
 		Logger:   zerolog.New(io.Discard),
@@ -243,10 +264,12 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		Messages: messages.NewHandler(messagesSvc),
 		Reports:  reports.NewHandler(reportsSvc),
 		Tags:     tags.NewHandler(tagsSvc),
+		Gateway:  gw,
 	})
 	require.NoError(t, err)
 
-	return &api{t: t, handler: handler, pool: pool, mail: mailer}
+	return &api{t: t, handler: handler, pool: pool, mail: mailer,
+		authSvc: svc, guildsSvc: guildsSvc, bus: bus, gateway: gw}
 }
 
 // issueResetToken runs a real reset request and returns the token out of the email that would have gone.

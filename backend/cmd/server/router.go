@@ -30,6 +30,9 @@ const apiBase = "/api/v1"
 // on the root chain and skips it by path before routing has happened.
 const healthzPath = apiBase + "/healthz"
 
+// gatewayPath is where the WebSocket gateway is served (docs/architecture.md §2).
+const gatewayPath = "/gateway"
+
 type routerOptions struct {
 	Config   config.Config
 	Logger   zerolog.Logger
@@ -44,6 +47,9 @@ type routerOptions struct {
 	// RateLimitBackend is where every limiter below counts. The zero value is the in-memory store, which is
 	// what the test routers get; main passes the configured one.
 	RateLimitBackend ratelimit.Backend
+
+	// Gateway serves /gateway. Nil answers 404, which is what the service-less test routers get.
+	Gateway http.Handler
 }
 
 // authRateLimit is the stricter bucket the unauthenticated auth routes sit behind.
@@ -190,6 +196,24 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			opts.Auth.VerifyPageRoutes(r)
 		})
 	}
+
+	// The gateway (M18), at the root as docs/architecture.md §2 places it: a WebSocket's protocol version
+	// travels in its handshake (ADR 0033), not in its path.
+	//
+	// Inside the whole chain rather than beside it. The per-address limit counts the upgrade like any
+	// request, and refuseWhileStarting keeps a connection from identifying against a schema mid-migration.
+	// No Authenticate middleware: the token arrives in IDENTIFY, the first frame, because a browser
+	// cannot set a header on a WebSocket and the same protocol has to serve the web client at Phase O.
+	//
+	// Mounted whether or not a gateway was wired, for the reason /instance is: cmd/server/contract_test.go
+	// walks a router built without services, and a conditional route is one that walk cannot see.
+	r.Get(gatewayPath, func(w http.ResponseWriter, r *http.Request) {
+		if opts.Gateway == nil {
+			httpx.WriteError(w, r, httpx.ErrNotFound)
+			return
+		}
+		opts.Gateway.ServeHTTP(w, r)
+	})
 
 	r.Route(apiBase, func(r chi.Router) {
 		// Instance administration, mounted as a sibling of the group below rather than inside it.

@@ -2,26 +2,542 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://norite.example/contracts/gateway-events.schema.json",
   "title": "Norite Gateway Events",
-  "description": "Source-of-truth WS dispatch payload contract (see docs/architecture.md §2). M0 skeleton — only the envelope shape is defined; no real op-codes or DISPATCH event types exist yet. This file updates in the same commit as any new gateway dispatch type (CLAUDE.md rule 6), starting at Milestone M18.",
-  "type": "object",
-  "properties": {
-    "op": {
-      "type": "integer",
-      "description": "Op-code. See docs/architecture.md §2 for the full table (0 Dispatch, 7 Reconnect, 9 Invalid Session, 10 Hello, 11 Heartbeat ACK server-side; 1 Heartbeat, 2 Identify, 3 Presence Update, 4 Voice State Update, 6 Resume, 8 Request Guild Members client-side)."
+  "description": "Source of truth for every frame on the WebSocket at /gateway (docs/architecture.md §2). Updated in the same commit as any new op-code, close code or dispatch type (CLAUDE.md rule 6). backend/gatewayproto is its Go form, and the gateway's tests validate every frame the server sends against this document. Every frame carries op, d, s and t; s and t are null except on a dispatch (op 0).",
+  "$ref": "#/$defs/Frame",
+  "$defs": {
+    "Frame": {
+      "description": "Any frame, in either direction.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ServerFrame"
+        },
+        {
+          "$ref": "#/$defs/ClientFrame"
+        }
+      ]
     },
-    "d": {
-      "description": "Op-code-specific payload. Shape defined per dispatch type starting at Milestone M18.",
-      "type": ["object", "null"]
+    "ServerFrame": {
+      "description": "What the server sends.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Hello"
+        },
+        {
+          "$ref": "#/$defs/HeartbeatAck"
+        },
+        {
+          "$ref": "#/$defs/Reconnect"
+        },
+        {
+          "$ref": "#/$defs/InvalidSession"
+        },
+        {
+          "$ref": "#/$defs/Dispatch"
+        }
+      ]
     },
-    "s": {
-      "description": "Sequence number, present on Dispatch frames only.",
-      "type": ["integer", "null"]
+    "ClientFrame": {
+      "description": "What a client sends. Ops 3 (presence, M38), 4 (voice state, Phase E) and 8 (member requests) are reserved: sending one closes the connection with 4001, rather than being ignored.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Heartbeat"
+        },
+        {
+          "$ref": "#/$defs/Identify"
+        },
+        {
+          "$ref": "#/$defs/Resume"
+        }
+      ]
     },
-    "t": {
-      "description": "Dispatch event type name, present on Dispatch frames only.",
-      "type": ["string", "null"]
+    "Hello": {
+      "type": "object",
+      "description": "op 10, sent by the server immediately on connect.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 10
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "heartbeat_interval",
+            "server_time",
+            "version"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "heartbeat_interval": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Milliseconds between the client's heartbeats."
+            },
+            "server_time": {
+              "type": "string",
+              "format": "date-time",
+              "description": "For the client's clock offset (ADR 0010)."
+            },
+            "version": {
+              "type": "string",
+              "description": "The server's release version, or \"dev\" for an unstamped build. Compared with the client's under ADR 0033; a dev build on either side is compatible with anything."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "HeartbeatAck": {
+      "type": "object",
+      "description": "op 11, the answer to every heartbeat.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 11
+        },
+        "d": {
+          "type": "null"
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Reconnect": {
+      "type": "object",
+      "description": "op 7: the server is going away (a shutdown or a rollout). The connection is then closed with 1012; reconnect and RESUME.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 7
+        },
+        "d": {
+          "type": "null"
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "InvalidSession": {
+      "type": "object",
+      "description": "op 9: a RESUME that cannot be honoured.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 9
+        },
+        "d": {
+          "type": "boolean",
+          "description": "Whether the session may be resumed. false: IDENTIFY afresh."
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Dispatch": {
+      "description": "op 0: an event. s is the connection's sequence number, t the event's name.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ReadyDispatch"
+        }
+      ]
+    },
+    "ReadyDispatch": {
+      "type": "object",
+      "description": "The first dispatch on a new session.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Ready"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "READY"
+        }
+      }
+    },
+    "Ready": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "user",
+        "guilds"
+      ],
+      "additionalProperties": false,
+      "description": "A summary per guild and nothing bulk: channels, roles and member lists are fetched when a guild is opened (lazy per-guild loading, M18). dm_channels and presences are absent until M57 and M38 fill them.",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque; RESUME names it, together with the token."
+        },
+        "user": {
+          "$ref": "#/$defs/User"
+        },
+        "guilds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Guild"
+          }
+        }
+      }
+    },
+    "Heartbeat": {
+      "type": "object",
+      "description": "op 1, every heartbeat_interval milliseconds.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 1
+        },
+        "d": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "The last sequence number the client received, or null."
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Identify": {
+      "type": "object",
+      "description": "op 2, the first frame a client sends after HELLO.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 2
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "token",
+            "properties"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "token": {
+              "type": "string",
+              "minLength": 1,
+              "description": "An access token. An API token is refused, as is a token whose session has been signed out (close 4004)."
+            },
+            "properties": {
+              "type": "object",
+              "required": [
+                "os",
+                "client",
+                "version"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "os": {
+                  "type": "string"
+                },
+                "client": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string",
+                  "description": "The client's release version, or \"dev\"."
+                }
+              }
+            },
+            "intents": {
+              "type": "integer",
+              "const": 0,
+              "description": "Reserved; absent or 0 until a milestone defines a bit (close 4013)."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Resume": {
+      "type": "object",
+      "description": "op 6, continuing a session after a disconnect. Answered with op 9 false until RESUME lands (M18 part 4).",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 6
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "token",
+            "session_id",
+            "seq"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "token": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The access token again: the session id alone would let anybody who read one resume somebody else's stream."
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "CloseCode": {
+      "description": "Every WebSocket close code the gateway uses after the upgrade.",
+      "oneOf": [
+        {
+          "const": 1012,
+          "description": "Service restart: the server is going away. Sent after op 7; reconnect."
+        },
+        {
+          "const": 4000,
+          "description": "Unknown error on the server."
+        },
+        {
+          "const": 4001,
+          "description": "Unknown or reserved op-code."
+        },
+        {
+          "const": 4002,
+          "description": "A frame that is not valid gateway JSON, or a payload with unknown fields."
+        },
+        {
+          "const": 4003,
+          "description": "An op other than heartbeat, IDENTIFY or RESUME before IDENTIFY."
+        },
+        {
+          "const": 4004,
+          "description": "Authentication failed: an invalid token, an API token, or a signed-out session. Sign in again."
+        },
+        {
+          "const": 4005,
+          "description": "IDENTIFY or RESUME on a connection that is already identified."
+        },
+        {
+          "const": 4007,
+          "description": "RESUME with a sequence number the server cannot honour."
+        },
+        {
+          "const": 4008,
+          "description": "Rate limited: too many frames, too many IDENTIFYs, or too many connections for one account."
+        },
+        {
+          "const": 4009,
+          "description": "Session timed out: no IDENTIFY, or no heartbeat, in time."
+        },
+        {
+          "const": 4010,
+          "description": "Version mismatch under ADR 0033; the reason names the side to upgrade."
+        },
+        {
+          "const": 4011,
+          "description": "The session was revoked (a sign-out, a password reset, a ban). Sign in again."
+        },
+        {
+          "const": 4012,
+          "description": "The client did not read fast enough and its outbound buffer filled. Reconnect and resync."
+        },
+        {
+          "const": 4013,
+          "description": "intents was not 0."
+        }
+      ]
+    },
+    "Snowflake": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "A Snowflake id as a decimal string (ADR 0003)."
+    },
+    "User": {
+      "description": "Identical to contracts/openapi.yaml's User, which GET /users/@me returns; a test holds the two equal.",
+      "type": "object",
+      "required": [
+        "id",
+        "username",
+        "email",
+        "display_name",
+        "created_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "username": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "avatar_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email_verified_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "two_factor_enabled": {
+          "type": "boolean"
+        },
+        "recovery_codes_remaining": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "Guild": {
+      "description": "Identical to contracts/openapi.yaml's Guild, which GET /guilds/{guild_id} returns; a test holds the two equal.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "owner_id",
+        "icon_hash",
+        "description",
+        "message_audit_enabled",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "icon_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_audit_enabled": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
     }
-  },
-  "required": ["op", "d"],
-  "additionalProperties": false
+  }
 }
