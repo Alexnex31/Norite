@@ -167,6 +167,10 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 20. **Any server-side feature that gates delivery or visibility to a user** (DM send, whisper send, friend
     request, presence, notification dispatch, and guild-channel gateway fan-out specifically) **must check
     the `blocks` table.** This includes the real-time gateway dispatch path, not only REST mutation handlers.
+    **One stated exception: instance announcements (M93a)**. They are authored by the instance rather than
+    by any account, so there is no author for a block to name; the sending admin appears only in
+    `instance_audit_log`. Anything that shows its sender to readers is not an announcement, and the rule
+    applies to it in full.
 21. **Any new REST endpoint or gateway event affecting CLI-observable or browser-observable state must be
     sanity-checked against real browser constraints** (CORS, request chattiness, BFF-auth-compatibility) at
     the time it's added — never deferred silently to Phase O just because the web client isn't built yet.
@@ -395,13 +399,14 @@ the milestone number lowercased, so a copy here carries no information and only 
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Eleven exist:
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Twelve exist:
 `M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
 surface), `M16b` (opt-in per-guild message audit), `M20a` (first usable client), `M56a` (message
 reactions), `M62a` (guild info and per-guild preferences), `M67a`
-(registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional) and
-`M76a` (self-service account export and deletion). `M72b` was the first `b`, which the convention already
-allowed — letters run `a`, `b`, `c` in insertion order after the same number.
+(registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional),
+`M76a` (self-service account export and deletion) and `M93a` (instance announcements). `M72b` was the
+first `b`, which the convention already allowed — letters run `a`, `b`, `c` in insertion order after the
+same number.
 
 **A suffixed milestone can be retired, and its number is then never reused.** `M17a` (Phase C's
 command-tree verbs) was the first, folded into M20 on 2026-09-25 when its planning found the verbs could

@@ -1217,6 +1217,10 @@ of this section.
   M5 for the SMTP path. Done when: enabling Deep Work suppresses a normal mention's push, and an `@urgent`
   mention still comes through; disconnecting every client and triggering an `@urgent` mention with the
   fallback enabled delivers an email instead.
+
+  **One thing this suppression never holds back: an instance announcement (M93a).** It is shown, and its
+  OS notification raised, during a session exactly as outside one. Decided 2026-09-30 and recorded here
+  so the suppression logic is written with the exception in it, rather than having it added later.
 - **M40 — OS desktop notifications**: `gen2brain/beeep` wiring, triggered by `@urgent`-during-Deep-Work and
   regular mentions. Done when: a real OS toast/notification-center alert appears for both cases.
 - **M41 — TUI shell and grid** (`1a` skeleton): the application frame — guild rail, channel list, message
@@ -2036,6 +2040,102 @@ when a constraint the terminal imposed is lifted.
   worth profiling before there are features generating load. Done when: `/metrics` requires auth, exposes
   the documented metric set, rejects unauthenticated access, and `pprof` is unreachable without the same
   gate.
+- **M93a — Instance announcements**: a short plain-text message an Instance Admin sends to every account
+  on the instance. It pops up in every attached client, and reaches an account that is offline the next
+  time its daemon connects. It is for server maintenance, outages and events that concern everyone.
+  Assigned 2026-09-30. Not to be confused with the reserved `GUILD_ANNOUNCEMENT` channel type, which is a
+  guild's own channel and has nothing to do with this.
+
+  **It is intrusive by design, so it is built to be used rarely.** Nothing else in the product lets one
+  account put text in front of every other account, and an announcement nobody asked for is a cost paid by
+  everyone who receives it. Every decision below leans toward making it deliberate, plain and hard to
+  overuse, rather than convenient.
+
+  - **Who may send:** an Instance Admin (M71), and nobody else. No guild role, no permission bit and no
+    ownership reaches it. It takes a user actor behind `RequireLiveSession` and **never an API token**: a
+    credential able to message every account is a phishing channel to the whole instance, which is the
+    reasoning that keeps token minting and ownership transfer undelegable.
+  - **Confirmed before it is sent.** Before sending, every client shows the exact text as it will appear and
+    how many accounts it reaches, then asks the admin to confirm. The CLI verb (`norite instance announce`)
+    prompts interactively and refuses without `--yes` when there is no terminal, through M20's shared
+    confirmation helper. The API itself has no preview step: the confirmation lives in the clients, where
+    the person is.
+  - **Plain text, and nothing else.**
+    - Never rendered as markdown (rule 9), and passed through `termsafe` like any other foreign text
+      (rule 19).
+    - **No emoji of any kind**: refused at validation rather than stripped. That covers every rune in
+      Unicode's `Extended_Pictographic` property, regional-indicator pairs and the emoji presentation
+      selector `U+FE0F`. A custom emoji shortcode is never resolved, so `:tada:` shows as those six
+      characters.
+    - Control characters are refused except the line feed.
+  - **A hard length cap: 500 characters, counted in runes.** Counted the way go-playground/validator's
+    `max` counts, which is M15's lesson about a limit enforced in two places measuring two different
+    things. 500 fits a maintenance window with its reason and times, and fits a TUI overlay without
+    scrolling. Empty or whitespace-only text is refused.
+  - **Rate-limited on its own bucket** through `internal/platform/ratelimit`, per admin and across the
+    instance, so a second admin cannot double the rate.
+  - **Recorded in `instance_audit_log`** (rule 14, M72) in the same transaction as the send, with the full
+    text. Withdrawing one is audited the same way.
+
+  **Delivery.**
+  - **Live:** a new gateway dispatch goes to every live connection after the transaction commits (rule 5),
+    through the event bus, so a multi-replica flagship reaches everyone (M114). It lands in
+    `contracts/gateway-events.schema.json` and the CLI `--json` schemas in the same commit (rules 6 and
+    15).
+  - **Offline:** an account with no live connection finds every unexpired announcement it has not
+    acknowledged in its next READY. Acknowledgement is **one watermark column per account** (the newest
+    announcement id it has seen), never a row per account per announcement: one announcement to 100,000
+    accounts must not write 100,000 rows.
+  - **On screen:** the daemon runs from login (ADR 0010), so "not connected" usually means no client is
+    attached. The daemon then raises an OS notification (M40), and an attached client shows the text
+    itself.
+  - **Expiry and withdrawal:** an announcement carries an optional `expires_at`, and an expired one is not
+    delivered at READY, because last week's maintenance notice is noise. An admin can withdraw one sent in
+    error, which dispatches its removal.
+  - **No email.** Mailing every account would push the whole instance through a bounded queue built to
+    drop (M5), and an account that was away already gets the announcement, and its OS notification, the
+    moment its daemon reconnects.
+
+  **Clients:**
+  - the TUI, as an overlay (M43);
+  - the GUI, as a dialog (M79);
+  - the web SPA once it exists (rule 21 applies at build time, not at Phase O).
+
+  The overlay needs a screen id in `docs/design/tui/SCREENS.md`, and this milestone owes it, claimed by
+  this milestone alone (`architecture.md` §16). A reader dismisses an announcement once, and that
+  acknowledgement moves the watermark. **There is no opt-out**, because an announcement a user can mute
+  cannot tell them the instance is going down.
+
+  **Two decisions taken at assignment (2026-09-30), both following from what an announcement is.**
+  1. **The server is the author, not the admin, so no block hides it.** An announcement is shown under the
+     instance's name and never as a message from the admin's account. The admin who sent it is recorded in
+     `instance_audit_log` and nowhere a reader sees. With no author, there is no account a block could
+     name, and rule 20 carries this as its one stated exception rather than being broken quietly. The
+     exception holds only while that is true: an announcement that ever displays its sender stops being
+     one.
+  2. **It overrides Deep Work (M39).** It is shown, and the OS notification is raised, during a Deep Work
+     session exactly as outside one. A maintenance warning that waits until somebody finishes focusing
+     arrives after the maintenance. That is also why the rate limit and the confirmation exist: an
+     override is only tolerable if it is rare.
+
+  Depends on M18–M20 (dispatch, the daemon, the confirmation helper), M40 (OS notifications), M43 and
+  M79 (TUI and GUI rendering), M48 (`--json`), M71 (the tier) and M72 (`instance_audit_log`). All of
+  them precede Phase L. Nothing in Phase L depends on it, and it depends on nothing in Phase L, so it can
+  be built at any point in the phase.
+
+  Done when:
+  - an Instance Admin's announcement appears in every attached client on the instance within the gateway's
+    ordinary delivery time;
+  - an account whose daemon was offline receives it on reconnect, and a daemon with no client attached
+    raises an OS notification;
+  - an account that has blocked the sending admin still receives it, shown under the instance's name;
+  - an account in a Deep Work session sees it and gets the OS notification;
+  - a non-admin, and an admin presenting an API token, are refused;
+  - every client asks for confirmation before sending, and the CLI refuses without `--yes` off a terminal;
+  - a 501-character message, an empty one, and any message containing an emoji are refused;
+  - an expired announcement is not delivered at READY;
+  - a withdrawn one is removed from clients that still show it;
+  - each send and withdrawal writes exactly one `instance_audit_log` entry in its own transaction.
 - **M94 — P2P file transfer**: explicit opt-in per transfer, the initiating attach client (TUI/GUI) owns the
   WebRTC negotiation directly (the daemon is not involved, the same rule as video), enforced as a real
   three-way handshake (server-relayed Intent-to-Transfer → recipient Accept → only then

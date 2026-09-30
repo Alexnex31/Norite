@@ -222,7 +222,8 @@ foundations land first, not so that scope gets dropped at the end.
   sandboxed, capability-gated, headless by design.
 - **P2P file transfer**, opt-in per transfer and consent-gated before any IP address is exposed.
 - **Moderation** — an Instance Admin tier, platform-wide bans, a unified reports system, registration
-  gating.
+  gating, and instance-wide announcements for maintenance and outages: plain text, capped, confirmed
+  before sending, and meant to be rare.
 - **Self-hosting infrastructure** — SMTP and automatic HTTPS, both real and both deployment-time opt-outs.
   An instance runs fine with neither configured.
 
