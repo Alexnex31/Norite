@@ -416,7 +416,7 @@ func (s *Service) DisableTwoFactor(ctx context.Context, userID snowflake.ID, cur
 		if _, err := q.DeleteRecoveryCodesForUser(ctx, int64(userID)); err != nil {
 			return fmt.Errorf("removing the recovery codes: %w", err)
 		}
-		out, err = revokeEverything(ctx, q, int64(userID), RevocationScope{KeepDeviceID: currentDevice})
+		out, err = s.revokeEverything(ctx, q, int64(userID), RevocationScope{KeepDeviceID: currentDevice})
 		return err
 	})
 	if err != nil {

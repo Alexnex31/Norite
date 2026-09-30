@@ -207,6 +207,10 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	issuer, err := auth.NewTokenIssuer([]byte(testJWTSecret))
 	require.NoError(t, err)
 
+	bus := events.NewInProc(nil)
+	t.Cleanup(func() { _ = bus.Close() })
+	publisher := dispatch.NewPublisher(bus, nil)
+
 	svc, err := auth.NewService(auth.ServiceOptions{
 		Pool:             pool,
 		IDs:              ids,
@@ -215,6 +219,7 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		Mailer:           mailer,
 		PublicBaseURL:    publicBaseURL,
 		OAuth:            providers,
+		Events:           publisher,
 	})
 	require.NoError(t, err)
 
@@ -227,10 +232,6 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	// gives: every HTTP test drives the assembly the composition root builds.
 	// The ceilings come from config in production; the harness takes them from the same testConfig() the
 	// router does, so a test never disagrees with the instance it is running against.
-	bus := events.NewInProc(nil)
-	t.Cleanup(func() { _ = bus.Close() })
-	publisher := dispatch.NewPublisher(bus, nil)
-
 	guildsSvc, err := guilds.NewService(guilds.ServiceOptions{
 		Pool:                pool,
 		IDs:                 ids,

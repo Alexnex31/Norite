@@ -58,6 +58,9 @@ type conn struct {
 
 	mu   sync.Mutex
 	sess *session
+
+	// checkedAt is when the device last answered that it is signed in. Touched only by serve's goroutine.
+	checkedAt time.Time
 }
 
 func newConn(s *Server, ws *websocket.Conn, log *zerolog.Logger) *conn {
@@ -146,6 +149,9 @@ func (c *conn) handle(ctx context.Context, f gatewayproto.Frame) bool {
 		// Only an identified connection earns a longer deadline. Before IDENTIFY the identify timeout stands,
 		// or heartbeating alone would hold a connection open unauthenticated for as long as a client liked.
 		if identified {
+			if !c.stillSignedIn(ctx) {
+				return false
+			}
 			c.watchdog.Reset(c.heartbeatDeadline())
 		}
 		c.send(gatewayproto.OpHeartbeatAck, nil)
@@ -178,11 +184,11 @@ func (c *conn) handle(ctx context.Context, f gatewayproto.Frame) bool {
 }
 
 // authenticate is what IDENTIFY and RESUME both ask of a token: that it is an access token, that its
-// account has not identified too often, and that its device is still signed in. It closes the connection
-// saying why when the answer is no.
+// account has not identified too often, and which device it belongs to. It closes the connection saying why
+// when the answer is no. Whether that device is still signed in is checkLive's, asked separately so IDENTIFY
+// can register the session in between.
 //
-// Shared, so the two cannot drift apart. RESUME skipping any of these would make it the easier door: a
-// signed-out device resuming a stream it had before the sign-out is the case the liveness check exists for.
+// Shared, so the two cannot drift apart. RESUME skipping any of these would make it the easier door.
 func (c *conn) authenticate(ctx context.Context, token string) (auth.Actor, string, bool) {
 	// An access token only. An API token is not a JWT and fails here, which is the intent: the gateway
 	// carries everything an account can see, and a delegated credential reaching it would need a scope
@@ -200,17 +206,35 @@ func (c *conn) authenticate(ctx context.Context, token string) (auth.Actor, stri
 		return auth.Actor{}, "", false
 	}
 
-	device, err := c.srv.opts.Accounts.LiveDevice(ctx, actor.UserID, actor.SessionID)
+	device, err := c.srv.opts.Accounts.DeviceOf(ctx, actor.UserID, actor.SessionID)
 	if err != nil {
-		if errors.Is(err, auth.ErrSessionSignedOut) {
-			c.closeWith(gatewayproto.CloseAuthenticationFailed, auth.ErrSessionSignedOut.Error())
-			return auth.Actor{}, "", false
-		}
-		c.log.Error().Err(err).Msg("gateway could not check the session")
+		c.log.Error().Err(err).Msg("gateway could not look up the session")
 		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return auth.Actor{}, "", false
 	}
+	if device == "" {
+		// A token naming a session this account does not hold: not one this instance minted, so the same
+		// answer as a device that has signed out.
+		c.closeWith(gatewayproto.CloseAuthenticationFailed, auth.ErrSessionSignedOut.Error())
+		return auth.Actor{}, "", false
+	}
 	return actor, device, true
+}
+
+// checkLive asks whether device is still signed in, closing the connection when it is not. A token outlives
+// its session by up to fifteen minutes, which a request can afford and a connection cannot.
+func (c *conn) checkLive(ctx context.Context, userID snowflake.ID, device string) bool {
+	err := c.srv.opts.Accounts.RequireLiveDevice(ctx, userID, device)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, auth.ErrSessionSignedOut) {
+		c.closeWith(gatewayproto.CloseAuthenticationFailed, auth.ErrSessionSignedOut.Error())
+		return false
+	}
+	c.log.Error().Err(err).Msg("gateway could not check the session")
+	c.closeWith(gatewayproto.CloseUnknownError, "internal error")
+	return false
 }
 
 // identify authenticates the connection, starts a session, and sends READY, or closes it saying why not.
@@ -250,7 +274,7 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 		c.closeWith(gatewayproto.CloseUnknownError, "internal error")
 		return false
 	}
-	s, ok := c.srv.newSession(sessionID, actor.UserID, device)
+	s, ok := c.srv.newSession(sessionID, actor.UserID, actor.SessionID, device)
 	if !ok {
 		c.closeWith(gatewayproto.CloseRateLimited, "too many connections for this account")
 		return false
@@ -259,6 +283,16 @@ func (c *conn) identify(ctx context.Context, raw json.RawMessage) bool {
 	c.mu.Lock()
 	c.sess = s
 	c.mu.Unlock()
+
+	// Liveness is asked only now that the session is registered, which is what leaves a sign-out no gap to
+	// fall into. One committed before this read is refused by it; one committed after it publishes its
+	// revocation after commit, finds this session registered, and closes it. Asked before registering, a
+	// sign-out landing between the two would be seen by neither.
+	if !c.checkLive(ctx, actor.UserID, device) {
+		c.srv.dropSession(s)
+		return false
+	}
+	c.checkedAt = time.Now()
 
 	// The session is a fan-out candidate from here, before READY's data is read, and holds what arrives
 	// meanwhile (session.pending). Read first and register second, and an event committed in between
@@ -301,7 +335,7 @@ func (c *conn) resume(ctx context.Context, raw json.RawMessage) bool {
 	}
 
 	actor, device, ok := c.authenticate(ctx, r.Token)
-	if !ok {
+	if !ok || !c.checkLive(ctx, actor.UserID, device) {
 		return false
 	}
 
@@ -313,7 +347,11 @@ func (c *conn) resume(ctx context.Context, raw json.RawMessage) bool {
 		return true
 	}
 
-	switch s.resume(c, r.Seq) {
+	switch s.resume(c, actor.SessionID, r.Seq) {
+	case resumeEnded:
+		// Revoked or expired between the lookup and here: the same answer as a session that was never found.
+		c.send(gatewayproto.OpInvalidSess, false)
+		return true
 	case resumeInvalidSeq:
 		c.closeWith(gatewayproto.CloseInvalidSeq, "that sequence number was never sent")
 		return false
@@ -328,8 +366,37 @@ func (c *conn) resume(ctx context.Context, raw json.RawMessage) bool {
 	c.mu.Lock()
 	c.sess = s
 	c.mu.Unlock()
+	c.checkedAt = time.Now()
 	c.watchdog.Reset(c.heartbeatDeadline())
 	return true
+}
+
+// stillSignedIn is the periodic half of revocation: once LivenessInterval has passed since the device last
+// answered, a heartbeat asks again. A revocation's close normally arrives over the bus within moments, but
+// the bus is at-most-once, and without this a lost one would leave the connection open for as long as its
+// client kept it. This bounds that at the interval.
+//
+// A database that cannot answer keeps the connection and asks again on the next heartbeat. Closing instead
+// would turn a database blip into every connection on the process reconnecting at once, into the same
+// blip.
+func (c *conn) stillSignedIn(ctx context.Context) bool {
+	if time.Since(c.checkedAt) < c.srv.opts.LivenessInterval {
+		return true
+	}
+	s := c.session()
+	err := c.srv.opts.Accounts.RequireLiveDevice(ctx, s.userID, s.deviceID)
+	switch {
+	case err == nil:
+		c.checkedAt = time.Now()
+		return true
+	case errors.Is(err, auth.ErrSessionSignedOut):
+		c.srv.revoke(s)
+		c.closeWith(gatewayproto.CloseSessionRevoked, "signed out")
+		return false
+	default:
+		c.log.Warn().Err(err).Msg("gateway could not re-check a connection's sign-in; keeping it until the next heartbeat")
+		return true
+	}
 }
 
 // ready is READY's payload.

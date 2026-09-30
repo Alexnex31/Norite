@@ -12,15 +12,16 @@
 //   - **IDENTIFY asks whether the device is still signed in**, not only whether the token verifies. A token
 //     outlives its session by up to fifteen minutes, which a request can afford and a connection cannot.
 //   - **Nothing here decides who may see what.** READY carries only what the account is a member of; which
-//     events reach a connection is a fresh permission check per event (M18 part 6), never a cached one.
+//     events reach a connection is a fresh permission check per event, never a cached one.
 //   - **Every connection belongs to the server that accepted it**, which knows how to close it: on
-//     shutdown with a Reconnect, on a revoked session (part 5), on a client too slow to keep up.
+//     shutdown with a Reconnect, on a revoked sign-in, on a client too slow to keep up.
 //
 // The wire format is gatewayproto's, shared with the daemon from M19.
 package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog"
 
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
@@ -44,7 +46,8 @@ import (
 // protocol without a database, while cmd/server wires the real service.
 type Accounts interface {
 	AuthenticateAccessToken(ctx context.Context, raw string) (auth.Actor, error)
-	LiveDevice(ctx context.Context, userID, sessionID snowflake.ID) (string, error)
+	DeviceOf(ctx context.Context, userID, sessionID snowflake.ID) (string, error)
+	RequireLiveDevice(ctx context.Context, userID snowflake.ID, device string) error
 	ReadyUser(ctx context.Context, userID snowflake.ID) (any, error)
 }
 
@@ -81,7 +84,18 @@ type Options struct {
 	ResumeWindow time.Duration
 	// ResumeBuffer is how many frames a session keeps for replay. Zero means DefaultResumeBuffer.
 	ResumeBuffer int
+	// LivenessInterval is how often a connection's device is asked again whether it is still signed in.
+	// Zero means DefaultLivenessInterval.
+	LivenessInterval time.Duration
 }
+
+// DefaultLivenessInterval bounds how long a connection outlives its sign-out when the revocation meant to
+// close it is lost. The bus is at-most-once, so a revocation can be dropped, and without this a connection
+// whose close was lost would stay open for as long as its client kept it. Asked on a heartbeat once this
+// long has passed since the last answer, so it costs one indexed read per connection per interval and
+// nothing on a connection that is about to be closed for missing heartbeats anyway. Five minutes is a third
+// of the access token's life, the window §17.10 already accepts for REST.
+const DefaultLivenessInterval = 5 * time.Minute
 
 // DefaultResumeWindow is how long a disconnected session waits to be resumed. Long enough for a laptop
 // changing networks or a daemon restarting; short enough that a client which is not coming back does not
@@ -138,7 +152,8 @@ type Server struct {
 	identifyLimiter *ratelimit.Limiter
 	frameLimiter    *ratelimit.Limiter
 
-	sub events.Subscription
+	sub        events.Subscription
+	revokedSub events.Subscription
 
 	mu       sync.Mutex
 	conns    map[*conn]struct{}
@@ -170,6 +185,9 @@ func New(opts Options) (*Server, error) {
 	if opts.ResumeBuffer <= 0 {
 		opts.ResumeBuffer = DefaultResumeBuffer
 	}
+	if opts.LivenessInterval <= 0 {
+		opts.LivenessInterval = DefaultLivenessInterval
+	}
 
 	identifyLimiter, err := ratelimit.New(ratelimit.Options{
 		Rate: identifyRate, Bucket: "gateway-identify", Backend: opts.RateLimitBackend,
@@ -197,6 +215,10 @@ func New(opts Options) (*Server, error) {
 	if opts.Bus != nil {
 		if s.sub, err = opts.Bus.Subscribe(dispatch.Topic, s.onEvent); err != nil {
 			return nil, fmt.Errorf("gateway: subscribing to events: %w", err)
+		}
+		if s.revokedSub, err = opts.Bus.Subscribe(dispatch.RevocationTopic, s.onRevocation); err != nil {
+			s.sub.Unsubscribe()
+			return nil, fmt.Errorf("gateway: subscribing to revocations: %w", err)
 		}
 	}
 	return s, nil
@@ -248,6 +270,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// No new events first: a connection being told to reconnect should not be handed one more frame.
 	if s.sub != nil {
 		s.sub.Unsubscribe()
+	}
+	if s.revokedSub != nil {
+		s.revokedSub.Unsubscribe()
 	}
 	s.mu.Lock()
 	s.closing = true
@@ -310,7 +335,7 @@ func (s *Server) untrack(c *conn) {
 // rather than resuming has given its earlier stream up, and leaving it to expire would let a daemon that
 // reconnects by identifying fill its account's slots within minutes and lock itself out. Only detached
 // ones: a session with a connection attached is in use, by this device or by one sharing its id.
-func (s *Server) newSession(id string, userID snowflake.ID, device string) (*session, bool) {
+func (s *Server) newSession(id string, userID, signIn snowflake.ID, device string) (*session, bool) {
 	s.mu.Lock()
 	var superseded []*session
 	for _, old := range s.sessions {
@@ -332,7 +357,7 @@ func (s *Server) newSession(id string, userID snowflake.ID, device string) (*ses
 		return nil, false
 	}
 	s.perUser[userID]++
-	sess := &session{srv: s, id: id, userID: userID, deviceID: device}
+	sess := &session{srv: s, id: id, userID: userID, deviceID: device, signIn: signIn}
 	s.sessions[id] = sess
 	s.mu.Unlock()
 	stopAll(superseded)
@@ -363,6 +388,42 @@ func (s *Server) dropSession(sess *session) {
 	}
 	s.mu.Unlock()
 	sess.stop()
+}
+
+// onRevocation ends every session on this process that a committed revocation names: each is dropped, so it
+// cannot be resumed, and its connection is closed with CloseSessionRevoked.
+//
+// Dropped as well as closed, because closing alone would leave the stream waiting to be resumed — and
+// RESUME re-checks liveness, so it would be refused, but a session held for a client that is not allowed
+// back is a buffer of the account's events kept for nobody.
+func (s *Server) onRevocation(payload []byte) {
+	var r dispatch.Revocation
+	if err := json.Unmarshal(payload, &r); err != nil {
+		s.opts.Logger.Error().Err(err).Msg("gateway received a revocation it could not decode")
+		return
+	}
+	s.mu.Lock()
+	var ended []*session
+	for _, sess := range s.sessions {
+		if sess.userID == r.UserID && sess.revokedBy(r) {
+			ended = append(ended, sess)
+		}
+	}
+	s.mu.Unlock()
+	for _, sess := range ended {
+		s.revoke(sess)
+	}
+}
+
+// revoke ends one session whose sign-in is over.
+func (s *Server) revoke(sess *session) {
+	c := sess.takeConn()
+	s.dropSession(sess)
+	if c != nil {
+		// On its own goroutine: a close waits for queued frames to flush, and the bus delivers the next
+		// revocation only when this one returns.
+		go c.closeWith(gatewayproto.CloseSessionRevoked, "signed out")
+	}
 }
 
 // expireSession is the resume window's timer: the session goes unless it was resumed while the timer was

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
@@ -109,13 +110,16 @@ func (s *Service) RevokeSessionDevice(ctx context.Context, userID, sessionID sno
 		return ErrNotFound
 	}
 
-	if _, err := s.queries.RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
-		UserID:   int64(userID),
-		DeviceID: session.DeviceID,
-	}); err != nil {
-		return fmt.Errorf("revoking device sessions: %w", err)
-	}
-	return nil
+	// With the device's gateway connections, which is most of what signing a lost laptop out is for.
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := s.queries.WithTx(tx).RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
+			UserID:   int64(userID),
+			DeviceID: session.DeviceID,
+		}); err != nil {
+			return fmt.Errorf("revoking device sessions: %w", err)
+		}
+		return s.endConnections(ctx, dispatch.Revocation{UserID: userID, Device: session.DeviceID})
+	})
 }
 
 // RevokeOtherSessions signs out everything except the device the request came from.
@@ -143,7 +147,7 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID, currentSessio
 	var out RevocationResult
 	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		out, err = revokeEverything(ctx, s.queries.WithTx(tx), int64(userID),
+		out, err = s.revokeEverything(ctx, s.queries.WithTx(tx), int64(userID),
 			RevocationScope{KeepDeviceID: currentDevice})
 		return err
 	})
@@ -227,21 +231,22 @@ func (s *Service) currentDeviceID(ctx context.Context, userID, sessionID snowfla
 	return session.DeviceID, nil
 }
 
-// LiveDevice reports the device behind an access token's session, and refuses with ErrSessionSignedOut when
-// that device has no live session left.
+// DeviceOf reports the device behind an access token's session, or "" when the session names nothing this
+// account holds. It says nothing about whether that device is still signed in; RequireLiveDevice does.
 //
-// The gateway asks it at IDENTIFY and RESUME (M18), for the reason RequireLiveSession asks it on REST: an
-// access token outlives its session by up to AccessTokenTTL, which a single request can afford and a
-// connection cannot. Without it a token from a device signed out five minutes ago would open a stream that
-// nothing ever closes. The device is returned because revocation closes connections by device, so the
-// gateway has to know which one each connection belongs to.
-func (s *Service) LiveDevice(ctx context.Context, userID, sessionID snowflake.ID) (string, error) {
-	device, err := s.currentDeviceID(ctx, userID, sessionID)
-	if err != nil {
-		return "", err
-	}
-	if err := s.requireLiveDeviceNamed(ctx, userID, device); err != nil {
-		return "", err
-	}
-	return device, nil
+// Two methods rather than one because the gateway needs the device before it asks the question: it
+// registers a connection under its device, *then* checks liveness, so a revocation committing in between
+// finds the connection registered and closes it (M18). Asked in the other order, a sign-out landing between
+// the check and the registration would miss the connection entirely.
+func (s *Service) DeviceOf(ctx context.Context, userID, sessionID snowflake.ID) (string, error) {
+	return s.currentDeviceID(ctx, userID, sessionID)
+}
+
+// RequireLiveDevice refuses with ErrSessionSignedOut when device has no live session left on the account.
+//
+// The gateway asks it at IDENTIFY and RESUME, and again periodically on every connection, for the reason
+// RequireLiveSession asks it on REST: an access token outlives its session by up to AccessTokenTTL, which a
+// single request can afford and a connection cannot.
+func (s *Service) RequireLiveDevice(ctx context.Context, userID snowflake.ID, device string) error {
+	return s.requireLiveDeviceNamed(ctx, userID, device)
 }

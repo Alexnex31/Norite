@@ -118,3 +118,57 @@ func (p *Publisher) Queue(ctx context.Context, ev Event, data any) error {
 	})
 	return nil
 }
+
+// RevocationTopic carries revocations: which connections every gateway process must close because the
+// sign-in they were opened with has ended. Its own topic rather than an event type on Topic, because a
+// revocation is an instruction to the gateway rather than something any client receives, and it must never
+// pass through an audience check that could decide nobody is its audience.
+const RevocationTopic = "gateway.revocation"
+
+// Revocation names the connections a committed revocation ends: the account's connections opened with a
+// sign-in minted before Before, on Device if it is set, or on every device but ExceptDevice if that is set.
+//
+// Before is what keeps the close from reaching past the revocation. A revocation is published after its
+// commit and delivered some time later, and in that time the same device can sign in again and connect; that
+// connection's sign-in is newer than the cutoff and is left alone. Snowflakes are ordered by time, which is
+// what makes the comparison mean "minted before the revocation" — across replicas only as well as their
+// clocks agree, and the gateway's periodic liveness check is what bounds a close that clock skew misses.
+type Revocation struct {
+	UserID       snowflake.ID `json:"user_id"`
+	Before       snowflake.ID `json:"before"`
+	Device       string       `json:"device,omitempty"`
+	ExceptDevice string       `json:"except_device,omitempty"`
+}
+
+// Matches reports whether a connection opened by sessionID, on device, for userID, is one r ends.
+func (r Revocation) Matches(userID, sessionID snowflake.ID, device string) bool {
+	switch {
+	case userID != r.UserID, sessionID >= r.Before:
+		return false
+	case r.Device != "":
+		return device == r.Device
+	case r.ExceptDevice != "":
+		return device != r.ExceptDevice
+	}
+	return true
+}
+
+// QueueRevocation publishes r once ctx's transaction commits, like Queue: a revocation that rolled back ends
+// nothing, and closing before the commit would let a reconnect race the revoke and win.
+func (p *Publisher) QueueRevocation(ctx context.Context, r Revocation) error {
+	if p == nil || p.bus == nil {
+		return nil
+	}
+	msg, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("dispatch: encoding a revocation: %w", err)
+	}
+	database.AfterCommit(ctx, func(ctx context.Context) {
+		// Logged, not returned, for Queue's reason. A lost revocation is bounded by the gateway's periodic
+		// liveness check rather than left open for the life of the connection.
+		if err := p.bus.Publish(ctx, RevocationTopic, msg); err != nil {
+			p.logger.Error().Err(err).Msg("could not publish a gateway revocation")
+		}
+	})
+	return nil
+}

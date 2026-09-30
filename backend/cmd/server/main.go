@@ -186,23 +186,10 @@ func run() error {
 		logger.Info().Strs("providers", names).Msg("oauth sign-in enabled")
 	}
 
-	authService, err := auth.NewService(auth.ServiceOptions{
-		Pool:             pool,
-		IDs:              ids,
-		Issuer:           issuer,
-		RegistrationMode: auth.RegistrationMode(cfg.RegistrationMode),
-		Mailer:           mailer,
-		PublicBaseURL:    cfg.PublicBaseURL,
-		OAuth:            oauthProviders,
-	})
-	if err != nil {
-		logger.Error().Err(err).Msg("could not initialize the auth service")
-		return err
-	}
-
 	// The event bus: in-process unless configured otherwise, and connected before anything can publish, for
 	// the rate-limit store's reason — a Redis the process could not reach would otherwise surface as events
-	// silently going nowhere.
+	// silently going nowhere. Built before the auth service too, which publishes the revocations that close
+	// gateway connections.
 	var bus events.Bus = events.NewInProc(&logger)
 	if cfg.EventsBackend == "redis" {
 		bus, err = events.NewRedis(ctx, events.RedisOptions{URL: cfg.RedisURL, ConnectTimeout: cfg.DBConnectTimeout})
@@ -213,6 +200,21 @@ func run() error {
 	}
 	defer func() { _ = bus.Close() }()
 	publisher := dispatch.NewPublisher(bus, &logger)
+
+	authService, err := auth.NewService(auth.ServiceOptions{
+		Pool:             pool,
+		IDs:              ids,
+		Issuer:           issuer,
+		RegistrationMode: auth.RegistrationMode(cfg.RegistrationMode),
+		Mailer:           mailer,
+		PublicBaseURL:    cfg.PublicBaseURL,
+		OAuth:            oauthProviders,
+		Events:           publisher,
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("could not initialize the auth service")
+		return err
+	}
 
 	guildService, err := guilds.NewService(guilds.ServiceOptions{
 		Pool:                pool,

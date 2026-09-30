@@ -30,8 +30,12 @@ type session struct {
 	userID   snowflake.ID
 	deviceID string
 
-	mu  sync.Mutex
-	seq int64
+	mu sync.Mutex
+	// signIn is the auth session behind the token that last identified or resumed this stream. A revocation
+	// closes the streams opened with a sign-in from before it (dispatch.Revocation), and a resume with a
+	// newer token moves the stream onto the newer sign-in.
+	signIn snowflake.ID
+	seq    int64
 	// guilds is what READY listed, kept current by GUILD_CREATE and GUILD_DELETE. It picks which events
 	// this session is a candidate for and nothing more: whether it may receive one is decided against the
 	// database at fan-out (see onEvent), because this is exactly what goes stale.
@@ -42,6 +46,9 @@ type session struct {
 	// lost; register second and it is lost.
 	ready   bool
 	pending []dispatch.Event
+
+	// ended is set once the session is dropped, for any reason. Nothing resumes it afterwards.
+	ended bool
 
 	buf      []buffered
 	bufBytes int
@@ -144,6 +151,8 @@ const (
 	resumeInvalidSeq
 	// resumeGap: the buffer no longer reaches back to the client's last frame.
 	resumeGap
+	// resumeEnded: the session was dropped after the client looked it up, by a revocation or its expiry.
+	resumeEnded
 )
 
 // resume attaches c and replays every frame after afterSeq, then RESUMED, all under the lock that numbers
@@ -151,10 +160,14 @@ const (
 //
 // A connection still attached is replaced and closed: the client has evidently moved to the new one, and two
 // sockets for one stream would each see half of it.
-func (s *session) resume(c *conn, afterSeq int64) resumeResult {
+func (s *session) resume(c *conn, signIn snowflake.ID, afterSeq int64) resumeResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Attaching to a dropped session would leave a connection bound to a stream nothing delivers to.
+	if s.ended {
+		return resumeEnded
+	}
 	if afterSeq > s.seq {
 		return resumeInvalidSeq
 	}
@@ -174,6 +187,7 @@ func (s *session) resume(c *conn, afterSeq int64) resumeResult {
 		go old.closeWith(gatewayproto.CloseSessionTimedOut, "resumed on another connection")
 	}
 	s.conn = c
+	s.signIn = signIn
 	for _, b := range s.buf {
 		if b.seq > afterSeq {
 			c.enqueueFrame(b.frame)
@@ -202,6 +216,22 @@ func (s *session) detach(c *conn) {
 	s.expiry = time.AfterFunc(s.srv.opts.ResumeWindow, func() { s.srv.expireSession(s) })
 }
 
+// revokedBy reports whether r ends this session.
+func (s *session) revokedBy(r dispatch.Revocation) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return r.Matches(s.userID, s.signIn, s.deviceID)
+}
+
+// takeConn unbinds and returns the attached connection, if any, for a session being ended from outside.
+func (s *session) takeConn() *conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.conn
+	s.conn = nil
+	return c
+}
+
 // stop ends the session's timer, for a session being dropped for any reason.
 func (s *session) stop() {
 	s.mu.Lock()
@@ -211,4 +241,5 @@ func (s *session) stop() {
 		s.expiry = nil
 	}
 	s.buf, s.pending = nil, nil
+	s.ended = true
 }

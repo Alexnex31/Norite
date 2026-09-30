@@ -196,7 +196,7 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 		// Everything the old password could reach is revoked in the same transaction, through the one
 		// primitive every caller shares (CLAUDE.md rule 17). The reasoning for each step lives on that
 		// function rather than here: this path is one of its callers now, not its owner.
-		if _, err := revokeEverything(ctx, q, token.UserID, RevocationScope{}); err != nil {
+		if _, err := s.revokeEverything(ctx, q, token.UserID, RevocationScope{}); err != nil {
 			return err
 		}
 
