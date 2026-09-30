@@ -881,10 +881,13 @@ number the same query already had in hand. Standing is meaningless for an owner 
 `@everyone`'s position, so it is unexported and read only through `Outranks`/`OutranksMember`, which ask
 about ownership first.
 
-**It is not cached, and will not be until M18.** The cache this paragraph used to describe is invalidated
-by a gateway dispatch, and there is no gateway until M18 — a cache with nothing to invalidate it is a
-demotion that takes effect five minutes late, which is a security failure rather than a slow path. M12
-built it as one indexed read per check; the cache lands with the signal that can clear it. See
+**It is not cached, and M18 decided it still should not be.** The cache this paragraph used to describe
+is invalidated by a gateway dispatch, which is why M12 left it for M18. But on the flagship that
+invalidation crosses replicas over Redis pub/sub, which is asynchronous, so a demotion would take effect
+*eventually*: the stale decision rule 1 exists to refuse. So the gateway's fan-out resolves each event's
+recipients against fresh rows instead, in one batched query per event, bounded by the guild's *connected*
+members. A cache comes later only if a measurement asks for one, and only with an invalidation that is
+synchronous with the change. M12 built resolution as one indexed read per check, and that stands. See
 [ADR 0008](adr/0008-guild-authority-hierarchy.md) for the full consolidated authority hierarchy, including
 the parts that deliberately sit **outside** `roles.Resolve` entirely:
 
@@ -911,16 +914,35 @@ trusting a potentially-skewed OS clock for JWT-expiry checks.
 
 ```json
 // server -> client, immediately on connect
-{"op":10,"d":{"heartbeat_interval":41250,"server_time":"2026-01-01T00:00:00.000Z"}}
+{"op":10,"d":{"heartbeat_interval":41250,"server_time":"2026-01-01T00:00:00.000Z","version":"0.1.0"}}
 // client -> server, first frame after Hello
-{"op":2,"d":{"token":"<bearer access token>","properties":{"os":"linux","client":"daemon"},"intents":0}}
-// server -> client — READY payload sends guild/channel metadata upfront; full per-guild member lists and
-// other bulk state are deferred until a guild is actually opened (lazy per-guild loading), keeping this
-// payload's size from scaling linearly with total guild count for accounts in many guilds
-{"op":0,"s":1,"t":"READY","d":{"session_id":"...","user":{...},"guilds":[...],"dm_channels":[...],"presences":[...]}}
-// client -> server, on reconnect
-{"op":6,"d":{"session_id":"...","seq":57}}
+{"op":2,"d":{"token":"<bearer access token>","properties":{"os":"linux","client":"daemon","version":"0.1.0"},"intents":0}}
+// server -> client — READY carries a summary per guild (id, name, owner, icon) and nothing bulk: channels,
+// roles and member lists are fetched when a guild is actually opened (lazy per-guild loading). At the
+// joined-guild cap that is ~20 KB at worst; carrying each guild's channels too would be ~12.5 MB at 100
+// guilds of 500 channels, which is why it does not (M18)
+{"op":0,"s":1,"t":"READY","d":{"session_id":"...","user":{...},"guilds":[...]}}
+// client -> server, on reconnect: the token again, not the session id alone
+{"op":6,"d":{"token":"<bearer access token>","session_id":"...","seq":57}}
 ```
+
+**Both IDENTIFY and RESUME ask whether the token's device is still signed in** (M18), the check
+`RequireLiveSession` makes on REST. An access token outlives its session by up to fifteen minutes
+(§17.10), which a REST request can afford and a connection cannot: without the check, a token from a
+session signed out five minutes ago would open a stream nothing ever closes. **RESUME carries the token**
+for the same reason, and must name the account the session belongs to. With the session id alone,
+whoever read one from a log line or a crash report could resume somebody else's stream. Revoking a
+device's sessions, by any of the five paths that do it, closes that device's connections once the
+revocation commits.
+
+`dm_channels` and `presences` are absent from READY until M57 and M38 fill them. Adding a field later is
+additive; one shipped empty would claim an account has no DMs.
+
+**Versions**: HELLO carries the server's release version and IDENTIFY the client's, compared under
+[ADR 0033](adr/0033-semver-release-progression.md)'s strict rule ("Protocol version compatibility" in §3).
+A build with no version stamped (`dev`, from a `go build` of a checkout) is compatible with anything, and
+both sides log that the check was skipped. `dev` only exists where somebody built from source, and a
+self-hoster building their own server must not lock out every released client.
 
 The daemon **stream-decodes** (`json.Decoder`) this payload rather than buffering it fully before parsing.
 

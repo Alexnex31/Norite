@@ -877,8 +877,10 @@ of this section.
 
 - **M18 — Gateway protocol core (backend)**: op-codes, the HELLO/IDENTIFY/READY handshake (carrying the
   backend's current server time for client clock-offset calculation), heartbeat, RESUME, DISPATCH, backed by
-  `coder/websocket`. The initial READY payload sends guild/channel metadata upfront but defers full member
-  lists/bulk per-guild state until a guild is actually opened (lazy per-guild loading).
+  `coder/websocket`. The initial READY payload sends a summary of each guild upfront and defers
+  everything bulk (channels, roles, member lists) until a guild is actually opened (lazy per-guild
+  loading). Channels were upfront in this sentence until planning priced them at ~12.5 MB for an account
+  at the joined-guild cap of 100 guilds of 500 channels each.
 
   **Also close M11's first gap: force-closing live connections when an account's sessions are revoked.**
   `auth.revokeEverything` carries the step as a named comment because there was nothing to close; the close
@@ -1015,7 +1017,10 @@ of this section.
   **It builds `GET /users/@me/guilds`, which §2 lists and nothing owned.** Without it no verb can tell a
   person which guilds they are in, and every other verb takes a guild id. Uncursored and bounded, like the
   channel and role lists: accounts own at most 50 guilds (M12), joining does not exist until M57, and M72a's
-  joined cap of 100 is already the READY payload bound. M18's READY is its second consumer.
+  joined cap of 100 is already the READY payload bound. **The membership query already exists by then**:
+  M18's READY needs "which guilds is this account in" first, so M18 writes the query and this milestone
+  adds the REST route over it. This line called READY the query's second consumer until M18's planning
+  noticed M18 comes first.
 
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
@@ -1740,9 +1745,11 @@ of this section.
   per-user seam ADR 0007 reserved and no v1 code path has used. An ordinary account gets 50/100, a flagship
   subscriber more, an Instance Admin the maximum. Two consequences: **only an Instance Admin may write
   `user_entitlements`**, and that write is a rule-14 action in `instance_audit_log`, or a subscriber grants
-  themselves 5,000 guilds. And **the joined cap is the READY payload bound** (§15.2) — that payload carries
-  guild and channel metadata upfront, so this number is what stops it scaling without limit, which is why
-  it is 100 rather than a larger round number.
+  themselves 5,000 guilds. And **the joined cap is the READY payload bound** (§15.2), so this number is
+  what stops it scaling without limit, which is why it is 100 rather than a larger round number. **M18
+  made that bound small** by sending a summary per guild and no channels (~20 KB at 100 guilds). This
+  paragraph was written assuming READY carried every guild's channels, which at 500 channels a guild would
+  have made the bound ~12.5 MB.
 
   ADR 0007 and ADR 0032 both describe `user_entitlements` as inert and unused by any v1 code path. This is
   the milestone that stops being true, and both say so.
@@ -2318,6 +2325,16 @@ does not appear to disagree with them.
   Done when: a client connected to one API replica receives an event published by another, and a rate limit
   counts across replicas rather than per pod — the second being the half that silently multiplies the
   configured limit by the replica count if it is missed.
+
+  **And RESUME across replicas, noted at M18's planning (2026-09-30).**
+  - **Why it fails today:** M18's replay buffer lives in the process that owns the session. A client
+    whose reconnect lands on a different replica is answered with Invalid Session, and has to identify
+    again and resync, losing nothing but time.
+  - **Why it went unnoticed:** M18's `redis` test matrix covers fan-out and rate limits, not this, because
+    there is one process.
+  - **The choice owed here:** a replay buffer shared across replicas, or sticky routing at the Ingress.
+  - **The done-when this adds:** a gateway client resuming against a replica other than the one it
+    identified on either resumes without losing events, or is told to re-identify and does.
 - **M115 — In-cluster object storage for attachments**: an S3-compatible backend for attachments (M58),
   and only attachments now that M113 backs up to volume snapshots.
 
