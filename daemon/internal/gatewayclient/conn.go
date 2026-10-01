@@ -86,6 +86,18 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 	seq.Store(c.seq)
 	acked.Store(true)
 
+	// The sign-in this connection streams can end while it is open — a logout whose hand-back did not reach
+	// the instance leaves the server no reason to close it. So the client closes it, and the sink forgets.
+	var signedOut atomic.Bool
+	go func() {
+		select {
+		case <-c.creds.Ended(cred.Generation):
+			signedOut.Store(true)
+			_ = ws.Close(websocket.StatusNormalClosure, "signed out")
+		case <-readCtx.Done():
+		}
+	}()
+
 	if err := c.open(ctx, ws, token); err != nil {
 		return outcome{ending: endResume, token: token}
 	}
@@ -99,6 +111,13 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 		_, data, err := ws.Read(readCtx)
 		if err != nil {
 			c.seq = seq.Load()
+			if signedOut.Load() {
+				c.log.Info().Msg("the account signed out; closed the gateway connection")
+				c.sink.End()
+				c.sessionID, c.seq = "", 0
+				out.ending = endAgain
+				return out
+			}
 			if missed.Load() {
 				c.log.Warn().Msg("the gateway stopped acknowledging heartbeats; reconnecting")
 				out.ending = endResume

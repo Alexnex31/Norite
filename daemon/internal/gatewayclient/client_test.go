@@ -264,11 +264,14 @@ func (c *fakeConn) handshake(sessionID string) gatewayproto.Identify {
 // ---------- fakes for the daemon's side ----------
 
 type fakeCreds struct {
-	mu       sync.Mutex
-	cred     session.Credential
-	rejected []string
-	revoked  int
-	observed []time.Time
+	mu   sync.Mutex
+	cred session.Credential
+	// ended closes when the test ends the sign-in; signedOut then makes Current wait, as the real one does.
+	ended     chan struct{}
+	signedOut bool
+	rejected  []string
+	revoked   int
+	observed  []time.Time
 	// order records Observe and Current calls, to assert HELLO's clock is sampled before the token.
 	order []string
 }
@@ -276,13 +279,38 @@ type fakeCreds struct {
 func newFakeCreds(instanceURL string) *fakeCreds {
 	return &fakeCreds{cred: session.Credential{
 		InstanceURL: instanceURL, Username: "ada", AccessToken: "eyJ.access.1", Generation: 1,
-	}}
+	}, ended: make(chan struct{})}
+}
+
+func (f *fakeCreds) Ended(generation uint64) <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if generation != f.cred.Generation {
+		c := make(chan struct{})
+		close(c)
+		return c
+	}
+	return f.ended
+}
+
+// signOut ends the sign-in, as a logout does.
+func (f *fakeCreds) signOut() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.signedOut = true
+	close(f.ended)
 }
 
 func (f *fakeCreds) Current(ctx context.Context) (session.Credential, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.order = append(f.order, "current")
+	if f.signedOut {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return session.Credential{}, ctx.Err()
+	}
 	if err := ctx.Err(); err != nil {
 		return session.Credential{}, err
 	}
@@ -334,6 +362,12 @@ func (s *recordingSink) Begin(generation uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, "begin")
+}
+
+func (s *recordingSink) End() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, "end")
 }
 
 func (s *recordingSink) Dispatch(eventType string, _ json.RawMessage) {
@@ -594,6 +628,7 @@ func TestEachCloseCodeGetsItsAnswer(t *testing.T) {
 			}
 			if tc.revoked {
 				assert.Equal(t, 1, got.revoked, "the session is told the sign-in ended")
+				assert.Contains(t, h.sink.seen(), "end", "and the state forgets the account at once")
 			} else {
 				assert.Zero(t, got.revoked)
 			}
@@ -637,6 +672,21 @@ func TestASignInThatChangesStartsAFreshSession(t *testing.T) {
 	var id gatewayproto.Identify
 	require.NoError(t, json.Unmarshal(f.D, &id))
 	assert.Equal(t, "eyJ.grace", id.Token, "a RESUME would name the previous sign-in's session")
+}
+
+// A logout whose hand-back never reached the instance leaves the server no reason to close the connection,
+// and the daemon would go on streaming, and storing, an account nobody is signed in as (M19 /code-review).
+func TestASignInThatEndsClosesTheConnectionAndIsForgotten(t *testing.T) {
+	h := start(t)
+	c := h.g.next()
+	c.handshake("sess-1")
+	require.Eventually(t, func() bool { return len(h.sink.seen()) == 2 }, time.Second, time.Millisecond)
+
+	h.creds.signOut()
+	assert.Equal(t, websocket.StatusNormalClosure, c.closedWith())
+	require.Eventually(t, func() bool { s := h.sink.seen(); return s[len(s)-1] == "end" },
+		time.Second, time.Millisecond, "the sink must forget the account")
+	h.g.noConnectionWithin(100 * time.Millisecond)
 }
 
 func TestAPanickingSinkCostsTheConnectionNotTheDaemon(t *testing.T) {

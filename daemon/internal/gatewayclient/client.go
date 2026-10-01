@@ -41,6 +41,8 @@ type Credentials interface {
 	Rejected(accessToken string)
 	Revoked()
 	ObserveServerTime(t time.Time)
+	// Ended is closed once the sign-in of that generation is over: the connection streaming it must close.
+	Ended(generation uint64) <-chan struct{}
 }
 
 // Sink receives what the gateway sends. Called from one goroutine, in sequence order.
@@ -50,6 +52,10 @@ type Sink interface {
 	Begin(generation uint64)
 	// Dispatch delivers one event: its name and its payload exactly as the server sent it.
 	Dispatch(eventType string, data json.RawMessage)
+	// End says the sign-in is over — signed out, revoked, or replaced by another account's. Whatever the
+	// sink holds belongs to an account nobody on this machine is signed in as any more, and must go before
+	// anything reads it, not at the next IDENTIFY, which a signed-out daemon never sends (M19 /code-review).
+	End()
 }
 
 // Options configures a Client.
@@ -169,6 +175,9 @@ func (c *Client) Run(ctx context.Context) {
 		if cred.Generation != c.generation {
 			// A different sign-in. A RESUME names a session the previous sign-in started, and the server
 			// would refuse it — or, worse, the instance itself may be a different one.
+			if c.generation != 0 {
+				c.sink.End()
+			}
 			c.generation, c.sessionID, c.seq = cred.Generation, "", 0
 		}
 
@@ -201,7 +210,7 @@ const (
 	endRateLimited               // 4008
 	endVersion                   // 4010, or HELLO named a version this daemon cannot talk to
 	endProtocol                  // a close that says this client sent something it should not have
-	endAgain                     // the sign-in changed mid-handshake: start over at once
+	endAgain                     // the sign-in changed or ended: start over at once, waiting on the session
 )
 
 type outcome struct {
@@ -230,6 +239,7 @@ func (c *Client) after(out outcome, retry *backoff.Backoff) time.Duration {
 		// The sign-in is over — revoked, or superseded by a `norite login` on this machine. The session
 		// reads the store; Current blocks until there is something to sign in with.
 		c.creds.Revoked()
+		c.sink.End()
 		c.sessionID, c.seq = "", 0
 		return c.retryMin
 

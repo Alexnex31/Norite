@@ -236,6 +236,39 @@ func TestAPermissionChangeOrARemovalClearsTheBuffers(t *testing.T) {
 	}
 }
 
+// A signed-out daemon sends no IDENTIFY, so nothing else would clear what the account left behind.
+func TestTheSignInEndingForgetsEverything(t *testing.T) {
+	s, _ := newState(Limits{})
+	s.Begin(3)
+	s.Dispatch("READY", readyPayload("ada", "Ada", guild("10", "Ten")))
+	s.Dispatch("MESSAGE_CREATE", message("1", "30", "private words"))
+
+	s.End()
+	_, ok := s.User()
+	assert.False(t, ok)
+	assert.Empty(t, s.Guilds())
+	assert.Nil(t, s.Messages("30"))
+	assert.Zero(t, s.Bytes())
+	assert.Zero(t, s.Generation())
+}
+
+// A channel deleted to remove what was said in it takes its messages with it, here as at the instance.
+func TestADeletedChannelsMessagesGoWithIt(t *testing.T) {
+	s, _ := newState(Limits{})
+	s.Begin(1)
+	s.Dispatch("MESSAGE_CREATE", message("1", "30", "abusive"))
+	s.Dispatch("MESSAGE_CREATE", message("2", "31", "unrelated"))
+	s.Dispatch("CHANNEL_DELETE", mustJSON(map[string]any{"id": "30", "guild_id": "10"}))
+
+	assert.Nil(t, s.Messages("30"))
+	assert.Equal(t, []string{"unrelated"}, contents(s.Messages("31")))
+	assert.Equal(t, charge(message("2", "31", "unrelated")), s.Bytes())
+
+	// The channel's place in the eviction order went too: filling the budget evicts what remains.
+	s.Dispatch("MESSAGE_CREATE", message("3", "32", "later"))
+	assert.Len(t, s.Messages("32"), 1)
+}
+
 func TestEachChannelKeepsItsMostRecentMessages(t *testing.T) {
 	s, _ := newState(Limits{MessagesPerChannel: 3})
 	s.Begin(1)

@@ -22,6 +22,9 @@
 //
 //   - a fresh session (Begin) clears everything: events were missed between the old session and the new one,
 //     and history with a silent gap in it is a quiet lie, where an empty buffer refilled over REST is not;
+//   - the sign-in ending (End) clears everything, for the same reason and because nobody is signed in as that
+//     account any more;
+//   - CHANNEL_DELETE drops that channel's buffer: its messages went with it at the instance;
 //   - GUILD_PERMISSIONS_UPDATE and GUILD_DELETE clear every message buffer. A channel that drops out of view
 //     stops receiving its edits and deletes, so a message a moderator removed would stay here indefinitely.
 //     Every buffer and not only the guild's, because a Message names its channel and not its guild, and the
@@ -156,6 +159,17 @@ func (s *State) Begin(generation uint64) {
 	s.dropMessagesLocked()
 }
 
+// End forgets everything, because the sign-in it was built from is over. A signed-out daemon sends no
+// IDENTIFY, so waiting for the next Begin would leave the account's messages readable indefinitely.
+func (s *State) End() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generation = 0
+	s.user = nil
+	s.guilds = map[string]Guild{}
+	s.dropMessagesLocked()
+}
+
 // Dispatch applies one event.
 func (s *State) Dispatch(eventType string, data json.RawMessage) {
 	var err error
@@ -177,6 +191,17 @@ func (s *State) Dispatch(eventType string, data json.RawMessage) {
 			s.mu.Lock()
 			delete(s.guilds, gone.ID)
 			s.dropMessagesLocked()
+			s.mu.Unlock()
+		}
+	case "CHANNEL_DELETE":
+		// Its messages went with it at the instance. A moderator deleting a channel to remove what was said
+		// in it must not leave this daemon holding it (M19 /code-review).
+		var gone struct {
+			ID string `json:"id"`
+		}
+		if err = json.Unmarshal(data, &gone); err == nil {
+			s.mu.Lock()
+			s.dropChannelLocked(gone.ID)
 			s.mu.Unlock()
 		}
 	case "GUILD_PERMISSIONS_UPDATE":
@@ -351,6 +376,16 @@ func (s *State) removeLocked(channelID, messageID string) {
 			return
 		}
 	}
+}
+
+func (s *State) dropChannelLocked(id string) {
+	b := s.channels[id]
+	if b == nil {
+		return
+	}
+	s.bytes -= b.bytes
+	s.recency.Remove(b.place)
+	delete(s.channels, id)
 }
 
 func (s *State) dropMessagesLocked() {

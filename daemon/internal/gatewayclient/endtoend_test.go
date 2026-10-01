@@ -128,6 +128,16 @@ func TestTheDaemonAloneStaysConnectedAndBuildsItsState(t *testing.T) {
 	assert.Equal(t, []string{"four"}, held("30"))
 
 	mu.Lock()
-	defer mu.Unlock()
 	assert.Equal(t, 1, refreshes, "a fifteen-minute token covers the whole test; nothing refreshed for nothing")
+	mu.Unlock()
+
+	// `norite logout`. The daemon hands its token back — to an endpoint this stand-in does not serve, which
+	// is the case where the instance never closes the connection — and closes it itself, forgetting the
+	// account rather than keeping its messages for whoever reads the state next.
+	require.NoError(t, store.Clear())
+	src.Reload()
+	assert.Equal(t, websocket.StatusNormalClosure, c3.closedWith())
+	require.Eventually(t, func() bool { _, ok := st.User(); return !ok && held("30") == nil },
+		2*time.Second, time.Millisecond)
+	assert.Empty(t, st.Guilds())
 }
