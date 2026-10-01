@@ -35,13 +35,13 @@
 //
 // Names — the account's username and display name, a guild's name — go through termsafe.Text as they
 // arrive (rule 19). They are what people identify each other by, so they are what a spoofer forges, and they
-// are written to this daemon's log, which is read in a terminal. Message content and a guild's description
-// are kept exactly as sent: what is safe to show is the renderer's decision (rule 9's markdown subset at
+// are written to this daemon's log, which is read in a terminal. Message content is kept exactly as sent: what is safe to show is the renderer's decision (rule 9's markdown subset at
 // M20a), and a sanitizer here would destroy, for every later consumer, the text M20's lossless `--json`
 // exists to preserve. Content is never logged.
 package state
 
 import (
+	"container/list"
 	"encoding/json"
 	"sync"
 
@@ -54,15 +54,31 @@ import (
 // Limits bound what the state holds. A count per channel bounds nothing in total — the guild caps alone
 // allow fifty thousand channels and a message may be 4,000 runes — so there is a byte budget across every
 // buffer as well, and the channel that went quiet longest goes first.
+//
+// Bounded against the instance, not only against an instance behaving well. The instance is a stranger's
+// server (rule 19 treats its text that way), and every limit here holds whatever it sends: a message is
+// charged its whole payload rather than its content, and guild summaries are capped in number and length,
+// where the real server's own validation would have bounded them for it (M19 /security-sweep).
 type Limits struct {
 	// MessagesPerChannel is how many recent messages a channel keeps.
 	MessagesPerChannel int
-	// TotalBytes is the budget across every channel's buffer, estimated (messageSize).
+	// TotalBytes is the budget across every channel's buffer, charged per message as its payload's length.
 	TotalBytes int
 }
 
 // DefaultLimits are 200 messages a channel and 64 MiB in all.
 var DefaultLimits = Limits{MessagesPerChannel: 200, TotalBytes: 64 << 20}
+
+const (
+	// maxGuilds is ten times the joined-guild cap the server enforces (M72a's 100): room for that cap to
+	// grow, and none for an instance announcing guilds without limit.
+	maxGuilds = 1000
+	// maxNameRunes is the server's own limit on a guild name. A longer one did not come from a server
+	// validating its input, and is cut rather than stored at whatever length arrived.
+	maxNameRunes = 100
+	// entryOverhead is charged on top of each payload for the bookkeeping that holds it.
+	entryOverhead = 64
+)
 
 // User is the signed-in account, as READY described it.
 type User struct {
@@ -71,12 +87,12 @@ type User struct {
 	DisplayName string // sanitized
 }
 
-// Guild is a guild summary.
+// Guild is a guild summary: what READY carries, and no more. A guild's description is not kept — nothing a
+// summary is for needs it, and it is the one free-text field a guild has.
 type Guild struct {
-	ID          string
-	Name        string // sanitized
-	OwnerID     string
-	Description *string // as sent
+	ID      string
+	Name    string // sanitized, at most maxNameRunes
+	OwnerID string
 }
 
 // Message is a message as the gateway sent it. Content is as sent and unsanitized: see the package comment.
@@ -92,14 +108,21 @@ type State struct {
 	user       *User
 	guilds     map[string]Guild
 	channels   map[string]*buffer
-	bytes      int
-	tick       uint64 // orders channel activity for eviction
+	// recency orders channels by activity, most recent at the front, so evicting the quietest is O(1)
+	// whatever the number of channels — which an instance, not the daemon, decides.
+	recency *list.List
+	bytes   int
 }
 
 type buffer struct {
-	messages []Message
-	bytes    int
-	active   uint64
+	entries []entry
+	bytes   int
+	place   *list.Element // in recency; its value is the channel id
+}
+
+type entry struct {
+	message Message
+	size    int
 }
 
 // New builds an empty State. Zero limits mean DefaultLimits.
@@ -112,7 +135,7 @@ func New(log zerolog.Logger, limits Limits) *State {
 	}
 	return &State{
 		log: log, limits: limits,
-		guilds: map[string]Guild{}, channels: map[string]*buffer{},
+		guilds: map[string]Guild{}, channels: map[string]*buffer{}, recency: list.New(),
 	}
 }
 
@@ -137,7 +160,7 @@ func (s *State) Dispatch(eventType string, data json.RawMessage) {
 		var g apicontract.Guild
 		if err = json.Unmarshal(data, &g); err == nil {
 			s.mu.Lock()
-			s.guilds[g.Id] = guildOf(g)
+			s.putGuildLocked(g)
 			s.mu.Unlock()
 		}
 	case "GUILD_DELETE":
@@ -158,14 +181,14 @@ func (s *State) Dispatch(eventType string, data json.RawMessage) {
 		var m Message
 		if err = json.Unmarshal(data, &m); err == nil {
 			s.mu.Lock()
-			s.addLocked(m)
+			s.addLocked(entry{message: m, size: len(data) + entryOverhead})
 			s.mu.Unlock()
 		}
 	case "MESSAGE_UPDATE":
 		var m Message
 		if err = json.Unmarshal(data, &m); err == nil {
 			s.mu.Lock()
-			s.replaceLocked(m)
+			s.replaceLocked(entry{message: m, size: len(data) + entryOverhead})
 			s.mu.Unlock()
 		}
 	case "MESSAGE_DELETE":
@@ -203,59 +226,70 @@ func (s *State) ready(data json.RawMessage) error {
 		Username:    termsafe.Text(r.User.Username),
 		DisplayName: termsafe.Text(r.User.DisplayName),
 	}
-	guilds := make(map[string]Guild, len(r.Guilds))
-	for _, g := range r.Guilds {
-		guilds[g.Id] = guildOf(g)
-	}
 
 	s.mu.Lock()
 	s.user = &user
-	s.guilds = guilds
+	s.guilds = map[string]Guild{}
+	for _, g := range r.Guilds {
+		s.putGuildLocked(g)
+	}
+	count := len(s.guilds)
 	s.mu.Unlock()
 
 	// Names a stranger's instance chose, sanitized on the way in rather than relying on `norite login` to
 	// have done it — the case M7 deferred to here.
 	s.log.Info().Str("username", user.Username).Str("display_name", user.DisplayName).
-		Int("guilds", len(guilds)).Msg("ready")
+		Int("guilds", count).Msg("ready")
 	return nil
 }
 
-func guildOf(g apicontract.Guild) Guild {
-	return Guild{ID: g.Id, Name: termsafe.Text(g.Name), OwnerID: g.OwnerId, Description: g.Description}
+// putGuildLocked stores a guild summary, refusing a new one past maxGuilds.
+func (s *State) putGuildLocked(g apicontract.Guild) {
+	if _, known := s.guilds[g.Id]; !known && len(s.guilds) >= maxGuilds {
+		s.log.Warn().Int("limit", maxGuilds).Msg("the instance announced more guilds than this daemon keeps; " +
+			"ignoring the rest")
+		return
+	}
+	s.guilds[g.Id] = Guild{ID: g.Id, Name: truncateRunes(termsafe.Text(g.Name), maxNameRunes), OwnerID: g.OwnerId}
 }
 
-// messageSize estimates what a message costs to hold: its content and a fixed allowance for the rest. An
-// estimate on purpose — the budget bounds growth, it does not account for every byte.
-func messageSize(m Message) int { return len(m.Content) + 256 }
-
-func (s *State) addLocked(m Message) {
-	b := s.channels[m.ChannelId]
-	if b == nil {
-		b = &buffer{}
-		s.channels[m.ChannelId] = b
+func truncateRunes(s string, n int) string {
+	for i := range s {
+		if n == 0 {
+			return s[:i]
+		}
+		n--
 	}
-	for _, have := range b.messages {
-		if have.Id == m.Id {
+	return s
+}
+
+func (s *State) addLocked(e entry) {
+	id := e.message.ChannelId
+	b := s.channels[id]
+	if b == nil {
+		b = &buffer{place: s.recency.PushFront(id)}
+		s.channels[id] = b
+	}
+	for _, have := range b.entries {
+		if have.message.Id == e.message.Id {
 			return // a replay after RESUME can repeat what was already applied
 		}
 	}
-	s.tick++
-	b.active = s.tick
-	b.messages = append(b.messages, m)
-	size := messageSize(m)
-	b.bytes += size
-	s.bytes += size
+	s.recency.MoveToFront(b.place)
+	b.entries = append(b.entries, e)
+	b.bytes += e.size
+	s.bytes += e.size
 
-	for len(b.messages) > s.limits.MessagesPerChannel {
+	for len(b.entries) > s.limits.MessagesPerChannel {
 		s.trimOldestLocked(b)
 	}
-	s.enforceBudgetLocked(m.ChannelId)
+	s.enforceBudgetLocked(id)
 }
 
 func (s *State) trimOldestLocked(b *buffer) {
-	size := messageSize(b.messages[0])
-	b.messages[0] = Message{}
-	b.messages = b.messages[1:]
+	size := b.entries[0].size
+	b.entries[0] = entry{}
+	b.entries = b.entries[1:]
 	b.bytes -= size
 	s.bytes -= size
 }
@@ -264,41 +298,34 @@ func (s *State) trimOldestLocked(b *buffer) {
 // to is evicted last: it is the one somebody is most likely looking at.
 func (s *State) enforceBudgetLocked(keep string) {
 	for s.bytes > s.limits.TotalBytes {
-		victim, oldest := "", uint64(0)
-		for id, b := range s.channels {
-			if id == keep {
-				continue
-			}
-			if victim == "" || b.active < oldest {
-				victim, oldest = id, b.active
-			}
-		}
-		if victim == "" {
-			// Only the channel just written to is left, and it alone is over budget: trim it instead.
-			b := s.channels[keep]
-			if len(b.messages) <= 1 {
-				return
-			}
-			s.trimOldestLocked(b)
+		back := s.recency.Back()
+		if victim := back.Value.(string); victim != keep { //nolint:forcetypeassert // only strings are pushed
+			s.bytes -= s.channels[victim].bytes
+			s.recency.Remove(back)
+			delete(s.channels, victim)
 			continue
 		}
-		s.bytes -= s.channels[victim].bytes
-		delete(s.channels, victim)
+		// Only the channel just written to is left, and it alone is over budget: trim it instead.
+		b := s.channels[keep]
+		if len(b.entries) <= 1 {
+			return
+		}
+		s.trimOldestLocked(b)
 	}
 }
 
-func (s *State) replaceLocked(m Message) {
-	b := s.channels[m.ChannelId]
+func (s *State) replaceLocked(e entry) {
+	b := s.channels[e.message.ChannelId]
 	if b == nil {
 		return
 	}
-	for i := range b.messages {
-		if b.messages[i].Id == m.Id {
-			delta := messageSize(m) - messageSize(b.messages[i])
-			b.messages[i] = m
+	for i := range b.entries {
+		if b.entries[i].message.Id == e.message.Id {
+			delta := e.size - b.entries[i].size
+			b.entries[i] = e
 			b.bytes += delta
 			s.bytes += delta
-			s.enforceBudgetLocked(m.ChannelId)
+			s.enforceBudgetLocked(e.message.ChannelId)
 			return
 		}
 	}
@@ -309,10 +336,10 @@ func (s *State) removeLocked(channelID, messageID string) {
 	if b == nil {
 		return
 	}
-	for i := range b.messages {
-		if b.messages[i].Id == messageID {
-			size := messageSize(b.messages[i])
-			b.messages = append(b.messages[:i], b.messages[i+1:]...)
+	for i := range b.entries {
+		if b.entries[i].message.Id == messageID {
+			size := b.entries[i].size
+			b.entries = append(b.entries[:i], b.entries[i+1:]...)
 			b.bytes -= size
 			s.bytes -= size
 			return
@@ -322,6 +349,7 @@ func (s *State) removeLocked(channelID, messageID string) {
 
 func (s *State) dropMessagesLocked() {
 	s.channels = map[string]*buffer{}
+	s.recency.Init()
 	s.bytes = 0
 }
 
@@ -357,7 +385,11 @@ func (s *State) Messages(channelID string) []Message {
 	if b == nil {
 		return nil
 	}
-	return append([]Message(nil), b.messages...)
+	out := make([]Message, len(b.entries))
+	for i, e := range b.entries {
+		out[i] = e.message
+	}
+	return out
 }
 
 // Bytes reports the estimated size of every buffer together.

@@ -243,32 +243,78 @@ func TestEachChannelKeepsItsMostRecentMessages(t *testing.T) {
 		s.Dispatch("MESSAGE_CREATE", message(fmt.Sprint(i), "30", fmt.Sprint("m", i)))
 	}
 	assert.Equal(t, []string{"m2", "m3", "m4"}, contents(s.Messages("30")))
-	assert.Equal(t, 3*(2+256), s.Bytes())
+	assert.Equal(t, 3*charge(message("2", "30", "m2")), s.Bytes())
 }
 
 // The guild caps allow fifty thousand channels, so a count per channel bounds nothing in total. The budget
 // does, and the channel that went quiet longest goes first.
+// charge is what holding a message costs against the budget: its whole payload, and the bookkeeping.
+func charge(payload json.RawMessage) int { return len(payload) + entryOverhead }
+
 func TestTheByteBudgetEvictsTheQuietestChannel(t *testing.T) {
-	s, _ := newState(Limits{MessagesPerChannel: 100, TotalBytes: 3 * (256 + 10)})
+	one := charge(message("1", "a", "0123456789"))
+	s, _ := newState(Limits{MessagesPerChannel: 100, TotalBytes: 3 * one})
 	s.Begin(1)
 	s.Dispatch("MESSAGE_CREATE", message("1", "a", "0123456789"))
 	s.Dispatch("MESSAGE_CREATE", message("2", "b", "0123456789"))
 	s.Dispatch("MESSAGE_CREATE", message("3", "c", "0123456789"))
 	s.Dispatch("MESSAGE_CREATE", message("4", "a", "0123456789")) // a is active again
-	assert.LessOrEqual(t, s.Bytes(), 3*(256+10))
+	assert.LessOrEqual(t, s.Bytes(), 3*one)
 	assert.Nil(t, s.Messages("b"), "the quietest channel is evicted")
 	assert.Len(t, s.Messages("a"), 2)
 	assert.Len(t, s.Messages("c"), 1)
 }
 
 func TestAChannelAloneOverBudgetIsTrimmedRatherThanLetGrow(t *testing.T) {
-	s, _ := newState(Limits{MessagesPerChannel: 100, TotalBytes: 2 * (256 + 10)})
+	one := charge(message("1", "a", "0123456789"))
+	s, _ := newState(Limits{MessagesPerChannel: 100, TotalBytes: 2 * one})
 	s.Begin(1)
 	for i := range 5 {
 		s.Dispatch("MESSAGE_CREATE", message(fmt.Sprint(i), "a", "0123456789"))
 	}
-	assert.LessOrEqual(t, s.Bytes(), 2*(256+10))
+	assert.LessOrEqual(t, s.Bytes(), 2*one)
 	assert.Len(t, s.Messages("a"), 2)
+}
+
+// The instance is a stranger's server. A message is charged everything it arrived with, so padding a field
+// other than content — tags, here — cannot hold memory the budget does not count (M19 /security-sweep).
+func TestAMessageIsChargedItsWholePayload(t *testing.T) {
+	tags := make([]map[string]any, 2000)
+	for i := range tags {
+		tags[i] = map[string]any{"id": fmt.Sprint(i), "name": strings.Repeat("x", 100), "is_shared": true}
+	}
+	padded := mustJSON(map[string]any{
+		"id": "1", "channel_id": "30", "author_id": "1", "content": "hi", "type": 0,
+		"reply_to_id": nil, "edited_at": nil, "created_at": "2026-01-01T00:00:00Z", "tags": tags,
+	})
+	s, _ := newState(Limits{})
+	s.Begin(1)
+	s.Dispatch("MESSAGE_CREATE", padded)
+	assert.GreaterOrEqual(t, s.Bytes(), len(padded))
+}
+
+// A real server caps a member at a hundred guilds and a name at a hundred runes. This daemon does not rely
+// on the instance having validated anything.
+func TestGuildSummariesAreBoundedInNumberAndLength(t *testing.T) {
+	s, logs := newState(Limits{})
+	s.Begin(1)
+	for i := range maxGuilds + 100 {
+		s.Dispatch("GUILD_CREATE", mustJSON(guild(fmt.Sprint(i), strings.Repeat("é", 500))))
+	}
+	gs := s.Guilds()
+	assert.Len(t, gs, maxGuilds)
+	for _, g := range gs {
+		require.Equal(t, maxNameRunes, len([]rune(g.Name)))
+	}
+	assert.Contains(t, logs.String(), "more guilds than this daemon keeps")
+
+	// A guild already held is still updated at the cap.
+	s.Dispatch("GUILD_UPDATE", mustJSON(guild("0", "renamed")))
+	for _, g := range s.Guilds() {
+		if g.ID == "0" {
+			assert.Equal(t, "renamed", g.Name)
+		}
+	}
 }
 
 // ---------- what it survives ----------
