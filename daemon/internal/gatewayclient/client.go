@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/daemon/internal/backoff"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
@@ -150,7 +150,7 @@ func orDefault(d, def time.Duration) time.Duration {
 // It waits on the session for a credential, so a signed-out daemon is a client blocked here until somebody
 // signs in, and never a client reconnecting with nothing to identify with.
 func (c *Client) Run(ctx context.Context) {
-	retry := &backoff{min: c.retryMin, max: c.retryMax}
+	retry := &backoff.Backoff{Min: c.retryMin, Max: c.retryMax}
 	for {
 		cred, err := c.creds.Current(ctx)
 		if err != nil {
@@ -168,7 +168,7 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		}
 		if out.established && time.Since(started) >= stableAfter {
-			retry.reset()
+			retry.Reset()
 		}
 
 		wait := c.after(out, retry)
@@ -202,11 +202,11 @@ type outcome struct {
 
 // after applies what an ending asks for and returns how long to wait before connecting again. This is the
 // close-code table in the M19 plan, and the one place it lives.
-func (c *Client) after(out outcome, retry *backoff) time.Duration {
+func (c *Client) after(out outcome, retry *backoff.Backoff) time.Duration {
 	switch out.ending {
 	case endIdentify:
 		c.sessionID, c.seq = "", 0
-		return retry.next()
+		return retry.Next()
 
 	case endRejected:
 		// Either the token expired — a laptop that slept past it, a clock the estimate has wrong — or the
@@ -214,7 +214,7 @@ func (c *Client) after(out outcome, retry *backoff) time.Duration {
 		// refresh the instance refuses is a sign-out. The session id stays; RESUME is still worth trying with
 		// the new token inside the server's resume window.
 		c.creds.Rejected(out.token)
-		return retry.next()
+		return retry.Next()
 
 	case endRevoked:
 		// The sign-in is over — revoked, or superseded by a `norite login` on this machine. The session
@@ -224,7 +224,7 @@ func (c *Client) after(out outcome, retry *backoff) time.Duration {
 		return c.retryMin
 
 	case endRateLimited:
-		return max(retry.next(), c.rateLimitedFloor)
+		return max(retry.Next(), c.rateLimitedFloor)
 
 	case endVersion:
 		return c.versionHold
@@ -233,12 +233,12 @@ func (c *Client) after(out outcome, retry *backoff) time.Duration {
 		// Something this client sent was refused as malformed. Reconnecting will send it again, so the
 		// floor is long and the session is not resumed: whatever state led here is not worth keeping.
 		c.sessionID, c.seq = "", 0
-		return max(retry.next(), c.protocolFloor)
+		return max(retry.Next(), c.protocolFloor)
 
 	case endAgain:
 		return 0
 	}
-	return retry.next()
+	return retry.Next()
 }
 
 // connect dials, converses until the connection ends, and reports how.
@@ -323,25 +323,6 @@ func closeEnding(code websocket.StatusCode) ending {
 	// build has no name for: the session may still be there, so try to resume it.
 	return endResume
 }
-
-// backoff is exponential with equal jitter: half the delay fixed, half random, so a fleet of daemons
-// reconnecting after a rollout spreads out without any delay collapsing to nothing.
-type backoff struct {
-	min, max, cur time.Duration
-}
-
-func (b *backoff) next() time.Duration {
-	switch {
-	case b.cur == 0:
-		b.cur = b.min
-	case b.cur < b.max:
-		b.cur = min(b.cur*2, b.max)
-	}
-	half := b.cur / 2
-	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
-}
-
-func (b *backoff) reset() { b.cur = 0 }
 
 // errHeartbeatMissed is how the heartbeat ends a connection the server has stopped answering.
 var errHeartbeatMissed = errors.New("the gateway stopped acknowledging heartbeats")

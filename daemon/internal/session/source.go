@@ -29,7 +29,6 @@ package session
 import (
 	"context"
 	"errors"
-	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -37,6 +36,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/internal/backoff"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
@@ -253,7 +253,7 @@ func (s *Source) Run(ctx context.Context) {
 // refused says the token this process held was just refused, so a store nobody has changed since holds
 // nothing worth presenting.
 func (s *Source) signIn(ctx context.Context, refused bool) bool {
-	retry := s.newBackoff()
+	retry := &backoff.Backoff{Min: s.retryMin, Max: s.retryMax}
 	for {
 		record, token, err := s.store.Load()
 		switch {
@@ -275,7 +275,7 @@ func (s *Source) signIn(ctx context.Context, refused bool) bool {
 			// The case M7 deferred and M19 closes: a systemd user unit starting before the session keyring
 			// unlocks reads a record naming "keyring" and fails to read the secret. Tried once, that left
 			// the daemon without a session for its whole life. So it is tried again, until it works.
-			delay := retry.next()
+			delay := retry.Next()
 			s.log.Error().Err(err).Dur("retry_in", delay).
 				Msg("the stored credential could not be read; trying again")
 			if !s.waitForStore(ctx, s.clock.After(delay)) {
@@ -327,7 +327,7 @@ func (s *Source) signIn(ctx context.Context, refused bool) bool {
 // keepLive refreshes now and again before each expiry, until the session ends. It reports whether it ended
 // because the instance refused the token.
 func (s *Source) keepLive(ctx context.Context) (refused bool) {
-	retry := s.newBackoff()
+	retry := &backoff.Backoff{Min: s.retryMin, Max: s.retryMax}
 	for {
 		if !s.throttle(ctx) {
 			return false
@@ -358,7 +358,7 @@ func (s *Source) keepLive(ctx context.Context) (refused bool) {
 			// Unreachable, a 5xx, or an answer that made no sense. The token in hand is still the current
 			// one — nothing was spent that the instance acknowledged — so keep it and try again later.
 			// Current goes on handing out the access token until it expires.
-			delay := retry.next()
+			delay := retry.Next()
 			s.log.Error().Err(err).
 				Str("instance", termsafe.Text(s.record.InstanceURL)).
 				Dur("retry_in", delay).
@@ -368,7 +368,7 @@ func (s *Source) keepLive(ctx context.Context) (refused bool) {
 			}
 			continue
 		}
-		retry.reset()
+		retry.Reset()
 		// Only a refresh that succeeded counts toward the floor: it is rotation the floor exists to bound, and
 		// a failed attempt rotated nothing — its spacing is the backoff's business.
 		s.lastRefresh = started
@@ -598,24 +598,3 @@ func refreshDue(expiresAt, now time.Time) time.Time {
 	}
 	return due
 }
-
-// backoff is exponential with equal jitter: half the delay is fixed and half is random, so retries spread
-// out without a delay ever collapsing to nothing.
-type backoff struct {
-	min, max, cur time.Duration
-}
-
-func (s *Source) newBackoff() *backoff { return &backoff{min: s.retryMin, max: s.retryMax} }
-
-func (b *backoff) next() time.Duration {
-	switch {
-	case b.cur == 0:
-		b.cur = b.min
-	case b.cur < b.max:
-		b.cur = min(b.cur*2, b.max)
-	}
-	half := b.cur / 2
-	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
-}
-
-func (b *backoff) reset() { b.cur = 0 }

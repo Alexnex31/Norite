@@ -932,14 +932,3 @@ func TestServerClockAdvancesOnTheLocalClockFromItsLastSample(t *testing.T) {
 	c.observe(time.Time{})
 	assert.Equal(t, local.Now(), c.now(), "a missing Date header is no sample")
 }
-
-func TestBackoffGrowsToItsCapAndKeepsAFloor(t *testing.T) {
-	b := &backoff{min: time.Second, max: 8 * time.Second}
-	for _, ceiling := range []time.Duration{1, 2, 4, 8, 8} {
-		d := b.next()
-		assert.GreaterOrEqual(t, d, ceiling*time.Second/2)
-		assert.LessOrEqual(t, d, ceiling*time.Second)
-	}
-	b.reset()
-	assert.LessOrEqual(t, b.next(), time.Second)
-}
