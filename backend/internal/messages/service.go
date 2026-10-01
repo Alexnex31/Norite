@@ -22,6 +22,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
@@ -34,12 +35,17 @@ type Service struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
 	ids     *snowflake.Generator
+	events  *dispatch.Publisher
 }
 
 // ServiceOptions configures [NewService].
 type ServiceOptions struct {
 	Pool *pgxpool.Pool
 	IDs  *snowflake.Generator
+
+	// Events publishes gateway events after commit (M18). Nil drops them, which is what this package's own
+	// tests get; cmd/server always passes one, and the gateway's tests prove what arrives.
+	Events *dispatch.Publisher
 }
 
 // NewService validates its dependencies at construction rather than at first use.
@@ -50,12 +56,12 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	case opts.IDs == nil:
 		return nil, errors.New("messages: an ID generator is required")
 	}
-	return &Service{pool: opts.Pool, queries: db.New(opts.Pool), ids: opts.IDs}, nil
+	return &Service{pool: opts.Pool, queries: db.New(opts.Pool), ids: opts.IDs, events: opts.Events}, nil
 }
 
-func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) error) error {
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(s.queries.WithTx(tx))
+func (s *Service) inTx(ctx context.Context, fn func(ctx context.Context, q *db.Queries) error) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return fn(ctx, s.queries.WithTx(tx))
 	})
 }
 
@@ -85,7 +91,7 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 	}
 
 	var out Message
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The non-locking variant, deliberately, on the product's highest-volume write.
 		//
 		// AuthorizeChannel reads the channel FOR UPDATE and holds it to commit, which is right for the
@@ -159,7 +165,7 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 		if actor.HasScope(auth.ScopeTagsRead) {
 			out.Tags = []AppliedTag{}
 		}
-		return nil
+		return s.queueMessage(ctx, "MESSAGE_CREATE", guildID, out)
 	})
 	return out, err
 }
@@ -369,8 +375,8 @@ type UpdateInput struct {
 // were just silenced in, one rewrite per message they already posted. M13 spent two decisions keeping a
 // restriction from being *shed* (assignment is escalation-checked, DeleteRole refuses to drop overwrites
 // whose bits the caller lacks); this is the same restriction being walked around rather than shed, and at
-// M18 each rewrite fans out a MESSAGE_UPDATE to everyone in the channel. Found by a security audit after
-// the milestone's manual pass, and reproduced before it was fixed.
+// M18 each rewrite fans out a MESSAGE_UPDATE to everyone who can read the channel's history. Found by a
+// security audit after the milestone's manual pass, and reproduced before it was fixed.
 //
 // Delete deliberately stays at the view bit. Removing your own message is redaction, which is the outcome
 // a mute wants rather than one it should block.
@@ -384,7 +390,7 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 	}
 
 	var out Message
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// PermSendMessages, not merely the view bit the authorize folds in. An edit is a write into this
 		// channel and a mute must bound every one of them — see the paragraph above.
 		//
@@ -448,7 +454,7 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 			return err
 		}
 		out = single[0]
-		return nil
+		return s.queueMessage(ctx, "MESSAGE_UPDATE", guildID, out)
 	})
 	return out, err
 }
@@ -468,7 +474,7 @@ func (s *Service) Delete(
 		return fmt.Errorf("messages: mint audit entry id: %w", err)
 	}
 
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// Non-locking, for the reason Update is: loadInChannel locks the message row, which is the lock
 		// this operation actually needs.
 		_, guildID, decision, err := guildauth.AuthorizeChannelUnlocked(ctx, q, actor, channelID, 0)
@@ -507,6 +513,12 @@ func (s *Service) Delete(
 		if err := s.record(
 			ctx, q, guildID, actor.UserID, snowflake.ID(row.ID), AuditDelete,
 		); err != nil {
+			return err
+		}
+
+		if err := s.events.Queue(ctx, dispatch.Event{
+			Type: "MESSAGE_DELETE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
+		}, messageDeleted{ID: snowflake.ID(row.ID), ChannelID: channelID, GuildID: guildID}); err != nil {
 			return err
 		}
 
@@ -651,4 +663,32 @@ func idOrNil(id *snowflake.ID) *int64 {
 	}
 	v := int64(*id)
 	return &v
+}
+
+// queueMessage publishes a message event to the members who can view its channel (M18).
+//
+// **Without tags, always.** A private tag is visible only to the member who made it (M17), so one message's
+// tags differ per recipient, while an event is the same bytes for everyone. Tags travel as null, the value
+// the contract already defines as "not carried here", and a client that shows them reads them over REST.
+// Filtering per recipient on a second axis would be the one place fan-out made a disclosure decision of its
+// own rather than asking guildauth (M18 plan, D6).
+//
+// History governs the backlog, and a message sent while you are connected is not backlog, so a new message
+// needs view alone. An edit is different: it can rewrite a message posted before the recipient could read the
+// channel's history, and delivering its new text would hand them what REST refuses. So MESSAGE_UPDATE needs
+// PermReadMessageHistory too, which is the bit every REST read of an existing message requires.
+func (s *Service) queueMessage(ctx context.Context, event string, guildID snowflake.ID, m Message) error {
+	m.Tags = nil
+	ev := dispatch.Event{Type: event, Audience: dispatch.Guild, GuildID: guildID, ChannelID: m.ChannelID}
+	if event == "MESSAGE_UPDATE" {
+		ev.Need = roles.PermReadMessageHistory
+	}
+	return s.events.Queue(ctx, ev, m)
+}
+
+// messageDeleted is MESSAGE_DELETE's payload.
+type messageDeleted struct {
+	ID        snowflake.ID `json:"id"`
+	ChannelID snowflake.ID `json:"channel_id"`
+	GuildID   snowflake.ID `json:"guild_id"`
 }

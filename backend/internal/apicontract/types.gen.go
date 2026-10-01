@@ -827,13 +827,13 @@ type Guild struct {
 
 	// MessageAuditEnabled Whether this guild records every message its members send to a log its moderators can read (M16b), including edits and deletions. Off unless the guild's owner turned it on.
 	//
-	// **Readable by any member**, deliberately: this endpoint is gated on `VIEW_CHANNEL`, which every member holds by default, so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this field needs the owner; neither is required to learn the answer.
+	// **Readable by any member**, deliberately: this endpoint requires membership and nothing else, so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this field needs the owner; neither is required to learn the answer.
 	//
 	// Always present, in both states. A client must be able to say "this guild does not record" as positively as it says the opposite — a field that appeared only when recording was on would make its absence carry a meaning nothing guarantees.
 	MessageAuditEnabled bool   `json:"message_audit_enabled"`
 	Name                string `json:"name"`
 
-	// OwnerId The account that bypasses every permission check within this guild (authority layer 2). Cannot be removed from the guild, and transferring it is not yet possible.
+	// OwnerId The account that bypasses every permission check within this guild (authority layer 2). Cannot be removed from the guild; the owner hands it on with `POST /guilds/{guild_id}/owner`.
 	OwnerId   Snowflake `json:"owner_id"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -937,30 +937,30 @@ type Member struct {
 // Message defines model for Message.
 type Message struct {
 	// AuthorId Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
-	AuthorId Snowflake `json:"author_id"`
+	AuthorId *Snowflake `json:"author_id"`
 
 	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
 	//
 	//
 	// Examples: 7238829238972837423
-	ChannelId Snowflake `json:"channel_id"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
-	EditedAt  time.Time `json:"edited_at"`
+	ChannelId Snowflake  `json:"channel_id"`
+	Content   string     `json:"content"`
+	CreatedAt time.Time  `json:"created_at"`
+	EditedAt  *time.Time `json:"edited_at"`
 
 	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
 	//
 	//
 	// Examples: 7238829238972837423
-	Id        Snowflake `json:"id"`
-	ReplyToId Snowflake `json:"reply_to_id"`
+	Id        Snowflake  `json:"id"`
+	ReplyToId *Snowflake `json:"reply_to_id"`
 
 	// Tags The tags on the message this caller can see: every shared tag, plus the caller's own private ones. Somebody else's private tag never appears.
 	//
 	// **Null when the credential may not read tags** — an API token without the `tags.read` scope. Null rather than an empty array, because an empty array would claim the message has no tags when the answer is that they are not this credential's to see. A signed-in user always gets an array, empty for an untagged message.
 	//
 	// The channel listing resolves a whole page's tags at once, so a client drawing a channel needs no per-message request; `GET /channels/{channel_id}/messages/{message_id}/tags` remains for reading one message's tags on their own.
-	Tags []AppliedMessageTag `json:"tags"`
+	Tags *[]AppliedMessageTag `json:"tags"`
 
 	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
 	Type int `json:"type"`

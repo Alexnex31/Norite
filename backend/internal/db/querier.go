@@ -213,7 +213,13 @@ type Querier interface {
 	// Served by user_recovery_codes_live_idx (000014). One caller — the profile response — so it scales with
 	// the codes an account has left rather than with every set it has ever had.
 	CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error)
-	CountLiveSessionsForDevice(ctx context.Context, arg CountLiveSessionsForDeviceParams) (int64, error)
+	// Whether one sign-in is still live: its device's live rows, narrowed to the family that started at
+	// first_seen. It replaced a count over the device's live rows at M18, because a device signed out and then
+	// signed in again is live while the sign-in that ended is not: a token stolen from that sign-in passed
+	// RequireLiveSession again, and a gateway connection opened with it had no expiry at all. first_seen is the
+	// family's key: a fresh sign-in takes now(), and rotation carries it forward (000013). Served by
+	// sessions_live_by_device_idx, which holds about one row per device.
+	CountLiveSessionsInFamily(ctx context.Context, arg CountLiveSessionsInFamilyParams) (int64, error)
 	CountMemberPrivateTags(ctx context.Context, arg CountMemberPrivateTagsParams) (int64, error)
 	// How many of a tag's applications somebody other than the actor made. Deleting a shared tag cascades
 	// every application of it, and a deletion that takes other people's labels with it is authority over
@@ -405,6 +411,11 @@ type Querier interface {
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
 	// the waiting client stops immediately instead of polling for another twenty minutes.
 	DenyDeviceCode(ctx context.Context, id int64) (DeviceCode, error)
+	// What deleting a category does to its children, done explicitly rather than left to channels_parent_id_fkey's
+	// ON DELETE SET NULL, so the rows it changes come back to be dispatched as CHANNEL_UPDATE (M18): left to the
+	// foreign key, every connected client kept the children nested under a category that no longer exists.
+	// Served by channels_parent_id_idx; bounded by the guild's channel ceiling.
+	DetachChildChannels(ctx context.Context, arg DetachChildChannelsParams) ([]Channel, error)
 	// Runs on every request authenticated with an API token, which is why the hash column is indexed.
 	//
 	// One statement, not three: the owning account's liveness is joined in rather than fetched separately, and
@@ -439,6 +450,10 @@ type Querier interface {
 	// is refused before anything is written — the same two-step the reset path uses.
 	GetEmailVerificationTokenByHash(ctx context.Context, tokenHash []byte) (EmailVerificationToken, error)
 	GetGuild(ctx context.Context, id int64) (Guild, error)
+	// The guild-wide half of resolving many members at once (M18's fan-out): the owner, and @everyone, which
+	// every member holds and which ListMemberRolesForUsers therefore does not repeat per member. roles is read
+	// through roles_guild_id_position_idx, bounded by the guild's role ceiling.
+	GetGuildAuthorityBase(ctx context.Context, id int64) (GetGuildAuthorityBaseRow, error)
 	// The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points
 	// at. FOR NO KEY UPDATE rather than FOR UPDATE, which is the difference that matters: FOR UPDATE also
 	// conflicts with the FOR KEY SHARE lock every insert into a child table takes on its parent, so holding
@@ -801,9 +816,9 @@ type Querier interface {
 	// The guild, whether this account is in it, and every role whose permissions apply to them — in one round
 	// trip rather than three.
 	//
-	// Both queries here run before every mutating handler (rule 1) and neither result is cached: the cache
-	// architecture.md describes is invalidated by a gateway dispatch, and the gateway is M18. A cache with
-	// nothing to invalidate it is a demotion that takes effect five minutes late, so this runs live on every
+	// Both queries here run before every mutating handler (rule 1) and neither result is cached. M18 decided
+	// against the cache architecture.md once described: its invalidation would travel between replicas on an
+	// at-most-once bus, so a demotion would take effect eventually rather than now. So this runs live on every
 	// check and has to be cheap. That is the constraint the shape below is chosen against.
 	//
 	// The obvious decomposition is a guild lookup, then a membership lookup, then a role list, and it is three
@@ -967,6 +982,14 @@ type Querier interface {
 	ListGuildReportsByStatus(ctx context.Context, arg ListGuildReportsByStatusParams) ([]ListGuildReportsByStatusRow, error)
 	// Ordered by position, which the (guild_id, position) index serves.
 	ListGuildRoles(ctx context.Context, guildID int64) ([]Role, error)
+	// Every guild an account is a member of: what the gateway's READY carries, one summary per guild (M18), and
+	// what M20's GET /users/@me/guilds will serve.
+	//
+	// Unpaginated, like the channel and role lists, and bounded the same way: at creation rather than at read.
+	// An account owns at most [limits].guilds_per_account (M12), nothing adds a membership except creating a
+	// guild until M57, and M72a caps joined guilds at 100. guild_members_user_id_idx serves the lookup, and the
+	// join reaches each guild through its primary key.
+	ListGuildsForMember(ctx context.Context, userID int64) ([]Guild, error)
 	// Everything outstanding, newest first.
 	//
 	// Deliberately includes exhausted and expired rows. An administrator asking "what invites exist" is
@@ -978,6 +1001,19 @@ type Querier interface {
 	// call made by hand. An index on created_at would be a write on every registration to serve a query
 	// nobody makes in a loop.
 	ListInstanceInvites(ctx context.Context) ([]InstanceInvite, error)
+	// Whether each of a list of accounts is a member of one guild, and every role it holds there beyond
+	// @everyone: the per-recipient half of resolving who receives a gateway event (M18).
+	//
+	// Driven from the recipient list rather than filtered by it, and that shape is chosen against a plan
+	// rather than for style. `guild_id = $1 AND user_id = ANY($2)` is the query M13a found collapsing: under a
+	// cached generic plan Postgres used guild_id as the index condition and scanned every role grant in a large
+	// guild to keep the page's. Here each recipient is its own probe, matching guild_member_roles' primary key
+	// on both leading columns, so no plan can widen it into a scan of the guild; a test reads the generic plan
+	// pgx actually prepares.
+	//
+	// A non-member comes back once with is_member false and no role; a member holding nothing but @everyone
+	// comes back once with no role.
+	ListMemberRolesForUsers(ctx context.Context, arg ListMemberRolesForUsersParams) ([]ListMemberRolesForUsersRow, error)
 	// One page of a message's prior versions, newest first (Milestone M16a).
 	//
 	// # It pages, because nothing bounds how many versions a message has
@@ -1009,6 +1045,16 @@ type Querier interface {
 	// Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
 	// to the guild.
 	ListOverwritesForTarget(ctx context.Context, arg ListOverwritesForTargetParams) ([]PermissionOverwrite, error)
+	// A channel's overwrites, and whether the channel still exists: no rows means it does not, and one row with a
+	// null target means it does and has none. Fan-out needs the difference (M18). An event about a channel,
+	// waiting in its lane while the channel is deleted, otherwise resolved against no overwrites and reached
+	// every member with guild-level view, a hidden channel's message included.
+	//
+	// The guild is returned rather than matched, and the caller compares it. With guild_id in the WHERE, a
+	// generic plan was seen walking channels_guild_id_position_idx and filtering on id, which is up to the
+	// channel ceiling per event where the primary key is one row; with only the id, no plan has that choice
+	// (M13a's lesson; TestTheFanOutsRoleReadCannotScanTheWholeGuild).
+	ListOverwritesOfExistingChannel(ctx context.Context, id int64) ([]ListOverwritesOfExistingChannelRow, error)
 	// The role ids one member holds, for a response that returns that member after changing them.
 	//
 	// Equality on both key columns, for ListGuildMembers' reason: the `= ANY` form it replaces had a generic

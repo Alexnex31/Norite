@@ -180,7 +180,7 @@ func TestContractFileCoversEveryConfigSection(t *testing.T) {
 	doc := string(body)
 
 	for _, section := range []string{
-		"[http]", "[database]", "[log]", "[rate_limit]",
+		"[http]", "[database]", "[log]", "[rate_limit]", "[events]", "[redis]",
 		"[storage]", "[storage.s3]", "[acme]", "[smtp]",
 		"[oauth.google]", "[oauth.github]", "[registration]", "[auth]",
 	} {
@@ -386,5 +386,51 @@ func TestTheSourceOfferIsAlwaysUsable(t *testing.T) {
 		require.Error(t, err, "an unusable source offer must stop startup, not reach a user")
 		assert.Contains(t, err.Error(), envVarFor("SourceURL"),
 			"the error must name the variable an operator has to fix")
+	})
+}
+
+// The Redis server is needed by two settings, either of which asks for it. Choosing "redis" for one and
+// forgetting the URL must fail at startup naming the URL, not at the first event or the first request.
+func TestRedisIsRequiredExactlyWhenASettingAsksForIt(t *testing.T) {
+	for _, setting := range []string{"EVENTS_BACKEND", "RATELIMIT_STORE"} {
+		t.Run(setting, func(t *testing.T) {
+			withoutConfigFile(t)
+			t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+			t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+			t.Setenv(envPrefix+setting, "redis")
+
+			_, err := Load("")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), envPrefix+"REDIS_URL")
+
+			t.Setenv(envPrefix+"REDIS_URL", "redis://redis:6379/0")
+			cfg, err := Load("")
+			require.NoError(t, err)
+			assert.True(t, cfg.UsesRedis())
+		})
+	}
+
+	t.Run("neither", func(t *testing.T) {
+		withoutConfigFile(t)
+		t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+
+		cfg, err := Load("")
+		require.NoError(t, err, "a single-process instance needs no Redis at all")
+		assert.Equal(t, "inproc", cfg.EventsBackend)
+		assert.Equal(t, "memory", cfg.RateLimitStore)
+		assert.False(t, cfg.UsesRedis())
+	})
+
+	t.Run("not a redis URL", func(t *testing.T) {
+		withoutConfigFile(t)
+		t.Setenv(envPrefix+"DATABASE_URL", validDSN)
+		t.Setenv(envPrefix+"JWT_SECRET", testJWTSecret)
+		t.Setenv(envPrefix+"EVENTS_BACKEND", "redis")
+		t.Setenv(envPrefix+"REDIS_URL", "postgres://wrong-setting")
+
+		_, err := Load("")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), envPrefix+"REDIS_URL")
 	})
 }

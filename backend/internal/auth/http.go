@@ -306,9 +306,11 @@ type twoFactorCodesResponse struct {
 //
 // One type for one service value, shared by "sign out everywhere else" and "disable the second factor",
 // which revoke exactly the same things. It was briefly two identical structs, and the copies had already
-// drifted in the commit that made the second — which is the argument: when M18 adds force-closed gateway
-// connections to revokeEverything and M101 adds E2E device trust, the count goes in one place, not two,
-// and neither endpoint can end up reporting a smaller number than the primitive actually revoked.
+// drifted in the commit that made the second — which is the argument: the primitive has grown since (M18
+// made it close live gateway connections, M101 will drop E2E device trust), and with one type the count
+// goes in one place, so neither endpoint can report a smaller number than the primitive actually revoked.
+// The closed connections are not counted: a connection is closed by whichever process holds it, after the
+// commit, so the request answering has no way to know how many there were.
 //
 // Counted rather than a bare 204, because this action revokes more than its name suggests — API tokens go
 // with the sessions — and a client that cannot see the number cannot tell somebody their bots just
@@ -583,30 +585,46 @@ func (h *Handler) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) currentUser(w http.ResponseWriter, r *http.Request) {
 	actor, _ := ActorFrom(r.Context())
 
-	user, err := h.svc.GetUser(r.Context(), actor.UserID)
+	out, err := h.svc.currentUserView(r.Context(), actor.UserID)
 	if err != nil {
 		h.writeErr(w, r, err)
 		return
 	}
+	httpx.WriteJSON(w, r, http.StatusOK, out)
+}
 
-	enabled, err := h.svc.hasConfirmedFactor(r.Context(), int64(actor.UserID))
+// currentUserView is the account as it describes itself: GET /users/@me's body, and the user in the
+// gateway's READY (M18). One function for both, so the two cannot disagree about what an account sees of
+// itself — the two-factor fields below are exactly the kind of addition that would reach one and not the
+// other.
+func (s *Service) currentUserView(ctx context.Context, userID snowflake.ID) (userResponse, error) {
+	user, err := s.GetUser(ctx, userID)
 	if err != nil {
-		h.writeErr(w, r, err)
-		return
+		return userResponse{}, err
+	}
+
+	enabled, err := s.hasConfirmedFactor(ctx, int64(userID))
+	if err != nil {
+		return userResponse{}, err
 	}
 	out := newUserResponse(user)
 	out.TwoFactorEnabled = enabled
 	if enabled {
 		// Only meaningful when a factor exists, and only asked for then — a count of zero on an account
 		// with no factor would read as "you have run out" rather than "there is nothing to run out of".
-		remaining, err := h.svc.RemainingRecoveryCodes(r.Context(), int64(actor.UserID))
+		remaining, err := s.RemainingRecoveryCodes(ctx, int64(userID))
 		if err != nil {
-			h.writeErr(w, r, err)
-			return
+			return userResponse{}, err
 		}
 		out.RecoveryCodesRemaining = &remaining
 	}
-	httpx.WriteJSON(w, r, http.StatusOK, out)
+	return out, nil
+}
+
+// ReadyUser is currentUserView for the gateway, which cannot name the unexported type. It marshals exactly
+// as GET /users/@me does, and the gateway's schema test holds the two to one shape.
+func (s *Service) ReadyUser(ctx context.Context, userID snowflake.ID) (any, error) {
+	return s.currentUserView(ctx, userID)
 }
 
 func (h *Handler) mintToken(w http.ResponseWriter, r *http.Request) {

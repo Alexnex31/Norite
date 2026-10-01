@@ -28,8 +28,11 @@ builds:
     # GET /api/v1/meta answers with this value. The full commit rather than the tag: a commit always
     # resolves in the repository, while goreleaser strips the leading "v" from a tag, so a release tagged
     # v1.0.0 would advertise "1.0.0" and send anyone fetching it to a ref that does not exist.
+    #
+    # And the version, for the gateway's handshake (ADR 0033): unstamped, the server reports "dev", which
+    # every client accepts without checking — so every release would skip the check it exists to make.
     ldflags:
-      - -s -w -X github.com/Alexnex31/Norite/backend/internal/meta.Revision={{ .FullCommit }}
+      - -s -w -X github.com/Alexnex31/Norite/backend/internal/meta.Revision={{ .FullCommit }} -X github.com/Alexnex31/Norite/backend/internal/meta.Version={{ .Version }}
 
   - id: cli
     dir: cli

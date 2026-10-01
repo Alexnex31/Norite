@@ -875,32 +875,63 @@ of this section.
   proved in three runs, because it is guarded twice.
 #### Phase D — Real-time gateway and daemon
 
-- **M18 — Gateway protocol core (backend)**: op-codes, the HELLO/IDENTIFY/READY handshake (carrying the
-  backend's current server time for client clock-offset calculation), heartbeat, RESUME, DISPATCH, backed by
-  `coder/websocket`. The initial READY payload sends guild/channel metadata upfront but defers full member
-  lists/bulk per-guild state until a guild is actually opened (lazy per-guild loading).
+- **M18 — Gateway protocol core (backend)**: done. `/gateway` over `coder/websocket`, with the HELLO /
+  IDENTIFY / READY handshake (HELLO carrying the server's time and version), heartbeats, RESUME, DISPATCH and
+  Reconnect; the wire format in `backend/gatewayproto`, outside `internal/` because the daemon imports it at
+  M19; `internal/dispatch` (the event and its after-commit publisher), `internal/gateway`,
+  `guildauth.Audience` and `roles.ResolveMany`; `database.AfterCommit`; the event bus and the rate-limit
+  store on Redis as well as in process; and `gateway-events.schema.json` describing every frame, with its
+  REST shapes generated from `openapi.yaml`. Decisions are in this entry, in `architecture.md` §2 and in
+  `docs/security-ledger.md`.
 
-  **Also close M11's first gap: force-closing live connections when an account's sessions are revoked.**
-  `auth.revokeEverything` carries the step as a named comment because there was nothing to close; the close
-  belongs *inside* that function so every caller — reset, sign-out-everywhere-else, M72's bans, account
-  deletion — gets it without being edited. It matters more than it looks. Revoking a session stops the next
-  refresh, and an access token expires within fifteen minutes, so the REST surface is bounded by
-  construction (§17.10). A WebSocket is not: it authenticates once at IDENTIFY and stays open as long as
-  the client keeps it, so until this exists a revoked account keeps receiving events indefinitely.
+  **Planning corrected the design before building it** (2026-09-30), from reading `architecture.md` §2
+  against this entry. RESUME carried only the session id, so a session id read from a log resumed
+  somebody else's stream; it carries the token now. IDENTIFY accepted any unexpired token, which outlives its
+  session by up to fifteen minutes. READY sent every guild's channels, ~12.5 MB at the joined-guild cap; it
+  sends a summary per guild, ~20 KB. And the permission cache M12 deferred here stays unbuilt: its
+  invalidation would cross replicas on an at-most-once bus, so a demotion would take effect eventually.
+  Fan-out resolves every event against fresh rows instead.
 
-  **And the event-bus tests run against both backends from here on.** `EVENTS_BACKEND=inproc|redis` and the
-  Redis-backed rate-limit store are seams the flagship activates at M114 — which would make M114 their first
-  real exercise, in production, on the flagship itself, on the two components whose failure modes only
-  appear under concurrency across processes. `docker/docker-compose.yml` has shipped Redis since M0
-  specifically so the swap could be exercised without a compose change, and nothing has exercised it. §15.7
-  warns against building the Redis paths' *operational* surface early; a test matrix is not operational
-  surface, and this is the difference between the two.
+  **The revocation close is one of five paths, not the one this entry named.** Logout, revoking a device,
+  refresh-token reuse and a sign-in superseding a device each end a sign-in without going through
+  `revokeEverything`, and each closes its connections now (4011). The closes are queued after commit and
+  carry a cutoff, so a device that signs in again inside the delivery lag is not closed by the revocation it
+  outran; a heartbeat re-checks liveness every five minutes, because the bus may drop the close.
+
+  **Liveness is the sign-in's, not the device's**, which the review passes found and the first build got
+  wrong. After a device signs out and in again it is live, so a token stolen from the sign-in that ended
+  passed again: on the gateway it opened a stream with no end, and on REST it passed `RequireLiveSession`
+  and minted an API token, reproduced at 201. That was M11's check, and it is fixed there too.
+
+  **Who receives an event is decided at fan-out, in `guildauth`, never by the publisher.** An event names an
+  audience; membership and channel view are read per event. Three gaps came out of the reviews:
+  - an edit reached members who cannot read history, so `MESSAGE_UPDATE` needs that bit too;
+  - a guild deletion reached an account that happened to be mid-IDENTIFY;
+  - an event about a channel deleted while it waited reached the whole guild.
+
+  `/security-review` then found REST stricter than the gateway on three guild reads, against a contract that
+  said membership; REST was corrected.
+
+  **Measured, then changed.**
+  - **Finding an event's candidates scanned every session on the process**: 3.2 ms at 50,000 sessions, for
+    a hundred recipients. An index by guild and account makes it about a microsecond.
+  - **The audience check ran one event at a time for the whole process**, capping it near 1,300 events a
+    second. It now runs in lanes keyed by guild, a quarter of the pool's size.
+  - **Each recipient's frame re-encoded the payload**: 6.1 µs against 1.5 µs.
+
+  **Three choices to revisit with a reason, not by default**:
+  - MinorWindow is 2 for `1.x`.
+  - Role changes send the whole role list (`GUILD_ROLES_UPDATE`), because creating or reordering one role
+    moves the others.
+  - Messages carry `tags` as null on the gateway, because private tags differ per reader.
 
   Done when: a raw WebSocket client can complete the handshake, receive DISPATCH events for guild activity,
-  and RESUME after a disconnect without losing events; an account in many guilds gets a bounded-size
-  initial payload rather than one that scales linearly with total guild count; revoking an account's
-  sessions drops its live connections rather than leaving them subscribed; and the gateway fan-out and
-  rate-limit integration tests pass against `inproc` and `redis` both.
+  and RESUME after a disconnect without losing events; an account in many guilds gets a bounded-size initial
+  payload; revoking an account's sessions drops its live connections; and the gateway fan-out and
+  rate-limit integration tests pass against `inproc` and `redis` both. All met. The last was found missing
+  when this entry was checked before marking it done: the bus and the limiter were each tested on both
+  backends, the gateway itself never on Redis. `TestTheGatewayWorksAcrossReplicasOverRedis` runs two
+  replicas on separate Redis connections now, and fails with the second taken off Redis.
 - **M19 — Daemon as gateway client**: the daemon holds the persistent WS connection to the backend, maintains
   in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
   and stream-decodes (`json.Decoder`) the initial sync payload rather than buffering it fully before parsing.
@@ -922,6 +953,13 @@ of this section.
     unlocked reads the file path for its whole life. Correct while the daemon is short-lived and the record
     names its own backend (ADR 0025); a long-lived, reconnecting daemon is exactly the case it was not
     written for.
+
+  **What M18's gateway asks of its client**, so the daemon is written against it rather than discovering it:
+  IDENTIFY within ten seconds of HELLO, always sending `properties.version` (an empty one is refused, and
+  only `dev` skips the check); RESUME with the token as well as the session id, and identify afresh on op 9;
+  on 4011 the sign-in is over and the daemon must sign in again rather than reconnect; on op 7 reconnect,
+  resuming if it can. A daemon that reconnects by identifying rather than resuming supersedes its own
+  detached sessions, so it cannot lock itself out, but loses what they buffered.
 
   Done when: the daemon alone (no CLI/TUI/GUI attached) stays connected and accumulates state correctly; a
   deliberately skewed system clock does not cause spurious auth failures; a display name carrying terminal
@@ -1015,7 +1053,10 @@ of this section.
   **It builds `GET /users/@me/guilds`, which §2 lists and nothing owned.** Without it no verb can tell a
   person which guilds they are in, and every other verb takes a guild id. Uncursored and bounded, like the
   channel and role lists: accounts own at most 50 guilds (M12), joining does not exist until M57, and M72a's
-  joined cap of 100 is already the READY payload bound. M18's READY is its second consumer.
+  joined cap of 100 is already the READY payload bound. **The membership query already exists by then**:
+  M18's READY needs "which guilds is this account in" first, so M18 writes the query and this milestone
+  adds the REST route over it. This line called READY the query's second consumer until M18's planning
+  noticed M18 comes first.
 
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
@@ -1597,6 +1638,13 @@ of this section.
   regress message fan-out latency; blocking removes any existing friendship; and an account export includes
   who the user blocked but not who blocked them.
 
+  **The stage exists and is empty**: `gateway.withoutBlocked` in `internal/gateway/fanout.go`, run on every
+  event after the audience check and before delivery, filtering nothing until this milestone. Two things
+  M18 leaves for it. `dispatch.Event` carries no author, so the filter needs one added, set by the
+  publishers of message events. And a disconnected session's replay buffer holds frames already filtered at
+  fan-out, so a block made while somebody is disconnected does not reach back into what they will be
+  replayed. That is a two-minute window, and this milestone decides whether it matters.
+
   **M13a's ownership transfer needs a decision here**, deferred by M13a's `/security-sweep`: whether an
   account can make somebody who blocked it the owner of a guild. The recipient is already a member, so
   this is not delivery in rule 20's sense, but ownership makes them answerable for the guild. If it is
@@ -1740,9 +1788,11 @@ of this section.
   per-user seam ADR 0007 reserved and no v1 code path has used. An ordinary account gets 50/100, a flagship
   subscriber more, an Instance Admin the maximum. Two consequences: **only an Instance Admin may write
   `user_entitlements`**, and that write is a rule-14 action in `instance_audit_log`, or a subscriber grants
-  themselves 5,000 guilds. And **the joined cap is the READY payload bound** (§15.2) — that payload carries
-  guild and channel metadata upfront, so this number is what stops it scaling without limit, which is why
-  it is 100 rather than a larger round number.
+  themselves 5,000 guilds. And **the joined cap is the READY payload bound** (§15.2), so this number is
+  what stops it scaling without limit, which is why it is 100 rather than a larger round number. **M18
+  made that bound small** by sending a summary per guild and no channels (~20 KB at 100 guilds). This
+  paragraph was written assuming READY carried every guild's channels, which at 500 channels a guild would
+  have made the bound ~12.5 MB.
 
   ADR 0007 and ADR 0032 both describe `user_entitlements` as inert and unused by any v1 code path. This is
   the milestone that stops being true, and both say so.
@@ -2040,6 +2090,11 @@ when a constraint the terminal imposed is lifted.
   worth profiling before there are features generating load. Done when: `/metrics` requires auth, exposes
   the documented metric set, rejects unauthenticated access, and `pprof` is unreachable without the same
   gate.
+
+  **A gateway connection is one request-log line, written when it closes, with its whole lifetime as the
+  duration** (found by M18's manual pass). Request-latency metrics built from that line must exclude
+  `/gateway`, or connection lifetimes measured in hours swamp every percentile. Connection counts and
+  lifetimes are this milestone's gateway metrics instead, along with the event lanes' queue depth.
 - **M93a — Instance announcements**: a short plain-text message an Instance Admin sends to every account
   on the instance. It pops up in every attached client, and reaches an account that is offline the next
   time its daemon connects. It is for server maintenance, outages and events that concern everyone.
@@ -2240,8 +2295,23 @@ when a constraint the terminal imposed is lifted.
   this layer exists, one does. Note the page must keep working for somebody who has never touched the SPA:
   a session established purely to bind a continuation, not a login.
 
+  **And the gateway, which M18 built for a client that holds its token** (rule 21, raised by M18's
+  `/security-audit`). IDENTIFY and RESUME carry the access token *inside the first frame*, which is right for
+  the daemon and for any browser that holds a token, and impossible for an SPA that by this milestone's own
+  done-when never does. So the BFF has to put a gateway connection in front of the browser without handing
+  it a Bearer token. Two shapes, to be chosen here:
+  - **the BFF proxies `/gateway`**: it accepts the browser's WebSocket on its session cookie and holds the
+    upstream connection itself, identifying with the token it already keeps. The backend gateway is
+    unchanged.
+  - **a cookie-authenticated upgrade, or a short-lived single-use gateway ticket** the BFF mints.
+  Either way, the moment a cookie authenticates an upgrade, the `Origin` check is what stops cross-site
+  WebSocket hijacking: M18 left coder/websocket's default refusal of cross-origin upgrades on for exactly
+  this, and `internal/gateway/gateway.go` says so. It must stay on wherever the cookie is accepted.
+
   Done when: the web SPA can log in and receive a session cookie without ever holding a raw Bearer token in
-  JS, and a device-verification continuation is refused by a browser other than the one it was issued to.
+  JS; a device-verification continuation is refused by a browser other than the one it was issued to; and a
+  browser holds a live gateway connection without holding a Bearer token, while a cross-origin page cannot
+  open one with the user's cookie.
 - **M109 — Web SPA rebuild**: adapt the originally-planned React SPA to the current backend/contracts.
 
   Done when: the SPA builds with its API types generated from `contracts/` rather than hand-written, and a
@@ -2318,6 +2388,20 @@ does not appear to disagree with them.
   Done when: a client connected to one API replica receives an event published by another, and a rate limit
   counts across replicas rather than per pod — the second being the half that silently multiplies the
   configured limit by the replica count if it is missed.
+
+  **And RESUME across replicas, noted at M18's planning (2026-09-30).**
+  - **Why it fails today:** M18's replay buffer lives in the process that owns the session. A client
+    whose reconnect lands on a different replica is answered with Invalid Session, and has to identify
+    again and resync, losing nothing but time.
+  - **Why it went unnoticed:** M18's `redis` tests run fan-out and revocation across two replicas, and
+    rate limits across two stores, but never a RESUME: the session it names lives only in memory, so it
+    is the one gateway property the bus cannot carry.
+  - **Rollouts make it routine, not rare.** A replica shutting down sends op 7 and drops its sessions, so
+    every client a rollout moves identifies afresh on another replica. M118's staggering keeps that from
+    being one stampede, and this choice decides whether it is a resync at all.
+  - **The choice owed here:** a replay buffer shared across replicas, or sticky routing at the Ingress.
+  - **The done-when this adds:** a gateway client resuming against a replica other than the one it
+    identified on either resumes without losing events, or is told to re-identify and does.
 - **M115 — In-cluster object storage for attachments**: an S3-compatible backend for attachments (M58),
   and only attachments now that M113 backs up to volume snapshots.
 

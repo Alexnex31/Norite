@@ -94,7 +94,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, rawEmail string) err
 		return fmt.Errorf("generating reset token ID: %w", err)
 	}
 
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// Every older token for this account is spent first, so the newest link is the only one that
@@ -173,7 +173,7 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 		return err
 	}
 
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// Spending the token is the first statement and its own guard: single-use, unexpired, checked in
@@ -196,7 +196,7 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 		// Everything the old password could reach is revoked in the same transaction, through the one
 		// primitive every caller shares (CLAUDE.md rule 17). The reasoning for each step lives on that
 		// function rather than here: this path is one of its callers now, not its owner.
-		if _, err := revokeEverything(ctx, q, token.UserID, RevocationScope{}); err != nil {
+		if _, err := s.revokeEverything(ctx, q, token.UserID, RevocationScope{}); err != nil {
 			return err
 		}
 

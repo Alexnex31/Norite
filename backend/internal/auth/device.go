@@ -268,7 +268,7 @@ func (s *Service) RedeemDeviceCode(ctx context.Context, rawCode string, ip netip
 	}
 
 	var userID snowflake.ID
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		row, err := q.ConsumeDeviceCode(ctx, hash)

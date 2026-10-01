@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
@@ -117,6 +118,10 @@ type Service struct {
 	// one that is measures against it. See padToEnumerationFloor.
 	enumerationFloor time.Duration
 
+	// events closes the gateway connections a revocation ends (endConnections). Nil in tests that build a
+	// service without a gateway, where there is nothing to close.
+	events *dispatch.Publisher
+
 	now func() time.Time
 }
 
@@ -134,6 +139,9 @@ type ServiceOptions struct {
 
 	// OAuth is optional: an instance with no provider credentials simply offers no OAuth sign-in.
 	OAuth OAuthProviders
+
+	// Events carries revocations to the gateway, which closes the connections they end.
+	Events *dispatch.Publisher
 }
 
 // Mailer is the slice of internal/mail this package needs.
@@ -174,6 +182,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		issuer:           opts.Issuer,
 		registrationMode: mode,
 		enumerationFloor: enumerationFloor,
+		events:           opts.Events,
 		now:              time.Now,
 	}, nil
 }
@@ -284,7 +293,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (db.User, erro
 		user db.User
 		msg  mail.Message
 	)
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// Redeemed *before* the address is looked at, which is the ordering a review found wrong the
@@ -569,7 +578,7 @@ func (s *Service) startSession(ctx context.Context, userID snowflake.ID, deviceI
 		return TokenPair{}, fmt.Errorf("generating session ID: %w", err)
 	}
 
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return s.writeSession(ctx, s.queries.WithTx(tx), sessionID, userID, deviceID, deviceName, ip, hash)
 	})
 	if err != nil {
@@ -589,11 +598,23 @@ func (s *Service) startSession(ctx context.Context, userID snowflake.ID, deviceI
 func (s *Service) writeSession(ctx context.Context, q *db.Queries, sessionID, userID snowflake.ID,
 	deviceID, deviceName string, ip netip.Addr, hash TokenHash,
 ) error {
-	if _, err := q.RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
+	superseded, err := q.RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
 		UserID:   int64(userID),
 		DeviceID: deviceID,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("revoking the previous session for this device: %w", err)
+	}
+	// The superseded sign-in's gateway connections end with it. Cut off at this session's id, so the
+	// connection the device opens with the sign-in being written now is never the one closed. Only when
+	// something was superseded: a first sign-in on a device has nothing to close, and this runs on every
+	// login.
+	if superseded > 0 {
+		if err := s.endConnections(ctx, dispatch.Revocation{
+			UserID: userID, Before: sessionID, Device: deviceID,
+		}); err != nil {
+			return err
+		}
 	}
 
 	// FirstSeen is deliberately left unset here, which the query reads as now(): this is a sign-in, and a
@@ -650,12 +671,22 @@ func (s *Service) Refresh(ctx context.Context, rawToken string) (TokenPair, erro
 			return TokenPair{}, ErrInvalidRefreshToken
 		}
 
-		// Rotated away from, and presented again — replay.
-		if _, err := s.queries.RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
-			UserID:   session.UserID,
-			DeviceID: session.DeviceID,
-		}); err != nil {
-			return TokenPair{}, fmt.Errorf("revoking the compromised device family: %w", err)
+		// Rotated away from, and presented again — replay. The device's gateway connections go with its
+		// family, and this is the path where that matters most: one of the two parties holding this family is
+		// a thief, and nothing here can say which, so neither keeps a live stream of the account's events.
+		err := database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := s.queries.WithTx(tx).RevokeSessionsForDevice(ctx, db.RevokeSessionsForDeviceParams{
+				UserID:   session.UserID,
+				DeviceID: session.DeviceID,
+			}); err != nil {
+				return fmt.Errorf("revoking the compromised device family: %w", err)
+			}
+			return s.endConnections(ctx, dispatch.Revocation{
+				UserID: snowflake.ID(session.UserID), Device: session.DeviceID,
+			})
+		})
+		if err != nil {
+			return TokenPair{}, err
 		}
 		logging.FromContext(ctx).Warn().
 			Str("user_id", snowflake.ID(session.UserID).String()).
@@ -677,7 +708,7 @@ func (s *Service) Refresh(ctx context.Context, rawToken string) (TokenPair, erro
 		return TokenPair{}, fmt.Errorf("generating session ID: %w", err)
 	}
 
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		// The successor is inserted first so the old row can point at it. Same device_id, so the family
@@ -745,10 +776,15 @@ func (s *Service) Logout(ctx context.Context, rawToken string) error {
 		return nil
 	}
 
-	if _, err := s.queries.RevokeSession(ctx, session.ID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("revoking session: %w", err)
-	}
-	return nil
+	// With the device's gateway connections: signing out here is signing out of the stream too.
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := s.queries.WithTx(tx).RevokeSession(ctx, session.ID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("revoking session: %w", err)
+		}
+		return s.endConnections(ctx, dispatch.Revocation{
+			UserID: snowflake.ID(session.UserID), Device: session.DeviceID,
+		})
+	})
 }
 
 // issuePair signs an access token and packages it with the refresh token.

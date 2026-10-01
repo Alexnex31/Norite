@@ -40,11 +40,17 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
+	"github.com/Alexnex31/Norite/backend/internal/gateway"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
+	"github.com/Alexnex31/Norite/backend/internal/meta"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
+	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/logging"
+	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/reports"
 	"github.com/Alexnex31/Norite/backend/internal/tags"
@@ -180,6 +186,21 @@ func run() error {
 		logger.Info().Strs("providers", names).Msg("oauth sign-in enabled")
 	}
 
+	// The event bus: in-process unless configured otherwise, and connected before anything can publish, for
+	// the rate-limit store's reason — a Redis the process could not reach would otherwise surface as events
+	// silently going nowhere. Built before the auth service too, which publishes the revocations that close
+	// gateway connections.
+	var bus events.Bus = events.NewInProc(&logger)
+	if cfg.EventsBackend == "redis" {
+		bus, err = events.NewRedis(ctx, events.RedisOptions{URL: cfg.RedisURL, ConnectTimeout: cfg.DBConnectTimeout})
+		if err != nil {
+			logger.Error().Err(err).Msg("could not connect the event bus")
+			return err
+		}
+	}
+	defer func() { _ = bus.Close() }()
+	publisher := dispatch.NewPublisher(bus, &logger)
+
 	authService, err := auth.NewService(auth.ServiceOptions{
 		Pool:             pool,
 		IDs:              ids,
@@ -188,6 +209,7 @@ func run() error {
 		Mailer:           mailer,
 		PublicBaseURL:    cfg.PublicBaseURL,
 		OAuth:            oauthProviders,
+		Events:           publisher,
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("could not initialize the auth service")
@@ -200,12 +222,13 @@ func run() error {
 		MaxChannelsPerGuild: cfg.MaxChannelsPerGuild,
 		MaxRolesPerGuild:    cfg.MaxRolesPerGuild,
 		MaxGuildsPerAccount: cfg.MaxGuildsPerAccount,
+		Events:              publisher,
 	})
 	if err != nil {
 		return err
 	}
 
-	messageService, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
+	messageService, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids, Events: publisher})
 	if err != nil {
 		return err
 	}
@@ -220,16 +243,49 @@ func run() error {
 		return err
 	}
 
+	// Memory unless configured otherwise, which is every single-process instance. Connected, and verified,
+	// before the listener exists: a limiter that cannot reach its store fails open (see
+	// ratelimit.onStoreFailure), so an unreachable Redis at startup would otherwise mean an instance serving
+	// with no limits at all until somebody read the logs.
+	rateLimitBackend := ratelimit.MemoryBackend()
+	if cfg.RateLimitStore == "redis" {
+		rateLimitBackend, err = ratelimit.NewRedisBackend(ctx, cfg.RedisURL, cfg.DBConnectTimeout)
+		if err != nil {
+			logger.Error().Err(err).Msg("could not connect the rate-limit store")
+			return err
+		}
+		defer func() { _ = rateLimitBackend.Close() }()
+	}
+
+	gw, err := gateway.New(gateway.Options{
+		Accounts:         authService,
+		Guilds:           guildService,
+		Bus:              bus,
+		Audience:         guildauth.NewAudience(db.New(pool)),
+		RateLimitBackend: rateLimitBackend,
+		Version:          meta.Version,
+		Logger:           logger,
+		// A quarter of the pool, so fan-out can hold at most that many connections however busy the
+		// instance is, and requests keep the rest. One lane on the smallest pool, which is how fan-out ran
+		// before it had lanes.
+		FanoutLanes: max(1, int(cfg.DBMaxConns)/4),
+	})
+	if err != nil {
+		return err
+	}
+
 	router, err := newRouter(routerOptions{
-		Config:   cfg,
-		Logger:   logger,
-		Health:   health,
-		Auth:     auth.NewHandler(authService),
-		AuthSvc:  authService,
-		Guilds:   guilds.NewHandler(guildService, authService),
-		Messages: messages.NewHandler(messageService),
-		Reports:  reports.NewHandler(reportService),
-		Tags:     tags.NewHandler(tagService),
+		Config:           cfg,
+		Logger:           logger,
+		Health:           health,
+		Auth:             auth.NewHandler(authService),
+		AuthSvc:          authService,
+		Guilds:           guilds.NewHandler(guildService, authService),
+		Messages:         messages.NewHandler(messageService),
+		Reports:          reports.NewHandler(reportService),
+		Tags:             tags.NewHandler(tagService),
+		RateLimitBackend: rateLimitBackend,
+		Gateway:          gw,
 	})
 	if err != nil {
 		return err
@@ -267,7 +323,7 @@ func run() error {
 	// Blocking, before the instance reports ready. See the package comment.
 	if err := database.Migrate(ctx, migrateOpts); err != nil {
 		logger.Error().Err(err).Msg("migrations failed — shutting down without serving")
-		shutdown(srv, cfg.ShutdownTimeout, &logger)
+		shutdown(srv, gw, cfg.ShutdownTimeout, &logger)
 		return err
 	}
 
@@ -306,7 +362,7 @@ func run() error {
 	// Stop reporting ready before draining, so a load balancer stops sending new work while in-flight
 	// requests finish.
 	health.MarkStopping()
-	shutdown(srv, cfg.ShutdownTimeout, &logger)
+	shutdown(srv, gw, cfg.ShutdownTimeout, &logger)
 
 	// The sweeper observes the same canceled context, so this is a join rather than a wait. Joined at all
 	// so the process does not exit with a DELETE still in flight against a pool that is about to close.
@@ -351,11 +407,20 @@ func newMailQueue(cfg config.Config, logger zerolog.Logger) (*mail.Queue, error)
 	return mail.NewQueue(mail.Options{Sender: sender, Logger: logger}), nil
 }
 
-// shutdown drains in-flight requests, giving up after timeout.
-func shutdown(srv *http.Server, timeout time.Duration, logger *zerolog.Logger) {
+// shutdown drains in-flight requests and gateway connections, giving up after timeout.
+//
+// The gateway is shut down explicitly because srv.Shutdown ignores hijacked connections, and a WebSocket is
+// one: without this every client would be cut off with nothing telling it to reconnect (M118 depends on the
+// Reconnect this sends). Both share one deadline, so a stuck socket cannot stretch shutdown past the
+// configured timeout.
+func shutdown(srv *http.Server, gw *gateway.Server, timeout time.Duration, logger *zerolog.Logger) {
 	// Detached from the signal context, which is already canceled by the time we get here.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	if err := gw.Shutdown(ctx); err != nil {
+		logger.Error().Err(err).Msg("gateway connections did not close in time")
+	}
 
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error().Err(err).Dur("timeout", timeout).Msg("graceful shutdown did not finish in time")

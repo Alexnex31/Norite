@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -228,7 +229,7 @@ func (s *Service) CreateChannel(
 
 	var out Channel
 
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageChannels); err != nil {
 			return err
 		}
@@ -409,7 +410,11 @@ func (s *Service) CreateChannel(
 			}
 		}
 
-		return nil
+		// To members who can view the new channel, which the gateway resolves against the overwrites just
+		// copied into it: a channel created inside a locked category reaches only those the category admits.
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_CREATE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
+		}, out)
 	})
 	if err != nil {
 		return Channel{}, err
@@ -447,7 +452,7 @@ func (s *Service) UpdateChannel(
 ) (Channel, error) {
 	var out Channel
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The same resolve-and-authorize the overwrite endpoints use, and it carries the refusal that
 		// matters here: a member who cannot *see* this channel is answered as though it were not there.
 		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
@@ -539,7 +544,9 @@ func (s *Service) UpdateChannel(
 			out.PermissionOverwrites = append(out.PermissionOverwrites, overwriteFromRow(ow))
 		}
 
-		return nil
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_UPDATE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
+		}, out)
 	})
 	if err != nil {
 		return Channel{}, err
@@ -551,7 +558,7 @@ func (s *Service) UpdateChannel(
 // DeleteChannel removes a channel. Its children, if it is a category, are orphaned to the top level
 // rather than deleted — see channels.parent_id ON DELETE SET NULL in migration 000015.
 func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID snowflake.ID) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The same resolve-and-authorize the overwrite endpoints use, and it carries the refusal that
 		// matters here: a member who cannot *see* this channel is answered as though it were not there.
 		// The listing hides channels now, so a 403 for a hidden one against a 404 for a nonexistent one
@@ -580,7 +587,28 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 			return err
 		}
 
+		// Read before the delete takes them with it. By fan-out time the channel's overwrites are gone, and
+		// resolving against none would send a hidden channel's deletion to every member, naming a channel
+		// they were never shown; the event carries them instead (dispatch.Event.Overwrites).
+		overwrites, err := q.ListChannelPermissionOverwrites(ctx, db.ListChannelPermissionOverwritesParams{
+			ChannelID: int64(channelID),
+			GuildID:   int64(guildID),
+		})
+		if err != nil {
+			return fmt.Errorf("guilds: list overwrites of the channel being deleted: %w", err)
+		}
+
 		guild := int64(guildID)
+		// A category's children lose their parent with it. Detached here rather than by the foreign key, so
+		// the rows come back and every client that shows them nested is told they are not any more.
+		var children []db.Channel
+		if existing.Type == ChannelGuildCategory {
+			parent := int64(channelID)
+			if children, err = q.DetachChildChannels(ctx, db.DetachChildChannelsParams{ParentID: &parent, GuildID: &guild}); err != nil {
+				return fmt.Errorf("guilds: detach the category's channels: %w", err)
+			}
+		}
+
 		affected, err := q.DeleteChannel(ctx, db.DeleteChannelParams{ID: int64(channelID), GuildID: &guild})
 		if err != nil {
 			return fmt.Errorf("guilds: delete channel: %w", err)
@@ -589,6 +617,48 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		if err := s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_DELETE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
+			Overwrites: overwrites, Snapshot: true,
+		}, channelDeleted{ID: channelID, GuildID: guildID}); err != nil {
+			return err
+		}
+		return s.queueDetached(ctx, q, guildID, children)
 	})
+}
+
+// queueDetached dispatches CHANNEL_UPDATE for each channel a category deletion left without a parent, each
+// to the members who can view that channel, and each in the shape every other CHANNEL_UPDATE has: the whole
+// channel, overwrites included. One read for all their overwrites, grouped once, as the listing does.
+func (s *Service) queueDetached(ctx context.Context, q *db.Queries, guildID snowflake.ID, children []db.Channel) error {
+	if len(children) == 0 || s.events == nil {
+		return nil
+	}
+	ids := make([]int64, len(children))
+	for i, ch := range children {
+		ids[i] = ch.ID
+	}
+	rows, err := q.ListGuildPermissionOverwrites(ctx, db.ListGuildPermissionOverwritesParams{
+		ChannelIds: ids,
+		GuildID:    int64(guildID),
+	})
+	if err != nil {
+		return fmt.Errorf("guilds: list overwrites of detached channels: %w", err)
+	}
+	byChannel := make(map[int64][]db.PermissionOverwrite, len(children))
+	for _, ow := range rows {
+		byChannel[ow.ChannelID] = append(byChannel[ow.ChannelID], ow)
+	}
+	for _, row := range children {
+		ch := channelFromRow(row)
+		for _, ow := range byChannel[row.ID] {
+			ch.PermissionOverwrites = append(ch.PermissionOverwrites, overwriteFromRow(ow))
+		}
+		if err := s.events.Queue(ctx, dispatch.Event{
+			Type: "CHANNEL_UPDATE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: ch.ID,
+		}, ch); err != nil {
+			return err
+		}
+	}
+	return nil
 }

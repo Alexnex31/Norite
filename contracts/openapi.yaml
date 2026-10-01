@@ -30,6 +30,10 @@ tags:
       directly in the JSON body, never as cookies — the CLI, GUI and daemon have no cookie jar
       (docs/adr/0011-token-based-client-auth.md). A future web SPA gets cookies from a BFF layer in front of
       this same API, not from these endpoints.
+  - name: gateway
+    description: >
+      The real-time WebSocket. Only the upgrade is an HTTP request; everything after it is the frame protocol
+      in `contracts/gateway-events.schema.json`, which is the source of truth for it.
   - name: users
     description: Account profile surfaces.
   - name: guilds
@@ -55,6 +59,42 @@ tags:
       need never see a backlog.
 
 paths:
+  /gateway:
+    # Served at the instance root, as docs/architecture.md §2 places it: a WebSocket's protocol version
+    # travels in its handshake (ADR 0033), not its path. Documented here because it is a route the backend
+    # serves, and cmd/server/contract_test.go holds the router and this file to the same set; what happens
+    # after the upgrade is gateway-events.schema.json's to describe, not this file's.
+    servers:
+      - url: /
+    get:
+      summary: Open a gateway connection
+      description: >
+        Upgrades to a WebSocket (RFC 6455). The server sends HELLO at once; the client then sends IDENTIFY,
+        carrying an access token, within ten seconds. Authentication happens in that frame rather than in a
+        header, because a browser cannot set a header on a WebSocket and the same protocol serves every
+        client.
+
+
+        An API token is refused, as is an access token whose session has been signed out — a connection
+        outlives a request, so the gateway asks what `RequireLiveSession` asks. Every refusal after the
+        upgrade is a WebSocket close code listed in the schema, never an HTTP status.
+
+
+        Cross-origin upgrades are refused, and the per-address rate limit counts the upgrade like any
+        request. An address already holding sixty-four connections that have not yet identified is refused
+        with 429 before the upgrade.
+      operationId: connectGateway
+      tags: [gateway]
+      security: []
+      responses:
+        "101":
+          description: Switching Protocols. The connection is now a WebSocket.
+        "403":
+          description: The upgrade came from a disallowed origin.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /meta:
     get:
       summary: Instance metadata and the AGPL source offer
@@ -3244,9 +3284,9 @@ paths:
                   minLength: 1
                   maxLength: 4000
                 reply_to_id:
-                  allOf:
+                  oneOf:
                     - $ref: "#/components/schemas/Snowflake"
-                  nullable: true
+                    - type: "null"
       responses:
         "201":
           description: The message as stored.
@@ -4186,6 +4226,9 @@ paths:
     get:
       summary: List a guild's members
       description: >
+        Requires membership; a caller who is not a member gets 404.
+
+
         Cursor-paginated on `user_id`, never offset. An offset makes page N cost N pages of scanning and
         shifts every row when somebody joins or leaves mid-read; a cursor costs one index descent whatever
         the depth and is stable under concurrent writes.
@@ -5133,7 +5176,7 @@ components:
             - $ref: "#/components/schemas/Snowflake"
           description: >
             The account that bypasses every permission check within this guild (authority layer 2). Cannot
-            be removed from the guild, and transferring it is not yet possible.
+            be removed from the guild; the owner hands it on with `POST /guilds/{guild_id}/owner`.
         icon_hash:
           type: [string, "null"]
           description: Reserved. No upload endpoint exists yet, so this is always null.
@@ -5146,9 +5189,8 @@ components:
             (M16b), including edits and deletions. Off unless the guild's owner turned it on.
 
 
-            **Readable by any member**, deliberately: this endpoint is gated on `VIEW_CHANNEL`, which
-            every member holds by default, so being told whether you are recorded does not depend on
-            holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this
+            **Readable by any member**, deliberately: this endpoint requires membership and nothing else,
+            so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this
             field needs the owner; neither is required to learn the answer.
 
 
@@ -6074,9 +6116,9 @@ components:
         channel_id:
           $ref: "#/components/schemas/Snowflake"
         author_id:
-          allOf:
+          oneOf:
             - $ref: "#/components/schemas/Snowflake"
-          nullable: true
+            - type: "null"
           description: >
             Null for a message with no author — a system or webhook message. Never null because the
             author's account was deleted: a deleted account is soft-deleted and its messages survive
@@ -6088,19 +6130,17 @@ components:
           type: integer
           description: 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
         reply_to_id:
-          allOf:
+          oneOf:
             - $ref: "#/components/schemas/Snowflake"
-          nullable: true
+            - type: "null"
         edited_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
         created_at:
           type: string
           format: date-time
         tags:
-          type: array
-          nullable: true
+          type: [array, "null"]
           items:
             $ref: "#/components/schemas/AppliedMessageTag"
           description: >

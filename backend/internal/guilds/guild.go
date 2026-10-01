@@ -14,6 +14,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -71,7 +72,7 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 	var out Guild
 
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// The ceiling. No permission is checked on this path, so this is the only bound on it — see
 		// Service.maxGuildsPerAccount.
 		//
@@ -147,7 +148,11 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 		}
 
 		out = guildFromRow(row)
-		return nil
+		// To the creator alone: nobody else is a member yet, and the event is what adds the guild to their
+		// connections' sets so its later events find them.
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_CREATE", Audience: dispatch.Users, GuildID: out.ID, Users: []snowflake.ID{out.OwnerID},
+		}, out)
 	})
 	if err != nil {
 		return Guild{}, err
@@ -158,11 +163,14 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 // Get returns one guild.
 //
-// Authorized with PermViewChannel, which every member holds by default — so in practice this asks "are
-// you in this guild", and answers 404 when you are not. That is the same refusal a guild that does not
-// exist gets, deliberately; see authorize.
+// Membership is the whole requirement, as the contract says, and a non-member gets the 404 a guild that
+// does not exist gets; see authorize. It was guild-level PermViewChannel until M18, on the reasoning that
+// every member holds it by default. A member whose view comes only from a channel overwrite does not, so
+// they could list the guild's welcome channel and were refused the guild itself, while the gateway sent it
+// to them in READY. ListChannels made the same correction at M13; ListMembers and ListRoles share this one.
 func (s *Service) Get(ctx context.Context, actor auth.Actor, guildID snowflake.ID) (Guild, error) {
-	if err := s.authorize(ctx, actor, guildID, 0, roles.PermViewChannel); err != nil {
+	// Permission.Has(0) is true, so this establishes membership and asserts nothing else.
+	if err := s.authorize(ctx, actor, guildID, 0, 0); err != nil {
 		return Guild{}, err
 	}
 
@@ -252,7 +260,7 @@ func (s *Service) Update(
 ) (Guild, error) {
 	var out Guild
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// Authorized on the transaction's querier, not the pool, so the permissions that allow the write
 		// are read in the same snapshot the write happens in (rule 1). See guildauth.Authorize.
 		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageGuild); err != nil {
@@ -365,7 +373,7 @@ func (s *Service) Update(
 		}
 
 		out = guildFromRow(row)
-		return nil
+		return s.events.Queue(ctx, dispatch.Event{Type: "GUILD_UPDATE", Audience: dispatch.Guild, GuildID: out.ID}, out)
 	})
 	if err != nil {
 		return Guild{}, err
@@ -384,7 +392,7 @@ func (s *Service) Update(
 // exactly this kind of decision, and an Instance Admin passes by layer 1 because operating the instance
 // includes removing what is on it.
 func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflake.ID) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// One query, not two. This used to read the guild for its owner id and then authorize, which ran
 		// ListGuildMemberAuthority — a query whose first column is that same owner id. M12 measured the
 		// redundancy and kept it rather than widen roles.Resolve's return for it; M13 widened that return
@@ -460,6 +468,33 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		// FormerMembers, because by fan-out time there are no membership rows left to check a recipient
+		// against. What it discloses is the id of a guild each recipient's READY already listed.
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_DELETE", Audience: dispatch.FormerMembers, GuildID: guildID,
+		}, guildDeleted{ID: guildID})
 	})
+}
+
+// ListForMember returns every guild userID is a member of, ordered by id: the summaries the gateway's READY
+// carries (M18).
+//
+// No actor and no authorize call, unlike every other read here, and that is the point rather than an
+// omission: the question is "which guilds am I in", asked by the account itself about itself, and the
+// answer is the membership rows. There is no guild in the request to authorize against. The caller is the
+// gateway, which has already authenticated userID and checked its session is live; nothing else may pass a
+// user id here that did not come from a credential.
+//
+// Deliberately the same Guild value GET /guilds/{id} returns, so a guild has one wire shape whether it
+// arrives over REST or in READY.
+func (s *Service) ListForMember(ctx context.Context, userID snowflake.ID) ([]Guild, error) {
+	rows, err := s.queries.ListGuildsForMember(ctx, int64(userID))
+	if err != nil {
+		return nil, fmt.Errorf("listing the guilds an account belongs to: %w", err)
+	}
+	out := make([]Guild, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, guildFromRow(row))
+	}
+	return out, nil
 }

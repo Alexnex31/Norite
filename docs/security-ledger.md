@@ -854,3 +854,107 @@ carries the condition that would reopen it.
 - **Reopens if**: something takes a guild *from* an owner acting against it — M72's enforcement
   transferring an abusive owner's guild is the likely one — where the owner racing the transfer is the
   expected case rather than a contrived one.
+
+## M18 — gateway protocol core
+
+### HELLO tells anybody who connects the server's version
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: HELLO is sent before IDENTIFY and carries `version`, so an unauthenticated socket learns which
+  release is running. The same fact is already public by obligation: `GET /meta` answers unauthenticated
+  with the source revision, because AGPL §13 owes the source offer to everyone. The version is also what
+  lets a client refuse an incompatible server with a message naming the side to upgrade (ADR 0033), which
+  the client cannot do without it.
+- **Reopens if**: `/meta` stops disclosing the revision, or an instance gains a reason to hide its release —
+  at which point HELLO would be the one place still announcing it.
+
+### A close reason tells a token holder that its sign-in has ended
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: IDENTIFY and RESUME close with 4004 "invalid token" for a token that does not verify and 4004
+  "signed out" for a verified token whose sign-in ended. Telling the two apart needs a token the instance
+  signed for that account, whose holder learns only what the REST routes behind `RequireLiveSession`
+  already answer. Nothing about an account that the caller holds no token for is distinguishable.
+- **Reopens if**: the distinction ever depends on something other than a verified token — a reason that
+  differs for an unknown account against a known one, say.
+
+### A disconnected session holds a replay buffer for two minutes, sixteen per account
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: a session keeps up to 512 frames and 1 MiB for `ResumeWindow`, and an account may hold sixteen
+  sessions per process, attached or not, so one account can pin 16 MiB for two minutes. The buffer fills
+  only with events the account may receive, from guilds it belongs to, so filling it needs busy guilds as
+  well as sessions, and each session needs a sign-in, which is rate-limited per address and gated by
+  registration. A fresh IDENTIFY from a device supersedes that device's detached sessions, so a reconnect
+  loop does not accumulate them.
+- **Reopens if**: registration loses its anti-automation (M67a) or its invite gate on the flagship, or M93's
+  metrics show replay buffers as a meaningful share of a process's memory.
+
+### The rate-limit store fails open when Redis cannot answer
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: M18 made the Redis-backed store real, and with it the fail-open `onStoreFailure` has had since
+  M1: a store that errors lets the request through, on REST and at IDENTIFY alike. Failing closed would
+  turn a Redis outage into a total outage of every rate-limited route, sign-in included. What stays
+  bounded without the limiter: argon2id runs behind its concurrency gate, so a login flood during an outage
+  costs throughput rather than memory, and nothing an attacker sends can make the store fail.
+- **Reopens if**: a client can cause store errors, since that turns the fallback into a bypass; or a limit
+  becomes a security control with nothing behind it — a lockout after failed logins, say, or a second-factor
+  attempt counter kept only in the limiter.
+
+### A revocation's cutoff trusts the replicas' clocks
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: a revocation closes connections opened with a sign-in minted before its cutoff snowflake, and
+  snowflakes from different replicas compare only as well as the replicas' clocks agree. Skew in one
+  direction closes a connection opened just after the revocation, which reconnects at once. In the other it
+  misses a connection opened just before, and the periodic liveness check closes that one within
+  `LivenessInterval`, because it asks about the sign-in rather than trusting the cutoff.
+- **Reopens if**: the periodic check is removed or its interval lengthened past the access token's life, or
+  replicas run without synchronized clocks.
+
+### A lost revocation leaves a connection open until the next liveness check
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: revocations travel on the bus, which is at-most-once, so one can be dropped. The connection it
+  should have closed is closed by the heartbeat's liveness check within `LivenessInterval` (five minutes),
+  a third of the fifteen minutes §17.10 already accepts for a signed-out token on REST. Checking every
+  heartbeat instead would put a database read on every connection every forty seconds.
+- **Reopens if**: the interval is raised to or above `AccessTokenTTL`, or the bus drops messages often
+  enough that the interval is the ordinary close rather than the fallback.
+
+### A resumed stream replays frames authorized before a permission change
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: each frame in a session's buffer passed the audience check when it was fanned out, which is the
+  moment a connected client would have received it. A client that was disconnected then receives it on
+  resume, up to two minutes later. It is what an attached client would already hold, delivered late rather
+  than a wider audience.
+- **Reopens if**: the resume window grows long enough that "late" means "after a demotion the member was
+  meant to feel", or an event type carries something whose authorization is meant to lapse — E2E key
+  material being the obvious future case.
+
+### The per-address cap does not bound unidentified sockets across many addresses
+- **Raised**: M18, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the sweep found one address able to hold about four hundred sockets with no credential behind
+  them, which is now bounded at sixty-four per address (IPv6 by /64) and ten seconds each. What remains is
+  the same attack from many addresses, which is network-scale denial of service: the process cannot tell
+  a botnet from a busy instance, and the bound belongs to whatever sits in front of it — the flagship's
+  Ingress (M112) or a self-hoster's proxy.
+- **Reopens if**: an instance runs with nothing in front of it, or M93's metrics show unidentified
+  sockets as a meaningful share of a process's connections.
+
+### A token from an ended sign-in can supersede its device's detached sessions before it is refused
+- **Raised**: M18, `/security-review` (excluded there as denial of service)
+- **Verdict**: accepted risk
+- **Why**: IDENTIFY registers the new session before it asks whether the sign-in is live, which is what
+  leaves a concurrent sign-out no gap to fall into, and registering supersedes the device's detached
+  sessions (`gateway.newSession`, then `checkLive`). So a token from a sign-in that has ended, presented for
+  the same device, is refused only after the device's detached sessions are dropped. The owner loses their
+  resume buffer and identifies afresh, losing nothing but a resync. It needs an access token for that very
+  device, under fifteen minutes old, held by somebody else, which is a stolen credential, and the token can do
+  nothing else here.
+- **Reopens if**: a detached session comes to hold something a resync cannot rebuild, or superseding starts
+  doing more than dropping buffers. Either would make it worth checking liveness before superseding, which
+  means taking the account's session limit without counting the sessions about to be superseded.

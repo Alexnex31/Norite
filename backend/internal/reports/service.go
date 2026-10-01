@@ -61,9 +61,9 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	return &Service{pool: opts.Pool, queries: db.New(opts.Pool), ids: opts.IDs}, nil
 }
 
-func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) error) error {
-	return database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(s.queries.WithTx(tx))
+func (s *Service) inTx(ctx context.Context, fn func(ctx context.Context, q *db.Queries) error) error {
+	return database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return fn(ctx, s.queries.WithTx(tx))
 	})
 }
 
@@ -92,7 +92,7 @@ type FileInput struct {
 // The target is resolved to its channel and authorized with [guildauth.AuthorizeChannelUnlocked] at a
 // `need` of zero, which folds in PermViewChannel and nothing else. **Not PermReadMessageHistory**, which
 // [messages.Service.List] requires: a member without the history bit still watches live messages arrive
-// once M18 fans them out, and a design where somebody can see abuse and cannot report it is the worse
+// over the gateway (M18), and a design where somebody can see abuse and cannot report it is the worse
 // failure. What they cannot do is report a message in a channel they cannot see — that refusal is the
 // channel filter's existing 404, so filing discloses nothing the listing does not.
 //
@@ -140,7 +140,7 @@ func (s *Service) File(ctx context.Context, actor auth.Actor, in FileInput) (Rep
 	}
 
 	var out Report
-	err = s.inTx(ctx, func(q *db.Queries) error {
+	err = s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		message, err := q.GetMessageForReport(ctx, int64(in.TargetID))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -395,7 +395,7 @@ func (s *Service) Resolve(
 	}
 
 	var out Report
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		if _, err := guildauth.Authorize(
 			ctx, q, actor, guildID, 0, roles.PermManageMessages,
 		); err != nil {

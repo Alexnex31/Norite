@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -62,7 +63,7 @@ func (s *Service) TransferOwnership(
 ) (Guild, error) {
 	var out Guild
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// PermViewChannel is what a non-member fails, so a stranger gets the ordinary 404 rather than a
 		// 403 that would confirm the guild exists — Delete's opening, for Delete's reason.
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermViewChannel)
@@ -156,7 +157,13 @@ func (s *Service) TransferOwnership(
 		}
 
 		out = guildFromRow(row)
-		return nil
+		// A new owner is a change to the guild object (owner_id), which every member's client shows, and to
+		// two members' permissions: layer 2 moves from one to the other, so the old owner loses whatever
+		// only ownership gave them and the new one gains it.
+		if err := s.events.Queue(ctx, dispatch.Event{Type: "GUILD_UPDATE", Audience: dispatch.Guild, GuildID: out.ID}, out); err != nil {
+			return err
+		}
+		return s.queuePermissions(ctx, out.ID)
 	})
 	return out, err
 }

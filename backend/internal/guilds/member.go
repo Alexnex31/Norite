@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -43,7 +44,8 @@ type ListMembersInput struct {
 func (s *Service) ListMembers(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in ListMembersInput,
 ) ([]Member, error) {
-	if err := s.authorize(ctx, actor, guildID, 0, roles.PermViewChannel); err != nil {
+	// Membership, not guild-level view: Get's correction, for Get's reason.
+	if err := s.authorize(ctx, actor, guildID, 0, 0); err != nil {
 		return nil, err
 	}
 
@@ -102,7 +104,7 @@ func (s *Service) UpdateMember(
 ) (Member, error) {
 	var out Member
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		// Each field brings its own permission, and only its own.
 		//
 		// The first version started `need` at PermManageGuild and added the moderation bits to it, which
@@ -231,7 +233,9 @@ func (s *Service) UpdateMember(
 		}
 
 		out = memberFromRow(row, snowflakes(held))
-		return nil
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_MEMBER_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
+		}, out)
 	})
 	if err != nil {
 		return Member{}, err
@@ -248,7 +252,7 @@ func (s *Service) UpdateMember(
 func (s *Service) RemoveMember(
 	ctx context.Context, actor auth.Actor, guildID, userID snowflake.ID,
 ) error {
-	return s.inTx(ctx, func(q *db.Queries) error {
+	return s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		if userID == actor.UserID {
 			// Leaving. It needs membership and nothing else, which is why the permission asked for is the
 			// empty set: resolving at all is what establishes membership, and Permission.Has(0) is true by
@@ -382,6 +386,16 @@ func (s *Service) RemoveMember(
 			return httpx.ErrNotFound
 		}
 
-		return nil
+		// The removed account first, by name: it is no longer a member, so a guild-audience event could
+		// not reach it, and this is what drops the guild from its connections. Queued before the event to
+		// the others so no later event for this guild is still aimed at those connections.
+		if err := s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_DELETE", Audience: dispatch.Users, GuildID: guildID, Users: []snowflake.ID{userID},
+		}, guildDeleted{ID: guildID}); err != nil {
+			return err
+		}
+		return s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_MEMBER_REMOVE", Audience: dispatch.Guild, GuildID: guildID,
+		}, memberRemoved{GuildID: guildID, UserID: userID})
 	})
 }

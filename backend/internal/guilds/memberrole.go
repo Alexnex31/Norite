@@ -12,6 +12,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
@@ -85,7 +86,7 @@ func (s *Service) changeMemberRole(
 ) (Member, error) {
 	var out Member
 
-	err := s.inTx(ctx, func(q *db.Queries) error {
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
 		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, roles.PermManageRoles)
 		if err != nil {
 			return err
@@ -237,7 +238,13 @@ func (s *Service) changeMemberRole(
 		}
 
 		out = memberFromRow(member, snowflakes(held))
-		return nil
+		if err := s.events.Queue(ctx, dispatch.Event{
+			Type: "GUILD_MEMBER_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
+		}, out); err != nil {
+			return err
+		}
+		// A role held or no longer held changes what this member may see and do.
+		return s.queuePermissions(ctx, guildID)
 	})
 	if err != nil {
 		return Member{}, err

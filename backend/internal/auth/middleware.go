@@ -149,7 +149,8 @@ func RequireUserActor(next http.Handler) http.Handler {
 // cannot undo, not merely one that is important.
 //
 // A *rotated* session is live. Rotation revokes the row an access token names, so liveness is asked of the
-// device, never of the row — see Service.requireLiveDevice.
+// sign-in the row belongs to, never of the row, and never of the device either — see
+// Service.requireLiveDevice.
 func RequireLiveSession(svc *Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -52,7 +52,7 @@ func TestTheRevocationPrimitiveRevokesEveryClaim(t *testing.T) {
 	_, err = svc.AuthenticateAPIToken(ctx, minted.Raw)
 	require.NoError(t, err)
 
-	result, err := revokeEverything(ctx, svc.queries, user.ID, RevocationScope{})
+	result, err := svc.revokeEverything(ctx, svc.queries, user.ID, RevocationScope{})
 	require.NoError(t, err)
 
 	assert.EqualValues(t, 1, result.Sessions, "the one live session")
@@ -91,7 +91,7 @@ func TestSparingADeviceSparesItAndNoOther(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, err := revokeEverything(ctx, svc.queries, user.ID, RevocationScope{KeepDeviceID: "laptop"})
+	result, err := svc.revokeEverything(ctx, svc.queries, user.ID, RevocationScope{KeepDeviceID: "laptop"})
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, result.Sessions, "the phone and the tablet, not the laptop")
 
@@ -120,7 +120,7 @@ func TestASparedDeviceSurvivesItsNextRotations(t *testing.T) {
 	rotated, err := svc.Refresh(ctx, laptop.RefreshToken)
 	require.NoError(t, err)
 
-	_, err = revokeEverything(ctx, svc.queries, user.ID, RevocationScope{KeepDeviceID: "laptop"})
+	_, err = svc.revokeEverything(ctx, svc.queries, user.ID, RevocationScope{KeepDeviceID: "laptop"})
 	require.NoError(t, err)
 
 	again, err := svc.Refresh(ctx, rotated.RefreshToken)
@@ -140,10 +140,10 @@ func TestRevokingAnAccountWithNothingOutstandingIsQuiet(t *testing.T) {
 
 	user, _ := registerAndLogin(t, svc, "ada@example.com", "laptop")
 
-	_, err := revokeEverything(ctx, svc.queries, user.ID, RevocationScope{})
+	_, err := svc.revokeEverything(ctx, svc.queries, user.ID, RevocationScope{})
 	require.NoError(t, err)
 
-	result, err := revokeEverything(ctx, svc.queries, user.ID, RevocationScope{})
+	result, err := svc.revokeEverything(ctx, svc.queries, user.ID, RevocationScope{})
 	require.NoError(t, err)
 	assert.Zero(t, result.Total(), "a second pass has nothing left to revoke")
 }

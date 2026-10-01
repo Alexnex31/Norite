@@ -124,6 +124,22 @@ format = "json"
 # for free. That grouping is global and not configurable.
 rest = "600-M"
 
+# Where the counters live: "memory" or "redis". Default "memory", which is correct for a single process.
+# "redis" is for running more than one replica behind a load balancer, where a store per process would
+# multiply every limit by the replica count. Needs [redis].url.
+store = "memory"
+
+[events]
+# How a committed change reaches the gateway connections that hear about it: "inproc" or "redis". Default
+# "inproc", which is what a single process wants. "redis" is for running more than one replica, where an
+# event committed on one must reach connections held by another. Needs [redis].url.
+backend = "inproc"
+
+[redis]
+# The Redis (or Valkey) server [events].backend and [rate_limit].store use when set to "redis". Required
+# exactly then, unused otherwise. Carries the server's password when it has one, so this file stays 0600.
+url = "redis://redis:6379/0"
+
 [storage]
 # Where uploaded attachments live: "local" disk or "s3" (AWS S3, MinIO, or anything speaking that API).
 # Default "local". Read by the attachment milestones, not yet by anything at M2 — validated from M2 on so

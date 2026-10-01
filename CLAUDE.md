@@ -202,7 +202,8 @@ These apply to every milestone, not just a final pass — treat a PR that violat
 
 ```
 backend/       Go modular monolith — cmd/server, internal/{config,platform,auth,users,guilds,guildauth,
-               channels,roles,messages,gateway,presence,voice,db}, migrations/
+               channels,roles,messages,dispatch,gateway,presence,voice,db}, migrations/, and gatewayproto/
+               (the gateway's wire format, outside internal/ because the daemon imports it)
 cli/           The `norite` binary — the scriptable command tree (internal/cliapp) *and* the TUI
                (shell, panes, chords, screens); one binary, two front ends onto one command tree
 gui/           The native GUI — Gio app, mirrors the TUI's screens; shares the daemon/config model
@@ -220,7 +221,7 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
   joins at Phase O)
 - `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
   differs from CI is not a gate. **Needs a running container runtime**: the backend's integration tests
-  start a real Postgres via `testcontainers-go`. Costs about 1.6x, not the 10x the race detector is
+  start a real Postgres via `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race detector is
   reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
 - `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
   substitute for `just test` before pushing.
@@ -385,7 +386,8 @@ Install and authenticate `gh` if you want that to change.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order. Full
+**Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
+**Phase D under way, M18 done**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -840,6 +842,64 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   was moved to `C-c C-t` because tag held it — for a feature with no screen, no client and one mention in
   the whole roadmap. §16's hazard running backwards.
 
+- **M18 — Gateway protocol core**: done. `/gateway` with HELLO/IDENTIFY/READY, heartbeats, RESUME, DISPATCH
+  and Reconnect; `backend/gatewayproto` (the wire format and the ADR 0033 version check), `internal/gateway`,
+  `internal/dispatch`, `guildauth.Audience`, `roles.ResolveMany`, `database.AfterCommit`, the event bus and
+  rate-limit store on Redis as well as in process, and `gateway-events.schema.json` for every frame.
+  Decisions are in the roadmap entry, in `architecture.md` §2 and in `docs/security-ledger.md`.
+
+  **The design was corrected before it was built**, by reading `architecture.md` §2 against the roadmap,
+  the method that has now found something at five milestones running. RESUME carried no token, so a session
+  id from a log line resumed somebody else's stream. IDENTIFY took any unexpired token, which outlives its
+  session by fifteen minutes and a connection by nothing. READY carried every guild's channels, 12.5 MB at
+  the cap. And the permission cache M12 deferred here was declined: its invalidation would cross replicas
+  on an at-most-once bus, so a demotion would land eventually, which is the stale decision rule 1 refuses.
+
+  **Liveness belongs to the sign-in, not the device, and M11's own check had it wrong.** After a device
+  signed out and in again it was live, so a token stolen from the sign-in that ended passed: on the gateway
+  it opened a stream that never closed, and on REST `RequireLiveSession` let it mint an API token,
+  reproduced at 201. A sign-in is the device plus its family's `first_seen`, which rotation carries and a
+  new sign-in resets. Found by `/code-review` on the finished branch. M11 wrote "liveness is asked of the
+  device, never the row" to protect rotation, and the sentence was right about the row and wrong about the
+  device: **when a rule says what a check must not key on, ask separately what it must**.
+
+  **The revocation close had five paths, and the roadmap named one.** Logout, revoking a device, refresh
+  reuse and a sign-in superseding a device each end a sign-in without `revokeEverything`. All five queue the
+  close after commit and carry a cutoff snowflake, so a device that signs in again inside the delivery lag
+  is not closed by the revocation it outran; a heartbeat re-check bounds a close the bus dropped. M13a's
+  lesson for a value that starts changing applies to an event that starts mattering: enumerate every
+  writer, not the one somebody named.
+
+  **Two surfaces for one object must agree, and the contract says which is right.** `/security-review`
+  found the gateway sending guild objects, roles and members to a member REST refused them to — a member
+  whose only view is a welcome-channel overwrite, the configuration `ListChannels` already calls ordinary.
+  The contract said "requires membership"; REST said guild-level view. REST was the bug, and tightening the
+  gateway instead would have dropped the guild from that member's READY. The review passes found three more
+  in the other direction, each a gateway event reaching somebody REST would refuse: an edit to a member
+  without history, a guild deletion to an account mid-IDENTIFY, a deleted channel's message to the whole
+  guild.
+
+  **A done-when can be unmet while every test is green.** It asked for the gateway's tests to pass against
+  `redis` as well as `inproc`; the bus and the limiter each were, the gateway itself never ran over Redis,
+  and nothing failed because nothing looked. Found by reading the done-when clause by clause before marking
+  the milestone done. `TestTheGatewayWorksAcrossReplicasOverRedis` runs two replicas, and is proved by
+  taking the second off Redis.
+
+  **Measure what grows with something other than the audience.** Candidate lookup scanned every session
+  on the process (3.2 ms an event at 50,000, for a hundred recipients); the audience check ran one event at
+  a time for the whole process (a ceiling near 1,300 events a second); each frame re-encoded its payload
+  (6.1 µs against 1.5). An index, lanes keyed by guild and sized from the pool, and appending the encoded
+  bytes. The benchmarks are committed in `internal/gateway/bench_test.go`.
+
+  **A generic plan seen once is a plan to rule out, not to wait for.** The deleted-channel fix first read
+  overwrites with the guild in its `WHERE`, and on a database without fresh statistics the generic plan
+  walked the guild's channel index. With statistics the planner chose the primary key, so no test could make
+  it fail; the guild moved to a comparison in Go so no plan has the choice, M13a's shape.
+
+  **Gates in a chain need `&&`, not `;`.** A commit went in past a failed `contract-check` because the two
+  were joined with `;`, and was amended before push. CI would have caught it; the local gate exists so it
+  need not.
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -869,8 +929,11 @@ re-derive:
   that gap.
 - **Validation messages name the wire field**, because `NewHandler` registers a `json`-tag name func on the
   validator. Without it the message quotes the Go field (`DeviceID`), which appears in no contract.
-- **Transactions**: `database.RunInTx`. Mutation + audit-log write go in one `fn` (rule 2); publish gateway
-  events *after* it returns nil (rule 5).
+- **Transactions**: `database.RunInTx`. Mutation + audit-log write go in one `fn` (rule 2). A gateway event
+  is queued *inside* `fn` with `dispatch.Publisher.Queue`, which registers it with `database.AfterCommit`, so
+  it is published once the commit succeeds and never on a rollback (rule 5). Since M18, not after `RunInTx`
+  returns: that was the convention, and it could not reach the five revocations deep inside helpers that
+  never see the commit. `AfterCommit` outside a transaction panics, on purpose.
 - **Rate limiting**: always build limiters through `internal/platform/ratelimit` — it is what enforces the
   global "IPv6 groups by /64" rule (rule-adjacent, `docs/architecture.md` §11). Give a new stricter limit
   its own `Bucket`.
@@ -1910,6 +1973,40 @@ And on the opt-in recording log, from M16b:
   §2 settled the toggle's authority and said nothing about the read's; `SCREENS.md` had told members
   their messages are "kept in a log its moderators can read". When a surface has a screen, read the
   screen before deciding what the API allows — it may already have answered on the product's behalf.
+
+And on the gateway and event dispatch, from M18:
+
+- **Publish only through `dispatch.Publisher.Queue`, inside the transaction.** It registers the publish with
+  `database.AfterCommit`; there is no other way to publish, so there is no way to publish early (rule 5). The
+  payload is encoded once there and copied into every recipient's frame.
+- **An event names an audience, never a recipient list.** `Guild` (optionally narrowed to a channel),
+  `Users` for events about an account itself, `FormerMembers` only for a deleted guild's `GUILD_DELETE`. Who
+  receives it is decided at fan-out by `guildauth.Audience` against fresh rows, so a publisher cannot widen
+  an audience by getting a list wrong. When reading the event's object over REST needs more than view, say so
+  in `Need` — `MESSAGE_UPDATE` carries `READ_MESSAGE_HISTORY`. An event about a channel whose rows will be
+  gone by fan-out carries their snapshot with `Snapshot` set, or it reaches nobody.
+- **The gateway must never disclose more than REST.** For a new event, find the REST read of the same object
+  and make the audience match it. If the two disagree, the contract decides which is wrong.
+- **A new dispatch type goes in `gateway-events.schema.json` in the same commit** (rule 6), and every gateway
+  test validates every frame it reads against that schema, so an undeclared field fails the first test that
+  sees it. The REST shapes inside it are generated from `openapi.yaml` and held equal by a test; edit the
+  OpenAPI document, not the copy.
+- **Anything that ends a sign-in closes its connections**, through `revokeEverything` or `endConnections`,
+  inside the transaction. Liveness is asked of the sign-in (`SignInOf`, `RequireLiveSignIn`), never of the
+  device and never of the row.
+- **Ordering is per guild.** Fan-out runs in lanes keyed by guild, so a guild's events arrive in publish
+  order and two guilds' may not. Nothing may rely on cross-guild order.
+- **Lock order in `internal/gateway`**: the server's `mu` before a session's, and the index's lock after
+  either, never before. A session updates the index while holding its own lock.
+- **Fan-out queries are written against the generic plan.** They run on every event, so drive them from
+  primary keys and add them to `TestTheFanOutsRoleReadCannotScanTheWholeGuild`, which reads the plan pgx
+  actually prepared under `force_generic_plan`.
+- **`backend/gatewayproto` is outside `internal/` so the daemon can import it**, which will make
+  `daemon` → `backend` the repository's third cross-module edge at M19. Keep it free of anything the backend
+  alone needs.
+- **Testing the bus's timing**: `gatedBus` holds revocations until released, and `droppingBus` loses them,
+  in `gateway_revoke_test.go`. A race between a commit and its delivery is staged with those, never by
+  racing.
 
 ## Project-specific skills
 

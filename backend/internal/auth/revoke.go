@@ -8,6 +8,8 @@ import (
 	"fmt"
 
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
+	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
 
 // Revoking every claim an account holds.
@@ -28,22 +30,20 @@ import (
 // Four callers each remembering four things is four chances to remember three. So the list lives here, and
 // reset, sign-out-everywhere-else, M72's bans and account deletion call it rather than reproducing it.
 //
+// # Live connections
+//
+// Revoking a session stops the *next* refresh, and an access token expires within AccessTokenTTL, so the
+// REST surface is bounded at fifteen minutes by construction (§17.10). A gateway connection is not: it
+// authenticates once and then stays open for as long as its client keeps it. So the primitive also closes
+// every connection the revocation ends, through endConnections, after the transaction commits — here rather
+// than in a caller, so every caller gets it without being edited (M18).
+//
 // # What it does not do yet
 //
-// architecture.md §2 defines the primitive as three things, and this is one of them. The other two do not
-// exist to be called:
+// Revoke every linked device's E2E device-link trust (M101, ADR 0014). Same placement, same reason.
 //
-//   - **Force-close live gateway connections (M18).** This matters more than it looks. Revoking a session
-//     stops the *next* refresh, and an access token expires within AccessTokenTTL, so the REST surface is
-//     bounded at fifteen minutes by construction (§17.10). A WebSocket is not: it authenticates once at
-//     IDENTIFY and then stays open for as long as the client keeps it, so without an explicit close a
-//     revoked account keeps receiving events indefinitely. When M18 lands, the close belongs *here*, in
-//     this function, so every caller gets it without being edited.
-//   - **Revoke every linked device's E2E device-link trust (M101, ADR 0014).** Same placement, same
-//     reason.
-//
-// Deliberately not an interface with nil implementations. Two seams whose shapes are guesses would be two
-// wrong shapes; a list of statements with the missing ones written into it is one place to add a line.
+// Deliberately not an interface with a nil implementation. A seam whose shape is a guess is a wrong shape;
+// a list of statements with the missing one written into it is one place to add a line.
 
 // RevocationScope bounds what a revocation spares.
 //
@@ -80,7 +80,7 @@ func (r RevocationResult) Total() int64 {
 // Takes a *db.Queries rather than opening its own transaction, so a caller can compose it into one that is
 // already doing something else — which is the whole point at the reset path, where the password change and
 // the revocation must land together or not at all.
-func revokeEverything(ctx context.Context, q *db.Queries, userID int64, scope RevocationScope,
+func (s *Service) revokeEverything(ctx context.Context, q *db.Queries, userID int64, scope RevocationScope,
 ) (RevocationResult, error) {
 	var out RevocationResult
 	var err error
@@ -123,5 +123,34 @@ func revokeEverything(ctx context.Context, q *db.Queries, userID int64, scope Re
 		return out, fmt.Errorf("revoking device codes: %w", err)
 	}
 
+	// And every live gateway connection on the devices whose sessions just ended. Queued, so it happens
+	// only if the transaction commits: closing first would let the client reconnect before the revoke
+	// landed, and closing on a rollback would sign somebody out of a stream while leaving them signed in.
+	if err := s.endConnections(ctx, dispatch.Revocation{
+		UserID: snowflake.ID(userID), ExceptDevice: scope.KeepDeviceID,
+	}); err != nil {
+		return out, err
+	}
+
 	return out, nil
+}
+
+// endConnections queues the close of the gateway connections r ends, for after ctx's transaction commits.
+//
+// A zero Before is filled with an id minted now, so the connections closed are the ones opened with a
+// sign-in from before this revocation, and a device signing in again straight afterwards is not closed by
+// a revocation it outran. A caller that knows a better cutoff sets it: writeSession uses the id of the
+// session it is writing.
+func (s *Service) endConnections(ctx context.Context, r dispatch.Revocation) error {
+	if s.events == nil {
+		return nil
+	}
+	if r.Before == 0 {
+		id, err := s.ids.Next()
+		if err != nil {
+			return fmt.Errorf("minting a revocation cutoff: %w", err)
+		}
+		r.Before = id
+	}
+	return s.events.QueueRevocation(ctx, r)
 }

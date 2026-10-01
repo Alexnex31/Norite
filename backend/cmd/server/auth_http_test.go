@@ -21,13 +21,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
+	"github.com/Alexnex31/Norite/backend/internal/gateway"
+	"github.com/Alexnex31/Norite/backend/internal/guildauth"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/mail"
 	"github.com/Alexnex31/Norite/backend/internal/messages"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
+	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/httpx"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/reports"
@@ -70,6 +75,13 @@ type api struct {
 	// mail captures what the reset flow would have sent. The raw token exists nowhere else — that is the
 	// point of it — so this is the only way a test can follow a reset link.
 	mail *captureMailer
+
+	// The services and the gateway behind handler, for the gateway tests: some need a gateway built with
+	// their own options (a short heartbeat, a pinned version) over the same services and database.
+	authSvc   *auth.Service
+	guildsSvc *guilds.Service
+	bus       events.Bus
+	gateway   *gateway.Server
 }
 
 // captureMailer stands in for the real queue: it records messages instead of delivering them, and can
@@ -168,6 +180,15 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	providers auth.OAuthProviders, publicBaseURL string,
 ) *api {
 	t.Helper()
+	return newAPIOnBus(t, mode, mailer, providers, publicBaseURL, nil)
+}
+
+// newAPIOnBus is newAPIWithBaseURL over a bus the test chose, for the tests that run the gateway across
+// replicas over Redis. Nil is the in-process bus every other test uses.
+func newAPIOnBus(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer,
+	providers auth.OAuthProviders, publicBaseURL string, bus events.Bus,
+) *api {
+	t.Helper()
 	dbtest.RequireContainer(t)
 
 	ctx := t.Context()
@@ -195,6 +216,12 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	issuer, err := auth.NewTokenIssuer([]byte(testJWTSecret))
 	require.NoError(t, err)
 
+	if bus == nil {
+		bus = events.NewInProc(nil)
+		t.Cleanup(func() { _ = bus.Close() })
+	}
+	publisher := dispatch.NewPublisher(bus, nil)
+
 	svc, err := auth.NewService(auth.ServiceOptions{
 		Pool:             pool,
 		IDs:              ids,
@@ -203,6 +230,7 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		Mailer:           mailer,
 		PublicBaseURL:    publicBaseURL,
 		OAuth:            providers,
+		Events:           publisher,
 	})
 	require.NoError(t, err)
 
@@ -221,16 +249,29 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		MaxChannelsPerGuild: testConfig().MaxChannelsPerGuild,
 		MaxRolesPerGuild:    testConfig().MaxRolesPerGuild,
 		MaxGuildsPerAccount: testConfig().MaxGuildsPerAccount,
+		Events:              publisher,
 	})
 	require.NoError(t, err)
 
-	messagesSvc, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids})
+	messagesSvc, err := messages.NewService(messages.ServiceOptions{Pool: pool, IDs: ids, Events: publisher})
 	require.NoError(t, err)
 
 	tagsSvc, err := tags.NewService(tags.ServiceOptions{Pool: pool, IDs: ids})
 	require.NoError(t, err)
 
 	reportsSvc, err := reports.NewService(reports.ServiceOptions{Pool: pool, IDs: ids})
+	require.NoError(t, err)
+
+	gw, err := gateway.New(gateway.Options{
+		Accounts: svc,
+		Guilds:   guildsSvc,
+		Bus:      bus,
+		Audience: guildauth.NewAudience(db.New(pool)),
+		Version:  gatewayproto.DevVersion,
+		Logger:   zerolog.New(io.Discard),
+		// More than one, so every gateway test runs across lanes as the flagship's pool does.
+		FanoutLanes: 4,
+	})
 	require.NoError(t, err)
 
 	handler, err := newRouter(routerOptions{
@@ -243,10 +284,12 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		Messages: messages.NewHandler(messagesSvc),
 		Reports:  reports.NewHandler(reportsSvc),
 		Tags:     tags.NewHandler(tagsSvc),
+		Gateway:  gw,
 	})
 	require.NoError(t, err)
 
-	return &api{t: t, handler: handler, pool: pool, mail: mailer}
+	return &api{t: t, handler: handler, pool: pool, mail: mailer,
+		authSvc: svc, guildsSvc: guildsSvc, bus: bus, gateway: gw}
 }
 
 // issueResetToken runs a real reset request and returns the token out of the email that would have gone.

@@ -4,9 +4,9 @@
 -- The guild, whether this account is in it, and every role whose permissions apply to them — in one round
 -- trip rather than three.
 --
--- Both queries here run before every mutating handler (rule 1) and neither result is cached: the cache
--- architecture.md describes is invalidated by a gateway dispatch, and the gateway is M18. A cache with
--- nothing to invalidate it is a demotion that takes effect five minutes late, so this runs live on every
+-- Both queries here run before every mutating handler (rule 1) and neither result is cached. M18 decided
+-- against the cache architecture.md once described: its invalidation would travel between replicas on an
+-- at-most-once bus, so a demotion would take effect eventually rather than now. So this runs live on every
 -- check and has to be cheap. That is the constraint the shape below is chosen against.
 --
 -- The obvious decomposition is a guild lookup, then a membership lookup, then a role list, and it is three
@@ -184,3 +184,53 @@ FROM permission_overwrites po
 JOIN channels c ON c.id = po.channel_id
 WHERE po.channel_id = ANY(sqlc.arg(channel_ids)::bigint[])
   AND c.guild_id = sqlc.arg(guild_id)::bigint;
+
+-- name: GetGuildAuthorityBase :one
+-- The guild-wide half of resolving many members at once (M18's fan-out): the owner, and @everyone, which
+-- every member holds and which ListMemberRolesForUsers therefore does not repeat per member. roles is read
+-- through roles_guild_id_position_idx, bounded by the guild's role ceiling.
+SELECT g.owner_id, r.id AS everyone_role_id, r.permissions AS everyone_permissions
+FROM guilds g
+JOIN roles r ON r.guild_id = g.id AND r.is_default
+WHERE g.id = $1;
+
+-- name: ListMemberRolesForUsers :many
+-- Whether each of a list of accounts is a member of one guild, and every role it holds there beyond
+-- @everyone: the per-recipient half of resolving who receives a gateway event (M18).
+--
+-- Driven from the recipient list rather than filtered by it, and that shape is chosen against a plan
+-- rather than for style. `guild_id = $1 AND user_id = ANY($2)` is the query M13a found collapsing: under a
+-- cached generic plan Postgres used guild_id as the index condition and scanned every role grant in a large
+-- guild to keep the page's. Here each recipient is its own probe, matching guild_member_roles' primary key
+-- on both leading columns, so no plan can widen it into a scan of the guild; a test reads the generic plan
+-- pgx actually prepares.
+--
+-- A non-member comes back once with is_member false and no role; a member holding nothing but @everyone
+-- comes back once with no role.
+SELECT
+    u.user_id::bigint AS user_id,
+    (gm.user_id IS NOT NULL)::boolean AS is_member,
+    r.id AS role_id,
+    r.permissions AS role_permissions
+FROM unnest(sqlc.arg(user_ids)::bigint[]) AS u(user_id)
+LEFT JOIN guild_members gm
+    ON gm.guild_id = sqlc.arg(guild_id)::bigint AND gm.user_id = u.user_id
+LEFT JOIN guild_member_roles gmr
+    ON gmr.guild_id = sqlc.arg(guild_id)::bigint AND gmr.user_id = gm.user_id
+LEFT JOIN roles r
+    ON r.id = gmr.role_id;
+
+-- name: ListOverwritesOfExistingChannel :many
+-- A channel's overwrites, and whether the channel still exists: no rows means it does not, and one row with a
+-- null target means it does and has none. Fan-out needs the difference (M18). An event about a channel,
+-- waiting in its lane while the channel is deleted, otherwise resolved against no overwrites and reached
+-- every member with guild-level view, a hidden channel's message included.
+--
+-- The guild is returned rather than matched, and the caller compares it. With guild_id in the WHERE, a
+-- generic plan was seen walking channels_guild_id_position_idx and filtering on id, which is up to the
+-- channel ceiling per event where the primary key is one row; with only the id, no plan has that choice
+-- (M13a's lesson; TestTheFanOutsRoleReadCannotScanTheWholeGuild).
+SELECT c.guild_id, c.id AS channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM channels c
+LEFT JOIN permission_overwrites po ON po.channel_id = c.id
+WHERE c.id = $1;

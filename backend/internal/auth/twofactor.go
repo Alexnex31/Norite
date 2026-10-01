@@ -361,7 +361,7 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID int64, code 
 	// One transaction: the factor becomes required and its recovery codes exist together, or neither
 	// happens. A confirmation that committed without codes would leave somebody one lost phone away from
 	// an account nobody can reach.
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 		if _, err := q.ConfirmTOTP(ctx, userID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -408,7 +408,7 @@ func (s *Service) DisableTwoFactor(ctx context.Context, userID snowflake.ID, cur
 	}
 
 	var out RevocationResult
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 		if _, err := q.DeleteTOTPForUser(ctx, int64(userID)); err != nil {
 			return fmt.Errorf("removing the enrollment: %w", err)
@@ -416,7 +416,7 @@ func (s *Service) DisableTwoFactor(ctx context.Context, userID snowflake.ID, cur
 		if _, err := q.DeleteRecoveryCodesForUser(ctx, int64(userID)); err != nil {
 			return fmt.Errorf("removing the recovery codes: %w", err)
 		}
-		out, err = revokeEverything(ctx, q, int64(userID), RevocationScope{KeepDeviceID: currentDevice})
+		out, err = s.revokeEverything(ctx, q, int64(userID), RevocationScope{KeepDeviceID: currentDevice})
 		return err
 	})
 	if err != nil {
@@ -440,7 +440,7 @@ func (s *Service) RegenerateRecoveryCodes(ctx context.Context, userID int64, cod
 	}
 
 	// Replaced in one transaction, so there is no instant in which the account has no codes at all.
-	err = database.RunInTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = database.RunInTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 		if _, err := q.DeleteRecoveryCodesForUser(ctx, userID); err != nil {
 			return fmt.Errorf("clearing the old recovery codes: %w", err)

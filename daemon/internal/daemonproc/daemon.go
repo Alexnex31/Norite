@@ -5,8 +5,8 @@
 //
 // Milestone M3 scope is deliberately narrow: start cleanly, prove there is exactly one daemon per OS user,
 // prepare the process for the handle count it will eventually hold, log what it did, and stop cleanly on a
-// signal. It opens no sockets and talks to nothing — the gateway client, the dual IPC listeners, and the
-// plugin host arrive in Phase E (docs/roadmap.md M18-M24).
+// signal. It opens no sockets and talks to nothing — the gateway client and the dual IPC listeners arrive
+// in Phase D (docs/roadmap.md M19-M22), and the plugin host at M88.
 //
 // What it is not is a placeholder to be thrown away. Every later milestone adds a component *inside* this
 // startup and shutdown sequence, so the ordering it establishes — lock before anything observable, limits

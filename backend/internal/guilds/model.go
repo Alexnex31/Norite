@@ -383,3 +383,33 @@ func overwriteFromRow(row db.PermissionOverwrite) Overwrite {
 		Deny:      roles.PermissionFromInt64(row.Deny),
 	}
 }
+
+// guildDeleted is GUILD_DELETE's payload: which guild an account is no longer in, whether because it was
+// deleted or because the account was removed from it. Only the id, since there is nothing left to describe
+// and a client drops the guild either way.
+type guildDeleted struct {
+	ID snowflake.ID `json:"id"`
+}
+
+// channelDeleted is CHANNEL_DELETE's payload.
+type channelDeleted struct {
+	ID      snowflake.ID `json:"id"`
+	GuildID snowflake.ID `json:"guild_id"`
+}
+
+// guildRoles is GUILD_ROLES_UPDATE's payload: the guild's whole role list, in the order GET /roles returns.
+type guildRoles struct {
+	GuildID snowflake.ID `json:"guild_id"`
+	Roles   []Role       `json:"roles"`
+}
+
+// permissionsUpdated is GUILD_PERMISSIONS_UPDATE's payload: which guild to refetch.
+type permissionsUpdated struct {
+	GuildID snowflake.ID `json:"guild_id"`
+}
+
+// memberRemoved is GUILD_MEMBER_REMOVE's payload, sent to the members who remain.
+type memberRemoved struct {
+	GuildID snowflake.ID `json:"guild_id"`
+	UserID  snowflake.ID `json:"user_id"`
+}
