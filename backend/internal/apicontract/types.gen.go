@@ -833,7 +833,7 @@ type Guild struct {
 	MessageAuditEnabled bool   `json:"message_audit_enabled"`
 	Name                string `json:"name"`
 
-	// OwnerId The account that bypasses every permission check within this guild (authority layer 2). Cannot be removed from the guild, and transferring it is not yet possible.
+	// OwnerId The account that bypasses every permission check within this guild (authority layer 2). Cannot be removed from the guild; the owner hands it on with `POST /guilds/{guild_id}/owner`.
 	OwnerId   Snowflake `json:"owner_id"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

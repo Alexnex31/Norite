@@ -5176,7 +5176,7 @@ components:
             - $ref: "#/components/schemas/Snowflake"
           description: >
             The account that bypasses every permission check within this guild (authority layer 2). Cannot
-            be removed from the guild, and transferring it is not yet possible.
+            be removed from the guild; the owner hands it on with `POST /guilds/{guild_id}/owner`.
         icon_hash:
           type: [string, "null"]
           description: Reserved. No upload endpoint exists yet, so this is always null.
