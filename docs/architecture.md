@@ -84,7 +84,10 @@ Locked-in decisions:
 │   │   ├── emoji/  webhooks/
 │   │   ├── instanceadmin/       # instance_bans, instance_audit_log, reports (instance-scoped half)
 │   │   ├── reports/             # unified reports system (guild + instance routing)
-│   │   ├── gateway/             # ws.go, opcodes.go, session.go, registry.go, dispatch.go, block-aware fanout
+│   │   ├── dispatch/            # the event shape and the after-commit publisher every domain package uses
+│   │   ├── gateway/             # gateway.go, conn.go, session.go (resume buffer), index.go, fanout.go
+│   │   │                        #   (block-aware from M70); the wire format is backend/gatewayproto,
+│   │   │                        #   outside internal/ so the daemon can import it (M19)
 │   │   ├── voice/                # Pion SFU room/participant model, PionMediaCoordinator
 │   │   ├── turn/                 # embedded pion/turn server
 │   │   └── db/                   # sqlc-generated, one package, narrow interfaces consumed per-domain
@@ -885,8 +888,8 @@ about ownership first.
 is invalidated by a gateway dispatch, which is why M12 left it for M18. But on the flagship that
 invalidation crosses replicas over Redis pub/sub, which is asynchronous, so a demotion would take effect
 *eventually*: the stale decision rule 1 exists to refuse. So the gateway's fan-out resolves each event's
-recipients against fresh rows instead, in one batched query per event, bounded by the guild's *connected*
-members. A cache comes later only if a measurement asks for one, and only with an invalidation that is
+recipients against fresh rows instead (`roles.ResolveMany`, three batched reads per event, held equal to
+`Resolve` account by account), bounded by the guild's *connected* members. A cache comes later only if a measurement asks for one, and only with an invalidation that is
 synchronous with the change. M12 built resolution as one indexed read per check, and that stands. See
 [ADR 0008](adr/0008-guild-authority-hierarchy.md) for the full consolidated authority hierarchy, including
 the parts that deliberately sit **outside** `roles.Resolve` entirely:
@@ -926,14 +929,34 @@ trusting a potentially-skewed OS clock for JWT-expiry checks.
 {"op":6,"d":{"token":"<bearer access token>","session_id":"...","seq":57}}
 ```
 
-**Both IDENTIFY and RESUME ask whether the token's device is still signed in** (M18), the check
+**Both IDENTIFY and RESUME ask whether the token's sign-in is still live** (M18), the check
 `RequireLiveSession` makes on REST. An access token outlives its session by up to fifteen minutes
 (§17.10), which a REST request can afford and a connection cannot: without the check, a token from a
-session signed out five minutes ago would open a stream nothing ever closes. **RESUME carries the token**
-for the same reason, and must name the account the session belongs to. With the session id alone,
-whoever read one from a log line or a crash report could resume somebody else's stream. Revoking a
-device's sessions, by any of the five paths that do it, closes that device's connections once the
-revocation commits.
+session signed out five minutes ago would open a stream nothing ever closes. **The sign-in, not the
+device**: a sign-in is the device plus its session family's `first_seen`, which rotation carries forward
+and a fresh sign-in resets. Asked of the device, a token stolen from a sign-in that ended passed again the
+moment its owner signed back in on that machine, here and on REST, where it could mint an API token. IDENTIFY
+registers the connection *before* it asks, so a sign-out committing in between finds it registered.
+**RESUME carries the token** for the same reason, and must name the account and device the session belongs
+to. With the session id alone, whoever read one from a log line or a crash report could resume somebody
+else's stream; every refusal is the same op 9, so a session id cannot be confirmed either.
+
+**Revocation closes connections** (close 4011, and the session is dropped so it cannot be resumed) on all
+five paths that end a sign-in: the revocation primitive, logout, revoking a device, refresh-token reuse, and
+a new sign-in superseding a device. The close is registered with `database.AfterCommit` and travels on its
+own bus topic, so every replica closes its own connections and a rolled-back revocation closes nothing. It
+carries a cutoff snowflake and ends only connections opened with a sign-in minted before it, so a device
+signing in again inside the delivery lag is not closed by the revocation it outran. The bus is
+at-most-once, so each connection also re-checks its sign-in on a heartbeat every five minutes, which bounds
+a lost close.
+
+**Limits on a connection**: IDENTIFY within ten seconds of HELLO; at most sixty-four connections per address
+(IPv6 by /64) that have not yet identified, refused with 429 before the upgrade; IDENTIFY thirty a minute per
+account, and frames 120 a minute per connection; sixteen sessions per account per process, a disconnected
+one included, since it holds a buffer. A disconnected session buffers for two minutes, up to 512 frames and
+1 MiB; RESUME inside that replays every missed frame in order, then `RESUMED`, and a gap the buffer cannot
+cover is op 9 rather than a replay with a hole. Every refusal is a close code in
+`gateway-events.schema.json`, never a reason a client has to parse.
 
 `dm_channels` and `presences` are absent from READY until M57 and M38 fill them. Adding a field later is
 additive; one shipped empty would claim an account has no DMs.
@@ -941,19 +964,37 @@ additive; one shipped empty would claim an account has no DMs.
 **Versions**: HELLO carries the server's release version and IDENTIFY the client's, compared under
 [ADR 0033](adr/0033-semver-release-progression.md)'s strict rule ("Protocol version compatibility" in §3).
 A build with no version stamped (`dev`, from a `go build` of a checkout) is compatible with anything, and
-both sides log that the check was skipped. `dev` only exists where somebody built from source, and a
+both sides log that the check was skipped. An empty or unparseable version is not `dev` and is refused:
+a client that sent none would otherwise skip the check against every release. `dev` only exists where somebody built from source, and a
 self-hoster building their own server must not lock out every released client.
 
 The daemon **stream-decodes** (`json.Decoder`) this payload rather than buffering it fully before parsing.
 
 **Fan-out** (`internal/platform/events.Bus`): unchanged interface shape from the original design — in-process
 by default, swappable for Redis Pub/Sub via `EVENTS_BACKEND=redis`, activated only by the flagship (§12).
-Domain services call `bus.Publish` only after the originating DB transaction commits.
+Domain services publish only through `dispatch.Publisher.Queue`, which registers the publish with
+`database.AfterCommit`, so an event exists only once its change is durable (rule 5) and there is no other
+way to publish.
+
+An event names an *audience* (a guild, optionally narrowed to a channel; named accounts; or the former
+members of a deleted guild), never a recipient list. Who receives it is decided at fan-out, in `guildauth`,
+against fresh rows: membership, view permission on the channel, and whatever else the event names it needs —
+`MESSAGE_UPDATE` needs `READ_MESSAGE_HISTORY` too, because an edit can reach a message from before the
+recipient could read the backlog. An event about a channel that no longer exists reaches nobody, except
+`CHANNEL_DELETE`, which carries a snapshot of the channel's overwrites so its deletion reaches exactly those
+who could see it. Messages carry `tags` as null on the gateway: private tags differ per reader, and an
+event is the same bytes for everyone.
+
+Each process finds an event's candidate connections through an index of its sessions by guild and by
+account, then resolves them, in *lanes* keyed by guild: a guild's events reach every connection in the
+order they were published, which is the ordering the protocol promises; two guilds' events may pass each
+other. Each lane can hold a database connection, so the lane count is a quarter of the pool. The payload is
+encoded once by the publisher and copied into each recipient's frame.
 
 **Block-aware fan-out** (ADR 0013): each connection's block-set (accounts that have blocked this user, or
 that this user has blocked) is cached per-connection, not queried per message. At DISPATCH fan-out time for
 guild-channel message/presence/`@mention` events, a blocked author's content is filtered out of the fan-out
-target list entirely — never sent over the wire to the blocker's connection, and never merely hidden
+target list entirely, at `gateway.withoutBlocked`, the stage M18 left empty for M70 to fill — never sent over the wire to the blocker's connection, and never merely hidden
 client-side. A block/unblock action updates the affected connection's cached set immediately.
 
 **Voice signaling**: `internal/voice.MediaCoordinator` is now `PionMediaCoordinator`, backed by the real SFU
@@ -1407,14 +1448,14 @@ Each of those four was added separately, by somebody noticing one more outstandi
 missed — M4, M5, M6 and M9 respectively. That history is the argument for the primitive existing at all,
 and for new claims being added to it rather than to a caller.
 
-**What it does not revoke yet**, written into the function as named gaps rather than left out:
+**It also force-closes live gateway connections**, since M18, after the transaction commits (see
+"Revocation closes connections" in §2). This matters more than it looks. Revoking a session stops the
+*next* refresh, and an access token expires within 15 minutes, so the REST surface is bounded by
+construction (§17.10). A WebSocket is not: it authenticates once at IDENTIFY and then stays open for as long
+as the client keeps it, so without an explicit close a revoked account keeps receiving events indefinitely.
 
-- **force-closing live gateway connections (M18)**. This matters more than it looks. Revoking a session
-  stops the *next* refresh, and an access token expires within 15 minutes, so the REST surface is bounded
-  by construction (§17.10). A WebSocket is not: it authenticates once at IDENTIFY and then stays open for
-  as long as the client keeps it, so without an explicit close a revoked account keeps receiving events
-  indefinitely;
-- **revoking every linked device's E2E device-link trust (M101, ADR 0014)**.
+**What it does not revoke yet**, written into the function as a named gap rather than left out: every
+linked device's E2E device-link trust (M101, ADR 0014).
 
 Account deletion otherwise follows the original design: soft-delete with placeholder username/email,
 hard-delete `oauth_identities`/`sessions`, leave authored content in place rendered as "Deleted User."
