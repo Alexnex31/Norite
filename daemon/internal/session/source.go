@@ -115,6 +115,11 @@ type Source struct {
 	cred      Credential
 	stale     bool      // the gateway refused the current access token
 	refreshAt time.Time // the instance's time
+	// ended is closed when the sign-in of generation liveGen is over: signed out, refused, or replaced.
+	// See Ended.
+	ended       chan struct{}
+	endedClosed bool
+	liveGen     uint64
 
 	// Owned by Run alone.
 	record      credentials.Record
@@ -148,6 +153,7 @@ func New(opts Options) *Source {
 		reload:     make(chan struct{}, 1),
 		revoked:    make(chan struct{}, 1),
 		changed:    make(chan struct{}),
+		ended:      closedChan, endedClosed: true,
 	}
 	if s.retryMin <= 0 {
 		s.retryMin = defaultRetryMin
@@ -222,6 +228,35 @@ func (s *Source) Reload() { nudge(s.reload) }
 // ObserveServerTime records the instance's clock — HELLO's server_time, sampled before the token is checked.
 func (s *Source) ObserveServerTime(t time.Time) { s.server.observe(t) }
 
+// Ended returns a channel that is closed once the sign-in of the given generation is over — signed out,
+// refused, or replaced by another — and already closed if it is over now.
+//
+// It is how the gateway connection learns that the account it is streaming is no longer signed in. A
+// logout normally closes the connection from the instance's side too, through its hand-back, but the
+// hand-back is best-effort, and a connection that outlived its sign-in would go on filling the daemon's
+// state with an account nobody is signed in as (M19 /code-review).
+func (s *Source) Ended(generation uint64) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.liveGen || s.endedClosed {
+		return closedChan
+	}
+	return s.ended
+}
+
+var closedChan = func() chan struct{} { c := make(chan struct{}); close(c); return c }()
+
+// dropSignIn records that the token this process holds is no longer a live sign-in.
+func (s *Source) dropSignIn() {
+	s.have = false
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.endedClosed {
+		close(s.ended)
+		s.endedClosed = true
+	}
+}
+
 func nudge(ch chan struct{}) {
 	select {
 	case ch <- struct{}{}:
@@ -235,6 +270,7 @@ func nudge(ch chan struct{}) {
 // states a running daemon waits out — refusing to run would mean the daemon cannot be installed before its
 // first login, and `norite daemon install` deliberately runs first (M3).
 func (s *Source) Run(ctx context.Context) {
+	defer s.settleStore()
 	refused := false
 	for {
 		if !s.signIn(ctx, refused) {
@@ -245,6 +281,22 @@ func (s *Source) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// settleStore makes one last attempt, as the daemon stops, to store the token this process holds when the
+// store holds an older one — left there by a write that failed mid-session. Without it a restart would
+// present the spent token, and reuse detection would revoke this device's sign-in (M19 /code-review).
+func (s *Source) settleStore() {
+	if !s.have || s.current == s.stored {
+		return
+	}
+	if err := s.store.ReplaceToken(s.record, s.stored, s.current); err != nil {
+		s.log.Error().Err(err).Msg("could not store the renewed credential before stopping; the next start " +
+			"may find it spent and need `norite login`")
+		return
+	}
+	s.stored = s.current
+	s.log.Info().Msg("stored the renewed credential before stopping")
 }
 
 // signIn reads the store until it holds a credential this process may present. It reports false only when
@@ -263,7 +315,7 @@ func (s *Source) signIn(ctx context.Context, refused bool) bool {
 			// instance that issued it rather than staying valid for thirty days in nobody's hands.
 			if s.have {
 				handBackToken(ctx, s.log, s.http, s.record.InstanceURL, s.current)
-				s.have = false
+				s.dropSignIn()
 			}
 			s.signOut(zerolog.InfoLevel, "no stored credential; run `norite login` to sign in")
 			if !s.waitForStore(ctx, nil) {
@@ -296,7 +348,7 @@ func (s *Source) signIn(ctx context.Context, refused bool) bool {
 				msg = "the instance refused the stored credential; run `norite login` again"
 			}
 			s.dead = token
-			s.have = false
+			s.dropSignIn()
 			s.signOut(zerolog.WarnLevel, msg)
 			if !s.waitForStore(ctx, nil) {
 				return false
@@ -314,12 +366,18 @@ func (s *Source) signIn(ctx context.Context, refused bool) bool {
 		if s.have {
 			handBackToken(ctx, s.log, s.http, s.record.InstanceURL, s.current)
 		}
+		if s.have {
+			s.dropSignIn()
+		}
 		s.record, s.current, s.stored, s.have = record, token, token, true
 		s.gen++
 		// A credential somebody just stored is not the loop minRefreshGap guards against, and a person who
 		// has just run `norite login` should not wait it out.
 		s.lastRefresh = time.Time{}
-		s.set(func() { s.phase, s.cred, s.stale = phaseStarting, Credential{}, false })
+		s.set(func() {
+			s.phase, s.cred, s.stale = phaseStarting, Credential{}, false
+			s.ended, s.endedClosed, s.liveGen = make(chan struct{}), false, s.gen
+		})
 		return true
 	}
 }
@@ -349,7 +407,7 @@ func (s *Source) keepLive(ctx context.Context) (refused bool) {
 			// The uniform 401: unknown, expired, revoked or replayed. Possibly a login on this machine
 			// superseded this sign-in a moment ago, so the store is read before anything is concluded.
 			s.dead = s.current
-			s.have = false
+			s.dropSignIn()
 			s.set(func() { s.phase, s.cred = phaseStarting, Credential{} })
 			s.log.Info().Msg("the instance refused the session's refresh token; reading the store again")
 			return true
@@ -422,21 +480,6 @@ func (s *Source) writeBack(ctx context.Context, pair tokenPair) bool {
 		s.current, s.stored = pair.RefreshToken, pair.RefreshToken
 		return true
 
-	case errors.Is(err, credentials.ErrStoreUnavailable):
-		// The store could not be read, so nothing is known about what is on disk — and the likeliest holder
-		// of its lock is a `norite login` mid-write, which must not be disturbed. M7 handed the renewed token
-		// back here and gave up, which was right for a daemon starting and is wrong for one running: it
-		// signed the daemon out over a keyring that hesitated once.
-		//
-		// Kept instead, and safe either way. If the holder is a login on this machine, it superseded this
-		// sign-in at the instance, so this token is about to be refused and the store read again. If not,
-		// this process holds the only live token, and the next refresh writes again — naming the token the
-		// store still holds as the one spent, which is what makes that write possible.
-		s.current = pair.RefreshToken
-		s.log.Warn().Err(err).
-			Msg("could not store the renewed credential; keeping the session and storing it on the next renewal")
-		return true
-
 	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
 		// Somebody signed in or out while this was in flight, so the session just renewed is not the one
 		// this machine holds any more. Their credential is left alone, and the token obtained here — live,
@@ -444,27 +487,27 @@ func (s *Source) writeBack(ctx context.Context, pair tokenPair) bool {
 		// names now.
 		s.log.Info().Err(err).Msg("the stored credential changed while it was being renewed; leaving it alone")
 		handBackToken(ctx, s.log, s.http, s.record.InstanceURL, pair.RefreshToken)
-		s.have = false
+		s.dropSignIn()
 		s.set(func() { s.phase, s.cred = phaseStarting, Credential{} })
 		return false
 
 	default:
-		// The store refused the write, so it still holds the token just spent. Presenting a rotated token
-		// is what M4's reuse detection reads as theft. Clearing costs one `norite login`.
-		s.log.Error().Err(err).Msg("the renewed credential could not be stored")
-		if clearErr := s.store.Clear(); clearErr != nil {
-			s.log.Error().Err(clearErr).
-				Msg("the spent credential could not be cleared either; run `norite logout` then `norite login`")
-		} else {
-			s.log.Warn().Msg("cleared the spent credential; run `norite login` to sign in again")
-		}
-		handBackToken(ctx, s.log, s.http, s.record.InstanceURL, pair.RefreshToken)
-		// Whatever survived the clear is spent. Reading it back must not count as a credential to present,
-		// or a store that refuses writes would be refreshed and refused in a loop.
-		s.dead = s.stored
-		s.have = false
-		s.set(func() { s.phase, s.cred = phaseStarting, Credential{} })
-		return false
+		// Unreadable (ErrStoreUnavailable) or refused. M7 handed the renewed token back when the store could
+		// not be read, and cleared the store when a write was refused, because the spent token it still holds
+		// is what reuse detection reads as theft at the next start. Both were right for a daemon starting and
+		// are wrong for one running: each signed it out over a keyring that hesitated once (M19, and
+		// /code-review for the refused write).
+		//
+		// Kept instead, and safe either way. If the lock's holder is a login on this machine, it superseded
+		// this sign-in at the instance, so this token is about to be refused and the store read again. If
+		// not, this process holds the only live token, and the next refresh writes again — naming the token
+		// the store still holds as the one spent, which is what makes that write possible. What a restart
+		// would present is settled at shutdown: Run tries the write one last time, and a failure there costs
+		// what clearing would have, one `norite login`.
+		s.current = pair.RefreshToken
+		s.log.Warn().Err(err).
+			Msg("could not store the renewed credential; keeping the session and storing it on the next renewal")
+		return true
 	}
 }
 
@@ -510,8 +553,8 @@ func (s *Source) waitLive(ctx context.Context, after <-chan time.Time) bool {
 		return false
 	case <-after:
 		return true
-	case <-s.refreshNow:
-		return true
+	// Not refreshNow: a refresh is already failing, and somebody asking for a token does not make the next
+	// attempt likelier to succeed. Obeying it let every reconnect skip the backoff (M19 /code-review).
 	case <-s.reload:
 		return !s.storeChanged()
 	case <-s.revoked:

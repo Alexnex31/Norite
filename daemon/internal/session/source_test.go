@@ -716,12 +716,15 @@ func TestARenewalWaitsOutABrieflyHeldLock(t *testing.T) {
 	assert.Equal(t, "nrt_rotated_1", h.stored(), "a lock held briefly must not cost the renewed token")
 }
 
-// A store that refuses the write-back still holds the token just spent. Presenting a rotated token is what
-// M4 reads as theft. Clearing costs one `norite login` — and reading back whatever survived the clear must
-// not count as a credential, or a store refusing writes is refreshed and refused in a loop.
-func TestASpentTokenIsClearedRatherThanLeftToLookStolen(t *testing.T) {
+// A store that refuses the write-back still holds the token just spent. M7 cleared it, which on a running
+// daemon meant signing out over one failed write (M19 /code-review). The session is kept instead, and what a
+// restart would present is settled when the daemon stops: the write is tried one last time.
+func TestARefusedWriteKeepsTheSessionAndIsSettledAtShutdown(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix directory modes do not describe Windows ACLs")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes a directory whatever its mode")
 	}
 	h := newHarness(t)
 	h.f.set(func(f *fakeInstance) {
@@ -730,15 +733,65 @@ func TestASpentTokenIsClearedRatherThanLeftToLookStolen(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(h.dir, 0o700) })
 	h.start()
 
-	h.advanceUntil(time.Second, 10*time.Second, func() bool {
-		return strings.Contains(h.logs.String(), "could not be stored")
-	})
-	h.noCredential()
-	assert.Equal(t, "nrt_rotated_1", h.f.handedBackToken())
+	c, err := h.current()
+	require.NoError(t, err, "a refused write must not cost the session")
+	assert.Equal(t, "eyJ.access.1", c.AccessToken)
+	assert.Contains(t, h.logs.String(), "keeping the session")
+	assert.Empty(t, h.f.handedBackToken())
 
-	h.clock.Advance(time.Hour)
-	assert.False(t, waitBriefly(func() bool { return len(h.f.refreshes()) > 1 }),
-		"the spent token must not be presented again")
+	require.NoError(t, os.Chmod(h.dir, 0o700))
+	assert.Equal(t, "nrt_from_login", h.stored(), "the store still holds the spent token")
+	h.stop()
+	assert.Equal(t, "nrt_rotated_1", h.stored(), "stopping stores what the daemon held")
+	assert.Contains(t, h.logs.String(), "stored the renewed credential before stopping")
+}
+
+// A refresh that is failing waits out its backoff, however often something asks for a token. Obeying every
+// nudge let each gateway reconnect, and from M20 each attached client, skip the backoff (M19 /code-review).
+func TestAFailingRefreshKeepsItsBackoffWhenAsked(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	_, err := h.current()
+	require.NoError(t, err)
+
+	h.f.set(func(f *fakeInstance) { f.status = http.StatusServiceUnavailable })
+	h.advanceUntil(30*time.Second, 15*time.Minute, func() bool { return len(h.f.refreshes()) == 2 })
+
+	// Past the refresh point, every Current nudges. None of it may produce a refresh before the backoff.
+	for range 50 {
+		h.tryCurrent()
+	}
+	assert.False(t, waitBriefly(func() bool { return len(h.f.refreshes()) > 2 }),
+		"a nudge cut a failing refresh's backoff short")
+}
+
+// Ended is how the gateway connection learns that the account it is streaming is no longer signed in.
+func TestEndedClosesWhenTheSignInIsOver(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	c, err := h.current()
+	require.NoError(t, err)
+
+	ended := h.src.Ended(c.Generation)
+	select {
+	case <-ended:
+		t.Fatal("a live sign-in has not ended")
+	default:
+	}
+
+	require.NoError(t, h.store.Clear()) // a logout
+	h.src.Reload()
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a logout did not end the sign-in")
+	}
+
+	select {
+	case <-h.src.Ended(c.Generation + 7):
+	default:
+		t.Fatal("a generation that is not live has ended, by definition")
+	}
 }
 
 // The keyring done-when. A systemd user unit can start the daemon before the session keyring unlocks; the
