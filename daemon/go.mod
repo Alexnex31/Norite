@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/Alexnex31/Norite/backend v0.0.0
 	github.com/coder/websocket v1.8.15
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gofrs/flock v0.13.0
 	github.com/rs/zerolog v1.35.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3

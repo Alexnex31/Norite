@@ -145,6 +145,14 @@ func Run(ctx context.Context, opts Options) error {
 			store.Notify = func(msg string) { log.Warn().Msg(msg) }
 			src := session.New(session.Options{Store: store, Log: log})
 			components.Go(func() { src.Run(ctx) })
+			components.Go(func() {
+				// Without it the daemon still works, as it did before M19 had it: a logout is noticed at the
+				// next renewal and a login at the next restart.
+				if err := src.Watch(ctx); err != nil {
+					log.Warn().Err(err).Msg("cannot watch the credential store; a logout or login will be " +
+						"noticed late — at the next renewal, or the next restart")
+				}
+			})
 
 			// The gateway connection, which waits on the session for a credential: a daemon nobody has
 			// signed in to holds no connection and makes no attempts. What it carries builds the state
