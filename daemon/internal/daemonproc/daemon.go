@@ -19,11 +19,13 @@ import (
 	"context"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/daemon/credentials"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
+	"github.com/Alexnex31/Norite/daemon/internal/session"
 )
 
 // Options configures a daemon run.
@@ -121,8 +123,12 @@ func Run(ctx context.Context, opts Options) error {
 		log.Debug().Uint64("open_file_limit", limit).Msg("open-file limit set")
 	}
 
-	// The stored credential, before the daemon reports ready: a client attaching at M20 should find the
-	// session already established rather than racing it. Never fatal — see establishSession.
+	// The session runs for the daemon's whole life, in its own goroutine, and "ready" does not wait for it.
+	// M7 signed in before reporting ready so an attach client would find the session established; that
+	// stopped being possible to promise at M19, when signing in became something that can take indefinitely
+	// (a keyring that has not unlocked, an instance that is down) and can end at any moment (a revocation, a
+	// logout). A client has to handle "not signed in" whenever it attaches, so it may as well at startup.
+	var components sync.WaitGroup
 	if opts.SkipSession {
 		log.Debug().Msg("session establishment skipped")
 	} else {
@@ -134,7 +140,8 @@ func Run(ctx context.Context, opts Options) error {
 			// process cannot reach, most likely. Nobody is watching a daemon's terminal, so it goes to the
 			// log at a level that gets read.
 			store.Notify = func(msg string) { log.Warn().Msg(msg) }
-			establishSession(ctx, log, store, newRefreshClient())
+			src := session.New(session.Options{Store: store, Log: log})
+			components.Go(func() { src.Run(ctx) })
 		}
 	}
 
@@ -145,12 +152,11 @@ func Run(ctx context.Context, opts Options) error {
 
 	<-ctx.Done()
 
-	// Shutdown is the reverse of startup, and for now that is only the two deferred closes above: M3 owns
-	// no component with a drain step. The first one that does — the E2E keystore's write queue, the attach
-	// clients, the voice worker — brings its own bounded wait with it, and this is where it goes. It is
-	// deliberately not stubbed with a deadline now: an empty wait that always succeeds proves nothing and
-	// reads, later, like a guarantee that was never actually there.
+	// Shutdown is the reverse of startup. Each component stops on the same cancellation and is waited for
+	// here, before the log and the lock are released: a session mid-write to the credential store must
+	// finish before a second daemon can take the lock and read it.
 	log.Info().Msg("daemon stopping")
+	components.Wait()
 	log.Info().Msg("daemon stopped")
 	return nil
 }

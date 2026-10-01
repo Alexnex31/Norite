@@ -1,0 +1,621 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Package session keeps the daemon signed in: it reads the credential `norite login` stored, trades it for
+// an access token, and keeps that token live for as long as the daemon runs.
+//
+// M7 spent the refresh token once, at startup, and that was enough while nothing used the access token. From
+// M19 the daemon holds a gateway connection for hours or weeks, and two things make once insufficient: every
+// reconnect authenticates afresh with an access token that lives fifteen minutes, and a refresh token unused
+// for thirty days expires (auth.RefreshTokenTTL), so a daemon connected for a month would come back signed
+// out. So a Source refreshes ahead of expiry, for as long as it runs, and M20's relay spends what it keeps.
+//
+// # One goroutine owns the credential
+//
+// Run is the only code that loads, refreshes or writes back. Everything else asks: Current for a token,
+// Rejected when the gateway refused one, Revoked when the gateway says the sign-in ended, Reload when the
+// store may have changed. A refresh token is spent the moment it is presented, and two goroutines presenting
+// the same one is exactly what the instance's reuse detection reads as theft (M4) — so there is one presenter.
+//
+// # What the store holds, and what this process holds
+//
+// These are two values, not one, and conflating them is the bug this package is shaped around. After a
+// refresh the daemon holds the new token; whether the store does depends on the write-back, which can fail
+// because a keyring hesitated. ReplaceToken writes only if the store still holds the token named as spent —
+// so the daemon must name the token the *store* holds, not the one it last presented, or a single failed
+// write turns every later one into ErrCredentialChanged, which reads as "somebody logged in".
+package session
+
+import (
+	"context"
+	"errors"
+	"math/rand/v2"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
+)
+
+// Credential is what a caller of Current gets: who is signed in where, and a token to prove it.
+type Credential struct {
+	InstanceURL string
+	UserID      string
+	Username    string
+	DeviceName  string
+
+	// AccessToken is never logged and never written down (rule 8). It lives fifteen minutes, shorter than
+	// the interval between the restarts persisting it would let it survive.
+	AccessToken string
+	// ExpiresAt is the instance's time, not this machine's.
+	ExpiresAt time.Time
+
+	// Generation changes whenever the daemon adopts a credential from the store — a new login, or the first
+	// one. Anything derived from the previous sign-in (a gateway session, the state built from its events)
+	// belongs to a generation and is discarded when it changes, even when the account is the same: a new
+	// login supersedes the device's previous sign-in at the instance (M18).
+	Generation uint64
+}
+
+// Options configures a Source.
+type Options struct {
+	Store *credentials.Store
+	// HTTP is the client the refresh and hand-back use. Nil means NewHTTPClient.
+	HTTP *http.Client
+	Log  zerolog.Logger
+	// Clock is this machine's clock. Nil means the real one; tests skew and advance it.
+	Clock Clock
+	// RetryMin and RetryMax bound the backoff between failed attempts. Zero means the defaults.
+	RetryMin, RetryMax time.Duration
+}
+
+const (
+	defaultRetryMin = time.Second
+	defaultRetryMax = 5 * time.Minute
+
+	// minRefreshGap is the least time between two refreshes, whatever asks for them. It is what stops a
+	// clock this estimate has wrong, or a gateway refusing every token, from becoming a loop that rotates
+	// the account's refresh token as fast as the network allows.
+	minRefreshGap = 10 * time.Second
+
+	// expirySlack is how close to expiry a token may be and still be handed out. A token used for IDENTIFY
+	// has a round trip ahead of it, and the server's clock is an estimate.
+	expirySlack = 30 * time.Second
+)
+
+type phase int
+
+const (
+	phaseStarting  phase = iota // no usable token yet: loading, renewing, or between sign-ins
+	phaseSignedOut              // nothing to sign in with until the store changes
+	phaseLive
+)
+
+// Source keeps one account signed in. See the package comment.
+type Source struct {
+	store    *credentials.Store
+	http     *http.Client
+	log      zerolog.Logger
+	clock    Clock
+	server   *serverClock
+	retryMin time.Duration
+	retryMax time.Duration
+
+	// Requests to Run. Buffered by one and sent without blocking, so asking twice is asking once.
+	refreshNow chan struct{}
+	reload     chan struct{}
+	revoked    chan struct{}
+
+	mu        sync.Mutex
+	changed   chan struct{} // closed and replaced whenever what Current can answer changes
+	phase     phase
+	cred      Credential
+	stale     bool      // the gateway refused the current access token
+	refreshAt time.Time // the instance's time
+
+	// Owned by Run alone.
+	record      credentials.Record
+	current     string // the refresh token this process holds
+	stored      string // the refresh token the store holds, as far as this process knows
+	dead        string // a refresh token the instance refused, so reading it back is not a sign-in
+	have        bool   // current is live, as far as anyone has told us
+	gen         uint64
+	lastRefresh time.Time // this machine's clock
+}
+
+// New builds a Source. Nothing happens until Run.
+func New(opts Options) *Source {
+	clock := opts.Clock
+	if clock == nil {
+		clock = realClock{}
+	}
+	client := opts.HTTP
+	if client == nil {
+		client = NewHTTPClient()
+	}
+	s := &Source{
+		store:      opts.Store,
+		http:       client,
+		log:        opts.Log,
+		clock:      clock,
+		server:     &serverClock{local: clock},
+		retryMin:   opts.RetryMin,
+		retryMax:   opts.RetryMax,
+		refreshNow: make(chan struct{}, 1),
+		reload:     make(chan struct{}, 1),
+		revoked:    make(chan struct{}, 1),
+		changed:    make(chan struct{}),
+	}
+	if s.retryMin <= 0 {
+		s.retryMin = defaultRetryMin
+	}
+	if s.retryMax <= 0 {
+		s.retryMax = defaultRetryMax
+	}
+	return s
+}
+
+// Current returns a usable credential, waiting until there is one.
+//
+// "Usable" is judged on the instance's clock (serverClock): not refused, and not within expirySlack of
+// expiring. Past the point a refresh is due it still answers with the token it has, and asks Run to refresh;
+// it waits only when the token in hand is no good at all. A daemon that is signed out waits here until the
+// store changes, which is what a gateway client blocked on it should do.
+func (s *Source) Current(ctx context.Context) (Credential, error) {
+	for {
+		s.mu.Lock()
+		if s.phase == phaseLive {
+			now := s.server.now()
+			if !s.stale && now.Before(s.cred.ExpiresAt.Add(-expirySlack)) {
+				if !now.Before(s.refreshAt) {
+					nudge(s.refreshNow)
+				}
+				c := s.cred
+				s.mu.Unlock()
+				return c, nil
+			}
+			nudge(s.refreshNow)
+		}
+		changed := s.changed
+		s.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return Credential{}, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+// Rejected reports that the instance refused accessToken — the gateway's 4004. If it is still the current
+// token, Current stops handing it out and Run refreshes; a refusal of a token already replaced is stale news.
+func (s *Source) Rejected(accessToken string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase == phaseLive && s.cred.AccessToken == accessToken {
+		s.stale = true
+		nudge(s.refreshNow)
+	}
+}
+
+// Revoked reports that the instance ended this sign-in — the gateway's 4011.
+//
+// The ordinary cause on a running daemon is `norite login` on this machine, which supersedes the device's
+// previous sign-in (M18) and then stores its own credential. So the store is read first: a credential
+// somebody else wrote is adopted, and one nobody changed is checked by presenting it, which the instance
+// refuses if the sign-in really is over.
+func (s *Source) Revoked() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stale = true
+	nudge(s.revoked)
+}
+
+// Reload asks Run to read the store again, because something may have changed it. A store that turns out
+// unchanged costs nothing further; one that was cleared ends the session (a logout); one holding a different
+// credential replaces it (a login).
+func (s *Source) Reload() { nudge(s.reload) }
+
+// ObserveServerTime records the instance's clock — HELLO's server_time, sampled before the token is checked.
+func (s *Source) ObserveServerTime(t time.Time) { s.server.observe(t) }
+
+func nudge(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// Run keeps the account signed in until ctx is done.
+//
+// It never fails. No credential, an unreadable store, an unreachable instance and a refused token are all
+// states a running daemon waits out — refusing to run would mean the daemon cannot be installed before its
+// first login, and `norite daemon install` deliberately runs first (M3).
+func (s *Source) Run(ctx context.Context) {
+	refused := false
+	for {
+		if !s.signIn(ctx, refused) {
+			return
+		}
+		refused = s.keepLive(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// signIn reads the store until it holds a credential this process may present. It reports false only when
+// ctx is done.
+//
+// refused says the token this process held was just refused, so a store nobody has changed since holds
+// nothing worth presenting.
+func (s *Source) signIn(ctx context.Context, refused bool) bool {
+	retry := s.newBackoff()
+	for {
+		record, token, err := s.store.Load()
+		switch {
+		case errors.Is(err, credentials.ErrNoCredential):
+			// A logout, or nobody has signed in yet. A token this process still holds is the one live
+			// credential for this device and nobody else will ever present it, so it goes back to the
+			// instance that issued it rather than staying valid for thirty days in nobody's hands.
+			if s.have {
+				handBackToken(ctx, s.log, s.http, s.record.InstanceURL, s.current)
+				s.have = false
+			}
+			s.signOut(zerolog.InfoLevel, "no stored credential; run `norite login` to sign in")
+			if !s.waitForStore(ctx, nil) {
+				return false
+			}
+			continue
+
+		case err != nil:
+			// The case M7 deferred and M19 closes: a systemd user unit starting before the session keyring
+			// unlocks reads a record naming "keyring" and fails to read the secret. Tried once, that left
+			// the daemon without a session for its whole life. So it is tried again, until it works.
+			delay := retry.next()
+			s.log.Error().Err(err).Dur("retry_in", delay).
+				Msg("the stored credential could not be read; trying again")
+			if !s.waitForStore(ctx, s.clock.After(delay)) {
+				return false
+			}
+			continue
+		}
+
+		// Whether the store still holds what this process last knew it to — asked without regard to whether
+		// that token is still live, because after a refusal it is not, and that is exactly when it matters.
+		known := s.stored != "" && token == s.stored && sameSignIn(record, s.record)
+		switch {
+		case token == s.dead || (refused && known):
+			// What the instance just refused, or what survived a clear that failed, read back. Nothing here
+			// will sign in until somebody does.
+			msg := "the stored credential is spent and could not be replaced; run `norite login` again"
+			if refused {
+				msg = "the instance refused the stored credential; run `norite login` again"
+			}
+			s.dead = token
+			s.have = false
+			s.signOut(zerolog.WarnLevel, msg)
+			if !s.waitForStore(ctx, nil) {
+				return false
+			}
+			continue
+
+		case s.have && known:
+			return true
+		}
+
+		// Somebody else wrote this credential — a login, or this is the first read. What this process held
+		// before belongs to a sign-in that is over: superseded at the instance if the login was to the same
+		// one, and live with nobody holding it if the login went elsewhere. Handing it back is right in the
+		// second case and harmless in the first.
+		if s.have {
+			handBackToken(ctx, s.log, s.http, s.record.InstanceURL, s.current)
+		}
+		s.record, s.current, s.stored, s.have = record, token, token, true
+		s.gen++
+		// A credential somebody just stored is not the loop minRefreshGap guards against, and a person who
+		// has just run `norite login` should not wait it out.
+		s.lastRefresh = time.Time{}
+		s.set(func() { s.phase, s.cred, s.stale = phaseStarting, Credential{}, false })
+		return true
+	}
+}
+
+// keepLive refreshes now and again before each expiry, until the session ends. It reports whether it ended
+// because the instance refused the token.
+func (s *Source) keepLive(ctx context.Context) (refused bool) {
+	retry := s.newBackoff()
+	for {
+		if !s.throttle(ctx) {
+			return false
+		}
+
+		// Detached from ctx, and finished even when the daemon is stopping. A refresh the instance has
+		// answered has already spent the token presented; canceled before its write-back, the store would
+		// keep the spent one, and the next start would present it — which reuse detection reads as theft and
+		// answers by revoking this device's sign-in. refreshSession bounds it at refreshTimeout either way.
+		//
+		// The server's clock is sampled as of the request's start, not its end. The instance stamped its Date
+		// somewhere in between, so this errs toward its clock being later than it is — toward refreshing
+		// early, never toward handing out a token the instance already considers expired.
+		started := s.clock.Now()
+		pair, serverTime, err := refreshSession(context.WithoutCancel(ctx), s.http, s.record.InstanceURL, s.current)
+		s.server.observeAt(serverTime, started)
+		switch {
+		case errors.Is(err, errRefused):
+			// The uniform 401: unknown, expired, revoked or replayed. Possibly a login on this machine
+			// superseded this sign-in a moment ago, so the store is read before anything is concluded.
+			s.dead = s.current
+			s.have = false
+			s.set(func() { s.phase, s.cred = phaseStarting, Credential{} })
+			s.log.Info().Msg("the instance refused the session's refresh token; reading the store again")
+			return true
+
+		case err != nil:
+			// Unreachable, a 5xx, or an answer that made no sense. The token in hand is still the current
+			// one — nothing was spent that the instance acknowledged — so keep it and try again later.
+			// Current goes on handing out the access token until it expires.
+			delay := retry.next()
+			s.log.Error().Err(err).
+				Str("instance", termsafe.Text(s.record.InstanceURL)).
+				Dur("retry_in", delay).
+				Msg("could not renew the session; trying again")
+			if !s.waitLive(ctx, s.clock.After(delay)) {
+				return false
+			}
+			continue
+		}
+		retry.reset()
+		// Only a refresh that succeeded counts toward the floor: it is rotation the floor exists to bound, and
+		// a failed attempt rotated nothing — its spacing is the backoff's business.
+		s.lastRefresh = started
+
+		if !s.writeBack(ctx, pair) {
+			return false
+		}
+
+		first := false
+		s.set(func() {
+			first = s.phase != phaseLive
+			now := s.server.now()
+			s.phase, s.stale = phaseLive, false
+			s.cred = Credential{
+				InstanceURL: s.record.InstanceURL,
+				UserID:      s.record.UserID,
+				Username:    s.record.Username,
+				DeviceName:  s.record.DeviceName,
+				AccessToken: pair.AccessToken,
+				ExpiresAt:   pair.ExpiresAt,
+				Generation:  s.gen,
+			}
+			s.refreshAt = refreshDue(pair.ExpiresAt, now)
+		})
+
+		if first {
+			// The record's text is the instance's, read back out of a file a person can edit, so it is foreign
+			// again (rule 19) — the CLI sanitized it on the way in, and this side no longer relies on that.
+			s.log.Info().
+				Str("instance", termsafe.Text(s.record.InstanceURL)).
+				Str("username", termsafe.Text(s.record.Username)).
+				Str("device", termsafe.Text(s.record.DeviceName)).
+				Time("access_token_expires_at", pair.ExpiresAt).
+				Msg("signed in with the stored credential")
+		} else {
+			s.log.Debug().Time("access_token_expires_at", pair.ExpiresAt).Msg("renewed the session")
+		}
+
+		if !s.waitUntilDue(ctx) {
+			return false
+		}
+	}
+}
+
+// writeBack stores the renewed refresh token. It reports false when the session cannot continue and the
+// store has to be read again.
+func (s *Source) writeBack(ctx context.Context, pair tokenPair) bool {
+	err := s.store.ReplaceToken(s.record, s.stored, pair.RefreshToken)
+	switch {
+	case err == nil:
+		s.current, s.stored = pair.RefreshToken, pair.RefreshToken
+		return true
+
+	case errors.Is(err, credentials.ErrStoreUnavailable):
+		// The store could not be read, so nothing is known about what is on disk — and the likeliest holder
+		// of its lock is a `norite login` mid-write, which must not be disturbed. M7 handed the renewed token
+		// back here and gave up, which was right for a daemon starting and is wrong for one running: it
+		// signed the daemon out over a keyring that hesitated once.
+		//
+		// Kept instead, and safe either way. If the holder is a login on this machine, it superseded this
+		// sign-in at the instance, so this token is about to be refused and the store read again. If not,
+		// this process holds the only live token, and the next refresh writes again — naming the token the
+		// store still holds as the one spent, which is what makes that write possible.
+		s.current = pair.RefreshToken
+		s.log.Warn().Err(err).
+			Msg("could not store the renewed credential; keeping the session and storing it on the next renewal")
+		return true
+
+	case errors.Is(err, credentials.ErrCredentialChanged), errors.Is(err, credentials.ErrNoCredential):
+		// Somebody signed in or out while this was in flight, so the session just renewed is not the one
+		// this machine holds any more. Their credential is left alone, and the token obtained here — live,
+		// and held by nobody else — goes back to the instance that issued it, not to whatever the store
+		// names now.
+		s.log.Info().Err(err).Msg("the stored credential changed while it was being renewed; leaving it alone")
+		handBackToken(ctx, s.log, s.http, s.record.InstanceURL, pair.RefreshToken)
+		s.have = false
+		s.set(func() { s.phase, s.cred = phaseStarting, Credential{} })
+		return false
+
+	default:
+		// The store refused the write, so it still holds the token just spent. Presenting a rotated token
+		// is what M4's reuse detection reads as theft. Clearing costs one `norite login`.
+		s.log.Error().Err(err).Msg("the renewed credential could not be stored")
+		if clearErr := s.store.Clear(); clearErr != nil {
+			s.log.Error().Err(clearErr).
+				Msg("the spent credential could not be cleared either; run `norite logout` then `norite login`")
+		} else {
+			s.log.Warn().Msg("cleared the spent credential; run `norite login` to sign in again")
+		}
+		handBackToken(ctx, s.log, s.http, s.record.InstanceURL, pair.RefreshToken)
+		// Whatever survived the clear is spent. Reading it back must not count as a credential to present,
+		// or a store that refuses writes would be refreshed and refused in a loop.
+		s.dead = s.stored
+		s.have = false
+		s.set(func() { s.phase, s.cred = phaseStarting, Credential{} })
+		return false
+	}
+}
+
+// waitUntilDue waits for the next refresh. It reports false when the session has to be re-established from
+// the store, or ctx is done.
+func (s *Source) waitUntilDue(ctx context.Context) bool {
+	for {
+		s.mu.Lock()
+		due := s.refreshAt.Sub(s.server.now())
+		stale := s.stale
+		s.mu.Unlock()
+		if due <= 0 || stale {
+			return true
+		}
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.clock.After(due):
+			// Recomputed rather than trusted: a HELLO since may have moved the estimate of the server's clock.
+		case <-s.refreshNow:
+			// Not obeyed blindly: the loop re-checks. A nudge is buffered, so one sent while the last refresh
+			// was due is still waiting after that refresh completes, and obeying it would rotate the token a
+			// second time for nothing.
+		case <-s.reload:
+			if s.storeChanged() {
+				return false
+			}
+		case <-s.revoked:
+			if s.storeChanged() {
+				return false
+			}
+			return true // verified by refreshing: refused if the sign-in really is over
+		}
+	}
+}
+
+// waitLive waits out a backoff while a session is live. It reports false when the session has to be
+// re-established, or ctx is done.
+func (s *Source) waitLive(ctx context.Context, after <-chan time.Time) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-after:
+		return true
+	case <-s.refreshNow:
+		return true
+	case <-s.reload:
+		return !s.storeChanged()
+	case <-s.revoked:
+		return !s.storeChanged()
+	}
+}
+
+// waitForStore waits for a reason to read the store again: after, if not nil, or a request. It reports false
+// only when ctx is done.
+func (s *Source) waitForStore(ctx context.Context, after <-chan time.Time) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-after:
+	case <-s.reload:
+	case <-s.revoked:
+	}
+	return true
+}
+
+// throttle holds a refresh back until minRefreshGap has passed since the last one.
+func (s *Source) throttle(ctx context.Context) bool {
+	if s.lastRefresh.IsZero() {
+		return true
+	}
+	wait := minRefreshGap - s.clock.Now().Sub(s.lastRefresh)
+	if wait <= 0 {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.clock.After(wait):
+		return true
+	}
+}
+
+// storeChanged reads the store and reports whether it no longer holds this process's sign-in. An unreadable
+// store is not evidence of a change — the same judgement writeBack makes.
+func (s *Source) storeChanged() bool {
+	record, token, err := s.store.Load()
+	switch {
+	case errors.Is(err, credentials.ErrNoCredential):
+		return true
+	case err != nil:
+		return false
+	}
+	return token != s.stored || !sameSignIn(record, s.record)
+}
+
+func (s *Source) signOut(level zerolog.Level, msg string) {
+	already := false
+	s.set(func() {
+		already = s.phase == phaseSignedOut
+		s.phase, s.cred, s.stale = phaseSignedOut, Credential{}, false
+	})
+	if !already {
+		s.log.WithLevel(level).Msg(msg)
+	}
+}
+
+// set changes what Current can answer, and wakes everybody waiting in it.
+func (s *Source) set(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f()
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+// sameSignIn reports whether two records describe one sign-in: the same account, on the same instance, from
+// the same device.
+func sameSignIn(a, b credentials.Record) bool {
+	return a.InstanceURL == b.InstanceURL && a.UserID == b.UserID && a.DeviceID == b.DeviceID
+}
+
+// refreshDue picks when to renew a token expiring at expiresAt, now being the instance's time: a quarter of
+// its remaining life before expiry — 3¾ minutes of a fifteen-minute token, which a slow network and a
+// backoff both fit inside — and never sooner than minRefreshGap from now.
+func refreshDue(expiresAt, now time.Time) time.Time {
+	due := expiresAt.Add(-expiresAt.Sub(now) / 4)
+	if floor := now.Add(minRefreshGap); due.Before(floor) {
+		return floor
+	}
+	return due
+}
+
+// backoff is exponential with equal jitter: half the delay is fixed and half is random, so retries spread
+// out without a delay ever collapsing to nothing.
+type backoff struct {
+	min, max, cur time.Duration
+}
+
+func (s *Source) newBackoff() *backoff { return &backoff{min: s.retryMin, max: s.retryMax} }
+
+func (b *backoff) next() time.Duration {
+	switch {
+	case b.cur == 0:
+		b.cur = b.min
+	case b.cur < b.max:
+		b.cur = min(b.cur*2, b.max)
+	}
+	half := b.cur / 2
+	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
+}
+
+func (b *backoff) reset() { b.cur = 0 }
