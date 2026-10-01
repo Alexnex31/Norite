@@ -375,8 +375,8 @@ type UpdateInput struct {
 // were just silenced in, one rewrite per message they already posted. M13 spent two decisions keeping a
 // restriction from being *shed* (assignment is escalation-checked, DeleteRole refuses to drop overwrites
 // whose bits the caller lacks); this is the same restriction being walked around rather than shed, and at
-// M18 each rewrite fans out a MESSAGE_UPDATE to everyone in the channel. Found by a security audit after
-// the milestone's manual pass, and reproduced before it was fixed.
+// M18 each rewrite fans out a MESSAGE_UPDATE to everyone who can read the channel's history. Found by a
+// security audit after the milestone's manual pass, and reproduced before it was fixed.
 //
 // Delete deliberately stays at the view bit. Removing your own message is redaction, which is the outcome
 // a mute wants rather than one it should block.

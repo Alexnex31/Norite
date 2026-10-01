@@ -306,9 +306,11 @@ type twoFactorCodesResponse struct {
 //
 // One type for one service value, shared by "sign out everywhere else" and "disable the second factor",
 // which revoke exactly the same things. It was briefly two identical structs, and the copies had already
-// drifted in the commit that made the second — which is the argument: when M18 adds force-closed gateway
-// connections to revokeEverything and M101 adds E2E device trust, the count goes in one place, not two,
-// and neither endpoint can end up reporting a smaller number than the primitive actually revoked.
+// drifted in the commit that made the second — which is the argument: the primitive has grown since (M18
+// made it close live gateway connections, M101 will drop E2E device trust), and with one type the count
+// goes in one place, so neither endpoint can report a smaller number than the primitive actually revoked.
+// The closed connections are not counted: a connection is closed by whichever process holds it, after the
+// commit, so the request answering has no way to know how many there were.
 //
 // Counted rather than a bare 204, because this action revokes more than its name suggests — API tokens go
 // with the sessions — and a client that cannot see the number cannot tell somebody their bots just

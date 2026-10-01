@@ -92,7 +92,7 @@ type FileInput struct {
 // The target is resolved to its channel and authorized with [guildauth.AuthorizeChannelUnlocked] at a
 // `need` of zero, which folds in PermViewChannel and nothing else. **Not PermReadMessageHistory**, which
 // [messages.Service.List] requires: a member without the history bit still watches live messages arrive
-// once M18 fans them out, and a design where somebody can see abuse and cannot report it is the worse
+// over the gateway (M18), and a design where somebody can see abuse and cannot report it is the worse
 // failure. What they cannot do is report a message in a channel they cannot see — that refusal is the
 // channel filter's existing 404, so filing discloses nothing the listing does not.
 //

@@ -816,9 +816,9 @@ type Querier interface {
 	// The guild, whether this account is in it, and every role whose permissions apply to them — in one round
 	// trip rather than three.
 	//
-	// Both queries here run before every mutating handler (rule 1) and neither result is cached: the cache
-	// architecture.md describes is invalidated by a gateway dispatch, and the gateway is M18. A cache with
-	// nothing to invalidate it is a demotion that takes effect five minutes late, so this runs live on every
+	// Both queries here run before every mutating handler (rule 1) and neither result is cached. M18 decided
+	// against the cache architecture.md once described: its invalidation would travel between replicas on an
+	// at-most-once bus, so a demotion would take effect eventually rather than now. So this runs live on every
 	// check and has to be cheap. That is the constraint the shape below is chosen against.
 	//
 	// The obvious decomposition is a guild lookup, then a membership lookup, then a role list, and it is three

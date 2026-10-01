@@ -24,11 +24,12 @@
 //
 // # Deliberately not cached
 //
-// docs/architecture.md describes Resolve as cached per (guild_id, user_id, channel_id) and invalidated on
-// role, overwrite and membership change dispatch. The invalidation signal is a gateway dispatch and the
-// gateway does not exist until M18, so the cache would be a permission decision that goes stale with
-// nothing to refresh it — a demotion taking effect five minutes late is a security failure, not a slow
-// path. One indexed read per check until M18 can invalidate it.
+// docs/architecture.md once described Resolve as cached per (guild_id, user_id, channel_id) and
+// invalidated on role, overwrite and membership change dispatch. M18 built the dispatch and decided against
+// the cache anyway: the invalidation would cross replicas on an at-most-once bus, so a lost message would
+// leave a demotion unapplied, and a demotion taking effect late is a security failure, not a slow path.
+// One indexed read per check, permanently, and the gateway's fan-out resolves each event the same way
+// (ResolveMany).
 package roles
 
 import (
