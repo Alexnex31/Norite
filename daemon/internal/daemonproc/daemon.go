@@ -3,10 +3,11 @@
 
 // Package daemonproc is the Norite background daemon's lifecycle.
 //
-// Milestone M3 scope is deliberately narrow: start cleanly, prove there is exactly one daemon per OS user,
-// prepare the process for the handle count it will eventually hold, log what it did, and stop cleanly on a
-// signal. It opens no sockets and talks to nothing — the gateway client and the dual IPC listeners arrive
-// in Phase D (docs/roadmap.md M19-M22), and the plugin host at M88.
+// It starts cleanly, proves there is exactly one daemon per OS user, prepares the process for the handle
+// count it will eventually hold, starts each component, and stops them in reverse on a signal. M3 built the
+// sequence with nothing in it; M19 added the first two components, the session (internal/session) and the
+// gateway connection (internal/gatewayclient). The IPC listeners arrive at M20–M22 and the plugin host at
+// M88.
 //
 // What it is not is a placeholder to be thrown away. Every later milestone adds a component *inside* this
 // startup and shutdown sequence, so the ordering it establishes — lock before anything observable, limits
@@ -17,6 +18,7 @@ package daemonproc
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"sync"
@@ -24,6 +26,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/internal/gatewayclient"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 )
@@ -142,6 +145,14 @@ func Run(ctx context.Context, opts Options) error {
 			store.Notify = func(msg string) { log.Warn().Msg(msg) }
 			src := session.New(session.Options{Store: store, Log: log})
 			components.Go(func() { src.Run(ctx) })
+
+			// The gateway connection, which waits on the session for a credential: a daemon nobody has
+			// signed in to holds no connection and makes no attempts.
+			gw := gatewayclient.New(gatewayclient.Options{
+				Credentials: src, Sink: discardSink{}, Version: opts.Version,
+				Log: log.With().Str("component", "gateway").Logger(),
+			})
+			components.Go(func() { gw.Run(ctx) })
 		}
 	}
 
@@ -160,3 +171,10 @@ func Run(ctx context.Context, opts Options) error {
 	log.Info().Msg("daemon stopped")
 	return nil
 }
+
+// discardSink holds nothing. The daemon's state arrives later in M19; until then the connection is held, and
+// what it carries is let go.
+type discardSink struct{}
+
+func (discardSink) Begin(uint64)                     {}
+func (discardSink) Dispatch(string, json.RawMessage) {}
