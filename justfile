@@ -127,7 +127,7 @@ sqlc-check: sqlc-generate
     fi
     echo "sqlc output is up to date"
 
-# Regenerate the Go view of contracts/openapi.yaml into backend/internal/apicontract.
+# Regenerate the Go view of contracts/openapi.yaml into backend/apicontract.
 #
 # Types only — see backend/oapi-codegen.yaml for why this project does not generate a server. Run this and
 # commit the diff whenever the contract changes, which rule 6 requires to be the same commit as the
@@ -143,9 +143,9 @@ contract-generate:
 contract-check: contract-generate
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! git diff --quiet -- backend/internal/apicontract; then
-        echo "backend/internal/apicontract is out of date — run 'just contract-generate' and commit the result:" >&2
-        git --no-pager diff --stat -- backend/internal/apicontract >&2
+    if ! git diff --quiet -- backend/apicontract; then
+        echo "backend/apicontract is out of date — run 'just contract-generate' and commit the result:" >&2
+        git --no-pager diff --stat -- backend/apicontract >&2
         exit 1
     fi
     echo "contract types are up to date"

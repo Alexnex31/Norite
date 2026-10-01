@@ -1625,10 +1625,12 @@ And on guilds, permissions and the audit log, from M12:
   heap scan and a quicksort, because reading the heap in physical order beats an ordered index scan's
   random access. Add the `LIMIT` a real list endpoint carries and the sort node disappears. Measured, after
   being asserted wrongly first.
-- **`oapi-codegen` generates types only**, into `internal/apicontract`, committed with `just
-  contract-check` and a CI step. `chi-server` cannot reproduce this router — the fixed middleware order,
-  `/instance` as a sibling, three limiter buckets, one exempt path — and a generated router that had to be
-  fought is a worse contract than a hand-written one that matches the document.
+- **`oapi-codegen` generates types only**, into `backend/apicontract` — under `internal/` until M19, moved
+  out so the daemon and the CLI decode REST and gateway payloads with the same generated types rather than
+  hand-written copies — committed with `just contract-check` and a CI step. `chi-server` cannot reproduce
+  this router — the fixed middleware order, `/instance` as a sibling, three limiter buckets, one exempt
+  path — and a generated router that had to be fought is a worse contract than a hand-written one that
+  matches the document.
 - **The generated types are imported by no handler, and that is a limit rather than an unfinished step.**
   Handlers declare their own request structs to carry `validate:` tags and their own response types so ids
   marshal as snowflakes. So "a drifted field is a compile error" is *not* what this setup delivers; what it
@@ -1867,7 +1869,7 @@ And on messages, from M15:
   to no enum, and both gates stayed green — a generated client could not request the scopes the message
   routes are gated on, nor decode an audit page containing a moderator deletion. Found by a human reading
   the YAML. `TestTheScopeVocabularyMatchesTheContract` and `TestEveryAuditActionIsInTheContract` now
-  assert it against `internal/apicontract`, which is generated from the document and staleness-checked, so
+  assert it against `apicontract`, which is generated from the document and staleness-checked, so
   the comparison is Go-to-Go and needs no second YAML parser. **The error-code enum had this test since
   M11 and nobody generalised it** — when a check exists for one vocabulary, ask what the others are.
 - **A bound enforced in two places must measure the same thing in both.** `checkContent` was added so

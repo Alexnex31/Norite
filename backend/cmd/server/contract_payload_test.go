@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
-	"github.com/Alexnex31/Norite/backend/internal/apicontract"
+	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 )
@@ -373,7 +373,7 @@ func TestTheSourceOfferNeedsNoCredential(t *testing.T) {
 // audit page containing a moderator deletion. Found by a code review reading the YAML by hand, which is
 // precisely the thing rule 6 exists to make unnecessary.
 //
-// Asserted against `internal/apicontract`, which is generated *from* the YAML and checked for staleness
+// Asserted against `apicontract`, which is generated *from* the YAML and checked for staleness
 // by `just contract-check` — so this compares the Go vocabulary to the document, transitively, without
 // parsing YAML a second time. It lives here because this package is the only one importing `auth`,
 // `guilds` and `apicontract` together, for the reason the route-surface tests live here.

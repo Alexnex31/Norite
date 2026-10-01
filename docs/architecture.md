@@ -62,6 +62,8 @@ Locked-in decisions:
 /
 ├── backend/                     # Go modular monolith
 │   ├── cmd/server/main.go       # composition root
+│   ├── apicontract/             # oapi-codegen types for contracts/openapi.yaml, committed; outside
+│   │                            #   internal/ so the daemon and CLI decode with them too (M19)
 │   ├── internal/
 │   │   ├── config/              # config.go: typed Config struct, env-bound, validated at startup
 │   │   ├── platform/

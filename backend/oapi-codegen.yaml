@@ -36,7 +36,11 @@ package: apicontract
 # Committed, exactly as the sqlc output is, and for the reason stated in sqlc.yaml: generated code is
 # checked in so a plain `go build` needs no extra tooling. `just contract-check` and CI's codegen job fail
 # on a stale file, which is what keeps that arrangement honest.
-output: internal/apicontract/types.gen.go
+#
+# Outside internal/ since M19, for gatewayproto's reason: the daemon decodes gateway payloads that are
+# these REST shapes, and Go's internal/ rule would leave it a hand-written copy to drift. Types only, with
+# no server code, so importing it gives another module the contract and nothing that decides anything.
+output: apicontract/types.gen.go
 
 generate:
   models: true

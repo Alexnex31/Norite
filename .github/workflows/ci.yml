@@ -145,9 +145,9 @@ jobs:
             -config oapi-codegen.yaml ../contracts/openapi.yaml
       - name: fail if the committed contract types are stale
         run: |
-          if ! git diff --quiet -- backend/internal/apicontract; then
-            echo "::error::backend/internal/apicontract is out of date — run 'just contract-generate' and commit the result"
-            git --no-pager diff -- backend/internal/apicontract
+          if ! git diff --quiet -- backend/apicontract; then
+            echo "::error::backend/apicontract is out of date — run 'just contract-generate' and commit the result"
+            git --no-pager diff -- backend/apicontract
             exit 1
           fi
       # The dependency-license inventory is committed for the same reason the sqlc output is: a change to
