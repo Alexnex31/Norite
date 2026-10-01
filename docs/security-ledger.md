@@ -958,3 +958,55 @@ carries the condition that would reopen it.
 - **Reopens if**: a detached session comes to hold something a resync cannot rebuild, or superseding starts
   doing more than dropping buffers. Either would make it worth checking liveness before superseding, which
   means taking the account's session limit without counting the sessions about to be superseded.
+
+## M19 — daemon as gateway client
+
+### An instance served over plain HTTP gets the daemon's tokens over plain WebSocket
+- **Raised**: M19, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `credentials.ParseInstanceURL` admits `http://` for a self-hosted instance behind a proxy on a
+  private network, and the gateway URL follows the instance's scheme, so such an instance gets IDENTIFY's
+  access token over `ws://`. It already gets the password at login and the refresh token at every renewal
+  over the same cleartext. The CLI says so out loud at the login that chose it. The gateway adds a channel
+  and no new class of exposure.
+- **Reopens if**: `http://` stops being refused for public hosts by convention and starts being chosen for
+  them, or the daemon gains a credential the REST path never carries over that connection.
+
+### The instance's HELLO steers how often the daemon refreshes
+- **Raised**: M19, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the daemon judges expiry on the instance's clock (ADR 0010), so a `server_time` far ahead makes
+  every token look expired and one far behind makes them look fresh. The instance that sends HELLO is the
+  one that issued the token and decides whether it is valid, so it gains nothing it did not have. A forged
+  HELLO from anybody else needs the TLS connection. Refreshes are spaced at least `minRefreshGap` apart
+  whatever the estimate says, so rotation cannot be driven into a loop.
+- **Reopens if**: the gateway and the refresh endpoint can be different parties (a gateway on another
+  origin), or the refresh floor is removed.
+
+### A panic in the gateway connection is logged with its value
+- **Raised**: M19, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `converse` recovers a panic and logs `Interface("panic", p)`. Nothing on that path panics with a
+  value built from a frame: decoding errors are returned and logged as the event type only, and the state's
+  appliers panic on nothing they are given. So the value is a runtime error naming code, not content.
+- **Reopens if**: a sink or decoder panics with a value derived from the payload, such as a message's text
+  in a formatted panic, at which point the log carries content rule 13's spirit keeps out of it.
+
+### A running daemon adopts whatever credential appears in its state directory
+- **Raised**: M19, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the watcher reloads on any change to `account.json`, and the daemon signs in with what it finds.
+  The directory is `0700` and per-user (`paths.StateDir`), so whoever can write that file is the account the
+  daemon runs as, which is the trust boundary ADR 0025 draws for the credential itself. They could equally
+  run their own daemon.
+- **Reopens if**: the state directory's mode is relaxed, or the daemon comes to run as a different account
+  from whoever writes the store (a system service, which CLAUDE.md forbids).
+
+### The daemon logs the account's username and display name at every READY
+- **Raised**: M19, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: both are public within any guild the account shares, both pass `termsafe.Text` first, and the log
+  lives in the `0700` state directory beside the credential it would be less valuable than. The username was
+  already logged at every sign-in since M7.
+- **Reopens if**: the daemon's log leaves the machine (a crash reporter, a support bundle uploaded on the
+  user's behalf), or the line grows to carry something that is not already visible to other members.
