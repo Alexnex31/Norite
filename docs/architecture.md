@@ -110,7 +110,7 @@ Locked-in decisions:
 │   ├── credentials/              # the stored session: keyring-or-file secret, record, device identity
 │   ├── internal/daemonproc/      # single-instance flock, log rotation, startup sign-in, clean shutdown
 │   ├── internal/paths/           # the per-user 0700 state directory, resolved per platform
-│   ├── gatewayclient/            # holds the real WS connection, in-memory scrollback/presence
+│   ├── internal/gatewayclient/   # holds the real WS connection, in-memory scrollback/presence (M19)
 │   ├── ipc/                      # Unix socket / named pipe server, bot-automation TCP listener
 │   ├── config/                   # go-toml v2 document-editing, fsnotify hot-reload, flock, config split
 │   ├── plugins/                  # wazero host, capability manifest + hash-pinning
@@ -968,7 +968,9 @@ both sides log that the check was skipped. An empty or unparseable version is no
 a client that sent none would otherwise skip the check against every release. `dev` only exists where somebody built from source, and a
 self-hoster building their own server must not lock out every released client.
 
-The daemon **stream-decodes** (`json.Decoder`) this payload rather than buffering it fully before parsing.
+The daemon decodes READY like any other frame, under its inbound read limit. This line said it
+**stream-decodes** the payload until M19's planning: that was written for a READY carrying every guild's
+channels, about 12.5 MB at the cap, and the summaries-only READY above is about 20 KB.
 
 **Fan-out** (`internal/platform/events.Bus`): unchanged interface shape from the original design — in-process
 by default, swappable for Redis Pub/Sub via `EVENTS_BACKEND=redis`, activated only by the flagship (§12).
@@ -1589,7 +1591,10 @@ start — breaking the single-instance invariant with no error anywhere.
   socket, since external scripts must not receive first-party trust.
 
 **State persistence**: scrollback/pane/presence state is in-memory only, lost on daemon restart (tmux
-semantics) — the gateway's RESUME mechanism rebuilds it. The one deliberate exception is a "last active voice
+semantics). RESUME does **not** rebuild it, which this sentence claimed until M19's planning: the gateway
+session id lives in the process that dies, so a restarted daemon identifies afresh and starts with empty
+scrollback, refilled over REST as clients open channels. RESUME covers a dropped *connection*, inside the
+server's two-minute resume window, and nothing else. The one deliberate exception is a "last active voice
 channel" breadcrumb, persisted so voice can auto-rejoin after a crash (§6). **Read state is a separate,
 durable concern**: `channel_read_states` (§2) is Postgres-backed and synced via its own gateway dispatch
 event — a channel is marked read automatically when the client's viewport reaches the latest message,
@@ -2417,8 +2422,8 @@ E2E key-boundary violations.
 
 2. **Avoiding N+1 on gateway READY**: unchanged core discipline (batched queries, not per-guild loops), now
    combined with **lazy per-guild loading** — full member lists and other bulk per-guild state are deferred
-   until a guild is actually opened, keeping the payload from scaling linearly with total guild count. The
-   daemon stream-decodes (`json.Decoder`) rather than buffering fully before parsing.
+   until a guild is actually opened, keeping the payload from scaling linearly with total guild count. That
+   bound is what let M19 drop stream-decoding READY, which this item required while READY carried channels.
 
 3. **Connection pooling**: `pgxpool` sized relative to available CPU cores, kept intentionally small per
    backend replica (§11); PgBouncer recommended once a self-hoster's instance/device count outgrows it.

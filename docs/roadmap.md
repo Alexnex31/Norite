@@ -934,7 +934,20 @@ of this section.
   replicas on separate Redis connections now, and fails with the second taken off Redis.
 - **M19 — Daemon as gateway client**: the daemon holds the persistent WS connection to the backend, maintains
   in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
-  and stream-decodes (`json.Decoder`) the initial sync payload rather than buffering it fully before parsing.
+  and keeps its session live by refreshing ahead of expiry against that offset.
+
+  **Refreshing is this milestone's, not M20's.** M7 spends the refresh token once, at startup, and a
+  connection that outlives fifteen minutes cannot work that way: IDENTIFY and RESUME each authenticate an
+  access token, so the first reconnect needs a fresh one, and a refresh token unused for thirty days
+  expires (`auth.RefreshTokenTTL`), so a daemon connected for a month would reconnect signed out. M20's
+  relay reuses what is built here. M20's entry said it built this until M19's planning found M19 could
+  not meet its own done-when without it.
+
+  **It does not stream-decode READY, which this entry asked for until M19's planning.** That requirement was
+  written for a READY carrying every guild's channels — about 12.5 MB at the joined-guild cap — and M18
+  shipped summaries instead, about 20 KB at the same cap. Streaming it would also have to know the type
+  before the payload, and the envelope sends `d` ahead of `t`. A read limit bounds every inbound frame
+  instead.
 
   **Two things M7 deferred come due here, because this is the milestone whose changes make them real.**
   Neither is a bug today; each becomes one the moment the daemon does what this entry describes. (A third,
@@ -948,11 +961,14 @@ of this section.
     Here the daemon fetches names of its own from DISPATCH events, and rule 19 lands on its side of the
     line. Two copies of a sanitizer drift, and this one decides whether a stranger's display name can
     rewrite a log or a pane.
-  - **The daemon must re-probe for a keyring that unlocks later.** The storage backend is chosen once per
-    process (`sync.Once`), so a daemon started by a systemd user unit before the session keyring is
-    unlocked reads the file path for its whole life. Correct while the daemon is short-lived and the record
-    names its own backend (ADR 0025); a long-lived, reconnecting daemon is exactly the case it was not
-    written for.
+  - **The daemon must reach a keyring that unlocks after it starts.** A daemon started by a systemd user
+    unit before the session keyring is unlocked fails to read its credential, logs it, and runs for its
+    whole life with no session, because `Load` is tried once. The fix is retrying the read, **not
+    re-probing**, which is what this bullet said until M19's planning read the store: the `sync.Once`
+    probe decides only where `Save` puts a *new* secret, and the daemon never saves. Its reads and
+    write-backs go to the backend the record names (`Record.SecretBackend`, ADR 0025), which every record
+    has carried since M7 itself. The deferral was copied from a code comment into two documents and
+    believed in both — M11's dropped-token note again.
 
   **What M18's gateway asks of its client**, so the daemon is written against it rather than discovering it:
   IDENTIFY within ten seconds of HELLO, always sending `properties.version` (an empty one is refused, and
@@ -999,9 +1015,9 @@ of this section.
   owns, which is the shape M76a and M16a each were. So the socket carries a request/response operation: the
   attach client names a method, a path and a body; the daemon attaches the account's access token,
   performs the call, and returns the status and body. The token never crosses the socket. This is the
-  OS-permission-protected tier (rule 16), and the daemon keeps its session live for it — refreshing
-  before expiry against M19's clock offset — rather than spending the refresh token once at startup as it
-  has since M7.
+  OS-permission-protected tier (rule 16), and the relay spends the access token M19's daemon already keeps
+  live — refreshed ahead of expiry against the clock offset. This sentence assigned that refresh to M20
+  until M19's planning found M19 cannot keep a connection without it.
 
   **And Phase C's command-tree verbs, folded in 2026-09-25 from M17a, which is retired rather than
   renumbered.** M17a assigned six command groups over the 37 routes M12–M17 built and placed them in

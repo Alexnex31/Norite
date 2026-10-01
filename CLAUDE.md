@@ -1340,10 +1340,12 @@ them, because a deferral recorded only here is one that milestone never reads:
   and no gateway connection were needed. Left here rather than deleted because the reasoning is the
   cautionary part — a deferral repeated from a code comment into a roadmap entry, believed twice, and only
   disproved by somebody reading what `/auth/logout` actually does.
-- **The daemon never re-probes for a keyring that unlocks later.** The backend is chosen once per process
-  (`sync.Once`), so a daemon that started before the session keyring was unlocked keeps reading the file
-  path for its whole life. Correct today because the record names the backend; worth revisiting when the
-  daemon becomes long-lived and reconnecting at M19.
+- **A daemon started before its keyring unlocks never reaches it** — because `Load` is tried once, not
+  because the probe is cached. This bullet blamed the `sync.Once` probe until M19's planning read the
+  store: the probe only chooses where `Save` puts a *new* secret, the daemon never saves, and its reads go
+  to the backend the record names, which every record has carried since M7. The fix is a retried read, at
+  M19. The same shape as the dropped-token bullet above: a deferral repeated from a comment and believed
+  until somebody read the code it described.
 - **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
   logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
   function has to move somewhere both modules reach — not be copied.
