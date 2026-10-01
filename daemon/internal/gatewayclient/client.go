@@ -23,6 +23,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -276,7 +277,13 @@ func (c *Client) connect(ctx context.Context, cred session.Credential) outcome {
 	return c.converse(ctx, ws, cred)
 }
 
-// gatewayURL turns an instance origin into its gateway address: the same host, ws or wss, at /gateway.
+// gatewayURL turns an instance URL into its gateway address: the same host, ws or wss, at /gateway under
+// whatever path the instance is served from.
+//
+// The path is kept, not replaced. credentials.ParseInstanceURL accepts an instance behind a path prefix —
+// https://example.com/norite, a self-hoster's reverse proxy — and REST appends to it. Replacing the path
+// sent the access token in IDENTIFY to example.com/gateway: the same host, and possibly a different
+// application entirely (M19 /security-sweep).
 func gatewayURL(instanceURL string) (string, error) {
 	u, err := url.Parse(instanceURL)
 	if err != nil {
@@ -290,7 +297,8 @@ func gatewayURL(instanceURL string) (string, error) {
 	default:
 		return "", fmt.Errorf("an instance URL must be http or https, not %q", u.Scheme)
 	}
-	u.Path, u.RawQuery, u.Fragment = "/gateway", "", ""
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/gateway"
+	u.RawPath, u.RawQuery, u.Fragment = "", "", ""
 	return u.String(), nil
 }
 

@@ -698,6 +698,10 @@ func TestGatewayURL(t *testing.T) {
 		"https://chat.example.com":      "wss://chat.example.com/gateway",
 		"http://127.0.0.1:8080":         "ws://127.0.0.1:8080/gateway",
 		"https://chat.example.com:8443": "wss://chat.example.com:8443/gateway",
+		// An instance behind a path prefix: REST is under it, and so is the gateway. Dropping the prefix sent
+		// the token to whatever else the host serves at /gateway.
+		"https://example.com/norite":  "wss://example.com/norite/gateway",
+		"https://example.com/norite/": "wss://example.com/norite/gateway",
 	} {
 		got, err := gatewayURL(in)
 		require.NoError(t, err)
