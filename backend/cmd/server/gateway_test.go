@@ -204,12 +204,13 @@ func serveGateway(t *testing.T, handler http.Handler) string {
 func customGateway(t *testing.T, f *guildFixture, mutate func(*gateway.Options)) (string, *gateway.Server) {
 	t.Helper()
 	opts := gateway.Options{
-		Accounts: f.api.authSvc,
-		Guilds:   f.api.guildsSvc,
-		Bus:      f.api.bus,
-		Audience: guildauth.NewAudience(db.New(f.api.pool)),
-		Version:  gatewayproto.DevVersion,
-		Logger:   zerolog.New(os.Stderr).Level(zerolog.Disabled),
+		Accounts:    f.api.authSvc,
+		Guilds:      f.api.guildsSvc,
+		Bus:         f.api.bus,
+		Audience:    guildauth.NewAudience(db.New(f.api.pool)),
+		Version:     gatewayproto.DevVersion,
+		Logger:      zerolog.New(os.Stderr).Level(zerolog.Disabled),
+		FanoutLanes: 4,
 	}
 	mutate(&opts)
 	gw, err := gateway.New(opts)

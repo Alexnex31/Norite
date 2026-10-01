@@ -91,6 +91,10 @@ type Options struct {
 	// LivenessInterval is how often a connection's sign-in is asked again whether it is still live.
 	// Zero means DefaultLivenessInterval.
 	LivenessInterval time.Duration
+	// FanoutLanes is how many events are fanned out at once, each lane holding a guild's events in order
+	// (onEvent). Every lane can hold a database connection while it resolves an audience, so cmd/server sizes
+	// it from the pool rather than from the CPU count. Zero means one.
+	FanoutLanes int
 }
 
 // DefaultLivenessInterval bounds how long a connection outlives its sign-out when the revocation meant to
@@ -173,6 +177,14 @@ type Server struct {
 	sub        events.Subscription
 	revokedSub events.Subscription
 
+	// idx finds an event's candidate sessions (index.go). Its lock is taken after mu, never before.
+	idx sessionIndex
+
+	// lanes carry decoded events to the fan-out workers, one lane per worker, chosen by guild.
+	lanes     []chan dispatch.Event
+	lanesDone sync.WaitGroup
+	stopLanes sync.Once
+
 	mu       sync.Mutex
 	conns    map[*conn]struct{}
 	sessions map[string]*session
@@ -211,6 +223,9 @@ func New(opts Options) (*Server, error) {
 	if opts.LivenessInterval <= 0 {
 		opts.LivenessInterval = DefaultLivenessInterval
 	}
+	if opts.FanoutLanes <= 0 {
+		opts.FanoutLanes = 1
+	}
 
 	identifyLimiter, err := ratelimit.New(ratelimit.Options{
 		Rate: identifyRate, Bucket: "gateway-identify", Backend: opts.RateLimitBackend,
@@ -237,11 +252,14 @@ func New(opts Options) (*Server, error) {
 		unidentified:    map[string]int{},
 	}
 	if opts.Bus != nil {
+		s.startLanes()
 		if s.sub, err = opts.Bus.Subscribe(dispatch.Topic, s.onEvent); err != nil {
+			s.closeLanes()
 			return nil, fmt.Errorf("gateway: subscribing to events: %w", err)
 		}
 		if s.revokedSub, err = opts.Bus.Subscribe(dispatch.RevocationTopic, s.onRevocation); err != nil {
 			s.sub.Unsubscribe()
+			s.closeLanes()
 			return nil, fmt.Errorf("gateway: subscribing to revocations: %w", err)
 		}
 	}
@@ -307,6 +325,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.revokedSub != nil {
 		s.revokedSub.Unsubscribe()
 	}
+	// After the subscription, which waits for a handler in progress: nothing sends on a lane once it closes.
+	s.closeLanes()
 	s.mu.Lock()
 	s.closing = true
 	all := make([]*conn, 0, len(s.conns))
@@ -393,8 +413,8 @@ func (s *Server) newSession(id string, userID, signIn snowflake.ID, in auth.Sign
 	device := in.Device
 	s.mu.Lock()
 	var superseded []*session
-	for _, old := range s.sessions {
-		if old.userID != userID || old.deviceID != device {
+	for _, old := range s.idx.ofUser(userID) {
+		if old.deviceID != device {
 			continue
 		}
 		old.mu.Lock()
@@ -414,6 +434,7 @@ func (s *Server) newSession(id string, userID, signIn snowflake.ID, in auth.Sign
 	s.perUser[userID]++
 	sess := &session{srv: s, id: id, userID: userID, deviceID: device, signIn: signIn, since: in.Since}
 	s.sessions[id] = sess
+	s.idx.register(sess)
 	s.mu.Unlock()
 	stopAll(superseded)
 	return sess, true
@@ -457,14 +478,12 @@ func (s *Server) onRevocation(payload []byte) {
 		s.opts.Logger.Error().Err(err).Msg("gateway received a revocation it could not decode")
 		return
 	}
-	s.mu.Lock()
 	var ended []*session
-	for _, sess := range s.sessions {
-		if sess.userID == r.UserID && sess.revokedBy(r) {
+	for _, sess := range s.idx.ofUser(r.UserID) {
+		if sess.revokedBy(r) {
 			ended = append(ended, sess)
 		}
 	}
-	s.mu.Unlock()
 	for _, sess := range ended {
 		s.revoke(sess)
 	}

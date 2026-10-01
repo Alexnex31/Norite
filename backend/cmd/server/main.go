@@ -265,6 +265,10 @@ func run() error {
 		RateLimitBackend: rateLimitBackend,
 		Version:          meta.Version,
 		Logger:           logger,
+		// A quarter of the pool, so fan-out can hold at most that many connections however busy the
+		// instance is, and requests keep the rest. One lane on the smallest pool, which is how fan-out ran
+		// before it had lanes.
+		FanoutLanes: max(1, int(cfg.DBMaxConns)/4),
 	})
 	if err != nil {
 		return err

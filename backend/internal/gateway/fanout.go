@@ -22,7 +22,57 @@ type AudienceResolver interface {
 // database is well.
 const audienceTimeout = 5 * time.Second
 
-// onEvent fans one published event out to this process's connections.
+// laneDepth is how many decoded events may wait for one lane. A lane that falls this far behind holds the
+// bus's delivery goroutine until it catches up, and the bus drops past its own buffer, which is the
+// at-most-once every subscriber already accepts (events package).
+const laneDepth = 256
+
+func (s *Server) startLanes() {
+	s.lanes = make([]chan dispatch.Event, s.opts.FanoutLanes)
+	for i := range s.lanes {
+		ch := make(chan dispatch.Event, laneDepth)
+		s.lanes[i] = ch
+		s.lanesDone.Add(1)
+		go func() {
+			defer s.lanesDone.Done()
+			for ev := range ch {
+				s.fanOut(ev)
+			}
+		}()
+	}
+}
+
+// closeLanes stops the fan-out workers once every queued event has been fanned out.
+func (s *Server) closeLanes() {
+	s.stopLanes.Do(func() {
+		for _, ch := range s.lanes {
+			close(ch)
+		}
+		s.lanesDone.Wait()
+	})
+}
+
+// onEvent decodes a published event and hands it to its guild's lane.
+//
+// Lanes because the audience check is three database reads and fan-out ran them for one event at a time,
+// for the whole process: measured at about 770 µs for a channel event with a hundred candidates against a
+// local database, which caps a process at roughly 1,300 events a second, and fewer when the database is a
+// network hop away. A guild's events all take the same lane, so they reach every session in the order they
+// were published, which is the ordering the protocol promises; events of two guilds may now pass each other,
+// and nothing promised they would not.
+//
+// Decoding the whole event here is also what makes its Data valid JSON, which dispatchLocked relies on to
+// copy it into each frame without encoding it again.
+func (s *Server) onEvent(payload []byte) {
+	var ev dispatch.Event
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		s.opts.Logger.Error().Err(err).Msg("gateway received an event it could not decode")
+		return
+	}
+	s.lanes[uint64(ev.GuildID)%uint64(len(s.lanes))] <- ev
+}
+
+// fanOut sends one event to this process's connections.
 //
 // Three steps, and each has a reason to be a separate one:
 //
@@ -35,15 +85,9 @@ const audienceTimeout = 5 * time.Second
 //  3. **Blocks** is rule 20's stage, and it is empty until M70 builds the table. It is a named step rather
 //     than nothing, so M70 adds a filter here instead of discovering where one would go.
 //
-// Runs on the bus's delivery goroutine, one event at a time, which is what keeps a channel's events in the
-// order they were published.
-func (s *Server) onEvent(payload []byte) {
-	var ev dispatch.Event
-	if err := json.Unmarshal(payload, &ev); err != nil {
-		s.opts.Logger.Error().Err(err).Msg("gateway received an event it could not decode")
-		return
-	}
-
+// Runs on the event's lane, one event at a time, which is what keeps a guild's events in the order they were
+// published.
+func (s *Server) fanOut(ev dispatch.Event) {
 	sessions := s.candidates(ev)
 	if len(sessions) == 0 {
 		return
@@ -80,33 +124,14 @@ func (s *Server) onEvent(payload []byte) {
 	}
 }
 
-// candidates is step 1: the sessions on this process an event could be for. Sessions rather than
-// connections, so one whose client has disconnected keeps receiving into its buffer and can be resumed
-// without a gap.
+// candidates is step 1: the sessions on this process an event could be for, from the index rather than a
+// scan (index.go). Sessions rather than connections, so one whose client has disconnected keeps receiving into
+// its buffer and can be resumed without a gap.
 func (s *Server) candidates(ev dispatch.Event) []*session {
-	var named map[snowflake.ID]struct{}
 	if ev.Audience == dispatch.Users {
-		named = make(map[snowflake.ID]struct{}, len(ev.Users))
-		for _, id := range ev.Users {
-			named[id] = struct{}{}
-		}
+		return s.idx.ofUsers(ev.Users)
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []*session
-	for _, sess := range s.sessions {
-		if named != nil {
-			if _, ok := named[sess.userID]; ok {
-				out = append(out, sess)
-			}
-			continue
-		}
-		if sess.candidate(ev.GuildID) {
-			out = append(out, sess)
-		}
-	}
-	return out
+	return s.idx.ofGuild(ev.GuildID)
 }
 
 // withoutBlocked is rule 20's stage in guild-channel fan-out, and it filters nothing yet: the blocks table

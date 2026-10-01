@@ -258,6 +258,8 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 		Audience: guildauth.NewAudience(db.New(pool)),
 		Version:  gatewayproto.DevVersion,
 		Logger:   zerolog.New(io.Discard),
+		// More than one, so every gateway test runs across lanes as the flagship's pool does.
+		FanoutLanes: 4,
 	})
 	require.NoError(t, err)
 

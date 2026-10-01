@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"strconv"
 	"sync"
 	"time"
 
@@ -65,23 +66,15 @@ type buffered struct {
 	frame []byte
 }
 
-// candidate reports whether an event about guildID could be for this session. A session not yet READY is a
-// candidate for everything, because it does not know its guilds yet; the audience check decides, as for
-// every event.
-func (s *session) candidate(guildID snowflake.ID) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.ready {
-		return true
-	}
-	_, ok := s.guilds[guildID]
-	return ok
-}
-
 // deliver takes one permitted event.
 func (s *session) deliver(ev dispatch.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Fan-out picked its candidates a moment ago, and this one may have been dropped since. Applying the
+	// event anyway would put a dropped session back in the index on GUILD_CREATE.
+	if s.ended {
+		return
+	}
 	if !s.ready {
 		s.pending = append(s.pending, ev)
 		return
@@ -104,8 +97,10 @@ func (s *session) applyLocked(ev dispatch.Event) {
 	switch ev.Type {
 	case "GUILD_CREATE":
 		s.guilds[ev.GuildID] = struct{}{}
+		s.srv.idx.joined(s, ev.GuildID)
 	case "GUILD_DELETE":
 		delete(s.guilds, ev.GuildID)
+		s.srv.idx.left(s, ev.GuildID)
 	}
 	// The payload was encoded once by the publisher and is the same bytes for every recipient.
 	s.dispatchLocked(ev.Type, ev.Data)
@@ -115,7 +110,15 @@ func (s *session) applyLocked(ev dispatch.Event) {
 func (s *session) becomeReady(payload ready, guilds map[snowflake.ID]struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Revoked while READY's data was being read: there is nobody to send it to, and indexing the session
+	// now would keep a dropped session a fan-out candidate for good.
+	if s.ended {
+		return
+	}
 	s.guilds = guilds
+	// Indexed under the guilds READY lists before anything else is applied: a candidate for every guild
+	// until here, and for its own from here, with this lock ordering the switch against deliver.
+	s.srv.idx.ready(s, guilds)
 	s.dispatchLocked("READY", payload)
 	s.ready = true
 	for _, ev := range s.pending {
@@ -127,18 +130,26 @@ func (s *session) becomeReady(payload ready, guilds map[snowflake.ID]struct{}) {
 // dispatchLocked numbers a dispatch, keeps it for replay, and queues it on the attached connection if there
 // is one.
 func (s *session) dispatchLocked(event string, payload any) {
-	d, err := json.Marshal(payload)
-	if err != nil {
-		s.srv.opts.Logger.Error().Err(err).Str("type", event).Msg("gateway could not encode a dispatch")
-		return
+	// An event's payload arrives encoded, once for every recipient, and is used as it is: encoding it again
+	// here, then again inside the envelope, cost 6.1 µs and 4.6 KB per recipient for a 2 KB message against
+	// 1.5 µs and 2.5 KB for appending its bytes (BenchmarkDispatchFrame). It is valid JSON already, because the event it came in was
+	// decoded whole (onEvent). READY and RESUMED are built here and encoded here.
+	d, ok := payload.(json.RawMessage)
+	if !ok {
+		var err error
+		if d, err = json.Marshal(payload); err != nil {
+			s.srv.opts.Logger.Error().Err(err).Str("type", event).Msg("gateway could not encode a dispatch")
+			return
+		}
 	}
-	s.seq++
-	seq, t := s.seq, event
-	frame, err := json.Marshal(gatewayproto.Frame{Op: gatewayproto.OpDispatch, D: d, S: &seq, T: &t})
+	// Numbered only once the frame exists, so a frame that could not be built leaves no gap in the sequence.
+	seq := s.seq + 1
+	frame, err := appendDispatchFrame(seq, event, d)
 	if err != nil {
 		s.srv.opts.Logger.Error().Err(err).Str("type", event).Msg("gateway could not encode a frame envelope")
 		return
 	}
+	s.seq = seq
 
 	s.buf = append(s.buf, buffered{seq: seq, frame: frame})
 	s.bufBytes += len(frame)
@@ -266,5 +277,27 @@ func (s *session) stop() {
 		s.expiry = nil
 	}
 	s.buf, s.pending = nil, nil
+	if !s.ended {
+		s.srv.idx.remove(s, s.guilds)
+	}
 	s.ended = true
+}
+
+// appendDispatchFrame builds an op 0 frame around an already-encoded payload: gatewayproto.Frame's fields,
+// in its order, with d copied rather than re-encoded. A test holds it equal to encoding the struct.
+func appendDispatchFrame(seq int64, event string, d json.RawMessage) ([]byte, error) {
+	t, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(d)+len(t)+40)
+	out = append(out, `{"op":`...)
+	out = strconv.AppendInt(out, int64(gatewayproto.OpDispatch), 10)
+	out = append(out, `,"d":`...)
+	out = append(out, d...)
+	out = append(out, `,"s":`...)
+	out = strconv.AppendInt(out, seq, 10)
+	out = append(out, `,"t":`...)
+	out = append(out, t...)
+	return append(out, '}'), nil
 }
