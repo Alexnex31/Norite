@@ -63,6 +63,12 @@ type Limits struct {
 	// MessagesPerChannel is how many recent messages a channel keeps.
 	MessagesPerChannel int
 	// TotalBytes is the budget across every channel's buffer, charged per message as its payload's length.
+	//
+	// The charge tracks the heap closely rather than exactly, and that was measured rather than assumed
+	// (M19 /optimization-review, 20,000 messages, after GC): real heap is 0.76–1.02 of the charge across
+	// contents of 0 to 4,000 bytes, and 1.18 of it in the steady state of full channels trimming their
+	// oldest message, whose slices keep dead slots until append reallocates. So the default's 64 MiB means
+	// at most about 76 MiB. A ring buffer would recover the 18%, at the cost of the simplest code here.
 	TotalBytes int
 }
 
