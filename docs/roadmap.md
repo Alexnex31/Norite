@@ -2295,8 +2295,23 @@ when a constraint the terminal imposed is lifted.
   this layer exists, one does. Note the page must keep working for somebody who has never touched the SPA:
   a session established purely to bind a continuation, not a login.
 
+  **And the gateway, which M18 built for a client that holds its token** (rule 21, raised by M18's
+  `/security-audit`). IDENTIFY and RESUME carry the access token *inside the first frame*, which is right for
+  the daemon and for any browser that holds a token, and impossible for an SPA that by this milestone's own
+  done-when never does. So the BFF has to put a gateway connection in front of the browser without handing
+  it a Bearer token. Two shapes, to be chosen here:
+  - **the BFF proxies `/gateway`**: it accepts the browser's WebSocket on its session cookie and holds the
+    upstream connection itself, identifying with the token it already keeps. The backend gateway is
+    unchanged.
+  - **a cookie-authenticated upgrade, or a short-lived single-use gateway ticket** the BFF mints.
+  Either way, the moment a cookie authenticates an upgrade, the `Origin` check is what stops cross-site
+  WebSocket hijacking: M18 left coder/websocket's default refusal of cross-origin upgrades on for exactly
+  this, and `internal/gateway/gateway.go` says so. It must stay on wherever the cookie is accepted.
+
   Done when: the web SPA can log in and receive a session cookie without ever holding a raw Bearer token in
-  JS, and a device-verification continuation is refused by a browser other than the one it was issued to.
+  JS; a device-verification continuation is refused by a browser other than the one it was issued to; and a
+  browser holds a live gateway connection without holding a Bearer token, while a cross-origin page cannot
+  open one with the user's cookie.
 - **M109 — Web SPA rebuild**: adapt the originally-planned React SPA to the current backend/contracts.
 
   Done when: the SPA builds with its API types generated from `contracts/` rather than hand-written, and a
