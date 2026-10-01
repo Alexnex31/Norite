@@ -51,6 +51,9 @@ func TestTheFanOutsRoleReadCannotScanTheWholeGuild(t *testing.T) {
 	             ON CONFLICT DO NOTHING`, base)
 	f.exec(ctx, `INSERT INTO guild_member_roles (guild_id, user_id, role_id)
 	             SELECT guild_id, user_id, guild_id + 10000 FROM guild_members WHERE guild_id > $1::bigint + 10000`, base)
+	// And four hundred channels in the large guild, for the overwrite read every channel event makes.
+	f.exec(ctx, `INSERT INTO channels (id, guild_id, type, name, position)
+	             SELECT $1::bigint + 30000 + c, $2, 0, 'c' || c, c FROM generate_series(1, 400) c`, base, int64(big))
 	f.exec(ctx, `ANALYZE`)
 
 	// A connection of its own with the generic plan forced, so what is examined is the plan a cached
@@ -96,6 +99,31 @@ func TestTheFanOutsRoleReadCannotScanTheWholeGuild(t *testing.T) {
 	removed, filters := plans[0].Plan.filtered()
 	require.Zero(t, removed,
 		"the generic plan discards rows through a filter %v: it is scanning the guild, not the recipients", filters)
+
+	// Every channel event reads its channel's overwrites, and whether the channel still exists. A guild
+	// predicate in that statement gave the generic plan the guild's channel index to walk, filtering the
+	// guild's channels down to one: up to the channel ceiling per event, where the primary key is one row.
+	channel := snowflake.ID(base + 30000 + 200)
+	_, err = roles.ResolveMany(ctx, q, big, channel, recipients, nil)
+	require.NoError(t, err)
+	var overwriteStmt string
+	var params int
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT name, cardinality(parameter_types) FROM pg_prepared_statements WHERE statement LIKE $1`,
+		"%-- name: ListOverwritesOfExistingChannel :%",
+	).Scan(&overwriteStmt, &params), "pgx prepared ListOverwritesOfExistingChannel on this connection")
+	args := fmt.Sprint(int64(channel))
+	if params == 2 {
+		args += ", " + fmt.Sprint(int64(big))
+	}
+	require.NoError(t, conn.QueryRow(ctx,
+		`EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE `+pgx.Identifier{overwriteStmt}.Sanitize()+`(`+args+`)`,
+	).Scan(&raw))
+	plans = nil
+	require.NoError(t, json.Unmarshal(raw, &plans))
+	removed, filters = plans[0].Plan.filtered()
+	require.Zero(t, removed,
+		"the overwrite read's generic plan discards rows through a filter %v: it is walking the guild's channels", filters)
 }
 
 type fanOutPlanNode struct {

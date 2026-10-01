@@ -1045,6 +1045,16 @@ type Querier interface {
 	// Same access path as the delete it precedes: the ids restrict the scan and the channels join scopes it
 	// to the guild.
 	ListOverwritesForTarget(ctx context.Context, arg ListOverwritesForTargetParams) ([]PermissionOverwrite, error)
+	// A channel's overwrites, and whether the channel still exists: no rows means it does not, and one row with a
+	// null target means it does and has none. Fan-out needs the difference (M18). An event about a channel,
+	// waiting in its lane while the channel is deleted, otherwise resolved against no overwrites and reached
+	// every member with guild-level view, a hidden channel's message included.
+	//
+	// The guild is returned rather than matched, and the caller compares it. With guild_id in the WHERE, a
+	// generic plan was seen walking channels_guild_id_position_idx and filtering on id, which is up to the
+	// channel ceiling per event where the primary key is one row; with only the id, no plan has that choice
+	// (M13a's lesson; TestTheFanOutsRoleReadCannotScanTheWholeGuild).
+	ListOverwritesOfExistingChannel(ctx context.Context, id int64) ([]ListOverwritesOfExistingChannelRow, error)
 	// The role ids one member holds, for a response that returns that member after changing them.
 	//
 	// Equality on both key columns, for ListGuildMembers' reason: the `= ANY` form it replaces had a generic

@@ -30,6 +30,11 @@ import (
 // non-nil, are used instead of reading the channel's, for a channel whose rows no longer exist; see
 // dispatch.Event.Overwrites.
 //
+// When the overwrites are read, a channel that is no longer in the guild answers with nobody: an event
+// about it can only be one that waited while it was deleted, and resolving it against no overwrites would
+// send a hidden channel's message to every member with guild-level view. Nobody includes the owner, who
+// loses nothing by it: the channel's deletion reaches them with its own snapshot.
+//
 // The result holds an entry for each account that is a member, or the owner. An account absent from it is
 // not in the guild, and gets nothing.
 func ResolveMany(
@@ -85,8 +90,29 @@ func ResolveMany(
 		}
 	}
 
+	if channelID != 0 && overwrites == nil {
+		rows, err := q.ListOverwritesOfExistingChannel(ctx, int64(channelID))
+		if err != nil {
+			return nil, fmt.Errorf("roles: load channel overwrites: %w", err)
+		}
+		// Gone, or in another guild, which the statement leaves to this comparison so its plan can only
+		// use the primary key. Either way the event is about a channel this guild does not have.
+		if len(rows) == 0 || rows[0].GuildID == nil || *rows[0].GuildID != int64(guildID) {
+			return map[snowflake.ID]Permission{}, nil
+		}
+		overwrites = make([]db.PermissionOverwrite, 0, len(rows))
+		for _, row := range rows {
+			if row.TargetID == nil {
+				continue // the channel exists and has no overwrites
+			}
+			overwrites = append(overwrites, db.PermissionOverwrite{
+				ChannelID: row.ChannelID, TargetType: *row.TargetType, TargetID: *row.TargetID,
+				Allow: *row.Allow, Deny: *row.Deny,
+			})
+		}
+	}
+
 	owner := snowflake.ID(base.OwnerID)
-	needOverwrites := channelID != 0 && overwrites == nil
 	for _, id := range userIDs {
 		// Layer 2, ahead of membership exactly as Resolve orders it.
 		if id == owner {
@@ -101,16 +127,6 @@ func ResolveMany(
 		if m.perms.Has(PermAdministrator) {
 			out[id] = permAll
 			continue
-		}
-		if channelID != 0 && needOverwrites {
-			overwrites, err = q.ListChannelPermissionOverwrites(ctx, db.ListChannelPermissionOverwritesParams{
-				ChannelID: int64(channelID),
-				GuildID:   int64(guildID),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("roles: load channel overwrites: %w", err)
-			}
-			needOverwrites = false
 		}
 		if channelID == 0 {
 			out[id] = m.perms

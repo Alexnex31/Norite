@@ -401,3 +401,55 @@ func (q *Queries) ListMemberRolesForUsers(ctx context.Context, arg ListMemberRol
 	}
 	return items, nil
 }
+
+const listOverwritesOfExistingChannel = `-- name: ListOverwritesOfExistingChannel :many
+SELECT c.guild_id, c.id AS channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM channels c
+LEFT JOIN permission_overwrites po ON po.channel_id = c.id
+WHERE c.id = $1
+`
+
+type ListOverwritesOfExistingChannelRow struct {
+	GuildID    *int64
+	ChannelID  int64
+	TargetType *int16
+	TargetID   *int64
+	Allow      *int64
+	Deny       *int64
+}
+
+// A channel's overwrites, and whether the channel still exists: no rows means it does not, and one row with a
+// null target means it does and has none. Fan-out needs the difference (M18). An event about a channel,
+// waiting in its lane while the channel is deleted, otherwise resolved against no overwrites and reached
+// every member with guild-level view, a hidden channel's message included.
+//
+// The guild is returned rather than matched, and the caller compares it. With guild_id in the WHERE, a
+// generic plan was seen walking channels_guild_id_position_idx and filtering on id, which is up to the
+// channel ceiling per event where the primary key is one row; with only the id, no plan has that choice
+// (M13a's lesson; TestTheFanOutsRoleReadCannotScanTheWholeGuild).
+func (q *Queries) ListOverwritesOfExistingChannel(ctx context.Context, id int64) ([]ListOverwritesOfExistingChannelRow, error) {
+	rows, err := q.db.Query(ctx, listOverwritesOfExistingChannel, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOverwritesOfExistingChannelRow{}
+	for rows.Next() {
+		var i ListOverwritesOfExistingChannelRow
+		if err := rows.Scan(
+			&i.GuildID,
+			&i.ChannelID,
+			&i.TargetType,
+			&i.TargetID,
+			&i.Allow,
+			&i.Deny,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

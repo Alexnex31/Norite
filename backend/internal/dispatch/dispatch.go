@@ -67,11 +67,16 @@ type Event struct {
 	// edit can reach a message that predates the recipient's access and REST refuses them that message.
 	Need  roles.Permission `json:"need,omitempty"`
 	Users []snowflake.ID   `json:"users,omitempty"`
-	// Overwrites, when set, are the channel's overwrites as they stood before the change, for an event
-	// about a channel whose rows are gone by fan-out time. CHANNEL_DELETE is the case: without them the
+	// Overwrites, with Snapshot set, are the channel's overwrites as they stood before the change, for an
+	// event about a channel whose rows are gone by fan-out time. CHANNEL_DELETE is the case: without them the
 	// gateway would have no overwrites to resolve against and would send a hidden channel's deletion to
 	// every member, which names a channel they were never shown.
 	Overwrites []db.PermissionOverwrite `json:"overwrites,omitempty"`
+	// Snapshot says Overwrites is the channel's whole state, even when it is empty, so the gateway resolves
+	// against it rather than reading the channel. Its own field because an empty list does not survive
+	// encoding as one: without it, a deleted channel that had no overwrites would be read, found missing,
+	// and its deletion sent to nobody, which is what a channel event that outlived its channel gets.
+	Snapshot bool `json:"snapshot,omitempty"`
 	// Data is the dispatch's d, already encoded: the same bytes go to every recipient.
 	Data json.RawMessage `json:"data"`
 }

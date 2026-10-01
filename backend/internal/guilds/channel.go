@@ -619,7 +619,7 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 
 		if err := s.events.Queue(ctx, dispatch.Event{
 			Type: "CHANNEL_DELETE", Audience: dispatch.Guild, GuildID: guildID, ChannelID: channelID,
-			Overwrites: overwrites,
+			Overwrites: overwrites, Snapshot: true,
 		}, channelDeleted{ID: channelID, GuildID: guildID}); err != nil {
 			return err
 		}

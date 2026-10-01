@@ -54,7 +54,12 @@ func (a *Audience) Allowed(ctx context.Context, ev dispatch.Event, candidates []
 		return nil, fmt.Errorf("guildauth: unknown event audience %q", ev.Audience)
 	}
 
-	perms, err := roles.ResolveMany(ctx, a.q, ev.GuildID, ev.ChannelID, candidates, ev.Overwrites)
+	overwrites := ev.Overwrites
+	if ev.Snapshot && overwrites == nil {
+		// Empty rather than nil: ResolveMany reads the channel for nil, and this channel is gone.
+		overwrites = []db.PermissionOverwrite{}
+	}
+	perms, err := roles.ResolveMany(ctx, a.q, ev.GuildID, ev.ChannelID, candidates, overwrites)
 	if err != nil {
 		return nil, fmt.Errorf("guildauth: resolving an event's audience: %w", err)
 	}

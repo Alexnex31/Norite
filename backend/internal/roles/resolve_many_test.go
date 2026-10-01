@@ -142,3 +142,50 @@ func randomPerms(rng *rand.Rand) roles.Permission {
 	}
 	return p
 }
+
+// An event about a channel can wait in its lane while the channel is deleted. Read then, the channel has no
+// overwrites, and resolving against none would hand a hidden channel's message to every member with
+// guild-level view. A channel that is gone answers with nobody, the owner included.
+func TestResolveManyForADeletedChannelIsNobody(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+
+	owner, member := f.newUser(ctx, "owner"), f.newUser(ctx, "member")
+	guildID, everyoneID := f.newGuild(ctx, owner, roles.PermViewChannel|roles.PermSendMessages)
+	f.join(ctx, guildID, member)
+	hidden := f.newChannel(ctx, guildID)
+	f.overwrite(ctx, hidden, 0, everyoneID, 0, roles.PermViewChannel)
+
+	before, err := roles.ResolveMany(ctx, f.q, guildID, hidden, []snowflake.ID{owner, member}, nil)
+	require.NoError(t, err)
+	require.False(t, before[member].Has(roles.PermViewChannel), "hidden from the member while it exists")
+
+	f.exec(ctx, `DELETE FROM channels WHERE id = $1`, int64(hidden))
+	after, err := roles.ResolveMany(ctx, f.q, guildID, hidden, []snowflake.ID{owner, member}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, after, "a channel that is gone reaches nobody, rather than everyone its overwrites hid it from")
+
+	// A snapshot is the caller saying what the channel was, and is resolved as given, empty or not.
+	snapshot, err := roles.ResolveMany(ctx, f.q, guildID, hidden, []snowflake.ID{owner, member}, []db.PermissionOverwrite{})
+	require.NoError(t, err)
+	assert.True(t, snapshot[member].Has(roles.PermViewChannel))
+}
+
+// The overwrite read is driven by the channel id alone, so its plan can only use the primary key, and the
+// guild is compared in Go. A channel of another guild is therefore one this guild does not have.
+func TestResolveManyForAnotherGuildsChannelIsNobody(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+
+	owner, member := f.newUser(ctx, "owner"), f.newUser(ctx, "member")
+	guildID, _ := f.newGuild(ctx, owner, roles.PermViewChannel)
+	f.join(ctx, guildID, member)
+	otherGuild, _ := f.newGuild(ctx, f.newUser(ctx, "elsewhere"), roles.PermViewChannel)
+	theirs := f.newChannel(ctx, otherGuild)
+
+	got, err := roles.ResolveMany(ctx, f.q, guildID, theirs, []snowflake.ID{owner, member}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}

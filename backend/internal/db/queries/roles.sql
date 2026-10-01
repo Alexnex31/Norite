@@ -219,3 +219,18 @@ LEFT JOIN guild_member_roles gmr
     ON gmr.guild_id = sqlc.arg(guild_id)::bigint AND gmr.user_id = gm.user_id
 LEFT JOIN roles r
     ON r.id = gmr.role_id;
+
+-- name: ListOverwritesOfExistingChannel :many
+-- A channel's overwrites, and whether the channel still exists: no rows means it does not, and one row with a
+-- null target means it does and has none. Fan-out needs the difference (M18). An event about a channel,
+-- waiting in its lane while the channel is deleted, otherwise resolved against no overwrites and reached
+-- every member with guild-level view, a hidden channel's message included.
+--
+-- The guild is returned rather than matched, and the caller compares it. With guild_id in the WHERE, a
+-- generic plan was seen walking channels_guild_id_position_idx and filtering on id, which is up to the
+-- channel ceiling per event where the primary key is one row; with only the id, no plan has that choice
+-- (M13a's lesson; TestTheFanOutsRoleReadCannotScanTheWholeGuild).
+SELECT c.guild_id, c.id AS channel_id, po.target_type, po.target_id, po.allow, po.deny
+FROM channels c
+LEFT JOIN permission_overwrites po ON po.channel_id = c.id
+WHERE c.id = $1;
