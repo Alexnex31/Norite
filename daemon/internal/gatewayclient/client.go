@@ -82,6 +82,16 @@ const (
 	defaultVersionHold  = time.Hour
 	defaultHelloTimeout = 10 * time.Second
 
+	// identifyBudget is how long the client may spend producing a token once HELLO has arrived: half the
+	// server's ten-second identify deadline (gateway.DefaultIdentifyTimeout), which started before HELLO was
+	// sent. Waiting the full hello timeout here could be pre-empted by the server's 4009 and waste the
+	// connection (M19 /code-review).
+	identifyBudget = 5 * time.Second
+
+	// maxHeartbeatInterval bounds what HELLO may ask for. The server's default is 41.25 seconds; ten minutes
+	// is room for any real configuration and keeps the interval far from overflowing a Duration.
+	maxHeartbeatInterval = 10 * time.Minute
+
 	// maxInboundFrame bounds one frame from the server. READY is about 20 KB at the joined-guild cap and a
 	// message at most a few times its 4,000-rune content; this is room for growth, not for a server trying
 	// to make the daemon buffer something enormous. It replaces the stream-decoding the roadmap once asked

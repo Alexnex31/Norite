@@ -710,3 +710,17 @@ func TestGatewayURL(t *testing.T) {
 	_, err := gatewayURL("ftp://chat.example.com")
 	assert.Error(t, err)
 }
+
+// HELLO's heartbeat_interval is an integer the schema bounds only below. One large enough overflowed the
+// Duration it became, went negative, and panicked the heartbeat goroutine — which nothing recovered, so the
+// daemon died, restarted, reconnected and died again (M19 /code-review). It is now refused as a protocol
+// error, and the goroutine recovers its own panics besides.
+func TestAnAbsurdHeartbeatIntervalIsRefusedNotFatal(t *testing.T) {
+	h := start(t)
+	c := h.g.next()
+	c.send(gatewayproto.OpHello, map[string]any{
+		"heartbeat_interval": int64(1e13), "server_time": time.Now(), "version": gatewayproto.DevVersion,
+	}, nil, nil)
+	assert.NotEqual(t, websocket.StatusNormalClosure, c.closedWith())
+	assert.Contains(t, h.logs.String(), "heartbeat interval")
+}

@@ -50,9 +50,9 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 		}
 	}()
 
-	hello, ok := c.readHello(readCtx, ws)
+	hello, ending, ok := c.readHello(readCtx, ws)
 	if !ok {
-		return outcome{ending: endResume}
+		return outcome{ending: ending}
 	}
 
 	compat := gatewayproto.Check(hello.Version, c.version)
@@ -91,7 +91,9 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 	}
 
 	interval := time.Duration(hello.HeartbeatInterval) * time.Millisecond
-	go c.heartbeat(ctx, ws, interval, &seq, &acked, &missed)
+	// On the connection's context, not the daemon's: it ends with this connection rather than outliving it
+	// until its next tick, holding a closed socket (M19 /code-review).
+	go c.heartbeat(readCtx, ws, interval, &seq, &acked, &missed)
 
 	for {
 		_, data, err := ws.Read(readCtx)
@@ -173,14 +175,14 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 }
 
 // readHello waits for the server's first frame and samples its clock.
-func (c *Client) readHello(ctx context.Context, ws *websocket.Conn) (gatewayproto.Hello, bool) {
+func (c *Client) readHello(ctx context.Context, ws *websocket.Conn) (gatewayproto.Hello, ending, bool) {
 	helloCtx, cancel := context.WithTimeout(ctx, c.helloTimeout)
 	defer cancel()
 
 	_, data, err := ws.Read(helloCtx)
 	if err != nil {
 		c.log.Warn().Msg("the gateway did not say hello; reconnecting")
-		return gatewayproto.Hello{}, false
+		return gatewayproto.Hello{}, endResume, false
 	}
 	// Sampled at receipt, before anything else is decoded or decided.
 	received := time.Now()
@@ -191,17 +193,26 @@ func (c *Client) readHello(ctx context.Context, ws *websocket.Conn) (gatewayprot
 		json.Unmarshal(f.D, &hello) != nil || hello.HeartbeatInterval <= 0 {
 		c.log.Error().Msg("the gateway's first frame was not a HELLO; reconnecting")
 		_ = ws.Close(websocket.StatusProtocolError, "expected HELLO")
-		return gatewayproto.Hello{}, false
+		return gatewayproto.Hello{}, endProtocol, false
+	}
+	// The schema bounds the interval only below. One past this overflowed the Duration it became and
+	// panicked the heartbeat — the daemon's, not the connection's, since nothing recovered there — so a
+	// hostile or broken instance could crash-loop the daemon with one frame (M19 /code-review).
+	if hello.HeartbeatInterval > maxHeartbeatInterval.Milliseconds() {
+		c.log.Error().Int64("interval_ms", hello.HeartbeatInterval).
+			Msg("the gateway asked for an impossible heartbeat interval; refusing it")
+		_ = ws.Close(websocket.StatusProtocolError, "heartbeat interval out of range")
+		return gatewayproto.Hello{}, endProtocol, false
 	}
 	// Dated from when the frame arrived, so the time spent decoding it does not count against the estimate.
 	c.creds.ObserveServerTime(hello.ServerTime.Add(time.Since(received)))
-	return hello, true
+	return hello, endResume, true
 }
 
 // tokenFor gets an access token for IDENTIFY or RESUME. again is true when the sign-in changed meanwhile —
 // a login, a logout — and the connection should be started over for the new one.
 func (c *Client) tokenFor(ctx context.Context, generation uint64) (token string, again bool) {
-	tokenCtx, cancel := context.WithTimeout(ctx, c.helloTimeout)
+	tokenCtx, cancel := context.WithTimeout(ctx, identifyBudget)
 	defer cancel()
 	cred, err := c.creds.Current(tokenCtx)
 	if err != nil || cred.Generation != generation {
@@ -235,6 +246,14 @@ func (c *Client) open(ctx context.Context, ws *websocket.Conn, token string) err
 func (c *Client) heartbeat(ctx context.Context, ws *websocket.Conn, interval time.Duration,
 	seq *atomic.Int64, acked, missed *atomic.Bool,
 ) {
+	// Its own recover: converse's covers converse's goroutine and not this one, and a panic here would
+	// otherwise be the daemon's.
+	defer func() {
+		if p := recover(); p != nil {
+			c.log.Error().Interface("panic", p).Msg("the gateway heartbeat panicked; closing the connection")
+			_ = ws.Close(websocket.StatusInternalError, "client error")
+		}
+	}()
 	timer := time.NewTimer(time.Duration(rand.Int64N(int64(interval)) + 1)) //nolint:gosec // jitter
 	defer timer.Stop()
 	for {
