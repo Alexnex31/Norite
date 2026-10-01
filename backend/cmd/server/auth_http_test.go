@@ -180,6 +180,15 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	providers auth.OAuthProviders, publicBaseURL string,
 ) *api {
 	t.Helper()
+	return newAPIOnBus(t, mode, mailer, providers, publicBaseURL, nil)
+}
+
+// newAPIOnBus is newAPIWithBaseURL over a bus the test chose, for the tests that run the gateway across
+// replicas over Redis. Nil is the in-process bus every other test uses.
+func newAPIOnBus(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer,
+	providers auth.OAuthProviders, publicBaseURL string, bus events.Bus,
+) *api {
+	t.Helper()
 	dbtest.RequireContainer(t)
 
 	ctx := t.Context()
@@ -207,8 +216,10 @@ func newAPIWithBaseURL(t *testing.T, mode auth.RegistrationMode, mailer *capture
 	issuer, err := auth.NewTokenIssuer([]byte(testJWTSecret))
 	require.NoError(t, err)
 
-	bus := events.NewInProc(nil)
-	t.Cleanup(func() { _ = bus.Close() })
+	if bus == nil {
+		bus = events.NewInProc(nil)
+		t.Cleanup(func() { _ = bus.Close() })
+	}
 	publisher := dispatch.NewPublisher(bus, nil)
 
 	svc, err := auth.NewService(auth.ServiceOptions{

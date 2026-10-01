@@ -37,8 +37,12 @@ type guildFixture struct {
 
 func newGuildFixture(t *testing.T) *guildFixture {
 	t.Helper()
+	return newGuildFixtureOn(t, newAPI(t, auth.RegistrationOpen))
+}
 
-	a := newAPI(t, auth.RegistrationOpen)
+// newGuildFixtureOn builds the fixture on an api the caller assembled, such as one over a Redis bus.
+func newGuildFixtureOn(t *testing.T, a *api) *guildFixture {
+	t.Helper()
 	f := &guildFixture{api: a}
 
 	owner := a.newAccount("owner", "owner@example.com", "owner-device")
