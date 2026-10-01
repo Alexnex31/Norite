@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// The sanitizer itself lives in cli/internal/termsafe and is tested there. What belongs here is that the
+// The sanitizer itself lives in daemon/termsafe and is tested there. What belongs here is that the
 // Runner actually applies it, which is the property every backend depends on without knowing it does.
 
 func TestExecRunnerSanitizesWhatItCaptures(t *testing.T) {

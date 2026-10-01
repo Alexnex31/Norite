@@ -1283,7 +1283,8 @@ And on the client-auth side, from M7:
   `Clear` removes the record — and logging out revokes nothing on the instance, so a fresh ID would leave
   the old family live for its full TTL beside a duplicate session. `Store.DeviceID()` is the only way to
   obtain one; it mints on first use and adopts the ID of a record written before that file existed.
-- **Untrusted text goes through `cli/internal/termsafe` before it reaches a terminal** (rule 19). `Text`
+- **Untrusted text goes through `daemon/termsafe` before it reaches a terminal** (rule 19) — in the daemon
+  module since M19, outside `internal/` so the CLI imports it, and `cli/internal/termsafe` before that. `Text`
   for a value printed inside a line — it removes newlines too, since a one-line value that can contain one
   can forge a line of output — and `Block` for output meant to span lines. Sanitize where foreign text
   *enters* the program, as the API client and `daemonctl.Runner` do, so the value is safe wherever it goes
@@ -1346,9 +1347,9 @@ them, because a deferral recorded only here is one that milestone never reads:
   to the backend the record names, which every record has carried since M7. The fix is a retried read, at
   M19. The same shape as the dropped-token bullet above: a deferral repeated from a comment and believed
   until somebody read the code it described.
-- **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
-  logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
-  function has to move somewhere both modules reach — not be copied.
+- ~~**`termsafe` lives in the CLI module and the daemon cannot import it.**~~ **Closed at M19**, by moving
+  it to `daemon/termsafe` rather than copying it — the daemon fetches names of its own from that milestone,
+  and two copies of a sanitizer drift.
 
 And on the device-code side, from M9 (decisions in ADR 0028):
 

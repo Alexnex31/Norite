@@ -12,8 +12,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // Command builds `norite login`.

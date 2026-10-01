@@ -11,7 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // Runner executes an external command.

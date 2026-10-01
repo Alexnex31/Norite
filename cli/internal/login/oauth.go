@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // `norite login --provider google`, the loopback flow (Milestone M8).

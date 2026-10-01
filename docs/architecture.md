@@ -98,7 +98,6 @@ Locked-in decisions:
 │   ├── cmd/app/                  # main() only: process lifetime and exit codes, nothing else
 │   ├── internal/cliapp/          # urfave/cli v3 command tree, global --json/--help flags, completions
 │   ├── internal/<command>/       # one package per command group, e.g. instanceinit (`norite instance init`)
-│   ├── internal/termsafe/        # the blanket terminal-escape sanitizer every untrusted string passes
 │   ├── tui/                      # pane engine, keybindings, markdown renderer, image rendering
 │   └── go.mod
 ├── gui/                          # The native GUI — Gio
@@ -108,6 +107,8 @@ Locked-in decisions:
 ├── daemon/                       # Shared background daemon
 │   ├── cmd/daemond/              # main() only: process lifetime, signals, exit codes
 │   ├── credentials/              # the stored session: keyring-or-file secret, record, device identity
+│   ├── termsafe/                 # the blanket terminal-escape sanitizer every untrusted string passes;
+│   │                             #   outside internal/ so the CLI imports it (moved from cli/ at M19)
 │   ├── internal/daemonproc/      # single-instance flock, log rotation, startup sign-in, clean shutdown
 │   ├── internal/paths/           # the per-user 0700 state directory, resolved per platform
 │   ├── internal/gatewayclient/   # holds the real WS connection, in-memory scrollback/presence (M19)
@@ -1793,11 +1794,12 @@ commonest terminal width and leaving that to the layout code is how it gets deci
 code, links, mentions, custom-emoji shortcodes) — not Charm's `glamour`, to keep the trusted-rendering
 surface as narrow as the security posture used for message content everywhere else.
 
-**Terminal-escape sanitization** (`cli/internal/termsafe`, built at M7). A blanket function over all
-untrusted text — usernames, message content, link-preview titles, plugin manifest descriptions, webhook
-display names, the output of any tool the CLI shells out to. Specific to the terminal clients, because a
-terminal acts on what it is printed and no other client does — it covers both front ends in that binary,
-§4's command output as much as this section's screens.
+**Terminal-escape sanitization** (`daemon/termsafe`, built at M7 in the cli module and moved at M19). A
+blanket function over all untrusted text — usernames, message content, link-preview titles, plugin manifest
+descriptions, webhook display names, the output of any tool the CLI shells out to. Specific to text bound
+for a terminal, because a terminal acts on what it is printed and no other client does — it covers both
+front ends in the cli binary, §4's command output as much as this section's screens, and the daemon's log,
+which is read with `cat`. It lives in the daemon module because both need it and a copy would drift.
 
 Its guarantee: *what a terminal displays, and the order it displays it in, is the printable characters that
 were in the string.* Two classes break that and are removed — Unicode category `Cc` (C0, DEL, and C1, the

@@ -523,7 +523,7 @@ func FormatUserCode(code string) string {
 // sanitizeDeviceName makes a client-supplied name fit to display, and bounds it.
 //
 // Cleaned where it enters rather than where it is shown, which is this codebase's rule for foreign text
-// (see cli/internal/termsafe): the value goes into a database column and comes back out on a page whose
+// (see daemon/termsafe): the value goes into a database column and comes back out on a page whose
 // entire job is being read carefully, so making it safe once at the boundary is what makes it safe
 // everywhere afterwards.
 //

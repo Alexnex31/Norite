@@ -17,8 +17,8 @@ import (
 
 	"github.com/Alexnex31/Norite/cli/internal/apiclient"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
 	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // `norite login`, the password path (Milestone M7). The OAuth paths arrive at M8 (loopback) and M9
