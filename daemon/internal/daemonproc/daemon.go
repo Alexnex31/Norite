@@ -18,7 +18,6 @@ package daemonproc
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"os"
 	"sync"
@@ -29,6 +28,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/gatewayclient"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
+	"github.com/Alexnex31/Norite/daemon/internal/state"
 )
 
 // Options configures a daemon run.
@@ -147,9 +147,11 @@ func Run(ctx context.Context, opts Options) error {
 			components.Go(func() { src.Run(ctx) })
 
 			// The gateway connection, which waits on the session for a credential: a daemon nobody has
-			// signed in to holds no connection and makes no attempts.
+			// signed in to holds no connection and makes no attempts. What it carries builds the state
+			// attach clients read from M20.
+			st := state.New(log.With().Str("component", "state").Logger(), state.DefaultLimits)
 			gw := gatewayclient.New(gatewayclient.Options{
-				Credentials: src, Sink: discardSink{}, Version: opts.Version,
+				Credentials: src, Sink: st, Version: opts.Version,
 				Log: log.With().Str("component", "gateway").Logger(),
 			})
 			components.Go(func() { gw.Run(ctx) })
@@ -171,10 +173,3 @@ func Run(ctx context.Context, opts Options) error {
 	log.Info().Msg("daemon stopped")
 	return nil
 }
-
-// discardSink holds nothing. The daemon's state arrives later in M19; until then the connection is held, and
-// what it carries is let go.
-type discardSink struct{}
-
-func (discardSink) Begin(uint64)                     {}
-func (discardSink) Dispatch(string, json.RawMessage) {}

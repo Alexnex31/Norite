@@ -84,6 +84,8 @@ type fakeGateway struct {
 	srv     *httptest.Server
 	conns   chan *fakeConn
 	version string
+	// rest answers every path but /gateway, so one server can stand in for a whole instance.
+	rest http.Handler
 }
 
 func newFakeGateway(t *testing.T) *fakeGateway {
@@ -91,6 +93,10 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 	g := &fakeGateway{t: t, conns: make(chan *fakeConn, 16), version: gatewayproto.DevVersion}
 	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/gateway" {
+			if g.rest != nil {
+				g.rest.ServeHTTP(w, r)
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}
