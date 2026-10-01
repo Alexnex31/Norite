@@ -944,3 +944,17 @@ carries the condition that would reopen it.
   Ingress (M112) or a self-hoster's proxy.
 - **Reopens if**: an instance runs with nothing in front of it, or M93's metrics show unidentified
   sockets as a meaningful share of a process's connections.
+
+### A token from an ended sign-in can supersede its device's detached sessions before it is refused
+- **Raised**: M18, `/security-review` (excluded there as denial of service)
+- **Verdict**: accepted risk
+- **Why**: IDENTIFY registers the new session before it asks whether the sign-in is live, which is what
+  leaves a concurrent sign-out no gap to fall into, and registering supersedes the device's detached
+  sessions (`gateway.newSession`, then `checkLive`). So a token from a sign-in that has ended, presented for
+  the same device, is refused only after the device's detached sessions are dropped. The owner loses their
+  resume buffer and identifies afresh, losing nothing but a resync. It needs an access token for that very
+  device, under fifteen minutes old, held by somebody else, which is a stolen credential, and the token can do
+  nothing else here.
+- **Reopens if**: a detached session comes to hold something a resync cannot rebuild, or superseding starts
+  doing more than dropping buffers. Either would make it worth checking liveness before superseding, which
+  means taking the account's session limit without counting the sessions about to be superseded.
