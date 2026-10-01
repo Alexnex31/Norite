@@ -4226,6 +4226,9 @@ paths:
     get:
       summary: List a guild's members
       description: >
+        Requires membership; a caller who is not a member gets 404.
+
+
         Cursor-paginated on `user_id`, never offset. An offset makes page N cost N pages of scanning and
         shifts every row when somebody joins or leaves mid-read; a cursor costs one index descent whatever
         the depth and is stable under concurrent writes.
@@ -5186,9 +5189,8 @@ components:
             (M16b), including edits and deletions. Off unless the guild's owner turned it on.
 
 
-            **Readable by any member**, deliberately: this endpoint is gated on `VIEW_CHANNEL`, which
-            every member holds by default, so being told whether you are recorded does not depend on
-            holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this
+            **Readable by any member**, deliberately: this endpoint requires membership and nothing else,
+            so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this
             field needs the owner; neither is required to learn the answer.
 
 

@@ -163,11 +163,14 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 
 // Get returns one guild.
 //
-// Authorized with PermViewChannel, which every member holds by default — so in practice this asks "are
-// you in this guild", and answers 404 when you are not. That is the same refusal a guild that does not
-// exist gets, deliberately; see authorize.
+// Membership is the whole requirement, as the contract says, and a non-member gets the 404 a guild that
+// does not exist gets; see authorize. It was guild-level PermViewChannel until M18, on the reasoning that
+// every member holds it by default. A member whose view comes only from a channel overwrite does not, so
+// they could list the guild's welcome channel and were refused the guild itself, while the gateway sent it
+// to them in READY. ListChannels made the same correction at M13; ListMembers and ListRoles share this one.
 func (s *Service) Get(ctx context.Context, actor auth.Actor, guildID snowflake.ID) (Guild, error) {
-	if err := s.authorize(ctx, actor, guildID, 0, roles.PermViewChannel); err != nil {
+	// Permission.Has(0) is true, so this establishes membership and asserts nothing else.
+	if err := s.authorize(ctx, actor, guildID, 0, 0); err != nil {
 		return Guild{}, err
 	}
 

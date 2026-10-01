@@ -827,7 +827,7 @@ type Guild struct {
 
 	// MessageAuditEnabled Whether this guild records every message its members send to a log its moderators can read (M16b), including edits and deletions. Off unless the guild's owner turned it on.
 	//
-	// **Readable by any member**, deliberately: this endpoint is gated on `VIEW_CHANNEL`, which every member holds by default, so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this field needs the owner; neither is required to learn the answer.
+	// **Readable by any member**, deliberately: this endpoint requires membership and nothing else, so being told whether you are recorded does not depend on holding a permission. Reading the log itself needs `VIEW_MESSAGE_AUDIT` and writing this field needs the owner; neither is required to learn the answer.
 	//
 	// Always present, in both states. A client must be able to say "this guild does not record" as positively as it says the opposite — a field that appeared only when recording was on would make its absence carry a meaning nothing guarantees.
 	MessageAuditEnabled bool   `json:"message_audit_enabled"`

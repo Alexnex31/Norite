@@ -23,7 +23,8 @@ import (
 func (s *Service) ListRoles(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID,
 ) ([]Role, error) {
-	if err := s.authorize(ctx, actor, guildID, 0, roles.PermViewChannel); err != nil {
+	// Membership, not guild-level view: Get's correction, for Get's reason.
+	if err := s.authorize(ctx, actor, guildID, 0, 0); err != nil {
 		return nil, err
 	}
 

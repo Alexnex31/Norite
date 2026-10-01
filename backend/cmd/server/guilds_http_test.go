@@ -1192,3 +1192,35 @@ func (f *guildFixture) auditCount(t *testing.T) int {
 		[]any{mustID(t, f.guildID)}, &n)
 	return n
 }
+
+// A member whose only view is a channel overwrite is still a member, and the guild-level reads say so. The
+// configuration is the one ListChannels names as ordinary — @everyone withholding view at role level, a
+// welcome channel allowing it back — and the contract has always said these routes require membership.
+// They required guild-level PermViewChannel instead, so such a member could list the welcome channel and
+// was refused the guild it belongs to: its name, its roles, its members, and whether it records their
+// messages, which message_audit_enabled promises any member can learn. The gateway already sent all of it
+// to them, so REST and the gateway disagreed about the same objects (M18 /security-review).
+func TestAMemberWhoseOnlyViewIsAChannelOverwriteCanReadTheGuild(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+
+	resp := f.api.call(http.MethodPatch, fmt.Sprintf("/api/v1/guilds/%s/roles/%s", f.guildID, f.everyoneID),
+		map[string]any{"permissions": fmt.Sprint((roles.PermSendMessages | roles.PermReadMessageHistory).Int64())},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, resp.Code, resp)
+	welcome := createChannel(t, f, map[string]any{"name": "welcome", "type": 0})
+	resp = f.api.call(http.MethodPut, fmt.Sprintf("/api/v1/channels/%s/permissions/%s", welcome, f.everyoneID),
+		map[string]any{"type": 0, "allow": fmt.Sprint(roles.PermViewChannel.Int64()), "deny": "0"},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusOK, resp.Code, resp)
+
+	listed := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID+"/channels", nil, withToken(f.memberToken))
+	require.Equal(t, http.StatusOK, listed.Code, listed)
+
+	for _, path := range []string{"", "/members", "/roles"} {
+		res := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID+path, nil, withToken(f.memberToken))
+		assert.Equal(t, http.StatusOK, res.Code, "GET /guilds/{id}%s: %s", path, res)
+	}
+	stranger := f.api.call(http.MethodGet, "/api/v1/guilds/"+f.guildID, nil, withToken(f.strangerToken))
+	assert.Equal(t, http.StatusNotFound, stranger.Code, "a non-member is still refused, with the 404 that hides the guild")
+}

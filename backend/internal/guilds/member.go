@@ -44,7 +44,8 @@ type ListMembersInput struct {
 func (s *Service) ListMembers(
 	ctx context.Context, actor auth.Actor, guildID snowflake.ID, in ListMembersInput,
 ) ([]Member, error) {
-	if err := s.authorize(ctx, actor, guildID, 0, roles.PermViewChannel); err != nil {
+	// Membership, not guild-level view: Get's correction, for Get's reason.
+	if err := s.authorize(ctx, actor, guildID, 0, 0); err != nil {
 		return nil, err
 	}
 
