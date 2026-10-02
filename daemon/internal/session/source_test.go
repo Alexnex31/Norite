@@ -369,14 +369,22 @@ func (h *harness) noCredential() {
 // advanceUntil moves the fake clock forward a step at a time until cond holds. Steps rather than one jump,
 // because Run arms its timers between steps — a jump past several deadlines at once fires only the timers
 // that already existed.
+//
+// At the limit it waits in real time before failing. What it asserts is that cond holds by the limit on the
+// fake clock, which waiting does not move: a refresh that fired on the last steps and is still crossing a
+// loaded machine's loopback is not a late refresh. With only waitBriefly here, CI failed a renewal that
+// was due a step before the limit.
 func (h *harness) advanceUntil(step time.Duration, limit time.Duration, cond func() bool) {
 	h.t.Helper()
 	for moved := time.Duration(0); ; moved += step {
-		if waitBriefly(cond) {
+		if moved >= limit {
+			if !waitFor(5*time.Second, cond) {
+				h.t.Fatalf("condition not met after advancing the clock %v", limit)
+			}
 			return
 		}
-		if moved >= limit {
-			h.t.Fatalf("condition not met after advancing the clock %v", limit)
+		if waitBriefly(cond) {
+			return
 		}
 		h.clock.Advance(step)
 	}
@@ -384,7 +392,12 @@ func (h *harness) advanceUntil(step time.Duration, limit time.Duration, cond fun
 
 // waitBriefly polls cond in real time, for long enough that Run has acted on whatever just happened.
 func waitBriefly(cond func() bool) bool {
-	deadline := time.Now().Add(25 * time.Millisecond)
+	return waitFor(25*time.Millisecond, cond)
+}
+
+// waitFor polls cond in real time for up to d.
+func waitFor(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return true
