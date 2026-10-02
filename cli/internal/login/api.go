@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/cli/internal/apiclient"
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // APIError is a structured failure from the instance.

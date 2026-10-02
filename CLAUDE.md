@@ -387,7 +387,7 @@ Install and authenticate `gh` if you want that to change.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D under way, M18 done**. Full
+**Phase D under way, M19 done**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -900,6 +900,51 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   were joined with `;`, and was amended before push. CI would have caught it; the local gate exists so it
   need not.
 
+- **M19 — Daemon as gateway client**: done. `daemon/internal/session` (the token source, refreshing ahead
+  of expiry on the server's clock, and the `fsnotify` credential watch), `daemon/internal/gatewayclient`,
+  `daemon/internal/state`, `daemon/internal/backoff`; `daemon/termsafe`, moved from the CLI;
+  `backend/apicontract`, moved out of `internal/`; and `daemon` → `backend`, the repository's third
+  cross-module edge. Decisions are in the roadmap entry and in `docs/security-ledger.md`.
+
+  **Planning found four claims wrong before anything was built**, by reading the store, the roadmap and
+  `architecture.md` against each other — six milestones running. The keyring deferral blamed the
+  `sync.Once` probe, which only chooses where a *new* secret goes; the daemon never saves, and was stranded
+  because `Load` was tried once. Refreshing ahead of expiry sat in M20's entry, and M19 cannot keep a
+  connection past fifteen minutes without it. Stream-decoding READY was required for a payload M18 had
+  already cut from 12.5 MB to 20 KB. And RESUME was said to rebuild the daemon's state after a restart,
+  which it cannot: the session id dies with the process.
+
+  **The instance is a stranger's server, and the first build trusted it to behave.** The state's limits held
+  only while the instance sent what a real server validates: a message was charged its content and not its
+  payload, and guild summaries were not budgeted at all. An instance served under a path lost the prefix,
+  so its access token went to the same host's `/gateway` — possibly another application. And a HELLO whose
+  heartbeat interval overflowed the `Duration` it became panicked a goroutine nothing recovered, so one
+  frame crash-looped the daemon; reproduced as a panic of the test binary itself. **The backend's own
+  validation is not the daemon's bound**: the daemon is a client of whatever URL somebody typed.
+  `/security-sweep` found the first two, `/code-review` the third — and the sweep, looking for exactly this
+  class, walked past it, which is the case for the passes asking separate questions.
+
+  **A sign-in that ends must take down everything standing on it.** After a logout the daemon kept the
+  account's guilds and messages, because only a fresh IDENTIFY cleared them and a signed-out daemon never
+  identifies; and a logout whose hand-back never reached the instance left the server no reason to close
+  the connection, so the daemon went on streaming an account nobody was signed in as. The connection now
+  follows the sign-in through `Ended(generation)`, closes itself, and tells the state to forget. Found by
+  `/code-review`; the end-to-end test's logout leg runs against a stand-in that does not serve the
+  hand-back, the one case where only the client can close.
+
+  **The manual pass found five things the tests and three review passes had not**, and every one was in
+  what a person reads rather than what the code decides: M18's server closing a heartbeat timeout as
+  "no IDENTIFY in time"; every gateway and state log line carrying `component` twice; a failed dial that
+  never said why; a login landing within ten seconds of a renewal stuck behind the refresh floor and
+  presenting the superseded token first; and a logout logged as "the renewed credential that the store
+  could not keep". **A schema-validating fake cannot see wording**: it checks every frame's shape and writes
+  its own close reasons, so the real server's sentences are only read against the real server.
+
+  **The harness lied once, in the fixture.** The proxy built to kill the network passed the backend's FIN
+  through while "dead", so the first silent-outage run measured a closed connection and the daemon's
+  heartbeat detection never ran. M16's seed lesson one layer out: before trusting what a stand-in
+  measured, check it fails the way the real thing does.
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -1283,7 +1328,8 @@ And on the client-auth side, from M7:
   `Clear` removes the record — and logging out revokes nothing on the instance, so a fresh ID would leave
   the old family live for its full TTL beside a duplicate session. `Store.DeviceID()` is the only way to
   obtain one; it mints on first use and adopts the ID of a record written before that file existed.
-- **Untrusted text goes through `cli/internal/termsafe` before it reaches a terminal** (rule 19). `Text`
+- **Untrusted text goes through `daemon/termsafe` before it reaches a terminal** (rule 19) — in the daemon
+  module since M19, outside `internal/` so the CLI imports it, and `cli/internal/termsafe` before that. `Text`
   for a value printed inside a line — it removes newlines too, since a one-line value that can contain one
   can forge a line of output — and `Block` for output meant to span lines. Sanitize where foreign text
   *enters* the program, as the API client and `daemonctl.Runner` do, so the value is safe wherever it goes
@@ -1340,13 +1386,15 @@ them, because a deferral recorded only here is one that milestone never reads:
   and no gateway connection were needed. Left here rather than deleted because the reasoning is the
   cautionary part — a deferral repeated from a code comment into a roadmap entry, believed twice, and only
   disproved by somebody reading what `/auth/logout` actually does.
-- **The daemon never re-probes for a keyring that unlocks later.** The backend is chosen once per process
-  (`sync.Once`), so a daemon that started before the session keyring was unlocked keeps reading the file
-  path for its whole life. Correct today because the record names the backend; worth revisiting when the
-  daemon becomes long-lived and reconnecting at M19.
-- **`termsafe` lives in the CLI module and the daemon cannot import it.** Fine while every value the daemon
-  logs was sanitized by the login that stored it. At M19 the daemon fetches names of its own, and the
-  function has to move somewhere both modules reach — not be copied.
+- ~~**A daemon started before its keyring unlocks never reaches it.**~~ **Closed at M19**, by retrying the
+  read — and the cause was `Load` being tried once, not the probe being cached. This bullet blamed the
+  `sync.Once` probe until M19's planning read the store: the probe only chooses where `Save` puts a *new*
+  secret, the daemon never saves, and its reads go to the backend the record names, which every record has
+  carried since M7. The same shape as the dropped-token bullet above: a deferral repeated from a comment
+  and believed until somebody read the code it described.
+- ~~**`termsafe` lives in the CLI module and the daemon cannot import it.**~~ **Closed at M19**, by moving
+  it to `daemon/termsafe` rather than copying it — the daemon fetches names of its own from that milestone,
+  and two copies of a sanitizer drift.
 
 And on the device-code side, from M9 (decisions in ADR 0028):
 
@@ -1622,10 +1670,12 @@ And on guilds, permissions and the audit log, from M12:
   heap scan and a quicksort, because reading the heap in physical order beats an ordered index scan's
   random access. Add the `LIMIT` a real list endpoint carries and the sort node disappears. Measured, after
   being asserted wrongly first.
-- **`oapi-codegen` generates types only**, into `internal/apicontract`, committed with `just
-  contract-check` and a CI step. `chi-server` cannot reproduce this router — the fixed middleware order,
-  `/instance` as a sibling, three limiter buckets, one exempt path — and a generated router that had to be
-  fought is a worse contract than a hand-written one that matches the document.
+- **`oapi-codegen` generates types only**, into `backend/apicontract` — under `internal/` until M19, moved
+  out so the daemon and the CLI decode REST and gateway payloads with the same generated types rather than
+  hand-written copies — committed with `just contract-check` and a CI step. `chi-server` cannot reproduce
+  this router — the fixed middleware order, `/instance` as a sibling, three limiter buckets, one exempt
+  path — and a generated router that had to be fought is a worse contract than a hand-written one that
+  matches the document.
 - **The generated types are imported by no handler, and that is a limit rather than an unfinished step.**
   Handlers declare their own request structs to carry `validate:` tags and their own response types so ids
   marshal as snowflakes. So "a drifted field is a compile error" is *not* what this setup delivers; what it
@@ -1864,7 +1914,7 @@ And on messages, from M15:
   to no enum, and both gates stayed green — a generated client could not request the scopes the message
   routes are gated on, nor decode an audit page containing a moderator deletion. Found by a human reading
   the YAML. `TestTheScopeVocabularyMatchesTheContract` and `TestEveryAuditActionIsInTheContract` now
-  assert it against `internal/apicontract`, which is generated from the document and staleness-checked, so
+  assert it against `apicontract`, which is generated from the document and staleness-checked, so
   the comparison is Go-to-Go and needs no second YAML parser. **The error-code enum had this test since
   M11 and nobody generalised it** — when a check exists for one vocabulary, ask what the others are.
 - **A bound enforced in two places must measure the same thing in both.** `checkContent` was added so
@@ -2001,12 +2051,51 @@ And on the gateway and event dispatch, from M18:
 - **Fan-out queries are written against the generic plan.** They run on every event, so drive them from
   primary keys and add them to `TestTheFanOutsRoleReadCannotScanTheWholeGuild`, which reads the plan pgx
   actually prepared under `force_generic_plan`.
-- **`backend/gatewayproto` is outside `internal/` so the daemon can import it**, which will make
-  `daemon` → `backend` the repository's third cross-module edge at M19. Keep it free of anything the backend
-  alone needs.
+- **`backend/gatewayproto` is outside `internal/` so the daemon can import it**, which made `daemon` →
+  `backend` the repository's third cross-module edge at M19. Keep it free of anything the backend alone
+  needs.
 - **Testing the bus's timing**: `gatedBus` holds revocations until released, and `droppingBus` loses them,
   in `gateway_revoke_test.go`. A race between a commit and its delivery is staged with those, never by
   racing.
+
+And on the daemon as gateway client, from M19:
+
+- **One goroutine owns the refresh token.** Every load, refresh and write-back runs in `session.Source.Run`;
+  everything else asks it — `Current`, `Rejected`, `Revoked`, `Reload`. Two presenters of one rotating
+  token is what reuse detection reads as theft, and it answers by revoking the device's sign-in.
+- **Expiry is judged on the server's clock, never `time.Now()`.** `serverClock` takes samples from HELLO and
+  from each refresh's `Date` header and advances them on the monotonic clock. Anything new that compares
+  against an instance timestamp goes through it, and its tests inject a `Clock`.
+- **A refresh the instance has answered is finished and stored, even while stopping.** The token presented
+  is spent the moment the instance answers, and a spent token on disk is what the next start presents —
+  reuse detection again. Hence the detached context, and `settleStore` on the way down.
+- **The write-back names the token the store holds**, which the source tracks as `stored`, apart from
+  `current`. `ReplaceToken` with the wrong one reads as somebody else having logged in. A store that
+  refuses a write keeps the session in memory; it is not a sign-out.
+- **Every wait in `Run` listens for a reload and a revocation, and re-reads the store before acting.**
+  `waitUntilDue`, `waitLive`, `waitForStore` and `throttle` all do. The throttle was the one that did not,
+  and a login landing in it waited out the floor and presented a superseded token first.
+- **The close-code table is `gatewayclient.Client.after`, and nowhere else.** A new close code or op from
+  the server is a row there, not a branch in the read loop.
+- **The connection follows the sign-in.** A credential carries its `Generation`; a different one starts a
+  fresh session rather than resuming another sign-in's, and `Ended(generation)` closes the connection
+  however the sign-in ended. A `Sink` must forget everything on `End`.
+- **The instance is not bounded by the server's own validation.** Frames are read-limited, HELLO's interval
+  is bounded, a message is charged its whole payload, guild summaries are capped and their names cut.
+  Anything new the daemon keeps from the gateway is bounded against a hostile instance, not a correct one.
+- **Names are sanitized on arrival; content never is, and is never logged.** Server text that reaches the
+  log — close reasons, dial errors, versions, event types — goes through `termsafe.Text` first. No frame is
+  logged at any level. Content is the renderer's to make safe (rule 9) and M20's `--json` keeps it
+  lossless.
+- **A sub-logger adds `subsystem`, never `component`.** The base logger sets `component=daemon`, and
+  zerolog appends a field rather than replacing it.
+- **The `daemon` → `backend` edge reaches types only**: `gatewayproto` and `apicontract`. Keep both free of
+  anything that decides, or the daemon starts depending on the server's judgement rather than its wire.
+- **Testing the session**: `fakeClock` with `advanceUntil`, which steps rather than jumps because `Run`
+  arms timers between steps; `settle` before counting refreshes; `waitingWithin` to hold `Run` inside a
+  wait. The gateway's fake validates every frame in both directions against
+  `gateway-events.schema.json`, and writes its own close reasons — so wording the real server sends is
+  checked by a manual pass against the real server, and nothing else.
 
 ## Project-specific skills
 

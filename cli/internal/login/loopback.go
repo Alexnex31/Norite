@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // The listener a browser returns to once the instance has finished with the provider.

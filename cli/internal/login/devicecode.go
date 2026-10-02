@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // `norite login --device-code`, and what `--provider` falls back to on a machine with no browser of its

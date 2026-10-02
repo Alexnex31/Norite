@@ -932,27 +932,52 @@ of this section.
   when this entry was checked before marking it done: the bus and the limiter were each tested on both
   backends, the gateway itself never on Redis. `TestTheGatewayWorksAcrossReplicasOverRedis` runs two
   replicas on separate Redis connections now, and fails with the second taken off Redis.
-- **M19 — Daemon as gateway client**: the daemon holds the persistent WS connection to the backend, maintains
-  in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
-  and stream-decodes (`json.Decoder`) the initial sync payload rather than buffering it fully before parsing.
+- **M19 — Daemon as gateway client**: done. The daemon holds its account's one gateway connection, keeps
+  its session live by refreshing ahead of expiry on an estimate of the server's clock, and builds an
+  in-memory state from what arrives: the account, the guild summaries, and a bounded buffer of recent
+  messages per channel. `daemon/internal/session` (the token source and the credential watch),
+  `daemon/internal/gatewayclient`, `daemon/internal/state` and `daemon/internal/backoff`; `daemon/termsafe`,
+  moved from the CLI; `backend/apicontract`, moved out of `internal/`; and `daemon` → `backend`, the
+  repository's third cross-module edge. Decisions are in this entry and in `docs/security-ledger.md`.
 
-  **Two things M7 deferred come due here, because this is the milestone whose changes make them real.**
-  Neither is a bug today; each becomes one the moment the daemon does what this entry describes. (A third,
-  handing back the refresh token a colliding login makes unkeepable, was closed at M11 instead — it needed
-  no gateway connection, only the HTTP client the daemon already had.)
+  **Presence is not here; it is M38's.** This entry asked for "in-memory scrollback/presence state", and the
+  gateway carries no presence: M18 reserved op 3 and READY's `presences` for M38, whose entry built only
+  the persistence of an "in-memory-only original design" no milestone owned. Found at M19's close by
+  reading the entries against each other, and M38 now builds presence whole.
 
-  - **`termsafe` has to move to a package both modules import — and must not be copied.** It lives in
-    `cli/internal/termsafe`, which the daemon module cannot reach. That is fine only while every untrusted
-    string the daemon handles was sanitized by the `norite login` that stored it, which
-    `daemon/internal/daemonproc/session.go` says in a comment beside the one log line that prints one.
+  **Refreshing is this milestone's, not M20's.** M7 spends the refresh token once, at startup, and a
+  connection that outlives fifteen minutes cannot work that way: IDENTIFY and RESUME each authenticate an
+  access token, so the first reconnect needs a fresh one, and a refresh token unused for thirty days
+  expires (`auth.RefreshTokenTTL`), so a daemon connected for a month would reconnect signed out. M20's
+  relay reuses what is built here. M20's entry said it built this until M19's planning found M19 could
+  not meet its own done-when without it.
+
+  **It does not stream-decode READY, which this entry asked for until M19's planning.** That requirement was
+  written for a READY carrying every guild's channels — about 12.5 MB at the joined-guild cap — and M18
+  shipped summaries instead, about 20 KB at the same cap. Streaming it would also have to know the type
+  before the payload, and the envelope sends `d` ahead of `t`. A read limit bounds every inbound frame
+  instead.
+
+  **Two things M7 deferred came due here, because this is the milestone whose changes made them real**, and
+  both are closed. (A third, handing back the refresh token a colliding login makes unkeepable, was closed
+  at M11 instead — it needed no gateway connection, only the HTTP client the daemon already had.)
+
+  - **`termsafe` moved to a package both modules import — and was not copied.** It lived in
+    `cli/internal/termsafe`, which the daemon module cannot reach. That was fine only while every untrusted
+    string the daemon handled had been sanitized by the `norite login` that stored it, which
+    `daemon/internal/daemonproc/session.go` said in a comment beside the one log line that printed one.
     Here the daemon fetches names of its own from DISPATCH events, and rule 19 lands on its side of the
     line. Two copies of a sanitizer drift, and this one decides whether a stranger's display name can
-    rewrite a log or a pane.
-  - **The daemon must re-probe for a keyring that unlocks later.** The storage backend is chosen once per
-    process (`sync.Once`), so a daemon started by a systemd user unit before the session keyring is
-    unlocked reads the file path for its whole life. Correct while the daemon is short-lived and the record
-    names its own backend (ADR 0025); a long-lived, reconnecting daemon is exactly the case it was not
-    written for.
+    rewrite a log or a pane. It is `daemon/termsafe` now, outside `internal/` so the CLI imports it.
+  - **The daemon reaches a keyring that unlocks after it starts.** A daemon started by a systemd user
+    unit before the session keyring is unlocked fails to read its credential, logs it, and runs for its
+    whole life with no session, because `Load` is tried once. The fix is retrying the read, **not
+    re-probing**, which is what this bullet said until M19's planning read the store: the `sync.Once`
+    probe decides only where `Save` puts a *new* secret, and the daemon never saves. Its reads and
+    write-backs go to the backend the record names (`Record.SecretBackend`, ADR 0025), which every record
+    has carried since M7 itself. The deferral was copied from a code comment into two documents and
+    believed in both — M11's dropped-token note again. The read is retried with backoff now, for as long
+    as it takes.
 
   **What M18's gateway asks of its client**, so the daemon is written against it rather than discovering it:
   IDENTIFY within ten seconds of HELLO, always sending `properties.version` (an empty one is refused, and
@@ -961,10 +986,69 @@ of this section.
   resuming if it can. A daemon that reconnects by identifying rather than resuming supersedes its own
   detached sessions, so it cannot lock itself out, but loses what they buffered.
 
+  **Expiry is judged on the server's clock, never the machine's.** Each refresh's `Date` header and each
+  HELLO's `server_time` is a sample, advanced on the monotonic clock, so an NTP step or a hand-set clock
+  while the daemon runs changes nothing. The `Date` header matters because the first refresh is decided
+  before any HELLO arrives, and a refresh's sample is dated from the request's start, so a slow answer errs
+  toward refreshing early. HELLO is sampled before the token is chosen, so a laptop that slept past its
+  token's expiry does not present it.
+
+  **One goroutine owns every load, refresh and write-back**, because two presenters of one rotating token is
+  what reuse detection reads as theft. Three things M7's startup-only handling got wrong for a daemon that
+  stays up, each fixed: a store it cannot write to keeps the session in memory and is written at the next
+  renewal (and once more on the way down, or a restart would present a spent token); the write names the
+  token the store holds as the one being replaced, not the one last presented; and a refresh the instance
+  has answered finishes even when the daemon is stopping.
+
+  **A login or a logout reaches a running daemon when it happens.** A logout revokes nothing at the
+  instance, so the daemon went on streaming the account's messages until its next renewal found no record.
+  It watches the credential record with `fsnotify` (the directory, since the record is replaced by an atomic
+  rename), hands its live token back on a logout, closes its connection itself and forgets the account; a
+  login is adopted. A login superseding a running sign-in arrives in the wrong order — the server's 4011
+  before the CLI has written the store — and the refresh that settles it no longer waits out the floor
+  behind the watch's reload (manual pass).
+
+  **What the client does with each close code lives in one table** (`gatewayclient.Client.after`): a drop,
+  op 7 and the timeout-shaped codes resume; op 9 and 4007 identify afresh; 4004 asks the session to renew;
+  4011 reads the store; a version refusal waits an hour; a close saying this client sent something malformed
+  waits a minute and does not resume. The backoff is shared with the session's refresh retries, so one fix
+  reaches both.
+
+  **The state.** READY carries summaries, so a channel, role or member list built from events alone would
+  look complete and not be; those lists are M20's relay, loaded when a client opens a guild. A fresh
+  IDENTIFY clears everything, because a buffer is only worth showing if it has no hole nobody can see; a
+  RESUME keeps it. A `Message` names its channel and not its guild, so a permissions update or a guild
+  removal clears every buffer rather than the guild's — rare, and an empty buffer refilled over REST is
+  correct where one keeping a message a moderator removed is not. Names a stranger's instance chose go
+  through `termsafe.Text` as they arrive; content is kept as sent and never logged, because sanitizing it
+  here would destroy what M20's lossless `--json` preserves.
+
+  **The instance is a stranger's server, and the reviews held the daemon to that.** `/security-sweep` found
+  the state's limits held only while the instance behaved: a message charged its content alone, guild
+  summaries unbudgeted. A message is charged its whole payload, summaries stop at 1,000 with names cut at
+  100 runes, and eviction is an LRU list rather than a scan. It also found an instance served under a path
+  (`https://example.com/norite`) losing the prefix, which sent its access token to `example.com/gateway`,
+  possibly a different application. `/code-review` found a HELLO whose heartbeat interval overflowed the
+  `Duration` it became and crash-looped the daemon, reproduced as a panic of the test binary itself; it is
+  refused now, and the heartbeat recovers its own panics.
+
+  **The byte budget was measured against the heap rather than trusted.** 64 MiB means at most about 76: real
+  heap is 0.76–1.02 of the charge, and 1.18 once full channels trim, since a slice trimmed from the front
+  keeps dead slots until append reallocates. Written where the limit is defined.
+
+  **Not proved by hand: the six-hour skew.** A Go binary reads the clock through the vDSO, so `libfaketime`
+  cannot skew it; the injected-clock tests carry it instead.
+
   Done when: the daemon alone (no CLI/TUI/GUI attached) stays connected and accumulates state correctly; a
   deliberately skewed system clock does not cause spurious auth failures; a display name carrying terminal
   escapes is sanitized by the daemon rather than by whoever logged in; and a daemon started before its
-  keyring unlocks reaches the keyring afterwards.
+  keyring unlocks reaches the keyring afterwards. All met. The first is an end-to-end test assembling the
+  three pieces as `daemonproc` does, and a manual pass against a real backend through a network that could
+  be killed silently: it resumed and received what it missed, identified afresh when it could not, and
+  noticed `norite login` and `norite logout` within the second. The second runs a simulated day six hours
+  behind and six hours ahead, and replacing the estimate with the wall clock fails both — one handing out
+  expired tokens, the other refreshing in a loop. The third and fourth each have a test that fails with
+  the guard removed.
 - **M20 — Daemon↔client local IPC**: the Unix domain socket / named pipe, 4-byte-length-prefixed JSON
   framing, reusing the gateway's op-code/DISPATCH shape and one shared client-side event parser, and the
   semver MAJOR-must-match/MINOR-window version-compatibility handshake (read with the `0.x` rule below).
@@ -999,9 +1083,9 @@ of this section.
   owns, which is the shape M76a and M16a each were. So the socket carries a request/response operation: the
   attach client names a method, a path and a body; the daemon attaches the account's access token,
   performs the call, and returns the status and body. The token never crosses the socket. This is the
-  OS-permission-protected tier (rule 16), and the daemon keeps its session live for it — refreshing
-  before expiry against M19's clock offset — rather than spending the refresh token once at startup as it
-  has since M7.
+  OS-permission-protected tier (rule 16), and the relay spends the access token M19's daemon already keeps
+  live — refreshed ahead of expiry against the clock offset. This sentence assigned that refresh to M20
+  until M19's planning found M19 cannot keep a connection without it.
 
   **And Phase C's command-tree verbs, folded in 2026-09-25 from M17a, which is retired rather than
   renumbered.** M17a assigned six command groups over the 37 routes M12–M17 built and placed them in
@@ -1244,8 +1328,43 @@ of this section.
 
 #### Phase F — Presence, Deep Work, and the TUI foundation
 
-- **M38 — Presence persistence**: the `presence_status` table (including the Deep Work value), replacing
-  the in-memory-only original design. Done when: presence survives a backend restart.
+- **M38 — Presence**: presence, built whole and persisted from the start. Op 3 (Presence Update) goes from
+  reserved to real, a `PRESENCE_UPDATE` dispatch carries a member's status to those allowed to see it,
+  READY gains the `presences` M18 left absent, the `presence_status` table (including the Deep Work value
+  M39 gives meaning) holds it across restarts, and the daemon keeps it in its state and relays it over
+  M20's socket. Depends on M18, M19 and M20.
+
+  **This entry said "Presence persistence" until M19's close, and persisted something nothing built.** It
+  replaced "the in-memory-only original design", and no milestone owned that design: M19's entry asked for
+  presence state the gateway could not carry, while M18 had reserved op 3 and READY's `presences` for this
+  milestone. The contract and `architecture.md` already named M38; the roadmap was the one document that
+  did not. The in-memory design was superseded before anything built it, so it is not built first here
+  either. M39's Deep Work, M41–M43's presence glyphs and M70's presence filtering all stand on this entry.
+
+  **Questions its planning must answer, because no document does yet:**
+  - **Audience.** Who receives a member's change: members of a shared guild who can see the member list,
+    DM peers once M57 lands, friends once M69 does. The rule is M18's — the gateway never discloses more
+    than REST — so the REST read of a member's presence decides it.
+  - **Fan-out cost** (rules 7 and 21). Presence is the highest-volume event a chat gateway carries, and a
+    naive fan-out sends every status change to every member of every shared guild. §15 says nothing about
+    it. Measure it against the largest guild the caps allow before choosing a shape, lazy subscription to
+    large guilds' member lists included.
+  - **One account, several machines.** Each machine's daemon holds a connection, so presence aggregates:
+    online if any machine is, and a status chosen explicitly outranks one computed, such as idle.
+  - **Invisible is indistinguishable from offline** — in the fan-out, in READY and over REST — or it is an
+    oracle. Ask what each branch *sends*, not only what it says.
+  - **Blocks (rule 20).** Presence goes through the fan-out's `withoutBlocked` stage, which M70 fills, so
+    M70 completes one stage rather than discovering a second path.
+  - **A custom status is somebody else's text**: bounded by the server, and through `termsafe` on arrival in
+    the daemon, as names are since M19.
+  - **The contract moves in one commit** (rules 6 and 15): `gateway-events.schema.json`, `gatewayproto`, the
+    daemon's state, and the CLI's `--json` schema.
+
+  Done when: a status change reaches exactly the accounts the REST read would show it to, verified on the
+  DISPATCH stream; an invisible account is indistinguishable from an offline one on every surface; two
+  machines signed in to one account report one presence; presence survives a backend restart; and the
+  fan-out for a status change in the largest guild the caps allow is measured, with the bound it settles
+  on written down.
 - **M39 — Deep Work**: server-side notification-suppression logic, the `@urgent` mention bypass, the
   **allow-rule model** the client exposes at `5d` — mentions of you, a named DM sender, or a user-supplied
   pattern — the **held-message queue** with its review, the auto-reply others see, and the session

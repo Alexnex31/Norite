@@ -593,6 +593,11 @@ func (s *Store) writeDeviceID(id string) error {
 func (s *Store) SecretLocation() string { return s.secrets.describe() }
 
 func (s *Store) recordPath() string { return filepath.Join(s.dir, recordFileName) }
+
+// RecordPath is where the non-secret half of a session lives — the file a login writes and a logout
+// removes, and so the one a running daemon watches to learn of either (M19). Watching it says something
+// changed and nothing about what; Load is still how to find out.
+func (s *Store) RecordPath() string { return s.recordPath() }
 func (s *Store) devicePath() string { return filepath.Join(s.dir, deviceFileName) }
 
 func (s *Store) readRecord() (Record, error) {

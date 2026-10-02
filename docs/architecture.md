@@ -62,6 +62,8 @@ Locked-in decisions:
 /
 ├── backend/                     # Go modular monolith
 │   ├── cmd/server/main.go       # composition root
+│   ├── apicontract/             # oapi-codegen types for contracts/openapi.yaml, committed; outside
+│   │                            #   internal/ so the daemon and CLI decode with them too (M19)
 │   ├── internal/
 │   │   ├── config/              # config.go: typed Config struct, env-bound, validated at startup
 │   │   ├── platform/
@@ -98,7 +100,6 @@ Locked-in decisions:
 │   ├── cmd/app/                  # main() only: process lifetime and exit codes, nothing else
 │   ├── internal/cliapp/          # urfave/cli v3 command tree, global --json/--help flags, completions
 │   ├── internal/<command>/       # one package per command group, e.g. instanceinit (`norite instance init`)
-│   ├── internal/termsafe/        # the blanket terminal-escape sanitizer every untrusted string passes
 │   ├── tui/                      # pane engine, keybindings, markdown renderer, image rendering
 │   └── go.mod
 ├── gui/                          # The native GUI — Gio
@@ -108,9 +109,15 @@ Locked-in decisions:
 ├── daemon/                       # Shared background daemon
 │   ├── cmd/daemond/              # main() only: process lifetime, signals, exit codes
 │   ├── credentials/              # the stored session: keyring-or-file secret, record, device identity
-│   ├── internal/daemonproc/      # single-instance flock, log rotation, startup sign-in, clean shutdown
+│   ├── termsafe/                 # the blanket terminal-escape sanitizer every untrusted string passes;
+│   │                             #   outside internal/ so the CLI imports it (moved from cli/ at M19)
+│   ├── internal/daemonproc/      # single-instance flock, log rotation, starts and stops each component
 │   ├── internal/paths/           # the per-user 0700 state directory, resolved per platform
-│   ├── gatewayclient/            # holds the real WS connection, in-memory scrollback/presence
+│   ├── internal/session/         # the token source: refresh ahead of expiry on the server's clock, the
+│   │                             #   credential watch (M19)
+│   ├── internal/gatewayclient/   # holds the real WS connection: handshake, RESUME, close codes (M19)
+│   ├── internal/state/           # in-memory account, guild summaries, bounded message buffers (M19)
+│   ├── internal/backoff/         # the one retry policy the session and the connection share
 │   ├── ipc/                      # Unix socket / named pipe server, bot-automation TCP listener
 │   ├── config/                   # go-toml v2 document-editing, fsnotify hot-reload, flock, config split
 │   ├── plugins/                  # wazero host, capability manifest + hash-pinning
@@ -605,7 +612,7 @@ CREATE TABLE audit_log_entries (
 -- index serves both.
 CREATE INDEX ON audit_log_entries (guild_id, id DESC);
 
--- Presence (persisted — Milestone M38; supersedes the original in-memory-only design)
+-- Presence (Milestone M38, persisted from the start; the in-memory-only original design was never built)
 CREATE TABLE presence_status (
   user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   status smallint NOT NULL DEFAULT 0,   -- 0 online, 1 idle, 2 dnd, 3 invisible, 4 DEEP_WORK
@@ -913,7 +920,10 @@ to `PionMediaCoordinator`), `6` Resume, `8` Request Guild Members.
 **Auth transport**: `Identify` carries the daemon's Bearer access token (obtained via the token-based auth
 flow, §"Auth design" below) — never a cookie, since there is no browser. **`Hello` carries the backend's
 current server time**, so the daemon can compute and apply a local clock offset (`ADR 0010`) rather than
-trusting a potentially-skewed OS clock for JWT-expiry checks.
+trusting a potentially-skewed OS clock for JWT-expiry checks. As built at M19 the daemon keeps an estimate
+of the server's clock rather than an offset from its own: the latest sample — HELLO's `server_time`, or
+the `Date` header on a refresh, since the first refresh is decided before any HELLO — advanced on the
+monotonic clock, so a wall clock stepped while the daemon runs changes nothing.
 
 ```json
 // server -> client, immediately on connect
@@ -968,7 +978,9 @@ both sides log that the check was skipped. An empty or unparseable version is no
 a client that sent none would otherwise skip the check against every release. `dev` only exists where somebody built from source, and a
 self-hoster building their own server must not lock out every released client.
 
-The daemon **stream-decodes** (`json.Decoder`) this payload rather than buffering it fully before parsing.
+The daemon decodes READY like any other frame, under its inbound read limit. This line said it
+**stream-decodes** the payload until M19's planning: that was written for a READY carrying every guild's
+channels, about 12.5 MB at the cap, and the summaries-only READY above is about 20 KB.
 
 **Fan-out** (`internal/platform/events.Bus`): unchanged interface shape from the original design — in-process
 by default, swappable for Redis Pub/Sub via `EVENTS_BACKEND=redis`, activated only by the flagship (§12).
@@ -1589,7 +1601,10 @@ start — breaking the single-instance invariant with no error anywhere.
   socket, since external scripts must not receive first-party trust.
 
 **State persistence**: scrollback/pane/presence state is in-memory only, lost on daemon restart (tmux
-semantics) — the gateway's RESUME mechanism rebuilds it. The one deliberate exception is a "last active voice
+semantics). RESUME does **not** rebuild it, which this sentence claimed until M19's planning: the gateway
+session id lives in the process that dies, so a restarted daemon identifies afresh and starts with empty
+scrollback, refilled over REST as clients open channels. RESUME covers a dropped *connection*, inside the
+server's two-minute resume window, and nothing else. The one deliberate exception is a "last active voice
 channel" breadcrumb, persisted so voice can auto-rejoin after a crash (§6). **Read state is a separate,
 durable concern**: `channel_read_states` (§2) is Postgres-backed and synced via its own gateway dispatch
 event — a channel is marked read automatically when the client's viewport reaches the latest message,
@@ -1788,11 +1803,12 @@ commonest terminal width and leaving that to the layout code is how it gets deci
 code, links, mentions, custom-emoji shortcodes) — not Charm's `glamour`, to keep the trusted-rendering
 surface as narrow as the security posture used for message content everywhere else.
 
-**Terminal-escape sanitization** (`cli/internal/termsafe`, built at M7). A blanket function over all
-untrusted text — usernames, message content, link-preview titles, plugin manifest descriptions, webhook
-display names, the output of any tool the CLI shells out to. Specific to the terminal clients, because a
-terminal acts on what it is printed and no other client does — it covers both front ends in that binary,
-§4's command output as much as this section's screens.
+**Terminal-escape sanitization** (`daemon/termsafe`, built at M7 in the cli module and moved at M19). A
+blanket function over all untrusted text — usernames, message content, link-preview titles, plugin manifest
+descriptions, webhook display names, the output of any tool the CLI shells out to. Specific to text bound
+for a terminal, because a terminal acts on what it is printed and no other client does — it covers both
+front ends in the cli binary, §4's command output as much as this section's screens, and the daemon's log,
+which is read with `cat`. It lives in the daemon module because both need it and a copy would drift.
 
 Its guarantee: *what a terminal displays, and the order it displays it in, is the printable characters that
 were in the string.* Two classes break that and are removed — Unicode category `Cc` (C0, DEL, and C1, the
@@ -2417,8 +2433,8 @@ E2E key-boundary violations.
 
 2. **Avoiding N+1 on gateway READY**: unchanged core discipline (batched queries, not per-guild loops), now
    combined with **lazy per-guild loading** — full member lists and other bulk per-guild state are deferred
-   until a guild is actually opened, keeping the payload from scaling linearly with total guild count. The
-   daemon stream-decodes (`json.Decoder`) rather than buffering fully before parsing.
+   until a guild is actually opened, keeping the payload from scaling linearly with total guild count. That
+   bound is what let M19 drop stream-decoding READY, which this item required while READY carried channels.
 
 3. **Connection pooling**: `pgxpool` sized relative to available CPU cores, kept intentionally small per
    backend replica (§11); PgBouncer recommended once a self-hoster's instance/device count outgrows it.

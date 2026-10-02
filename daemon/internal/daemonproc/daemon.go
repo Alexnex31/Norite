@@ -3,10 +3,11 @@
 
 // Package daemonproc is the Norite background daemon's lifecycle.
 //
-// Milestone M3 scope is deliberately narrow: start cleanly, prove there is exactly one daemon per OS user,
-// prepare the process for the handle count it will eventually hold, log what it did, and stop cleanly on a
-// signal. It opens no sockets and talks to nothing — the gateway client and the dual IPC listeners arrive
-// in Phase D (docs/roadmap.md M19-M22), and the plugin host at M88.
+// It starts cleanly, proves there is exactly one daemon per OS user, prepares the process for the handle
+// count it will eventually hold, starts each component, and stops them in reverse on a signal. M3 built the
+// sequence with nothing in it; M19 added the first two components, the session (internal/session) and the
+// gateway connection (internal/gatewayclient). The IPC listeners arrive at M20–M22 and the plugin host at
+// M88.
 //
 // What it is not is a placeholder to be thrown away. Every later milestone adds a component *inside* this
 // startup and shutdown sequence, so the ordering it establishes — lock before anything observable, limits
@@ -19,11 +20,15 @@ import (
 	"context"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/internal/gatewayclient"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
+	"github.com/Alexnex31/Norite/daemon/internal/session"
+	"github.com/Alexnex31/Norite/daemon/internal/state"
 )
 
 // Options configures a daemon run.
@@ -121,8 +126,12 @@ func Run(ctx context.Context, opts Options) error {
 		log.Debug().Uint64("open_file_limit", limit).Msg("open-file limit set")
 	}
 
-	// The stored credential, before the daemon reports ready: a client attaching at M20 should find the
-	// session already established rather than racing it. Never fatal — see establishSession.
+	// The session runs for the daemon's whole life, in its own goroutine, and "ready" does not wait for it.
+	// M7 signed in before reporting ready so an attach client would find the session established; that
+	// stopped being possible to promise at M19, when signing in became something that can take indefinitely
+	// (a keyring that has not unlocked, an instance that is down) and can end at any moment (a revocation, a
+	// logout). A client has to handle "not signed in" whenever it attaches, so it may as well at startup.
+	var components sync.WaitGroup
 	if opts.SkipSession {
 		log.Debug().Msg("session establishment skipped")
 	} else {
@@ -134,7 +143,30 @@ func Run(ctx context.Context, opts Options) error {
 			// process cannot reach, most likely. Nobody is watching a daemon's terminal, so it goes to the
 			// log at a level that gets read.
 			store.Notify = func(msg string) { log.Warn().Msg(msg) }
-			establishSession(ctx, log, store, newRefreshClient())
+			// Each component's lines carry its name under a key of their own. Not "component", which the log's
+			// base already sets to "daemon": zerolog appends a field rather than replacing one, so the line would
+			// carry the key twice and a reader would keep whichever its parser happens to prefer.
+			part := func(name string) zerolog.Logger { return log.With().Str("subsystem", name).Logger() }
+			src := session.New(session.Options{Store: store, Log: part("session")})
+			components.Go(func() { src.Run(ctx) })
+			components.Go(func() {
+				// Without it the daemon still works, as it did before M19 had it: a logout is noticed at the
+				// next renewal and a login at the next restart.
+				if err := src.Watch(ctx); err != nil {
+					log.Warn().Err(err).Msg("cannot watch the credential store; a logout or login will be " +
+						"noticed late — at the next renewal, or the next restart")
+				}
+			})
+
+			// The gateway connection, which waits on the session for a credential: a daemon nobody has
+			// signed in to holds no connection and makes no attempts. What it carries builds the state
+			// attach clients read from M20.
+			st := state.New(part("state"), state.DefaultLimits)
+			gw := gatewayclient.New(gatewayclient.Options{
+				Credentials: src, Sink: st, Version: opts.Version,
+				Log: part("gateway"),
+			})
+			components.Go(func() { gw.Run(ctx) })
 		}
 	}
 
@@ -145,12 +177,11 @@ func Run(ctx context.Context, opts Options) error {
 
 	<-ctx.Done()
 
-	// Shutdown is the reverse of startup, and for now that is only the two deferred closes above: M3 owns
-	// no component with a drain step. The first one that does — the E2E keystore's write queue, the attach
-	// clients, the voice worker — brings its own bounded wait with it, and this is where it goes. It is
-	// deliberately not stubbed with a deadline now: an empty wait that always succeeds proves nothing and
-	// reads, later, like a guarantee that was never actually there.
+	// Shutdown is the reverse of startup. Each component stops on the same cancellation and is waited for
+	// here, before the log and the lock are released: a session mid-write to the credential store must
+	// finish before a second daemon can take the lock and read it.
 	log.Info().Msg("daemon stopping")
+	components.Wait()
 	log.Info().Msg("daemon stopped")
 	return nil
 }

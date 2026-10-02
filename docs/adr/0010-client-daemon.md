@@ -35,8 +35,10 @@ uses atomic writes plus `gofrs/flock` locking; the daemon hot-reloads on externa
   a client whose buffer fills gets dropped rather than stalling the gateway connection, E2E ratchet
   advancement, or voice control signaling for everyone else attached.
 - Scrollback/pane/presence state is in-memory only, lost on daemon restart (the same semantics as tmux); the
-  gateway's RESUME mechanism rebuilds it. The one deliberate exception is the "last active voice channel"
-  breadcrumb, persisted specifically so voice can auto-rejoin after a crash.
+  gateway's RESUME mechanism rebuilds it. *(Corrected at M19: RESUME cannot rebuild state after a restart,
+  because the session id dies with the process — a restarted daemon identifies afresh and refills over
+  REST. See `docs/architecture.md` §3, "State persistence".)* The one deliberate exception is the "last
+  active voice channel" breadcrumb, persisted specifically so voice can auto-rejoin after a crash.
 - Cross-client pane splitting is a requirement for all three clients but is never synced across clients or
   devices by default — each client implements its own split-pane engine, and layout lives in the daemon/
   config-file state (CLI/GUI, same machine) or `localStorage` (web, separate codebase). A same-machine

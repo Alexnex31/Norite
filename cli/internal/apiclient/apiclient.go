@@ -38,7 +38,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Alexnex31/Norite/cli/internal/termsafe"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // RequestTimeout bounds a call to the instance.
