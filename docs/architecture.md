@@ -1342,8 +1342,14 @@ protocol requirement.
 
 **Credential ownership**: the daemon is the sole holder of its account's tokens (ADR 0011) — one keychain
 entry, one process; CLI/TUI/GUI never independently store a token copy. `norite login` (M7) is the single
-exception and a temporary one: it writes that entry because it is the only process that ever sees the
-password, and stops doing so at M20, when the local IPC socket exists and credentials cross it instead.
+exception, and a permanent one: it writes that entry because it is the only process that ever sees the
+password. This sentence said it would stop at M20, once the local socket existed and credentials could cross
+it instead, and M20's planning kept the write. A login has to work with no daemon running — `norite daemon
+install` deliberately runs before the first one, and a daemon may simply be stopped — so crossing the socket
+would need the store write as its fallback, which is two writers for one credential. M19's credential watch
+already delivers a login to a running daemon within the second, which is what crossing would have bought.
+What the CLI never does is read a token back: from M20 every call it makes as an account is relayed through
+the daemon (§3).
 
 **Where the credential actually lives** (M7, [ADR 0025](adr/0025-credential-storage-without-a-keyring.md)):
 the OS keyring where the machine has one, and a `0600` file in the daemon's `0700` per-user state directory
@@ -1586,19 +1592,53 @@ start — breaking the single-instance invariant with no error anywhere.
   only panics and pre-logging failures rather than an unbounded copy of the rotated log.
 
 **Dual IPC, different trust tiers**:
-- **Daemon↔attach-client**: a Unix domain socket / Windows named pipe, OS-file-permission-protected (no
-  secret needed — only the owning OS user can open it). Reuses the gateway's exact op-code/DISPATCH protocol
-  over 4-byte-length-prefixed JSON framing, so every attach client shares one client-side event parser. The
-  shared HELLO/IDENTIFY handshake carries a semver field (MAJOR must match exactly; a defined
+- **Daemon↔attach-client**: a Unix domain socket / Windows named pipe, OS-permission-protected — the
+  first-party tier, needing no secret because only the owning OS user's processes can open it, which holds by
+  construction rather than by default (see "Where the attach socket lives" below). Reuses the gateway's exact
+  op-code/DISPATCH protocol over 4-byte-length-prefixed JSON framing, so every attach client shares one
+  client-side event parser; the local additions are a Request and a Response op, numbered from 100 so they
+  can never meet an op the gateway assigns later, and no heartbeat, since a local socket reports a dead peer
+  as EOF. The shared HELLO/IDENTIFY handshake carries a semver field (MAJOR must match exactly; a defined
   MINOR-version-back window is tolerated; during `0.x`, MINOR must match too — see "Protocol version
-  compatibility" below). **The daemon's write path to each attach client is asynchronous
-  and bounded** — a per-connection outbound channel with fixed capacity, fed by its own writer goroutine
+  compatibility" below). **The daemon's write path to each attach client is asynchronous and bounded** — a
+  per-connection outbound channel with fixed capacity, fed by its own writer goroutine
   (see "Concurrency model" below); a client whose buffer fills gets **dropped**, never allowed to block the
   daemon's core loop, since that would also stall E2E ratchet advancement and voice signaling for everyone
-  else attached. The dropped client resyncs on reattach.
+  else attached. The dropped client resyncs on reattach. The daemon closes every client the same way when
+  its own session starts afresh or its sign-in ends (M20), because the state those frames were building has
+  just been cleared (M19), and a view built from them would show the gap as history.
 - **Local bot-automation port**: a separate, localhost-only TCP listener with its own per-session secret
   (`0600` file or env var), authenticated via scoped `api_tokens` — deliberately lower-trust than the attach
   socket, since external scripts must not receive first-party trust.
+
+**Where the attach socket lives** (M20). On Unix it is `<state-dir>/daemon.sock`, inside the `0700` state
+directory that already holds the single-instance lock, so the directory's mode is the boundary. A socket
+file found there is removed only after the flock is taken, when it is stale by construction. The daemon also
+checks each connecting peer's uid (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS) against its own and
+closes anything else, the check that still holds if somebody loosens the directory. A socket path is limited
+to 108 bytes on Linux and 104 on macOS, and a state directory deep enough to exceed that fails at startup
+naming the limit. `$XDG_RUNTIME_DIR` was considered and not taken: macOS has none, so it would be two rules,
+and a lingering systemd user service can outlive the login session that owns the directory.
+
+On Windows it is a named pipe, and a pipe protects nothing by default: its default DACL lets Everyone and
+the anonymous account read it, and any user's process can claim its name first. So the daemon creates it
+as the first instance with an owner-only DACL (`Microsoft/go-winio`), and the client checks that the pipe it
+opened belongs to its own user before sending anything. The Windows half is compiled and vetted in CI and
+run on no CI machine, since CI is Linux-only.
+
+**What attaching allows** (M20). Every process running as the user can attach. That is the tier, and it is
+not argued with: it is the set of processes that can already read the state directory and, on the file
+backend, the credential itself. Attaching gives two things, the daemon's DISPATCH stream and the **request
+relay**: an attach client names a method, a path and a body, and the daemon performs the call with its own
+access token and returns the status and body. The token never crosses the socket, and a 401 is the
+session's to settle — the daemon asks it for a renewed token and retries once, rather than failing the
+first call after an expiry. The relay builds the URL itself (the instance URL with its path prefix, then
+`/api/v1`, then the client's path) and refuses any path that could change the host. It also refuses
+`/auth/*` and `/instance/*`, which mint and revoke credentials, change the second factor and administer the
+instance: the surface M11 put behind `RequireLiveSession`, because a credential that can make credentials
+escalates itself. Nothing in M20 needs either, and lifting a refusal later is additive where withdrawing a
+reach scripts rely on is not. Neither request nor response bodies are logged, since they carry message
+content.
 
 **State persistence**: scrollback/pane/presence state is in-memory only, lost on daemon restart (tmux
 semantics). RESUME does **not** rebuild it, which this sentence claimed until M19's planning: the gateway
@@ -1675,9 +1715,12 @@ that drew a screen.
 
 **Command routing**: `urfave/cli` v3 — the argument parser and command tree (`norite instance init`,
 `norite config get`, …), distinct from the Charm stack, which is only the interactive TUI layer. It carries
-`--help` and shell completions for every command, and declares the global `--json` flag; the machinery that
-*renders* JSON, and the per-command schemas in `contracts/cli-json/`, arrive with the first data-printing
-command (Milestone M48) — until then the flag is a declared seam, not a working output mode. The tree lives
+`--help` and shell completions for every command, and declares the global `--json` flag. This sentence
+once put the machinery that renders it at M48; it arrived per command instead. `norite instance invite`
+honoured it first (M10), and M20's verbs each return a typed result that one shared renderer prints as text
+or JSON, each with its schema in `contracts/cli-json/`. M48 extends that renderer to the TUI's panes and
+decides what a command printing no data emits; until then `norite daemon status` and `norite logout` ignore
+the flag. The tree lives
 in `internal/cliapp`, not under `cmd/`, so it can be constructed and exercised in tests without spawning a
 process; `cmd/app/main.go` owns process lifetime and exit codes and nothing else. A mistyped command exits
 non-zero rather than printing help and succeeding, which `urfave/cli` does by default. *Where the choice was contested*: over
@@ -1687,7 +1730,18 @@ from a router, work equally well in both.
 
 **Structured output**: every data-printing command supports `--json`, schemas versioned in
 `contracts/cli-json/` as a third source-of-truth contract alongside `openapi.yaml`/`gateway-events.schema.json`
-— schema changes ship in the same commit as the code change causing them.
+— schema changes ship in the same commit as the code change causing them. JSON goes through one writer
+(M20) that escapes, as `\uXXXX`, every rune `termsafe` would remove: `encoding/json` escapes the C0 controls
+and leaves the C1 controls and the bidi overrides raw, so a listing printed to a terminal could drive it.
+The escape is lossless, since a parser reads back the original rune, and inert on a terminal.
+
+**Exit codes** (M20): 0 for success; 2 for a local usage error; 3 when the command cannot be carried out
+here — no daemon running, not signed in, the instance unreachable; 4 when the instance refused the request
+with a 4xx, a non-member's refusal included; and 1 for anything else. 2 and 4 print without the `norite: `
+prefix that makes a message read like a crash, and they are kept apart so a script can tell its own mistake
+from the instance's answer. `norite daemon status` keeps its own three (§3), which are its answer rather
+than a failure. A command needing the daemon never starts it: one started from a shell is not the service,
+and would hold the lock the service then fails to take.
 
 **Instance setup wizard** (`norite instance init`): the self-hosted operator's first-run flow, living in the
 `norite` CLI rather than the server binary so that creating the first admin account is a normal API call

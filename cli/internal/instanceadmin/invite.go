@@ -22,13 +22,13 @@ import (
 // # Why this authenticates as the operator rather than as an administrator
 //
 // The endpoints behind it accept either an instance administrator's access token or an operator token.
-// This command can only produce the second, and that is a consequence of where the CLI sits rather than a
-// decision: an attach client does not hold its account's tokens — the daemon does (ADR 0011) — and the
-// local IPC socket that would let the CLI ask the daemon to make an authenticated call is M20's. Until
-// then, "run it where the config file is" is the only authority a command like this can present.
+// This command presents the second. An attach client does not hold its account's tokens — the daemon does
+// (ADR 0011) — and the daemon's request relay, which since M20 makes the CLI's calls as the account,
+// refuses `/instance/*`: administering the instance stays off the socket until a milestone decides
+// otherwise. "Run it where the config file is" is the authority this command presents instead.
 //
 // The practical effect is that invites are managed from the machine running the instance, which is the
-// same place `norite instance bootstrap` runs and a reasonable place for this to live in the meantime.
+// same place `norite instance bootstrap` runs, and where a daemon need not be running at all.
 
 // inviteView is one invite as this command prints it, and the shape contracts/cli-json/ pins.
 //
