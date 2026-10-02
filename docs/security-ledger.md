@@ -1010,3 +1010,54 @@ carries the condition that would reopen it.
   already logged at every sign-in since M7.
 - **Reopens if**: the daemon's log leaves the machine (a crash reporter, a support bundle uploaded on the
   user's behalf), or the line grows to carry something that is not already visible to other members.
+
+## M20 — daemon↔client local IPC
+
+### Any process running as the user can act as the account through the relay
+- **Raised**: M20, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the attach socket is the first-party tier by decision (rule 16, B1): every process running as
+  the user can attach, and the relay performs anything the account may do outside `/auth/*`, `/instance/*`
+  and `/users/@me/sessions` — deleting a guild, transferring its ownership. Those processes can already read
+  the state directory, and on the file backend the refresh token itself; on Linux an unlocked Secret Service
+  answers them too. The socket adds no reach that tier lacked, and the credential surfaces stay off it.
+- **Reopens if**: the socket admits anything below the first-party tier, or the credential's storage gains
+  per-process access control (a keyring that prompts per application) that the relay would then bypass.
+
+### A local process can hold every attach slot, or make the daemon buffer gigabytes of relayed bodies
+- **Raised**: M20, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: 64 clients, each holding a slot for the ten-second handshake, deny the CLI the socket; 64 clients
+  with 16 requests each against endpoints answering near the 8 MiB body cap make the daemon hold that much
+  at once. Both need a process running as the user, which can stop the daemon outright with a signal.
+  Every bound that matters against the *instance* — the body cap, the frame caps, the queue drop — holds.
+- **Reopens if**: the socket admits another tier, or a daemon component other than the relay starts
+  holding per-client memory that is not bounded by the queue.
+
+### A squatted named pipe could impersonate the CLI that connects to it
+- **Raised**: M20, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: a pipe server can impersonate a client at the level the client allows, and Windows defaults to
+  full impersonation. go-winio's `DialPipeContext` dials with `SECURITY_SQOS_PRESENT` and
+  `SECURITY_ANONYMOUS` (`tryDialPipe`), so a squatter learns nothing it can act as, and `ipc.DialAt` then
+  refuses a pipe another account owns before writing a byte.
+- **Reopens if**: the dial moves to `DialPipeAccessImpLevel` with a higher level, or the owner check moves
+  after the first write.
+
+### A relayed request can make the session renew by drawing a 401
+- **Raised**: M20, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the relay reports a 401 with `Rejected`, which renews the token. It needs the instance to refuse
+  the daemon's own token, which a live sign-in only meets on a revoked one, and renewals are at least
+  `minRefreshGap` apart however often they are asked for.
+- **Reopens if**: an endpoint answers 401 to a valid token for a reason of its own, or the refresh floor
+  is removed.
+
+### The attach socket briefly has the umask's mode before it is narrowed
+- **Raised**: M20, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `attach.Listen` binds and then `chmod`s to `0600`, so for an instant the socket's mode is the
+  umask's. It sits inside the `0700` state directory, which nobody else can traverse, so the window opens
+  nothing. The chmod is for a directory somebody loosened.
+- **Reopens if**: the socket moves out of the state directory, or the directory's mode stops being
+  enforced (`paths.tighten`).

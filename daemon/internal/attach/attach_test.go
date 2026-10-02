@@ -526,6 +526,23 @@ func TestAClientWatchingIsResyncedWhenTheDaemonsSessionChanges(t *testing.T) {
 	}
 }
 
+// TestADispatchWithNoPayloadIsNotForwarded: a hostile instance sending a dispatch without `d` must not be
+// able to end every watching client's connection with a frame they cannot parse.
+func TestADispatchWithNoPayloadIsNotForwarded(t *testing.T) {
+	ts := newTestServer(t, echoRelay())
+	c := ts.attach(t, true)
+	ts.Dispatch("MESSAGE_DELETE", nil)
+	ts.Dispatch("MESSAGE_CREATE", messagePayload("1", "30", "after"))
+	select {
+	case ev, ok := <-c.Events():
+		require.True(t, ok, "the client was disconnected: %v", c.Err())
+		assert.Equal(t, "MESSAGE_CREATE", ev.Type)
+		assert.Equal(t, int64(2), ev.Seq)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing arrived")
+	}
+}
+
 func TestResumedIsNotForwardedAndChangesNothing(t *testing.T) {
 	ts := newTestServer(t, echoRelay())
 	c := ts.attach(t, true)

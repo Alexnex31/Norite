@@ -195,6 +195,15 @@ func (s *Server) Dispatch(eventType string, data json.RawMessage) {
 		return
 	}
 
+	// An event with no payload is not forwarded. The gateway client hands over `d` as it arrived, and a
+	// frame with no `d` at all reaches here as nothing, which spliced into the frame below would make it
+	// invalid JSON and end every watching client's connection — on every such frame a hostile instance
+	// chose to send (M20 /security-sweep). Any payload that is present is valid JSON: it was decoded out
+	// of a frame that parsed.
+	if len(data) == 0 {
+		return
+	}
+
 	// Encoded once for every client, which differ only in the sequence number. The payload is copied into
 	// no client's frame: each writer sends head, its own number and tail as one vectored write.
 	t, err := json.Marshal(eventType)
