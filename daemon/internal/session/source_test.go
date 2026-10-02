@@ -883,6 +883,32 @@ func TestALogoutEndsTheSessionAndHandsTheTokenBack(t *testing.T) {
 	h.noCredential()
 }
 
+// TestStatusAnswersWithoutWaiting follows one sign-in through the three standings Status reports, which is
+// what an attach client is told in READY and what lets a relayed request fail at once while signed out.
+func TestStatusAnswersWithoutWaiting(t *testing.T) {
+	h := newHarness(t)
+
+	standing, account := h.src.Status()
+	assert.Equal(t, Starting, standing, "before the store has been read")
+	assert.Empty(t, account.UserID)
+
+	h.start()
+	_, err := h.current()
+	require.NoError(t, err)
+	standing, account = h.src.Status()
+	assert.Equal(t, Live, standing)
+	assert.Equal(t, Account{InstanceURL: h.f.server.URL, UserID: account.UserID, Username: "ada", Generation: 1},
+		account)
+	assert.NotEmpty(t, account.UserID)
+
+	require.NoError(t, h.store.Clear())
+	h.src.Reload()
+	require.Eventually(t, func() bool { s, _ := h.src.Status(); return s == SignedOut },
+		time.Second, 5*time.Millisecond)
+	_, account = h.src.Status()
+	assert.Equal(t, Account{}, account, "a signed-out daemon names nobody")
+}
+
 // A reload that finds the store as this process left it costs nothing: no refresh, same session.
 func TestAReloadOfAnUnchangedStoreChangesNothing(t *testing.T) {
 	h := newHarness(t)
