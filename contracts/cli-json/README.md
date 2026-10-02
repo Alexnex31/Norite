@@ -20,6 +20,9 @@ verb's output a definition in it that the CLI's tests validate against.
 | `role.schema.json` | `norite role list \| create \| update \| reorder \| delete` |
 | `member.schema.json` | `norite member list \| update \| remove \| role add \| role remove` |
 | `overwrite.schema.json` | `norite overwrite set \| delete` |
+| `message.schema.json` | `norite message list \| send \| edit \| delete \| history` |
+| `report.schema.json` | `norite report file \| list \| show \| resolve \| dismiss` |
+| `tag.schema.json` | `norite tag list \| create \| delete \| apply \| unapply \| on` |
 
 **These shapes belong to the CLI, not to the instance.** Several of them are built from a REST response
 carrying the same information, and they are re-declared here rather than passed through: a scripted

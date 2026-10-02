@@ -359,3 +359,252 @@ func overwriteTypeName(n int) string {
 // c is output.Clean, short because every value an instance sent passes through it before it is printed —
 // ids included, which are digits only when the instance is the one this CLI was built against (rule 19).
 func c(s string) string { return output.Clean(s) }
+
+// ---------- messages ----------
+
+type appliedTagView struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Shared    bool      `json:"shared"`
+	AppliedBy string    `json:"applied_by"`
+	AppliedAt time.Time `json:"applied_at"`
+}
+
+func appliedTagFrom(a apicontract.AppliedMessageTag) appliedTagView {
+	return appliedTagView{ID: a.Id, Name: a.Name, Shared: a.IsShared, AppliedBy: a.AppliedBy, AppliedAt: a.AppliedAt}
+}
+
+type messageView struct {
+	ID        string     `json:"id"`
+	ChannelID string     `json:"channel_id"`
+	AuthorID  *string    `json:"author_id"`
+	Content   string     `json:"content"`
+	ReplyToID *string    `json:"reply_to_id"`
+	CreatedAt time.Time  `json:"created_at"`
+	EditedAt  *time.Time `json:"edited_at"`
+	// Tags is null where the credential cannot read tags, and [] where the message has none: the API's
+	// distinction, kept.
+	Tags []appliedTagView `json:"tags"`
+}
+
+func messageFrom(m apicontract.Message) messageView {
+	v := messageView{
+		ID: m.Id, ChannelID: m.ChannelId, AuthorID: m.AuthorId, Content: m.Content, ReplyToID: m.ReplyToId,
+		CreatedAt: m.CreatedAt, EditedAt: m.EditedAt,
+	}
+	if m.Tags != nil {
+		v.Tags = []appliedTagView{}
+		for _, a := range *m.Tags {
+			v.Tags = append(v.Tags, appliedTagFrom(a))
+		}
+	}
+	return v
+}
+
+func (m messageView) Text(t *output.Text) {
+	edited := ""
+	if m.EditedAt != nil {
+		edited = " (edited)"
+	}
+	t.Line("%s  %s  %s%s", c(m.ID), stamp(m.CreatedAt), output.OrNone(m.AuthorID), edited)
+	indented(t, m.Content)
+	for _, tag := range m.Tags {
+		t.Line("    # %s", c(tag.Name))
+	}
+}
+
+type messagePage Page[messageView]
+
+func (p messagePage) Text(t *output.Text) {
+	if len(p.Items) == 0 {
+		t.Line("No messages.")
+	}
+	for _, m := range p.Items {
+		m.Text(t)
+	}
+	nextLine(t, p.Next, "--before")
+}
+
+type versionView struct {
+	ID       string    `json:"id"`
+	Content  string    `json:"content"`
+	EditedAt time.Time `json:"edited_at"`
+}
+
+// historyView is a message's prior versions, newest first, with what it says now.
+type historyView struct {
+	MessageID      string        `json:"message_id"`
+	ChannelID      string        `json:"channel_id"`
+	AuthorID       *string       `json:"author_id"`
+	CurrentContent *string       `json:"current_content"`
+	EditedAt       *time.Time    `json:"edited_at"`
+	DeletedAt      *time.Time    `json:"deleted_at"`
+	E2E            bool          `json:"e2e"`
+	Versions       []versionView `json:"versions"`
+	Next           *string       `json:"next"`
+}
+
+func (h historyView) Text(t *output.Text) {
+	t.Line("message %s in %s by %s", c(h.MessageID), c(h.ChannelID), output.OrNone(h.AuthorID))
+	switch {
+	case h.E2E:
+		t.Line("  end-to-end encrypted: no version is readable here")
+	case h.DeletedAt != nil:
+		t.Line("  deleted %s", stamp(*h.DeletedAt))
+	case h.CurrentContent != nil:
+		t.Line("  now:")
+		indented(t, *h.CurrentContent)
+	}
+	for _, v := range h.Versions {
+		t.Line("  before %s:", stamp(v.EditedAt))
+		indented(t, v.Content)
+	}
+	nextLine(t, h.Next, "--before")
+}
+
+// ---------- reports ----------
+
+// reportView is a report as its filer or a moderator reads it. There is no reporter field, here or in any
+// view below, because the API sends none: a guild moderator is never told who filed (M16).
+type reportView struct {
+	ID         string     `json:"id"`
+	GuildID    *string    `json:"guild_id"`
+	TargetType string     `json:"target_type"`
+	TargetID   string     `json:"target_id"`
+	Reason     string     `json:"reason"`
+	Detail     *string    `json:"detail"`
+	Status     string     `json:"status"`
+	ResolvedBy *string    `json:"resolved_by"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ResolvedAt *time.Time `json:"resolved_at"`
+}
+
+func reportFrom(r apicontract.Report) reportView {
+	return reportView{
+		ID: r.Id, GuildID: r.GuildId, TargetType: string(r.TargetType), TargetID: r.TargetId,
+		Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status), ResolvedBy: r.ResolvedBy,
+		CreatedAt: r.CreatedAt, ResolvedAt: r.ResolvedAt,
+	}
+}
+
+func (r reportView) Text(t *output.Text) {
+	t.Line("%s  %s  %s %s  %s", c(r.ID), c(r.Status), c(r.TargetType), c(r.TargetID), c(r.Reason))
+	if r.Detail != nil {
+		indented(t, *r.Detail)
+	}
+}
+
+// triageView is a report in a moderator's queue: two facts about the target and no content, as the API
+// keeps the listing.
+type triageView struct {
+	reportView
+	TargetIsE2E     *bool      `json:"target_is_e2e"`
+	TargetDeletedAt *time.Time `json:"target_deleted_at"`
+}
+
+func triageFrom(r apicontract.TriageReport) triageView {
+	return triageView{
+		reportView: reportView{
+			ID: r.Id, GuildID: r.GuildId, TargetType: string(r.TargetType), TargetID: r.TargetId,
+			Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status),
+			ResolvedBy: r.ResolvedBy, CreatedAt: r.CreatedAt, ResolvedAt: r.ResolvedAt,
+		},
+		TargetIsE2E: r.TargetIsE2e, TargetDeletedAt: r.TargetDeletedAt,
+	}
+}
+
+type triagePage Page[triageView]
+
+func (p triagePage) Text(t *output.Text) {
+	if len(p.Items) == 0 {
+		t.Line("No reports.")
+	}
+	for _, r := range p.Items {
+		r.Text(t)
+	}
+	nextLine(t, p.Next, "--before")
+}
+
+// triageDetailView is one report opened, with what its target says now.
+type triageDetailView struct {
+	triageView
+	TargetChannelID *string `json:"target_channel_id"`
+	TargetAuthorID  *string `json:"target_author_id"`
+	TargetContent   *string `json:"target_content"`
+}
+
+func triageDetailFrom(r apicontract.TriageReportDetail) triageDetailView {
+	return triageDetailView{
+		triageView: triageView{
+			reportView: reportView{
+				ID: r.Id, GuildID: r.GuildId, TargetType: string(r.TargetType), TargetID: r.TargetId,
+				Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status),
+				ResolvedBy: r.ResolvedBy, CreatedAt: r.CreatedAt, ResolvedAt: r.ResolvedAt,
+			},
+			TargetIsE2E: r.TargetIsE2e, TargetDeletedAt: r.TargetDeletedAt,
+		},
+		TargetChannelID: r.TargetChannelId, TargetAuthorID: r.TargetAuthorId, TargetContent: r.TargetContent,
+	}
+}
+
+func (r triageDetailView) Text(t *output.Text) {
+	r.reportView.Text(t)
+	t.Line("  target: %s in channel %s by %s", c(r.TargetID), output.OrNone(r.TargetChannelID),
+		output.OrNone(r.TargetAuthorID))
+	switch {
+	case r.TargetIsE2E != nil && *r.TargetIsE2E:
+		t.Line("  end-to-end encrypted: its content is not readable here")
+	case r.TargetContent != nil:
+		indented(t, *r.TargetContent)
+	case r.TargetDeletedAt != nil:
+		t.Line("  deleted %s", stamp(*r.TargetDeletedAt))
+	}
+}
+
+// ---------- tags ----------
+
+type tagView struct {
+	ID        string    `json:"id"`
+	GuildID   string    `json:"guild_id"`
+	Name      string    `json:"name"`
+	Shared    bool      `json:"shared"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func tagFrom(m apicontract.MessageTag) tagView {
+	return tagView{
+		ID: m.Id, GuildID: m.GuildId, Name: m.Name, Shared: m.IsShared, CreatedBy: m.CreatedBy,
+		CreatedAt: m.CreatedAt,
+	}
+}
+
+func (v tagView) Text(t *output.Text) {
+	kind := "private"
+	if v.Shared {
+		kind = "shared"
+	}
+	t.Line("%s  %-7s %s", c(v.ID), kind, c(v.Name))
+}
+
+type tagList []tagView
+
+func (l tagList) Text(t *output.Text) {
+	if len(l) == 0 {
+		t.Line("No tags.")
+	}
+	for _, v := range l {
+		v.Text(t)
+	}
+}
+
+type appliedTagList []appliedTagView
+
+func (l appliedTagList) Text(t *output.Text) {
+	if len(l) == 0 {
+		t.Line("No tags on this message.")
+	}
+	for _, a := range l {
+		t.Line("%s  %s  applied by %s", c(a.ID), c(a.Name), c(a.AppliedBy))
+	}
+}

@@ -109,6 +109,57 @@ func verbCases() map[string]verbCase {
 		"overwrite delete": {argv: []string{"overwrite", "delete", "20", "30", "--type", "member"},
 			answers: map[string]answerFunc{"deleteChannelPermissionOverwrite": noContent()},
 			file:    "common.schema.json", def: "done"},
+
+		"message list": {argv: []string{"message", "list", "20", "--limit", "1"},
+			answers: map[string]answerFunc{"listChannelMessages": ok([]apicontract.Message{apiMessage("30", "20", "hello")})},
+			file:    "message.schema.json", def: "messagePage"},
+		"message send": {argv: []string{"message", "send", "20", "--content", "hello", "--reply-to", "29"},
+			answers: map[string]answerFunc{"sendMessage": created(apiMessage("30", "20", "hello"))},
+			file:    "message.schema.json", def: "message"},
+		"message edit": {argv: []string{"message", "edit", "20", "30", "--content", "hello, corrected"},
+			answers: map[string]answerFunc{"updateMessage": ok(apiMessage("30", "20", "hello, corrected"))},
+			file:    "message.schema.json", def: "message"},
+		"message delete": {argv: []string{"message", "delete", "20", "30", "--yes"},
+			answers: map[string]answerFunc{"deleteMessage": noContent()},
+			file:    "common.schema.json", def: "done"},
+		"message history": {argv: []string{"message", "history", "20", "30"},
+			answers: map[string]answerFunc{"getMessageEditHistory": ok(apiHistory("30", "20", "before"))},
+			file:    "message.schema.json", def: "history"},
+
+		"report file": {argv: []string{"report", "file", "30", "--reason", "spam", "--detail", "look"},
+			answers: map[string]answerFunc{"fileReport": created(apiReport("70", "open"))},
+			file:    "report.schema.json", def: "report"},
+		"report list": {argv: []string{"report", "list", "10", "--status", "open"},
+			answers: map[string]answerFunc{"listGuildReports": ok([]apicontract.TriageReport{apiTriage("70")})},
+			file:    "report.schema.json", def: "triagePage"},
+		"report show": {argv: []string{"report", "show", "10", "70"},
+			answers: map[string]answerFunc{"getGuildReport": ok(apiTriageDetail("70"))},
+			file:    "report.schema.json", def: "triageDetail"},
+		"report resolve": {argv: []string{"report", "resolve", "10", "70"},
+			answers: map[string]answerFunc{"resolveGuildReport": ok(apiReport("70", "resolved"))},
+			file:    "report.schema.json", def: "report"},
+		"report dismiss": {argv: []string{"report", "dismiss", "10", "70"},
+			answers: map[string]answerFunc{"resolveGuildReport": ok(apiReport("70", "dismissed"))},
+			file:    "report.schema.json", def: "report"},
+
+		"tag list": {argv: []string{"tag", "list", "10"},
+			answers: map[string]answerFunc{"listGuildMessageTags": ok([]apicontract.MessageTag{apiTag("80", "todo", false)})},
+			file:    "tag.schema.json", def: "tagList"},
+		"tag create": {argv: []string{"tag", "create", "10", "--name", "todo", "--shared"},
+			answers: map[string]answerFunc{"createMessageTag": created(apiTag("80", "todo", true))},
+			file:    "tag.schema.json", def: "tag"},
+		"tag delete": {argv: []string{"tag", "delete", "10", "80", "--yes"},
+			answers: map[string]answerFunc{"deleteMessageTag": noContent()},
+			file:    "common.schema.json", def: "done"},
+		"tag apply": {argv: []string{"tag", "apply", "21", "30", "80"},
+			answers: map[string]answerFunc{"applyMessageTag": noContent()},
+			file:    "common.schema.json", def: "done"},
+		"tag unapply": {argv: []string{"tag", "unapply", "21", "30", "80"},
+			answers: map[string]answerFunc{"unapplyMessageTag": noContent()},
+			file:    "common.schema.json", def: "done"},
+		"tag on": {argv: []string{"tag", "on", "21", "30"},
+			answers: map[string]answerFunc{"listMessageTags": ok([]apicontract.AppliedMessageTag{apiApplied("80", "todo")})},
+			file:    "tag.schema.json", def: "appliedTagList"},
 	}
 }
 
@@ -332,4 +383,107 @@ func TestAHostileNameIsInertInTextAndExactInJSON(t *testing.T) {
 	var back []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(js.out), &back))
 	assert.Equal(t, hostile, back[0]["name"], "lossless")
+}
+
+func TestAReportIsFiledAndTriagedAndTheReporterIsNeverShown(t *testing.T) {
+	f := newFake(t).
+		on("fileReport", created(apiReport("70", "open"))).
+		on("listGuildReports", ok([]apicontract.TriageReport{apiTriage("70")})).
+		on("getGuildReport", ok(apiTriageDetail("70"))).
+		on("resolveGuildReport", func(r request) (int, any) {
+			var body struct{ Status string }
+			_ = json.Unmarshal(r.Body, &body)
+			return http.StatusOK, apiReport("70", body.Status)
+		})
+
+	require.NoError(t, runVerb(t, f, "", "report", "file", "30", "--reason", "harassment").err)
+	for _, argv := range [][]string{
+		{"report", "list", "10"}, {"report", "show", "10", "70"}, {"report", "resolve", "10", "70"},
+	} {
+		for _, asJSON := range []bool{true, false} {
+			args := argv
+			if asJSON {
+				args = append([]string{"--json"}, argv...)
+			}
+			r := runVerb(t, f, "", args...)
+			require.NoError(t, r.err, "%v", args)
+			assert.NotContains(t, strings.ToLower(r.out), "reporter", "%v names a reporter", args)
+		}
+	}
+
+	calls := f.requests()
+	assert.JSONEq(t, `{"target_type":"message","target_id":"30","reason_category":"harassment"}`, string(calls[0].Body))
+	assert.JSONEq(t, `{"status":"resolved"}`, string(calls[len(calls)-1].Body))
+
+	dismissed := runVerb(t, f, "", "--json", "report", "dismiss", "10", "70")
+	require.NoError(t, dismissed.err)
+	assert.Contains(t, dismissed.out, `"status": "dismissed"`, "dismiss is resolve with the other outcome")
+}
+
+func TestABacklogIsReadPostedToEditedAndDeletedAndAMessagesVersionsRead(t *testing.T) {
+	f := newFake(t).
+		on("listChannelMessages", ok([]apicontract.Message{apiMessage("31", "20", "newer"), apiMessage("30", "20", "older")})).
+		on("sendMessage", created(apiMessage("32", "20", "line one\nline two"))).
+		on("updateMessage", ok(apiMessage("32", "20", "corrected"))).
+		on("deleteMessage", noContent()).
+		on("getMessageEditHistory", ok(apiHistory("32", "20", "line one\nline two")))
+
+	page := runVerb(t, f, "", "--json", "message", "list", "20", "--limit", "2")
+	require.NoError(t, page.err)
+	assert.Contains(t, page.out, `"next": "30"`, "the oldest id, for --before")
+
+	require.NoError(t, runVerb(t, f, "line one\nline two\n", "message", "send", "20", "--content", "-").err)
+	require.NoError(t, runVerb(t, f, "", "message", "edit", "20", "32", "--content", "corrected").err)
+	history := runVerb(t, f, "", "message", "history", "20", "32")
+	require.NoError(t, history.err)
+	assert.Contains(t, history.out, "line two")
+	require.NoError(t, runVerb(t, f, "", "message", "delete", "20", "32", "--yes").err)
+
+	calls := f.requests()
+	assert.JSONEq(t, `{"content":"line one\nline two"}`, string(calls[1].Body), "read from stdin, the final newline dropped")
+	assert.JSONEq(t, `{"content":"corrected"}`, string(calls[2].Body))
+	assert.Equal(t, "DELETE", calls[4].Method)
+}
+
+// TestATagIsAppliedToAMessageInAnotherChannelAndRemoved: the tag is the guild's, the message is reached
+// through its own channel — 21 here, where the tag was listed through the guild.
+func TestATagIsAppliedToAMessageInAnotherChannelAndRemoved(t *testing.T) {
+	f := newFake(t).
+		on("createMessageTag", created(apiTag("80", "todo", true))).
+		on("applyMessageTag", noContent()).
+		on("unapplyMessageTag", noContent())
+
+	require.NoError(t, runVerb(t, f, "", "tag", "create", "10", "--name", "todo", "--shared").err)
+	applied := runVerb(t, f, "", "--json", "tag", "apply", "21", "30", "80")
+	require.NoError(t, applied.err)
+	assert.JSONEq(t, `{"action":"tag.apply","target":{"channel_id":"21","message_id":"30","tag_id":"80"}}`, applied.out)
+	require.NoError(t, runVerb(t, f, "", "tag", "unapply", "21", "30", "80").err)
+
+	calls := f.requests()
+	assert.Equal(t, "/channels/21/messages/30/tags/80", calls[1].Path)
+	assert.Equal(t, http.MethodPut, calls[1].Method)
+	assert.Equal(t, http.MethodDelete, calls[2].Method)
+}
+
+func TestAMessageMustHaveContentWithinTheLimit(t *testing.T) {
+	for _, tc := range []struct {
+		stdin string
+		argv  []string
+	}{
+		{"", []string{"message", "send", "20"}},
+		{"", []string{"message", "send", "20", "--content", "   "}},
+		{"\n\n", []string{"message", "send", "20", "--content", "-"}},
+		{"", []string{"message", "send", "20", "--content", strings.Repeat("日", maxContent+1)}},
+		{"", []string{"report", "file", "30", "--reason", "rude"}},
+	} {
+		f := newFake(t)
+		r := runVerb(t, f, tc.stdin, tc.argv...)
+		var usage *clierr.UsageError
+		require.ErrorAs(t, r.err, &usage, "%v", tc.argv)
+		assert.Empty(t, f.requests())
+	}
+
+	// Counted in runes, as the instance counts them: 4,000 Japanese characters are 12,000 bytes and fit.
+	f := newFake(t).on("sendMessage", created(apiMessage("30", "20", "x")))
+	require.NoError(t, runVerb(t, f, "", "message", "send", "20", "--content", strings.Repeat("日", maxContent)).err)
 }

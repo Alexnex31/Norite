@@ -74,3 +74,53 @@ func created(body any) answerFunc {
 }
 
 func noContent() answerFunc { return func(request) (int, any) { return http.StatusNoContent, nil } }
+
+func apiMessage(id, channel, content string) apicontract.Message {
+	return apicontract.Message{
+		Id: id, ChannelId: channel, AuthorId: ptr("1"), Content: content, CreatedAt: at,
+		Tags: &[]apicontract.AppliedMessageTag{},
+	}
+}
+
+func apiHistory(message, channel string, versions ...string) apicontract.MessageEditHistory {
+	h := apicontract.MessageEditHistory{
+		MessageId: message, ChannelId: channel, AuthorId: ptr("2"), CurrentContent: ptr("now"), EditedAt: &at,
+		Versions: []apicontract.MessageEditVersion{},
+	}
+	for i, v := range versions {
+		h.Versions = append(h.Versions, apicontract.MessageEditVersion{Id: "9" + string(rune('0'+i)), Content: v, EditedAt: at})
+	}
+	return h
+}
+
+func apiReport(id, status string) apicontract.Report {
+	return apicontract.Report{
+		Id: id, GuildId: ptr("10"), TargetType: apicontract.ReportTargetTypeMessage, TargetId: "30",
+		ReasonCategory: "spam", Detail: ptr("look"), Status: apicontract.ReportStatus(status), CreatedAt: at,
+	}
+}
+
+func apiTriage(id string) apicontract.TriageReport {
+	return apicontract.TriageReport{
+		Id: id, GuildId: ptr("10"), TargetType: apicontract.ReportTargetTypeMessage, TargetId: "30",
+		ReasonCategory: "spam", Detail: ptr("look"), Status: "open", CreatedAt: at, TargetIsE2e: ptr(false),
+	}
+}
+
+func apiTriageDetail(id string) apicontract.TriageReportDetail {
+	return apicontract.TriageReportDetail{
+		Id: id, GuildId: ptr("10"), TargetType: apicontract.ReportTargetTypeMessage, TargetId: "30",
+		ReasonCategory: "spam", Detail: ptr("look"), Status: "open", CreatedAt: at, TargetIsE2e: ptr(false),
+		TargetChannelId: ptr("20"), TargetAuthorId: ptr("2"), TargetContent: ptr("the reported text"),
+	}
+}
+
+func apiTag(id, name string, shared bool) apicontract.MessageTag {
+	return apicontract.MessageTag{Id: id, GuildId: "10", Name: name, IsShared: shared, CreatedBy: "1", CreatedAt: at}
+}
+
+func apiApplied(id, name string) apicontract.AppliedMessageTag {
+	return apicontract.AppliedMessageTag{
+		Id: id, GuildId: "10", Name: name, CreatedBy: "1", CreatedAt: at, AppliedBy: "1", AppliedAt: at,
+	}
+}

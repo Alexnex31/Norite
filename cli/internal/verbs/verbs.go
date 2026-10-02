@@ -53,6 +53,9 @@ func Commands(connect Connector) []*cli.Command {
 		roleCommand(connect),
 		memberCommand(connect),
 		overwriteCommand(connect),
+		messageCommand(connect),
+		reportCommand(connect),
+		tagCommand(connect),
 	}
 }
 
