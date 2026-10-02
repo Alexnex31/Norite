@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -106,5 +107,26 @@ func TestTheDaemonServesItsAttachSocket(t *testing.T) {
 	}
 	if _, err := ipc.DialAt(t.Context(), ipc.SocketPath(dir)); !errors.Is(err, ipc.ErrNotRunning) {
 		t.Errorf("dialing a stopped daemon: %v, want ErrNotRunning", err)
+	}
+}
+
+// A daemon that cannot open its socket stops with ErrMisconfigured, which daemond exits 4 for and the
+// systemd unit does not retry: a restart cannot fix a file that is not a socket where the socket goes.
+func TestADaemonThatCannotListenIsMisconfigured(t *testing.T) {
+	dir, err := os.MkdirTemp("", "nd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.WriteFile(ipc.SocketPath(dir), []byte("not a socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = Run(t.Context(), Options{StateDir: dir, Version: "dev", Stderr: io.Discard})
+	if !errors.Is(err, ErrMisconfigured) {
+		t.Fatalf("Run returned %v, want ErrMisconfigured", err)
+	}
+	if !strings.Contains(err.Error(), "not a socket") {
+		t.Errorf("the reason is lost: %v", err)
 	}
 }

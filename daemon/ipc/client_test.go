@@ -94,8 +94,9 @@ func (d *fakeDaemon) close(code int, reason string) {
 
 func signedIn() Ready {
 	return Ready{
-		Account: &Account{InstanceURL: "https://chat.example", UserID: "100", Username: "alice"},
-		Guilds:  []GuildSummary{{ID: "200", Name: "Guild", OwnerID: "100"}},
+		Standing: StandingSignedIn,
+		Account:  &Account{InstanceURL: "https://chat.example", UserID: "100", Username: "alice"},
+		Guilds:   []GuildSummary{{ID: "200", Name: "Guild", OwnerID: "100"}},
 	}
 }
 
@@ -126,7 +127,7 @@ func TestAttachingIdentifiesWithoutATokenAndReadsReady(t *testing.T) {
 
 func TestASignedOutDaemonsReadyHasNoAccountAndAnEmptyList(t *testing.T) {
 	conn, d := newPair(t)
-	go d.handshake("dev", Ready{Guilds: []GuildSummary{}})
+	go d.handshake("dev", Ready{Standing: StandingSignedOut, Guilds: []GuildSummary{}})
 
 	c, err := attach(t, conn, Options{Client: "norite", Version: "dev"})
 	require.NoError(t, err)
@@ -364,5 +365,43 @@ func TestClosingTheClientFailsWhatIsWaiting(t *testing.T) {
 		assert.True(t, errors.Is(err, ErrClosed), "got %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the request outlived its connection")
+	}
+}
+
+// TestANewerDaemonsExtraFieldStillGetsTheVersionAnswer: the version is read before the payload is decoded
+// strictly, so a field a later release added to HELLO surfaces as "restart the daemon", not a decode error.
+func TestANewerDaemonsExtraFieldStillGetsTheVersionAnswer(t *testing.T) {
+	conn, d := newPair(t)
+	go func() {
+		// Not d.send: this HELLO is off the contract on purpose, as a newer daemon's would be.
+		f, _ := Encode(1, nil)
+		f.Op = 10
+		f.D = json.RawMessage(`{"version":"0.3.0","added_later":true}`)
+		_ = WriteFrame(d.conn, f)
+	}()
+	_, err := attach(t, conn, Options{Client: "norite", Version: "0.2.0"})
+	var ve *VersionError
+	require.ErrorAs(t, err, &ve, "got %v", err)
+}
+
+// TestAWriteCutShortEndsTheConnection: half a frame may be on the stream, and the next request's bytes would
+// be read as the rest of it.
+func TestAWriteCutShortEndsTheConnection(t *testing.T) {
+	conn, d := newPair(t)
+	go d.handshake("dev", signedIn()) // and then never reads again
+
+	c, err := attach(t, conn, Options{Client: "norite", Version: "dev"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = c.Do(ctx, "POST", "/guilds", map[string]string{"name": "x"})
+	require.Error(t, err)
+
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection outlived a write that may have left half a frame behind")
 	}
 }

@@ -50,8 +50,9 @@ func TestSystemdInstallWritesTheUnitAndEnablesIt(t *testing.T) {
 	if !strings.Contains(unit, "Restart=on-failure") {
 		t.Errorf("the unit restarts on a clean exit:\n%s", unit)
 	}
-	// Exit 3 is "another daemon already holds the lock" — retrying it forever achieves nothing.
-	if !strings.Contains(unit, "RestartPreventExitStatus=3") {
+	// Exit 3 is "another daemon already holds the lock", and 4 a configuration no restart fixes — retrying
+	// either forever achieves nothing.
+	if !strings.Contains(unit, "RestartPreventExitStatus=3 4") {
 		t.Errorf("the unit would restart-loop on the already-running exit code:\n%s", unit)
 	}
 	if !strings.Contains(unit, "NoNewPrivileges=true") {

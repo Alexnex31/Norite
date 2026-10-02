@@ -118,22 +118,26 @@ func (c *conn) handshake() error {
 		c.kill(ipc.CloseNotIdentified, "IDENTIFY must come first")
 		return fmt.Errorf("op %d before IDENTIFY", f.Op)
 	}
+	// The version first, read leniently, and only then the whole payload strictly: a newer client may have
+	// added a field, and it should hear "restart the daemon" rather than "IDENTIFY is malformed".
+	var announced struct {
+		Properties struct {
+			Version string `json:"version"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(f.D, &announced); err != nil {
+		c.kill(ipc.CloseDecodeError, "IDENTIFY is malformed")
+		return err
+	}
+	if v := announced.Properties.Version; !gatewayproto.Check(c.srv.version, v).Compatible {
+		c.kill(ipc.CloseVersionMismatch, fmt.Sprintf("this daemon is version %s and cannot serve a %s client; "+
+			"restart the daemon so both run the installed version", c.srv.version, termsafe.Text(v)))
+		return errors.New("incompatible client version")
+	}
 	var id ipc.Identify
 	if err := ipc.Decode(f, &id); err != nil {
 		c.kill(ipc.CloseDecodeError, "IDENTIFY is malformed")
 		return err
-	}
-
-	c.log = c.log.With().
-		Str("client", termsafe.Text(id.Properties.Client)).
-		Str("client_version", termsafe.Text(id.Properties.Version)).
-		Logger()
-
-	if !gatewayproto.Check(c.srv.version, id.Properties.Version).Compatible {
-		c.kill(ipc.CloseVersionMismatch, fmt.Sprintf("this daemon is version %s and cannot serve a %s client; "+
-			"restart the daemon so both run the installed version", c.srv.version,
-			termsafe.Text(id.Properties.Version)))
-		return errors.New("incompatible client version")
 	}
 
 	c.srv.mu.Lock()
@@ -152,7 +156,11 @@ func (c *conn) handshake() error {
 		return err
 	}
 
-	c.log.Debug().Bool("events", id.Events).Msg("attach client identified")
+	// A logger of its own rather than c.log reassigned: c.log is read by kill, which the server calls under
+	// its lock from other goroutines, and replacing it here raced with them (M20 /code-review).
+	c.log.Debug().Str("client", termsafe.Text(id.Properties.Client)).
+		Str("client_version", termsafe.Text(id.Properties.Version)).Bool("events", id.Events).
+		Msg("attach client identified")
 	return nil
 }
 

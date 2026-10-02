@@ -116,12 +116,27 @@ type Identify struct {
 	Events bool `json:"events"`
 }
 
+// The daemon's standings, as READY reports them.
+const (
+	// StandingSignedIn: the daemon holds a usable session.
+	StandingSignedIn = "signed_in"
+	// StandingStarting: a sign-in is being established — the store not yet read, a keyring not yet unlocked,
+	// a token being obtained. A request now waits a bounded while for it rather than failing.
+	StandingStarting = "starting"
+	// StandingSignedOut: nobody is signed in, and nothing will change until somebody runs `norite login`.
+	StandingSignedOut = "signed_out"
+)
+
 // Ready is the payload of the first dispatch, READY, which answers IDENTIFY.
 type Ready struct {
-	// Account is who the daemon is signed in as, or nil when nobody is.
+	// Standing is whether the daemon is signed in. Not inferred from Account: a daemon still starting has no
+	// account to name yet and is not signed out, and telling the two apart is what stops a client sending
+	// somebody to `norite login` a moment after a restart (M20 /code-review).
+	Standing string `json:"standing"`
+	// Account is who the daemon is signed in as, or nil when nobody is, or nobody is yet.
 	Account *Account `json:"account"`
-	// Guilds are the summaries the daemon holds from its gateway connection: empty before the gateway's
-	// own READY, and for a daemon nobody is signed in to. Never null.
+	// Guilds are the summaries the daemon holds from its gateway connection, for the sign-in Account names:
+	// empty before the gateway's own READY, and for a daemon nobody is signed in to. Never null.
 	Guilds []GuildSummary `json:"guilds"`
 }
 

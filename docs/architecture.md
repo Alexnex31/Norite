@@ -1562,6 +1562,9 @@ the open file description, so the kernel releases it however the process dies �
 PID file. A second daemon exits **3**, which the systemd unit is told never to retry
 (`RestartPreventExitStatus=3`), since the condition it reports is by definition already satisfied; launchd
 has no per-exit-code equivalent and is throttled instead (see the platform differences below). A
+daemon that cannot run as configured — an attach socket it cannot open, from a state directory too deep for
+the platform's socket path limit or a file that is not a socket where the socket goes — exits **4**, which
+the systemd unit also never retries (`RestartPreventExitStatus=3 4`), since no restart fixes it (M20). A
 signal-initiated stop exits **0**, not 128+signum: every service manager reads a non-zero exit as a crash
 and answers with a restart, which would make an ordinary stop loop. `norite daemon status` reports through
 its exit code — 0 running, 1 installed-but-stopped, 2 not installed — so a script can branch without parsing

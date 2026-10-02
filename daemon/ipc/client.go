@@ -154,16 +154,24 @@ func (c *Client) handshake(opts Options) (Ready, error) {
 	if f.Op != gatewayproto.OpHello {
 		return Ready{}, fmt.Errorf("the daemon sent op %d where HELLO belongs", f.Op)
 	}
-	if err := Decode(f, &c.hello); err != nil {
-		return Ready{}, err
+	// The version first, read leniently, and only then the whole payload strictly: a newer daemon may have
+	// added a field, and the answer to that is "restart the daemon", which a strict decode failing first
+	// would never get to say (M20 /code-review).
+	var announced struct {
+		Version string `json:"version"`
 	}
-
+	if err := json.Unmarshal(f.D, &announced); err != nil {
+		return Ready{}, fmt.Errorf("ipc: HELLO's payload: %w", err)
+	}
 	version := opts.Version
 	if version == "" {
 		version = gatewayproto.DevVersion
 	}
-	if !gatewayproto.Check(c.hello.Version, version).Compatible {
-		return Ready{}, &VersionError{Daemon: c.hello.Version, Client: version}
+	if !gatewayproto.Check(announced.Version, version).Compatible {
+		return Ready{}, &VersionError{Daemon: announced.Version, Client: version}
+	}
+	if err := Decode(f, &c.hello); err != nil {
+		return Ready{}, err
 	}
 
 	identify, err := Encode(gatewayproto.OpIdentify, Identify{
@@ -218,6 +226,12 @@ func (c *Client) Ready() Ready { return c.ready }
 
 // Events delivers the daemon's dispatches after READY, in order, and is closed when the connection ends; Err
 // then says why. Nil unless Options.Events was set.
+//
+// Drain it on a goroutine of its own, and never wait on Do from that goroutine. One reader serves both, so
+// once Events holds eventBuffer undrained events the reader waits for room before it reads anything else —
+// including the response a Do on the draining goroutine is waiting for — and the daemon, seeing nothing
+// read, drops the client as too slow. That pacing is the point of the bound; waiting on it from both ends
+// is a deadlock with a delay.
 func (c *Client) Events() <-chan Event { return c.events }
 
 // Done is closed when the connection has ended.
@@ -322,6 +336,10 @@ func (c *Client) write(ctx context.Context, f gatewayproto.Frame) error {
 		if e := c.Err(); e != nil {
 			return e
 		}
+		// A write cut short — by its deadline, most likely — may have left half a frame on the stream, and
+		// the next request's bytes would be read as the rest of it. Nothing written after this can be
+		// framed correctly, so the connection ends here rather than at the daemon's decode error.
+		_ = c.conn.Close()
 		return fmt.Errorf("writing to the daemon: %w", err)
 	}
 	return nil

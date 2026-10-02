@@ -266,6 +266,7 @@ func readyPayload(guilds ...json.RawMessage) json.RawMessage {
 
 func TestReadyNamesTheAccountAndTheGuildsWithoutAToken(t *testing.T) {
 	ts := newTestServer(t, echoRelay())
+	ts.Begin(1)
 	ts.Dispatch("READY", readyPayload(guildPayload("20", "Second"), guildPayload("3", "First")))
 
 	r := ts.raw(t)
@@ -277,6 +278,7 @@ func TestReadyNamesTheAccountAndTheGuildsWithoutAToken(t *testing.T) {
 
 	var ready ipc.Ready
 	require.NoError(t, ipc.Decode(f, &ready))
+	assert.Equal(t, ipc.StandingSignedIn, ready.Standing)
 	require.NotNil(t, ready.Account)
 	assert.Equal(t, "1", ready.Account.UserID)
 	assert.NotContains(t, ready.Account.Username, "\x1b", "the stored username is foreign text (rule 19)")
@@ -291,8 +293,40 @@ func TestASignedOutDaemonSaysSo(t *testing.T) {
 	ts.sess.mu.Unlock()
 
 	c := ts.attach(t, false)
+	assert.Equal(t, ipc.StandingSignedOut, c.Ready().Standing)
 	assert.Nil(t, c.Ready().Account)
 	assert.Equal(t, []ipc.GuildSummary{}, c.Ready().Guilds)
+}
+
+// TestADaemonStillSigningInIsNotSignedOut: a client must be able to tell a daemon that has not finished
+// signing in from one nobody is signed in to, or it sends somebody to log in again a moment after a restart.
+func TestADaemonStillSigningInIsNotSignedOut(t *testing.T) {
+	ts := newTestServer(t, echoRelay())
+	ts.sess.mu.Lock()
+	ts.sess.standing, ts.sess.account = session.Starting, session.Account{}
+	ts.sess.mu.Unlock()
+
+	c := ts.attach(t, false)
+	assert.Equal(t, ipc.StandingStarting, c.Ready().Standing)
+	assert.Nil(t, c.Ready().Account)
+}
+
+// TestReadyNeverPairsOneAccountWithAnothersGuilds: after a login the session names the new account at once,
+// while the state still holds the old sign-in's guilds until the gateway connection notices it ended.
+func TestReadyNeverPairsOneAccountWithAnothersGuilds(t *testing.T) {
+	ts := newTestServer(t, echoRelay())
+	ts.Begin(1)
+	ts.Dispatch("READY", readyPayload(guildPayload("20", "First account's")))
+
+	ts.sess.mu.Lock()
+	ts.sess.account = session.Account{InstanceURL: "https://chat.example", UserID: "2", Username: "bob",
+		Generation: 2}
+	ts.sess.mu.Unlock()
+
+	c := ts.attach(t, false)
+	require.NotNil(t, c.Ready().Account)
+	assert.Equal(t, "2", c.Ready().Account.UserID)
+	assert.Empty(t, c.Ready().Guilds, "the guilds belong to the sign-in that just ended")
 }
 
 func TestAnIncompatibleClientIsRefusedWithTheReason(t *testing.T) {
@@ -640,4 +674,21 @@ func TestAClientThatLeavesCancelsItsRequests(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the request outlived its client")
 	}
+}
+
+// TestANewerClientsExtraFieldStillGetsTheVersionAnswer: the daemon reads IDENTIFY's version before decoding
+// it strictly, and a field the same version does not know is still refused as malformed.
+func TestANewerClientsExtraFieldStillGetsTheVersionAnswer(t *testing.T) {
+	ts := newTestServer(t, echoRelay(), func(s *Server) { s.version = "0.2.0" })
+	identify := func(version string) ipc.Close {
+		r := ts.raw(t)
+		r.expect(gatewayproto.OpHello)
+		r.sendOffContract(gatewayproto.OpIdentify, map[string]any{
+			"properties": map[string]string{"os": "linux", "client": "raw", "version": version},
+			"events":     false, "added_later": true,
+		})
+		return r.closedWith()
+	}
+	assert.Equal(t, ipc.CloseVersionMismatch, identify("0.3.0").Code)
+	assert.Equal(t, ipc.CloseDecodeError, identify("0.2.0").Code)
 }

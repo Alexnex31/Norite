@@ -35,9 +35,13 @@ var Version = "dev"
 // A signal-initiated stop deliberately exits 0, not 128+signum: a daemon asked to stop by its service
 // manager has succeeded, and reporting 143 would make systemd count every ordinary stop as a failure and
 // restart it.
+//
+// 4 is a configuration no restart can fix — the attach socket cannot be opened — and the systemd unit does
+// not retry it, so the error is logged once rather than every five seconds.
 const (
-	exitFailure   = 1
-	exitAlreadyUp = 3
+	exitFailure       = 1
+	exitAlreadyUp     = 3
+	exitMisconfigured = 4
 )
 
 func main() {
@@ -101,6 +105,9 @@ func main() {
 		// tell apart from a real problem. `norite daemon status` is the way to see the running one.
 		fmt.Fprintln(os.Stderr, "norite-daemon: already running for this user; nothing to do")
 		os.Exit(exitAlreadyUp)
+	case errors.Is(err, daemonproc.ErrMisconfigured):
+		fmt.Fprintf(os.Stderr, "norite-daemon: %v\n", err)
+		os.Exit(exitMisconfigured)
 	default:
 		fmt.Fprintf(os.Stderr, "norite-daemon: %v\n", err)
 		os.Exit(exitFailure)

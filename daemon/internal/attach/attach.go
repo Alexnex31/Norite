@@ -56,6 +56,8 @@ type State interface {
 	Dispatch(eventType string, data json.RawMessage)
 	End()
 	Guilds() []state.Guild
+	// Generation is the sign-in the state was built from, or 0 when it holds nothing.
+	Generation() uint64
 }
 
 // Relay performs a request with the daemon's credential. Its answer's ID is ignored and set by the server.
@@ -242,6 +244,14 @@ func (s *Server) readyLocked() ipc.Ready {
 	ready := ipc.Ready{Guilds: []ipc.GuildSummary{}}
 
 	standing, account := s.session.Status()
+	switch standing {
+	case session.Live:
+		ready.Standing = ipc.StandingSignedIn
+	case session.SignedOut:
+		ready.Standing = ipc.StandingSignedOut
+	default:
+		ready.Standing = ipc.StandingStarting
+	}
 	if standing != session.SignedOut && account.UserID != "" {
 		ready.Account = &ipc.Account{
 			InstanceURL: account.InstanceURL,
@@ -251,6 +261,13 @@ func (s *Server) readyLocked() ipc.Ready {
 		}
 	}
 
+	// The guilds only when the state was built from the sign-in READY names. A login switches the session
+	// to the new account at once, while the state is cleared only once the gateway connection notices the
+	// old sign-in ended, so in between the two disagree, and READY would name one account as a member of
+	// the other's guilds (M20 /code-review).
+	if ready.Account == nil || s.state.Generation() != account.Generation {
+		return ready
+	}
 	guilds := s.state.Guilds()
 	// Snowflakes are decimal strings, so by length and then by text is by value.
 	slices.SortFunc(guilds, func(a, b state.Guild) int {

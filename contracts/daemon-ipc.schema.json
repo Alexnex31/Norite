@@ -168,11 +168,20 @@
     "Ready": {
       "type": "object",
       "required": [
+        "standing",
         "account",
         "guilds"
       ],
       "additionalProperties": false,
       "properties": {
+        "standing": {
+          "enum": [
+            "signed_in",
+            "starting",
+            "signed_out"
+          ],
+          "description": "Whether the daemon is signed in. starting is a sign-in being established — the store not yet read, a keyring not yet unlocked — and a request made now waits a bounded while for it; signed_out changes only when somebody runs `norite login`."
+        },
         "account": {
           "oneOf": [
             {
@@ -189,7 +198,7 @@
           "items": {
             "$ref": "#/$defs/GuildSummary"
           },
-          "description": "The summaries the daemon holds from its gateway connection. Empty, never null, before the gateway's own READY and while signed out."
+          "description": "The summaries the daemon holds from its gateway connection, for the sign-in account names. Empty, never null, before the gateway's own READY, while signed out, and while the state still belongs to a sign-in that just ended."
         }
       }
     },

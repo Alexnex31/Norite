@@ -69,8 +69,6 @@ type Options struct {
 }
 
 const (
-	// requestTimeout bounds one call to the instance.
-	requestTimeout = 30 * time.Second
 	// signInWait bounds the wait for a usable token when the daemon is still signing in or renewing. A
 	// signed-out daemon is not waited for at all. Longer than the session's ten-second floor between
 	// refreshes, so a token refused just after a renewal waits for the next one rather than timing out.
@@ -89,13 +87,11 @@ type Relay struct {
 func New(opts Options) *Relay {
 	client := opts.HTTP
 	if client == nil {
-		// Redirects are refused for the reason the session refuses them: a request carrying a credential is
-		// not replayed to wherever a 307 names. Go drops Authorization on a cross-host redirect, but a
-		// same-host one would carry it to a path this relay has not checked.
-		client = &http.Client{
-			Timeout:       requestTimeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}
+		// The session's client, not a copy of its policy: one place decides how the daemon's credential
+		// travels, so a later hardening cannot miss the relay (M20 /code-review). Its refusal of redirects
+		// matters here too — Go drops Authorization on a cross-host redirect, but a same-host one would carry
+		// the token to a path this relay has not checked.
+		client = session.NewHTTPClient()
 	}
 	version := opts.Version
 	if version == "" {

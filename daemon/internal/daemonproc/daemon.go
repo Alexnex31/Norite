@@ -18,6 +18,8 @@ package daemonproc
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -31,6 +33,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/relay"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/state"
+	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
 // Options configures a daemon run.
@@ -137,28 +140,37 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.SkipSession {
 		log.Debug().Msg("session establishment skipped")
 	} else {
+		// The attach socket opens first, before anything starts, so a daemon that cannot listen stops here
+		// with the reason rather than running unreachable: a socket path past the platform's limit, a file
+		// that is not a socket where the socket goes, or on Windows a pipe name another process holds. After
+		// the lock, which is what makes a socket file already there a stale one. None of those is fixed by
+		// starting again, so the error is ErrMisconfigured, which the service manager is told not to retry.
+		listener, err := attach.Listen(stateDir)
+		if err != nil {
+			log.Error().Err(err).Msg("cannot open the attach socket")
+			return fmt.Errorf("%w: %w", ErrMisconfigured, err)
+		}
+
+		// Each component's lines carry its name under a key of their own. Not "component", which the log's
+		// base already sets to "daemon": zerolog appends a field rather than replacing one, so the line would
+		// carry the key twice and a reader would keep whichever its parser happens to prefer.
+		part := func(name string) zerolog.Logger { return log.With().Str("subsystem", name).Logger() }
+		st := state.New(part("state"), state.DefaultLimits)
+
 		store, err := credentials.OpenIn(stateDir)
 		if err != nil {
+			// Still served, so a client is told what is wrong rather than that no daemon is running, which
+			// would send somebody to start one that is already up (M20 /code-review).
 			log.Error().Err(err).Msg("the credential store could not be opened")
+			server := attach.New(attach.Options{
+				Session: storeless{}, State: st, Relay: storeless{}, Version: opts.Version, Log: part("attach"),
+			})
+			components.Go(func() { server.Serve(ctx, listener) })
 		} else {
-			// The attach socket opens first, before anything starts, so a daemon that cannot listen stops
-			// here with the reason rather than running unreachable: a socket path past the platform's limit,
-			// or on Windows a pipe name another process holds. After the lock, which is what makes a socket
-			// file already there a stale one.
-			listener, err := attach.Listen(stateDir)
-			if err != nil {
-				log.Error().Err(err).Msg("cannot open the attach socket")
-				return err
-			}
-
 			// The store's own account of anything it could not finish — a credential left in a backend this
 			// process cannot reach, most likely. Nobody is watching a daemon's terminal, so it goes to the
 			// log at a level that gets read.
 			store.Notify = func(msg string) { log.Warn().Msg(msg) }
-			// Each component's lines carry its name under a key of their own. Not "component", which the log's
-			// base already sets to "daemon": zerolog appends a field rather than replacing one, so the line would
-			// carry the key twice and a reader would keep whichever its parser happens to prefer.
-			part := func(name string) zerolog.Logger { return log.With().Str("subsystem", name).Logger() }
 			src := session.New(session.Options{Store: store, Log: part("session")})
 			components.Go(func() { src.Run(ctx) })
 			components.Go(func() {
@@ -173,7 +185,6 @@ func Run(ctx context.Context, opts Options) error {
 			// The gateway connection, which waits on the session for a credential: a daemon nobody has
 			// signed in to holds no connection and makes no attempts. What it carries goes to the attach
 			// server, which keeps the state and fans each event out to the clients watching.
-			st := state.New(part("state"), state.DefaultLimits)
 			server := attach.New(attach.Options{
 				Session: src, State: st, Version: opts.Version, Log: part("attach"),
 				Relay: relay.New(relay.Options{Credentials: src, Version: opts.Version, Log: part("relay")}),
@@ -201,4 +212,23 @@ func Run(ctx context.Context, opts Options) error {
 	components.Wait()
 	log.Info().Msg("daemon stopped")
 	return nil
+}
+
+// ErrMisconfigured is a daemon that cannot run as configured, where starting it again changes nothing: the
+// attach socket cannot be opened. cmd/daemond exits 4 for it, and the systemd unit is told not to retry 4
+// (RestartPreventExitStatus), so a misconfiguration is one error in the log rather than one every five
+// seconds for ever (M20 /code-review).
+var ErrMisconfigured = errors.New("the daemon cannot run as configured")
+
+// storeless stands in for the session and the relay when the credential store cannot be opened: the socket
+// is served, and every client is told why nothing works.
+type storeless struct{}
+
+func (storeless) Status() (session.Standing, session.Account) {
+	return session.SignedOut, session.Account{}
+}
+
+func (storeless) Do(context.Context, ipc.Request) ipc.Response {
+	return ipc.Response{Error: &ipc.RelayError{Code: ipc.RelayNotSignedIn,
+		Message: "the daemon could not open its credential store; its log says why"}}
 }
