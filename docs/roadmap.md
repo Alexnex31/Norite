@@ -940,10 +940,10 @@ of this section.
   moved from the CLI; `backend/apicontract`, moved out of `internal/`; and `daemon` → `backend`, the
   repository's third cross-module edge. Decisions are in this entry and in `docs/security-ledger.md`.
 
-  **Presence is not here, and no milestone builds it.** This entry asked for "in-memory scrollback/presence
-  state", and the gateway carries no presence: M18 defined no presence op or event, and nothing sends one.
-  M38 makes durable an "in-memory-only original design" that no entry creates. Found at M19's close by
-  reading the two entries against each other, and left for the roadmap to place rather than filled in here.
+  **Presence is not here; it is M38's.** This entry asked for "in-memory scrollback/presence state", and the
+  gateway carries no presence: M18 reserved op 3 and READY's `presences` for M38, whose entry built only
+  the persistence of an "in-memory-only original design" no milestone owned. Found at M19's close by
+  reading the entries against each other, and M38 now builds presence whole.
 
   **Refreshing is this milestone's, not M20's.** M7 spends the refresh token once, at startup, and a
   connection that outlives fifteen minutes cannot work that way: IDENTIFY and RESUME each authenticate an
@@ -1328,8 +1328,43 @@ of this section.
 
 #### Phase F — Presence, Deep Work, and the TUI foundation
 
-- **M38 — Presence persistence**: the `presence_status` table (including the Deep Work value), replacing
-  the in-memory-only original design. Done when: presence survives a backend restart.
+- **M38 — Presence**: presence, built whole and persisted from the start. Op 3 (Presence Update) goes from
+  reserved to real, a `PRESENCE_UPDATE` dispatch carries a member's status to those allowed to see it,
+  READY gains the `presences` M18 left absent, the `presence_status` table (including the Deep Work value
+  M39 gives meaning) holds it across restarts, and the daemon keeps it in its state and relays it over
+  M20's socket. Depends on M18, M19 and M20.
+
+  **This entry said "Presence persistence" until M19's close, and persisted something nothing built.** It
+  replaced "the in-memory-only original design", and no milestone owned that design: M19's entry asked for
+  presence state the gateway could not carry, while M18 had reserved op 3 and READY's `presences` for this
+  milestone. The contract and `architecture.md` already named M38; the roadmap was the one document that
+  did not. The in-memory design was superseded before anything built it, so it is not built first here
+  either. M39's Deep Work, M41–M43's presence glyphs and M70's presence filtering all stand on this entry.
+
+  **Questions its planning must answer, because no document does yet:**
+  - **Audience.** Who receives a member's change: members of a shared guild who can see the member list,
+    DM peers once M57 lands, friends once M69 does. The rule is M18's — the gateway never discloses more
+    than REST — so the REST read of a member's presence decides it.
+  - **Fan-out cost** (rules 7 and 21). Presence is the highest-volume event a chat gateway carries, and a
+    naive fan-out sends every status change to every member of every shared guild. §15 says nothing about
+    it. Measure it against the largest guild the caps allow before choosing a shape, lazy subscription to
+    large guilds' member lists included.
+  - **One account, several machines.** Each machine's daemon holds a connection, so presence aggregates:
+    online if any machine is, and a status chosen explicitly outranks one computed, such as idle.
+  - **Invisible is indistinguishable from offline** — in the fan-out, in READY and over REST — or it is an
+    oracle. Ask what each branch *sends*, not only what it says.
+  - **Blocks (rule 20).** Presence goes through the fan-out's `withoutBlocked` stage, which M70 fills, so
+    M70 completes one stage rather than discovering a second path.
+  - **A custom status is somebody else's text**: bounded by the server, and through `termsafe` on arrival in
+    the daemon, as names are since M19.
+  - **The contract moves in one commit** (rules 6 and 15): `gateway-events.schema.json`, `gatewayproto`, the
+    daemon's state, and the CLI's `--json` schema.
+
+  Done when: a status change reaches exactly the accounts the REST read would show it to, verified on the
+  DISPATCH stream; an invisible account is indistinguishable from an offline one on every surface; two
+  machines signed in to one account report one presence; presence survives a backend restart; and the
+  fan-out for a status change in the largest guild the caps allow is measured, with the bound it settles
+  on written down.
 - **M39 — Deep Work**: server-side notification-suppression logic, the `@urgent` mention bypass, the
   **allow-rule model** the client exposes at `5d` — mentions of you, a named DM sender, or a user-supplied
   pattern — the **held-message queue** with its review, the auto-reply others see, and the session

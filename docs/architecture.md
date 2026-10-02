@@ -612,7 +612,7 @@ CREATE TABLE audit_log_entries (
 -- index serves both.
 CREATE INDEX ON audit_log_entries (guild_id, id DESC);
 
--- Presence (persisted — Milestone M38; supersedes the original in-memory-only design)
+-- Presence (Milestone M38, persisted from the start; the in-memory-only original design was never built)
 CREATE TABLE presence_status (
   user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   status smallint NOT NULL DEFAULT 0,   -- 0 online, 1 idle, 2 dnd, 3 invisible, 4 DEEP_WORK
