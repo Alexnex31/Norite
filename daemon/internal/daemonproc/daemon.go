@@ -143,7 +143,11 @@ func Run(ctx context.Context, opts Options) error {
 			// process cannot reach, most likely. Nobody is watching a daemon's terminal, so it goes to the
 			// log at a level that gets read.
 			store.Notify = func(msg string) { log.Warn().Msg(msg) }
-			src := session.New(session.Options{Store: store, Log: log})
+			// Each component's lines carry its name under a key of their own. Not "component", which the log's
+			// base already sets to "daemon": zerolog appends a field rather than replacing one, so the line would
+			// carry the key twice and a reader would keep whichever its parser happens to prefer.
+			part := func(name string) zerolog.Logger { return log.With().Str("subsystem", name).Logger() }
+			src := session.New(session.Options{Store: store, Log: part("session")})
 			components.Go(func() { src.Run(ctx) })
 			components.Go(func() {
 				// Without it the daemon still works, as it did before M19 had it: a logout is noticed at the
@@ -157,10 +161,10 @@ func Run(ctx context.Context, opts Options) error {
 			// The gateway connection, which waits on the session for a credential: a daemon nobody has
 			// signed in to holds no connection and makes no attempts. What it carries builds the state
 			// attach clients read from M20.
-			st := state.New(log.With().Str("component", "state").Logger(), state.DefaultLimits)
+			st := state.New(part("state"), state.DefaultLimits)
 			gw := gatewayclient.New(gatewayclient.Options{
 				Credentials: src, Sink: st, Version: opts.Version,
-				Log: log.With().Str("component", "gateway").Logger(),
+				Log: part("gateway"),
 			})
 			components.Go(func() { gw.Run(ctx) })
 		}

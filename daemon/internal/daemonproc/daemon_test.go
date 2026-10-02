@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/Alexnex31/Norite/daemon/credentials"
 )
 
 // startDaemon runs the daemon in a goroutine and blocks until it reports itself ready.
@@ -156,6 +160,95 @@ func TestStartupLogIsStructuredAndNamesItsPaths(t *testing.T) {
 	if got := start["component"]; got != "daemon" {
 		t.Errorf("component = %v, want daemon", got)
 	}
+}
+
+// A component's lines name it without repeating the key the base logger sets. zerolog appends a field
+// rather than replacing one, so a sub-logger adding "component" again wrote it twice on every line it
+// logged, and which of the two a reader keeps is up to its parser (M19 manual pass).
+//
+// The stand-in instance renews the session and refuses the gateway, so the session and the connection
+// both have something to log.
+func TestAComponentsLinesCarryEachKeyOnce(t *testing.T) {
+	instance := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/auth/refresh" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "eyJ.access", "refresh_token": "nrt_rotated", "token_type": "Bearer",
+			"expires_at": time.Now().Add(15 * time.Minute).Format(time.RFC3339Nano),
+		})
+	}))
+	t.Cleanup(instance.Close)
+
+	dir := t.TempDir()
+	store, err := credentials.OpenLocalForTest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(credentials.Record{
+		InstanceURL: instance.URL, UserID: "1", Username: "ada", DeviceID: "dev_test", DeviceName: "laptop",
+	}, "nrt_from_login"); err != nil {
+		t.Fatal(err)
+	}
+
+	stop, logs := startDaemon(t, Options{StateDir: dir, Version: "test-1.2.3"})
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(logs.String(), "could not reach the gateway") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the connection never reported the refused gateway:\n%s", logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
+		if key := repeatedKey(t, line); key != "" {
+			t.Errorf("%q appears twice in %s", key, line)
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("log line is not JSON: %q (%v)", line, err)
+		}
+		for message, subsystem := range map[string]string{
+			"signed in with the stored credential": "session",
+			"could not reach the gateway":          "gateway",
+		} {
+			if strings.HasPrefix(entry["message"].(string), message) &&
+				(entry["component"] != "daemon" || entry["subsystem"] != subsystem) {
+				t.Errorf("a line of the %s's is not named as its: %s", subsystem, line)
+			}
+		}
+	}
+}
+
+// repeatedKey returns a key that appears more than once in a flat JSON object, or "".
+func repeatedKey(t *testing.T, line string) string {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(line))
+	if _, err := dec.Token(); err != nil { // {
+		t.Fatalf("log line is not JSON: %q (%v)", line, err)
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("log line is not JSON: %q (%v)", line, err)
+		}
+		key := tok.(string)
+		if seen[key] {
+			return key
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			t.Fatalf("log line is not JSON: %q (%v)", line, err)
+		}
+	}
+	return ""
 }
 
 func TestASecondDaemonRefusesToStart(t *testing.T) {
