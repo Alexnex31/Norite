@@ -117,8 +117,16 @@ func (c *conn) serve(ctx context.Context) {
 		}
 	}()
 
+	// One timer for both deadlines, reset to the heartbeat's once the connection identifies, so the reason
+	// is decided when it fires. Fixed at creation, every heartbeat timeout told the client it had never
+	// identified (M19 manual pass). markIdentified runs immediately before that reset, so an IDENTIFY still
+	// being answered when the first deadline passes is reported as the IDENTIFY timeout it is.
 	c.watchdog = time.AfterFunc(c.srv.opts.IdentifyTimeout, func() {
-		c.closeWith(gatewayproto.CloseSessionTimedOut, "no IDENTIFY in time")
+		reason := "no IDENTIFY in time"
+		if c.slotReleased.Load() {
+			reason = "no heartbeat in time"
+		}
+		c.closeWith(gatewayproto.CloseSessionTimedOut, reason)
 	})
 	defer c.watchdog.Stop()
 

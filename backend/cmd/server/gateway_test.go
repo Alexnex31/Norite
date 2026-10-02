@@ -411,7 +411,7 @@ func TestADeadlineClosesASilentConnection(t *testing.T) {
 	t.Run("no IDENTIFY", func(t *testing.T) {
 		c := dialGateway(t, url, nil)
 		c.hello()
-		c.expectClose(gatewayproto.CloseSessionTimedOut)
+		assert.Equal(t, "no IDENTIFY in time", c.expectClose(gatewayproto.CloseSessionTimedOut))
 	})
 
 	t.Run("heartbeats without IDENTIFY", func(t *testing.T) {
@@ -427,7 +427,7 @@ func TestADeadlineClosesASilentConnection(t *testing.T) {
 				}
 			}
 		}()
-		c.expectClose(gatewayproto.CloseSessionTimedOut)
+		assert.Equal(t, "no IDENTIFY in time", c.expectClose(gatewayproto.CloseSessionTimedOut))
 		assert.Less(t, time.Since(start), 700*time.Millisecond, "heartbeats must not extend the identify deadline")
 	})
 
@@ -436,7 +436,9 @@ func TestADeadlineClosesASilentConnection(t *testing.T) {
 		c.hello()
 		c.identify(f.ownerToken, "dev")
 		c.ready()
-		c.expectClose(gatewayproto.CloseSessionTimedOut)
+		// The reason is what a client logs, and it said "no IDENTIFY in time" to a connection that had
+		// identified, until the M19 manual pass read it in the server's log during a dropped network.
+		assert.Equal(t, "no heartbeat in time", c.expectClose(gatewayproto.CloseSessionTimedOut))
 	})
 }
 
