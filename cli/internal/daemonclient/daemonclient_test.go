@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -112,4 +113,35 @@ func TestNoDaemonIsUnavailableAndSaysWhatToDo(t *testing.T) {
 	var unavailable *clierr.UnavailableError
 	require.ErrorAs(t, err, &unavailable)
 	assert.Contains(t, err.Error(), "norite daemon start")
+}
+
+// TestNoBodyWhereOneWasOwedIsNotSuccess: a 200 whose body a proxy replaced with HTML reaches the CLI as no
+// body, and must not decode into an empty object reported as the thing that was asked for.
+func TestNoBodyWhereOneWasOwedIsNotSuccess(t *testing.T) {
+	for _, body := range []json.RawMessage{nil, json.RawMessage("null"), json.RawMessage(" null ")} {
+		var out map[string]any
+		err := Call(context.Background(), answer{res: ipc.Result{Status: 200, Body: body}}, "GET", "/guilds/1", nil, &out)
+		require.Error(t, err, "%q", body)
+	}
+	// A 204 owes nothing.
+	require.NoError(t, Call(context.Background(), answer{res: ipc.Result{Status: 204}}, "DELETE", "/guilds/1", nil, nil))
+}
+
+type hung struct{}
+
+func (hung) Do(ctx context.Context, _, _ string, _ any) (ipc.Result, error) {
+	<-ctx.Done()
+	return ipc.Result{}, ctx.Err()
+}
+
+// TestADaemonThatStopsAnsweringIsUnavailable: a call is bounded, and its expiry reads as exit 3.
+func TestADaemonThatStopsAnsweringIsUnavailable(t *testing.T) {
+	saved := callTimeout
+	callTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { callTimeout = saved })
+
+	err := Call(context.Background(), hung{}, "GET", "/guilds/1", nil, nil)
+	var unavailable *clierr.UnavailableError
+	require.ErrorAs(t, err, &unavailable)
+	assert.Contains(t, err.Error(), "did not answer")
 }

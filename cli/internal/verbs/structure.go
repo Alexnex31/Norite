@@ -418,16 +418,23 @@ func overwriteCommand(connect Connector) *cli.Command {
 		spec{
 			name: "set", usage: "Set what a role or member is allowed and denied in a channel",
 			ids: []string{"channel", "target"},
-			description: "--allow and --deny are permission bitfields as decimal numbers. An overwrite replaces\n" +
-				"the previous one for that target; what it no longer carries is lifted.",
+			description: "--allow and --deny are permission bitfields as decimal numbers, and both are\n" +
+				"required: an overwrite is replaced whole, so a half left out would be set to 0 and\n" +
+				"whatever it carried — a mute's deny, say — lifted without a word. Pass 0 to clear one.",
 			flags: []cli.Flag{typeFlag,
-				&cli.StringFlag{Name: "allow", Usage: "the permission `BITS` to allow"},
-				&cli.StringFlag{Name: "deny", Usage: "the permission `BITS` to deny"},
+				&cli.StringFlag{Name: "allow", Usage: "the permission `BITS` to allow (required; 0 for none)"},
+				&cli.StringFlag{Name: "deny", Usage: "the permission `BITS` to deny (required; 0 for none)"},
 			},
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
 				typ, err := targetType(cmd)
 				if err != nil {
 					return nil, err
+				}
+				// Both halves, always: PUT replaces the overwrite, and an absent half is stored as 0 — so
+				// `--allow 1024` on a muted role's overwrite would lift its deny of sending (M20 /code-review).
+				if !cmd.IsSet("allow") || !cmd.IsSet("deny") {
+					return nil, clierr.Usage("pass both --allow and --deny: an overwrite is replaced whole, " +
+						"so state the half you are not changing too (0 for none)")
 				}
 				req := apicontract.SetOverwriteRequest{Type: apicontract.SetOverwriteRequestType(typ)}
 				if req.Allow, err = permissionsFlag(cmd, "allow"); err != nil {
@@ -446,13 +453,18 @@ func overwriteCommand(connect Connector) *cli.Command {
 		},
 		spec{
 			name: "delete", usage: "Delete a channel's overwrite for a role or a member",
-			ids: []string{"channel", "target"}, flags: []cli.Flag{typeFlag},
+			ids: []string{"channel", "target"}, flags: []cli.Flag{typeFlag, yesFlag},
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
 				typ, err := targetType(cmd)
 				if err != nil {
 					return nil, err
 				}
 				channel, target := cmd.Args().Get(0), cmd.Args().Get(1)
+				// Asked first: deleting an overwrite lifts whatever it denied, which is how a mute is undone.
+				if err := confirm(cmd, e, "delete the overwrite for "+target+" in channel "+channel+
+					", lifting whatever it denied"); err != nil {
+					return nil, err
+				}
 				req := apicontract.DeleteOverwriteRequest{Type: apicontract.DeleteOverwriteRequestType(typ)}
 				if err := e.do(ctx, http.MethodDelete, "/channels/"+channel+"/permissions/"+target, req, nil); err != nil {
 					return nil, err

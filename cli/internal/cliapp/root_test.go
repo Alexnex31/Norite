@@ -350,3 +350,19 @@ func TestAMistypedSubcommandIsAUsageErrorInEveryGroup(t *testing.T) {
 	require.NoError(t, err, "a bare group shows its help")
 	assert.Contains(t, out, "audit-log")
 }
+
+// TestEveryUsageMistakeIsExitTwoAndPrintsNoHelp: a mistyped top-level command and every flag error are
+// usage errors, and nothing lands on stdout, which a --json pipeline is reading.
+func TestEveryUsageMistakeIsExitTwoAndPrintsNoHelp(t *testing.T) {
+	for _, args := range [][]string{
+		{"guidl", "list"},
+		{"--json", "guild", "list", "--bogus"},
+		{"message", "list", "1", "--limit", "abc"},
+		{"--nonsense"},
+	} {
+		out, _, err := runArgs(t, args...)
+		var usage *clierr.UsageError
+		require.ErrorAs(t, err, &usage, "%v: %v", args, err)
+		assert.Empty(t, out, "%v printed to stdout", args)
+	}
+}

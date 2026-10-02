@@ -10,7 +10,6 @@ package cliapp
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"strings"
 
@@ -73,10 +72,11 @@ func New(out, errOut io.Writer) *cli.Command {
 			if arg := cmd.Args().First(); arg != "" {
 				// Taking over the not-found path means the library's own "did you mean" never fires, so
 				// the suggestion is built here instead of being silently lost.
+				// A usage error, exit 2 without the prefix, like every other mistake in a command line (M20).
 				if suggestion := cli.SuggestCommand(cmd.Commands, arg); suggestion != "" && suggestion != arg {
-					return fmt.Errorf("unknown command %q; did you mean %q?", arg, suggestion)
+					return clierr.Usage("unknown command %q; did you mean %q?", arg, suggestion)
 				}
-				return fmt.Errorf("unknown command %q; run `norite --help` to see the available commands", arg)
+				return clierr.Usage("unknown command %q; run `norite --help` to see the available commands", arg)
 			}
 			// Bare `norite` with no arguments: show what it can do rather than erroring.
 			return cli.ShowAppHelp(cmd)
@@ -98,7 +98,24 @@ func New(out, errOut io.Writer) *cli.Command {
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)
+	reportUsageErrors(root)
 	return root
+}
+
+// reportUsageErrors makes a flag the command line got wrong — unknown, missing its value, a value of the
+// wrong type — a usage error, on every command in the tree.
+//
+// urfave/cli's own handling exits 1 with the crash prefix and prints the command's help to stdout first,
+// which puts a page of text into a pipeline that asked for --json. Its OnUsageError hook is what stops both,
+// and it is per command, so it is set on all of them by the walk (M20 /code-review).
+func reportUsageErrors(cmd *cli.Command) {
+	cmd.OnUsageError = func(_ context.Context, c *cli.Command, err error, _ bool) error {
+		name := c.FullName()
+		return clierr.Usage("%s; see `%s --help`", err, name)
+	}
+	for _, sub := range cmd.Commands {
+		reportUsageErrors(sub)
+	}
 }
 
 // refuseUnknownSubcommands gives every group without an action of its own the root's: a mistyped

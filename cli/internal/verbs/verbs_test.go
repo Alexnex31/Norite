@@ -106,10 +106,10 @@ func verbCases() map[string]verbCase {
 			answers: map[string]answerFunc{"removeGuildMemberRole": ok(apiMember("10", "2"))},
 			file:    "member.schema.json", def: "member"},
 
-		"overwrite set": {argv: []string{"overwrite", "set", "20", "30", "--type", "role", "--deny", "2048"},
+		"overwrite set": {argv: []string{"overwrite", "set", "20", "30", "--type", "role", "--allow", "0", "--deny", "2048"},
 			answers: map[string]answerFunc{"setChannelPermissionOverwrite": ok(apiOverwrite("20", "30", 0, "0", "2048"))},
 			file:    "overwrite.schema.json", def: "overwrite"},
-		"overwrite delete": {argv: []string{"overwrite", "delete", "20", "30", "--type", "member"},
+		"overwrite delete": {argv: []string{"overwrite", "delete", "20", "30", "--type", "member", "--yes"},
 			answers: map[string]answerFunc{"deleteChannelPermissionOverwrite": noContent()},
 			file:    "common.schema.json", def: "done"},
 
@@ -256,7 +256,7 @@ func TestAGuildIsCreatedRenamedGivenARoleAndAChannelAnOverwriteWrittenAndItsLogR
 		{"guild", "update", "10", "--name", "Renamed"},
 		{"role", "create", "10", "--name", "mods"},
 		{"channel", "create", "10", "--name", "general"},
-		{"overwrite", "set", "20", "30", "--type", "role", "--deny", "2048"},
+		{"overwrite", "set", "20", "30", "--type", "role", "--allow", "0", "--deny", "2048"},
 		{"guild", "audit-log", "10"},
 	} {
 		require.NoError(t, runVerb(t, f, "", argv...).err, "%v", argv)
@@ -269,7 +269,7 @@ func TestAGuildIsCreatedRenamedGivenARoleAndAChannelAnOverwriteWrittenAndItsLogR
 	assert.JSONEq(t, `{"name":"mods"}`, string(calls[2].Body))
 	assert.JSONEq(t, `{"name":"general","type":0}`, string(calls[3].Body))
 	assert.Equal(t, "/channels/20/permissions/30", calls[4].Path)
-	assert.JSONEq(t, `{"type":0,"deny":"2048"}`, string(calls[4].Body))
+	assert.JSONEq(t, `{"type":0,"allow":"0","deny":"2048"}`, string(calls[4].Body))
 	assert.Equal(t, "50", calls[5].Query.Get("limit"))
 }
 
@@ -335,6 +335,7 @@ func TestADestructiveVerbWithoutYesAndNoTerminalTouchesNothing(t *testing.T) {
 	for _, argv := range [][]string{
 		{"guild", "delete", "10"}, {"guild", "transfer", "10", "2"}, {"channel", "delete", "20"},
 		{"role", "delete", "10", "30"}, {"member", "remove", "10", "2"},
+		{"overwrite", "delete", "20", "30", "--type", "role"},
 	} {
 		f := newFake(t)
 		r := runVerb(t, f, "y\n", argv...)
@@ -359,6 +360,8 @@ func TestAnUpdateWithNothingOrContradictionsIsAUsageError(t *testing.T) {
 		{"role", "reorder", "10"},
 		{"role", "reorder", "10", "--set", "30=-1"},
 		{"overwrite", "set", "20", "30"},
+		// Half an overwrite would blank the other half: a mute's deny, lifted by adding an allow.
+		{"overwrite", "set", "20", "30", "--type", "role", "--allow", "1024"},
 		{"guild", "audit-log", "10", "--actor", "me"},
 		{"member", "list", "10", "--limit", "500"},
 	} {

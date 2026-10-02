@@ -15,11 +15,13 @@
 package daemonclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/Alexnex31/Norite/cli/internal/apiclient"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
@@ -43,14 +45,23 @@ type Caller interface {
 // It never starts a daemon (E1 in M20's planning): one started from a shell is not the service, and would
 // hold the lock the service then fails to take.
 func Connect(ctx context.Context, version string) (*ipc.Client, error) {
+	// Bounded, because a daemon can accept a connection and never answer — stopped under a debugger, or
+	// wedged — and a scripted verb waiting on it would wait for ever where exit 3 would let it retry.
+	ctx, cancel := context.WithTimeout(ctx, attachTimeout)
+	defer cancel()
 	c, err := ipc.Connect(ctx, ipc.Options{Client: "norite", Version: version})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, clierr.Unavailable("the daemon accepted the connection and did not answer within %s; "+
+				"it may be hung, and `norite daemon restart` restarts it", attachTimeout)
+		}
 		var ve *ipc.VersionError
 		var ce *ipc.CloseError
 		switch {
 		case errors.Is(err, ipc.ErrNotRunning):
-			return nil, clierr.Unavailable("the daemon is not running; start it with `norite daemon start`, " +
-				"or install it first with `norite daemon install`")
+			return nil, clierr.Unavailable("%s; start it with `norite daemon start`, or install it first with "+
+				"`norite daemon install`. If it is running already, it was started with a different state "+
+				"directory from this shell's (XDG_STATE_HOME)", termsafe.Text(err.Error()))
 		case errors.As(err, &ve):
 			return nil, clierr.Unavailable("%s", ve.Error())
 		case errors.As(err, &ce):
@@ -61,10 +72,24 @@ func Connect(ctx context.Context, version string) (*ipc.Client, error) {
 	return c, nil
 }
 
+// attachTimeout bounds the handshake with a local daemon, which answers in milliseconds when it answers.
+const attachTimeout = 10 * time.Second
+
+// callTimeout bounds one relayed request: longer than the relay's own worst case — a wait for a renewed token
+// and the request, twice, when a 401 is retried — so that it only fires on a daemon that stopped answering,
+// not on a slow instance the relay is already timing out (M20 /code-review). A variable for the tests.
+var callTimeout = 2 * time.Minute
+
 // Call performs one request and decodes a 2xx answer's body into out, which may be nil to ignore it.
 func Call(ctx context.Context, c Caller, method, path string, body, out any) error {
-	res, err := c.Do(ctx, method, path, body)
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	res, err := c.Do(callCtx, method, path, body)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return clierr.Unavailable("the daemon did not answer within %s; the request may or may not have "+
+				"reached the instance", callTimeout)
+		}
 		return fromRelay(err)
 	}
 
@@ -73,8 +98,10 @@ func Call(ctx context.Context, c Caller, method, path string, body, out any) err
 		if out == nil {
 			return nil
 		}
-		if res.Body == nil {
-			return fmt.Errorf("the instance answered HTTP %d with no body", res.Status)
+		// No body where one was owed: not success, whatever the status says. A proxy answering 200 with HTML
+		// arrives here, its body dropped by the relay as not JSON, and must not decode into an empty object.
+		if res.Body == nil || string(bytes.TrimSpace(res.Body)) == "null" {
+			return fmt.Errorf("the instance answered HTTP %d with no usable body", res.Status)
 		}
 		if err := json.Unmarshal(res.Body, out); err != nil {
 			return fmt.Errorf("the instance's answer does not decode: %w", err)
