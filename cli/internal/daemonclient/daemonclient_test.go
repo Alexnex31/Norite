@@ -34,7 +34,7 @@ func TestEveryOutcomeEndsInItsExitCode(t *testing.T) {
 		{"a 2xx", answer{res: ipc.Result{Status: 200, Body: json.RawMessage(`{"id":"1"}`)}},
 			func(t *testing.T, err error) { assert.NoError(t, err) }},
 		{"a non-member's 404", answer{res: ipc.Result{Status: 404, Body: json.RawMessage(
-			`{"code":"not_found","message":"not \u001b[2Jfound","request_id":"r-1"}`)}},
+			`{"error":{"code":"not_found","message":"not \u001b[2Jfound","request_id":"r-1"}}`)}},
 			func(t *testing.T, err error) {
 				var refused *clierr.RefusedError
 				require.ErrorAs(t, err, &refused)

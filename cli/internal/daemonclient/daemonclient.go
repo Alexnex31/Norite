@@ -59,11 +59,14 @@ func Connect(ctx context.Context, version string) (*ipc.Client, error) {
 	return c, nil
 }
 
-// instanceError is the body of an error response from the instance (openapi.yaml's Error).
+// instanceError is the body of an error response from the instance: openapi.yaml's Error, an envelope
+// around the error itself.
 type instanceError struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id"`
+	Error struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		RequestID string `json:"request_id"`
+	} `json:"error"`
 }
 
 // Call performs one request and decodes a 2xx answer's body into out, which may be nil to ignore it.
@@ -94,18 +97,18 @@ func Call(ctx context.Context, c Caller, method, path string, body, out any) err
 		var e instanceError
 		if res.Body != nil && json.Unmarshal(res.Body, &e) == nil {
 			// The instance's own words, and a stranger's server: sanitized as they enter (rule 19).
-			refused.Code = termsafe.Text(e.Code)
-			refused.Message = termsafe.Text(e.Message)
-			refused.RequestID = termsafe.Text(e.RequestID)
+			refused.Code = termsafe.Text(e.Error.Code)
+			refused.Message = termsafe.Text(e.Error.Message)
+			refused.RequestID = termsafe.Text(e.Error.RequestID)
 		}
 		return refused
 	}
 
 	if res.Body != nil {
 		var e instanceError
-		if json.Unmarshal(res.Body, &e) == nil && e.Message != "" {
+		if json.Unmarshal(res.Body, &e) == nil && e.Error.Message != "" {
 			return fmt.Errorf("the instance failed the request (HTTP %d): %s (request %s)", res.Status,
-				termsafe.Text(e.Message), termsafe.Text(e.RequestID))
+				termsafe.Text(e.Error.Message), termsafe.Text(e.Error.RequestID))
 		}
 	}
 	return fmt.Errorf("the instance failed the request (HTTP %d)", res.Status)
