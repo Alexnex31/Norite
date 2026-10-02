@@ -133,6 +133,7 @@ Locked-in decisions:
 ├── contracts/
 │   ├── openapi.yaml               # REST contract — single source of truth
 │   ├── gateway-events.schema.json # WS dispatch payload contract
+│   ├── daemon-ipc.schema.json     # the daemon's attach socket, sharing the gateway's frames (M20)
 │   └── cli-json/                  # CLI --json output schemas, versioned
 ├── docker/docker-compose.yml      # postgres, valkey, backend (air hot-reload) — local dev + self-hosted
 ├── deploy/helm/                   # flagship Kubernetes Helm chart (§12)
