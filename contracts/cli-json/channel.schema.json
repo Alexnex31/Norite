@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/channel.schema.json",
+  "title": "norite channel --json",
+  "description": "The machine-readable output of `norite channel list`, `create`, `update` and `delete`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/channelList",
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/channel",
+      "title": "create, update"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "delete"
+    }
+  ],
+  "$defs": {
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "guild_id",
+        "name",
+        "type",
+        "parent_id",
+        "position",
+        "topic",
+        "nsfw",
+        "bitrate",
+        "user_limit",
+        "last_message_id",
+        "overwrites",
+        "created_at",
+        "updated_at"
+      ],
+      "description": "One channel.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "guild_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "description": "text, voice or category; `type N` for a type this CLI does not know yet."
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "position": {
+          "type": "integer"
+        },
+        "topic": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nsfw": {
+          "type": "boolean"
+        },
+        "bitrate": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "user_limit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_message_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "overwrites": {
+          "type": "array",
+          "items": {
+            "$ref": "overwrite.schema.json#/$defs/overwrite"
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "channelList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/channel"
+      }
+    }
+  }
+}

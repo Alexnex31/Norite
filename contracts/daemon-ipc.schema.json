@@ -1,0 +1,532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.example/contracts/daemon-ipc.schema.json",
+  "title": "Norite daemon attach socket",
+  "description": "Source of truth for every frame on the daemon's attach socket (docs/architecture.md §3, ADR 0010, M20): a Unix domain socket or a named pipe, each frame JSON behind a 4-byte big-endian length. daemon/ipc is its Go form, and the tests validate every frame both ends send against this document. The envelope, the op numbers for HELLO, IDENTIFY and DISPATCH, and every forwarded dispatch are the gateway's (gateway-events.schema.json); HELLO, IDENTIFY and READY carry local payloads, and ops from 100 are local. Trust tier (rule 16): OS-permission-protected, for first-party clients, no secret. No frame carries a token.",
+  "$ref": "#/$defs/Frame",
+  "$defs": {
+    "Frame": {
+      "description": "Any frame, in either direction.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DaemonFrame"
+        },
+        {
+          "$ref": "#/$defs/ClientFrame"
+        }
+      ]
+    },
+    "DaemonFrame": {
+      "description": "What the daemon sends: HELLO on connect, READY in answer to IDENTIFY, then responses, forwarded dispatches (only to a client that asked for events) and, last, Close.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Hello"
+        },
+        {
+          "$ref": "#/$defs/ReadyDispatch"
+        },
+        {
+          "$ref": "#/$defs/ForwardedDispatch"
+        },
+        {
+          "$ref": "#/$defs/Response"
+        },
+        {
+          "$ref": "#/$defs/Close"
+        }
+      ]
+    },
+    "ClientFrame": {
+      "description": "What an attach client sends: IDENTIFY first and once, then requests. Anything else closes the connection.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Identify"
+        },
+        {
+          "$ref": "#/$defs/Request"
+        }
+      ]
+    },
+    "Hello": {
+      "type": "object",
+      "description": "op 10, sent by the daemon on connect. Unlike the gateway's there is no heartbeat_interval: a local socket reports a dead peer as EOF, and a heartbeat exists to detect a silent network.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 10
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "version"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string",
+              "description": "The daemon's release version, or \"dev\". Compared with the client's under ADR 0033, as on the gateway; a dev build on either side is compatible with anything."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Identify": {
+      "type": "object",
+      "description": "op 2, the client's first frame. Carries no token: the daemon holds the account's tokens and they never cross this socket.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 2
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "properties",
+            "events"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "properties": {
+              "type": "object",
+              "required": [
+                "os",
+                "client",
+                "version"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "os": {
+                  "type": "string"
+                },
+                "client": {
+                  "type": "string",
+                  "description": "The program attaching: norite, norite-gui."
+                },
+                "version": {
+                  "type": "string",
+                  "description": "The client's release version, or \"dev\"."
+                }
+              }
+            },
+            "events": {
+              "type": "boolean",
+              "description": "Whether the client wants the daemon's dispatches. A one-shot command does not."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "ReadyDispatch": {
+      "type": "object",
+      "description": "The daemon's answer to IDENTIFY, always sequence 1.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Ready"
+        },
+        "s": {
+          "const": 1
+        },
+        "t": {
+          "const": "READY"
+        }
+      }
+    },
+    "Ready": {
+      "type": "object",
+      "required": [
+        "standing",
+        "account",
+        "guilds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "standing": {
+          "enum": [
+            "signed_in",
+            "starting",
+            "signed_out"
+          ],
+          "description": "Whether the daemon is signed in. starting is a sign-in being established — the store not yet read, a keyring not yet unlocked — and a request made now waits a bounded while for it; signed_out changes only when somebody runs `norite login`."
+        },
+        "account": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Account"
+            }
+          ],
+          "description": "Who the daemon is signed in as, or null when nobody is."
+        },
+        "guilds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GuildSummary"
+          },
+          "description": "The summaries the daemon holds from its gateway connection, for the sign-in account names. Empty, never null, before the gateway's own READY, while signed out, and while the state still belongs to a sign-in that just ended."
+        }
+      }
+    },
+    "Account": {
+      "type": "object",
+      "required": [
+        "instance_url",
+        "user_id",
+        "username"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "instance_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "user_id": {
+          "$ref": "gateway-events.schema.json#/$defs/Snowflake"
+        },
+        "username": {
+          "type": "string",
+          "description": "Sanitized: read from a file a person can edit."
+        }
+      }
+    },
+    "GuildSummary": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "owner_id"
+      ],
+      "additionalProperties": false,
+      "description": "A guild as the daemon's state keeps it: the name sanitized and cut at the server's own 100 runes. A client wanting the guild as the instance holds it asks over the relay.",
+      "properties": {
+        "id": {
+          "$ref": "gateway-events.schema.json#/$defs/Snowflake"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner_id": {
+          "$ref": "gateway-events.schema.json#/$defs/Snowflake"
+        }
+      }
+    },
+    "ForwardedDispatch": {
+      "description": "A dispatch the daemon received from the gateway and forwards unchanged except for s, which numbers this connection's dispatches from 1. The gateway's READY and RESUMED are the daemon's own business and are never forwarded; a test holds this list to every other dispatch the gateway schema declares.",
+      "oneOf": [
+        {
+          "$ref": "gateway-events.schema.json#/$defs/GuildCreateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/GuildUpdateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/GuildDeleteDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/ChannelCreateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/ChannelUpdateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/ChannelDeleteDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/GuildRolesUpdateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/GuildMemberUpdateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/GuildMemberRemoveDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/GuildPermissionsUpdateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/MessageCreateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/MessageUpdateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/MessageDeleteDispatch"
+        }
+      ]
+    },
+    "Request": {
+      "type": "object",
+      "description": "op 100: perform a REST call with the daemon's credential. At most 16 in flight per connection.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 100
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "id",
+            "method",
+            "path",
+            "body"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-9A-Za-z_-]{1,64}$",
+              "description": "Chosen by the client, echoed by the response. Unique among the connection's requests in flight."
+            },
+            "method": {
+              "enum": [
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE"
+              ]
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "^/",
+              "description": "Under /api/v1, which the daemon prefixes, with any query string. The daemon builds the URL from its own instance URL and refuses a path that could leave it, and anything under /auth or /instance."
+            },
+            "body": {
+              "description": "The JSON to send, or null for none."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Response": {
+      "type": "object",
+      "description": "op 101: the answer to one request, by its id.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 101
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "id",
+            "status",
+            "body",
+            "error"
+          ],
+          "additionalProperties": false,
+          "description": "Exactly one of status and error is non-null.",
+          "oneOf": [
+            {
+              "properties": {
+                "status": {
+                  "type": "integer",
+                  "minimum": 100,
+                  "maximum": 599
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "type": "null"
+                },
+                "body": {
+                  "type": "null"
+                },
+                "error": {
+                  "$ref": "#/$defs/RelayError"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "description": "The instance's HTTP status, whatever it was."
+            },
+            "body": {
+              "description": "The instance's JSON body, or null when it sent none or sent something that is not JSON."
+            },
+            "error": {
+              "description": "Why the daemon could not ask the instance, or null."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "RelayError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "not_signed_in",
+            "unreachable",
+            "refused",
+            "bad_request",
+            "too_many_requests",
+            "too_large"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "The daemon's own wording, never the instance's."
+        }
+      }
+    },
+    "Close": {
+      "type": "object",
+      "description": "op 102: the daemon's last frame on a connection it is closing. A raw socket has no close frame of its own.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 102
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "code",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/CloseCode"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "CloseCode": {
+      "description": "Why the daemon closed a connection. The gateway's number wherever the meaning is the same; local cases from 4100.",
+      "oneOf": [
+        {
+          "const": 1001,
+          "description": "The daemon is stopping."
+        },
+        {
+          "const": 4001,
+          "description": "An op a client may not send."
+        },
+        {
+          "const": 4002,
+          "description": "A frame that is not valid, or too large (1 MiB from a client)."
+        },
+        {
+          "const": 4003,
+          "description": "Anything but IDENTIFY first."
+        },
+        {
+          "const": 4005,
+          "description": "A second IDENTIFY."
+        },
+        {
+          "const": 4010,
+          "description": "Incompatible versions under ADR 0033."
+        },
+        {
+          "const": 4012,
+          "description": "The client stopped reading and its buffer filled: dropped rather than allowed to stall the daemon. Attach again and resync."
+        },
+        {
+          "const": 4100,
+          "description": "Resync: the daemon's session started afresh or its sign-in ended, and the state its events built was cleared. Sent only to clients that asked for events."
+        },
+        {
+          "const": 4101,
+          "description": "Too many clients: the daemon already serves 64."
+        }
+      ]
+    }
+  }
+}

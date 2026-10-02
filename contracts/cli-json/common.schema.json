@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/common.schema.json",
+  "title": "Shapes the verb groups share",
+  "description": "Referenced by the group schemas in this directory (M20).",
+  "$defs": {
+    "done": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "target"
+      ],
+      "description": "What a verb prints when the instance answered with no object: what it did, and to what. `norite instance invite revoke` set the precedent of a document rather than nothing, so --json always gives a script something to parse.",
+      "properties": {
+        "action": {
+          "type": "string",
+          "pattern": "^[a-z_]+\\.[a-z_]+$",
+          "description": "What happened, in the audit log's vocabulary where there is one: guild.delete, member.remove, tag.apply."
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "description": "The ids the verb acted on, keyed by what they are: guild_id, user_id, role_id."
+        }
+      }
+    }
+  }
+}

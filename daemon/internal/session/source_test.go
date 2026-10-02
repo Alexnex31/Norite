@@ -369,14 +369,22 @@ func (h *harness) noCredential() {
 // advanceUntil moves the fake clock forward a step at a time until cond holds. Steps rather than one jump,
 // because Run arms its timers between steps — a jump past several deadlines at once fires only the timers
 // that already existed.
+//
+// At the limit it waits in real time before failing. What it asserts is that cond holds by the limit on the
+// fake clock, which waiting does not move: a refresh that fired on the last steps and is still crossing a
+// loaded machine's loopback is not a late refresh. With only waitBriefly here, CI failed a renewal that
+// was due a step before the limit.
 func (h *harness) advanceUntil(step time.Duration, limit time.Duration, cond func() bool) {
 	h.t.Helper()
 	for moved := time.Duration(0); ; moved += step {
-		if waitBriefly(cond) {
+		if moved >= limit {
+			if !waitFor(5*time.Second, cond) {
+				h.t.Fatalf("condition not met after advancing the clock %v", limit)
+			}
 			return
 		}
-		if moved >= limit {
-			h.t.Fatalf("condition not met after advancing the clock %v", limit)
+		if waitBriefly(cond) {
+			return
 		}
 		h.clock.Advance(step)
 	}
@@ -384,7 +392,12 @@ func (h *harness) advanceUntil(step time.Duration, limit time.Duration, cond fun
 
 // waitBriefly polls cond in real time, for long enough that Run has acted on whatever just happened.
 func waitBriefly(cond func() bool) bool {
-	deadline := time.Now().Add(25 * time.Millisecond)
+	return waitFor(25*time.Millisecond, cond)
+}
+
+// waitFor polls cond in real time for up to d.
+func waitFor(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return true
@@ -883,6 +896,32 @@ func TestALogoutEndsTheSessionAndHandsTheTokenBack(t *testing.T) {
 	h.noCredential()
 }
 
+// TestStatusAnswersWithoutWaiting follows one sign-in through the three standings Status reports, which is
+// what an attach client is told in READY and what lets a relayed request fail at once while signed out.
+func TestStatusAnswersWithoutWaiting(t *testing.T) {
+	h := newHarness(t)
+
+	standing, account := h.src.Status()
+	assert.Equal(t, Starting, standing, "before the store has been read")
+	assert.Empty(t, account.UserID)
+
+	h.start()
+	_, err := h.current()
+	require.NoError(t, err)
+	standing, account = h.src.Status()
+	assert.Equal(t, Live, standing)
+	assert.Equal(t, Account{InstanceURL: h.f.server.URL, UserID: account.UserID, Username: "ada", Generation: 1},
+		account)
+	assert.NotEmpty(t, account.UserID)
+
+	require.NoError(t, h.store.Clear())
+	h.src.Reload()
+	require.Eventually(t, func() bool { s, _ := h.src.Status(); return s == SignedOut },
+		time.Second, 5*time.Millisecond)
+	_, account = h.src.Status()
+	assert.Equal(t, Account{}, account, "a signed-out daemon names nobody")
+}
+
 // A reload that finds the store as this process left it costs nothing: no refresh, same session.
 func TestAReloadOfAnUnchangedStoreChangesNothing(t *testing.T) {
 	h := newHarness(t)
@@ -1027,4 +1066,23 @@ func TestServerClockAdvancesOnTheLocalClockFromItsLastSample(t *testing.T) {
 
 	c.observe(time.Time{})
 	assert.Equal(t, local.Now(), c.now(), "a missing Date header is no sample")
+}
+
+// TestCurrentUnlessSignedOutAnswersAsSoonAsTheDaemonIsSignedOut: a relayed request does not wait out its
+// timeout for a login that is not coming, whether the daemon was signed out already or became so during the
+// wait.
+func TestCurrentUnlessSignedOutAnswersAsSoonAsTheDaemonIsSignedOut(t *testing.T) {
+	h := newHarness(t)
+	h.f.set(func(f *fakeInstance) { f.status, f.body = 401, `{}` })
+	h.start()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := h.src.CurrentUnlessSignedOut(ctx)
+	require.ErrorIs(t, err, ErrSignedOut, "the refused renewal signs the daemon out during the wait")
+	assert.Less(t, time.Since(start), 2*time.Second)
+
+	_, err = h.src.CurrentUnlessSignedOut(ctx)
+	require.ErrorIs(t, err, ErrSignedOut, "and once signed out, at once")
 }

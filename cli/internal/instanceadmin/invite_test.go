@@ -237,6 +237,26 @@ func TestAHostileInviteCodeIsSanitizedBeforePrinting(t *testing.T) {
 	assert.NotContains(t, out2.String(), "\x1b")
 }
 
+// The JSON form keeps the code exactly, for the parser, and inert, for a terminal it lands on with no pipe:
+// a bidi override comes out as the six characters of its escape (M20). It came out raw before, because
+// json.Marshal escapes C0 controls and nothing above them.
+func TestAHostileInviteCodeIsEscapedInJSON(t *testing.T) {
+	f := newFakeInviteAPI(t)
+	f.status = http.StatusOK
+	f.reply = `[{"code":"BCDF\u202eGHJK\u009b2K","created_by":null,"max_uses":null,"uses":0,` +
+		`"expires_at":null,"created_at":"2026-08-25T10:00:00Z"}]`
+
+	r, out := inviteRunner(t, f, true)
+	require.NoError(t, r.listInvites(context.Background()))
+	assert.NotContains(t, out.String(), string(rune(0x202e)), "raw on the terminal")
+	assert.NotContains(t, out.String(), string(rune(0x9b)))
+	assert.Contains(t, out.String(), `\u202e`)
+
+	var back []inviteView
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &back))
+	assert.Equal(t, "BCDF"+string(rune(0x202e))+"GHJK"+string(rune(0x9b))+"2K", back[0].Code, "lossless")
+}
+
 // A negative flag used to mean "omit the field", which the server reads as unlimited — the opposite of
 // what was asked for, silently. The service-side guards cannot help, because the value is never sent.
 func TestANegativeInviteLimitIsRefused(t *testing.T) {

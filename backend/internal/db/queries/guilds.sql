@@ -720,7 +720,7 @@ LIMIT sqlc.arg(lim);
 
 -- name: ListGuildsForMember :many
 -- Every guild an account is a member of: what the gateway's READY carries, one summary per guild (M18), and
--- what M20's GET /users/@me/guilds will serve.
+-- what GET /users/@me/guilds serves (M20).
 --
 -- Unpaginated, like the channel and role lists, and bounded the same way: at creation rather than at read.
 -- An account owns at most [limits].guilds_per_account (M12), nothing adds a membership except creating a

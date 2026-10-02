@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/report.schema.json",
+  "title": "norite report --json",
+  "description": "The machine-readable output of `norite report file`, `list`, `show`, `resolve` and `dismiss`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/report",
+      "title": "file, resolve, dismiss"
+    },
+    {
+      "$ref": "#/$defs/triagePage",
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/triageDetail",
+      "title": "show"
+    }
+  ],
+  "$defs": {
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "guild_id",
+        "target_type",
+        "target_id",
+        "reason",
+        "detail",
+        "status",
+        "resolved_by",
+        "created_at",
+        "resolved_at"
+      ],
+      "description": "A report. There is no reporter field: a guild moderator is never told who filed (M16), and additionalProperties false makes that a property of the contract.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "guild_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "target_type": {
+          "enum": [
+            "message",
+            "channel",
+            "user",
+            "whisper"
+          ]
+        },
+        "target_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "reason": {
+          "enum": [
+            "spam",
+            "harassment",
+            "hate_speech",
+            "violence",
+            "nsfw",
+            "self_harm",
+            "illegal",
+            "other"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The filer's own words."
+        },
+        "status": {
+          "enum": [
+            "open",
+            "under_review",
+            "resolved",
+            "dismissed"
+          ]
+        },
+        "resolved_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolved_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "triage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "guild_id",
+        "target_type",
+        "target_id",
+        "reason",
+        "detail",
+        "status",
+        "resolved_by",
+        "created_at",
+        "resolved_at",
+        "target_is_e2e",
+        "target_deleted_at"
+      ],
+      "description": "A report in a moderator's queue: two facts about its target and no content. There is no reporter field: a guild moderator is never told who filed (M16), and additionalProperties false makes that a property of the contract.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "guild_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "target_type": {
+          "enum": [
+            "message",
+            "channel",
+            "user",
+            "whisper"
+          ]
+        },
+        "target_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "reason": {
+          "enum": [
+            "spam",
+            "harassment",
+            "hate_speech",
+            "violence",
+            "nsfw",
+            "self_harm",
+            "illegal",
+            "other"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The filer's own words."
+        },
+        "status": {
+          "enum": [
+            "open",
+            "under_review",
+            "resolved",
+            "dismissed"
+          ]
+        },
+        "resolved_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolved_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "target_is_e2e": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the target is end-to-end encrypted; null when it no longer resolves."
+        },
+        "target_deleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "triagePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next"
+      ],
+      "description": "A page of a guild's reports, newest first.",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/triage"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The id to pass to --before for the next page, or null on the last page: a page shorter than --limit."
+        }
+      }
+    },
+    "triageDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "guild_id",
+        "target_type",
+        "target_id",
+        "reason",
+        "detail",
+        "status",
+        "resolved_by",
+        "created_at",
+        "resolved_at",
+        "target_is_e2e",
+        "target_deleted_at",
+        "target_channel_id",
+        "target_author_id",
+        "target_content"
+      ],
+      "description": "One report opened, with what its target says now. There is no reporter field: a guild moderator is never told who filed (M16), and additionalProperties false makes that a property of the contract.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "guild_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "target_type": {
+          "enum": [
+            "message",
+            "channel",
+            "user",
+            "whisper"
+          ]
+        },
+        "target_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "reason": {
+          "enum": [
+            "spam",
+            "harassment",
+            "hate_speech",
+            "violence",
+            "nsfw",
+            "self_harm",
+            "illegal",
+            "other"
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The filer's own words."
+        },
+        "status": {
+          "enum": [
+            "open",
+            "under_review",
+            "resolved",
+            "dismissed"
+          ]
+        },
+        "resolved_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolved_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "target_is_e2e": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the target is end-to-end encrypted; null when it no longer resolves."
+        },
+        "target_deleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "target_channel_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "target_author_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "target_content": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the target says now; null when deleted, encrypted, or not a message."
+        }
+      }
+    }
+  }
+}

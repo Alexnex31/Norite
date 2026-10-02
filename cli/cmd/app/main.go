@@ -64,7 +64,23 @@ func report(err error) (code int, message string) {
 	// A command that needs a terminal and hasn't got one is a usage problem, not a crash: say what to do
 	// about it without the "norite:" prefix. One sentinel, matched once — see clierr for why it is one.
 	if errors.Is(err, clierr.ErrNoTerminal) {
-		return 2, errorText(err)
+		return clierr.ExitUsage, errorText(err)
+	}
+
+	// The three M20 added. A usage error and an instance's refusal print without the prefix, because the
+	// program worked and was told no; a command that cannot be carried out here keeps it, being a condition
+	// of this machine rather than an answer (architecture.md §4).
+	var usage *clierr.UsageError
+	if errors.As(err, &usage) {
+		return clierr.ExitUsage, errorText(err)
+	}
+	var refused *clierr.RefusedError
+	if errors.As(err, &refused) {
+		return clierr.ExitRefused, errorText(err)
+	}
+	var unavailable *clierr.UnavailableError
+	if errors.As(err, &unavailable) {
+		return clierr.ExitUnavailable, "norite: " + errorText(err)
 	}
 
 	// A command that reports its result through the exit code rather than through output —
@@ -72,15 +88,23 @@ func report(err error) (code int, message string) {
 	// handling of these precisely so the decision lands here. An empty message means the code *is* the
 	// message and there is nothing to print: a status that exits 1 has already said, on stdout, that
 	// the daemon is stopped, and "norite: " in front of nothing would be noise.
+	//
+	// Code 2 is a usage error however it was raised, and prints as one: without the prefix. It printed with
+	// it until M20 settled the codes, which made `norite instance invite revoke` with no code read like a
+	// crash while the same mistake caught by ErrNoTerminal did not.
 	var exit cli.ExitCoder
 	if errors.As(err, &exit) {
-		if msg := errorText(exit); msg != "" {
-			return exit.ExitCode(), "norite: " + msg
+		msg := errorText(exit)
+		switch {
+		case msg == "":
+			return exit.ExitCode(), ""
+		case exit.ExitCode() == clierr.ExitUsage:
+			return exit.ExitCode(), msg
 		}
-		return exit.ExitCode(), ""
+		return exit.ExitCode(), "norite: " + msg
 	}
 
-	return 1, "norite: " + errorText(err)
+	return clierr.ExitFailure, "norite: " + errorText(err)
 }
 
 // errorText renders an error for a terminal.

@@ -387,7 +387,7 @@ Install and authenticate `gh` if you want that to change.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D under way, M19 done**. Full
+**Phase D under way, M20 done**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -945,6 +945,44 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   heartbeat detection never ran. M16's seed lesson one layer out: before trusting what a stand-in
   measured, check it fails the way the real thing does.
 
+- **M20 — Daemon↔client local IPC**: done. `daemon/ipc` (the attach socket's protocol and client half,
+  outside `internal/` for the CLI and the GUI), `daemon/internal/attach` (the server: peer check, bounded
+  fan-out, resync), `daemon/internal/relay`, `contracts/daemon-ipc.schema.json`; `cli/internal/verbs` (forty
+  verbs over M12–M17, folded in from M17a), `daemonclient`, `output` and `clierr`'s exit codes, and nine new
+  schemas in `contracts/cli-json/`; and `GET /users/@me/guilds`. Decisions are in the roadmap entry, in
+  `architecture.md` §3 and §4, and in `docs/security-ledger.md`.
+
+  **Planning corrected three documents before anything was built** — seven milestones running. §2 said
+  `norite login` would stop writing the store here, which would have broken a login with no daemon running;
+  §3 named a socket and never said where it lives, and its claim that only the owner could open it was false
+  on Windows, where a pipe's default DACL lets Everyone read it; §4 put the `--json` machinery at M48.
+
+  **A fake that answers only with what the contract declares finds what the author had in mind.** The verbs'
+  tests run against a fake daemon that validates every request and every scripted answer against
+  `openapi.yaml`, and writing it found the CLI decoding an instance's refusal from the top level rather than
+  its `error` envelope. The decoder's own unit test had used the shape its author imagined. M19's fixture
+  lesson, pointed at a decoder instead of a proxy.
+
+  **An exit code's meaning is everybody's, not the code that returns it.** Settling 3 as "unavailable" made
+  three older paths lie: urfave/cli's help command answers a mistyped subcommand with exit 3, a verb that
+  attached before checking its flags reported a typo as a stopped daemon, and a 429 read as a refusal.
+  `/code-review` found all three, and the fixes are structural — every group gets the root's refusal by a
+  walk of the tree, and a verb attaches on its first request rather than before its checks.
+
+  **A state the protocol cannot express is one a client guesses.** READY named an account or did not, so a
+  daemon still waiting for its keyring looked signed out, and the CLI told its user to log in again — which
+  would supersede a perfectly good sign-in. READY now carries `standing`. The same review found READY
+  pairing a new login's account with the old one's guild list, because nothing tied the two together.
+
+  **The hostile instance reaches attach clients too.** `/security-sweep` found a dispatch with no payload
+  turning the fan-out's spliced frame into invalid JSON, which disconnected every watching client on every
+  such frame. M19's lesson, one hop further out: what the daemon forwards is bounded against the instance,
+  not against a correct one.
+
+  **The manual pass, two accounts on two daemons, found one sentence**: a daemon killed under a verb
+  in flight printed one thing twice and did not say the request might have arrived anyway. Everything the
+  done-when names was walked by hand.
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -1077,9 +1115,10 @@ And on the daemon side, from M3:
   the first macOS user. A non-zero exit is data, not an error (`systemctl is-active` answers with one); use
   `mustSucceed` when it genuinely is a failure, so the error quotes the command and the tool's own output.
 - **Exit codes are load-bearing.** Daemon: 0 for a signal-initiated stop (a non-zero would make every
-  service manager treat an ordinary stop as a crash and restart it), 3 for "already running" — which the
-  systemd unit is told never to retry (`RestartPreventExitStatus=3`; launchd has no per-code equivalent and
-  is throttled instead). `norite daemon status`: 0 running, 1 stopped, 2 not installed. Changing any of
+  service manager treat an ordinary stop as a crash and restart it), 3 for "already running", and since M20
+  4 for a configuration no restart fixes (an attach socket it cannot open) — both of which the systemd unit
+  is told never to retry (`RestartPreventExitStatus=3 4`; launchd has no per-code equivalent and is
+  throttled instead). `norite daemon status`: 0 running, 1 stopped, 2 not installed. Changing any of
   these means changing the unit/plist template in the same commit.
 - **Report platform differences, don't paper over them.** launchd starts the agent as part of installing it
   and cannot do otherwise, so `Manager.StartsOnInstall()` exists and `install` prints what actually
@@ -2096,6 +2135,47 @@ And on the daemon as gateway client, from M19:
   wait. The gateway's fake validates every frame in both directions against
   `gateway-events.schema.json`, and writes its own close reasons — so wording the real server sends is
   checked by a manual pass against the real server, and nothing else.
+
+And on the attach socket and the relayed verbs, from M20:
+
+- **The token never crosses the socket.** An attach client names a method, a path and a body; the relay
+  performs the call with the daemon's token and returns the status and body. Nothing in `daemon/ipc` has a
+  field that could carry a token, and IDENTIFY is decoded strictly.
+- **A field added to any frame on the socket is a MINOR change, never a PATCH one.** Frames are decoded
+  strictly, and the version rule lets a PATCH-different daemon and client talk, so a field added in a patch
+  release would be refused as malformed instead of answered with "restart the daemon". The version is read
+  leniently first, so a MINOR mismatch always reports as one.
+- **Frames are encoded with `ipc.Marshal`**, which does not HTML-escape: `json.Marshal` rewrites `<` `>` `&`
+  as six-byte escapes inside a relayed body too, which let a hostile instance's answer outgrow the bounds.
+- **The relay's reach is a decision per route.** It refuses `/auth/*`, `/instance/*` and
+  `/users/@me/sessions`, and `TestEveryContractPathIsDecided` fails on any path in `openapi.yaml` without an
+  explicit relay-or-refuse entry. A new route gets one in the same commit.
+- **The fan-out never waits on a client.** Queuing is non-blocking and bounded in frames and bytes; a full
+  queue drops the client with 4012. The fan-out runs on the gateway connection's read loop, so a blocking
+  write there stops the daemon reading the gateway. The payload is encoded once and shared.
+- **A watching client is closed with resync (4100)** whenever the state it was built from is cleared: a
+  fresh session, its READY, the sign-in ending. A client that asked for no events is left alone.
+- **A verb is ids in, a typed result out.** Ids are digits, checked before anything is attached to. The
+  result is a view of the verb's own, filled field by field from `backend/apicontract`'s types, rendered
+  by `output.Render` as text or JSON from one value — the shape M48 extends. Its schema goes in
+  `contracts/cli-json/` in the same commit (rule 15), and a verb returning no object prints `done`.
+- **Every relayed outcome's exit code is decided in `daemonclient.Call`**, never in a verb: 4xx is 4,
+  except 401 and 429, which are 3 like a stopped daemon, a signed-out one or an unreachable instance; 5xx
+  is 1; a 2xx without the body it owed is an error, never an empty object reported as success. Every call
+  and every attach is bounded, so a hung daemon is exit 3, not a hang. Usage errors are `clierr.Usage`,
+  exit 2, and so is every flag urfave/cli refuses, through the `OnUsageError` the tree walk sets. 2 and 4
+  print without the `norite: ` prefix.
+- **A verb attaches on its first request**, after every flag check and confirmation, so a usage error is
+  exit 2 on a machine with no daemon running.
+- **Destructive verbs go through `confirm`**: `--yes` answers it, the question goes to stderr, and with no
+  terminal and no `--yes` it is `ErrNoTerminal` naming the flag.
+- **Text output passes every instance value through `termsafe`**, ids included; `--json` goes through
+  `output.WriteJSON`, which escapes what `termsafe.Block` would remove and is lossless to a parser. Never
+  `json.Marshal` straight to stdout.
+- **Testing a verb**: add a case to `verbCases`, which `TestEveryVerbHasACase` holds to the tree. The fake
+  daemon validates the request and your scripted answer against `openapi.yaml`, so a fixture missing a field
+  the instance always sends fails, and the output is validated against its `contracts/cli-json/`
+  definition.
 
 ## Project-specific skills
 

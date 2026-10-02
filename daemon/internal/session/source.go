@@ -120,6 +120,9 @@ type Source struct {
 	ended       chan struct{}
 	endedClosed bool
 	liveGen     uint64
+	// account names the sign-in adopted from the store, from the moment it is adopted until the daemon is
+	// signed out: what Status reports while a token is still being obtained.
+	account Account
 
 	// Owned by Run alone.
 	record      credentials.Record
@@ -171,6 +174,21 @@ func New(opts Options) *Source {
 // it waits only when the token in hand is no good at all. A daemon that is signed out waits here until the
 // store changes, which is what a gateway client blocked on it should do.
 func (s *Source) Current(ctx context.Context) (Credential, error) {
+	return s.awaitCredential(ctx, false)
+}
+
+// ErrSignedOut is CurrentUnlessSignedOut's answer for a daemon nobody is signed in to.
+var ErrSignedOut = errors.New("session: signed out")
+
+// CurrentUnlessSignedOut is Current for a caller that must not wait for a login: it waits while a sign-in
+// is being established or renewed, and returns ErrSignedOut as soon as the daemon is signed out — including
+// when it becomes so during the wait. A relayed request racing a logout, or a refused renewal, answers at
+// once rather than when its own timeout runs out (M20 /code-review).
+func (s *Source) CurrentUnlessSignedOut(ctx context.Context) (Credential, error) {
+	return s.awaitCredential(ctx, true)
+}
+
+func (s *Source) awaitCredential(ctx context.Context, unlessSignedOut bool) (Credential, error) {
 	for {
 		s.mu.Lock()
 		if s.phase == phaseLive {
@@ -185,14 +203,59 @@ func (s *Source) Current(ctx context.Context) (Credential, error) {
 			}
 			nudge(s.refreshNow)
 		}
+		signedOut := s.phase == phaseSignedOut
 		changed := s.changed
 		s.mu.Unlock()
+		if unlessSignedOut && signedOut {
+			return Credential{}, ErrSignedOut
+		}
 
 		select {
 		case <-ctx.Done():
 			return Credential{}, ctx.Err()
 		case <-changed:
 		}
+	}
+}
+
+// Standing is whether the daemon is signed in, as Status reports it.
+type Standing int
+
+const (
+	// Starting: a sign-in is being established — the store not yet read, a token being obtained or renewed.
+	// Current will answer once it is, or once the daemon turns out to be signed out.
+	Starting Standing = iota
+	// SignedOut: nothing to sign in with until the store changes. Current would wait for a login.
+	SignedOut
+	// Live: Current answers at once.
+	Live
+)
+
+// Account names a sign-in without its tokens.
+type Account struct {
+	InstanceURL string
+	UserID      string
+	// Username is as the store holds it, which is a file a person can edit: foreign text.
+	Username   string
+	Generation uint64
+}
+
+// Status reports, without waiting, whether the daemon is signed in and as whom. The account is empty while
+// signed out, and while starting until a credential has been read from the store.
+//
+// For a caller that must not block on a daemon nobody has signed in to — an attach client asking who it is
+// talking to, a relayed request that should fail at once rather than wait for a login. Current is still what
+// gets a token.
+func (s *Source) Status() (Standing, Account) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch s.phase {
+	case phaseLive:
+		return Live, s.account
+	case phaseSignedOut:
+		return SignedOut, Account{}
+	default:
+		return Starting, s.account
 	}
 }
 
@@ -377,6 +440,10 @@ func (s *Source) signIn(ctx context.Context, refused bool) bool {
 		s.set(func() {
 			s.phase, s.cred, s.stale = phaseStarting, Credential{}, false
 			s.ended, s.endedClosed, s.liveGen = make(chan struct{}), false, s.gen
+			s.account = Account{
+				InstanceURL: record.InstanceURL, UserID: record.UserID, Username: record.Username,
+				Generation: s.gen,
+			}
 		})
 		return true
 	}
@@ -628,6 +695,7 @@ func (s *Source) signOut(level zerolog.Level, msg string) {
 	s.set(func() {
 		already = s.phase == phaseSignedOut
 		s.phase, s.cred, s.stale = phaseSignedOut, Credential{}, false
+		s.account = Account{}
 	})
 	if !already {
 		s.log.WithLevel(level).Msg(msg)

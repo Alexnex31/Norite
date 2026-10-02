@@ -53,10 +53,10 @@ Environment=XDG_STATE_HOME={{ .StateHome }}
 Restart=on-failure
 RestartSec=5s
 
-# Exit code 3 is "another daemon is already running for this user". That is the one failure that must never
-# be retried: the condition is by definition already satisfied, and retrying produces a restart loop that
-# achieves nothing.
-RestartPreventExitStatus=3
+# Two exits must never be retried. 3 is "another daemon is already running for this user": the condition
+# is by definition already satisfied. 4 is a configuration no restart can fix, such as an attach socket path
+# too long for the platform. Retrying either produces a restart loop that achieves nothing.
+RestartPreventExitStatus=3 4
 
 KillSignal=SIGTERM
 # Comfortably longer than the daemon's own shutdown path needs, so the daemon decides how a stop ends

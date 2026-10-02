@@ -1049,12 +1049,21 @@ of this section.
   behind and six hours ahead, and replacing the estimate with the wall clock fails both — one handing out
   expired tokens, the other refreshing in a loop. The third and fourth each have a test that fails with
   the guard removed.
-- **M20 — Daemon↔client local IPC**: the Unix domain socket / named pipe, 4-byte-length-prefixed JSON
-  framing, reusing the gateway's op-code/DISPATCH shape and one shared client-side event parser, and the
-  semver MAJOR-must-match/MINOR-window version-compatibility handshake (read with the `0.x` rule below).
-  The daemon's write path to each attach client is asynchronous and bounded (a per-connection outbound
-  channel with fixed capacity, fed by its own writer goroutine); a client whose socket buffer fills gets
-  dropped rather than blocking the daemon.
+- **M20 — Daemon↔client local IPC**: done. The daemon serves an attach socket: the gateway's DISPATCH
+  stream fanned out to every client that asks, and a relay that performs a client's REST call with the
+  daemon's own token, which never crosses the socket. On top of it the command tree gains forty verbs over
+  everything M12–M17 built, folded in from M17a. `daemon/ipc` (the protocol and the client half, outside
+  `internal/` for the CLI and the GUI), `daemon/internal/attach` (the server half), `daemon/internal/relay`,
+  `contracts/daemon-ipc.schema.json`; `cli/internal/verbs`, `daemonclient` and `output`, and nine new schemas in
+  `contracts/cli-json/`; and `GET /users/@me/guilds`. Decisions are in this entry, in `docs/architecture.md`
+  §3 and §4, and in `docs/security-ledger.md`.
+
+  As planned, which the rest of this entry records: the Unix domain socket / named pipe, 4-byte-length-
+  prefixed JSON framing, reusing the gateway's op-code/DISPATCH shape and one shared client-side event
+  parser, and the semver MAJOR-must-match/MINOR-window version-compatibility handshake (read with the `0.x`
+  rule below). The daemon's write path to each attach client is asynchronous and bounded (a per-connection
+  outbound channel with fixed capacity, fed by its own writer goroutine); a client whose socket buffer
+  fills gets dropped rather than blocking the daemon.
 
   **While MAJOR is 0, MINOR is the breaking component, specified 2026-09-30 with ADR 0033.** "MAJOR must
   match" protects nothing during `0.x`, because every version has MAJOR 0 and SemVer lets any `0.y`
@@ -1146,6 +1155,69 @@ of this section.
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
   `docs/design/tui/` change subject to §16's check that a screen id is claimed by exactly one milestone.
 
+  **Planning settled where the socket lives, which nothing had said.** `<state-dir>/daemon.sock` on Unix,
+  inside the `0700` directory that already holds the single-instance lock, so a socket file found there
+  after the lock is taken is stale by construction; the peer's uid is checked as well, and a path past
+  `sun_path`'s 107 bytes (104 on macOS) is refused naming the limit. On Windows a named pipe protects
+  nothing by default — its DACL lets Everyone read it, and any account can claim its name first — so the
+  daemon creates it as the first instance with an owner-only DACL, and the client refuses a pipe another
+  account owns before writing a byte. `$XDG_RUNTIME_DIR` was considered and not taken: macOS has none,
+  and a lingering user service can outlive the session that owns it.
+
+  **`norite login` keeps writing the store, which `architecture.md` §2 said it would stop doing here.** A
+  login has to work with no daemon running, so crossing the socket would need the store write as its
+  fallback — two writers for one credential — and M19's watch already delivers a login to a running daemon
+  within the second. §2 is corrected. What the CLI never does is read a token back.
+
+  **The relay refuses three surfaces, not two.** `/auth/*` and `/instance/*` as planned (B1), and
+  `/users/@me/sessions`, which lists every device and signs them out: the same credential management by
+  another path. `TestEveryContractPathIsDecided` walks `openapi.yaml` and needs an explicit relay-or-refuse
+  decision for every path, so the next route is a decision rather than a default. A 401 goes to the
+  session and is retried once, only as the same sign-in.
+
+  **The four questions M17a left, answered.** Ids only, digits only, checked before anything is attached
+  to, since an id goes into a request path. One confirmation helper for every verb that destroys something
+  or gives a guild away, answered by `--yes` and failing as `ErrNoTerminal` without a terminal. Paging by
+  `--limit`, `--before` and `--after`, each page carrying the cursor for the next, and no `--all`. And the
+  exit codes (C2): 2 a local usage error, 3 the daemon unavailable — not running, not signed in, the
+  instance unreachable or throttling — 4 the instance's refusal, 1 anything else. 2 and 4 print without
+  the `norite: ` prefix.
+
+  **A verb that prints no object prints `done`**, naming what it did and to what, after `instance invite
+  revoke`'s precedent. M48's entry asked whether such a verb should emit JSON at all; for the verbs
+  built here it does, and M48 settles the two older commands that still ignore the flag.
+
+  **`--json` is lossless and inert.** One writer escapes, as `\uXXXX`, every rune `termsafe.Block`
+  removes, and `termsafe` exports that predicate so the two cannot disagree. `instance invite` moved onto
+  it; with `json.MarshalIndent` restored its test fails on a raw override.
+
+  **Every verb is held to two contracts by its tests.** A fake daemon answers through `openapi.yaml`: the
+  route and method must exist, the query parameters must be declared, the body must match the request
+  schema, and every scripted answer must match the response schema for its status. Each verb's `--json`
+  output is validated against its definition, and `TestEveryVerbHasACase` walks the tree in both
+  directions. Writing that fake found the CLI decoding an instance's refusal from the top level rather than
+  its `error` envelope, which had lost every refusal's message.
+
+  **The review passes, and what each found.** `/security-sweep`: a dispatch with no payload made the
+  fan-out's spliced frame invalid JSON and disconnected every watching client, on every such frame a
+  hostile instance chose to send; five rejections went to the ledger. `/optimization-review` measured the
+  fan-out at about 330 ns and four allocations a client per event, the payload never copied, and changed
+  nothing. `/code-review` found fifteen; the ones a script would meet:
+  - a mistyped subcommand exited 3 through urfave/cli's help path, which since this milestone means
+    "unavailable";
+  - a bad flag with no daemon running said the daemon was not running;
+  - a daemon still signing in was reported as signed out, inviting a login that would supersede a good
+    sign-in — READY now carries `standing`;
+  - a socket that could not be opened restarted every five seconds for ever — it exits 4 and the unit does
+    not retry it;
+  - a READY could pair a new login's account with the old one's guilds.
+
+  `/security-review` reported nothing.
+
+  **The manual pass ran two accounts on two daemons against a real backend**, the whole command-line journey
+  below included. It found one thing: killing the daemon under a verb whose request was in flight printed
+  one sentence twice and did not say the request might have arrived anyway.
+
   Depends on M14, M15, M16, M16a, M16b and M17 (the endpoints) as well as M19. Done when: a CLI-side test
   client attaches to the daemon's socket and receives the same DISPATCH events the daemon itself gets from
   the real gateway; a deliberately frozen test client gets dropped without stalling delivery to a second,
@@ -1157,7 +1229,22 @@ of this section.
   versions read by a moderator — a guild's recording switched on and off by its owner and its log paged —
   a tag created, applied to a message in another channel of the same guild, and removed; with `--json`
   output validated against `contracts/cli-json/` and a non-member's refusal reported as a usage error
-  rather than a crash.
+  rather than a crash. All met:
+  - **The first**: `TestAnAttachedClientReceivesWhatTheGatewaySends` runs the real session, gateway client
+    and attach server against the schema-validating stand-in gateway, with `daemon/ipc`'s client on the
+    socket. The manual pass streamed the real gateway's events to a client the same way.
+  - **The second**: `TestAFrozenClientIsDroppedWithoutStallingAHealthyOne`, which with a blocking enqueue
+    stalls at 306 of 2,000 events. By hand, 1,500 messages reached the healthy client, none missing, while
+    the frozen one was dropped with 4012.
+  - **The third**: `TestTwoVerbsAtOnceLeaveTheAccountSignedInAndNoTokenCrossesTheSocket`, against a
+    stand-in doing M4's reuse detection, records every byte both sockets carried. By hand, 1,500 sends ran
+    eight at a time without a refusal.
+  - **The command-line journey**: walked by hand, step by step, and each step has a test against the
+    contract-checked fake.
+  - **"Reported as a usage error, not a crash"** is met as the presentation: printed without the crash
+    prefix, under its own exit code, 4, rather than 2. 4 keeps "the instance said no" apart from "my
+    arguments were wrong", which a script retrying or reporting needs to tell apart (C2, decided at
+    planning).
 - **M20a — First usable client, end to end**: the smallest thing a person can actually read and send a
   message in — one pane, a message list, a composer, and quit. No guild rail, no channel list, no panes or
   splits, no chords beyond quit, no theming, no scrollback search. Depends on M20 (the daemon socket the
@@ -1457,11 +1544,13 @@ of this section.
   **Two verbs already accept `--json` and ignore it**, and they are the ones to start from because a
   scripted caller gets human text today with nothing to tell it apart from JSON: `norite daemon status`
   (M3) and `norite logout` (M7). `--json` is declared at the root, so every command advertises it in its
-  own help whether or not it honours it. `norite instance invite create|list|revoke` (M10) is the shape to
-  follow — it is the only group with a schema in `contracts/cli-json/` so far. Whether a verb that prints
-  no data should emit JSON at all is the decision to make here rather than leave per-command: a fixed
-  `{"ok": true}`-shaped result and a silent no-op are both defensible, and the one thing that is not is the
-  current split, where the flag's meaning depends on which verb you typed.
+  own help whether or not it honours it. M20 built what the rest stand on: every relayed verb returns a
+  typed result that `cli/internal/output` renders as text or JSON from one value, nine groups have schemas in
+  `contracts/cli-json/`, and a verb that changes something without returning it prints a `done`
+  acknowledgement, as `norite instance invite revoke` (M10) already did. So whether a verb printing no data
+  emits JSON is decided for everything since M10, and this milestone brings the two older commands into
+  line rather than choosing afresh — the one thing that cannot stand is the flag's meaning depending on
+  which verb you typed.
 
   Done when: a script can parse `--json` against its documented schema, the same call renders in a pane
   without a second code path, and no verb accepts the flag while ignoring it.

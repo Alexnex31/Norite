@@ -4,8 +4,8 @@
 package instanceadmin
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +15,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/apiclient"
+	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
 // `norite instance invite` — the codes that let somebody onto a gated instance.
@@ -22,13 +23,13 @@ import (
 // # Why this authenticates as the operator rather than as an administrator
 //
 // The endpoints behind it accept either an instance administrator's access token or an operator token.
-// This command can only produce the second, and that is a consequence of where the CLI sits rather than a
-// decision: an attach client does not hold its account's tokens — the daemon does (ADR 0011) — and the
-// local IPC socket that would let the CLI ask the daemon to make an authenticated call is M20's. Until
-// then, "run it where the config file is" is the only authority a command like this can present.
+// This command presents the second. An attach client does not hold its account's tokens — the daemon does
+// (ADR 0011) — and the daemon's request relay, which since M20 makes the CLI's calls as the account,
+// refuses `/instance/*`: administering the instance stays off the socket until a milestone decides
+// otherwise. "Run it where the config file is" is the authority this command presents instead.
 //
 // The practical effect is that invites are managed from the machine running the instance, which is the
-// same place `norite instance bootstrap` runs and a reasonable place for this to live in the meantime.
+// same place `norite instance bootstrap` runs, and where a daemon need not be running at all.
 
 // inviteView is one invite as this command prints it, and the shape contracts/cli-json/ pins.
 //
@@ -185,9 +186,10 @@ func (r *Runner) listInvites(ctx context.Context) error {
 		if invites == nil {
 			invites = []inviteView{}
 		}
-		// Unsanitized on purpose here, and only here: --json output is parsed, not printed to a terminal,
-		// and a caller piping it into jq needs the code the instance actually issued rather than one with
-		// a replacement character in it. json.Marshal escapes control characters for the parser's sake.
+		// Not sanitized, because a caller piping this into jq needs the code the instance actually issued
+		// rather than one with a replacement character in it — and not raw either, because --json with no
+		// pipe after it prints to a terminal. output.WriteJSON escapes what a terminal would act on, which a
+		// parser reads back unchanged (M20). json.Marshal alone left C1 controls and bidi overrides raw.
 		return r.printJSON(invites)
 	}
 
@@ -246,16 +248,14 @@ func (r *Runner) connect() (*apiclient.Client, string, error) {
 	return r.client(baseURL), token, nil
 }
 
-// printJSON writes one value as the machine-readable form.
-//
-// Indented and newline-terminated: this output is read by people as often as by scripts, and jq does not
-// care either way.
+// printJSON writes one value as the machine-readable form, through the CLI's one JSON writer: indented,
+// newline-terminated, and with every rune a terminal would act on escaped (output.WriteJSON).
 func (r *Runner) printJSON(v any) error {
-	encoded, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding output: %w", err)
+	var buf bytes.Buffer
+	if err := output.WriteJSON(&buf, v); err != nil {
+		return err
 	}
-	r.printf("%s\n", encoded)
+	r.printf("%s", buf.String())
 	return nil
 }
 

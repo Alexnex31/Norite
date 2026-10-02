@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/tag.schema.json",
+  "title": "norite tag --json",
+  "description": "The machine-readable output of `norite tag list`, `create`, `delete`, `apply`, `unapply` and `on`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/tagList",
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/tag",
+      "title": "create"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "delete, apply, unapply"
+    },
+    {
+      "$ref": "#/$defs/appliedTagList",
+      "title": "on"
+    }
+  ],
+  "$defs": {
+    "tag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "guild_id",
+        "name",
+        "shared",
+        "created_by",
+        "created_at"
+      ],
+      "description": "A tag.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "guild_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "name": {
+          "type": "string"
+        },
+        "shared": {
+          "type": "boolean",
+          "description": "Shared with the guild, or private to its creator."
+        },
+        "created_by": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "tagList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tag"
+      }
+    },
+    "appliedTag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "shared",
+        "applied_by",
+        "applied_at"
+      ],
+      "description": "A tag on a message.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "name": {
+          "type": "string"
+        },
+        "shared": {
+          "type": "boolean"
+        },
+        "applied_by": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "applied_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "appliedTagList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/appliedTag"
+      }
+    }
+  }
+}

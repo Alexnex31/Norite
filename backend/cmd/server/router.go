@@ -284,7 +284,16 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 						opts.Auth.DevicePollRoutes(r)
 					})
 				})
-				r.Route("/users", opts.Auth.UserRoutes)
+				// /users is the account's own surface, and two packages hang routes off it: auth for the
+				// account and its sessions, guilds for its memberships (M20). One subrouter mounting both,
+				// because chi refuses a second mount on a path and a route registered beside a mount is
+				// one nobody reading this would look for.
+				r.Route("/users", func(r chi.Router) {
+					opts.Auth.UserRoutes(r)
+					if opts.Guilds != nil {
+						opts.Guilds.UserRoutes(r)
+					}
+				})
 			}
 
 			// Guilds, channels, roles and membership (M12). Inside the authenticated group and in the base

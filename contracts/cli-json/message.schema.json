@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/message.schema.json",
+  "title": "norite message --json",
+  "description": "The machine-readable output of `norite message list`, `send`, `edit`, `delete` and `history`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/messagePage",
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/message",
+      "title": "send, edit"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "delete"
+    },
+    {
+      "$ref": "#/$defs/history",
+      "title": "history"
+    }
+  ],
+  "$defs": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "channel_id",
+        "author_id",
+        "content",
+        "reply_to_id",
+        "created_at",
+        "edited_at",
+        "tags"
+      ],
+      "description": "One message.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "channel_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "author_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "content": {
+          "type": "string",
+          "description": "Exactly as sent. Rendering it is the client's business (rule 9); here it is escaped only where a terminal would act on it."
+        },
+        "reply_to_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "edited_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "tags": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "tag.schema.json#/$defs/appliedTag"
+          },
+          "description": "null when the credential cannot read tags; [] when the message has none."
+        }
+      }
+    },
+    "messagePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next"
+      ],
+      "description": "A page of a channel's messages, newest first.",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/message"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The id to pass to --before for the next page, or null on the last page: a page shorter than --limit."
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "content",
+        "edited_at"
+      ],
+      "description": "A message as it read before an edit.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "content": {
+          "type": "string"
+        },
+        "edited_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message_id",
+        "channel_id",
+        "author_id",
+        "current_content",
+        "edited_at",
+        "deleted_at",
+        "e2e",
+        "versions",
+        "next"
+      ],
+      "description": "A message's earlier versions, newest first, and what it says now.",
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "channel_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "author_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "current_content": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What it says now; null when deleted, or end-to-end encrypted."
+        },
+        "edited_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "deleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "e2e": {
+          "type": "boolean",
+          "description": "End-to-end encrypted, so no version is readable (rule 13)."
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/version"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The id to pass to --before for older versions, or null."
+        }
+      }
+    }
+  }
+}
