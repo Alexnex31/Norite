@@ -97,6 +97,14 @@ func Text(s string) string { return filter(s, false) }
 // reposition a cursor or repaint a line. Never use it for a value printed inside a sentence.
 func Block(s string) string { return filter(s, true) }
 
+// Removes reports whether Block removes r: what acts on a terminal or reorders what it prints, newline and
+// tab aside.
+//
+// For an encoder that has to keep such a rune and make it inert rather than drop it — the CLI's --json
+// writer escapes each one as \uXXXX, so the output is lossless to a parser and harmless to a terminal (M20).
+// Exported as the predicate itself so the two cannot disagree about which runes those are.
+func Removes(r rune) bool { return mustRemove(r, true) }
+
 func filter(s string, keepLayout bool) string {
 	// Invalid bytes go first, and that ordering is load-bearing rather than tidiness. Ranging a string
 	// decodes an invalid byte as U+FFFD, which is printable, so a raw 0x9b — CSI itself, and not valid

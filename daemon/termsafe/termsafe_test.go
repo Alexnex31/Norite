@@ -298,3 +298,17 @@ func TestBlockKeepsTheUnicodeLineSeparators(t *testing.T) {
 		t.Errorf("Block(%q) = %q, want it unchanged", in, got)
 	}
 }
+
+// TestRemovesIsWhatBlockRemoves holds the exported predicate to the filter, rune for rune, across every
+// plane a terminal could be handed.
+func TestRemovesIsWhatBlockRemoves(t *testing.T) {
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue // not a rune a valid string can hold
+		}
+		removed := Block(string(r)) != string(r)
+		if removed != Removes(r) {
+			t.Fatalf("U+%04X: Block removes it %v, Removes says %v", r, removed, Removes(r))
+		}
+	}
+}

@@ -58,12 +58,35 @@ func TestReport(t *testing.T) {
 			wantMessage: "norite: something went wrong",
 		},
 		{
-			// The prefix is added here, once. A command that includes its own gets "norite: norite: …",
-			// which is what `norite instance invite revoke` printed until a manual run read it.
+			// Exit 2 is a usage error however it was raised, so it prints like ErrNoTerminal's: without the
+			// prefix (M20). The prefix it does not carry is still never the command's to add — see
+			// TestUsageMessagesDoNotCarryThePrefixMainAdds — or the exit-1 path would print it twice.
 			name:        "a usage error from a command",
 			err:         cli.Exit("which invite? Pass the code to revoke.", 2),
 			wantCode:    2,
-			wantMessage: "norite: which invite? Pass the code to revoke.",
+			wantMessage: "which invite? Pass the code to revoke.",
+		},
+		{
+			name:        "a usage error found by a verb",
+			err:         clierr.Usage("pass the guild's id"),
+			wantCode:    2,
+			wantMessage: "pass the guild's id",
+		},
+		{
+			// The done-when's non-member: exit 4, distinct from a crash and from the caller's own mistake,
+			// and printed as the instance's answer rather than as a failure of this program.
+			name: "an instance refusing the request",
+			err: fmt.Errorf("renaming the guild: %w", &clierr.RefusedError{
+				Status: 404, Code: "not_found", Message: "not found", RequestID: "req-1",
+			}),
+			wantCode:    4,
+			wantMessage: "renaming the guild: not found (request req-1)",
+		},
+		{
+			name:        "a daemon that is not running",
+			err:         clierr.Unavailable("the daemon is not running; start it with `norite daemon start`"),
+			wantCode:    3,
+			wantMessage: "norite: the daemon is not running; start it with `norite daemon start`",
 		},
 		{
 			// `norite daemon status` reports through the code alone and has already said its piece.
