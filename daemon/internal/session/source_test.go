@@ -679,8 +679,9 @@ func TestADroppedTokenGoesBackToItsOwnInstance(t *testing.T) {
 	h.advanceUntil(time.Second, 15*time.Second, func() bool { return h.f.handedBackToken() != "" })
 	assert.Equal(t, "nrt_rotated_1", h.f.handedBackToken(), "the issuing instance is the one told to revoke it")
 	assert.Empty(t, other.handedBackToken(), "the instance the login switched to never saw this token")
-	require.Eventually(t, func() bool { return strings.Contains(h.logs.String(), "revoked the renewed credential") },
-		time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool {
+		return strings.Contains(h.logs.String(), "revoked the token this daemon could no longer keep")
+	}, time.Second, 5*time.Millisecond)
 }
 
 // A hand-back that fails is logged and survived: a token it could not revoke leaves exactly the situation

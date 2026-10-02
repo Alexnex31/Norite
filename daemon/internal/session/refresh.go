@@ -117,7 +117,8 @@ func refreshSession(ctx context.Context, client *http.Client, instanceURL, refre
 	return pair, serverTime, nil
 }
 
-// handBackToken revokes a refresh token this daemon obtained and then could not keep.
+// handBackToken revokes a refresh token this daemon holds and can no longer keep: the one it held when a
+// logout cleared the store or a login replaced it, or one it renewed while either happened.
 //
 // Best-effort by construction, and never fatal: a token it failed to hand back leaves exactly the situation
 // that existed before this function did. Both outcomes are logged, because the person reading that log is
@@ -135,14 +136,14 @@ func handBackToken(parent context.Context, log zerolog.Logger, client *http.Clie
 
 	body, err := json.Marshal(map[string]string{"refresh_token": refreshToken})
 	if err != nil {
-		log.Warn().Err(err).Msg("could not build the request to revoke the token that was dropped")
+		log.Warn().Err(err).Msg("could not build the request to revoke the token this daemon could no longer keep")
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		instanceURL+"/api/v1/auth/logout", bytes.NewReader(body))
 	if err != nil {
-		log.Warn().Err(err).Msg("could not build the request to revoke the token that was dropped")
+		log.Warn().Err(err).Msg("could not build the request to revoke the token this daemon could no longer keep")
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -150,7 +151,7 @@ func handBackToken(parent context.Context, log zerolog.Logger, client *http.Clie
 	resp, err := client.Do(req)
 	if err != nil {
 		// No URL and no wrapped transport error, for the reason refreshSession gives.
-		log.Warn().Msg("could not reach the instance to revoke the token that was dropped; " +
+		log.Warn().Msg("could not reach the instance to revoke the token this daemon could no longer keep; " +
 			"it stays valid until it expires")
 		return
 	}
@@ -158,8 +159,8 @@ func handBackToken(parent context.Context, log zerolog.Logger, client *http.Clie
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		log.Warn().Int("status", resp.StatusCode).
-			Msg("the instance did not accept the revocation of the token that was dropped")
+			Msg("the instance did not accept the revocation of the token this daemon could no longer keep")
 		return
 	}
-	log.Info().Msg("revoked the renewed credential that the store could not keep")
+	log.Info().Msg("revoked the token this daemon could no longer keep")
 }
