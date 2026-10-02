@@ -477,13 +477,14 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 }
 
 // ListForMember returns every guild userID is a member of, ordered by id: the summaries the gateway's READY
-// carries (M18).
+// carries (M18), and GET /users/@me/guilds (M20).
 //
 // No actor and no authorize call, unlike every other read here, and that is the point rather than an
 // omission: the question is "which guilds am I in", asked by the account itself about itself, and the
-// answer is the membership rows. There is no guild in the request to authorize against. The caller is the
-// gateway, which has already authenticated userID and checked its session is live; nothing else may pass a
-// user id here that did not come from a credential.
+// answer is the membership rows. There is no guild in the request to authorize against. The callers are
+// the gateway, which has already authenticated userID and checked its session is live, and the handler,
+// which takes it from the request's actor; nothing may pass a user id here that did not come from a
+// credential.
 //
 // Deliberately the same Guild value GET /guilds/{id} returns, so a guild has one wire shape whether it
 // arrives over REST or in READY.

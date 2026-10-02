@@ -2348,6 +2348,42 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /users/@me/guilds:
+    get:
+      summary: List the guilds this account is a member of
+      description: >
+        Every guild the caller belongs to, ordered by id, in the shape `GET /guilds/{guild_id}` returns.
+        The same set the gateway's READY carries as summaries, for a client that has no gateway connection
+        of its own — the command tree's verbs, which reach the instance through the daemon's relay (M20).
+
+
+        **Returns every guild, with no pagination**, like the channel and role lists, and bounded the same
+        way: at creation rather than at read. An account owns at most `[limits].guilds_per_account`, and
+        nothing adds a membership except creating a guild until joining exists (M57).
+
+
+        Whose list it is comes from the credential and nowhere else; there is no id in the request. An
+        account in no guild answers with an empty array.
+      operationId: listCurrentUserGuilds
+      tags: [guilds]
+      responses:
+        "200":
+          description: The caller's guilds, ordered by id. Empty array, never null, when there are none.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Guild"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential is an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /guilds:
     post:
       summary: Create a guild

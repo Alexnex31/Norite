@@ -124,7 +124,36 @@ func (h *Handler) Routes(r chi.Router) {
 	})
 }
 
+// UserRoutes mounts the guild endpoints that hang off the account rather than off a guild, inside the
+// caller's /users route.
+//
+// One today: the account's own memberships (M20). It lives with the guild handler because what it returns
+// is guilds, in the same wire shape GET /guilds/{guild_id} answers with.
+func (h *Handler) UserRoutes(r chi.Router) {
+	r.With(auth.RequireScope(auth.ScopeGuildsRead)).Get("/@me/guilds", h.listMyGuilds)
+}
+
 // --- guilds ---
+
+// listMyGuilds answers GET /users/@me/guilds: every guild the caller is a member of.
+//
+// Rule 1's question here is whose list it is, and it is the actor's own: the user id comes from the
+// credential and nowhere else, so there is no guild in the request to authorize against and no id a caller
+// could substitute. Uncursored for the reason the channel and role lists are (see ListForMember).
+func (h *Handler) listMyGuilds(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok {
+		return
+	}
+
+	guilds, err := h.svc.ListForMember(r.Context(), actor.UserID)
+	if err != nil {
+		h.writeErr(w, r, err)
+		return
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, guilds)
+}
 
 type createGuildRequest struct {
 	Name        string  `json:"name" validate:"required,min=2,max=100"`

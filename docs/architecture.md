@@ -1065,7 +1065,7 @@ POST   /auth/2fa/verify                   -- step two of a login or an OAuth exc
 
 GET    /users/@me
 PATCH  /users/@me
-GET    /users/@me/guilds
+GET    /users/@me/guilds                   -- the account's own memberships, uncursored, guilds.read (M20)
 GET    /users/@me/sessions                 -- one entry per *device*, not per session row: the rows rotate
                                            --   every refresh, so a listing of them is useless (M11)
 DELETE /users/@me/sessions/{sessionID}     -- signs that device out, family and all (M11)
