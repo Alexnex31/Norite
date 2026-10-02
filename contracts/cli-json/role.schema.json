@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/role.schema.json",
+  "title": "norite role --json",
+  "description": "The machine-readable output of `norite role list`, `create`, `update`, `reorder` and `delete`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/roleList",
+      "title": "list, reorder"
+    },
+    {
+      "$ref": "#/$defs/role",
+      "title": "create, update"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "delete"
+    }
+  ],
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "guild_id",
+        "name",
+        "permissions",
+        "position",
+        "color",
+        "hoist",
+        "mentionable",
+        "is_default",
+        "created_at",
+        "updated_at"
+      ],
+      "description": "One role.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "guild_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "name": {
+          "type": "string"
+        },
+        "permissions": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A permission bitfield as a decimal string: 63 bits do not survive a float64."
+        },
+        "position": {
+          "type": "integer"
+        },
+        "color": {
+          "type": "integer"
+        },
+        "hoist": {
+          "type": "boolean"
+        },
+        "mentionable": {
+          "type": "boolean"
+        },
+        "is_default": {
+          "type": "boolean",
+          "description": "True for @everyone."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "roleList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/role"
+      }
+    }
+  }
+}

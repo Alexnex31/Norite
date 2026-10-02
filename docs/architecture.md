@@ -1721,11 +1721,11 @@ that drew a screen.
 `--help` and shell completions for every command, and declares the global `--json` flag. This sentence
 once put the machinery that renders it at M48; it arrived per command instead. `norite instance invite`
 honoured it first (M10), and M20's verbs each return a typed result that one shared renderer prints as text
-or JSON, each with its schema in `contracts/cli-json/`. M48 extends that renderer to the TUI's panes and
-decides what a command printing no data emits; until then `norite daemon status` and `norite logout` ignore
-the flag. The tree lives
-in `internal/cliapp`, not under `cmd/`, so it can be constructed and exercised in tests without spawning a
-process; `cmd/app/main.go` owns process lifetime and exit codes and nothing else. A mistyped command exits
+or JSON, each with its schema in `contracts/cli-json/`; a verb whose request returns no object prints an
+acknowledgement naming what it did, as `instance invite revoke` already did. M48 extends that renderer to
+the TUI's panes, and settles `norite daemon status` and `norite logout`, which until then ignore the flag.
+The tree lives in `internal/cliapp`, not under `cmd/`, so it can be constructed and exercised in tests
+without spawning a process; `cmd/app/main.go` owns process lifetime and exit codes and nothing else. A mistyped command exits
 non-zero rather than printing help and succeeding, which `urfave/cli` does by default. *Where the choice was contested*: over
 `spf13/cobra`, the heavier ecosystem default, for a lighter dependency and less per-command boilerplate
 across what will become dozens of commands; nested subcommand groups, the one thing this CLI genuinely needs

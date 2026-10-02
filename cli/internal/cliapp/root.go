@@ -19,6 +19,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
+	"github.com/Alexnex31/Norite/cli/internal/verbs"
 )
 
 // Version is the build's version string, overridden at link time by goreleaser.
@@ -86,12 +87,12 @@ func New(out, errOut io.Writer) *cli.Command {
 			},
 		},
 
-		Commands: []*cli.Command{
+		Commands: append([]*cli.Command{
 			login.Command(),
 			login.LogoutCommand(),
 			daemonctl.GroupCommand(),
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
-		},
+		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 }

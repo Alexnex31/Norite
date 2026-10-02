@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/overwrite.schema.json",
+  "title": "norite overwrite --json",
+  "description": "The machine-readable output of `norite overwrite set` and `delete`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/overwrite",
+      "title": "set"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "delete"
+    }
+  ],
+  "$defs": {
+    "overwrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel_id",
+        "target_id",
+        "type",
+        "allow",
+        "deny"
+      ],
+      "description": "One permission overwrite on a channel.",
+      "properties": {
+        "channel_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "target_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "type": {
+          "enum": [
+            "role",
+            "member"
+          ]
+        },
+        "allow": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A permission bitfield as a decimal string: 63 bits do not survive a float64."
+        },
+        "deny": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A permission bitfield as a decimal string: 63 bits do not survive a float64."
+        }
+      }
+    }
+  }
+}

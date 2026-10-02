@@ -45,6 +45,17 @@ func Daemon(version string) Connector {
 	}
 }
 
+// Commands returns every verb group, to be mounted at the root.
+func Commands(connect Connector) []*cli.Command {
+	return []*cli.Command{
+		guildCommand(connect),
+		channelCommand(connect),
+		roleCommand(connect),
+		memberCommand(connect),
+		overwriteCommand(connect),
+	}
+}
+
 // env is what a verb runs with.
 type env struct {
 	out  io.Writer

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/member.schema.json",
+  "title": "norite member --json",
+  "description": "The machine-readable output of `norite member list`, `update`, `remove`, and `role add` and `role remove`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/memberPage",
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/member",
+      "title": "update, role add, role remove"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "remove"
+    }
+  ],
+  "$defs": {
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guild_id",
+        "user_id",
+        "nickname",
+        "roles",
+        "mute",
+        "deaf",
+        "joined_at"
+      ],
+      "description": "One guild member.",
+      "properties": {
+        "guild_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "user_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "nickname": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "A Snowflake ID, as a decimal string."
+          },
+          "description": "The ids of the roles the member holds, @everyone aside."
+        },
+        "mute": {
+          "type": "boolean"
+        },
+        "deaf": {
+          "type": "boolean"
+        },
+        "joined_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "memberPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next"
+      ],
+      "description": "A page of members, in id order.",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/member"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The id to pass to --after for the next page, or null on the last page: a page shorter than --limit."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/guild.schema.json",
+  "title": "norite guild --json",
+  "description": "The machine-readable output of `norite guild list`, `create`, `show`, `update`, `delete`, `transfer`, `audit-log` and `recording-log`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/guildList",
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/guild",
+      "title": "create, show, update, transfer"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "delete"
+    },
+    {
+      "$ref": "#/$defs/auditPage",
+      "title": "audit-log"
+    },
+    {
+      "$ref": "#/$defs/recordingPage",
+      "title": "recording-log"
+    }
+  ],
+  "$defs": {
+    "guild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "description",
+        "owner_id",
+        "icon_hash",
+        "recording",
+        "created_at",
+        "updated_at"
+      ],
+      "description": "One guild.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "icon_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recording": {
+          "type": "boolean",
+          "description": "Whether the guild records every message (M16b); switched by its owner with `norite guild update --recording on|off`."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "guildList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/guild"
+      }
+    },
+    "auditEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "action",
+        "actor_id",
+        "target_id",
+        "changes",
+        "created_at"
+      ],
+      "description": "One audit log entry.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "action": {
+          "type": "string",
+          "description": "The audit log's verb: role.create, guild.update, message.delete, …"
+        },
+        "actor_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "changes": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "The entry's diff exactly as the instance recorded it: a changed field is an object with from and/or to, a context field a scalar."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "auditPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next"
+      ],
+      "description": "A page of the audit log, newest first.",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/auditEntry"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The id to pass to --before for the next page, or null on the last page: a page shorter than --limit."
+        }
+      }
+    },
+    "recordingEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "action",
+        "actor_id",
+        "channel_id",
+        "message_id",
+        "content",
+        "created_at"
+      ],
+      "description": "One entry of a recording guild's message log.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "action": {
+          "enum": [
+            "create",
+            "edit",
+            "delete"
+          ]
+        },
+        "actor_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "channel_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The message as it was at this moment, or null."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "recordingPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next"
+      ],
+      "description": "A page of the recording log, newest first.",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/recordingEntry"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The id to pass to --before for the next page, or null on the last page: a page shorter than --limit."
+        }
+      }
+    }
+  }
+}
