@@ -126,8 +126,18 @@ func Attach(ctx context.Context, conn net.Conn, opts Options) (*Client, error) {
 	}
 	if err != nil {
 		_ = conn.Close()
-		if ctx.Err() != nil && !isCloseOrVersion(err) {
+		if isCloseOrVersion(err) {
+			return nil, err
+		}
+		// The deadline reaches the connection and the context by two timers, and the connection's can fire
+		// first, leaving a bare i/o timeout with ctx.Err() still nil. Either way the handshake ran out of the
+		// time ctx gave it, and that is what a caller checking for context.DeadlineExceeded is asking.
+		if ctx.Err() != nil {
 			return nil, fmt.Errorf("attaching to the daemon: %w", ctx.Err())
+		}
+		var ne net.Error
+		if _, hasDeadline := ctx.Deadline(); hasDeadline && errors.As(err, &ne) && ne.Timeout() {
+			return nil, fmt.Errorf("attaching to the daemon: %w", context.DeadlineExceeded)
 		}
 		return nil, err
 	}
