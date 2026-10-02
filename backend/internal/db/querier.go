@@ -256,7 +256,19 @@ type Querier interface {
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
 	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
 	CreateInstanceInvite(ctx context.Context, arg CreateInstanceInviteParams) (InstanceInvite, error)
-	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
+	// Every statement that returns a message names its author (Milestone M20a): this one,
+	// ListChannelMessages and UpdateMessageContent, the only three a `Message` is built from.
+	//
+	// The author's username and display name ride on the statement that produced the row, rather than in a
+	// second read per message or a batch read per page: an author is one primary-key lookup on `users`. The
+	// three return the same columns in the same order, which is what lets the Go side convert all three to one
+	// type — a fourth that drifted would not compile.
+	//
+	// `deleted_at IS NULL` is in the join, not the WHERE: a soft-deleted account's messages survive (000020)
+	// and are returned with a NULL author, which the client renders as a deleted account. M76a renames a
+	// deleted account to a placeholder, and that placeholder must not reach a reader as somebody's name.
+	//
+	CreateMessage(ctx context.Context, arg CreateMessageParams) (CreateMessageRow, error)
 	// Message tags (Milestone M17).
 	// The uniqueness guards are the two partial indexes in 000024, not a check here: a read-then-insert races
 	// under READ COMMITTED the way M10's invite redemption did, where four of four concurrent racers got in.
@@ -713,7 +725,13 @@ type Querier interface {
 	// Deleted messages are excluded here and not by a partial index. 000020 says why: M16's moderation
 	// surface reads them on purpose, so an index that could not serve that reader would be the wrong shape.
 	//
-	ListChannelMessages(ctx context.Context, arg ListChannelMessagesParams) ([]Message, error)
+	// # The author is joined to the page, never the page to the authors (M20a)
+	//
+	// The page is chosen in a subquery and only its rows meet `users`, so no plan — generic or custom, fresh
+	// statistics or none — can join before it limits. M13a and M18 each found a generic plan taking a choice
+	// a literal-valued EXPLAIN never showed; the shape is written so the planner has no such choice to take.
+	//
+	ListChannelMessages(ctx context.Context, arg ListChannelMessagesParams) ([]ListChannelMessagesRow, error)
 	// Every overwrite on one channel: ADR 0008 layer 5, in one lookup, ordered in Go by the precedence the ADR
 	// fixes rather than by SQL.
 	//
@@ -1458,7 +1476,10 @@ type Querier interface {
 	// caller has to be able to tell 403 from 404.
 	UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild, error)
 	UpdateGuildMember(ctx context.Context, arg UpdateGuildMemberParams) (GuildMember, error)
-	UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (Message, error)
+	// `messages.id` is qualified because sqlc cannot resolve a bare `id` once the CTE meets `users`; Postgres
+	// could.
+	//
+	UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (UpdateMessageContentRow, error)
 	// Same COALESCE shape as UpdateGuild, and the same guild scoping as GetRole.
 	//
 	// position is not updatable here. Reordering roles is a multi-row swap and role *hierarchy* — who may

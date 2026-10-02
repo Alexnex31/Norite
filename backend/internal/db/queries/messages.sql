@@ -1,7 +1,23 @@
+-- Every statement that returns a message names its author (Milestone M20a): this one,
+-- ListChannelMessages and UpdateMessageContent, the only three a `Message` is built from.
+--
+-- The author's username and display name ride on the statement that produced the row, rather than in a
+-- second read per message or a batch read per page: an author is one primary-key lookup on `users`. The
+-- three return the same columns in the same order, which is what lets the Go side convert all three to one
+-- type — a fourth that drifted would not compile.
+--
+-- `deleted_at IS NULL` is in the join, not the WHERE: a soft-deleted account's messages survive (000020)
+-- and are returned with a NULL author, which the client renders as a deleted account. M76a renames a
+-- deleted account to a placeholder, and that placeholder must not reach a reader as somebody's name.
+--
 -- name: CreateMessage :one
-INSERT INTO messages (id, channel_id, author_id, content, type, reply_to_id)
-VALUES ($1, $2, $3, $4, $5, sqlc.narg(reply_to_id)::bigint)
-RETURNING *;
+WITH m AS (
+  INSERT INTO messages (id, channel_id, author_id, content, type, reply_to_id)
+  VALUES ($1, $2, $3, $4, $5, sqlc.narg(reply_to_id)::bigint)
+  RETURNING *
+)
+SELECT m.*, u.username AS author_username, u.display_name AS author_display_name
+FROM m LEFT JOIN users u ON u.id = m.author_id AND u.deleted_at IS NULL;
 
 -- One page of a channel's backlog (Milestone M15).
 --
@@ -21,14 +37,25 @@ RETURNING *;
 -- Deleted messages are excluded here and not by a partial index. 000020 says why: M16's moderation
 -- surface reads them on purpose, so an index that could not serve that reader would be the wrong shape.
 --
+-- # The author is joined to the page, never the page to the authors (M20a)
+--
+-- The page is chosen in a subquery and only its rows meet `users`, so no plan — generic or custom, fresh
+-- statistics or none — can join before it limits. M13a and M18 each found a generic plan taking a choice
+-- a literal-valued EXPLAIN never showed; the shape is written so the planner has no such choice to take.
+--
 -- name: ListChannelMessages :many
-SELECT * FROM messages
-WHERE channel_id = $1
-  AND deleted_at IS NULL
-  AND id < COALESCE(sqlc.narg(before)::bigint, 9223372036854775807)
-  AND id > COALESCE(sqlc.narg(after)::bigint, 0)
-ORDER BY id DESC
-LIMIT $2;
+SELECT m.*, u.username AS author_username, u.display_name AS author_display_name
+FROM (
+  SELECT * FROM messages
+  WHERE channel_id = $1
+    AND deleted_at IS NULL
+    AND id < COALESCE(sqlc.narg(before)::bigint, 9223372036854775807)
+    AND id > COALESCE(sqlc.narg(after)::bigint, 0)
+  ORDER BY id DESC
+  LIMIT $2
+) m
+LEFT JOIN users u ON u.id = m.author_id AND u.deleted_at IS NULL
+ORDER BY m.id DESC;
 
 -- name: GetMessage :one
 SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL;
@@ -43,8 +70,17 @@ SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL;
 -- name: GetMessageForUpdate :one
 SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL FOR UPDATE;
 
+-- `messages.id` is qualified because sqlc cannot resolve a bare `id` once the CTE meets `users`; Postgres
+-- could.
+--
 -- name: UpdateMessageContent :one
-UPDATE messages SET content = $2, edited_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING *;
+WITH m AS (
+  UPDATE messages SET content = $2, edited_at = now()
+  WHERE messages.id = $1 AND messages.deleted_at IS NULL
+  RETURNING *
+)
+SELECT m.*, u.username AS author_username, u.display_name AS author_display_name
+FROM m LEFT JOIN users u ON u.id = m.author_id AND u.deleted_at IS NULL;
 
 -- Soft delete, so the row survives for M16 to carry a report against and for M16a to resolve an edit
 -- history back to its message. A hard delete would make a reported message vanish from the queue it was

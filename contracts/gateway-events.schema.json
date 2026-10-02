@@ -816,12 +816,34 @@
       },
       "description": "Generated from contracts/openapi.yaml#/components/schemas/Member; a test holds the two equal. "
     },
+    "MessageAuthor": {
+      "description": "The part of an account a message's readers see (M20a). A username is a public handle and the display name is what the account chose to be shown as; never the email.\n",
+      "type": "object",
+      "required": [
+        "id",
+        "username",
+        "display_name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "username": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        }
+      }
+    },
     "Message": {
       "type": "object",
       "required": [
         "id",
         "channel_id",
         "author_id",
+        "author",
         "content",
         "type",
         "reply_to_id",
@@ -847,6 +869,17 @@
             }
           ],
           "description": "Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.\n"
+        },
+        "author": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/MessageAuthor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who wrote it. Null when `author_id` is null, and null when the author's account was deleted, where `author_id` survives: a client renders the second as a deleted account, and never shows the placeholder name a deleted account is renamed to.\n"
         },
         "content": {
           "type": "string",

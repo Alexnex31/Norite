@@ -936,6 +936,9 @@ type Member struct {
 
 // Message defines model for Message.
 type Message struct {
+	// Author Who wrote it. Null when `author_id` is null, and null when the author's account was deleted, where `author_id` survives: a client renders the second as a deleted account, and never shows the placeholder name a deleted account is renamed to.
+	Author *MessageAuthor `json:"author"`
+
 	// AuthorId Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
 	AuthorId *Snowflake `json:"author_id"`
 
@@ -1003,6 +1006,18 @@ type MessageAuditEntry struct {
 
 	// MessageId The message this entry is about. Deliberately not a foreign key in the schema either: an audit record that vanished with the thing it records would not be one, and a delete entry naming a hard-deleted message is exactly the row somebody goes looking for.
 	MessageId Snowflake `json:"message_id"`
+}
+
+// MessageAuthor The part of an account a message's readers see (M20a). A username is a public handle and the display name is what the account chose to be shown as; never the email.
+type MessageAuthor struct {
+	DisplayName string `json:"display_name"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id       Snowflake `json:"id"`
+	Username string    `json:"username"`
 }
 
 // MessageEditHistory A message's prior versions plus what it says now. The current text is here because no endpoint returns a single message on its own, so a caller reading this would otherwise have every version except the one that matters most.

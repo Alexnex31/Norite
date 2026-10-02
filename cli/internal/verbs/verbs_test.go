@@ -391,6 +391,50 @@ func TestAHostileNameIsInertInTextAndExactInJSON(t *testing.T) {
 	assert.Equal(t, hostile, back[0]["name"], "lossless")
 }
 
+// TestAMessageIsNamedByItsAuthor: the backlog says who wrote each message (M20a), as a person reads it —
+// display name and handle, "deleted account" where only the id survived, and "-" for a message with no
+// author — and both names are an instance's text, inert in a terminal and exact in JSON.
+func TestAMessageIsNamedByItsAuthor(t *testing.T) {
+	hostile := "Evil\x1b[2J\u202eesrever"
+	named := apiMessage("33", "20", "named")
+	named.Author = &apicontract.MessageAuthor{Id: "1", Username: "alice", DisplayName: hostile}
+	deleted := apiMessage("32", "20", "deleted")
+	deleted.Author = nil
+	system := apiMessage("31", "20", "system")
+	system.Author, system.AuthorId = nil, nil
+	f := newFake(t).on("listChannelMessages", ok([]apicontract.Message{named, deleted, system}))
+
+	text := runVerb(t, f, "", "message", "list", "20")
+	require.NoError(t, text.err)
+	lines := strings.Split(text.out, "\n")
+	require.GreaterOrEqual(t, len(lines), 6)
+	assert.Contains(t, lines[0], "(@alice)")
+	assert.Contains(t, lines[0], "Evil")
+	assert.NotContains(t, text.out, "\x1b")
+	assert.NotContains(t, text.out, "\u202e")
+	assert.True(t, strings.HasSuffix(lines[2], "  deleted account"), "%q", lines[2])
+	assert.True(t, strings.HasSuffix(lines[4], "  -"), "%q", lines[4])
+
+	js := runVerb(t, f, "", "--json", "message", "list", "20")
+	require.NoError(t, js.err)
+	var back struct {
+		Items []struct {
+			AuthorID *string `json:"author_id"`
+			Author   *struct {
+				Username    string `json:"username"`
+				DisplayName string `json:"display_name"`
+			} `json:"author"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(js.out), &back))
+	require.Len(t, back.Items, 3)
+	require.NotNil(t, back.Items[0].Author)
+	assert.Equal(t, hostile, back.Items[0].Author.DisplayName, "lossless")
+	assert.Nil(t, back.Items[1].Author)
+	assert.NotNil(t, back.Items[1].AuthorID, "a deleted account keeps its id")
+	assert.Nil(t, back.Items[2].AuthorID)
+}
+
 func TestAReportIsFiledAndTriagedAndTheReporterIsNeverShown(t *testing.T) {
 	f := newFake(t).
 		on("fileReport", created(apiReport("70", "open"))).

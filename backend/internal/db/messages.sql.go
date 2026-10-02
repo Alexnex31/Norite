@@ -27,9 +27,13 @@ func (q *Queries) AppendMessageEditHistory(ctx context.Context, arg AppendMessag
 }
 
 const createMessage = `-- name: CreateMessage :one
-INSERT INTO messages (id, channel_id, author_id, content, type, reply_to_id)
-VALUES ($1, $2, $3, $4, $5, $6::bigint)
-RETURNING id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at
+WITH m AS (
+  INSERT INTO messages (id, channel_id, author_id, content, type, reply_to_id)
+  VALUES ($1, $2, $3, $4, $5, $6::bigint)
+  RETURNING id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at
+)
+SELECT m.id, m.channel_id, m.author_id, m.content, m.type, m.reply_to_id, m.is_e2e, m.edited_at, m.deleted_at, m.created_at, u.username AS author_username, u.display_name AS author_display_name
+FROM m LEFT JOIN users u ON u.id = m.author_id AND u.deleted_at IS NULL
 `
 
 type CreateMessageParams struct {
@@ -41,7 +45,33 @@ type CreateMessageParams struct {
 	ReplyToID *int64
 }
 
-func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error) {
+type CreateMessageRow struct {
+	ID                int64
+	ChannelID         int64
+	AuthorID          *int64
+	Content           string
+	Type              int16
+	ReplyToID         *int64
+	IsE2e             bool
+	EditedAt          pgtype.Timestamptz
+	DeletedAt         pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	AuthorUsername    *string
+	AuthorDisplayName *string
+}
+
+// Every statement that returns a message names its author (Milestone M20a): this one,
+// ListChannelMessages and UpdateMessageContent, the only three a `Message` is built from.
+//
+// The author's username and display name ride on the statement that produced the row, rather than in a
+// second read per message or a batch read per page: an author is one primary-key lookup on `users`. The
+// three return the same columns in the same order, which is what lets the Go side convert all three to one
+// type — a fourth that drifted would not compile.
+//
+// `deleted_at IS NULL` is in the join, not the WHERE: a soft-deleted account's messages survive (000020)
+// and are returned with a NULL author, which the client renders as a deleted account. M76a renames a
+// deleted account to a placeholder, and that placeholder must not reach a reader as somebody's name.
+func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (CreateMessageRow, error) {
 	row := q.db.QueryRow(ctx, createMessage,
 		arg.ID,
 		arg.ChannelID,
@@ -50,7 +80,7 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (M
 		arg.Type,
 		arg.ReplyToID,
 	)
-	var i Message
+	var i CreateMessageRow
 	err := row.Scan(
 		&i.ID,
 		&i.ChannelID,
@@ -62,6 +92,8 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (M
 		&i.EditedAt,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AuthorUsername,
+		&i.AuthorDisplayName,
 	)
 	return i, err
 }
@@ -204,13 +236,18 @@ func (q *Queries) GuildRecordsMessages(ctx context.Context, id int64) (bool, err
 }
 
 const listChannelMessages = `-- name: ListChannelMessages :many
-SELECT id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at FROM messages
-WHERE channel_id = $1
-  AND deleted_at IS NULL
-  AND id < COALESCE($3::bigint, 9223372036854775807)
-  AND id > COALESCE($4::bigint, 0)
-ORDER BY id DESC
-LIMIT $2
+SELECT m.id, m.channel_id, m.author_id, m.content, m.type, m.reply_to_id, m.is_e2e, m.edited_at, m.deleted_at, m.created_at, u.username AS author_username, u.display_name AS author_display_name
+FROM (
+  SELECT id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at FROM messages
+  WHERE channel_id = $1
+    AND deleted_at IS NULL
+    AND id < COALESCE($3::bigint, 9223372036854775807)
+    AND id > COALESCE($4::bigint, 0)
+  ORDER BY id DESC
+  LIMIT $2
+) m
+LEFT JOIN users u ON u.id = m.author_id AND u.deleted_at IS NULL
+ORDER BY m.id DESC
 `
 
 type ListChannelMessagesParams struct {
@@ -218,6 +255,21 @@ type ListChannelMessagesParams struct {
 	Limit     int32
 	Before    *int64
 	After     *int64
+}
+
+type ListChannelMessagesRow struct {
+	ID                int64
+	ChannelID         int64
+	AuthorID          *int64
+	Content           string
+	Type              int16
+	ReplyToID         *int64
+	IsE2e             bool
+	EditedAt          pgtype.Timestamptz
+	DeletedAt         pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	AuthorUsername    *string
+	AuthorDisplayName *string
 }
 
 // One page of a channel's backlog (Milestone M15).
@@ -237,7 +289,13 @@ type ListChannelMessagesParams struct {
 //
 // Deleted messages are excluded here and not by a partial index. 000020 says why: M16's moderation
 // surface reads them on purpose, so an index that could not serve that reader would be the wrong shape.
-func (q *Queries) ListChannelMessages(ctx context.Context, arg ListChannelMessagesParams) ([]Message, error) {
+//
+// # The author is joined to the page, never the page to the authors (M20a)
+//
+// The page is chosen in a subquery and only its rows meet `users`, so no plan — generic or custom, fresh
+// statistics or none — can join before it limits. M13a and M18 each found a generic plan taking a choice
+// a literal-valued EXPLAIN never showed; the shape is written so the planner has no such choice to take.
+func (q *Queries) ListChannelMessages(ctx context.Context, arg ListChannelMessagesParams) ([]ListChannelMessagesRow, error) {
 	rows, err := q.db.Query(ctx, listChannelMessages,
 		arg.ChannelID,
 		arg.Limit,
@@ -248,9 +306,9 @@ func (q *Queries) ListChannelMessages(ctx context.Context, arg ListChannelMessag
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Message{}
+	items := []ListChannelMessagesRow{}
 	for rows.Next() {
-		var i Message
+		var i ListChannelMessagesRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ChannelID,
@@ -262,6 +320,8 @@ func (q *Queries) ListChannelMessages(ctx context.Context, arg ListChannelMessag
 			&i.EditedAt,
 			&i.DeletedAt,
 			&i.CreatedAt,
+			&i.AuthorUsername,
+			&i.AuthorDisplayName,
 		); err != nil {
 			return nil, err
 		}
@@ -495,7 +555,13 @@ func (q *Queries) SoftDeleteMessage(ctx context.Context, id int64) error {
 }
 
 const updateMessageContent = `-- name: UpdateMessageContent :one
-UPDATE messages SET content = $2, edited_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at
+WITH m AS (
+  UPDATE messages SET content = $2, edited_at = now()
+  WHERE messages.id = $1 AND messages.deleted_at IS NULL
+  RETURNING id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at
+)
+SELECT m.id, m.channel_id, m.author_id, m.content, m.type, m.reply_to_id, m.is_e2e, m.edited_at, m.deleted_at, m.created_at, u.username AS author_username, u.display_name AS author_display_name
+FROM m LEFT JOIN users u ON u.id = m.author_id AND u.deleted_at IS NULL
 `
 
 type UpdateMessageContentParams struct {
@@ -503,9 +569,26 @@ type UpdateMessageContentParams struct {
 	Content string
 }
 
-func (q *Queries) UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (Message, error) {
+type UpdateMessageContentRow struct {
+	ID                int64
+	ChannelID         int64
+	AuthorID          *int64
+	Content           string
+	Type              int16
+	ReplyToID         *int64
+	IsE2e             bool
+	EditedAt          pgtype.Timestamptz
+	DeletedAt         pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	AuthorUsername    *string
+	AuthorDisplayName *string
+}
+
+// `messages.id` is qualified because sqlc cannot resolve a bare `id` once the CTE meets `users`; Postgres
+// could.
+func (q *Queries) UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (UpdateMessageContentRow, error) {
 	row := q.db.QueryRow(ctx, updateMessageContent, arg.ID, arg.Content)
-	var i Message
+	var i UpdateMessageContentRow
 	err := row.Scan(
 		&i.ID,
 		&i.ChannelID,
@@ -517,6 +600,8 @@ func (q *Queries) UpdateMessageContent(ctx context.Context, arg UpdateMessageCon
 		&i.EditedAt,
 		&i.DeletedAt,
 		&i.CreatedAt,
+		&i.AuthorUsername,
+		&i.AuthorDisplayName,
 	)
 	return i, err
 }

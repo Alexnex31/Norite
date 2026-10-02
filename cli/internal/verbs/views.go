@@ -374,14 +374,24 @@ func appliedTagFrom(a apicontract.AppliedMessageTag) appliedTagView {
 	return appliedTagView{ID: a.Id, Name: a.Name, Shared: a.IsShared, AppliedBy: a.AppliedBy, AppliedAt: a.AppliedAt}
 }
 
+// authorView names a message's author (M20a).
+type authorView struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+}
+
 type messageView struct {
-	ID        string     `json:"id"`
-	ChannelID string     `json:"channel_id"`
-	AuthorID  *string    `json:"author_id"`
-	Content   string     `json:"content"`
-	ReplyToID *string    `json:"reply_to_id"`
-	CreatedAt time.Time  `json:"created_at"`
-	EditedAt  *time.Time `json:"edited_at"`
+	ID        string  `json:"id"`
+	ChannelID string  `json:"channel_id"`
+	AuthorID  *string `json:"author_id"`
+	// Author is null for a message with no author, and for one whose author's account was deleted, which
+	// keeps its author_id: the API's distinction, kept.
+	Author    *authorView `json:"author"`
+	Content   string      `json:"content"`
+	ReplyToID *string     `json:"reply_to_id"`
+	CreatedAt time.Time   `json:"created_at"`
+	EditedAt  *time.Time  `json:"edited_at"`
 	// Tags is null where the credential cannot read tags, and [] where the message has none: the API's
 	// distinction, kept.
 	Tags []appliedTagView `json:"tags"`
@@ -391,6 +401,9 @@ func messageFrom(m apicontract.Message) messageView {
 	v := messageView{
 		ID: m.Id, ChannelID: m.ChannelId, AuthorID: m.AuthorId, Content: m.Content, ReplyToID: m.ReplyToId,
 		CreatedAt: m.CreatedAt, EditedAt: m.EditedAt,
+	}
+	if m.Author != nil {
+		v.Author = &authorView{ID: m.Author.Id, Username: m.Author.Username, DisplayName: m.Author.DisplayName}
 	}
 	if m.Tags != nil {
 		v.Tags = []appliedTagView{}
@@ -406,11 +419,23 @@ func (m messageView) Text(t *output.Text) {
 	if m.EditedAt != nil {
 		edited = " (edited)"
 	}
-	t.Line("%s  %s  %s%s", c(m.ID), stamp(m.CreatedAt), output.OrNone(m.AuthorID), edited)
+	t.Line("%s  %s  %s%s", c(m.ID), stamp(m.CreatedAt), m.byline(), edited)
 	indented(t, m.Content)
 	for _, tag := range m.Tags {
 		t.Line("    # %s", c(tag.Name))
 	}
+}
+
+// byline is who wrote the message, as a person reads it: the display name and the handle, or what stands
+// in for them. Both names are an instance's text and are sanitized (rule 19).
+func (m messageView) byline() string {
+	switch {
+	case m.Author != nil:
+		return fmt.Sprintf("%s (@%s)", c(m.Author.DisplayName), c(m.Author.Username))
+	case m.AuthorID != nil:
+		return "deleted account"
+	}
+	return "-"
 }
 
 type messagePage Page[messageView]

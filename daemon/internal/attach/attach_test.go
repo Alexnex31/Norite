@@ -255,7 +255,8 @@ func guildPayload(id, name string) json.RawMessage {
 }
 
 func messagePayload(id, channelID, content string) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"id":%q,"channel_id":%q,"author_id":"1","content":%q,"type":0,`+
+	return json.RawMessage(fmt.Sprintf(`{"id":%q,"channel_id":%q,"author_id":"1",`+
+		`"author":{"id":"1","username":"alice","display_name":"Alice"},"content":%q,"type":0,`+
 		`"reply_to_id":null,"edited_at":null,"created_at":"2026-01-01T00:00:00Z","tags":null}`,
 		id, channelID, content))
 }
