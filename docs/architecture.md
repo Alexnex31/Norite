@@ -1635,10 +1635,12 @@ access token and returns the status and body. The token never crosses the socket
 session's to settle — the daemon asks it for a renewed token and retries once, rather than failing the
 first call after an expiry. The relay builds the URL itself (the instance URL with its path prefix, then
 `/api/v1`, then the client's path) and refuses any path that could change the host. It also refuses
-`/auth/*` and `/instance/*`, which mint and revoke credentials, change the second factor and administer the
-instance: the surface M11 put behind `RequireLiveSession`, because a credential that can make credentials
-escalates itself. Nothing in M20 needs either, and lifting a refusal later is additive where withdrawing a
-reach scripts rely on is not. Neither request nor response bodies are logged, since they carry message
+`/auth/*`, `/instance/*` and `/users/@me/sessions`, which mint and revoke credentials, change the second
+factor, sign devices out and administer the instance: the surface M11 put behind `RequireLiveSession`,
+because a credential that can make credentials escalates itself. Nothing in M20 needs any of them, and
+lifting a refusal later is additive where withdrawing a reach scripts rely on is not. Every path in
+`openapi.yaml` carries an explicit relay-or-refuse decision in the relay's tests, so a new route is a
+decision rather than a default. Neither request nor response bodies are logged, since they carry message
 content.
 
 **State persistence**: scrollback/pane/presence state is in-memory only, lost on daemon restart (tmux

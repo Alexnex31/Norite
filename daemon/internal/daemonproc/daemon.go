@@ -6,8 +6,8 @@
 // It starts cleanly, proves there is exactly one daemon per OS user, prepares the process for the handle
 // count it will eventually hold, starts each component, and stops them in reverse on a signal. M3 built the
 // sequence with nothing in it; M19 added the first two components, the session (internal/session) and the
-// gateway connection (internal/gatewayclient). The IPC listeners arrive at M20–M22 and the plugin host at
-// M88.
+// gateway connection (internal/gatewayclient); M20 the attach socket (internal/attach) and the request relay
+// behind it (internal/relay). The bot-automation listener arrives at M22 and the plugin host at M88.
 //
 // What it is not is a placeholder to be thrown away. Every later milestone adds a component *inside* this
 // startup and shutdown sequence, so the ordering it establishes — lock before anything observable, limits
@@ -25,8 +25,10 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/internal/attach"
 	"github.com/Alexnex31/Norite/daemon/internal/gatewayclient"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
+	"github.com/Alexnex31/Norite/daemon/internal/relay"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/state"
 )
@@ -139,6 +141,16 @@ func Run(ctx context.Context, opts Options) error {
 		if err != nil {
 			log.Error().Err(err).Msg("the credential store could not be opened")
 		} else {
+			// The attach socket opens first, before anything starts, so a daemon that cannot listen stops
+			// here with the reason rather than running unreachable: a socket path past the platform's limit,
+			// or on Windows a pipe name another process holds. After the lock, which is what makes a socket
+			// file already there a stale one.
+			listener, err := attach.Listen(stateDir)
+			if err != nil {
+				log.Error().Err(err).Msg("cannot open the attach socket")
+				return err
+			}
+
 			// The store's own account of anything it could not finish — a credential left in a backend this
 			// process cannot reach, most likely. Nobody is watching a daemon's terminal, so it goes to the
 			// log at a level that gets read.
@@ -159,14 +171,19 @@ func Run(ctx context.Context, opts Options) error {
 			})
 
 			// The gateway connection, which waits on the session for a credential: a daemon nobody has
-			// signed in to holds no connection and makes no attempts. What it carries builds the state
-			// attach clients read from M20.
+			// signed in to holds no connection and makes no attempts. What it carries goes to the attach
+			// server, which keeps the state and fans each event out to the clients watching.
 			st := state.New(part("state"), state.DefaultLimits)
+			server := attach.New(attach.Options{
+				Session: src, State: st, Version: opts.Version, Log: part("attach"),
+				Relay: relay.New(relay.Options{Credentials: src, Version: opts.Version, Log: part("relay")}),
+			})
 			gw := gatewayclient.New(gatewayclient.Options{
-				Credentials: src, Sink: st, Version: opts.Version,
+				Credentials: src, Sink: server, Version: opts.Version,
 				Log: part("gateway"),
 			})
 			components.Go(func() { gw.Run(ctx) })
+			components.Go(func() { server.Serve(ctx, listener) })
 		}
 	}
 

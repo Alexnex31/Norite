@@ -1,0 +1,287 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Package relay performs an attach client's REST call with the daemon's own credential (M20). The client
+// names a method, a path and a body; the relay builds the request, presents the access token, and returns
+// the instance's status and body. The token never leaves this process in any direction but the instance's:
+// not to the client, not to the log.
+//
+// # Where it may reach
+//
+// Under /api/v1 on the signed-in instance, and nowhere else. The URL is built here, from the credential's
+// instance URL with its path prefix (M19's /security-sweep finding), then /api/v1, then the client's path;
+// a path that could change the host or climb out of /api/v1 is refused before any request exists.
+//
+// Three surfaces are refused outright, because each manages credentials rather than using one (B1 in M20's
+// planning, and architecture.md §3):
+//
+//   - /auth/*, which mints and revokes tokens and changes the second factor;
+//   - /instance/*, the operator's surface;
+//   - /users/@me/sessions, which lists every device the account is signed in on and signs them out.
+//
+// They are the routes M11 put behind a user actor and a live session, because a credential that can make or
+// unmake credentials escalates itself. Nothing in M20 needs them. Lifting a refusal later is additive, where
+// withdrawing a reach scripts rely on is not, and TestEveryContractPathIsDecided makes each new route in
+// the contract a decision rather than a default.
+//
+// # A 401 is the session's business
+//
+// An access token can expire under a request, and the gateway client already answers a 4004 by telling the
+// session and taking the renewed token. The relay does the same, once: session.Source is the only owner of
+// the refresh token, so two clients refreshing at the same moment is one refresh, never two presentations
+// of one rotating token, which reuse detection reads as theft.
+package relay
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/Alexnex31/Norite/daemon/internal/session"
+	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
+)
+
+// Credentials is what the relay needs from the session. *session.Source implements it.
+type Credentials interface {
+	Status() (session.Standing, session.Account)
+	Current(ctx context.Context) (session.Credential, error)
+	Rejected(accessToken string)
+}
+
+// Options configure a Relay.
+type Options struct {
+	Credentials Credentials
+	// HTTP performs the calls. Nil means one that follows no redirect and gives up after requestTimeout.
+	HTTP *http.Client
+	// Version goes in the User-Agent.
+	Version string
+	Log     zerolog.Logger
+}
+
+const (
+	// requestTimeout bounds one call to the instance.
+	requestTimeout = 30 * time.Second
+	// signInWait bounds the wait for a usable token when the daemon is still signing in or renewing. A
+	// signed-out daemon is not waited for at all. Longer than the session's ten-second floor between
+	// refreshes, so a token refused just after a renewal waits for the next one rather than timing out.
+	signInWait = 15 * time.Second
+)
+
+// Relay performs requests for attach clients. Safe for concurrent use.
+type Relay struct {
+	creds     Credentials
+	http      *http.Client
+	userAgent string
+	log       zerolog.Logger
+}
+
+// New builds a Relay.
+func New(opts Options) *Relay {
+	client := opts.HTTP
+	if client == nil {
+		// Redirects are refused for the reason the session refuses them: a request carrying a credential is
+		// not replayed to wherever a 307 names. Go drops Authorization on a cross-host redirect, but a
+		// same-host one would carry it to a path this relay has not checked.
+		client = &http.Client{
+			Timeout:       requestTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	}
+	version := opts.Version
+	if version == "" {
+		version = "dev"
+	}
+	return &Relay{creds: opts.Credentials, http: client, userAgent: "norite-daemon/" + version, log: opts.Log}
+}
+
+func failure(code, msg string) ipc.Response {
+	return ipc.Response{Error: &ipc.RelayError{Code: code, Message: msg}}
+}
+
+// Do performs req. Its answer's ID is left for the caller to set.
+func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
+	target, err := Target(req.Path)
+	if err != nil {
+		return failure(ipc.RelayRefused, err.Error())
+	}
+	// The contract carries "no body" as JSON null, which arrives here as the four bytes of it.
+	if bytes.Equal(bytes.TrimSpace(req.Body), []byte("null")) {
+		req.Body = nil
+	}
+	if req.Body != nil && !json.Valid(req.Body) {
+		return failure(ipc.RelayBadRequest, "the request body is not JSON")
+	}
+
+	if standing, _ := r.creds.Status(); standing == session.SignedOut {
+		return failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
+	}
+	cred, failed := r.current(ctx)
+	if failed != nil {
+		return *failed
+	}
+
+	status, body, err := r.send(ctx, req, target, cred)
+	if err == nil && status == http.StatusUnauthorized {
+		// Expired or refused under the request. The session decides what that means and renews; the retry
+		// goes only to the sign-in the first attempt was made as, so a login landing in between does not
+		// turn a call made as one account into the same call made as another.
+		r.creds.Rejected(cred.AccessToken)
+		renewed, failed := r.current(ctx)
+		if failed != nil {
+			return *failed
+		}
+		if renewed.Generation != cred.Generation || renewed.InstanceURL != cred.InstanceURL {
+			return failure(ipc.RelayNotSignedIn, "the daemon's sign-in changed during the request; try it again")
+		}
+		status, body, err = r.send(ctx, req, target, renewed)
+	}
+
+	switch {
+	case errors.Is(err, errTooLarge):
+		return failure(ipc.RelayTooLarge, fmt.Sprintf("the instance's answer exceeds %d bytes", ipc.MaxResponseBody))
+	case err != nil:
+		if ctx.Err() != nil {
+			return failure(ipc.RelayUnreachable, "the request was canceled")
+		}
+		r.log.Debug().Str("error", termsafe.Text(err.Error())).Msg("a relayed request could not reach the instance")
+		return failure(ipc.RelayUnreachable, "could not reach the instance: "+termsafe.Text(err.Error()))
+	}
+
+	r.log.Debug().Str("method", req.Method).Str("path", termsafe.Text(target.Path)).Int("status", status).
+		Msg("relayed a request")
+	return ipc.Response{Status: &status, Body: body}
+}
+
+// current waits a bounded while for a usable credential.
+func (r *Relay) current(ctx context.Context) (session.Credential, *ipc.Response) {
+	waitCtx, cancel := context.WithTimeout(ctx, signInWait)
+	defer cancel()
+	cred, err := r.creds.Current(waitCtx)
+	if err == nil {
+		return cred, nil
+	}
+	if ctx.Err() != nil {
+		f := failure(ipc.RelayUnreachable, "the request was canceled")
+		return session.Credential{}, &f
+	}
+	if standing, _ := r.creds.Status(); standing == session.SignedOut {
+		f := failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
+		return session.Credential{}, &f
+	}
+	f := failure(ipc.RelayUnreachable, "the daemon has no usable session from its instance yet; "+
+		"it may be unreachable, and the daemon's log says why")
+	return session.Credential{}, &f
+}
+
+var errTooLarge = errors.New("response too large")
+
+// send makes one attempt. A body that is not JSON comes back as nil: a proxy in front of an instance answers
+// a failure with HTML, and the status is what the client needs from it.
+func (r *Relay) send(ctx context.Context, req ipc.Request, target *url.URL, cred session.Credential) (int, json.RawMessage, error) {
+	u, err := Build(cred.InstanceURL, target)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	var reader io.Reader
+	if req.Body != nil {
+		reader = bytes.NewReader(req.Body)
+	}
+	hreq, err := http.NewRequestWithContext(ctx, req.Method, u.String(), reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	hreq.Header.Set("Authorization", "Bearer "+cred.AccessToken)
+	hreq.Header.Set("Accept", "application/json")
+	hreq.Header.Set("User-Agent", r.userAgent)
+	if req.Body != nil {
+		hreq.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := r.http.Do(hreq)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, ipc.MaxResponseBody+1))
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(raw) > ipc.MaxResponseBody {
+		return 0, nil, errTooLarge
+	}
+	if len(bytes.TrimSpace(raw)) == 0 || !json.Valid(raw) {
+		return resp.StatusCode, nil, nil
+	}
+	return resp.StatusCode, raw, nil
+}
+
+// refused are the surfaces the relay will not reach, as path prefixes under /api/v1: see the package comment.
+var refused = []string{"/auth", "/instance", "/users/@me/sessions"}
+
+// Target checks a client's path and returns it parsed: a path under /api/v1 and its query, nothing that
+// could name another host or climb out, and nothing on a refused surface.
+func Target(path string) (*url.URL, error) {
+	switch {
+	case path == "" || path[0] != '/':
+		return nil, errors.New("the path must start with /")
+	case strings.HasPrefix(path, "//"):
+		return nil, errors.New("the path must not start with //, which names a host")
+	case strings.ContainsAny(path, "\\#"):
+		return nil, errors.New("the path must not contain a backslash or a fragment")
+	case len(path) > 2048:
+		return nil, errors.New("the path is longer than 2048 bytes")
+	}
+
+	u, err := url.Parse(path)
+	if err != nil {
+		return nil, fmt.Errorf("the path does not parse: %w", err)
+	}
+	if u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return nil, errors.New("the path must be a path, not a URL")
+	}
+	// A path whose escaping differs from the default — an encoded slash, most usefully — would mean one
+	// thing to the check below and another to the router. Nothing a verb sends needs one: ids are digits.
+	if u.RawPath != "" {
+		return nil, errors.New("the path must not percent-encode its separators")
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == "." || seg == ".." {
+			return nil, errors.New("the path must not contain . or .. segments")
+		}
+	}
+
+	lower := strings.ToLower(u.Path)
+	for _, prefix := range refused {
+		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+			return nil, fmt.Errorf("the daemon does not relay %s: it manages credentials or the instance, "+
+				"and stays off the attach socket", prefix)
+		}
+	}
+	return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
+}
+
+// Build joins a checked target onto an instance URL: its scheme and host, its path prefix, then /api/v1.
+func Build(instanceURL string, target *url.URL) (*url.URL, error) {
+	base, err := url.Parse(instanceURL)
+	if err != nil || base.Host == "" || (base.Scheme != "https" && base.Scheme != "http") {
+		return nil, fmt.Errorf("the stored instance URL is not usable")
+	}
+	return &url.URL{
+		Scheme:   base.Scheme,
+		Host:     base.Host,
+		Path:     strings.TrimRight(base.Path, "/") + "/api/v1" + target.Path,
+		RawQuery: target.RawQuery,
+	}, nil
+}
