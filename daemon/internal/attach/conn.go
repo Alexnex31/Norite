@@ -71,7 +71,7 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 
 	if refusal := s.add(c); refusal.Code != 0 {
 		// Refused before HELLO, so the client's handshake reads the reason as its first frame.
-		_ = nc.SetWriteDeadline(time.Now().Add(closeGrace))
+		_ = nc.SetWriteDeadline(time.Now().Add(s.closeGrace))
 		if f, err := ipc.Encode(ipc.OpClose, refusal); err == nil {
 			_ = ipc.WriteFrame(nc, f)
 		}
@@ -332,7 +332,7 @@ func (c *conn) write() {
 			c.queued.Add(-int64(n))
 		case <-c.gone:
 			if c.closing.Code != 0 {
-				_ = c.nc.SetWriteDeadline(time.Now().Add(closeGrace))
+				_ = c.nc.SetWriteDeadline(time.Now().Add(c.srv.closeGrace))
 				if f, err := ipc.Encode(ipc.OpClose, c.closing); err == nil {
 					_ = ipc.WriteFrame(c.nc, f)
 				}
@@ -351,7 +351,7 @@ func (c *conn) kill(code int, reason string) {
 		c.closing = ipc.Close{Code: code, Reason: reason}
 		close(c.gone)
 		c.cancel()
-		_ = c.nc.SetWriteDeadline(time.Now().Add(closeGrace))
+		_ = c.nc.SetWriteDeadline(time.Now().Add(c.srv.closeGrace))
 		_ = c.nc.SetReadDeadline(time.Now())
 		if code != 0 {
 			c.log.Debug().Int("code", code).Str("reason", reason).Msg("closing an attach client")

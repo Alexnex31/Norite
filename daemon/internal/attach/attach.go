@@ -92,7 +92,8 @@ const (
 	// not a copy per client.
 	queueFrames = 256
 	queueBytes  = 2 * ipc.MaxResponseBody
-	// closeGrace is how long the writer tries to deliver a Close frame before closing anyway.
+	// closeGrace is how long the writer tries to deliver a Close frame before closing anyway. A client that
+	// has stopped reading and does not start again within it is cut off without one.
 	closeGrace = time.Second
 )
 
@@ -107,6 +108,7 @@ type Server struct {
 	// Overridden by tests.
 	maxClients int
 	wantUID    int
+	closeGrace time.Duration
 
 	mu      sync.Mutex
 	clients map[*conn]struct{}
@@ -128,6 +130,7 @@ func New(opts Options) *Server {
 		log:        opts.Log,
 		maxClients: ipc.MaxClients,
 		wantUID:    ownUID(),
+		closeGrace: closeGrace,
 		clients:    make(map[*conn]struct{}),
 	}
 }

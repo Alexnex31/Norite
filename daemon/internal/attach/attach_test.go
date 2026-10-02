@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -487,8 +488,16 @@ func TestTheForwardedFramesAreTheContracts(t *testing.T) {
 //
 // Proved by removal: with a blocking enqueue, the fan-out stops at the frozen client's full queue and the
 // healthy client's events stop with it.
+//
+// The close grace is raised because the frozen client reads again only once the healthy one has everything,
+// and on a slow runner under -race that takes longer than the real second. Past the grace the writer is cut
+// off mid-frame and closes without a Close frame: the design for a client that never reads again, and what
+// made this test fail in CI while the property it is about held.
+//
+// The producer yields after each event, as the gateway's read loop does on every read from the network. One
+// that never yields keeps the healthy client's reader off a single CPU until its queue fills too.
 func TestAFrozenClientIsDroppedWithoutStallingAHealthyOne(t *testing.T) {
-	ts := newTestServer(t, echoRelay())
+	ts := newTestServer(t, echoRelay(), func(s *Server) { s.closeGrace = time.Minute })
 
 	frozen := ts.raw(t)
 	frozen.identify("dev", true)
@@ -503,6 +512,7 @@ func TestAFrozenClientIsDroppedWithoutStallingAHealthyOne(t *testing.T) {
 		defer close(fanned)
 		for i := range events {
 			ts.Dispatch("MESSAGE_CREATE", messagePayload(fmt.Sprint(1000+i), "30", content))
+			runtime.Gosched()
 		}
 	}()
 
