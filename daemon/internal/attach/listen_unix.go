@@ -24,7 +24,7 @@ import (
 func Listen(stateDir string) (net.Listener, error) {
 	path := ipc.SocketPath(stateDir)
 	if err := ipc.CheckSocketPath(path); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrUnusable, err)
 	}
 
 	info, err := os.Lstat(path)
@@ -33,7 +33,8 @@ func Listen(stateDir string) (net.Listener, error) {
 	case err != nil:
 		return nil, fmt.Errorf("checking for a stale attach socket: %w", err)
 	case info.Mode()&fs.ModeSocket == 0:
-		return nil, fmt.Errorf("%s exists and is not a socket; remove it so the daemon can listen there", path)
+		return nil, fmt.Errorf("%w: %s exists and is not a socket; remove it so the daemon can listen there",
+			ErrUnusable, path)
 	default:
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("removing the stale attach socket: %w", err)

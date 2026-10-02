@@ -46,6 +46,8 @@ func TestTargetRefusesWhatCouldLeaveTheInstance(t *testing.T) {
 		"/instance/invites",
 		"/users/@me/sessions",
 		"/users/@me/sessions/123",
+		"/users//@me/sessions",
+		"/guilds/1/",
 		"/guilds/1\x00",
 	} {
 		_, err := Target(path)
@@ -174,10 +176,13 @@ func (f *fakeCreds) Status() (session.Standing, session.Account) {
 	return f.standing, session.Account{InstanceURL: f.cred.InstanceURL, UserID: f.cred.UserID}
 }
 
-func (f *fakeCreds) Current(ctx context.Context) (session.Credential, error) {
+func (f *fakeCreds) CurrentUnlessSignedOut(ctx context.Context) (session.Credential, error) {
 	f.mu.Lock()
-	noAnswer, cred := f.noAnswer, f.cred
+	noAnswer, cred, standing := f.noAnswer, f.cred, f.standing
 	f.mu.Unlock()
+	if standing == session.SignedOut {
+		return session.Credential{}, session.ErrSignedOut
+	}
 	if noAnswer {
 		<-ctx.Done()
 		return session.Credential{}, ctx.Err()

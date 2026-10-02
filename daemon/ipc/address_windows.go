@@ -64,7 +64,7 @@ func DialAt(ctx context.Context, addr string) (net.Conn, error) {
 	conn, err := winio.DialPipeContext(ctx, addr)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-			return nil, ErrNotRunning
+			return nil, fmt.Errorf("%w: there is no pipe named %s", ErrNotRunning, addr)
 		}
 		return nil, fmt.Errorf("connecting to the daemon at %s: %w", addr, err)
 	}

@@ -29,7 +29,10 @@ func Listen(string) (net.Listener, error) {
 	}
 	l, err := winio.ListenPipe(addr, &winio.PipeConfig{SecurityDescriptor: ipc.PipeSecurity(sid)})
 	if err != nil {
-		return nil, fmt.Errorf("creating the attach pipe %s (is another process holding the name?): %w", addr, err)
+		// The name is taken, by another daemon or a squatter: as permanent as a path that is too long, since
+		// a restart meets the same holder.
+		return nil, fmt.Errorf("%w: creating the attach pipe %s (is another process holding the name?): %w",
+			ErrUnusable, addr, err)
 	}
 	return l, nil
 }

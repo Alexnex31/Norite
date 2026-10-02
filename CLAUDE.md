@@ -2141,6 +2141,12 @@ And on the attach socket and the relayed verbs, from M20:
 - **The token never crosses the socket.** An attach client names a method, a path and a body; the relay
   performs the call with the daemon's token and returns the status and body. Nothing in `daemon/ipc` has a
   field that could carry a token, and IDENTIFY is decoded strictly.
+- **A field added to any frame on the socket is a MINOR change, never a PATCH one.** Frames are decoded
+  strictly, and the version rule lets a PATCH-different daemon and client talk, so a field added in a patch
+  release would be refused as malformed instead of answered with "restart the daemon". The version is read
+  leniently first, so a MINOR mismatch always reports as one.
+- **Frames are encoded with `ipc.Marshal`**, which does not HTML-escape: `json.Marshal` rewrites `<` `>` `&`
+  as six-byte escapes inside a relayed body too, which let a hostile instance's answer outgrow the bounds.
 - **The relay's reach is a decision per route.** It refuses `/auth/*`, `/instance/*` and
   `/users/@me/sessions`, and `TestEveryContractPathIsDecided` fails on any path in `openapi.yaml` without an
   explicit relay-or-refuse entry. A new route gets one in the same commit.
@@ -2155,7 +2161,10 @@ And on the attach socket and the relayed verbs, from M20:
   `contracts/cli-json/` in the same commit (rule 15), and a verb returning no object prints `done`.
 - **Every relayed outcome's exit code is decided in `daemonclient.Call`**, never in a verb: 4xx is 4,
   except 401 and 429, which are 3 like a stopped daemon, a signed-out one or an unreachable instance; 5xx
-  is 1. Usage errors are `clierr.Usage`, exit 2. 2 and 4 print without the `norite: ` prefix.
+  is 1; a 2xx without the body it owed is an error, never an empty object reported as success. Every call
+  and every attach is bounded, so a hung daemon is exit 3, not a hang. Usage errors are `clierr.Usage`,
+  exit 2, and so is every flag urfave/cli refuses, through the `OnUsageError` the tree walk sets. 2 and 4
+  print without the `norite: ` prefix.
 - **A verb attaches on its first request**, after every flag check and confirmation, so a usage error is
   exit 2 on a machine with no daemon running.
 - **Destructive verbs go through `confirm`**: `--yes` answers it, the question goes to stderr, and with no

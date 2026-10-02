@@ -4,6 +4,7 @@
 package ipc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -320,7 +321,15 @@ func resultOf(id string, resp Response) (Result, error) {
 	if resp.Status == nil {
 		return Result{}, fmt.Errorf("the daemon answered request %s with neither a status nor an error", id)
 	}
-	return Result{Status: *resp.Status, Body: resp.Body}, nil
+	// "No body" crosses the socket as JSON null, which a json.RawMessage decodes as the four bytes of it.
+	// Result.Body is nil for none, as documented, or a caller checking for a body would find one: a 200
+	// whose body a proxy replaced with HTML decoded "null" into an empty object and reported success
+	// (M20 /code-review).
+	body := resp.Body
+	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
+		body = nil
+	}
+	return Result{Status: *resp.Status, Body: body}, nil
 }
 
 // write sends one frame, bounded by ctx's deadline. A local socket blocks a write only when the daemon has

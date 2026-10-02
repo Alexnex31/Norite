@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"strconv"
@@ -43,6 +44,12 @@ import (
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
+
+// ErrUnusable is a socket address the daemon cannot listen on and will not be able to on a restart: a path
+// too long for the platform, a file that is not a socket where the socket goes, a pipe name another
+// process holds. Anything else Listen returns may be transient — out of descriptors, a full disk — and a
+// restart can fix it, which is the line daemonproc draws between exit 4 and exit 1 (M20 /code-review).
+var ErrUnusable = errors.New("the attach socket's address cannot be used")
 
 // Session is what the server asks of the daemon's session: who is signed in, without waiting.
 // *session.Source implements it.
@@ -206,6 +213,27 @@ func (s *Server) Dispatch(eventType string, data json.RawMessage) {
 		return
 	}
 
+	// Forwarded only while the state belongs to the sign-in the session names. After a login the session
+	// names the new account at once, and the gateway connection goes on delivering the old one's events
+	// until it notices that sign-in ended; a client that attached in between was told it is the new account,
+	// and must not be sent the old one's messages as part of that view (M20 /code-review).
+	if _, account := s.session.Status(); account.Generation != s.state.Generation() {
+		return
+	}
+
+	// Nothing is built for nobody: with no client watching — the ordinary case, a daemon with no TUI open —
+	// the payload is not copied at all.
+	watching := false
+	for c := range s.clients {
+		if c.watching {
+			watching = true
+			break
+		}
+	}
+	if !watching {
+		return
+	}
+
 	// Encoded once for every client, which differ only in the sequence number. The payload is copied into
 	// no client's frame: each writer sends head, its own number and tail as one vectored write.
 	t, err := json.Marshal(eventType)
@@ -279,14 +307,22 @@ func (s *Server) readyLocked() ipc.Ready {
 	return ready
 }
 
-func (s *Server) add(c *conn) bool {
+// add registers c, or says why it cannot be: the daemon is stopping, or full. A zero Close means added.
+//
+// Two refusals rather than one, because they ask different things of the client: one that arrives as the
+// daemon stops should wait for it to come back, not be told it is full (M20 /code-review).
+func (s *Server) add(c *conn) ipc.Close {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closing || len(s.clients) >= s.maxClients {
-		return false
+	switch {
+	case s.closing:
+		return ipc.Close{Code: ipc.CloseGoingAway, Reason: "the daemon is stopping"}
+	case len(s.clients) >= s.maxClients:
+		return ipc.Close{Code: ipc.CloseTooManyClients,
+			Reason: fmt.Sprintf("the daemon is already serving %d clients", s.maxClients)}
 	}
 	s.clients[c] = struct{}{}
-	return true
+	return ipc.Close{}
 }
 
 func (s *Server) remove(c *conn) {

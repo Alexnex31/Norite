@@ -126,6 +126,9 @@ func newTestServer(t *testing.T, relay Relay, opts ...serverOpt) *testServer {
 		InstanceURL: "https://chat.example", UserID: "1", Username: "ada\x1b[2J", Generation: 1,
 	}}
 	st := state.New(zerolog.Nop(), state.DefaultLimits)
+	// The state belongs to the session's sign-in, as the gateway client's Begin makes it on a real daemon:
+	// events are forwarded only while the two agree.
+	st.Begin(1)
 	srv := New(Options{Session: sess, State: st, Relay: relay, Version: "dev", Log: zerolog.Nop()})
 	for _, o := range opts {
 		o(srv)
@@ -691,4 +694,68 @@ func TestANewerClientsExtraFieldStillGetsTheVersionAnswer(t *testing.T) {
 	}
 	assert.Equal(t, ipc.CloseVersionMismatch, identify("0.3.0").Code)
 	assert.Equal(t, ipc.CloseDecodeError, identify("0.2.0").Code)
+}
+
+// TestAnEventFromASignInThatEndedIsNotForwarded: after a login the session names the new account at once,
+// while the gateway connection may still deliver the old one's events until it notices; a client told it is
+// the new account must not be sent them.
+func TestAnEventFromASignInThatEndedIsNotForwarded(t *testing.T) {
+	ts := newTestServer(t, echoRelay())
+	c := ts.attach(t, true)
+
+	ts.sess.mu.Lock()
+	ts.sess.account.Generation = 2
+	ts.sess.mu.Unlock()
+	ts.Dispatch("MESSAGE_CREATE", messagePayload("1", "30", "the old account's"))
+
+	ts.state.Begin(2)
+	ts.Dispatch("MESSAGE_CREATE", messagePayload("2", "30", "the new account's"))
+	select {
+	case ev, ok := <-c.Events():
+		require.True(t, ok, "closed: %v", c.Err())
+		assert.Contains(t, string(ev.Data), "the new account's", "the old sign-in's event was forwarded first")
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing arrived")
+	}
+}
+
+// TestAClientArrivingAsTheDaemonStopsIsToldSo: not that the daemon is full.
+func TestAClientArrivingAsTheDaemonStopsIsToldSo(t *testing.T) {
+	ts := newTestServer(t, echoRelay())
+	ts.mu.Lock()
+	ts.closing = true
+	ts.mu.Unlock()
+
+	r := ts.raw(t)
+	f, err := r.recv()
+	require.NoError(t, err)
+	require.Equal(t, ipc.OpClose, f.Op)
+	var cl ipc.Close
+	require.NoError(t, ipc.Decode(f, &cl))
+	assert.Equal(t, ipc.CloseGoingAway, cl.Code)
+
+	ts.mu.Lock()
+	ts.closing = false
+	ts.mu.Unlock()
+}
+
+// TestARelayedBodyCrossesTheSocketUnescaped: json.Marshal rewrites < > & as six-byte escapes inside a raw
+// body too, which let a hostile instance's answer grow past the queue's bound and drop its client.
+func TestARelayedBodyCrossesTheSocketUnescaped(t *testing.T) {
+	body := json.RawMessage(`"` + strings.Repeat("<&>", 1000) + `"`)
+	ts := newTestServer(t, relayFunc(func(context.Context, ipc.Request) ipc.Response {
+		status := 200
+		return ipc.Response{Status: &status, Body: body}
+	}))
+	r := ts.raw(t)
+	r.identify("dev", false)
+	r.expect(gatewayproto.OpDispatch)
+	r.send(ipc.OpRequest, ipc.Request{ID: "1", Method: "GET", Path: "/guilds/1"})
+
+	_ = r.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var prefix [4]byte
+	_, err := io.ReadFull(r.conn, prefix[:])
+	require.NoError(t, err)
+	n := int(prefix[0])<<24 | int(prefix[1])<<16 | int(prefix[2])<<8 | int(prefix[3])
+	assert.Less(t, n, len(body)+200, "the body grew on the way: %d bytes for a %d-byte body", n, len(body))
 }

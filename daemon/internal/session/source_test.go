@@ -1054,3 +1054,22 @@ func TestServerClockAdvancesOnTheLocalClockFromItsLastSample(t *testing.T) {
 	c.observe(time.Time{})
 	assert.Equal(t, local.Now(), c.now(), "a missing Date header is no sample")
 }
+
+// TestCurrentUnlessSignedOutAnswersAsSoonAsTheDaemonIsSignedOut: a relayed request does not wait out its
+// timeout for a login that is not coming, whether the daemon was signed out already or became so during the
+// wait.
+func TestCurrentUnlessSignedOutAnswersAsSoonAsTheDaemonIsSignedOut(t *testing.T) {
+	h := newHarness(t)
+	h.f.set(func(f *fakeInstance) { f.status, f.body = 401, `{}` })
+	h.start()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := h.src.CurrentUnlessSignedOut(ctx)
+	require.ErrorIs(t, err, ErrSignedOut, "the refused renewal signs the daemon out during the wait")
+	assert.Less(t, time.Since(start), 2*time.Second)
+
+	_, err = h.src.CurrentUnlessSignedOut(ctx)
+	require.ErrorIs(t, err, ErrSignedOut, "and once signed out, at once")
+}

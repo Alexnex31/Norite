@@ -174,6 +174,21 @@ func New(opts Options) *Source {
 // it waits only when the token in hand is no good at all. A daemon that is signed out waits here until the
 // store changes, which is what a gateway client blocked on it should do.
 func (s *Source) Current(ctx context.Context) (Credential, error) {
+	return s.awaitCredential(ctx, false)
+}
+
+// ErrSignedOut is CurrentUnlessSignedOut's answer for a daemon nobody is signed in to.
+var ErrSignedOut = errors.New("session: signed out")
+
+// CurrentUnlessSignedOut is Current for a caller that must not wait for a login: it waits while a sign-in
+// is being established or renewed, and returns ErrSignedOut as soon as the daemon is signed out — including
+// when it becomes so during the wait. A relayed request racing a logout, or a refused renewal, answers at
+// once rather than when its own timeout runs out (M20 /code-review).
+func (s *Source) CurrentUnlessSignedOut(ctx context.Context) (Credential, error) {
+	return s.awaitCredential(ctx, true)
+}
+
+func (s *Source) awaitCredential(ctx context.Context, unlessSignedOut bool) (Credential, error) {
 	for {
 		s.mu.Lock()
 		if s.phase == phaseLive {
@@ -188,8 +203,12 @@ func (s *Source) Current(ctx context.Context) (Credential, error) {
 			}
 			nudge(s.refreshNow)
 		}
+		signedOut := s.phase == phaseSignedOut
 		changed := s.changed
 		s.mu.Unlock()
+		if unlessSignedOut && signedOut {
+			return Credential{}, ErrSignedOut
+		}
 
 		select {
 		case <-ctx.Done():

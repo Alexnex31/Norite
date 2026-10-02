@@ -78,7 +78,9 @@ func DialAt(ctx context.Context, addr string) (net.Conn, error) {
 	conn, err := d.DialContext(ctx, "unix", addr)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
-			return nil, ErrNotRunning
+			// Saying where is the point: a service installed with one XDG_STATE_HOME and a shell exporting
+			// another look here as a daemon that is not running (M20 /code-review).
+			return nil, fmt.Errorf("%w: nothing is listening at %s", ErrNotRunning, addr)
 		}
 		return nil, fmt.Errorf("connecting to the daemon at %s: %w", addr, err)
 	}

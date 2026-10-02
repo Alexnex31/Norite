@@ -54,7 +54,7 @@ import (
 // Credentials is what the relay needs from the session. *session.Source implements it.
 type Credentials interface {
 	Status() (session.Standing, session.Account)
-	Current(ctx context.Context) (session.Credential, error)
+	CurrentUnlessSignedOut(ctx context.Context) (session.Credential, error)
 	Rejected(accessToken string)
 }
 
@@ -162,7 +162,7 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 func (r *Relay) current(ctx context.Context) (session.Credential, *ipc.Response) {
 	waitCtx, cancel := context.WithTimeout(ctx, signInWait)
 	defer cancel()
-	cred, err := r.creds.Current(waitCtx)
+	cred, err := r.creds.CurrentUnlessSignedOut(waitCtx)
 	if err == nil {
 		return cred, nil
 	}
@@ -170,7 +170,7 @@ func (r *Relay) current(ctx context.Context) (session.Credential, *ipc.Response)
 		f := failure(ipc.RelayUnreachable, "the request was canceled")
 		return session.Credential{}, &f
 	}
-	if standing, _ := r.creds.Status(); standing == session.SignedOut {
+	if errors.Is(err, session.ErrSignedOut) {
 		f := failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
 		return session.Credential{}, &f
 	}
@@ -252,9 +252,14 @@ func Target(path string) (*url.URL, error) {
 	if u.RawPath != "" {
 		return nil, errors.New("the path must not percent-encode its separators")
 	}
-	for _, seg := range strings.Split(u.Path, "/") {
-		if seg == "." || seg == ".." {
+	for i, seg := range strings.Split(u.Path, "/") {
+		switch {
+		case seg == "." || seg == "..":
 			return nil, errors.New("the path must not contain . or .. segments")
+		case seg == "" && i > 0:
+			// Empty segments too: `/users//@me/sessions` passes a prefix check, and a proxy in front of an
+			// instance that merges slashes delivers it as the surface the check refuses (M20 /code-review).
+			return nil, errors.New("the path must not contain an empty segment")
 		}
 	}
 

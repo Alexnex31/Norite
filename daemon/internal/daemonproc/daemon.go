@@ -143,12 +143,16 @@ func Run(ctx context.Context, opts Options) error {
 		// The attach socket opens first, before anything starts, so a daemon that cannot listen stops here
 		// with the reason rather than running unreachable: a socket path past the platform's limit, a file
 		// that is not a socket where the socket goes, or on Windows a pipe name another process holds. After
-		// the lock, which is what makes a socket file already there a stale one. None of those is fixed by
-		// starting again, so the error is ErrMisconfigured, which the service manager is told not to retry.
+		// the lock, which is what makes a socket file already there a stale one. Those are not fixed by
+		// starting again, so they are ErrMisconfigured, which the service manager is told not to retry; any
+		// other failure — out of descriptors, a full disk — may be, and is an ordinary one.
 		listener, err := attach.Listen(stateDir)
 		if err != nil {
 			log.Error().Err(err).Msg("cannot open the attach socket")
-			return fmt.Errorf("%w: %w", ErrMisconfigured, err)
+			if errors.Is(err, attach.ErrUnusable) {
+				return fmt.Errorf("%w: %w", ErrMisconfigured, err)
+			}
+			return err
 		}
 
 		// Each component's lines carry its name under a key of their own. Not "component", which the log's

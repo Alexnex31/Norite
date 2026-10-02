@@ -405,3 +405,26 @@ func TestAWriteCutShortEndsTheConnection(t *testing.T) {
 		t.Fatal("the connection outlived a write that may have left half a frame behind")
 	}
 }
+
+// TestNoBodyIsNil: "no body" crosses the socket as JSON null, and Result.Body is nil for it, as documented.
+func TestNoBodyIsNil(t *testing.T) {
+	conn, d := newPair(t)
+	go func() {
+		d.handshake("dev", signedIn())
+		f, err := d.recv()
+		if err != nil {
+			return
+		}
+		var r Request
+		_ = Decode(f, &r)
+		d.send(OpResponse, Response{ID: r.ID, Status: ptr(200)}, nil, nil)
+	}()
+	c, err := attach(t, conn, Options{Client: "norite", Version: "dev"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	res, err := c.Do(context.Background(), "GET", "/guilds/1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, 200, res.Status)
+	assert.Nil(t, res.Body)
+}

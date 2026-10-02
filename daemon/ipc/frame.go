@@ -21,11 +21,27 @@ var ErrFrameTooLarge = errors.New("ipc: frame exceeds the size limit")
 // WriteFrame writes one frame: its JSON behind a 4-byte big-endian length, in a single Write so a frame
 // is never interleaved with another writer's on a stream that allows concurrent writes.
 func WriteFrame(w io.Writer, f gatewayproto.Frame) error {
-	payload, err := json.Marshal(f)
+	payload, err := Marshal(f)
 	if err != nil {
 		return fmt.Errorf("ipc: encoding a frame: %w", err)
 	}
 	return WriteEncoded(w, payload)
+}
+
+// Marshal encodes v as JSON without HTML escaping, which is what every frame on the socket is encoded with.
+//
+// json.Marshal rewrites `<`, `>` and `&` as six-byte escapes, inside a json.RawMessage too, so a relayed
+// body within MaxResponseBody could grow up to six times over and pass the queue's and the client's bounds:
+// a hostile instance answering with a page of `<` would have its client dropped as too slow, or refused as
+// too large, rather than answered (M20 /code-review). Nothing reads these frames as HTML.
+func Marshal(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // WriteEncoded writes an already-encoded frame. The fan-out encodes a dispatch once and writes the same
@@ -76,7 +92,7 @@ func ReadFrame(r io.Reader, limit int) (gatewayproto.Frame, error) {
 
 // Encode builds a frame with op and payload d, s and t null: every frame but a dispatch.
 func Encode(op gatewayproto.Opcode, d any) (gatewayproto.Frame, error) {
-	raw, err := json.Marshal(d)
+	raw, err := Marshal(d)
 	if err != nil {
 		return gatewayproto.Frame{}, fmt.Errorf("ipc: encoding op %d: %w", op, err)
 	}
@@ -84,8 +100,12 @@ func Encode(op gatewayproto.Opcode, d any) (gatewayproto.Frame, error) {
 }
 
 // Decode reads a frame's payload into v, refusing a field v does not declare. Both ends are built from one
-// repository and must match exactly under the 0.x version rule, so an unknown field is a bug to surface, not
-// a newer peer to tolerate.
+// repository, and the version rule (ADR 0033) lets two that differ only in PATCH talk, so an unknown field
+// is a bug to surface rather than a newer peer to tolerate — on one condition this package depends on: a
+// field added to any frame is a MINOR change, never a PATCH one, because a PATCH-newer peer would be
+// refused as malformed instead of told to restart. The gateway decodes IDENTIFY the same way. The version
+// itself is read leniently before anything is decoded strictly, so a MINOR mismatch is always reported as
+// one (M20 /code-review).
 func Decode(f gatewayproto.Frame, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(f.D))
 	dec.DisallowUnknownFields()

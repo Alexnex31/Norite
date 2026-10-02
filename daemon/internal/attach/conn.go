@@ -69,15 +69,16 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 	}
 	defer cancel()
 
-	if !s.add(c) {
+	if refusal := s.add(c); refusal.Code != 0 {
 		// Refused before HELLO, so the client's handshake reads the reason as its first frame.
 		_ = nc.SetWriteDeadline(time.Now().Add(closeGrace))
-		reason := fmt.Sprintf("the daemon is already serving %d clients", s.maxClients)
-		if f, err := ipc.Encode(ipc.OpClose, ipc.Close{Code: ipc.CloseTooManyClients, Reason: reason}); err == nil {
+		if f, err := ipc.Encode(ipc.OpClose, refusal); err == nil {
 			_ = ipc.WriteFrame(nc, f)
 		}
 		_ = nc.Close()
-		s.log.Warn().Int("clients", s.maxClients).Msg("refused an attach client: too many attached")
+		if refusal.Code == ipc.CloseTooManyClients {
+			s.log.Warn().Int("clients", s.maxClients).Msg("refused an attach client: too many attached")
+		}
 		return
 	}
 	defer s.remove(c)
@@ -270,7 +271,7 @@ func isTimeout(err error) bool {
 
 // enqueueFrame queues an encoded frame for the writer.
 func (c *conn) enqueueFrame(f gatewayproto.Frame) {
-	payload, err := json.Marshal(f)
+	payload, err := ipc.Marshal(f)
 	if err != nil {
 		c.kill(0, "")
 		return
