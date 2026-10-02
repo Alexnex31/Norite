@@ -12,9 +12,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonctl"
 	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
@@ -36,7 +38,7 @@ const JSONFlagName = "json"
 
 // New builds the root command.
 func New(out, errOut io.Writer) *cli.Command {
-	return &cli.Command{
+	root := &cli.Command{
 		Name:    "norite",
 		Usage:   "Norite — voice and text chat",
 		Version: Version,
@@ -94,5 +96,38 @@ func New(out, errOut io.Writer) *cli.Command {
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
 		}, verbs.Commands(verbs.Daemon(Version))...),
+	}
+	refuseUnknownSubcommands(root.Commands)
+	return root
+}
+
+// refuseUnknownSubcommands gives every group without an action of its own the root's: a mistyped
+// subcommand is a usage error, with the nearest name offered, and a bare group shows its help.
+//
+// urfave/cli's default for a group is its help command, which answers an unknown name with "No help topic"
+// and exit 3 — and since M20, 3 means the daemon is unavailable, so `norite guild lsit` read to a script
+// as "wait and retry" (M20 /code-review). Applied across the whole tree rather than per group, so a group
+// added later cannot forget it.
+func refuseUnknownSubcommands(cmds []*cli.Command) {
+	for _, c := range cmds {
+		if len(c.Commands) == 0 {
+			continue
+		}
+		refuseUnknownSubcommands(c.Commands)
+		if c.Action != nil {
+			continue
+		}
+		c.Action = func(_ context.Context, cmd *cli.Command) error {
+			arg := cmd.Args().First()
+			if arg == "" {
+				return cli.ShowSubcommandHelp(cmd)
+			}
+			name := strings.TrimPrefix(cmd.FullName(), "norite ")
+			if suggestion := cli.SuggestCommand(cmd.Commands, arg); suggestion != "" && suggestion != arg {
+				return clierr.Usage("unknown command %q in `norite %s`; did you mean %q?", arg, name, suggestion)
+			}
+			return clierr.Usage("unknown command %q in `norite %s`; run `norite %s --help` to see its commands",
+				arg, name, name)
+		}
 	}
 }

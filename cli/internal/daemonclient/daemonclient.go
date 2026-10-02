@@ -9,7 +9,7 @@
 //
 //   - the instance answered 2xx: the body, decoded;
 //   - it answered 4xx: clierr.RefusedError, exit 4 — except 401, which is the daemon's credential failing
-//     after the relay's retry, and is unavailable;
+//     after the relay's retry, and 429, a throttle, which are both unavailable;
 //   - the daemon is not running, not signed in, or cannot reach the instance: clierr.UnavailableError, exit 3;
 //   - anything else, a 5xx included: an ordinary error, exit 1.
 package daemonclient
@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/Alexnex31/Norite/cli/internal/apiclient"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -31,8 +32,13 @@ type Caller interface {
 	Do(ctx context.Context, method, path string, body any) (ipc.Result, error)
 }
 
-// Connect attaches to this user's daemon, for one command's requests, and checks it is signed in. version
-// is this CLI's, for the handshake.
+// Connect attaches to this user's daemon, for one command's requests. version is this CLI's, for the
+// handshake.
+//
+// It does not judge the sign-in from READY. A daemon that has just started, or is waiting for a keyring to
+// unlock, names no account yet and is not signed out, and telling such a user to run `norite login` would
+// have them supersede a perfectly good stored sign-in. The relay decides: it answers at once when the
+// daemon is signed out, and waits a bounded while when it is starting (M20 /code-review).
 //
 // It never starts a daemon (E1 in M20's planning): one started from a shell is not the service, and would
 // hold the lock the service then fails to take.
@@ -52,21 +58,7 @@ func Connect(ctx context.Context, version string) (*ipc.Client, error) {
 		}
 		return nil, clierr.Unavailable("could not attach to the daemon: %s", termsafe.Text(err.Error()))
 	}
-	if c.Ready().Account == nil {
-		_ = c.Close()
-		return nil, clierr.Unavailable("the daemon is not signed in; run `norite login`")
-	}
 	return c, nil
-}
-
-// instanceError is the body of an error response from the instance: openapi.yaml's Error, an envelope
-// around the error itself.
-type instanceError struct {
-	Error struct {
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		RequestID string `json:"request_id"`
-	} `json:"error"`
 }
 
 // Call performs one request and decodes a 2xx answer's body into out, which may be nil to ignore it.
@@ -92,24 +84,24 @@ func Call(ctx context.Context, c Caller, method, path string, body, out any) err
 	case res.Status == http.StatusUnauthorized:
 		return clierr.Unavailable("the instance refused the daemon's credential; run `norite login` again")
 
-	case res.Status >= 400 && res.Status < 500:
+	case res.Status == http.StatusTooManyRequests:
+		// A throttle is transient, so it is "not now" rather than "no": exit 3, which a script may retry
+		// after a wait, where 4 would read as the request itself being refused.
+		return clierr.Unavailable("the instance is rate-limiting this account; try again shortly")
+	}
+
+	// The instance's own words, and a stranger's server: sanitized as they are lifted out (rule 19).
+	e, decoded := apiclient.ErrorFromBody(res.Status, res.Body)
+	if res.Status >= 400 && res.Status < 500 {
 		refused := &clierr.RefusedError{Status: res.Status}
-		var e instanceError
-		if res.Body != nil && json.Unmarshal(res.Body, &e) == nil {
-			// The instance's own words, and a stranger's server: sanitized as they enter (rule 19).
-			refused.Code = termsafe.Text(e.Error.Code)
-			refused.Message = termsafe.Text(e.Error.Message)
-			refused.RequestID = termsafe.Text(e.Error.RequestID)
+		if decoded {
+			refused.Code, refused.Message, refused.RequestID = e.Code, e.Message, e.RequestID
 		}
 		return refused
 	}
-
-	if res.Body != nil {
-		var e instanceError
-		if json.Unmarshal(res.Body, &e) == nil && e.Error.Message != "" {
-			return fmt.Errorf("the instance failed the request (HTTP %d): %s (request %s)", res.Status,
-				termsafe.Text(e.Error.Message), termsafe.Text(e.Error.RequestID))
-		}
+	if decoded {
+		return fmt.Errorf("the instance failed the request (HTTP %d): %s (request %s)", res.Status,
+			e.Message, e.RequestID)
 	}
 	return fmt.Errorf("the instance failed the request (HTTP %d)", res.Status)
 }

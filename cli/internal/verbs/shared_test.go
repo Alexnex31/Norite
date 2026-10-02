@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ func probe(t *testing.T, argv []string, in string, connected *bool,
 	}
 	var out bytes.Buffer
 	root := &cli.Command{
-		Name: "norite", Writer: &out, Reader: strings.NewReader(in),
+		Name: "norite", Writer: &out, ErrWriter: io.Discard, Reader: strings.NewReader(in),
 		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
 		Commands: []*cli.Command{{
@@ -75,7 +76,7 @@ func TestAnIdArgumentIsDigitsAndCheckedBeforeTheDaemon(t *testing.T) {
 	connected := false
 	out, err := probe(t, []string{"verb", "7238829238972837423"}, "", &connected, verb, "guild")
 	require.NoError(t, err)
-	assert.True(t, connected)
+	assert.False(t, connected, "a verb that asks the instance nothing never attaches")
 	assert.Equal(t, "ran\n", out)
 }
 
@@ -168,8 +169,13 @@ func TestPagingFlagsAreCheckedAndEncoded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "?before=123&limit=10", q)
 
+	// Both together are a window, which the instance applies as one: how a --after listing pages.
+	q, err = check("--after", "100", "--before", "150")
+	require.NoError(t, err)
+	assert.Equal(t, "?after=100&before=150&limit=50", q)
+
 	for _, bad := range [][]string{
-		{"--limit", "0"}, {"--limit", "101"}, {"--before", "x&admin=1"}, {"--before", "1", "--after", "2"},
+		{"--limit", "0"}, {"--limit", "101"}, {"--before", "x&admin=1"},
 	} {
 		_, err := check(bad...)
 		var usage *clierr.UsageError

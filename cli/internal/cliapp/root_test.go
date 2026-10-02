@@ -333,3 +333,20 @@ func TestEmbeddedNoticesAreNotEmpty(t *testing.T) {
 			strings.Contains(notices.Text, "Redistribution and use"),
 		"no license body — only the generated header survived")
 }
+
+// TestAMistypedSubcommandIsAUsageErrorInEveryGroup: urfave/cli's own answer is its help command's "No help
+// topic" with exit 3, which since M20 means the daemon is unavailable — a typo a script would wait out.
+func TestAMistypedSubcommandIsAUsageErrorInEveryGroup(t *testing.T) {
+	for _, args := range [][]string{
+		{"guild", "lsit"}, {"daemon", "sttus"}, {"member", "role", "ad"}, {"instance", "invte"},
+	} {
+		_, _, err := runArgs(t, args...)
+		var usage *clierr.UsageError
+		require.ErrorAs(t, err, &usage, "%v", args)
+		assert.Contains(t, err.Error(), "did you mean", "%v", args)
+	}
+
+	out, _, err := runArgs(t, "guild")
+	require.NoError(t, err, "a bare group shows its help")
+	assert.Contains(t, out, "audit-log")
+}

@@ -61,22 +61,31 @@ func Commands(connect Connector) []*cli.Command {
 
 // env is what a verb runs with.
 type env struct {
-	out  io.Writer
-	in   io.Reader
-	json bool
+	out    io.Writer
+	errOut io.Writer
+	in     io.Reader
+	json   bool
 	// interactive reports whether in is a terminal a question can be asked on.
 	interactive bool
-	call        daemonclient.Caller
+
+	// The daemon is attached to on the verb's first request, not before it: every flag a verb checks, and
+	// the confirmation it asks for, comes first, so a mistake is a usage error (2) on a machine with no
+	// daemon running rather than "the daemon is not running" (3), which a script would wait out.
+	connect Connector
+	call    daemonclient.Caller
+	detach  func()
 }
 
-// run attaches, runs the verb, and renders what it produced. A verb that produces nothing to show — a
-// confirmation it printed itself — returns a nil Result.
+// run checks the arguments, runs the verb, and renders what it produced.
 func run(connect Connector, verb func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error)) cli.ActionFunc {
 	return func(ctx context.Context, cmd *cli.Command) error {
 		root := cmd.Root()
-		e := &env{out: root.Writer, in: root.Reader, json: root.Bool("json")}
+		e := &env{out: root.Writer, errOut: root.ErrWriter, in: root.Reader, json: root.Bool("json"), connect: connect}
 		if e.out == nil {
 			e.out = os.Stdout
+		}
+		if e.errOut == nil {
+			e.errOut = os.Stderr
 		}
 		if e.in == nil {
 			e.in = os.Stdin
@@ -85,18 +94,14 @@ func run(connect Connector, verb func(ctx context.Context, cmd *cli.Command, e *
 			e.interactive = term.IsTerminal(int(f.Fd()))
 		}
 
-		// Arguments are checked before the daemon is attached to, so a typo is a usage error on a machine
-		// with no daemon running, rather than "the daemon is not running".
 		if err := checkArgs(cmd); err != nil {
 			return err
 		}
-
-		c, detach, err := connect(ctx)
-		if err != nil {
-			return err
-		}
-		defer detach()
-		e.call = c
+		defer func() {
+			if e.detach != nil {
+				e.detach()
+			}
+		}()
 
 		result, err := verb(ctx, cmd, e)
 		if err != nil || result == nil {
@@ -104,6 +109,19 @@ func run(connect Connector, verb func(ctx context.Context, cmd *cli.Command, e *
 		}
 		return output.Render(e.out, e.json, result)
 	}
+}
+
+// attached returns the verb's connection to the daemon, attaching on first use.
+func (e *env) attached(ctx context.Context) (daemonclient.Caller, error) {
+	if e.call != nil {
+		return e.call, nil
+	}
+	c, detach, err := e.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	e.call, e.detach = c, detach
+	return c, nil
 }
 
 // ---------- arguments ----------

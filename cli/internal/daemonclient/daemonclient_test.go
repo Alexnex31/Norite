@@ -55,6 +55,12 @@ func TestEveryOutcomeEndsInItsExitCode(t *testing.T) {
 				require.ErrorAs(t, err, &unavailable)
 				assert.Contains(t, err.Error(), "norite login")
 			}},
+		{"a throttle", answer{res: ipc.Result{Status: 429, Body: json.RawMessage(
+			`{"error":{"code":"rate_limited","message":"slow down","request_id":"r-2"}}`)}},
+			func(t *testing.T, err error) {
+				var unavailable *clierr.UnavailableError
+				require.ErrorAs(t, err, &unavailable, "not now, rather than no")
+			}},
 		{"a 502 from a proxy", answer{res: ipc.Result{Status: 502}},
 			func(t *testing.T, err error) {
 				assert.EqualError(t, err, "the instance failed the request (HTTP 502)")

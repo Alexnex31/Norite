@@ -51,9 +51,13 @@ func group(name, usage string, connect Connector, specs ...spec) *cli.Command {
 	return cmd
 }
 
-// call is daemonclient.Call on the verb's connection.
+// do is daemonclient.Call on the verb's connection, attaching to the daemon if this is its first request.
 func (e *env) do(ctx context.Context, method, path string, body, out any) error {
-	return daemonclient.Call(ctx, e.call, method, path, body, out)
+	c, err := e.attached(ctx)
+	if err != nil {
+		return err
+	}
+	return daemonclient.Call(ctx, c, method, path, body, out)
 }
 
 func guildCommand(connect Connector) *cli.Command {

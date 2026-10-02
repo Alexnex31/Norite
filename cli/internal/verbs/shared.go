@@ -34,7 +34,9 @@ func confirm(cmd *cli.Command, e *env, question string) error {
 	if !e.interactive {
 		return fmt.Errorf("%w: pass --yes to %s without being asked", clierr.ErrNoTerminal, question)
 	}
-	if _, err := fmt.Fprintf(e.out, "%s? This cannot be undone. [y/N] ", upperFirst(question)); err != nil {
+	// On stderr: stdout is the result, which --json pipes into a parser, and a question written there would
+	// both vanish into the pipe and corrupt the document.
+	if _, err := fmt.Fprintf(e.errOut, "%s? This cannot be undone. [y/N] ", upperFirst(question)); err != nil {
 		return err
 	}
 	line, _ := bufio.NewReader(e.in).ReadString('\n')
@@ -92,6 +94,9 @@ func afterFlag(what string) *cli.StringFlag {
 
 // query builds a paged list's query string from its flags. names says which of before and after the verb
 // takes; extra adds the verb's own filters, already checked.
+//
+// A verb taking both passes both through: the instance applies them together as a window, newest first, so
+// `--after X` pages by adding each page's --before and keeping --after X.
 func query(cmd *cli.Command, names []string, extra url.Values) (string, int, error) {
 	q := url.Values{}
 	for k, v := range extra {
@@ -110,9 +115,6 @@ func query(cmd *cli.Command, names []string, extra url.Values) (string, int, err
 		if v != nil {
 			q.Set(n, *v)
 		}
-	}
-	if cmd.IsSet("before") && cmd.IsSet("after") {
-		return "", 0, clierr.Usage("--before and --after page in opposite directions; pass one")
 	}
 	return "?" + q.Encode(), limit, nil
 }

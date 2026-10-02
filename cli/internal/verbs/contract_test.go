@@ -330,9 +330,9 @@ type ran struct {
 func runVerb(t *testing.T, f *fakeDaemon, stdin string, argv ...string) ran {
 	t.Helper()
 	connect := func(context.Context) (daemonclient.Caller, func(), error) { return f, func() {}, nil }
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	root := &cli.Command{
-		Name: "norite", Writer: &out, Reader: strings.NewReader(stdin),
+		Name: "norite", Writer: &out, ErrWriter: &errOut, Reader: strings.NewReader(stdin),
 		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
 		Commands:       Commands(connect),

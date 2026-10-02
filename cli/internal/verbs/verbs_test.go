@@ -4,9 +4,11 @@
 package verbs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
 // verbCase is one verb, run once with --json against the contract-checked fake daemon.
@@ -486,4 +489,63 @@ func TestAMessageMustHaveContentWithinTheLimit(t *testing.T) {
 	// Counted in runes, as the instance counts them: 4,000 Japanese characters are 12,000 bytes and fit.
 	f := newFake(t).on("sendMessage", created(apiMessage("30", "20", "x")))
 	require.NoError(t, runVerb(t, f, "", "message", "send", "20", "--content", strings.Repeat("日", maxContent)).err)
+}
+
+// TestAUsageErrorNeedsNoDaemon: every flag check and every confirmation happens before the verb attaches,
+// so a mistake is exit 2 on a machine with no daemon running, never exit 3 (M20 /code-review).
+func TestAUsageErrorNeedsNoDaemon(t *testing.T) {
+	noDaemon := func(context.Context) (daemonclient.Caller, func(), error) {
+		return nil, nil, clierr.Unavailable("the daemon is not running")
+	}
+	for _, argv := range [][]string{
+		{"message", "send", "1"},
+		{"message", "list", "1", "--limit", "0"},
+		{"guild", "update", "10"},
+		{"guild", "audit-log", "10", "--actor", "me"},
+		{"report", "file", "30", "--reason", "rude"},
+		{"overwrite", "set", "20", "30"},
+	} {
+		root := &cli.Command{
+			Name: "norite", Writer: io.Discard, ErrWriter: io.Discard, Reader: strings.NewReader(""),
+			Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
+			ExitErrHandler: func(context.Context, *cli.Command, error) {},
+			Commands:       Commands(noDaemon),
+		}
+		err := root.Run(context.Background(), append([]string{"norite"}, argv...))
+		var usage *clierr.UsageError
+		assert.ErrorAs(t, err, &usage, "%v: %v", argv, err)
+	}
+
+	// The confirmation too: no terminal and no --yes is ErrNoTerminal, exit 2, before anything attaches.
+	root := &cli.Command{
+		Name: "norite", Writer: io.Discard, ErrWriter: io.Discard, Reader: strings.NewReader(""),
+		Flags: []cli.Flag{&cli.BoolFlag{Name: "json"}}, ExitErrHandler: func(context.Context, *cli.Command, error) {},
+		Commands: Commands(noDaemon),
+	}
+	err := root.Run(context.Background(), []string{"norite", "guild", "delete", "1"})
+	assert.True(t, errors.Is(err, clierr.ErrNoTerminal), "got %v", err)
+}
+
+// TestTheConfirmationIsAskedOnStderr: stdout carries the result, which --json pipes into a parser.
+func TestTheConfirmationIsAskedOnStderr(t *testing.T) {
+	f := newFake(t).on("deleteGuild", noContent())
+	connect := func(context.Context) (daemonclient.Caller, func(), error) { return f, func() {}, nil }
+	var out, errOut bytes.Buffer
+	root := &cli.Command{
+		Name: "norite", Writer: &out, ErrWriter: &errOut, Reader: strings.NewReader("y\n"),
+		Flags: []cli.Flag{&cli.BoolFlag{Name: "json"}}, ExitErrHandler: func(context.Context, *cli.Command, error) {},
+		Commands: []*cli.Command{guildCommand(connect)},
+	}
+	// The env sees a non-terminal reader, so the question is forced the way a terminal would see it.
+	root.Commands[0].Commands[4].Action = run(connect, func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
+		e.interactive = true
+		if err := confirm(cmd, e, "delete guild 10"); err != nil {
+			return nil, err
+		}
+		return done{Action: "guild.delete", Target: map[string]string{"guild_id": "10"}}, nil
+	})
+	require.NoError(t, root.Run(context.Background(), []string{"norite", "--json", "guild", "delete", "10"}))
+	assert.Contains(t, errOut.String(), "[y/N]")
+	assert.NotContains(t, out.String(), "[y/N]")
+	assert.True(t, json.Valid(out.Bytes()), "stdout is only the document: %s", out.String())
 }

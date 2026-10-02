@@ -185,21 +185,8 @@ func (c *Client) DoStatus(ctx context.Context, method, path, bearer string, body
 // resp.Status is no safer than the body: the reason phrase is the server's text too.
 func (c *Client) errorFrom(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-
-	var envelope struct {
-		Error struct {
-			Code      string `json:"code"`
-			Message   string `json:"message"`
-			RequestID string `json:"request_id"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(data, &envelope); err == nil && envelope.Error.Message != "" {
-		return &Error{
-			Status:    resp.StatusCode,
-			Code:      termsafe.Text(envelope.Error.Code),
-			Message:   termsafe.Text(envelope.Error.Message),
-			RequestID: termsafe.Text(envelope.Error.RequestID),
-		}
+	if e, ok := ErrorFromBody(resp.StatusCode, data); ok {
+		return e
 	}
 
 	// Not this API's error shape. Most often a proxy, a captive portal, or a URL that is not a Norite
@@ -209,6 +196,31 @@ func (c *Client) errorFrom(resp *http.Response) error {
 		Message: fmt.Sprintf("%s answered %s, which is not a Norite API response",
 			c.baseURL, termsafe.Text(resp.Status)),
 	}
+}
+
+// ErrorFromBody decodes openapi.yaml's Error envelope from a failure response's body, sanitizing every
+// string as it is lifted out (rule 19). ok is false when the body is not that envelope.
+//
+// The one decoder of that shape in the CLI: the daemon's relayed answers go through it as well as this
+// client's own, because a second copy already drifted once (M20, read from the top level and losing every
+// refusal's message).
+func ErrorFromBody(status int, data []byte) (*Error, bool) {
+	var envelope struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil || envelope.Error.Message == "" {
+		return nil, false
+	}
+	return &Error{
+		Status:    status,
+		Code:      termsafe.Text(envelope.Error.Code),
+		Message:   termsafe.Text(envelope.Error.Message),
+		RequestID: termsafe.Text(envelope.Error.RequestID),
+	}, true
 }
 
 // ForDisplay makes a value from the instance safe to print, and short enough not to bury what is around it.

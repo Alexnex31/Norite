@@ -328,7 +328,7 @@ func stamp(ts time.Time) string { return ts.Local().Format("2006-01-02 15:04") }
 
 func nextLine(t *output.Text, next *string, flag string) {
 	if next != nil {
-		t.Line("More: pass %s %s for the next page.", flag, c(*next))
+		t.Line("More: pass %s %s for the next page, with the same other flags.", flag, c(*next))
 	}
 }
 
