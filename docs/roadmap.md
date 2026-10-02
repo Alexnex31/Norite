@@ -932,9 +932,18 @@ of this section.
   when this entry was checked before marking it done: the bus and the limiter were each tested on both
   backends, the gateway itself never on Redis. `TestTheGatewayWorksAcrossReplicasOverRedis` runs two
   replicas on separate Redis connections now, and fails with the second taken off Redis.
-- **M19 — Daemon as gateway client**: the daemon holds the persistent WS connection to the backend, maintains
-  in-memory scrollback/presence state, computes and applies the HELLO clock offset to local JWT-expiry checks,
-  and keeps its session live by refreshing ahead of expiry against that offset.
+- **M19 — Daemon as gateway client**: done. The daemon holds its account's one gateway connection, keeps
+  its session live by refreshing ahead of expiry on an estimate of the server's clock, and builds an
+  in-memory state from what arrives: the account, the guild summaries, and a bounded buffer of recent
+  messages per channel. `daemon/internal/session` (the token source and the credential watch),
+  `daemon/internal/gatewayclient`, `daemon/internal/state` and `daemon/internal/backoff`; `daemon/termsafe`,
+  moved from the CLI; `backend/apicontract`, moved out of `internal/`; and `daemon` → `backend`, the
+  repository's third cross-module edge. Decisions are in this entry and in `docs/security-ledger.md`.
+
+  **Presence is not here, and no milestone builds it.** This entry asked for "in-memory scrollback/presence
+  state", and the gateway carries no presence: M18 defined no presence op or event, and nothing sends one.
+  M38 makes durable an "in-memory-only original design" that no entry creates. Found at M19's close by
+  reading the two entries against each other, and left for the roadmap to place rather than filled in here.
 
   **Refreshing is this milestone's, not M20's.** M7 spends the refresh token once, at startup, and a
   connection that outlives fifteen minutes cannot work that way: IDENTIFY and RESUME each authenticate an
@@ -949,26 +958,26 @@ of this section.
   before the payload, and the envelope sends `d` ahead of `t`. A read limit bounds every inbound frame
   instead.
 
-  **Two things M7 deferred come due here, because this is the milestone whose changes make them real.**
-  Neither is a bug today; each becomes one the moment the daemon does what this entry describes. (A third,
-  handing back the refresh token a colliding login makes unkeepable, was closed at M11 instead — it needed
-  no gateway connection, only the HTTP client the daemon already had.)
+  **Two things M7 deferred came due here, because this is the milestone whose changes made them real**, and
+  both are closed. (A third, handing back the refresh token a colliding login makes unkeepable, was closed
+  at M11 instead — it needed no gateway connection, only the HTTP client the daemon already had.)
 
-  - **`termsafe` has to move to a package both modules import — and must not be copied.** It lives in
-    `cli/internal/termsafe`, which the daemon module cannot reach. That is fine only while every untrusted
-    string the daemon handles was sanitized by the `norite login` that stored it, which
-    `daemon/internal/daemonproc/session.go` says in a comment beside the one log line that prints one.
+  - **`termsafe` moved to a package both modules import — and was not copied.** It lived in
+    `cli/internal/termsafe`, which the daemon module cannot reach. That was fine only while every untrusted
+    string the daemon handled had been sanitized by the `norite login` that stored it, which
+    `daemon/internal/daemonproc/session.go` said in a comment beside the one log line that printed one.
     Here the daemon fetches names of its own from DISPATCH events, and rule 19 lands on its side of the
     line. Two copies of a sanitizer drift, and this one decides whether a stranger's display name can
-    rewrite a log or a pane.
-  - **The daemon must reach a keyring that unlocks after it starts.** A daemon started by a systemd user
+    rewrite a log or a pane. It is `daemon/termsafe` now, outside `internal/` so the CLI imports it.
+  - **The daemon reaches a keyring that unlocks after it starts.** A daemon started by a systemd user
     unit before the session keyring is unlocked fails to read its credential, logs it, and runs for its
     whole life with no session, because `Load` is tried once. The fix is retrying the read, **not
     re-probing**, which is what this bullet said until M19's planning read the store: the `sync.Once`
     probe decides only where `Save` puts a *new* secret, and the daemon never saves. Its reads and
     write-backs go to the backend the record names (`Record.SecretBackend`, ADR 0025), which every record
     has carried since M7 itself. The deferral was copied from a code comment into two documents and
-    believed in both — M11's dropped-token note again.
+    believed in both — M11's dropped-token note again. The read is retried with backoff now, for as long
+    as it takes.
 
   **What M18's gateway asks of its client**, so the daemon is written against it rather than discovering it:
   IDENTIFY within ten seconds of HELLO, always sending `properties.version` (an empty one is refused, and
@@ -977,10 +986,69 @@ of this section.
   resuming if it can. A daemon that reconnects by identifying rather than resuming supersedes its own
   detached sessions, so it cannot lock itself out, but loses what they buffered.
 
+  **Expiry is judged on the server's clock, never the machine's.** Each refresh's `Date` header and each
+  HELLO's `server_time` is a sample, advanced on the monotonic clock, so an NTP step or a hand-set clock
+  while the daemon runs changes nothing. The `Date` header matters because the first refresh is decided
+  before any HELLO arrives, and a refresh's sample is dated from the request's start, so a slow answer errs
+  toward refreshing early. HELLO is sampled before the token is chosen, so a laptop that slept past its
+  token's expiry does not present it.
+
+  **One goroutine owns every load, refresh and write-back**, because two presenters of one rotating token is
+  what reuse detection reads as theft. Three things M7's startup-only handling got wrong for a daemon that
+  stays up, each fixed: a store it cannot write to keeps the session in memory and is written at the next
+  renewal (and once more on the way down, or a restart would present a spent token); the write names the
+  token the store holds as the one being replaced, not the one last presented; and a refresh the instance
+  has answered finishes even when the daemon is stopping.
+
+  **A login or a logout reaches a running daemon when it happens.** A logout revokes nothing at the
+  instance, so the daemon went on streaming the account's messages until its next renewal found no record.
+  It watches the credential record with `fsnotify` (the directory, since the record is replaced by an atomic
+  rename), hands its live token back on a logout, closes its connection itself and forgets the account; a
+  login is adopted. A login superseding a running sign-in arrives in the wrong order — the server's 4011
+  before the CLI has written the store — and the refresh that settles it no longer waits out the floor
+  behind the watch's reload (manual pass).
+
+  **What the client does with each close code lives in one table** (`gatewayclient.Client.after`): a drop,
+  op 7 and the timeout-shaped codes resume; op 9 and 4007 identify afresh; 4004 asks the session to renew;
+  4011 reads the store; a version refusal waits an hour; a close saying this client sent something malformed
+  waits a minute and does not resume. The backoff is shared with the session's refresh retries, so one fix
+  reaches both.
+
+  **The state.** READY carries summaries, so a channel, role or member list built from events alone would
+  look complete and not be; those lists are M20's relay, loaded when a client opens a guild. A fresh
+  IDENTIFY clears everything, because a buffer is only worth showing if it has no hole nobody can see; a
+  RESUME keeps it. A `Message` names its channel and not its guild, so a permissions update or a guild
+  removal clears every buffer rather than the guild's — rare, and an empty buffer refilled over REST is
+  correct where one keeping a message a moderator removed is not. Names a stranger's instance chose go
+  through `termsafe.Text` as they arrive; content is kept as sent and never logged, because sanitizing it
+  here would destroy what M20's lossless `--json` preserves.
+
+  **The instance is a stranger's server, and the reviews held the daemon to that.** `/security-sweep` found
+  the state's limits held only while the instance behaved: a message charged its content alone, guild
+  summaries unbudgeted. A message is charged its whole payload, summaries stop at 1,000 with names cut at
+  100 runes, and eviction is an LRU list rather than a scan. It also found an instance served under a path
+  (`https://example.com/norite`) losing the prefix, which sent its access token to `example.com/gateway`,
+  possibly a different application. `/code-review` found a HELLO whose heartbeat interval overflowed the
+  `Duration` it became and crash-looped the daemon, reproduced as a panic of the test binary itself; it is
+  refused now, and the heartbeat recovers its own panics.
+
+  **The byte budget was measured against the heap rather than trusted.** 64 MiB means at most about 76: real
+  heap is 0.76–1.02 of the charge, and 1.18 once full channels trim, since a slice trimmed from the front
+  keeps dead slots until append reallocates. Written where the limit is defined.
+
+  **Not proved by hand: the six-hour skew.** A Go binary reads the clock through the vDSO, so `libfaketime`
+  cannot skew it; the injected-clock tests carry it instead.
+
   Done when: the daemon alone (no CLI/TUI/GUI attached) stays connected and accumulates state correctly; a
   deliberately skewed system clock does not cause spurious auth failures; a display name carrying terminal
   escapes is sanitized by the daemon rather than by whoever logged in; and a daemon started before its
-  keyring unlocks reaches the keyring afterwards.
+  keyring unlocks reaches the keyring afterwards. All met. The first is an end-to-end test assembling the
+  three pieces as `daemonproc` does, and a manual pass against a real backend through a network that could
+  be killed silently: it resumed and received what it missed, identified afresh when it could not, and
+  noticed `norite login` and `norite logout` within the second. The second runs a simulated day six hours
+  behind and six hours ahead, and replacing the estimate with the wall clock fails both — one handing out
+  expired tokens, the other refreshing in a loop. The third and fourth each have a test that fails with
+  the guard removed.
 - **M20 — Daemon↔client local IPC**: the Unix domain socket / named pipe, 4-byte-length-prefixed JSON
   framing, reusing the gateway's op-code/DISPATCH shape and one shared client-side event parser, and the
   semver MAJOR-must-match/MINOR-window version-compatibility handshake (read with the `0.x` rule below).

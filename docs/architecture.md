@@ -111,9 +111,13 @@ Locked-in decisions:
 │   ├── credentials/              # the stored session: keyring-or-file secret, record, device identity
 │   ├── termsafe/                 # the blanket terminal-escape sanitizer every untrusted string passes;
 │   │                             #   outside internal/ so the CLI imports it (moved from cli/ at M19)
-│   ├── internal/daemonproc/      # single-instance flock, log rotation, startup sign-in, clean shutdown
+│   ├── internal/daemonproc/      # single-instance flock, log rotation, starts and stops each component
 │   ├── internal/paths/           # the per-user 0700 state directory, resolved per platform
-│   ├── internal/gatewayclient/   # holds the real WS connection, in-memory scrollback/presence (M19)
+│   ├── internal/session/         # the token source: refresh ahead of expiry on the server's clock, the
+│   │                             #   credential watch (M19)
+│   ├── internal/gatewayclient/   # holds the real WS connection: handshake, RESUME, close codes (M19)
+│   ├── internal/state/           # in-memory account, guild summaries, bounded message buffers (M19)
+│   ├── internal/backoff/         # the one retry policy the session and the connection share
 │   ├── ipc/                      # Unix socket / named pipe server, bot-automation TCP listener
 │   ├── config/                   # go-toml v2 document-editing, fsnotify hot-reload, flock, config split
 │   ├── plugins/                  # wazero host, capability manifest + hash-pinning
@@ -916,7 +920,10 @@ to `PionMediaCoordinator`), `6` Resume, `8` Request Guild Members.
 **Auth transport**: `Identify` carries the daemon's Bearer access token (obtained via the token-based auth
 flow, §"Auth design" below) — never a cookie, since there is no browser. **`Hello` carries the backend's
 current server time**, so the daemon can compute and apply a local clock offset (`ADR 0010`) rather than
-trusting a potentially-skewed OS clock for JWT-expiry checks.
+trusting a potentially-skewed OS clock for JWT-expiry checks. As built at M19 the daemon keeps an estimate
+of the server's clock rather than an offset from its own: the latest sample — HELLO's `server_time`, or
+the `Date` header on a refresh, since the first refresh is decided before any HELLO — advanced on the
+monotonic clock, so a wall clock stepped while the daemon runs changes nothing.
 
 ```json
 // server -> client, immediately on connect

@@ -16,13 +16,13 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
-[![Milestone](https://img.shields.io/badge/milestone-M18%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M19%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 > [!WARNING]
 > **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work, so
 > does the guild, channel, role and permission core, and since `M15` so do messages, with reporting and
 > moderator triage on top of them since `M16`, and since `M18` a real-time gateway that pushes all of it
-> live — all of it with no client in front of it.
+> live, which since `M19` the background daemon holds on its own — all of it with no client in front of it.
 > Nobody can hold a conversation on this: voice does not exist, and there is nothing to read or write
 > messages *in*. See [Status](#status) for exactly what is built, and note that the full scope here is
 > multi-year work.
@@ -49,8 +49,8 @@ software.
 ## Status
 
 **Foundation, auth, the permission core, messages, guild-level reports, the moderation read over a
-message's edit history, a guild's opt-in message recording, message tagging and the real-time gateway are
-done — `M0` through `M18`. `M20a` is the first thing a person can actually use.**
+message's edit history, a guild's opt-in message recording, message tagging, the real-time gateway and the
+daemon that holds it are done — `M0` through `M19`. `M20a` is the first thing a person can actually use.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -80,6 +80,7 @@ done — `M0` through `M18`. `M20a` is the first thing a person can actually use
 | `M16b` | Opt-in message recording — a guild's owner can have every message create, edit and delete kept in a log of its own, off by default, readable only by a permission granted to nobody until somebody grants it, with both flips of the switch recorded in the ordinary audit log and the setting visible to every member of the guild |
 | `M17` | Message tagging — a guild-wide vocabulary of labels that follow a message across channels, split into shared tags a moderator curates and private ones visible to nobody but the member who made them |
 | `M18` | The real-time gateway — a WebSocket that pushes every guild, channel, role, member and message change to the members allowed to see it, decided per event against the database rather than remembered; resuming after a disconnect without losing anything; signing out closes the connection, on every path that signs out; and the same across several servers over Redis |
+| `M19` | The daemon as gateway client — the background daemon holds the account's live connection by itself, with nothing attached to it; keeps its sign-in renewed by the server's clock, so a machine whose clock is hours out stays signed in; keeps recent messages in memory, bounded; notices `norite login` and `norite logout` the moment they happen; and treats the server it talks to as a stranger's, sanitizing every name it is sent |
 
 </details>
 

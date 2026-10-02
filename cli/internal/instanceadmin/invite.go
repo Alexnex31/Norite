@@ -24,7 +24,7 @@ import (
 // The endpoints behind it accept either an instance administrator's access token or an operator token.
 // This command can only produce the second, and that is a consequence of where the CLI sits rather than a
 // decision: an attach client does not hold its account's tokens — the daemon does (ADR 0011) — and the
-// local IPC socket that would let the CLI ask the daemon to make an authenticated call is M19's. Until
+// local IPC socket that would let the CLI ask the daemon to make an authenticated call is M20's. Until
 // then, "run it where the config file is" is the only authority a command like this can present.
 //
 // The practical effect is that invites are managed from the machine running the instance, which is the
