@@ -282,9 +282,12 @@ func (c *Client) connect(ctx context.Context, cred session.Credential) outcome {
 		_ = resp.Body.Close()
 	}
 	if err != nil {
-		// The error names the URL, which carries no credential — the token goes in IDENTIFY. The status, if
-		// the server answered, is the useful part; its body and reason phrase are the server's text.
-		ev := c.log.Warn().Str("instance", termsafe.Text(cred.InstanceURL))
+		// The error names the URL, which carries no credential — the token goes in IDENTIFY — and it is what
+		// tells a refused connection from a timeout from a certificate that does not match, so it is logged.
+		// Sanitized, because it can quote the server: a certificate's names, the extensions a handshake
+		// offered back. The status, if the server answered, is logged too; its body is not.
+		ev := c.log.Warn().Str("instance", termsafe.Text(cred.InstanceURL)).
+			Str("error", termsafe.Text(err.Error()))
 		if resp != nil {
 			ev = ev.Int("status", resp.StatusCode)
 		}

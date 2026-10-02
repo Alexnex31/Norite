@@ -6,6 +6,8 @@ package gatewayclient
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -741,6 +743,45 @@ func TestACloseReasonIsSanitizedBeforeItIsLogged(t *testing.T) {
 	assert.NotContains(t, logs, "\x1b")
 	assert.NotContains(t, logs, "\\u001b", "an escape survives as zerolog's own escaping of it")
 	assert.NotContains(t, logs, "\u202e")
+}
+
+// A connection that never got as far as a HELLO says why, because "could not reach" is the same words for a
+// refused port, a timeout and a certificate for the wrong host. The cause can quote the server, so it is
+// sanitized first: here a handshake answers with extensions it was never offered, and the library's error
+// repeats them unquoted (M19 manual pass). Not with an escape sequence, which net/http already refuses in a
+// header; a bidi override is legal UTF-8 there and reorders whatever line it lands in.
+func TestAFailedDialSaysWhyInTheServersWordsSanitized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sum := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" +
+			"Sec-WebSocket-Accept: " + base64.StdEncoding.EncodeToString(sum[:]) + "\r\n" +
+			"Sec-WebSocket-Extensions: x-one, x-\u202eowt\r\n\r\n")
+		_ = buf.Flush()
+	}))
+	t.Cleanup(srv.Close)
+
+	logs := &syncBuffer{}
+	client := New(Options{
+		Credentials: newFakeCreds(srv.URL), Sink: &recordingSink{}, Version: "dev",
+		Log: zerolog.New(logs), RetryMin: time.Hour, RetryMax: time.Hour,
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); client.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "could not reach the gateway") },
+		5*time.Second, time.Millisecond)
+	var line struct{ Error string }
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(logs.String())), &line))
+	assert.Contains(t, line.Error, "unsupported extensions", "the cause is logged")
+	assert.Contains(t, line.Error, "owt", "the server's own words are kept")
+	assert.NotContains(t, line.Error, "\u202e")
 }
 
 func TestGatewayURL(t *testing.T) {
