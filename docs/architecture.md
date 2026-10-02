@@ -100,6 +100,11 @@ Locked-in decisions:
 │   ├── cmd/app/                  # main() only: process lifetime and exit codes, nothing else
 │   ├── internal/cliapp/          # urfave/cli v3 command tree, global --json/--help flags, completions
 │   ├── internal/<command>/       # one package per command group, e.g. instanceinit (`norite instance init`)
+│   ├── internal/verbs/           # the relayed verbs: guild, channel, role, member, overwrite, message,
+│   │                             #   report, tag — ids only, one confirm helper, paged lists (M20)
+│   ├── internal/daemonclient/    # attaching to the daemon, and every relayed outcome's exit code (M20)
+│   ├── internal/output/          # one result as text or as lossless, terminal-inert JSON (M20)
+│   ├── internal/clierr/          # the values main decides exit codes from: 2 usage, 3 unavailable, 4 refused
 │   ├── tui/                      # pane engine, keybindings, markdown renderer, image rendering
 │   └── go.mod
 ├── gui/                          # The native GUI — Gio
@@ -118,7 +123,10 @@ Locked-in decisions:
 │   ├── internal/gatewayclient/   # holds the real WS connection: handshake, RESUME, close codes (M19)
 │   ├── internal/state/           # in-memory account, guild summaries, bounded message buffers (M19)
 │   ├── internal/backoff/         # the one retry policy the session and the connection share
-│   ├── ipc/                      # Unix socket / named pipe server, bot-automation TCP listener
+│   ├── internal/attach/          # the attach socket's server: peer check, bounded fan-out, resync (M20)
+│   ├── internal/relay/           # attach clients' REST calls, made with the daemon's token (M20)
+│   ├── ipc/                      # the attach socket's protocol and client half, outside internal/ for the
+│   │                             #   CLI and GUI (M20); the bot-automation TCP listener joins at M22
 │   ├── config/                   # go-toml v2 document-editing, fsnotify hot-reload, flock, config split
 │   ├── plugins/                  # wazero host, capability manifest + hash-pinning
 │   ├── voiceworker/               # os/exec spawn/supervise, stdin/stdout IPC framing
