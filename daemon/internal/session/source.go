@@ -575,7 +575,14 @@ func (s *Source) waitForStore(ctx context.Context, after <-chan time.Time) bool 
 	return true
 }
 
-// throttle holds a refresh back until minRefreshGap has passed since the last one.
+// throttle holds a refresh back until minRefreshGap has passed since the last one. It reports false when the
+// session has to be re-established from the store, or ctx is done.
+//
+// The store is read again on a request, because a login superseding this sign-in lands here: the instance
+// closes the connection 4011 the moment the login's sign-in commits, before `norite login` has written what
+// it got, so Revoked finds nothing changed and asks for a refresh to settle it — and the login is written
+// while that refresh waits. Waiting it out regardless presented the superseded token, which could only be
+// refused, and held the new sign-in back for the rest of the floor (M19 manual pass).
 func (s *Source) throttle(ctx context.Context) bool {
 	if s.lastRefresh.IsZero() {
 		return true
@@ -584,11 +591,22 @@ func (s *Source) throttle(ctx context.Context) bool {
 	if wait <= 0 {
 		return true
 	}
-	select {
-	case <-ctx.Done():
-		return false
-	case <-s.clock.After(wait):
-		return true
+	after := s.clock.After(wait)
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-after:
+			return true
+		case <-s.reload:
+			if s.storeChanged() {
+				return false
+			}
+		case <-s.revoked:
+			if s.storeChanged() {
+				return false
+			}
+		}
 	}
 }
 

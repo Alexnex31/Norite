@@ -83,6 +83,20 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.waiters = kept
 }
 
+// waitingWithin reports whether something is waiting on a deadline no further than d ahead.
+func (c *fakeClock) waitingWithin(d time.Duration) func() bool {
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, w := range c.waiters {
+			if !w.at.After(c.now.Add(d)) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 // skewedClock is the daemon's view of fakeClock on a machine whose clock is off by skew.
 type skewedClock struct {
 	*fakeClock
@@ -596,6 +610,34 @@ func TestARevocationAfterALoginAdoptsTheNewCredential(t *testing.T) {
 	assert.Equal(t, "nrt_new_login", h.f.refreshes()[1], "the login's token is the one presented next")
 	assert.Equal(t, "nrt_rotated_1", h.f.handedBackToken(),
 		"what the daemon held belonged to a sign-in that is over, and is handed back")
+}
+
+// The same login as it actually arrives. The instance closes 4011 the moment the login's sign-in commits,
+// before `norite login` has had its answer, so the daemon hears of the revocation while the store still
+// holds what it knew and sets out to settle it by refreshing — which the floor holds back when the last
+// renewal was recent, as it is after another login a moment before. The login is written in that wait. Waiting
+// it out and then presenting the superseded token cost a refusal and up to ten seconds (M19 manual pass). Past
+// the floor the refresh goes at once, loses the race to the login's write and costs one refusal, which is how a
+// revocation that is not a login is told apart from one that is.
+func TestALoginWrittenAfterItsRevocationIsAdoptedWithoutPresentingTheOldToken(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	first, err := h.current()
+	require.NoError(t, err)
+
+	h.src.Revoked()
+	require.Eventually(t, h.clock.waitingWithin(minRefreshGap), time.Second, time.Millisecond,
+		"the refresh that settles the revocation is held back by the floor")
+
+	loginTo(t, h.store, h.f.server.URL, "nrt_new_login")
+	h.src.Reload() // what the watch does once the login has written the store
+
+	h.advanceUntil(time.Second, 15*time.Second, func() bool {
+		c, ok := h.tryCurrent()
+		return ok && c.Generation != first.Generation
+	})
+	assert.Equal(t, []string{"nrt_from_login", "nrt_new_login"}, h.f.refreshes(),
+		"the superseded token is never presented")
 }
 
 // ---------- the store ----------
