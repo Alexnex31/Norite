@@ -81,6 +81,14 @@ func TestEveryOutcomeEndsInItsExitCode(t *testing.T) {
 			func(t *testing.T, err error) {
 				var unavailable *clierr.UnavailableError
 				require.ErrorAs(t, err, &unavailable)
+				assert.Contains(t, err.Error(), "may or may not have reached the instance")
+			}},
+		{"a daemon that died mid-request", answer{err: ipc.ErrClosed},
+			func(t *testing.T, err error) {
+				var unavailable *clierr.UnavailableError
+				require.ErrorAs(t, err, &unavailable)
+				assert.Equal(t, "the daemon went away during the request — it stopped or crashed; the request "+
+					"may or may not have reached the instance", err.Error())
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -116,9 +116,18 @@ func fromRelay(err error) error {
 		}
 		return fmt.Errorf("the daemon would not relay the request: %s", termsafe.Text(re.Message))
 	}
+	// Said once, and saying what a script retrying it needs to know: the request was handed over, so
+	// whether it reached the instance is unknown. The first wording repeated itself ("the connection to the
+	// daemon ended: the connection to the daemon closed"), found by the M20 manual pass killing a daemon
+	// under a running verb.
+	const unknown = "; the request may or may not have reached the instance"
 	var ce *ipc.CloseError
-	if errors.As(err, &ce) || errors.Is(err, ipc.ErrClosed) {
-		return clierr.Unavailable("the connection to the daemon ended: %s", termsafe.Text(err.Error()))
+	if errors.As(err, &ce) {
+		return clierr.Unavailable("the daemon closed the connection during the request (%s)%s",
+			termsafe.Text(ce.Reason), unknown)
+	}
+	if errors.Is(err, ipc.ErrClosed) {
+		return clierr.Unavailable("the daemon went away during the request — it stopped or crashed%s", unknown)
 	}
 	return err
 }
