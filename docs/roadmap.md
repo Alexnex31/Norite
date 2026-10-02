@@ -582,11 +582,11 @@ of this section.
   the whole of M13's surface. Both derive from the walk now, failing in both directions — a route with no
   case, and a case naming a route that no longer exists.
 
-  *Two audit-completeness gaps are recorded rather than closed*, both in `docs/security-ledger.md` with
-  the condition that would reopen them: deleting a category re-parents its children and names none of
-  them, and a kick or a role deletion destroys permission overwrites without recording their bits. Both
-  are questions about entry *volume* — the counts are unbounded — rather than about the diff shape this
-  milestone settled, and the second is the rejoin question M57 and M72a already carry.
+  *Two audit-completeness gaps are recorded rather than closed*, both in `docs/security-ledger.md` with the
+  condition that would reopen them: deleting a category re-parents its children and names none of them, and a
+  kick or a role deletion destroys permission overwrites without recording their bits. Both are questions
+  about entry *volume* — the counts are unbounded — rather than about the diff shape this milestone settled,
+  and the second is the rejoin question M57 and M72a already carry (M20a took M57's, 2026-10-02).
 
   *Three query plans were measured rather than assumed.* The optional cursor was written
   `$n IS NULL OR id < $n`, which cannot become an index qual under a generic plan; `COALESCE` is sargable
@@ -623,11 +623,11 @@ of this section.
   nothing else. The `is_e2e` column *is* M15's, because it is what the generated column will later key its
   exclusion off and because rule 13 is cheaper to design in than to retrofit.
 
-  **It lands before M57 and M72a, which is worth knowing rather than discovering.** Those two carry the
-  rejoin question M13 routed to them — a kick clears a member's channel-tier overwrites, and nothing
-  restores them if that member comes back. M15 makes channels carry conversations, so from here the
-  residual stops being about access to an empty room. Neither milestone moves: there is still no join path
-  before M57, so the question remains unreachable rather than merely unanswered.
+  **It lands before M57 and M72a, which is worth knowing rather than discovering.** Those two carry the rejoin
+  question M13 routed to them (M57's moved to M20a with the invites, 2026-10-02) — a kick clears a member's
+  channel-tier overwrites, and nothing restores them if that member comes back. M15 makes channels carry
+  conversations, so from here the residual stops being about access to an empty room. Neither milestone moves:
+  there is still no join path before M57, so the question remains unreachable rather than merely unanswered.
 
   **It audits administrative message actions only, and that narrowed rule 2** (settled 2026-09-15). Taken
   literally the old wording made every send an audit row, which doubles the write volume of the hottest
@@ -1120,10 +1120,10 @@ of this section.
     excerpt is content the instance holds under a moderation permission, so rule 19 bites harder here than
     on the names above.
   - **`norite message`** — list, send, edit, delete, and `history` for M16a's moderation read. Distinct from
-    M20a, not redundant with it: M20a draws a pane over the daemon's scrollback; these are pipeable
-    one-shot calls, and because the CLI and TUI share one command tree (ADR 0026) they are verbs M20a's
-    client inherits rather than reimplements. `history` prints what somebody deliberately edited out, the
-    one output whose value depends on being shown exactly as stored.
+    M20a, not redundant with it: M20a draws a pane over a page of history and the live stream; these are
+    pipeable one-shot calls, and because the CLI and TUI share one command tree (ADR 0026) they are verbs
+    M20a's client inherits rather than reimplements. `history` prints what somebody deliberately edited out,
+    the one output whose value depends on being shown exactly as stored.
   - **M16b's recording**: the toggle is a flag on the guild update verb rather than a group of its own —
     one boolean on an existing endpoint, where `norite guild record on|off` would be a second way to spell
     a field — and the log is read under `norite guild`. The toggle is owner-only and refused to an Instance
@@ -1145,11 +1145,11 @@ of this section.
 
   **It builds `GET /users/@me/guilds`, which §2 lists and nothing owned.** Without it no verb can tell a
   person which guilds they are in, and every other verb takes a guild id. Uncursored and bounded, like the
-  channel and role lists: accounts own at most 50 guilds (M12), joining does not exist until M57, and M72a's
-  joined cap of 100 is already the READY payload bound. **The membership query already exists by then**:
-  M18's READY needs "which guilds is this account in" first, so M18 writes the query and this milestone
-  adds the REST route over it. This line called READY the query's second consumer until M18's planning
-  noticed M18 comes first.
+  channel and role lists: accounts own at most 50 guilds (M12), joining does not exist until M20a's invites,
+  and M72a's joined cap of 100 is already the READY payload bound. **The membership query already exists by
+  then**: M18's READY needs "which guilds is this account in" first, so M18 writes the query and this
+  milestone adds the REST route over it. This line called READY the query's second consumer until M18's
+  planning noticed M18 comes first.
 
   **The screen half stays open and is named here rather than left implied.** These are command-tree verbs;
   a guild-moderator triage *screen* has no id in `SCREENS.md` and no milestone, and adding one is a
@@ -1245,15 +1245,21 @@ of this section.
     prefix, under its own exit code, 4, rather than 2. 4 keeps "the instance said no" apart from "my
     arguments were wrong", which a script retrying or reporting needs to tell apart (C2, decided at
     planning).
-- **M20a — First usable client, end to end**: the smallest thing a person can actually read and send a
-  message in — one pane, a message list, a composer, and quit. No guild rail, no channel list, no panes or
-  splits, no chords beyond quit, no theming, no scrollback search. Depends on M20 (the daemon socket the
-  client attaches to) and on M15's message endpoints.
+- **M20a — First usable client, end to end**: the smallest thing two people can actually hold a
+  conversation in. Bare `norite` on a terminal opens a home screen naming the signed-in account, listing
+  its guilds with their text channels, and offering a box to redeem an invite; opening a channel shows one
+  pane with a message list, a composer and quit, and ESC returns home. No guild rail, no panes or splits,
+  no chords beyond quit, no theming, no scrollback search. Depends on M20 (the socket the client attaches
+  to and the `message` verbs it inherits), M15's message endpoints, and M18–M19's dispatch reaching the
+  daemon.
 
   **This is a scheduling change, not a design one.** The screens are already specified in
-  `docs/design/tui/SCREENS.md` and this milestone draws a strict subset of `1a` — the reduced form the
-  "screens are drawn finished; milestones are not" rule already governs. M41–M43 then *replace* a working
-  thing rather than introducing the first one.
+  `docs/design/tui/SCREENS.md`, and this milestone draws reduced forms of two of them, the shape the
+  "screens are drawn finished; milestones are not" rule already governs: the channel pane is a strict
+  subset of `1a`, and home is `5b`'s redeem box with `1a`'s channel column folded into one list beneath
+  it. `SCREENS.md` gains no screen. M41–M43 then *replace* a working thing rather than introducing the
+  first one. This entry said "no channel list" until its planning (2026-10-02): something has to list the
+  channels a person can open, and a list is not the rail and channel column M41 draws.
 
   **Why it exists at all.** The roadmap is ordered by architectural layer, and until this entry the first
   point at which anybody could read a message in a real interface was M43 — with Phase E's thirteen voice
@@ -1263,24 +1269,79 @@ of this section.
   completion demonstrates nothing; this milestone is what makes partial completion a working, narrow
   product. For a multi-year solo build that difference is not aesthetic.
 
+  **It carries guild invites, moved from M57 on 2026-10-02.** Planning found that no route adds a guild
+  member: M20's manual pass made the second account a member with `psql`. So a client two people could
+  talk in needs a way for the second person in, and the alpha stays at this milestone rather than waiting
+  for M57's DMs. What it builds, and what follows from decisions already taken:
+  - **Routes.** `POST /channels/{channel_id}/invites` creates one, needing `PermCreateInvite` on that
+    channel, resolved with its overwrites, since the channel is where the joiner lands.
+    `GET /guilds/{guild_id}/invites` lists a guild's, needing `PermManageGuild`. Preview, redemption and
+    revocation are `POST /invites/preview`, `POST /invites/redeem` and `POST /invites/revoke`, **the code
+    in the body, never in a path**. §2 listed them as `/invites/{code}`, and a path is written to every log
+    line: ADR 0029's reasoning for M10's instance invites, and ADR 0028's for M9's poll. Revoking is the
+    creator's or a `PermManageGuild` holder's.
+  - **A signed-in account previews and redeems.** An unauthenticated preview is a browser's concern, for
+    Phase O to open; opening it later is additive. Redemption has its own rate-limit bucket.
+  - **M10's code**: random, from the unambiguous alphabet, normalized as typed, and stored in plaintext for
+    M10's reasons. An unknown, expired, revoked and exhausted code all answer one 404.
+  - **Redemption is one statement** with every guard in its `WHERE`, sharing a transaction with the
+    membership, the joined-guild ceiling and the audit entry. The ceiling is M72a's 100, already READY's
+    bound, counted under the per-account advisory lock (slot 4) that guild creation and the ownership
+    transfer take. A current member redeeming changes nothing, and does not spend a use.
+  - **Ceilings at creation**: live invites per guild, set by the backend part.
+  - **Audit (rule 2)**: `invite.create`, `invite.revoke`, and `member.join`, since leaving is already
+    audited and a log of departures without arrivals is half a record.
+  - **Events (rule 6)**: `GUILD_MEMBER_ADD` to the guild, and `GUILD_CREATE` to the joiner, which adds the
+    guild to their live sessions.
+  - **Not built**: §2's `temporary`, which needs presence (M38's), and bans, which do not exist for guilds
+    yet (M74).
+  - **Verbs (rule 15)**: `norite invite create`, `list`, `show`, `join` and `revoke`.
+
+  **Rejoining, M57's clause until this milestone took the join path.** M13 made `RemoveMember` delete the
+  departing member's own overwrites so that a rejoin would not silently restore a deny nothing explained.
+  Answered at planning: **the deletion stands, and a rejoin is a clean slate.** That makes
+  leave-and-rejoin a way to shed a member-tier restriction, since leaving needs no permission; M74, which
+  owns timeouts and is where a restriction meant to outlive a departure belongs, inherits it.
+
+  **Messages name their authors.** Nothing could name another account before this: `Message` carried
+  `author_id` alone and there is no `GET /users/{id}`. `Message` gains `author` (`id`, `username`,
+  `display_name`) in REST and on the gateway, joined by primary key, and the channel listing, one of rule
+  7's hot paths, is measured under the generic plan.
+
+  **History comes over the relay.** M20's entry said this client draws a pane over the daemon's scrollback,
+  and the socket has no operation that reads it. The pane fetches one page through the relay, the call
+  `norite message list` makes, after attaching for events, and merges the two by id, so a message arriving
+  during the fetch is neither lost nor shown twice. Whether a pane reads the daemon's buffer first is
+  M43's.
+
   **Its completion cuts `v0.1.0-alpha`**, the first release (ADR 0033): from here on there is something to
   hand a tester and something a self-hoster can run by name. It is the only milestone the release policy
-  fixes to a pre-release label. The README's `pre-alpha` status badge changes when that tag ships, not
-  before.
+  fixes to a pre-release label. The release pipeline has never run, so it is dry-run first with
+  goreleaser pinned, ships one client archive of `norite` and `norite-daemon` and no GUI stub, and signs
+  `checksums.txt` with cosign, keyless, under the release workflow's identity (moved here from M24 on
+  2026-10-02; M24 keeps the updater's verification). Every release's notes say how to verify it and that
+  the binaries are not OS code-signed. The README gains "Trying the alpha". Its `pre-alpha` status badge
+  changes when that tag ships, not before.
 
   **It also carries the license notice, in its plain-text form.** This is the first milestone at which a
   person can open a client at all, so it is the first at which AGPL §5(d)'s notice has anywhere to go —
   and `6d`, the full About screen, does not arrive until M44's help surfaces exist. What lands here is the
-  minimum that is honest: `norite about` printing the license, the build's revision and its source URL (the
-  three values `GET /api/v1/meta` serves), with `norite licenses` already printing the third-party set
-  since the relicensing. §5(d) obliges a notice where the *original* displays one, so this is Norite
-  setting that baseline deliberately rather than satisfying a constraint imposed on it — a client that
-  showed nothing would leave every downstream fork free to show nothing too.
+  minimum that is honest: `norite about` printing **this build's** version, revision and source URL,
+  stamped at build time so a fork's own build names its own source, and the Appropriate Legal Notices —
+  the copyright, the licence, the absence of warranty and where the terms are. Beside them it prints **your
+  instance's** §13 offer from `GET /api/v1/meta` when a daemon is signed in. The two are different
+  obligations about different programs, and this entry once took the first from the second. `norite
+  licenses` has printed the third-party set since the relicensing. §5(d) obliges a notice where the
+  *original* displays one, so this is Norite setting that baseline deliberately rather than satisfying a
+  constraint imposed on it — a client that showed nothing would leave every downstream fork free to show
+  nothing too.
 
-  Done when: with the daemon running and signed in, `norite` opens a single pane against one guild channel,
-  renders its recent messages through `termsafe`, sends a message that a second attached client receives
-  live, and quits cleanly — and `norite about` reports a revision that resolves in the repository it
-  names.
+  Done when: with the daemon running and signed in, `norite` opens home and a channel opens from it; the
+  channel's recent messages render through `termsafe`, each named by its author; a message sent from the
+  pane is received live by a second attached client; and the client quits cleanly. A second account,
+  invited by the first, redeems the invite from its own home screen and the two hold a conversation.
+  Rejoining a guild has a stated, tested answer for member-tier overwrites: a deny is gone after
+  leave-and-rejoin. And `norite about` reports a revision that resolves in the repository it names.
 
 - **M21 — Config file**: the shared TOML config (`pelletier/go-toml` v2, document-editing mode for
   comment-preserving programmatic writes), namespaced `[shared]` / `[tui]` / `[gui]` — there is no `[cli]`
@@ -1341,8 +1402,12 @@ of this section.
     update check.
 
   **This is the last milestone of Phase D, so its completion cuts `v0.1.0`** (ADR 0033), unless the
-  phase's last milestone changes. It is also the milestone that wires release signing: `v0.1.0-alpha`,
-  cut at M20a, precedes it and ships with checksums and no signature.
+  phase's last milestone changes. It was also to be the milestone that wires release signing, with
+  `v0.1.0-alpha` at M20a shipping checksums and no signature. **Signing moved to M20a on 2026-10-02**: the
+  release workflow signs `checksums.txt` with cosign, keyless, under its own GitHub OIDC identity, and a
+  tester verifies with `cosign verify-blob`. What stays here is what this milestone was always about —
+  the updater verifying a release before it swaps anything in, against that same identity, offline from
+  the bundle — so the signatures it checks exist from the first release rather than from this one.
 
 #### Phase E — Voice
 
@@ -1471,7 +1536,8 @@ of this section.
 - **M40 — OS desktop notifications**: `gen2brain/beeep` wiring, triggered by `@urgent`-during-Deep-Work and
   regular mentions. Done when: a real OS toast/notification-center alert appears for both cases.
 - **M41 — TUI shell and grid** (`1a` skeleton): the application frame — guild rail, channel list, message
-  area, member list — on the Charm stack, one window and one pane, drawn from fixture data. Rounded
+  area, member list — on the Charm stack, one window and one pane, built around M20a's live client
+  rather than fixture data, since from M20a there is a working client to replace. Rounded
   borders, the focused/unfocused palette split, and the responsive drop order from
   `docs/design/tui/README.md` (member list first, then channel list, then side-by-side splitting is
   refused, then the rail collapses). Depends on M20 for the socket the real data will arrive on. Done when:
@@ -1490,15 +1556,15 @@ of this section.
   joiners Persian, Indic and composed emoji need. Guild channels only; DM and group-DM presentation arrive
   with the feature at M57.
 
-  **This is also where the TUI stops drawing fixtures and attaches.** M41 deliberately renders a frame with
-  no connection behind it, and nothing between the two milestones closes that: here the client opens the
-  daemon socket (M20), completes the semver handshake, and renders from DISPATCH events and the daemon's
-  in-memory scrollback (M19) instead of a fixed table — and the composer posts a real message through it.
-  Stated because it is the one seam in this phase with no milestone of its own, and a phase that never
-  names it is how a client stays on fixtures until somebody notices. Done when: a channel's history renders
-  live from the daemon with grouping and dividers, a message typed in the composer reaches the instance and
-  comes back through the gateway, a disallowed markdown corpus renders inert, and a message containing
-  escape sequences cannot move the cursor.
+  **The TUI attached at M20a, not here.** This paragraph once made M43 the point where the client stopped
+  drawing fixtures and opened the daemon socket, because no milestone before it owned that seam. M20a now
+  does: it attaches, fetches a page of history through the relay, merges the live stream by id, and posts from
+  a plain composer. What stays here is everything that makes the pane good rather than present — grouping,
+  dividers, system lines, the markdown renderer and the full composer — and one question M20a left open:
+  whether a pane reads the daemon's in-memory scrollback (M19) before it fetches. Done when: a channel's
+  history renders live from the daemon with grouping and dividers, a message typed in the composer reaches the
+  instance and comes back through the gateway, a disallowed markdown corpus renders inert, and a message
+  containing escape sequences cannot move the cursor.
 - **M44 — TUI chord dispatcher and help** (`3d`, `1d`, `6d`): the two-prefix Emacs model (`C-x` panes,
   `C-c` app, `M-x` command mode, `M-1`…`M-9` guilds), armed-prefix feedback in the status bar, unknown
   chords as a status-bar error rather than a modal, `[tui.keys]` in the config file with hot reload, the
@@ -1585,9 +1651,10 @@ of this section.
   to the full view, and the level meters redraw without a full repaint.
 - **M55 — TUI lifecycle and state screens** (`5a`, `5c`, `5d`): first run (the device-code path of M9, with
   the browser login of M8 shown as progress rows when a browser is available), disconnected — cached header,
-  the retry banner, queued messages marked `◷` in an in-memory outbox flushed in order on reconnect — and
-  the Deep Work view with its rule strip, countdown and held-message review. `5b` (empty / first join) rides
-  with invites at M57 and `5e` (whisper composer) with whispers at M61.
+  the retry banner, queued messages marked `◷` in an in-memory outbox flushed in order on reconnect — and the
+  Deep Work view with its rule strip, countdown and held-message review. `5b` (empty / first join) rides with
+  DMs at M57, its redeem box over the invite routes M20a built, and `5e` (whisper composer) with whispers at
+  M61.
 
   **`5a` is also where a device-code flow that stalls has to say so.** ADR 0029 left one case pending: a
   device flow whose browser half signs in with a provider that will not vouch for the address gets an
@@ -1637,21 +1704,14 @@ of this section.
   Done when: two accounts can react to the same message and each sees the other's reaction live; removing
   a reaction is idempotent; the same emoji from the same account twice is one row; and a blocked account's
   reactions never appear in the other's stream.
-- **M57 — DMs/Group DMs/invites**: `DM`/`GROUP_DM` channel types, `channel_recipients`, guild invite codes
-  (existing pattern). Carries its screens: `1b` (DM — the peer column, verified-device header, `◈` composer)
-  and `1c` (group DM, which shows instance-side encryption and **no** `◈`, since E2E is `DM`-only per rule
-  13), plus `5b` (empty / first join, with the invite-redeem box) and the DM entries the M50 switcher gains.
+- **M57 — DMs/Group DMs**: `DM`/`GROUP_DM` channel types and `channel_recipients`. Guild invites were this
+  milestone's until 2026-10-02, when M20a took them: no route added a guild member, so the first client could
+  not be shared. Carries its screens: `1b` (DM — the peer column, verified-device header, `◈` composer) and
+  `1c` (group DM, which shows instance-side encryption and **no** `◈`, since E2E is `DM`-only per rule 13),
+  plus `5b` (empty / first join, whose invite-redeem box drives M20a's routes) and the DM entries the M50
+  switcher gains. The rejoin question M13 left here went with the invites, and M20a answered it.
 
-  **This is the first milestone where a guild can be *re*joined, and M13 left a question waiting for it.**
-  `RemoveMember` deletes the departing member's own permission overwrites — deliberately, so that a rejoin
-  does not silently restore a channel-level deny nothing in the UI or the audit log explains. Read the
-  other way, leaving and rejoining sheds every member-tier restriction. That was unreachable at M13 because
-  no join path existed; it is reachable here. Decide it rather than inherit it: either the deletion stands
-  and a rejoin is a clean slate, or member-tier overwrites survive a departure and the M13 comment is
-  wrong.
-
-  Done when: a user can DM another user and create/redeem a guild invite; and rejoining a guild has a
-  stated, tested answer for member-tier permission overwrites.
+  Done when: a user can DM another user.
 - **M58 — Attachments storage**: the pluggable storage interface (local disk default), server-side
   content-type sniffing, size/rate limits. The `minio-go` S3-compatible backend is wired in as the alternate
   implementation (used later by the flagship at M115, self-hosted instances never touch it). Carries the `▤`
@@ -2020,16 +2080,16 @@ of this section.
   it true. The migration also backfills the counter from `guild_members`, which is the same statement the
   reconciliation sweep runs.
 
-  **The direct-join path inherits M57's rejoin question**, and inherits it in a sharper form: a public
-  guild can be left and rejoined by anyone, repeatedly, with no invite to gate it. `RemoveMember` deletes
-  the departing member's own permission overwrites, so a member-tier channel deny is shed by leaving and
-  coming back. Whatever M57 settles applies here; what is different is that here the cycle costs the
-  attacker nothing.
+  **The direct-join path inherits M20a's rejoin answer**, in a sharper form: a public guild can be left
+  and rejoined by anyone, repeatedly, with no invite to gate it. `RemoveMember` deletes the departing
+  member's own permission overwrites, so a member-tier channel deny is shed by leaving and coming back.
+  M20a kept that deletion and handed the evasion to M74; what is different here is that the cycle costs
+  the attacker nothing, so whatever M74 builds has to gate this path as well as invite redemption.
 
   Done when: an owner can publish a guild and unpublish it; the directory lists only published guilds and
   never leaks the existence of an unpublished one; the three sorts and prefix search work; a guild can be
   joined directly from the listing and not at all when it is unpublished; a leave-and-rejoin cycle through
-  this path behaves as M57 decided for member-tier overwrites; member counts stay correct across
+  this path behaves as M20a and M74 decided for member-tier overwrites; member counts stay correct across
   joins, leaves, kicks, guild deletion and account soft-deletion, and the reconciliation sweep finds no
   drift; an Instance Admin can force-unpublish and the owner cannot undo it; a non-subscriber is held to 50
   owned and 100 joined; and discovery can be switched off instance-wide, which removes the screen rather
@@ -2110,6 +2170,18 @@ of this section.
   target — which is a per-user bound on duplicates and not on volume. A reporter may still file one report
   against every message they can see. Naming it here because M16's entry does not, and a requirement in an
   ADR that no milestone claims is one that ships unbuilt.
+
+  **And a restriction that outlives a departure, inherited from M20a on 2026-10-02.** M20a built guild
+  invites and kept M13's rule that a departing member's own overwrites are deleted, so a rejoin is a clean
+  slate. The cost is stated there and settled here: leaving needs no permission, so a moderator's
+  member-tier deny ("alice may not post in #general") lasts until alice leaves and redeems any live invite.
+  M72a's direct join makes the cycle free. Nothing built so far can hold her out either: guild bans are
+  anticipated by `PermBanMembers` and **built by no milestone**, and a kicked member rejoins through any
+  live invite, as on Discord. This milestone owns the question because timeouts are already here, and
+  owes three answers: whether a timeout applies to guild-level restrictions as well as instance-level
+  ones, whether guild bans are built here or given an entry of their own, and how either gates invite
+  redemption and M72a's direct join. The security ledger carries the accepted risk until then, with this
+  milestone as its reopening condition.
 
   Done when: an Instance Admin
   can review a filed report on a whisper and that specific access is itself an audit-log entry, a report

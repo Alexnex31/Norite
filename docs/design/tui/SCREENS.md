@@ -343,12 +343,15 @@ conversations with `▲`.
 **Deviations** settings nav with `about` active; no right column — the pane runs full width from the
 channel column, because a license text wraps badly at 40 cells.
 - Header: `norite <version>` + `AGPL-3.0-or-later` in `ok`, and the build's revision in `text.dim`.
-- **This build** block: the version, the git revision, and `source: <url>` — the same three values
-  `GET /api/v1/meta` serves. The revision is selectable and copyable, since its whole use is fetching that
-  exact source.
-- **Your rights** block, three lines in `text` rather than a legal wall: you may use, study, modify and
+- **This build** block: the version, the git revision, and `source: <url>`, all three stamped into the
+  client binary when it was built. The revision is selectable and copyable, since its whole use is
+  fetching that exact source.
+- **Your instance** block, one line: the instance's own revision and `source: <url>` from
+  `GET /api/v1/meta`, its AGPL §13 offer, or `could not be asked` when no daemon is signed in. Labelled as
+  the instance's, because it describes a different program from the block above and the two can differ.
+- **Your rights** block, four lines in `text` rather than a legal wall: you may use, study, modify and
   share this program; if you run a modified version as a network service you must offer its source to the
-  people using it; the full terms are in `LICENSE`.
+  people using it; it comes with no warranty; the full terms are in `LICENSE`.
 - **Third-party** block: the module count for *this* binary — the TUI ships inside `norite`, so it is the
   CLI's set, not the server's — and `RET read` opening the embedded
   `THIRD-PARTY-NOTICES.txt` in a scrollable pane — the same bytes `norite licenses` prints. It is long and
@@ -360,8 +363,11 @@ channel column, because a license text wraps badly at 40 cells.
 `KEYMAP.md` already scopes it per screen. `ESC` closes, per the shared conventions; no chord here is new
 except `C-c ?`, which opens it.
 
-A fork that has modified Norite shows **its own** source URL here, because the value comes from the
-instance's `[source].url` rather than from a constant — see `architecture.md` §11.
+A fork that has modified Norite shows **its own** source URL here, because its build stamps it. This
+paragraph once took the value from the instance's `[source].url`, which conflated two notices: the client's
+§5(d) notice is about the client binary on this machine, while the instance's §13 offer is about the server
+it talks to — see `architecture.md` §11. `norite about` (M20a) prints both blocks in plain text before
+this screen exists.
 
 **On the obligation.** AGPL §5(d) requires an interactive program to display Appropriate Legal Notices
 *where the original already does*, so the baseline is Norite's to set rather than something already forced

@@ -90,15 +90,15 @@ the first thing a person can actually use.**
 Registering an address that already has an account is indistinguishable from registering a new one, and
 an address is confirmed by email before its account can be used.
 
-**No usable product features exist yet.** Since `M20` every part of the backend can be driven from the
-command line, a verb at a time, which is enough to script it and not enough to use it: there is no client
-that shows a conversation as it happens, nothing to type into but a shell. The honest threshold is when two
-people can hold a text conversation, and as of `M15` the only thing still missing for that is `M20a`'s first
-client. What `M12` through `M14` built is the permission model those conversations happen inside and the
-record of who changed it; `M15` is the conversation itself, `M16` is how it gets moderated, `M16a` is what a
-moderator reads when the message was edited after it was reported, and `M16b` is what a guild can choose to
-keep — all reachable since `M20` through `norite`'s verbs, and before that only with an HTTP client and a
-token.
+**No usable product features exist yet.** Since `M20` every part of the backend can be driven from the command
+line, a verb at a time, which is enough to script it and not enough to use it: there is no client that shows a
+conversation as it happens, nothing to type into but a shell. The honest threshold is when two people can hold
+a text conversation, and as of `M15` what is still missing for that is `M20a`: its first client, and the guild
+invites without which a second person cannot join a guild at all. What `M12` through `M14` built is the
+permission model those conversations happen inside and the record of who changed it; `M15` is the conversation
+itself, `M16` is how it gets moderated, `M16a` is what a moderator reads when the message was edited after it
+was reported, and `M16b` is what a guild can choose to keep — all reachable since `M20` through `norite`'s
+verbs, and before that only with an HTTP client and a token.
 
 One consequence of `M16b` is worth stating plainly rather than leaving in the changelog: a guild whose
 owner switches recording on keeps every message sent in it, including edits and deletions, and the

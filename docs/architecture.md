@@ -568,13 +568,25 @@ CREATE TABLE attachments (
   width integer NULL, height integer NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE invites (
-  code varchar(16) PRIMARY KEY, guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
-  channel_id bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE, inviter_id bigint NOT NULL REFERENCES users(id),
-  max_uses integer NULL, uses integer NOT NULL DEFAULT 0, max_age_seconds integer NULL, expires_at timestamptz NULL,
-  temporary boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now()
+CREATE TABLE invites (                         -- M20a, moved from M57; the migration is the authority
+  code varchar(16) PRIMARY KEY,                -- plaintext, M10's reasoning (000009); M10's alphabet and
+                                               --   normalization, and never in a request path (ADR 0029)
+  guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+  channel_id bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE,  -- where the joiner lands;
+                                               --   PermCreateInvite is resolved on it
+  inviter_id bigint NOT NULL REFERENCES users(id),
+  max_uses integer NULL, uses integer NOT NULL DEFAULT 0,  -- NULL is unlimited; redemption checks both in
+                                               --   its one statement's WHERE, as instance invites do
+  max_age_seconds integer NULL, expires_at timestamptz NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+  -- No `temporary`: a membership that ends with its session needs presence (M38). Left out rather than
+  --   stored and ignored, which is the reversible direction.
 );
-CREATE INDEX ON invites (guild_id);
+CREATE INDEX ON invites (guild_id);            -- the listing; M20a's migration adds what its foreign keys'
+                                               --   cascades need (rule 7), measured rather than listed here
+-- Ceilings, checked at creation because neither list is paginated: live invites per guild, and the
+--   redeemer's joined guilds (M72a's 100, READY's bound), the second counted under the per-account
+--   advisory lock (slot 4) that guild creation and ownership transfer take.
 
 CREATE TABLE instance_invites (                -- distinct from per-guild invites: gates account creation itself
   code varchar(16) PRIMARY KEY,                -- plaintext, deliberately: see migration 000009
@@ -1147,7 +1159,8 @@ DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}
                                            -- M13; the same checks. Removing a role lifts that role's
                                            --   channel denies off the target, so it is not the pure
                                            --   demotion it looks like
-GET    /guilds/{guild_id}/invites
+GET    /guilds/{guild_id}/invites          -- M20a; PermManageGuild. Codes in full, as the guild needs
+                                           --   them back
 GET    /guilds/{guild_id}/audit-log        -- M14 reads it; M12 created the table and writes to it.
                                            --   PermViewAuditLog, its own bit and not implied by
                                            --   PermManageGuild. Cursor on the entry id, never created_at,
@@ -1219,7 +1232,7 @@ GET    /channels/{channel_id}/messages/{message_id}/history
 PUT    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- react (M56a); idempotent
 DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}    -- un-react; idempotent
 POST   /channels/{channel_id}/typing
-POST   /channels/{channel_id}/invites
+POST   /channels/{channel_id}/invites      -- M20a; PermCreateInvite on this channel, overwrites resolved
 POST   /channels/{channel_id}/attachments
 POST   /channels/{channel_id}/read           -- update channel_read_states watermark
 POST   /channels/{channel_id}/whispers
@@ -1228,9 +1241,15 @@ DELETE /webhooks/{id}
 POST   /webhooks/{id}/regenerate-token
 POST   /webhooks/{id}/{token}                -- unauthenticated-except-by-token, per-webhook rate limited
 
-GET    /invites/{code}
-POST   /invites/{code}
-DELETE /invites/{code}
+POST   /invites/preview                    -- M20a; any signed-in account. The guild, inviter and expiry;
+                                           --   an unknown, expired, revoked or used-up code is one 404
+POST   /invites/redeem                     -- M20a; any signed-in account, its own rate-limit bucket. Joins;
+                                           --   a current member changes nothing and spends no use
+POST   /invites/revoke                     -- M20a; the invite's creator or PermManageGuild
+                                           -- All three take the code in the body. This list had
+                                           --   GET/POST/DELETE /invites/{code}, and a path is logged
+                                           --   (ADR 0029, ADR 0028); a preview is a POST for the same
+                                           --   reason, and writes nothing (rule 4 is about GET)
 
 -- Public matchmaking, friends, blocks, reports
 GET    /matchmaking/channels
@@ -1814,7 +1833,7 @@ presents natively — not a different product sharing a backend.
 [ADR 0026](adr/0026-tui-as-a-first-class-client.md) records why it is its own client rather than a mode of
 §4.
 
-**The screens are specified, not described here.** `docs/design/tui/` is normative: `SCREENS.md` (25
+**The screens are specified, not described here.** `docs/design/tui/` is normative: `SCREENS.md` (27
 screens, stable ids `1a`…`7a`), `KEYMAP.md` (every chord), `TOKENS.md` (palette, glyphs, component
 recipes), `README.md` (the grid, the responsive rules, and the corrections applied to the original
 handoff). Milestones cite screen ids rather than restating them. `mockups.dc.html` is a visual reference
@@ -2248,6 +2267,14 @@ difference automatically, so it is stated in the contract file, `.env.example` a
 
 The operational consequence for the flagship is that it deploys only revisions that exist in the public
 repository; configuration and secrets are not source and are not covered.
+
+**The clients' notice is a different obligation, and takes its source from the build, not the
+instance.** `norite about` (M20a) and `6d` display AGPL §5(d)'s Appropriate Legal Notices for the *client*
+binary, which connects to any instance and may be built by somebody who runs none. So its version,
+revision and source URL are stamped into the client at link time, the source URL defaulting to this
+repository and overridden by a fork's own build; an unstamped build reads its revision from the module's
+VCS information, or says `unknown`. The instance's `/meta` above is printed beside it, labelled as the
+instance's §13 offer, because the two can differ and both are true.
 
 **Federation and mobile**: both explicit non-goals for v1 — each instance is an island, no dedicated mobile
 client planned. See [ADR 0019](adr/0019-platform-scope-and-commercial-model.md).
