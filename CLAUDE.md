@@ -1771,7 +1771,8 @@ And on hierarchy and overwrites, from M13:
 - **`RemoveMember` deliberately does not get the overwrite guard the other two deletion paths have.**
   Guarding a kick would let a member become unkickable by holding an overwrite whose bits the moderator
   lacks, trading an escalation for a denial of moderation. The residual — a kick clears a member-tier deny
-  — only matters once that member can return, which is M57's and M72a's.
+  — matters once that member can return, which they can since M20a's invites: a rejoin is a clean slate
+  (F1), so leave-and-rejoin sheds a deny, accepted and carried to M74 (`docs/security-ledger.md`).
 - **Category permissions are copied at creation, never inherited at read time.** A channel does not follow
   its category's later changes, so "sync permissions with category" is a client re-copying through the
   overwrite endpoints rather than a flag anything stores. Without the copy, a channel created inside a

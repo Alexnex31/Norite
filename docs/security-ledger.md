@@ -70,8 +70,12 @@ would flip them.
   rows unguarded. Guarding it would let a member become **unkickable** by holding an overwrite whose bits
   the moderator lacks, trading an escalation for a denial of moderation. The residual is that a kick
   clears a member-tier deny, which only matters once that member can return.
-- **Reopens if**: a join path exists. That is M57 (invites) and M72a (discovery join), and both entries
-  already carry the rejoin question.
+- **Reopened at M20a, and answered**: the join path exists — guild invites moved from M57 to M20a — and
+  the rejoin question was decided at its planning (F1): a departure still deletes the member's own
+  overwrites, so a rejoin is a clean slate. The kick stays unguarded for the reason above, and the residual
+  is now live and accepted: see M20a's "Leaving and rejoining sheds a member-tier restriction" below.
+- **Reopens if**: M74 decides that a member-tier restriction must survive a departure, at which point a kick
+  that deletes it is the hole this entry describes rather than a residual.
 
 ### A moderator can shed a low role that restricts them
 - **Raised**: M13, escalation audit (gap 13)
@@ -279,9 +283,12 @@ would flip them.
   asymmetry is already guarded in the direction that would be an escalation: `DeleteRole` refuses to
   remove overwrites whose bits the caller lacks, while `RemoveMember` deliberately does not, so a member
   cannot become unkickable.
-- **Reopens if**: a join path exists (M57, M72a) — at which point the rejoin question and this one are the
-  same question and should be answered together, since what makes a silently-restored deny dangerous is
-  exactly that nothing in the log explains it.
+- **Reopened at M20a, and answered with the rejoin question**, as this entry asked: nothing is restored on
+  a rejoin (F1), so no silently-restored deny exists for the missing bits to explain. What a reader still
+  cannot recover from the log is which denies a kick removed; `member.join` now names the invite an
+  arrival came through, so the round trip itself is visible.
+- **Reopens if**: overwrites ever survive a departure (M74's question), since a restored row is then exactly
+  the unexplained deny this entry was about; or a rejoin path appears that writes no `member.join`.
 
 ## M15 — core messaging CRUD
 
@@ -351,7 +358,8 @@ would flip them.
 - **Reopens if**: the role-assignment path is ever made to serialize against sends — at which point the
   two paths agree again and this one becomes the odd one out — or if a moderation feature arrives whose
   correctness depends on "no message exists after this timestamp", which timeouts (`PermModerateMembers`,
-  M74) and guild bans (M57) plausibly could. Also reopens if `SetChannelLastMessage` stops being
+  M74) and guild bans plausibly could. This entry said guild bans were M57's; no milestone builds them, and
+  M74 owns the question since M20a. Also reopens if `SetChannelLastMessage` stops being
   monotonic, since `GREATEST` is what replaced the lock's other job and a plain assignment would walk the
   channel's unread pointer backwards — reproduced in psql, pointer 100 with message 101 present.
 
@@ -1061,3 +1069,36 @@ carries the condition that would reopen it.
   nothing. The chmod is for a directory somebody loosened.
 - **Reopens if**: the socket moves out of the state directory, or the directory's mode stops being
   enforced (`paths.tighten`).
+
+## M20a — first usable client, end to end
+
+### Leaving and rejoining sheds a member-tier restriction
+- **Raised**: M20a planning (question F), from the rejoin question M13 routed to the first join path
+- **Verdict**: accepted risk
+- **Why**: `RemoveMember` deletes the departing member's own overwrites, so a rejoin restores nothing — the
+  property M13 wanted, since a silently restored deny is one nothing explains. Read the other way, a
+  moderator's member-tier deny ("may not post in #general") lasts until its subject leaves, which needs no
+  permission, and redeems any live invite. Keeping the deny's bits across a departure was weighed and not
+  taken (F1): it is restrictions that should outlive a departure, and they belong with timeouts and bans,
+  which are M74's. `TestARejoinIsACleanSlate` pins the behavior, and `member.join` records each arrival
+  with the invite it used, so the cycle is visible in the audit log if not prevented.
+- **Reopens if**: M74 lands without settling it, or M72a's direct join lands before M74, which makes the
+  cycle free of any invite a moderator could revoke.
+
+### A kicked member can rejoin through any live invite
+- **Raised**: M20a planning
+- **Verdict**: accepted risk
+- **Why**: no guild ban exists. `PermBanMembers` anticipates one and no milestone builds it, so a kick
+  removes a member until they hold a live invite, which is also what a kick means on Discord. A guild's
+  answer today is to revoke its invites, which `MANAGE_GUILD` can list and revoke.
+- **Reopens if**: M74 builds guild bans and they do not gate both invite redemption and M72a's direct join.
+
+### An Instance Admin can create and revoke invites into any guild, and only the guild's log records it
+- **Raised**: M20a, part 3
+- **Verdict**: accepted risk
+- **Why**: `guildauth` passes the tier at layer 1, so invites reach as far for it as for an owner — M17's
+  settlement for tags, chosen over a second layer-1 exception. The guild's own audit log names the admin as
+  the actor of `invite.create` and `invite.revoke`; rule 14's `instance_audit_log` does not exist until
+  M72. The same gap M16a's entry records for the edit-history read.
+- **Reopens if**: M72 builds `instance_audit_log` and the tier's guild actions are not routed into it, or a
+  tier action ever stops appearing in the guild's own log.
