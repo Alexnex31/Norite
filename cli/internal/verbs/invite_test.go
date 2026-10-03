@@ -27,10 +27,10 @@ func TestAnInviteLivesAWeekUnlessToldOtherwise(t *testing.T) {
 		{[]string{"--expires-in", "3d"}, `{"expires_in_seconds":259200}`},
 		{[]string{"--expires-in", "12h", "--max-uses", "1"}, `{"expires_in_seconds":43200,"max_uses":1}`},
 	} {
-		f := newFake(t).on("createChannelInvite", created(apiInvite("90", "BCDFGHJKMNPQRSTV")))
+		f := newFake(t).On("createChannelInvite", created(apiInvite("90", "BCDFGHJKMNPQRSTV")))
 		r := runVerb(t, f, "", append([]string{"invite", "create", "20"}, tc.flags...)...)
 		require.NoError(t, r.err, "%v", tc.flags)
-		calls := f.requests()
+		calls := f.Requests()
 		require.Len(t, calls, 1)
 		assert.JSONEq(t, tc.body, string(calls[0].Body), "%v", tc.flags)
 	}
@@ -47,7 +47,7 @@ func TestAnInviteOutsideTheInstancesBoundsIsAUsageError(t *testing.T) {
 		r := runVerb(t, f, "", append([]string{"invite", "create", "20"}, flags...)...)
 		var usage *clierr.UsageError
 		require.ErrorAs(t, r.err, &usage, "%v: %v", flags, r.err)
-		assert.Empty(t, f.requests(), "%v", flags)
+		assert.Empty(t, f.Requests(), "%v", flags)
 	}
 }
 
@@ -57,13 +57,13 @@ func TestAnInviteOutsideTheInstancesBoundsIsAUsageError(t *testing.T) {
 func TestACodeTravelsInTheBodyAndNeverInAPath(t *testing.T) {
 	const typed = "bcdf-ghjk-mnpq-rstv"
 	f := newFake(t).
-		on("previewInvite", ok(apiPreview("BCDFGHJKMNPQRSTV", "Guild"))).
-		on("redeemInvite", ok(apiGuild("10", "Guild"))).
-		on("revokeInvite", noContent())
+		On("previewInvite", ok(apiPreview("BCDFGHJKMNPQRSTV", "Guild"))).
+		On("redeemInvite", ok(apiGuild("10", "Guild"))).
+		On("revokeInvite", noContent())
 	for _, verb := range []string{"show", "join", "revoke"} {
 		require.NoError(t, runVerb(t, f, "", "invite", verb, typed).err, verb)
 	}
-	for _, call := range f.requests() {
+	for _, call := range f.Requests() {
 		assert.NotContains(t, strings.ToLower(call.Path), "bcdf", "%s %s", call.Method, call.Path)
 		assert.Empty(t, call.Query)
 		assert.JSONEq(t, `{"code":"`+typed+`"}`, string(call.Body), call.Path)
@@ -74,7 +74,7 @@ func TestACodeTravelsInTheBodyAndNeverInAPath(t *testing.T) {
 		r := runVerb(t, g, "", "invite", "join", bad)
 		var usage *clierr.UsageError
 		require.ErrorAs(t, r.err, &usage, "%q", bad)
-		assert.Empty(t, g.requests())
+		assert.Empty(t, g.Requests())
 	}
 }
 
@@ -87,7 +87,7 @@ func TestAPreviewIsInertInTextAndExactInJSON(t *testing.T) {
 	p.Guild.Description = &hostile
 	p.Channel.Name = &hostile
 	p.Inviter = &apicontract.PublicUser{Id: "1", Username: hostile, DisplayName: hostile}
-	f := newFake(t).on("previewInvite", ok(p))
+	f := newFake(t).On("previewInvite", ok(p))
 
 	text := runVerb(t, f, "", "invite", "show", "BCDFGHJKMNPQRSTV")
 	require.NoError(t, text.err)

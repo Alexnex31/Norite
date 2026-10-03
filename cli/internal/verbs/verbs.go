@@ -21,7 +21,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"regexp"
 	"strings"
 	"unicode"
 
@@ -30,6 +29,7 @@ import (
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -129,11 +129,6 @@ func (e *env) attached(ctx context.Context) (daemonclient.Caller, error) {
 
 // ---------- arguments ----------
 
-// snowflake is what an id argument may be: digits, and no more than a 64-bit integer has. Checked here
-// because an id goes into a request path, and the relay refusing a path that climbs out of /api/v1 is the
-// second line, not the first.
-var snowflake = regexp.MustCompile(`^[0-9]{1,20}$`)
-
 // argsKey is where a command records the ids it takes, for checkArgs to read.
 const argsKey = "ids"
 
@@ -161,6 +156,10 @@ func ids(names ...string) (usage string, meta map[string]any) {
 	return usage, map[string]any{argsKey: names}
 }
 
+// checkArgs holds a command's arguments to what it declared. An id must be what ops.IsID accepts — digits,
+// and no more than a 64-bit integer has — checked before anything is attached to, because an id goes into
+// a request path, and the relay refusing a path that climbs out of /api/v1 is the second line, not the
+// first.
 func checkArgs(cmd *cli.Command) error {
 	names, _ := cmd.Metadata[argsKey].([]string)
 	args := cmd.Args().Slice()
@@ -181,7 +180,7 @@ func checkArgs(cmd *cli.Command) error {
 			}
 			continue
 		}
-		if !snowflake.MatchString(a) {
+		if !ops.IsID(a) {
 			return clierr.Usage("%q is not a %s id: ids are the numbers the list commands print",
 				output.Clean(a), names[i])
 		}
@@ -195,7 +194,7 @@ func flagID(cmd *cli.Command, name string) (*string, error) {
 		return nil, nil
 	}
 	v := cmd.String(name)
-	if !snowflake.MatchString(v) {
+	if !ops.IsID(v) {
 		return nil, clierr.Usage("--%s %q is not an id", name, output.Clean(v))
 	}
 	return &v, nil

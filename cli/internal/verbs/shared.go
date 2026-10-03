@@ -13,6 +13,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 )
 
 // ---------- confirming ----------
@@ -90,6 +91,20 @@ func beforeFlag(what string) *cli.StringFlag {
 
 func afterFlag(what string) *cli.StringFlag {
 	return &cli.StringFlag{Name: "after", Usage: "list " + what + " after this `ID`"}
+}
+
+// pageOf reads a message list's paging flags into ops.Page, checked as query checks them.
+func pageOf(cmd *cli.Command) (ops.Page, error) {
+	p := ops.Page{Limit: int(cmd.Int("limit"))}
+	if p.Limit < 1 || p.Limit > ops.MaxPage {
+		return p, clierr.Usage("--limit must be between 1 and %d", ops.MaxPage)
+	}
+	var err error
+	if p.Before, err = flagID(cmd, "before"); err != nil {
+		return p, err
+	}
+	p.After, err = flagID(cmd, "after")
+	return p, err
 }
 
 // query builds a paged list's query string from its flags. names says which of before and after the verb

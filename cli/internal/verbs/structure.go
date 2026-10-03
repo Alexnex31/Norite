@@ -14,6 +14,8 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -25,9 +27,10 @@ func channelCommand(connect Connector) *cli.Command {
 			name: "list", usage: "List the guild's channels you can see, in position order",
 			ids: []string{"guild"},
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
-				var channels []apicontract.Channel
-				if err := e.do(ctx, http.MethodGet, "/guilds/"+cmd.Args().Get(0)+"/channels", nil,
-					&channels); err != nil {
+				channels, err := with(ctx, e, func(c daemonclient.Caller) ([]apicontract.Channel, error) {
+					return ops.ListChannels(ctx, c, cmd.Args().Get(0))
+				})
+				if err != nil {
 					return nil, err
 				}
 				out := channelList{}
@@ -250,7 +253,7 @@ func roleCommand(connect Connector) *cli.Command {
 				for _, pair := range cmd.StringSlice("set") {
 					role, pos, ok := strings.Cut(pair, "=")
 					n, err := strconv.ParseInt(pos, 10, 32)
-					if !ok || !snowflake.MatchString(role) || err != nil || n < 0 {
+					if !ok || !ops.IsID(role) || err != nil || n < 0 {
 						return nil, clierr.Usage("--set takes ROLE=POSITION: a role id and a position from 0, "+
 							"not %q", output.Clean(pair))
 					}

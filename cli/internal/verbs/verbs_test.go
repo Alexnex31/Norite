@@ -21,6 +21,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -229,11 +230,11 @@ func TestEveryVerbsJSONMatchesItsContract(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
 			for op, a := range tc.answers {
-				f.on(op, a)
+				f.On(op, a)
 			}
 			r := runVerb(t, f, "", append([]string{"--json"}, tc.argv...)...)
 			require.NoError(t, r.err)
-			require.NotEmpty(t, f.requests(), "the verb asked the instance nothing")
+			require.NotEmpty(t, f.Requests(), "the verb asked the instance nothing")
 			matchesCLISchema(t, r.out, tc.file, tc.def)
 		})
 	}
@@ -245,7 +246,7 @@ func TestEveryVerbAlsoPrintsText(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t)
 			for op, a := range tc.answers {
-				f.on(op, a)
+				f.On(op, a)
 			}
 			r := runVerb(t, f, "", tc.argv...)
 			require.NoError(t, r.err)
@@ -260,12 +261,12 @@ func TestEveryVerbAlsoPrintsText(t *testing.T) {
 
 func TestAGuildIsCreatedRenamedGivenARoleAndAChannelAnOverwriteWrittenAndItsLogRead(t *testing.T) {
 	f := newFake(t).
-		on("createGuild", created(apiGuild("10", "Guild"))).
-		on("updateGuild", ok(apiGuild("10", "Renamed"))).
-		on("createGuildRole", created(apiRole("30", "10", "mods", 1))).
-		on("createGuildChannel", created(apiChannel("20", "10", "general", 0))).
-		on("setChannelPermissionOverwrite", ok(apiOverwrite("20", "30", 0, "0", "2048"))).
-		on("listGuildAuditLog", ok([]apicontract.AuditLogEntry{apiAudit("53", "overwrite.set"), apiAudit("52", "channel.create")}))
+		On("createGuild", created(apiGuild("10", "Guild"))).
+		On("updateGuild", ok(apiGuild("10", "Renamed"))).
+		On("createGuildRole", created(apiRole("30", "10", "mods", 1))).
+		On("createGuildChannel", created(apiChannel("20", "10", "general", 0))).
+		On("setChannelPermissionOverwrite", ok(apiOverwrite("20", "30", 0, "0", "2048"))).
+		On("listGuildAuditLog", ok([]apicontract.AuditLogEntry{apiAudit("53", "overwrite.set"), apiAudit("52", "channel.create")}))
 
 	for _, argv := range [][]string{
 		{"guild", "create", "--name", "Guild"},
@@ -278,7 +279,7 @@ func TestAGuildIsCreatedRenamedGivenARoleAndAChannelAnOverwriteWrittenAndItsLogR
 		require.NoError(t, runVerb(t, f, "", argv...).err, "%v", argv)
 	}
 
-	calls := f.requests()
+	calls := f.Requests()
 	require.Len(t, calls, 6)
 	assert.JSONEq(t, `{"name":"Guild"}`, string(calls[0].Body))
 	assert.JSONEq(t, `{"name":"Renamed"}`, string(calls[1].Body), "only what was passed changes")
@@ -291,14 +292,14 @@ func TestAGuildIsCreatedRenamedGivenARoleAndAChannelAnOverwriteWrittenAndItsLogR
 
 func TestRecordingIsSwitchedOnAndOffAndItsLogPaged(t *testing.T) {
 	f := newFake(t).
-		on("updateGuild", func(r request) (int, any) {
+		On("updateGuild", func(r request) (int, any) {
 			var body map[string]bool
 			_ = json.Unmarshal(r.Body, &body)
 			g := apiGuild("10", "Guild")
 			g.MessageAuditEnabled = body["message_audit_enabled"]
 			return http.StatusOK, g
 		}).
-		on("listGuildMessageAudit", func(r request) (int, any) {
+		On("listGuildMessageAudit", func(r request) (int, any) {
 			if r.Query.Get("before") == "" {
 				return http.StatusOK, []apicontract.MessageAuditEntry{apiRecorded("62", "edit", "b"), apiRecorded("61", "create", "a")}
 			}
@@ -327,7 +328,7 @@ func TestRecordingIsSwitchedOnAndOffAndItsLogPaged(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(second.out), &page))
 	assert.Nil(t, page.Next, "a short page is the last")
 
-	calls := f.requests()
+	calls := f.Requests()
 	assert.JSONEq(t, `{"message_audit_enabled":true}`, string(calls[0].Body))
 	assert.JSONEq(t, `{"message_audit_enabled":false}`, string(calls[1].Body))
 	assert.Equal(t, "61", calls[3].Query.Get("before"))
@@ -336,7 +337,7 @@ func TestRecordingIsSwitchedOnAndOffAndItsLogPaged(t *testing.T) {
 // TestANonMembersRefusalIsAnAnswerNotACrash is the done-when's last clause: the instance's 404 for a guild
 // somebody is not in comes back as clierr.RefusedError, which main exits 4 for, without the crash prefix.
 func TestANonMembersRefusalIsAnAnswerNotACrash(t *testing.T) {
-	f := newFake(t).on("getGuild", func(request) (int, any) {
+	f := newFake(t).On("getGuild", func(request) (int, any) {
 		return http.StatusNotFound, refusal("not_found", "not found")
 	})
 	r := runVerb(t, f, "", "guild", "show", "10")
@@ -357,7 +358,7 @@ func TestADestructiveVerbWithoutYesAndNoTerminalTouchesNothing(t *testing.T) {
 		r := runVerb(t, f, "y\n", argv...)
 		require.True(t, errors.Is(r.err, clierr.ErrNoTerminal), "%v: %v", argv, r.err)
 		assert.Contains(t, r.err.Error(), "--yes")
-		assert.Empty(t, f.requests(), "%v asked the instance something", argv)
+		assert.Empty(t, f.Requests(), "%v asked the instance something", argv)
 	}
 }
 
@@ -385,14 +386,14 @@ func TestAnUpdateWithNothingOrContradictionsIsAUsageError(t *testing.T) {
 		r := runVerb(t, f, "", argv...)
 		var usage *clierr.UsageError
 		require.ErrorAs(t, r.err, &usage, "%v: %v", argv, r.err)
-		assert.Empty(t, f.requests(), "%v", argv)
+		assert.Empty(t, f.Requests(), "%v", argv)
 	}
 }
 
 // TestAHostileNameIsInertInTextAndExactInJSON: rule 19 in both presentations, on a name an instance chose.
 func TestAHostileNameIsInertInTextAndExactInJSON(t *testing.T) {
 	hostile := "Evil\x1b]0;owned\x07 \u202eesrever"
-	f := newFake(t).on("listCurrentUserGuilds", ok([]apicontract.Guild{apiGuild("10", hostile)}))
+	f := newFake(t).On("listCurrentUserGuilds", ok([]apicontract.Guild{apiGuild("10", hostile)}))
 
 	text := runVerb(t, f, "", "guild", "list")
 	require.NoError(t, text.err)
@@ -418,7 +419,7 @@ func TestAMessageIsNamedByItsAuthor(t *testing.T) {
 	deleted.Author = nil
 	system := apiMessage("31", "20", "system")
 	system.Author, system.AuthorId = nil, nil
-	f := newFake(t).on("listChannelMessages", ok([]apicontract.Message{named, deleted, system}))
+	f := newFake(t).On("listChannelMessages", ok([]apicontract.Message{named, deleted, system}))
 
 	text := runVerb(t, f, "", "message", "list", "20")
 	require.NoError(t, text.err)
@@ -453,10 +454,10 @@ func TestAMessageIsNamedByItsAuthor(t *testing.T) {
 
 func TestAReportIsFiledAndTriagedAndTheReporterIsNeverShown(t *testing.T) {
 	f := newFake(t).
-		on("fileReport", created(apiReport("70", "open"))).
-		on("listGuildReports", ok([]apicontract.TriageReport{apiTriage("70")})).
-		on("getGuildReport", ok(apiTriageDetail("70"))).
-		on("resolveGuildReport", func(r request) (int, any) {
+		On("fileReport", created(apiReport("70", "open"))).
+		On("listGuildReports", ok([]apicontract.TriageReport{apiTriage("70")})).
+		On("getGuildReport", ok(apiTriageDetail("70"))).
+		On("resolveGuildReport", func(r request) (int, any) {
 			var body struct{ Status string }
 			_ = json.Unmarshal(r.Body, &body)
 			return http.StatusOK, apiReport("70", body.Status)
@@ -477,7 +478,7 @@ func TestAReportIsFiledAndTriagedAndTheReporterIsNeverShown(t *testing.T) {
 		}
 	}
 
-	calls := f.requests()
+	calls := f.Requests()
 	assert.JSONEq(t, `{"target_type":"message","target_id":"30","reason_category":"harassment"}`, string(calls[0].Body))
 	assert.JSONEq(t, `{"status":"resolved"}`, string(calls[len(calls)-1].Body))
 
@@ -488,11 +489,11 @@ func TestAReportIsFiledAndTriagedAndTheReporterIsNeverShown(t *testing.T) {
 
 func TestABacklogIsReadPostedToEditedAndDeletedAndAMessagesVersionsRead(t *testing.T) {
 	f := newFake(t).
-		on("listChannelMessages", ok([]apicontract.Message{apiMessage("31", "20", "newer"), apiMessage("30", "20", "older")})).
-		on("sendMessage", created(apiMessage("32", "20", "line one\nline two"))).
-		on("updateMessage", ok(apiMessage("32", "20", "corrected"))).
-		on("deleteMessage", noContent()).
-		on("getMessageEditHistory", ok(apiHistory("32", "20", "line one\nline two")))
+		On("listChannelMessages", ok([]apicontract.Message{apiMessage("31", "20", "newer"), apiMessage("30", "20", "older")})).
+		On("sendMessage", created(apiMessage("32", "20", "line one\nline two"))).
+		On("updateMessage", ok(apiMessage("32", "20", "corrected"))).
+		On("deleteMessage", noContent()).
+		On("getMessageEditHistory", ok(apiHistory("32", "20", "line one\nline two")))
 
 	page := runVerb(t, f, "", "--json", "message", "list", "20", "--limit", "2")
 	require.NoError(t, page.err)
@@ -505,7 +506,7 @@ func TestABacklogIsReadPostedToEditedAndDeletedAndAMessagesVersionsRead(t *testi
 	assert.Contains(t, history.out, "line two")
 	require.NoError(t, runVerb(t, f, "", "message", "delete", "20", "32", "--yes").err)
 
-	calls := f.requests()
+	calls := f.Requests()
 	assert.JSONEq(t, `{"content":"line one\nline two"}`, string(calls[1].Body), "read from stdin, the final newline dropped")
 	assert.JSONEq(t, `{"content":"corrected"}`, string(calls[2].Body))
 	assert.Equal(t, "DELETE", calls[4].Method)
@@ -515,9 +516,9 @@ func TestABacklogIsReadPostedToEditedAndDeletedAndAMessagesVersionsRead(t *testi
 // through its own channel — 21 here, where the tag was listed through the guild.
 func TestATagIsAppliedToAMessageInAnotherChannelAndRemoved(t *testing.T) {
 	f := newFake(t).
-		on("createMessageTag", created(apiTag("80", "todo", true))).
-		on("applyMessageTag", noContent()).
-		on("unapplyMessageTag", noContent())
+		On("createMessageTag", created(apiTag("80", "todo", true))).
+		On("applyMessageTag", noContent()).
+		On("unapplyMessageTag", noContent())
 
 	require.NoError(t, runVerb(t, f, "", "tag", "create", "10", "--name", "todo", "--shared").err)
 	applied := runVerb(t, f, "", "--json", "tag", "apply", "21", "30", "80")
@@ -525,7 +526,7 @@ func TestATagIsAppliedToAMessageInAnotherChannelAndRemoved(t *testing.T) {
 	assert.JSONEq(t, `{"action":"tag.apply","target":{"channel_id":"21","message_id":"30","tag_id":"80"}}`, applied.out)
 	require.NoError(t, runVerb(t, f, "", "tag", "unapply", "21", "30", "80").err)
 
-	calls := f.requests()
+	calls := f.Requests()
 	assert.Equal(t, "/channels/21/messages/30/tags/80", calls[1].Path)
 	assert.Equal(t, http.MethodPut, calls[1].Method)
 	assert.Equal(t, http.MethodDelete, calls[2].Method)
@@ -539,19 +540,19 @@ func TestAMessageMustHaveContentWithinTheLimit(t *testing.T) {
 		{"", []string{"message", "send", "20"}},
 		{"", []string{"message", "send", "20", "--content", "   "}},
 		{"\n\n", []string{"message", "send", "20", "--content", "-"}},
-		{"", []string{"message", "send", "20", "--content", strings.Repeat("日", maxContent+1)}},
+		{"", []string{"message", "send", "20", "--content", strings.Repeat("日", ops.MaxContent+1)}},
 		{"", []string{"report", "file", "30", "--reason", "rude"}},
 	} {
 		f := newFake(t)
 		r := runVerb(t, f, tc.stdin, tc.argv...)
 		var usage *clierr.UsageError
 		require.ErrorAs(t, r.err, &usage, "%v", tc.argv)
-		assert.Empty(t, f.requests())
+		assert.Empty(t, f.Requests())
 	}
 
 	// Counted in runes, as the instance counts them: 4,000 Japanese characters are 12,000 bytes and fit.
-	f := newFake(t).on("sendMessage", created(apiMessage("30", "20", "x")))
-	require.NoError(t, runVerb(t, f, "", "message", "send", "20", "--content", strings.Repeat("日", maxContent)).err)
+	f := newFake(t).On("sendMessage", created(apiMessage("30", "20", "x")))
+	require.NoError(t, runVerb(t, f, "", "message", "send", "20", "--content", strings.Repeat("日", ops.MaxContent)).err)
 }
 
 // TestAUsageErrorNeedsNoDaemon: every flag check and every confirmation happens before the verb attaches,
@@ -591,7 +592,7 @@ func TestAUsageErrorNeedsNoDaemon(t *testing.T) {
 
 // TestTheConfirmationIsAskedOnStderr: stdout carries the result, which --json pipes into a parser.
 func TestTheConfirmationIsAskedOnStderr(t *testing.T) {
-	f := newFake(t).on("deleteGuild", noContent())
+	f := newFake(t).On("deleteGuild", noContent())
 	connect := func(context.Context) (daemonclient.Caller, func(), error) { return f, func() {}, nil }
 	var out, errOut bytes.Buffer
 	root := &cli.Command{

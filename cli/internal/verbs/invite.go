@@ -14,6 +14,8 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -110,9 +112,10 @@ func inviteCommand(connect Connector) *cli.Command {
 		spec{
 			name: "show", usage: "See where an invite leads before you use it", ids: []string{codeArg},
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
-				var p apicontract.GuildInvitePreview
-				if err := e.do(ctx, http.MethodPost, "/invites/preview",
-					apicontract.GuildInviteCodeRequest{Code: cmd.Args().Get(0)}, &p); err != nil {
+				p, err := with(ctx, e, func(c daemonclient.Caller) (apicontract.GuildInvitePreview, error) {
+					return ops.PreviewInvite(ctx, c, cmd.Args().Get(0))
+				})
+				if err != nil {
 					return nil, err
 				}
 				return previewFrom(p), nil
@@ -122,9 +125,10 @@ func inviteCommand(connect Connector) *cli.Command {
 			name: "join", usage: "Join the guild an invite leads to", ids: []string{codeArg},
 			description: "Joining a guild you are already in changes nothing and spends no use of the invite.",
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
-				var g apicontract.Guild
-				if err := e.do(ctx, http.MethodPost, "/invites/redeem",
-					apicontract.GuildInviteCodeRequest{Code: cmd.Args().Get(0)}, &g); err != nil {
+				g, err := with(ctx, e, func(c daemonclient.Caller) (apicontract.Guild, error) {
+					return ops.JoinInvite(ctx, c, cmd.Args().Get(0))
+				})
+				if err != nil {
 					return nil, err
 				}
 				return guildFrom(g), nil

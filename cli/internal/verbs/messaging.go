@@ -15,13 +15,12 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
 // What is said in a guild, and what is done about it: messages, reports and tags.
-
-// maxContent is the instance's own bound on a message, in runes, which the API's validator counts.
-const maxContent = 4000
 
 // content reads a message's text from --content, or from stdin when --content is "-": a message is the
 // one argument long enough, and multi-line enough, that a shell's quoting gets in the way.
@@ -31,17 +30,14 @@ func content(cmd *cli.Command, e *env) (string, error) {
 		return "", err
 	}
 	if text == "-" {
-		raw, err := io.ReadAll(io.LimitReader(e.in, 4*maxContent+1))
+		raw, err := io.ReadAll(io.LimitReader(e.in, 4*ops.MaxContent+1))
 		if err != nil {
 			return "", err
 		}
 		text = strings.TrimRight(string(raw), "\n")
 	}
-	if strings.TrimSpace(text) == "" {
-		return "", clierr.Usage("the message is empty")
-	}
-	if n := len([]rune(text)); n > maxContent {
-		return "", clierr.Usage("the message is %d characters; the instance takes at most %d", n, maxContent)
+	if err := ops.CheckContent(text); err != nil {
+		return "", err
 	}
 	return text, nil
 }
@@ -56,14 +52,17 @@ func messageCommand(connect Connector) *cli.Command {
 				"than an id, still newest first.",
 			flags: []cli.Flag{limitFlag(50), beforeFlag("messages"), afterFlag("messages")},
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
-				q, limit, err := query(cmd, []string{"before", "after"}, nil)
+				page, err := pageOf(cmd)
 				if err != nil {
 					return nil, err
 				}
-				var list []apicontract.Message
-				if err := e.do(ctx, http.MethodGet, "/channels/"+cmd.Args().Get(0)+"/messages"+q, nil, &list); err != nil {
+				list, err := with(ctx, e, func(c daemonclient.Caller) ([]apicontract.Message, error) {
+					return ops.ListMessages(ctx, c, cmd.Args().Get(0), page)
+				})
+				if err != nil {
 					return nil, err
 				}
+				limit := page.Limit
 				var views []messageView
 				for _, m := range list {
 					views = append(views, messageFrom(m))
@@ -79,12 +78,14 @@ func messageCommand(connect Connector) *cli.Command {
 				if err != nil {
 					return nil, err
 				}
-				body := apicontract.SendMessageJSONRequestBody{Content: text}
-				if body.ReplyToId, err = flagID(cmd, "reply-to"); err != nil {
+				replyTo, err := flagID(cmd, "reply-to")
+				if err != nil {
 					return nil, err
 				}
-				var m apicontract.Message
-				if err := e.do(ctx, http.MethodPost, "/channels/"+cmd.Args().Get(0)+"/messages", body, &m); err != nil {
+				m, err := with(ctx, e, func(c daemonclient.Caller) (apicontract.Message, error) {
+					return ops.SendMessage(ctx, c, cmd.Args().Get(0), text, replyTo)
+				})
+				if err != nil {
 					return nil, err
 				}
 				return messageFrom(m), nil

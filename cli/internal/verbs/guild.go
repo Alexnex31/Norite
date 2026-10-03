@@ -15,6 +15,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -60,13 +61,26 @@ func (e *env) do(ctx context.Context, method, path string, body, out any) error 
 	return daemonclient.Call(ctx, c, method, path, body, out)
 }
 
+// with runs one of ops' functions on the verb's connection, attaching first. The verbs that the terminal
+// client shares go through ops (M20a), so the request and its bounds exist once.
+func with[T any](ctx context.Context, e *env, op func(daemonclient.Caller) (T, error)) (T, error) {
+	c, err := e.attached(ctx)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return op(c)
+}
+
 func guildCommand(connect Connector) *cli.Command {
 	return group("guild", "List, create, change and delete guilds; read their logs", connect,
 		spec{
 			name: "list", usage: "List the guilds you are a member of",
 			run: func(ctx context.Context, _ *cli.Command, e *env) (output.Result, error) {
-				var guilds []apicontract.Guild
-				if err := e.do(ctx, http.MethodGet, "/users/@me/guilds", nil, &guilds); err != nil {
+				guilds, err := with(ctx, e, func(c daemonclient.Caller) ([]apicontract.Guild, error) {
+					return ops.ListGuilds(ctx, c)
+				})
+				if err != nil {
 					return nil, err
 				}
 				out := guildList{}
