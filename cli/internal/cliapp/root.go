@@ -95,6 +95,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			daemonctl.GroupCommand(),
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
+			aboutCommand(verbs.Daemon(Version)),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

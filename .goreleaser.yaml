@@ -44,8 +44,12 @@ builds:
     goarch: [amd64, arm64]
     # Without this, `norite --version` reports "dev" in every shipped release — the variable's default.
     # The other three binaries get the same treatment as they grow a version to report.
+    #
+    # And the revision, which `norite about` prints as AGPL section 5(d)'s notice (M20a): the full commit,
+    # for the backend's reason above, so it resolves in the repository the notice names. Unstamped, the CLI
+    # reads the commit `go build` recorded, and says so.
     ldflags:
-      - -s -w -X github.com/Alexnex31/Norite/cli/internal/cliapp.Version={{ .Version }}
+      - -s -w -X github.com/Alexnex31/Norite/cli/internal/cliapp.Version={{ .Version }} -X github.com/Alexnex31/Norite/cli/internal/cliapp.Revision={{ .FullCommit }}
 
   - id: gui
     dir: gui

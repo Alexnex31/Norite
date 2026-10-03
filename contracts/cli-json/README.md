@@ -24,6 +24,7 @@ verb's output a definition in it that the CLI's tests validate against.
 | `report.schema.json` | `norite report file \| list \| show \| resolve \| dismiss` |
 | `tag.schema.json` | `norite tag list \| create \| delete \| apply \| unapply \| on` |
 | `guild-invite.schema.json` | `norite invite create \| list \| show \| join \| revoke` |
+| `about.schema.json` | `norite about` |
 
 **These shapes belong to the CLI, not to the instance.** Several of them are built from a REST response
 carrying the same information, and they are re-declared here rather than passed through: a scripted

@@ -492,3 +492,48 @@ func (d *Daemon) Do(_ context.Context, method, rawPath string, body any) (ipc.Re
 	}
 	return ipc.Result{Status: status, Body: respBody}, nil
 }
+
+// ---------- contracts/cli-json ----------
+
+var (
+	cliOnce     sync.Once
+	cliCompiler *jsonschema.Compiler
+	cliErr      error
+)
+
+// MatchesCLISchema validates what a command printed under --json against one definition in
+// contracts/cli-json/ (rule 15).
+func MatchesCLISchema(t testing.TB, out, file, def string) {
+	t.Helper()
+	cliOnce.Do(func() {
+		cliCompiler = jsonschema.NewCompiler()
+		cliCompiler.AssertFormat()
+		entries, err := os.ReadDir(filepath.Join(Contracts(), "cli-json"))
+		if err != nil {
+			cliErr = err
+			return
+		}
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".schema.json") {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(Contracts(), "cli-json", e.Name()))
+			if err != nil {
+				cliErr = err
+				return
+			}
+			inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+			if err != nil {
+				cliErr = fmt.Errorf("%s: %w", e.Name(), err)
+				return
+			}
+			if cliErr = cliCompiler.AddResource("https://norite.chat/contracts/cli-json/"+e.Name(), inst); cliErr != nil {
+				return
+			}
+		}
+	})
+	require.NoError(t, cliErr)
+	s, err := cliCompiler.Compile("https://norite.chat/contracts/cli-json/" + file + "#/$defs/" + def)
+	require.NoError(t, err)
+	require.NoError(t, Conforms(s, []byte(out)), "%s does not match %s#%s:\n%s", "the output", file, def, out)
+}

@@ -6,15 +6,9 @@ package verbs
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/santhosh-tekuri/jsonschema/v6"
-	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
@@ -39,6 +33,12 @@ type (
 
 func newFake(t *testing.T) *fakeDaemon { return daemontest.New(t) }
 
+// matchesCLISchema validates what a verb printed against one definition in contracts/cli-json/.
+func matchesCLISchema(t *testing.T, out, file, def string) {
+	t.Helper()
+	daemontest.MatchesCLISchema(t, out, file, def)
+}
+
 // ---------- running a verb ----------
 
 type ran struct {
@@ -59,48 +59,4 @@ func runVerb(t *testing.T, f *fakeDaemon, stdin string, argv ...string) ran {
 	}
 	err := root.Run(context.Background(), append([]string{"norite"}, argv...))
 	return ran{out: out.String(), err: err}
-}
-
-// ---------- contracts/cli-json ----------
-
-var (
-	cliOnce     sync.Once
-	cliCompiler *jsonschema.Compiler
-	cliErr      error
-)
-
-// matchesCLISchema validates what a verb printed against one definition in contracts/cli-json/.
-func matchesCLISchema(t *testing.T, out, file, def string) {
-	t.Helper()
-	cliOnce.Do(func() {
-		cliCompiler = jsonschema.NewCompiler()
-		cliCompiler.AssertFormat()
-		entries, err := os.ReadDir(filepath.Join(daemontest.Contracts(), "cli-json"))
-		if err != nil {
-			cliErr = err
-			return
-		}
-		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".schema.json") {
-				continue
-			}
-			raw, err := os.ReadFile(filepath.Join(daemontest.Contracts(), "cli-json", e.Name()))
-			if err != nil {
-				cliErr = err
-				return
-			}
-			inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-			if err != nil {
-				cliErr = fmt.Errorf("%s: %w", e.Name(), err)
-				return
-			}
-			if cliErr = cliCompiler.AddResource("https://norite.chat/contracts/cli-json/"+e.Name(), inst); cliErr != nil {
-				return
-			}
-		}
-	})
-	require.NoError(t, cliErr)
-	s, err := cliCompiler.Compile("https://norite.chat/contracts/cli-json/" + file + "#/$defs/" + def)
-	require.NoError(t, err)
-	require.NoError(t, daemontest.Conforms(s, []byte(out)), "%s does not match %s#%s:\n%s", "the output", file, def, out)
 }

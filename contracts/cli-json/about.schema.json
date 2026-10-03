@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/about.schema.json",
+  "title": "norite about --json",
+  "description": "The machine-readable output of `norite about` (M20a): AGPL section 5(d)'s Appropriate Legal Notices for this build, and the section 13 source offer of the instance its daemon is signed in to.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what this command prints ships with a change to this file in the same commit. Two programs and two obligations, kept apart: `build` describes the binary that printed this, stamped into it; `instance` is the server's own offer, and its strings are a stranger's, escaped where a terminal would act on them.",
+  "$ref": "#/$defs/about",
+  "$defs": {
+    "about": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "build",
+        "instance",
+        "instance_unavailable",
+        "license",
+        "copyright",
+        "rights",
+        "warranty",
+        "terms"
+      ],
+      "properties": {
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "revision",
+            "revision_from",
+            "modified",
+            "source_url"
+          ],
+          "properties": {
+            "version": {
+              "type": "string",
+              "description": "This build's release version, or `dev` for a build nobody stamped."
+            },
+            "revision": {
+              "type": "string",
+              "description": "The git commit this build was made from, or `unknown`."
+            },
+            "revision_from": {
+              "enum": [
+                "stamped",
+                "vcs",
+                "unknown"
+              ],
+              "description": "Where the revision came from: stamped at link time, read from the toolchain's record of the checkout it was built in, or not known."
+            },
+            "modified": {
+              "type": "boolean",
+              "description": "True when the toolchain recorded uncommitted changes in that checkout, so the revision is where the source started rather than all of it. Always false unless revision_from is `vcs`."
+            },
+            "source_url": {
+              "type": "string",
+              "description": "Where this build's source can be had: upstream, unless the build that made it said otherwise."
+            }
+          }
+        },
+        "instance": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "license",
+                "source_url",
+                "source_revision"
+              ],
+              "properties": {
+                "license": {
+                  "type": "string",
+                  "description": "The license the instance's own code is under."
+                },
+                "source_url": {
+                  "type": "string",
+                  "description": "Where the instance's source can be had."
+                },
+                "source_revision": {
+                  "type": "string",
+                  "description": "The revision the instance's server was built from."
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The instance's own offer, through the daemon, or null when it could not be asked."
+        },
+        "instance_unavailable": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why the instance could not be asked, or null when it was."
+        },
+        "license": {
+          "const": "AGPL-3.0-or-later"
+        },
+        "copyright": {
+          "type": "string",
+          "description": "The copyright notice."
+        },
+        "rights": {
+          "type": "string",
+          "description": "What the license lets anybody do with the program."
+        },
+        "warranty": {
+          "type": "string",
+          "description": "That it comes with no warranty."
+        },
+        "terms": {
+          "type": "string",
+          "description": "Where the license's full terms are."
+        }
+      }
+    }
+  }
+}

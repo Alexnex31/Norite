@@ -159,3 +159,11 @@ func JoinInvite(ctx context.Context, c daemonclient.Caller, code string) (apicon
 		apicontract.GuildInviteCodeRequest{Code: code}, &out)
 	return out, err
 }
+
+// InstanceMeta is the instance's AGPL section 13 offer: its license, and where its running version's source
+// can be had. `norite about` prints it beside this build's own notice (M20a).
+func InstanceMeta(ctx context.Context, c daemonclient.Caller) (apicontract.InstanceMeta, error) {
+	var out apicontract.InstanceMeta
+	err := daemonclient.Call(ctx, c, http.MethodGet, "/meta", nil, &out)
+	return out, err
+}
