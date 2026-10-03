@@ -163,6 +163,22 @@ func verbCases() map[string]verbCase {
 		"tag on": {argv: []string{"tag", "on", "21", "30"},
 			answers: map[string]answerFunc{"listMessageTags": ok([]apicontract.AppliedMessageTag{apiApplied("80", "todo")})},
 			file:    "tag.schema.json", def: "appliedTagList"},
+
+		"invite create": {argv: []string{"invite", "create", "20", "--max-uses", "5"},
+			answers: map[string]answerFunc{"createChannelInvite": created(apiInvite("90", "BCDFGHJKMNPQRSTV"))},
+			file:    "guild-invite.schema.json", def: "invite"},
+		"invite list": {argv: []string{"invite", "list", "10"},
+			answers: map[string]answerFunc{"listGuildInvites": ok([]apicontract.GuildInvite{apiInvite("90", "BCDFGHJKMNPQRSTV")})},
+			file:    "guild-invite.schema.json", def: "inviteList"},
+		"invite show": {argv: []string{"invite", "show", "bcdf-ghjk-mnpq-rstv"},
+			answers: map[string]answerFunc{"previewInvite": ok(apiPreview("BCDFGHJKMNPQRSTV", "Guild"))},
+			file:    "guild-invite.schema.json", def: "preview"},
+		"invite join": {argv: []string{"invite", "join", "BCDFGHJKMNPQRSTV"},
+			answers: map[string]answerFunc{"redeemInvite": ok(apiGuild("10", "Guild"))},
+			file:    "guild.schema.json", def: "guild"},
+		"invite revoke": {argv: []string{"invite", "revoke", "BCDFGHJKMNPQRSTV"},
+			answers: map[string]answerFunc{"revokeInvite": noContent()},
+			file:    "guild-invite.schema.json", def: "revoked"},
 	}
 }
 

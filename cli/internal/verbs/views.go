@@ -374,11 +374,24 @@ func appliedTagFrom(a apicontract.AppliedMessageTag) appliedTagView {
 	return appliedTagView{ID: a.Id, Name: a.Name, Shared: a.IsShared, AppliedBy: a.AppliedBy, AppliedAt: a.AppliedAt}
 }
 
-// authorView names a message's author (M20a).
-type authorView struct {
+// userView is another account as the instance names it to us (M20a): a message's author, an invite's issuer.
+type userView struct {
 	ID          string `json:"id"`
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
+}
+
+func userFrom(u *apicontract.PublicUser) *userView {
+	if u == nil {
+		return nil
+	}
+	return &userView{ID: u.Id, Username: u.Username, DisplayName: u.DisplayName}
+}
+
+// named is how a person is written in text: the display name, the handle, and the id the member verbs take.
+// Both names are an instance's text and are sanitized (rule 19).
+func (u userView) named() string {
+	return fmt.Sprintf("%s (@%s) %s", c(u.DisplayName), c(u.Username), c(u.ID))
 }
 
 type messageView struct {
@@ -387,11 +400,11 @@ type messageView struct {
 	AuthorID  *string `json:"author_id"`
 	// Author is null for a message with no author, and for one whose author's account was deleted, which
 	// keeps its author_id: the API's distinction, kept.
-	Author    *authorView `json:"author"`
-	Content   string      `json:"content"`
-	ReplyToID *string     `json:"reply_to_id"`
-	CreatedAt time.Time   `json:"created_at"`
-	EditedAt  *time.Time  `json:"edited_at"`
+	Author    *userView  `json:"author"`
+	Content   string     `json:"content"`
+	ReplyToID *string    `json:"reply_to_id"`
+	CreatedAt time.Time  `json:"created_at"`
+	EditedAt  *time.Time `json:"edited_at"`
 	// Tags is null where the credential cannot read tags, and [] where the message has none: the API's
 	// distinction, kept.
 	Tags []appliedTagView `json:"tags"`
@@ -402,9 +415,7 @@ func messageFrom(m apicontract.Message) messageView {
 		ID: m.Id, ChannelID: m.ChannelId, AuthorID: m.AuthorId, Content: m.Content, ReplyToID: m.ReplyToId,
 		CreatedAt: m.CreatedAt, EditedAt: m.EditedAt,
 	}
-	if m.Author != nil {
-		v.Author = &authorView{ID: m.Author.Id, Username: m.Author.Username, DisplayName: m.Author.DisplayName}
-	}
+	v.Author = userFrom(m.Author)
 	if m.Tags != nil {
 		v.Tags = []appliedTagView{}
 		for _, a := range *m.Tags {
@@ -433,7 +444,7 @@ func (m messageView) Text(t *output.Text) {
 func (m messageView) byline() string {
 	switch {
 	case m.Author != nil:
-		return fmt.Sprintf("%s (@%s) %s", c(m.Author.DisplayName), c(m.Author.Username), c(m.Author.ID))
+		return m.Author.named()
 	case m.AuthorID != nil:
 		return "deleted account " + c(*m.AuthorID)
 	}

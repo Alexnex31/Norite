@@ -27,6 +27,31 @@
           "description": "The ids the verb acted on, keyed by what they are: guild_id, user_id, role_id."
         }
       }
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "username",
+        "display_name"
+      ],
+      "description": "Another account as the instance names it: a message's author, an invite's issuer (M20a).",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "username": {
+          "type": "string",
+          "description": "Exactly as sent, escaped where a terminal would act on it."
+        },
+        "display_name": {
+          "type": "string",
+          "description": "Exactly as sent, escaped where a terminal would act on it."
+        }
+      }
     }
   }
 }

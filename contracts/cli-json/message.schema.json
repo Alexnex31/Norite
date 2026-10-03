@@ -59,7 +59,7 @@
         "author": {
           "oneOf": [
             {
-              "$ref": "#/$defs/author"
+              "$ref": "common.schema.json#/$defs/user"
             },
             {
               "type": "null"
@@ -99,31 +99,6 @@
             "$ref": "tag.schema.json#/$defs/appliedTag"
           },
           "description": "null when the credential cannot read tags; [] when the message has none."
-        }
-      }
-    },
-    "author": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "username",
-        "display_name"
-      ],
-      "description": "The account that wrote a message, as its readers see it.",
-      "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[0-9]+$",
-          "description": "A Snowflake ID, as a decimal string."
-        },
-        "username": {
-          "type": "string",
-          "description": "Exactly as sent, escaped where a terminal would act on it."
-        },
-        "display_name": {
-          "type": "string",
-          "description": "Exactly as sent, escaped where a terminal would act on it."
         }
       }
     },

@@ -14,7 +14,7 @@ verb's output a definition in it that the CLI's tests validate against.
 | File | Commands |
 | --- | --- |
 | `instance-invite.schema.json` | `norite instance invite create \| list \| revoke` |
-| `common.schema.json` | `done`, what a verb prints when the instance answered with no object |
+| `common.schema.json` | `done`, what a verb prints when the instance answered with no object, and `user`, another account |
 | `guild.schema.json` | `norite guild list \| create \| show \| update \| delete \| transfer \| audit-log \| recording-log` |
 | `channel.schema.json` | `norite channel list \| create \| update \| delete` |
 | `role.schema.json` | `norite role list \| create \| update \| reorder \| delete` |
@@ -23,6 +23,7 @@ verb's output a definition in it that the CLI's tests validate against.
 | `message.schema.json` | `norite message list \| send \| edit \| delete \| history` |
 | `report.schema.json` | `norite report file \| list \| show \| resolve \| dismiss` |
 | `tag.schema.json` | `norite tag list \| create \| delete \| apply \| unapply \| on` |
+| `guild-invite.schema.json` | `norite invite create \| list \| show \| join \| revoke` |
 
 **These shapes belong to the CLI, not to the instance.** Several of them are built from a REST response
 carrying the same information, and they are re-declared here rather than passed through: a scripted
