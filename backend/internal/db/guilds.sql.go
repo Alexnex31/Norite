@@ -1363,7 +1363,7 @@ func (q *Queries) LockAccountOwnership(ctx context.Context, userID int64) error 
 }
 
 const lockGuildForKeyShare = `-- name: LockGuildForKeyShare :one
-SELECT id FROM guilds WHERE id = $1 FOR KEY SHARE
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR KEY SHARE
 `
 
 // The lock an insert into a child table's foreign key takes anyway, taken first (M20a).
@@ -1372,10 +1372,24 @@ SELECT id FROM guilds WHERE id = $1 FOR KEY SHARE
 // FOR KEY SHARE on the guild. Deleting a guild locks the guild FOR UPDATE and then cascades to the
 // invite. Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first
 // puts redemption in the deletion's order: guild, then invite.
-func (q *Queries) LockGuildForKeyShare(ctx context.Context, id int64) (int64, error) {
+//
+// The whole row, because redemption answers with the guild and sends it to the joiner: reading it here
+// spares a second read (M20a /optimization-review).
+func (q *Queries) LockGuildForKeyShare(ctx context.Context, id int64) (Guild, error) {
 	row := q.db.QueryRow(ctx, lockGuildForKeyShare, id)
-	err := row.Scan(&id)
-	return id, err
+	var i Guild
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.OwnerID,
+		&i.IconHash,
+		&i.Description,
+		&i.SystemChannelID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.MessageAuditEnabled,
+	)
+	return i, err
 }
 
 const lockGuildRolePositions = `-- name: LockGuildRolePositions :exec

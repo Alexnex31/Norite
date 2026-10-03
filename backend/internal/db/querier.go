@@ -1172,7 +1172,10 @@ type Querier interface {
 	// FOR KEY SHARE on the guild. Deleting a guild locks the guild FOR UPDATE and then cascades to the
 	// invite. Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first
 	// puts redemption in the deletion's order: guild, then invite.
-	LockGuildForKeyShare(ctx context.Context, id int64) (int64, error)
+	//
+	// The whole row, because redemption answers with the guild and sends it to the joiner: reading it here
+	// spares a second read (M20a /optimization-review).
+	LockGuildForKeyShare(ctx context.Context, id int64) (Guild, error)
 	// Serializes role creation within one guild, for the whole of the calling transaction.
 	//
 	// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and

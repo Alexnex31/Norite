@@ -617,7 +617,10 @@ SELECT * FROM guilds WHERE id = $1 FOR UPDATE;
 -- FOR KEY SHARE on the guild. Deleting a guild locks the guild FOR UPDATE and then cascades to the
 -- invite. Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first
 -- puts redemption in the deletion's order: guild, then invite.
-SELECT id FROM guilds WHERE id = $1 FOR KEY SHARE;
+--
+-- The whole row, because redemption answers with the guild and sends it to the joiner: reading it here
+-- spares a second read (M20a /optimization-review).
+SELECT * FROM guilds WHERE id = $1 FOR KEY SHARE;
 
 -- name: GetGuildForNoKeyUpdate :one
 -- The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points

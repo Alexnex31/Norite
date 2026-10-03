@@ -399,21 +399,18 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 		// insert would then take this lock through its foreign key: the other order, and the two
 		// deadlocked (M20a /code-review). A guild deleted before this point is the 404 an unknown code
 		// gets; one being deleted now is waited for, after which there is no guild and no invite either.
-		if _, err := q.LockGuildForKeyShare(ctx, invite.GuildID); err != nil {
+		guild, err := q.LockGuildForKeyShare(ctx, invite.GuildID)
+		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound
 			}
 			return fmt.Errorf("guilds: lock guild: %w", err)
 		}
+		out = guildFromRow(guild)
 
 		if _, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{
 			GuildID: invite.GuildID, UserID: int64(actor.UserID),
 		}); err == nil {
-			guild, err := q.GetGuild(ctx, invite.GuildID)
-			if err != nil {
-				return fmt.Errorf("guilds: get guild: %w", err)
-			}
-			out = guildFromRow(guild)
 			return nil
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("guilds: get membership: %w", err)
@@ -458,12 +455,6 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 		); err != nil {
 			return err
 		}
-
-		guild, err := q.GetGuild(ctx, spent.GuildID)
-		if err != nil {
-			return fmt.Errorf("guilds: get guild: %w", err)
-		}
-		out = guildFromRow(guild)
 
 		// The joiner first, by name, as Create does for an owner: the event is what adds the guild to their
 		// live connections, so the guild's later events — the next one included — find them.
