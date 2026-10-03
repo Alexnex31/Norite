@@ -31,6 +31,10 @@ env:
   # unpinned generator is exactly the surprise the two above are pinned against — and pointing at /v2,
   # which is actively released, is what would have made it a live one.
   GO_LICENSES_VERSION: "v2.0.1"
+  # Keep in sync with `goreleaser_version` in the justfile and GORELEASER_VERSION in release.yml. The build
+  # job below runs the same goreleaser the release does, so a configuration the pinned version refuses
+  # fails here, on the pull request, rather than on the tag.
+  GORELEASER_VERSION: "v2.18.2"
 
 jobs:
   lint:
@@ -348,5 +352,8 @@ jobs:
           cache-dependency-path: "**/go.sum"
       - uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
-          args: build --snapshot --clean
+          version: ${{ env.GORELEASER_VERSION }}
+          # The release itself rather than only the builds, so the archives, their files and the checksums
+          # are exercised on every push, not first on the tag that publishes them. Signing is skipped: it
+          # needs release.yml's OIDC identity, which this workflow does not have and must not ask for.
+          args: release --snapshot --clean --skip=sign

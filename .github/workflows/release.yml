@@ -11,8 +11,13 @@ on:
     tags:
       - "v*"
 
+# contents: write publishes the release. id-token: write lets cosign obtain this workflow's GitHub OIDC
+# token, which Sigstore exchanges for the short-lived certificate checksums.txt is signed with (M20a): the
+# certificate names this file and the tag, and that identity is what the release footer's verify command
+# pins. Nothing else in the job can use the token, since no other step asks for one.
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -21,6 +26,14 @@ concurrency:
 env:
   # Keep in sync with GO_VERSION in ci.yml.
   GO_VERSION: "1.26"
+  # Keep in sync with GORELEASER_VERSION in ci.yml and `goreleaser_version` in the justfile, which
+  # `just release-dry-run` uses. Pinned for the reason every tool here is: `latest` would make an upstream
+  # release the first thing a tag tests, on the one run that publishes.
+  GORELEASER_VERSION: "v2.18.2"
+  # The cosign the release signs with. Its `sign-blob --bundle` writes the Sigstore bundle format the release
+  # footer's `verify-blob` reads, so the footer asks testers for cosign v3: a major version changes here only
+  # with the footer read again beside it.
+  COSIGN_VERSION: "v3.1.3"
 
 jobs:
   release:
@@ -48,9 +61,13 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: "**/go.sum"
 
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
       - uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          version: ${{ env.GORELEASER_VERSION }}
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,7 +4,7 @@
 // Command gui is the Norite native GUI.
 //
 // M0 scope: proves the module builds. The real Gio app scaffold, attaching to the daemon over the local
-// socket, is Milestone M70 (Phase J) — see docs/roadmap.md and ADR 0009.
+// socket, is Milestone M78 (Phase J) — see docs/roadmap.md and ADR 0009.
 package main
 
 import "fmt"
