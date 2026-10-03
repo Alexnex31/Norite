@@ -43,7 +43,7 @@ type Message struct {
 	// author_id is null too, and for an author whose account was deleted, where author_id survives. The
 	// second is how a client tells "deleted account" from "nobody" without a name M76a's placeholder rename
 	// would otherwise put in front of every reader.
-	Author *MessageAuthor `json:"author"`
+	Author *PublicUser `json:"author"`
 
 	Content   string        `json:"content"`
 	Type      int16         `json:"type"`
@@ -64,7 +64,7 @@ type Message struct {
 	Tags []AppliedTag `json:"tags"`
 }
 
-// MessageAuthor is the part of an account a message's readers see.
+// PublicUser is the part of an account a message's readers see.
 //
 // Nothing could name another account before M20a: a message carried author_id alone, and there is no
 // `GET /users/{id}`. A username is a public handle by construction (M10 answers a taken one with 409), and
@@ -72,7 +72,7 @@ type Message struct {
 // posting did not. Carried on the message rather than resolved through a user endpoint, because a client
 // drawing a page would otherwise make one request per author — M17's tags lesson. Never the email, and
 // built field by field for the reason the User response is.
-type MessageAuthor struct {
+type PublicUser struct {
 	ID          snowflake.ID `json:"id"`
 	Username    string       `json:"username"`
 	DisplayName string       `json:"display_name"`
@@ -124,7 +124,7 @@ func messageFromRow(row authoredRow) Message {
 		// The join drops a deleted account's name, so a NULL username here is that, never a nameless one:
 		// users.username is NOT NULL.
 		if row.AuthorUsername != nil && row.AuthorDisplayName != nil {
-			m.Author = &MessageAuthor{ID: id, Username: *row.AuthorUsername, DisplayName: *row.AuthorDisplayName}
+			m.Author = &PublicUser{ID: id, Username: *row.AuthorUsername, DisplayName: *row.AuthorDisplayName}
 		}
 	}
 	if row.ReplyToID != nil {

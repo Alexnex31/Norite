@@ -249,7 +249,10 @@ func newAPIOnBus(t *testing.T, mode auth.RegistrationMode, mailer *captureMailer
 		MaxChannelsPerGuild: testConfig().MaxChannelsPerGuild,
 		MaxRolesPerGuild:    testConfig().MaxRolesPerGuild,
 		MaxGuildsPerAccount: testConfig().MaxGuildsPerAccount,
-		Events:              publisher,
+
+		MaxJoinedGuildsPerAccount: testConfig().MaxJoinedGuildsPerAccount,
+		MaxInvitesPerGuild:        testConfig().MaxInvitesPerGuild,
+		Events:                    publisher,
 	})
 	require.NoError(t, err)
 

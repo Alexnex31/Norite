@@ -2358,8 +2358,9 @@ paths:
 
 
         **Returns every guild, with no pagination**, like the channel and role lists, and bounded the same
-        way: at creation rather than at read. An account owns at most `[limits].guilds_per_account`, and
-        nothing adds a membership except creating a guild until joining exists (M57).
+        way: at creation rather than at read. An account is in at most
+        `[limits].joined_guilds_per_account` guilds (M20a), checked when it creates a guild and when it
+        redeems an invite, the only two ways in.
 
 
         Whose list it is comes from the credential and nowhere else; there is no id in the request. An
@@ -2430,8 +2431,9 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: >
-            The account already owns the maximum number of guilds. An instance-wide bound on the one
-            mutation that checks no permission.
+            The account already owns the maximum number of guilds, or is already in the maximum number
+            (`[limits].joined_guilds_per_account`, since creating one makes its creator a member of one
+            more). Instance-wide bounds on the one mutation that checks no permission.
           content:
             application/json:
               schema:
@@ -3589,6 +3591,212 @@ paths:
           description: >
             The caller is a member without `VIEW_MESSAGE_AUDIT`, or an API token without the
             `messages.audit` scope — which neither `messages.read` nor `messages.moderate` confers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /guilds/{guild_id}/invites:
+    parameters:
+      - name: guild_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: List a guild's live invites
+      description: >
+        **Requires `MANAGE_GUILD`**, which is more than creating an invite takes: whoever can list the
+        guild's live codes can hand any of them on. Codes are returned in full, because the guild needs
+        them back. Expired invites are absent, and an invite is deleted by the redemption that spends its
+        last use, so nothing here is dead.
+
+
+        Not paginated, and bounded at creation instead by `[limits].invites_per_guild` (500 by default).
+      operationId: listGuildInvites
+      tags: [guilds]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The guild's live invites, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GuildInvite"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: A member without `MANAGE_GUILD`, or an API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /channels/{channel_id}/invites:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    post:
+      summary: Create an invite into a channel
+      description: >
+        **Requires `CREATE_INVITE` on this channel**, resolved with its overwrites, and the
+        ability to see it: the channel is where whoever redeems the invite lands. Not in `@everyone`'s
+        default grant, so who may bring people in is a decision an owner makes on purpose. Text channels
+        only.
+
+
+        Without `expires_in_seconds` it never expires, and without `max_uses` it may be used any number of
+        times, as instance invites behave. Creating one is recorded in the audit log as `invite.create`,
+        without the code.
+      operationId: createChannelInvite
+      tags: [guilds]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGuildInviteRequest"
+      responses:
+        "201":
+          description: The invite, its code in full.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuildInvite"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            A member without `CREATE_INVITE` on this channel, or an API token without the
+            `guilds.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The guild already holds `[limits].invites_per_guild` live invites.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /invites/preview:
+    post:
+      summary: See where an invite leads
+      description: >
+        Any signed-in account holding a code may see the guild and channel it leads to and who issued
+        it, which is how the person given an invite decides whether to use it. A `POST` that writes
+        nothing: **the code is never in a path or a query string**, which a server's or a proxy's request
+        log records (ADR 0029). An unknown, expired, revoked, used-up or malformed code is one 404.
+      operationId: previewInvite
+      tags: [guilds]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GuildInviteCodeRequest"
+      responses:
+        "200":
+          description: Where the invite leads.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuildInvitePreview"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: An API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /invites/redeem:
+    post:
+      summary: Join the guild an invite leads to
+      description: >
+        Joins the caller and answers with the guild. **A caller already in the guild gets the same 200 and
+        spends no use**, so a second click is not an error. Exactly `max_uses` concurrent redemptions of a
+        counted invite succeed; the one spending the last use deletes it. Joining is recorded in the audit
+        log as `member.join`, and dispatches `GUILD_CREATE` to the joiner and `GUILD_MEMBER_ADD` to the
+        guild.
+
+
+        Refused with 409 when the caller is already in `[limits].joined_guilds_per_account` guilds. An
+        unknown, expired, revoked, used-up or malformed code is one 404.
+      operationId: redeemInvite
+      tags: [guilds]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GuildInviteCodeRequest"
+      responses:
+        "200":
+          description: The guild, which the caller is now a member of.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Guild"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: An API token without the `guilds.write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The caller is already in as many guilds as an account may be.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /invites/revoke:
+    post:
+      summary: Revoke an invite
+      description: >
+        The invite's creator may, while still a member, and so may a holder of `MANAGE_GUILD`. Recorded in
+        the audit log as `invite.revoke`. A caller who is not in the invite's guild gets the 404 an unknown
+        code gets. The code is in the body for the reason preview's is.
+      operationId: revokeInvite
+      tags: [guilds]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GuildInviteCodeRequest"
+      responses:
+        "204":
+          description: Revoked.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: >
+            A member who neither created the invite nor holds `MANAGE_GUILD`, or an API token without the
+            `guilds.write` scope.
           content:
             application/json:
               schema:
@@ -5673,6 +5881,13 @@ components:
         # M13a. Its own verb rather than an `owner_id` key in `guild.update`'s diff, for the reason the
         # recording switch has its own: who handed a guild to whom is the entry somebody looks for first.
         - guild.owner_transfer
+        # M20a. Creating and revoking an invite grant and withdraw entry to the guild, so both are
+        # administrative whoever performs them, and neither entry carries the code: this log is read under
+        # a different permission from the one that lists live codes. `member.join` is the arrival
+        # `member.remove` has always recorded the departure of, with the invite that brought it in context.
+        - invite.create
+        - invite.revoke
+        - member.join
         # Written by the messages service, not by guilds, and only on the moderator path — an author
         # deleting their own message writes nothing (rule 2 covers administrative mutations). It is in
         # this enum because the audit-log reader accepts it as an `action` filter and returns entries
@@ -6142,10 +6357,120 @@ components:
           type: string
           enum: [resolved, dismissed]
 
-    MessageAuthor:
+    CreateGuildInviteRequest:
+      type: object
+      additionalProperties: false
       description: >
-        The part of an account a message's readers see (M20a). A username is a public handle and the display
-        name is what the account chose to be shown as; never the email.
+        Both fields are optional, and omitting either means "no limit", as `CreateInviteRequest` does for
+        instance invites: an invite that lives for ever is spelled by leaving the field out rather than by a
+        number nobody meant to type. A client choosing a default — `norite invite create` gives a week —
+        sends it.
+      properties:
+        max_uses:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: How many accounts may join with this code. Omit for unlimited.
+        expires_in_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 2592000
+          description: Lifetime from now, up to thirty days. Omit for an invite that never expires.
+
+    GuildInviteCodeRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          maxLength: 64
+          description: >
+            As typed or pasted: case, spaces and dashes are ignored. In the body because a path or a query
+            string is written to request logs (ADR 0029).
+
+    GuildInvite:
+      description: A guild invite as its guild sees it (M20a), the code in full.
+      type: object
+      required: [id, code, guild_id, channel_id, inviter_id, inviter, max_uses, uses, expires_at, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Snowflake"
+        code:
+          type: string
+          description: Sixteen characters of the same alphabet instance invites use.
+        guild_id:
+          $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+          description: Where whoever redeems it lands.
+        inviter_id:
+          $ref: "#/components/schemas/Snowflake"
+        inviter:
+          oneOf:
+            - $ref: "#/components/schemas/PublicUser"
+            - type: "null"
+          description: Who created it. Null when that account was deleted, where `inviter_id` survives.
+        max_uses:
+          type: [integer, "null"]
+          description: Null is unlimited.
+        uses:
+          type: integer
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: Null never expires.
+        created_at:
+          type: string
+          format: date-time
+
+    GuildInvitePreview:
+      description: >
+        Where an invite leads, as the person holding it sees it before using it (M20a). Less than a
+        `Guild`: what a guild shows on its door, not its owner, settings or membership.
+      type: object
+      required: [code, expires_at, guild, channel, inviter]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        guild:
+          type: object
+          required: [id, name, description, icon_hash]
+          additionalProperties: false
+          properties:
+            id:
+              $ref: "#/components/schemas/Snowflake"
+            name:
+              type: string
+            description:
+              type: [string, "null"]
+            icon_hash:
+              type: [string, "null"]
+        channel:
+          type: object
+          required: [id, name]
+          additionalProperties: false
+          properties:
+            id:
+              $ref: "#/components/schemas/Snowflake"
+            name:
+              type: [string, "null"]
+        inviter:
+          oneOf:
+            - $ref: "#/components/schemas/PublicUser"
+            - type: "null"
+
+    PublicUser:
+      description: >
+        The part of an account other people see (M20a): a message's author, an invite's issuer, a guild's
+        new member. A username is a public handle and the display name is what the account chose to be
+        shown as; never the email.
       type: object
       required: [id, username, display_name]
       additionalProperties: false
@@ -6176,7 +6501,7 @@ components:
             attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
         author:
           oneOf:
-            - $ref: "#/components/schemas/MessageAuthor"
+            - $ref: "#/components/schemas/PublicUser"
             - type: "null"
           description: >
             Who wrote it. Null when `author_id` is null, and null when the author's account was deleted,

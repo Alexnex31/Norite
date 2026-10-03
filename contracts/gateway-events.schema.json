@@ -204,6 +204,9 @@
           "$ref": "#/$defs/GuildRolesUpdateDispatch"
         },
         {
+          "$ref": "#/$defs/GuildMemberAddDispatch"
+        },
+        {
           "$ref": "#/$defs/GuildMemberUpdateDispatch"
         },
         {
@@ -816,8 +819,8 @@
       },
       "description": "Generated from contracts/openapi.yaml#/components/schemas/Member; a test holds the two equal. "
     },
-    "MessageAuthor": {
-      "description": "The part of an account a message's readers see (M20a). A username is a public handle and the display name is what the account chose to be shown as; never the email.\n",
+    "PublicUser": {
+      "description": "The part of an account other people see (M20a): a message's author, an invite's issuer, a guild's new member. A username is a public handle and the display name is what the account chose to be shown as; never the email.\n",
       "type": "object",
       "required": [
         "id",
@@ -873,7 +876,7 @@
         "author": {
           "oneOf": [
             {
-              "$ref": "#/$defs/MessageAuthor"
+              "$ref": "#/$defs/PublicUser"
             },
             {
               "type": "null"
@@ -1076,6 +1079,58 @@
         },
         "user_id": {
           "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "MemberAdded": {
+      "type": "object",
+      "description": "GUILD_MEMBER_ADD: a Member, and the name nobody in the guild could look up otherwise, since no route returns another account (M20a).",
+      "required": [
+        "guild_id",
+        "user_id",
+        "nickname",
+        "joined_at",
+        "deaf",
+        "mute",
+        "roles",
+        "user"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "user_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "nickname": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A per-guild display name. Null means the account's own display name is used."
+        },
+        "joined_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deaf": {
+          "type": "boolean",
+          "description": "Server-side deafen, set by a moderator. Distinct from the self-deafen a client sets on itself, which lives in voice state.\n"
+        },
+        "mute": {
+          "type": "boolean",
+          "description": "Server-side mute, set by a moderator. See `deaf`."
+        },
+        "roles": {
+          "type": "array",
+          "description": "The roles this member holds, excluding `@everyone` — which every member holds and which appears in no grant. An empty array rather than null when there are none: a client that has to handle both writes the check once per field and forgets it somewhere.\n",
+          "items": {
+            "$ref": "#/$defs/Snowflake"
+          }
+        },
+        "user": {
+          "$ref": "#/$defs/PublicUser"
         }
       }
     },
@@ -1292,6 +1347,32 @@
         },
         "t": {
           "const": "GUILD_ROLES_UPDATE"
+        }
+      }
+    },
+    "GuildMemberAddDispatch": {
+      "type": "object",
+      "description": "To members, after somebody joins through an invite (M20a). The joiner receives it too, after the GUILD_CREATE that adds the guild to their connection.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/MemberAdded"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_MEMBER_ADD"
         }
       }
     },

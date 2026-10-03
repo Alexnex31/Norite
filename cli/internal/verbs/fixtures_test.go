@@ -78,7 +78,7 @@ func noContent() answerFunc { return func(request) (int, any) { return http.Stat
 func apiMessage(id, channel, content string) apicontract.Message {
 	return apicontract.Message{
 		Id: id, ChannelId: channel, AuthorId: ptr("1"), Content: content, CreatedAt: at,
-		Author: &apicontract.MessageAuthor{Id: "1", Username: "alice", DisplayName: "Alice"},
+		Author: &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: "Alice"},
 		Tags:   &[]apicontract.AppliedMessageTag{},
 	}
 }

@@ -20,6 +20,9 @@ const (
 	GuildMessageAuditEnable  AuditLogAction = "guild.message_audit_enable"
 	GuildOwnerTransfer       AuditLogAction = "guild.owner_transfer"
 	GuildUpdate              AuditLogAction = "guild.update"
+	InviteCreate             AuditLogAction = "invite.create"
+	InviteRevoke             AuditLogAction = "invite.revoke"
+	MemberJoin               AuditLogAction = "member.join"
 	MemberRemove             AuditLogAction = "member.remove"
 	MemberRoleAdd            AuditLogAction = "member.role_add"
 	MemberRoleRemove         AuditLogAction = "member.role_remove"
@@ -57,6 +60,12 @@ func (e AuditLogAction) Valid() bool {
 	case GuildOwnerTransfer:
 		return true
 	case GuildUpdate:
+		return true
+	case InviteCreate:
+		return true
+	case InviteRevoke:
+		return true
+	case MemberJoin:
 		return true
 	case MemberRemove:
 		return true
@@ -695,6 +704,15 @@ type CreateChannelRequest struct {
 // CreateChannelRequestType Text, voice, or category. See `Channel.type` for the values a guild cannot contain.
 type CreateChannelRequestType int
 
+// CreateGuildInviteRequest Both fields are optional, and omitting either means "no limit", as `CreateInviteRequest` does for instance invites: an invite that lives for ever is spelled by leaving the field out rather than by a number nobody meant to type. A client choosing a default — `norite invite create` gives a week — sends it.
+type CreateGuildInviteRequest struct {
+	// ExpiresInSeconds Lifetime from now, up to thirty days. Omit for an invite that never expires.
+	ExpiresInSeconds *int64 `json:"expires_in_seconds,omitempty"`
+
+	// MaxUses How many accounts may join with this code. Omit for unlimited.
+	MaxUses *int `json:"max_uses,omitempty"`
+}
+
 // CreateGuildRequest defines model for CreateGuildRequest.
 type CreateGuildRequest struct {
 	Description *string `json:"description,omitempty"`
@@ -838,6 +856,78 @@ type Guild struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// GuildInvite A guild invite as its guild sees it (M20a), the code in full.
+type GuildInvite struct {
+	// ChannelId Where whoever redeems it lands.
+	//
+	// Examples: 7238829238972837423
+	ChannelId Snowflake `json:"channel_id"`
+
+	// Code Sixteen characters of the same alphabet instance invites use.
+	Code      string    `json:"code"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// ExpiresAt Null never expires.
+	ExpiresAt *time.Time `json:"expires_at"`
+
+	// GuildId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	GuildId Snowflake `json:"guild_id"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id Snowflake `json:"id"`
+
+	// Inviter Who created it. Null when that account was deleted, where `inviter_id` survives.
+	Inviter *PublicUser `json:"inviter"`
+
+	// InviterId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	InviterId Snowflake `json:"inviter_id"`
+
+	// MaxUses Null is unlimited.
+	MaxUses *int `json:"max_uses"`
+	Uses    int  `json:"uses"`
+}
+
+// GuildInviteCodeRequest defines model for GuildInviteCodeRequest.
+type GuildInviteCodeRequest struct {
+	// Code As typed or pasted: case, spaces and dashes are ignored. In the body because a path or a query string is written to request logs (ADR 0029).
+	Code string `json:"code"`
+}
+
+// GuildInvitePreview Where an invite leads, as the person holding it sees it before using it (M20a). Less than a `Guild`: what a guild shows on its door, not its owner, settings or membership.
+type GuildInvitePreview struct {
+	Channel struct {
+		// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+		//
+		//
+		// Examples: 7238829238972837423
+		Id   Snowflake `json:"id"`
+		Name *string   `json:"name"`
+	} `json:"channel"`
+	Code      string     `json:"code"`
+	ExpiresAt *time.Time `json:"expires_at"`
+	Guild     struct {
+		Description *string `json:"description"`
+		IconHash    *string `json:"icon_hash"`
+
+		// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+		//
+		//
+		// Examples: 7238829238972837423
+		Id   Snowflake `json:"id"`
+		Name string    `json:"name"`
+	} `json:"guild"`
+	Inviter *PublicUser `json:"inviter"`
+}
+
 // HealthResponse defines model for HealthResponse.
 type HealthResponse struct {
 	// Detail Operator-facing explanation of a non-ok status. Omitted when status is `ok`.
@@ -937,7 +1027,7 @@ type Member struct {
 // Message defines model for Message.
 type Message struct {
 	// Author Who wrote it. Null when `author_id` is null, and null when the author's account was deleted, where `author_id` survives: a client renders the second as a deleted account, and never shows the placeholder name a deleted account is renamed to.
-	Author *MessageAuthor `json:"author"`
+	Author *PublicUser `json:"author"`
 
 	// AuthorId Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.
 	AuthorId *Snowflake `json:"author_id"`
@@ -1006,18 +1096,6 @@ type MessageAuditEntry struct {
 
 	// MessageId The message this entry is about. Deliberately not a foreign key in the schema either: an audit record that vanished with the thing it records would not be one, and a delete entry naming a hard-deleted message is exactly the row somebody goes looking for.
 	MessageId Snowflake `json:"message_id"`
-}
-
-// MessageAuthor The part of an account a message's readers see (M20a). A username is a public handle and the display name is what the account chose to be shown as; never the email.
-type MessageAuthor struct {
-	DisplayName string `json:"display_name"`
-
-	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
-	//
-	//
-	// Examples: 7238829238972837423
-	Id       Snowflake `json:"id"`
-	Username string    `json:"username"`
 }
 
 // MessageEditHistory A message's prior versions plus what it says now. The current text is here because no endpoint returns a single message on its own, so a caller reading this would otherwise have every version except the one that matters most.
@@ -1227,6 +1305,18 @@ type PermissionOverwriteType int32
 //
 // Examples: 3075, 0
 type Permissions = string
+
+// PublicUser The part of an account other people see (M20a): a message's author, an invite's issuer, a guild's new member. A username is a public handle and the display name is what the account chose to be shown as; never the email.
+type PublicUser struct {
+	DisplayName string `json:"display_name"`
+
+	// Id A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	Id       Snowflake `json:"id"`
+	Username string    `json:"username"`
+}
 
 // RecoveryCodes A fresh set of single-use recovery codes. Returned by confirmation and by regeneration, and shown exactly once — they are stored only as hashes, so nothing recoverable from the database can be presented as one (rule 8).
 type RecoveryCodes struct {
@@ -1985,6 +2075,9 @@ type RequestEmailVerificationJSONRequestBody RequestEmailVerificationJSONBody
 // UpdateChannelJSONRequestBody defines body for UpdateChannel for application/json ContentType.
 type UpdateChannelJSONRequestBody = UpdateChannelRequest
 
+// CreateChannelInviteJSONRequestBody defines body for CreateChannelInvite for application/json ContentType.
+type CreateChannelInviteJSONRequestBody = CreateGuildInviteRequest
+
 // SendMessageJSONRequestBody defines body for SendMessage for application/json ContentType.
 type SendMessageJSONRequestBody SendMessageJSONBody
 
@@ -2047,6 +2140,15 @@ type CreateInstanceInviteJSONRequestBody = CreateInviteRequest
 
 // RevokeInstanceInviteJSONRequestBody defines body for RevokeInstanceInvite for application/json ContentType.
 type RevokeInstanceInviteJSONRequestBody RevokeInstanceInviteJSONBody
+
+// PreviewInviteJSONRequestBody defines body for PreviewInvite for application/json ContentType.
+type PreviewInviteJSONRequestBody = GuildInviteCodeRequest
+
+// RedeemInviteJSONRequestBody defines body for RedeemInvite for application/json ContentType.
+type RedeemInviteJSONRequestBody = GuildInviteCodeRequest
+
+// RevokeInviteJSONRequestBody defines body for RevokeInvite for application/json ContentType.
+type RevokeInviteJSONRequestBody = GuildInviteCodeRequest
 
 // SubmitOAuthSignupFormdataRequestBody defines body for SubmitOAuthSignup for application/x-www-form-urlencoded ContentType.
 type SubmitOAuthSignupFormdataRequestBody SubmitOAuthSignupFormdataBody

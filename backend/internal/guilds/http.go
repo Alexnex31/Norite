@@ -100,6 +100,10 @@ func (h *Handler) Routes(r chi.Router) {
 
 		r.With(audit).Get("/audit-log", h.listAuditLog)
 
+		// M20a. Read scope, though the list carries live codes: PermManageGuild is what bounds it, and a
+		// scope only restricts (see invitehttp.go for the routes that take a code).
+		r.With(read).Get("/invites", h.listInvites)
+
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)
 		r.With(write).Delete("/members/{user_id}", h.removeMember)
@@ -113,6 +117,7 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Route("/channels/{channel_id}", func(r chi.Router) {
 		r.With(write).Patch("/", h.updateChannel)
 		r.With(write).Delete("/", h.deleteChannel)
+		r.With(write).Post("/invites", h.createInvite)
 
 		// The overwrite pair. Scoped like everything else — M12 shipped fifteen guild routes with no
 		// scope at all and a review found an identify-only API token deleting a guild, so a new route

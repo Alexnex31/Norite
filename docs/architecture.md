@@ -568,8 +568,10 @@ CREATE TABLE attachments (
   width integer NULL, height integer NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE invites (                         -- M20a, moved from M57; the migration is the authority
-  code varchar(16) PRIMARY KEY,                -- plaintext, M10's reasoning (000009); M10's alphabet and
+CREATE TABLE invites (                         -- M20a, moved from M57; 000025 is the authority
+  id bigint PRIMARY KEY,                       -- added at M20a: the audit log names an invite by id,
+                                               --   and must not carry its code
+  code varchar(16) NOT NULL UNIQUE,            -- plaintext, M10's reasoning (000009); M10's alphabet and
                                                --   normalization, and never in a request path (ADR 0029)
   guild_id bigint NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
   channel_id bigint NOT NULL REFERENCES channels(id) ON DELETE CASCADE,  -- where the joiner lands;
@@ -577,16 +579,22 @@ CREATE TABLE invites (                         -- M20a, moved from M57; the migr
   inviter_id bigint NOT NULL REFERENCES users(id),
   max_uses integer NULL, uses integer NOT NULL DEFAULT 0,  -- NULL is unlimited; redemption checks both in
                                                --   its one statement's WHERE, as instance invites do
-  max_age_seconds integer NULL, expires_at timestamptz NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  expires_at timestamptz NULL,                 -- §2 had max_age_seconds beside it too: a second
+                                               --   column that could disagree with this one
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT invites_uses_sane CHECK (
+    uses >= 0 AND (max_uses IS NULL OR (max_uses > 0 AND uses <= max_uses)))
   -- No `temporary`: a membership that ends with its session needs presence (M38). Left out rather than
   --   stored and ignored, which is the reversible direction.
 );
-CREATE INDEX ON invites (guild_id);            -- the listing; M20a's migration adds what its foreign keys'
-                                               --   cascades need (rule 7), measured rather than listed here
--- Ceilings, checked at creation because neither list is paginated: live invites per guild, and the
---   redeemer's joined guilds (M72a's 100, READY's bound), the second counted under the per-account
---   advisory lock (slot 4) that guild creation and ownership transfer take.
+CREATE INDEX ON invites (guild_id);            -- the listing and the live count
+CREATE INDEX ON invites (channel_id);          -- the cascade from channels
+CREATE INDEX ON invites (inviter_id);          -- a refusing FK still finds what it refuses on
+CREATE INDEX ON invites (expires_at);          -- the sweep; not partial (000005's lesson)
+-- Ceilings, checked at creation because neither list is paginated: [limits].invites_per_guild live invites
+--   per guild, and [limits].joined_guilds_per_account guilds per account (M72a's 100, READY's bound), the
+--   second counted under the per-account advisory lock (slot 4) that guild creation, ownership transfer
+--   and redemption all take.
 
 CREATE TABLE instance_invites (                -- distinct from per-guild invites: gates account creation itself
   code varchar(16) PRIMARY KEY,                -- plaintext, deliberately: see migration 000009

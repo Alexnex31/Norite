@@ -118,8 +118,8 @@ SELECT EXISTS (
 );
 
 -- name: LockAccountOwnership :exec
--- Serializes everything that changes how many guilds one account owns: Create, for the creating account,
--- and TransferOwnership, for the recipient. Each counts owned guilds against the ceiling and then writes;
+-- Serializes everything that changes how many guilds one account owns or is in: Create, for the creating
+-- account, TransferOwnership, for the recipient, and since M20a an invite's redemption, for the joiner. Each counts owned guilds against the ceiling and then writes;
 -- without this, two of them for the same account both read the count below the ceiling and both commit —
 -- transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
 -- by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
@@ -723,9 +723,9 @@ LIMIT sqlc.arg(lim);
 -- what GET /users/@me/guilds serves (M20).
 --
 -- Unpaginated, like the channel and role lists, and bounded the same way: at creation rather than at read.
--- An account owns at most [limits].guilds_per_account (M12), nothing adds a membership except creating a
--- guild until M57, and M72a caps joined guilds at 100. guild_members_user_id_idx serves the lookup, and the
--- join reaches each guild through its primary key.
+-- An account is in at most [limits].joined_guilds_per_account (M20a, 100 by default, M72a's figure),
+-- checked when an invite is redeemed and when a guild is created. guild_members_user_id_idx serves the
+-- lookup, and the join reaches each guild through its primary key.
 SELECT g.*
 FROM guilds g
 JOIN guild_members gm ON gm.guild_id = g.id

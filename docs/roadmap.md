@@ -1281,7 +1281,8 @@ of this section.
     line: ADR 0029's reasoning for M10's instance invites, and ADR 0028's for M9's poll. Revoking is the
     creator's or a `PermManageGuild` holder's.
   - **A signed-in account previews and redeems.** An unauthenticated preview is a browser's concern, for
-    Phase O to open; opening it later is additive. Redemption has its own rate-limit bucket.
+    Phase O to open; opening it later is additive. The three routes taking a code share a rate-limit
+    bucket of their own.
   - **M10's code**: random, from the unambiguous alphabet, normalized as typed, and stored in plaintext for
     M10's reasons. An unknown, expired, revoked and exhausted code all answer one 404.
   - **Redemption is one statement** with every guard in its `WHERE`, sharing a transaction with the

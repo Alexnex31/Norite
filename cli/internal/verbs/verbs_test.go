@@ -397,7 +397,7 @@ func TestAHostileNameIsInertInTextAndExactInJSON(t *testing.T) {
 func TestAMessageIsNamedByItsAuthor(t *testing.T) {
 	hostile := "Evil\x1b[2J\u202eesrever"
 	named := apiMessage("33", "20", "named")
-	named.Author = &apicontract.MessageAuthor{Id: "1", Username: "alice", DisplayName: hostile}
+	named.Author = &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: hostile}
 	deleted := apiMessage("32", "20", "deleted")
 	deleted.Author = nil
 	system := apiMessage("31", "20", "system")

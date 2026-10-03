@@ -273,6 +273,9 @@
           "$ref": "gateway-events.schema.json#/$defs/GuildMemberUpdateDispatch"
         },
         {
+          "$ref": "gateway-events.schema.json#/$defs/GuildMemberAddDispatch"
+        },
+        {
           "$ref": "gateway-events.schema.json#/$defs/GuildMemberRemoveDispatch"
         },
         {

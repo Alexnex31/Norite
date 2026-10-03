@@ -60,6 +60,11 @@ type SweepResult struct {
 	// VerificationTokens is M10's other TTL table. Unlike the invites above, these are ordinary garbage:
 	// an unfollowed verification link is dead the moment it expires.
 	VerificationTokens int64
+	// GuildInvites is M20a's: a guild's invites, swept here because this is the instance's one sweep and
+	// a second loop for one table would be a second thing to start and stop. Like the instance invites
+	// above, something a person made; an expired one already answers as an unknown code, so the row
+	// affects nothing but the guild's list and its live-invite count.
+	GuildInvites int64
 	// Sessions is the biggest of these by a wide margin, and the one that was missing longest — from M4
 	// until M11. Every refresh inserts a row and revokes its predecessor, so this table grows with traffic
 	// rather than with sign-ins: about ninety-six rows a day per active device, none of which anything
@@ -71,7 +76,7 @@ type SweepResult struct {
 // Total is how many rows the pass removed altogether.
 func (r SweepResult) Total() int64 {
 	return r.ResetTokens + r.OAuthStates + r.ExchangeCodes + r.DeviceCodes + r.Invites +
-		r.VerificationTokens + r.Sessions
+		r.VerificationTokens + r.GuildInvites + r.Sessions
 }
 
 // SweepExpired removes every expired row this package owns.
@@ -100,6 +105,9 @@ func (s *Service) SweepExpired(ctx context.Context) (SweepResult, error) {
 	}
 	if out.DeviceCodes, err = s.queries.DeleteExpiredDeviceCodes(ctx); err != nil {
 		return out, fmt.Errorf("sweeping expired device codes: %w", err)
+	}
+	if out.GuildInvites, err = s.queries.DeleteExpiredGuildInvites(ctx); err != nil {
+		return out, fmt.Errorf("sweeping expired guild invites: %w", err)
 	}
 	// Batched, because this is the one table with a backlog rather than a trickle — see the query. The loop
 	// stops as soon as a pass comes back short, so the steady state is a single statement deleting a

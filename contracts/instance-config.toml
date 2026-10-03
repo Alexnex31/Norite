@@ -90,6 +90,11 @@ url = "https://github.com/Alexnex31/Norite"
 channels_per_guild = 500
 roles_per_guild = 250
 guilds_per_account = 50
+# Every guild an account is in, owned ones included: what an invite redemption is refused past (M20a).
+# At least guilds_per_account.
+joined_guilds_per_account = 100
+# Live invites per guild, which its invite list returns whole (M20a).
+invites_per_guild = 500
 
 [database]
 # Postgres connection string. No default — there is no safe guess. Carries the password: see the 0600 note

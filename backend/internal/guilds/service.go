@@ -112,6 +112,9 @@ type Service struct {
 	maxChannelsPerGuild int32
 	maxRolesPerGuild    int32
 	maxGuildsPerAccount int32
+	// M20a's: every guild an account is in, and a guild's live invites.
+	maxJoinedGuildsPerAccount int32
+	maxInvitesPerGuild        int32
 }
 
 // ServiceOptions configures NewService.
@@ -128,6 +131,11 @@ type ServiceOptions struct {
 	MaxChannelsPerGuild int32
 	MaxRolesPerGuild    int32
 	MaxGuildsPerAccount int32
+	// MaxJoinedGuildsPerAccount bounds every membership an account holds, owned guilds included — what
+	// READY's guild list is bounded by. MaxInvitesPerGuild bounds a guild's live invites, which its listing
+	// returns whole.
+	MaxJoinedGuildsPerAccount int32
+	MaxInvitesPerGuild        int32
 }
 
 // NewService builds the guild service.
@@ -137,7 +145,8 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		return nil, errors.New("guilds: a database pool is required")
 	case opts.IDs == nil:
 		return nil, errors.New("guilds: an ID generator is required")
-	case opts.MaxChannelsPerGuild < 1, opts.MaxRolesPerGuild < 1, opts.MaxGuildsPerAccount < 1:
+	case opts.MaxChannelsPerGuild < 1, opts.MaxRolesPerGuild < 1, opts.MaxGuildsPerAccount < 1,
+		opts.MaxJoinedGuildsPerAccount < 1, opts.MaxInvitesPerGuild < 1:
 		// Fails here rather than at the first create. A zero ceiling refuses every creation with a
 		// conflict, which reads as a bug in the endpoint rather than as an unset setting.
 		return nil, errors.New("guilds: every creation ceiling must be at least 1")
@@ -151,6 +160,9 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		maxChannelsPerGuild: opts.MaxChannelsPerGuild,
 		maxRolesPerGuild:    opts.MaxRolesPerGuild,
 		maxGuildsPerAccount: opts.MaxGuildsPerAccount,
+
+		maxJoinedGuildsPerAccount: opts.MaxJoinedGuildsPerAccount,
+		maxInvitesPerGuild:        opts.MaxInvitesPerGuild,
 	}, nil
 }
 

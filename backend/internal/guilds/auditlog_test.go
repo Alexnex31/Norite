@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -358,6 +359,17 @@ func driveEveryMutation(t *testing.T, f *overwriteFixture, ctx context.Context) 
 	require.NoError(t, f.svc.DeleteRole(ctx, owner, f.guildID, doomedRole.ID), "role.delete")
 
 	require.NoError(t, f.svc.RemoveMember(ctx, owner, f.guildID, f.plain), "member.remove")
+
+	// M20a's three. The member just removed comes back through an invite, which is the only way in for
+	// somebody else's guild; a second invite is revoked unused. Each carries a limit, so invite.create
+	// records created fields and not only context.
+	invite, err := f.svc.CreateInvite(ctx, owner, CreateInviteInput{ChannelID: ch.ID, MaxUses: 2, MaxAge: time.Hour})
+	require.NoError(t, err, "invite.create")
+	_, err = f.svc.RedeemInvite(ctx, userActor(f.plain), invite.Code)
+	require.NoError(t, err, "member.join")
+	unused, err := f.svc.CreateInvite(ctx, owner, CreateInviteInput{ChannelID: ch.ID})
+	require.NoError(t, err)
+	require.NoError(t, f.svc.RevokeInvite(ctx, owner, unused.Code), "invite.revoke")
 
 	// Both directions of M16b's recording switch, because both are verbs and a vocabulary entry no
 	// mutation produces looks identical to one whose writer was removed. The fixture's actor is the

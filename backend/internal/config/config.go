@@ -68,7 +68,11 @@ type Config struct {
 	MaxChannelsPerGuild int32 `validate:"required,gte=1,lte=10000"`
 	MaxRolesPerGuild    int32 `validate:"required,gte=1,lte=10000"`
 	MaxGuildsPerAccount int32 `validate:"required,gte=1,lte=10000"`
-	DBMinConns          int32 `validate:"gte=0,ltefield=DBMaxConns"`
+	// M20a's two. The joined ceiling counts every membership, owned guilds included, and is what bounds
+	// READY's guild list; the invite ceiling counts a guild's live invites, which its listing returns whole.
+	MaxJoinedGuildsPerAccount int32 `validate:"required,gte=1,lte=10000,gtefield=MaxGuildsPerAccount"`
+	MaxInvitesPerGuild        int32 `validate:"required,gte=1,lte=10000"`
+	DBMinConns                int32 `validate:"gte=0,ltefield=DBMaxConns"`
 
 	// DBConnectTimeout bounds how long startup waits for the very first successful connection.
 	DBConnectTimeout time.Duration `validate:"required,gt=0"`
@@ -305,6 +309,9 @@ const (
 	defaultMaxChannelsPerGuild = 500
 	defaultMaxRolesPerGuild    = 250
 	defaultMaxGuildsPerAccount = 50
+	// M72a's figure, and the bound READY's guild list already assumed (M18).
+	defaultMaxJoinedGuildsPerAccount = 100
+	defaultMaxInvitesPerGuild        = 500
 )
 
 // Load reads configuration, applies defaults, and validates the result.
@@ -412,6 +419,20 @@ func Load(configPath string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.MaxGuildsPerAccount = guildsPerAccount
+
+	joinedPerAccount, err := getEnvInt32("MAX_JOINED_GUILDS_PER_ACCOUNT",
+		fileInt32(file.Limits.JoinedGuildsPerAccount, defaultMaxJoinedGuildsPerAccount))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxJoinedGuildsPerAccount = joinedPerAccount
+
+	invitesPerGuild, err := getEnvInt32("MAX_INVITES_PER_GUILD",
+		fileInt32(file.Limits.InvitesPerGuild, defaultMaxInvitesPerGuild))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxInvitesPerGuild = invitesPerGuild
 
 	maxConns, err := getEnvInt32("DB_MAX_CONNS", fileInt32(file.Database.MaxConns, defaultDBMaxConns()))
 	collect(err)
@@ -618,6 +639,10 @@ func fileKeyFor(field string) string {
 		return "[limits].roles_per_guild"
 	case "MaxGuildsPerAccount":
 		return "[limits].guilds_per_account"
+	case "MaxJoinedGuildsPerAccount":
+		return "[limits].joined_guilds_per_account"
+	case "MaxInvitesPerGuild":
+		return "[limits].invites_per_guild"
 	case "DBMaxConns":
 		return "[database].max_conns"
 	case "DBMinConns":
@@ -706,6 +731,10 @@ func envVarFor(field string) string {
 		return envPrefix + "MAX_ROLES_PER_GUILD"
 	case "MaxGuildsPerAccount":
 		return envPrefix + "MAX_GUILDS_PER_ACCOUNT"
+	case "MaxJoinedGuildsPerAccount":
+		return envPrefix + "MAX_JOINED_GUILDS_PER_ACCOUNT"
+	case "MaxInvitesPerGuild":
+		return envPrefix + "MAX_INVITES_PER_GUILD"
 	case "DatabaseURL":
 		return envPrefix + "DATABASE_URL"
 	case "DBMaxConns":

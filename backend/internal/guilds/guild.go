@@ -91,6 +91,17 @@ func (s *Service) Create(ctx context.Context, actor auth.Actor, in CreateGuildIn
 			return httpx.Errorf(ErrGuildFull,
 				"an account may own at most %d guilds", s.maxGuildsPerAccount)
 		}
+		// And the joined ceiling, since creating a guild makes its creator a member of one more (M20a).
+		// Without it an account at the ceiling could still pass it by creating, and READY's guild list is
+		// bounded by this count rather than by ownership.
+		joined, err := q.CountGuildsJoinedBy(ctx, int64(actor.UserID))
+		if err != nil {
+			return fmt.Errorf("guilds: count joined guilds: %w", err)
+		}
+		if joined >= int64(s.maxJoinedGuildsPerAccount) {
+			return httpx.Errorf(ErrGuildFull,
+				"an account may be in at most %d guilds", s.maxJoinedGuildsPerAccount)
+		}
 
 		row, err := q.CreateGuild(ctx, db.CreateGuildParams{
 			ID:          int64(guildID),

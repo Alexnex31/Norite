@@ -72,9 +72,11 @@ type fileConfig struct {
 	// M72a layers per-account entitlements on top: this is the floor every account gets, and a flagship
 	// subscriber or an Instance Admin resolves higher.
 	Limits struct {
-		ChannelsPerGuild *int32 `toml:"channels_per_guild"`
-		RolesPerGuild    *int32 `toml:"roles_per_guild"`
-		GuildsPerAccount *int32 `toml:"guilds_per_account"`
+		ChannelsPerGuild       *int32 `toml:"channels_per_guild"`
+		RolesPerGuild          *int32 `toml:"roles_per_guild"`
+		GuildsPerAccount       *int32 `toml:"guilds_per_account"`
+		JoinedGuildsPerAccount *int32 `toml:"joined_guilds_per_account"`
+		InvitesPerGuild        *int32 `toml:"invites_per_guild"`
 	} `toml:"limits"`
 
 	Log struct {

@@ -71,6 +71,16 @@ const (
 	// recording switch above is: who handed a guild to whom is the entry somebody goes looking for first,
 	// and it must not be a field buried in a payload (M13a).
 	ActionGuildOwnerTransfer = "guild.owner_transfer"
+
+	// Audit verbs for invites and joining (rule 2).
+	//
+	// Creating and revoking an invite grant and withdraw entry to the guild, which changes who may be in it,
+	// so both are administrative whoever performs them — a member revoking their own invite included. A join
+	// is recorded too, because a departure already is ("who left is exactly what an operator reads this log
+	// for", RemoveMember) and a log of departures without arrivals is half a record.
+	ActionInviteCreate = "invite.create"
+	ActionInviteRevoke = "invite.revoke"
+	ActionMemberJoin   = "member.join"
 )
 
 // allAuditActions is every verb above, which is the list the block's own comment says M14 would need.
@@ -106,6 +116,11 @@ var allAuditActions = []string{
 	ActionGuildMessageAuditEnable,
 	ActionGuildMessageAuditDisable,
 	ActionGuildOwnerTransfer,
+
+	// M20a's invites and the joins they bring. See ActionInviteCreate for why each is administrative.
+	ActionInviteCreate,
+	ActionInviteRevoke,
+	ActionMemberJoin,
 
 	// Written by the `messages` package (M15), not by this one, and listed here because this is the
 	// vocabulary the *reader* validates against: an `action` filter naming a verb absent from this slice
