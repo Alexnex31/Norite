@@ -121,15 +121,30 @@ func (p *paneModel) merge(page []apicontract.Message) {
 // put adds or replaces one message as it arrives. Scrolled up, the view stays where it was rather than
 // following: new lines raise the offset from the bottom by exactly what they add.
 func (p *paneModel) put(m apicontract.Message, width int) {
-	if m.ChannelId != p.channelID {
+	if m.ChannelId != p.channelID || !ops.IsID(m.Id) {
 		return
 	}
-	before := len(p.lines(width))
+	// Measured on the one message, not by laying out the pane twice: 10 ms per arrival with a full pane of
+	// 400-character messages, against one message's wrap.
+	if p.scroll > 0 {
+		if old, found := p.find(m.Id); found {
+			p.scroll -= len(messageLines(old, width))
+		}
+		p.scroll = max(p.scroll+len(messageLines(hold(m), width)), 0)
+	}
 	p.upsert(m)
 	p.trim()
-	if p.scroll > 0 {
-		p.scroll += len(p.lines(width)) - before
+}
+
+// find returns the held message with this id.
+func (p *paneModel) find(id string) (apicontract.Message, bool) {
+	i, found := slices.BinarySearchFunc(p.msgs, id, func(have apicontract.Message, id string) int {
+		return compareIDs(have.Id, id)
+	})
+	if !found {
+		return apicontract.Message{}, false
 	}
+	return p.msgs[i], true
 }
 
 func (p *paneModel) upsert(m apicontract.Message) {
@@ -164,7 +179,8 @@ func (m Model) paneKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	area := m.messageRows()
 	switch k.Keystroke() {
 	case "pgup":
-		p.scroll = min(p.scroll+max(area-1, 1), max(len(p.lines(m.width))-area, 0))
+		step := max(area-1, 1)
+		p.scroll = min(p.scroll+step, max(len(p.tail(m.width, p.scroll+step+area))-area, 0))
 		return m, nil
 	case "pgdown":
 		p.scroll = max(p.scroll-max(area-1, 1), 0)
@@ -218,12 +234,22 @@ func (p *paneModel) composerHeight() int {
 	return max(min(p.composer.Height(), composerRows), 1)
 }
 
-// lines lays out every held message as rows of the given width: a header row — the author, the time,
-// whether it was edited — and the content beneath it, wrapped by display width and indented.
-func (p *paneModel) lines(width int) []string {
-	var out []string
-	for _, msg := range p.msgs {
-		out = append(out, messageLines(msg, width)...)
+// tail lays out the newest held messages, oldest first, as many as fill at least `rows` rows of the given
+// width: each a header row — the author, the time, whether it was edited — and its content beneath,
+// wrapped by display width and indented. A frame shows the bottom of the pane, so laying out all 500 to
+// draw thirty rows cost 12 ms a frame at 400-character messages and 59 ms at the 4,000-rune limit, on every
+// keystroke in the composer.
+func (p *paneModel) tail(width, rows int) []string {
+	var chunks [][]string
+	n := 0
+	for i := len(p.msgs) - 1; i >= 0 && n < rows; i-- {
+		l := messageLines(p.msgs[i], width)
+		chunks = append(chunks, l)
+		n += len(l)
+	}
+	out := make([]string, 0, n)
+	for i := len(chunks) - 1; i >= 0; i-- {
+		out = append(out, chunks[i]...)
 	}
 	return out
 }
@@ -275,10 +301,10 @@ func (p *paneModel) view(width, height int) string {
 
 	area := max(height-1-1-p.composerHeight(), 1)
 	var body []string
-	switch all := p.lines(width); {
+	switch all := p.tail(width, p.scroll+area); {
 	case !p.loaded:
 		body = []string{sDim.Render("loading…")}
-	case len(all) == 0:
+	case len(p.msgs) == 0:
 		body = []string{sDim.Render("No messages yet. Say something.")}
 	default:
 		end := max(len(all)-p.scroll, 0)

@@ -149,3 +149,58 @@ func TestAPaneHoldsAMessageAtMostItsBound(t *testing.T) {
 	assert.Equal(t, fine.Content, p.msgs[1].Content)
 	assert.Equal(t, "Bob", p.msgs[1].Author.DisplayName)
 }
+
+// TestTheTailDrawsWhatTheWholeLayoutWould: a frame lays out only the newest messages that fill it, and must
+// draw exactly the rows a layout of every held message would, at every scroll offset.
+func TestTheTailDrawsWhatTheWholeLayoutWould(t *testing.T) {
+	p := newPane("10", "20")
+	p.resize(60)
+	p.loaded = true
+	for i := range 80 {
+		// Lengths vary so that messages wrap to different heights.
+		p.put(message(fmt.Sprint(1000+i), "20", "2", "Bob", strings.Repeat("word ", 1+i%23)), 60)
+	}
+	const width, height = 60, 20
+	area := height - 3
+	all := p.tail(width, 1<<30)
+	for scroll := 0; scroll <= len(all)-area; scroll++ {
+		p.scroll = scroll
+		got := strings.Split(p.view(width, height), "\n")[1 : 1+area]
+		end := len(all) - scroll
+		assert.Equal(t, all[end-area:end], got, "scroll %d", scroll)
+	}
+}
+
+// TestPagingUpReachesTheOldestAndStops: PgUp walks back to the oldest held message and no further.
+func TestPagingUpReachesTheOldestAndStops(t *testing.T) {
+	f := newFixture(t)
+	for i := range 60 {
+		f.held = append(f.held, message(fmt.Sprint(200+i), "20", "2", "Bob", fmt.Sprintf("line %02d", i)))
+	}
+	c := drive(t, Options{Dial: f.dialer(signedIn("bob"), nil), Channel: "20"}, 80, 24)
+	c.shows("line 59")
+	for range 30 {
+		c.press("pgup")
+	}
+	top := c.screen()
+	assert.Contains(t, top, "line 00", "the oldest message is reachable")
+	c.press("pgup")
+	assert.Equal(t, top, c.screen(), "and PgUp stops there")
+}
+
+// TestAnEditWhileScrolledMovesNothing: a message edited to the same height, while the pane is scrolled up,
+// leaves the view where it was; an arrival raises the offset by exactly its own rows.
+func TestAnEditWhileScrolledMovesNothing(t *testing.T) {
+	p := newPane("10", "20")
+	p.loaded = true
+	for i := range 40 {
+		p.put(message(fmt.Sprint(1000+i), "20", "2", "Bob", "short"), 80)
+	}
+	p.scroll = 5
+	edited := message("1039", "20", "2", "Bob", "edit")
+	p.put(edited, 80)
+	assert.Equal(t, 5, p.scroll, "an edit of the same height moves nothing")
+
+	p.put(message("2000", "20", "2", "Bob", "one\ntwo"), 80)
+	assert.Equal(t, 5+3, p.scroll, "an arrival raises the offset by its header and two lines")
+}
