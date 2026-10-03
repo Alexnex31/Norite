@@ -109,7 +109,8 @@ type Service struct {
 	// The owned-guild ceiling stopped being one of these at M13a. A transfer made a second writer of the
 	// same count, driven by another account, so an account could be handed guilds past its limit by
 	// concurrent transfers; that count is now taken under a per-account advisory lock
-	// (LockAccountOwnership), by Create and TransferOwnership both.
+	// (LockAccountOwnership), by Create and TransferOwnership both — and since M20a by RedeemInvite too, for
+	// the joined count, which Create also checks.
 	maxChannelsPerGuild int32
 	maxRolesPerGuild    int32
 	maxGuildsPerAccount int32

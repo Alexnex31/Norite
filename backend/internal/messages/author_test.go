@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
 
@@ -23,8 +24,8 @@ func TestEveryMessageNamesItsAuthor(t *testing.T) {
 	f.exec(t, `UPDATE users SET display_name = 'Member Person' WHERE id = $1`, int64(f.member))
 	f.exec(t, `UPDATE users SET display_name = 'The Owner' WHERE id = $1`, int64(f.owner))
 
-	member := PublicUser{ID: f.member, Username: "member", DisplayName: "Member Person"}
-	owner := PublicUser{ID: f.owner, Username: "owner", DisplayName: "The Owner"}
+	member := auth.PublicUser{ID: f.member, Username: "member", DisplayName: "Member Person"}
+	owner := auth.PublicUser{ID: f.owner, Username: "owner", DisplayName: "The Owner"}
 
 	sent := f.send(t, f.member, "hello")
 	require.Equal(t, &member, sent.Author, "a send names its author")

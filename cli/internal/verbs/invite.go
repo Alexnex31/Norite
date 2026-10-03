@@ -46,8 +46,12 @@ func parseInviteLife(raw string) (*time.Duration, error) {
 	var d time.Duration
 	var err error
 	if days, ok := strings.CutSuffix(raw, "d"); ok {
+		// Bounded before it is multiplied: a day count past thirty is refused anyway, and an enormous one
+		// would overflow the multiplication into a duration that passes (M20a's second /code-review).
 		var n int
-		n, err = strconv.Atoi(days)
+		if n, err = strconv.Atoi(days); err == nil && (n < 0 || n > 30) {
+			err = clierr.Usage("too many days")
+		}
 		d = time.Duration(n) * 24 * time.Hour
 	} else {
 		d, err = time.ParseDuration(raw)

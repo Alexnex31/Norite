@@ -820,7 +820,7 @@
       "description": "Generated from contracts/openapi.yaml#/components/schemas/Member; a test holds the two equal. "
     },
     "PublicUser": {
-      "description": "The part of an account other people see (M20a): a message's author, an invite's issuer, a guild's new member. A username is a public handle and the display name is what the account chose to be shown as; never the email.\n",
+      "description": "The part of an account other people see (M20a): a message's author, an invite's issuer. A username is a public handle and the display name is what the account chose to be shown as; never the email. Not carried by GUILD_MEMBER_ADD, which is a Member: no REST read returns another member's name.\n",
       "type": "object",
       "required": [
         "id",
@@ -1118,7 +1118,7 @@
     },
     "GuildCreateDispatch": {
       "type": "object",
-      "description": "To the account that created it; adds the guild to its connections.",
+      "description": "To an account that has just come into the guild — the account that created it, or since M20a one that joined it through an invite — adding the guild to its connections. Not a statement that the recipient created it: compare owner_id.",
       "required": [
         "op",
         "d",

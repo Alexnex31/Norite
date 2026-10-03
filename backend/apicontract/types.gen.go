@@ -1306,7 +1306,7 @@ type PermissionOverwriteType int32
 // Examples: 3075, 0
 type Permissions = string
 
-// PublicUser The part of an account other people see (M20a): a message's author, an invite's issuer, a guild's new member. A username is a public handle and the display name is what the account chose to be shown as; never the email.
+// PublicUser The part of an account other people see (M20a): a message's author, an invite's issuer. A username is a public handle and the display name is what the account chose to be shown as; never the email. Not carried by GUILD_MEMBER_ADD, which is a Member: no REST read returns another member's name.
 type PublicUser struct {
 	DisplayName string `json:"display_name"`
 

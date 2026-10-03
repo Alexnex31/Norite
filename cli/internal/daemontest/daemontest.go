@@ -13,6 +13,8 @@
 //
 // A client attached with events receives dispatches as the daemon forwards them, and a message the fake
 // accepts is fanned out to every such client as MESSAGE_CREATE, the sender's included, as the instance does.
+// That is the one mutation it echoes, because sending is the one M20a's client does; a test of editing or
+// deleting through the client teaches it MESSAGE_UPDATE or MESSAGE_DELETE the same way, in Do.
 //
 // A test-support package: nothing outside a test imports it, so it is never linked into a binary.
 package daemontest
@@ -41,11 +43,32 @@ import (
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
-// Contracts is the repository's contracts directory, found from this file rather than from the working
-// directory, which differs by the package a test runs in.
+// Contracts is the repository's contracts directory: found from this file, since the working directory
+// differs by the package a test runs in, and failing that by walking up from the working directory. The
+// second covers a build with -trimpath, where this file's recorded path is module-relative and leads
+// nowhere (M20a's second /code-review).
 func Contracts() string {
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "..", "..", "..", "contracts")
+	if _, file, _, ok := runtime.Caller(0); ok {
+		dir := filepath.Join(filepath.Dir(file), "..", "..", "..", "contracts")
+		if _, err := os.Stat(filepath.Join(dir, "openapi.yaml")); err == nil {
+			return dir
+		}
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "contracts"
+	}
+	for {
+		candidate := filepath.Join(dir, "contracts")
+		if _, err := os.Stat(filepath.Join(candidate, "openapi.yaml")); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "contracts"
+		}
+		dir = parent
+	}
 }
 
 // ---------- openapi.yaml ----------
@@ -282,10 +305,14 @@ type Client struct {
 	ready  ipc.Ready
 	events chan ipc.Event
 	done   chan struct{}
-	seq    int64
 
-	once sync.Once
-	err  error
+	// mu orders a dispatch against the client ending: numbering, the send and the close happen under it,
+	// so a dispatch racing a drop neither sends on a closed channel nor races on seq (M20a's second
+	// /code-review).
+	mu     sync.Mutex
+	seq    int64
+	closed bool
+	err    error
 }
 
 // Attach connects a client signed in as ready says. With events, it receives every dispatch from here on.
@@ -328,36 +355,45 @@ func (c *Client) dispatch(eventType string, payload json.RawMessage) {
 	if c.events == nil {
 		return
 	}
-	select {
-	case <-c.done:
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
 		return
-	default:
 	}
 	c.seq++
 	select {
 	case c.events <- ipc.Event{Type: eventType, Seq: c.seq, Data: append(json.RawMessage(nil), payload...)}:
 	default:
-		// The real daemon drops a client that stops reading (4012); a test that fills 256 events without
-		// reading has a bug, and saying so beats a hang.
-		c.d.t.Errorf("a client attached to the fake daemon stopped reading its events")
+		// The real daemon drops a client that stops reading (4012), and so does this one: a test that fills
+		// 256 events without reading has stopped reading, and ending the stream says so without a hang, and
+		// without reporting to a test that may already have finished.
+		c.endLocked(errors.New("the client stopped reading its events and was dropped as too slow"))
 	}
 }
 
 func (c *Client) end(err error) {
-	c.once.Do(func() {
-		c.err = err
-		close(c.done)
-		if c.events != nil {
-			close(c.events)
-		}
-	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.endLocked(err)
+}
+
+func (c *Client) endLocked(err error) {
+	if c.closed {
+		return
+	}
+	c.closed = true
+	c.err = err
+	close(c.done)
+	if c.events != nil {
+		close(c.events)
+	}
 }
 
 // Do performs a relayed request through the fake daemon, once this client is still attached.
 func (c *Client) Do(ctx context.Context, method, path string, body any) (ipc.Result, error) {
 	select {
 	case <-c.done:
-		return ipc.Result{}, c.err
+		return ipc.Result{}, c.Err()
 	default:
 	}
 	return c.d.Do(ctx, method, path, body)
@@ -374,12 +410,9 @@ func (c *Client) Done() <-chan struct{} { return c.done }
 
 // Err is why the client ended, once Done is closed.
 func (c *Client) Err() error {
-	select {
-	case <-c.done:
-		return c.err
-	default:
-		return nil
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
 }
 
 // Close detaches the client.

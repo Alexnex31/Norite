@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/go-playground/validator/v10"
+
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 )
 
 // Environment names the deployment shape. It only changes cross-cutting defaults (log format, error
@@ -71,11 +73,12 @@ type Config struct {
 	// M20a's two. The joined ceiling counts every membership, owned guilds included, and is what bounds
 	// READY's guild list; the invite ceiling counts a guild's live invites, which its listing returns whole.
 	//
-	// The joined ceiling stops at 1000 because that is what a daemon keeps (state.maxGuilds): past it the
-	// daemon would drop guilds the instance had let the account join. It is not required to be at least
-	// the owned ceiling: one below it simply binds first, since creating a guild counts against both. The
-	// first version required it, which refused to start any instance whose owned ceiling had been raised
-	// past the new default (/code-review).
+	// The joined ceiling stops at 1000, gatewayproto.MaxGuilds, because that is what a daemon keeps: past it
+	// the daemon would drop guilds the instance had let the account join. Left unset it follows a raised
+	// owned ceiling (see Load); set explicitly below the owned ceiling it refuses to start, naming both,
+	// rather than capping it without a word. The first version required it to be at least the owned
+	// ceiling even when unset, which refused to start any instance that had raised that one (/code-review),
+	// and the second dropped the rule, which capped it silently (the second /code-review).
 	MaxJoinedGuildsPerAccount int32 `validate:"required,gte=1,lte=1000"`
 	MaxInvitesPerGuild        int32 `validate:"required,gte=1,lte=10000"`
 	DBMinConns                int32 `validate:"gte=0,ltefield=DBMaxConns"`
@@ -318,8 +321,9 @@ const (
 	// M72a's figure, and the bound READY's guild list already assumed (M18).
 	defaultMaxJoinedGuildsPerAccount = 100
 	// maxJoinedGuildsPerAccount is the validator's lte on the joined ceiling, which the default never
-	// exceeds.
-	maxJoinedGuildsPerAccount = 1000
+	// exceeds: gatewayproto.MaxGuilds, what READY names and a daemon keeps. A struct tag cannot name a
+	// constant, so TestTheJoinedCeilingsBoundIsTheWiresBound holds the tag's literal to it.
+	maxJoinedGuildsPerAccount = gatewayproto.MaxGuilds
 	defaultMaxInvitesPerGuild = 500
 )
 
@@ -438,6 +442,19 @@ func Load(configPath string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.MaxJoinedGuildsPerAccount = joinedPerAccount
+
+	// Set explicitly below the owned ceiling, the joined one would cap it without a word: an operator who
+	// raised guilds_per_account to 200 beside a joined_guilds_per_account of 100 would find accounts
+	// refused at 100. Refused at startup instead, naming both. Unset, it follows the owned ceiling above, so
+	// only a value somebody wrote can disagree (M20a /code-review).
+	raw, fromEnv := os.LookupEnv(envPrefix + "MAX_JOINED_GUILDS_PER_ACCOUNT")
+	explicit := file.Limits.JoinedGuildsPerAccount != nil || (fromEnv && raw != "")
+	if explicit && joinedPerAccount < guildsPerAccount {
+		return Config{}, fmt.Errorf("config: %s ([limits].joined_guilds_per_account) is %d, below %s "+
+			"([limits].guilds_per_account), %d: an account could never own as many guilds as that allows. Raise "+
+			"it, or remove it to follow guilds_per_account", envPrefix+"MAX_JOINED_GUILDS_PER_ACCOUNT",
+			joinedPerAccount, envPrefix+"MAX_GUILDS_PER_ACCOUNT", guildsPerAccount)
+	}
 
 	invitesPerGuild, err := getEnvInt32("MAX_INVITES_PER_GUILD",
 		fileInt32(file.Limits.InvitesPerGuild, defaultMaxInvitesPerGuild))

@@ -593,30 +593,6 @@ func TestTheAppliedTagShapeAgreesAcrossPackages(t *testing.T) {
 		"tags.AppliedTag and messages.AppliedTag are one wire shape served by two endpoints")
 }
 
-// TestThePublicUserShapeAgreesAcrossPackages is the same pin for M20a's PublicUser: `messages` names a
-// message's author with it and `guilds` an invite's issuer, neither may import the other, and a field added
-// to one would make an account look different by endpoint. Added after /code-review found the two
-// declared with nothing holding them equal but the contract payload test.
-func TestThePublicUserShapeAgreesAcrossPackages(t *testing.T) {
-	t.Parallel()
-
-	keysOf := func(v any) []string {
-		raw, err := json.Marshal(v)
-		require.NoError(t, err)
-		var m map[string]any
-		require.NoError(t, json.Unmarshal(raw, &m))
-		keys := make([]string, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		return keys
-	}
-
-	require.Equal(t, keysOf(guilds.PublicUser{}), keysOf(messages.PublicUser{}),
-		"guilds.PublicUser and messages.PublicUser are one wire shape served by two endpoints")
-}
-
 // TestTheTextChannelTypeAgreesAcrossPackages pins the second value written in two places.
 //
 // `messages.ChannelGuildText` decides which channels accept a message; `guilds.ChannelGuildText` is the

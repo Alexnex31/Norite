@@ -51,6 +51,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
@@ -79,10 +80,10 @@ type Limits struct {
 var DefaultLimits = Limits{MessagesPerChannel: 200, TotalBytes: 64 << 20}
 
 const (
-	// maxGuilds is the most a server lets an account join: [limits].joined_guilds_per_account defaults to
-	// 100 (M72a's figure) and the server refuses to be configured past this (M20a), so an account never
-	// joins a guild its daemon drops. None to spare for an instance announcing guilds without limit.
-	maxGuilds = 1000
+	// maxGuilds is the most a server lets an account join, gatewayproto.MaxGuilds: the server refuses to be
+	// configured past it (M20a), so an account never joins a guild its daemon drops. None to spare for an
+	// instance announcing guilds without limit.
+	maxGuilds = gatewayproto.MaxGuilds
 	// maxNameRunes is the server's own limit on a guild name. A longer one did not come from a server
 	// validating its input, and is cut rather than stored at whatever length arrived.
 	maxNameRunes = 100

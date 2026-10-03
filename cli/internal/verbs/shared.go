@@ -82,7 +82,7 @@ func newPage[T any](items []T, limit int, cursor func(T) string) Page[T] {
 // limitFlag is a list's page size. Bounded here as the instance bounds it, so a value it would refuse is a
 // usage error before anything is asked.
 func limitFlag(def int) *cli.IntFlag {
-	return &cli.IntFlag{Name: "limit", Value: def, Usage: "how many to list, 1 to 100"}
+	return &cli.IntFlag{Name: "limit", Value: def, Usage: "how many to list, 1 to " + strconv.Itoa(ops.MaxPage)}
 }
 
 func beforeFlag(what string) *cli.StringFlag {
@@ -118,8 +118,8 @@ func query(cmd *cli.Command, names []string, extra url.Values) (string, int, err
 		q[k] = v
 	}
 	limit := int(cmd.Int("limit"))
-	if limit < 1 || limit > 100 {
-		return "", 0, clierr.Usage("--limit must be between 1 and 100")
+	if limit < 1 || limit > ops.MaxPage {
+		return "", 0, clierr.Usage("--limit must be between 1 and %d", ops.MaxPage)
 	}
 	q.Set("limit", strconv.Itoa(limit))
 	for _, n := range names {

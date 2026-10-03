@@ -4,10 +4,15 @@
 package config
 
 import (
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 )
 
 func loadWithEnv(t *testing.T, env map[string]string) (Config, error) {
@@ -41,12 +46,28 @@ func TestAnInstanceThatRaisedItsOwnedCeilingStillStarts(t *testing.T) {
 		})
 	}
 
-	// Set explicitly below the owned ceiling, it simply binds first.
-	cfg, err := loadWithEnv(t, map[string]string{
+	// Set explicitly below the owned ceiling, it would cap the owned one without a word, so it is refused,
+	// naming both settings (M20a's second /code-review). Set at or above it, it stands.
+	_, err := loadWithEnv(t, map[string]string{
 		"MAX_GUILDS_PER_ACCOUNT": "200", "MAX_JOINED_GUILDS_PER_ACCOUNT": "150",
 	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NORITE_MAX_JOINED_GUILDS_PER_ACCOUNT")
+	assert.Contains(t, err.Error(), "NORITE_MAX_GUILDS_PER_ACCOUNT")
+	cfg, err := loadWithEnv(t, map[string]string{
+		"MAX_GUILDS_PER_ACCOUNT": "200", "MAX_JOINED_GUILDS_PER_ACCOUNT": "250",
+	})
 	require.NoError(t, err)
-	assert.Equal(t, int32(150), cfg.MaxJoinedGuildsPerAccount)
+	assert.Equal(t, int32(250), cfg.MaxJoinedGuildsPerAccount)
+}
+
+// TestTheJoinedCeilingsBoundIsTheWiresBound holds the validator's literal to gatewayproto.MaxGuilds, which
+// the daemon keeps as its own bound: a struct tag cannot name a constant, and the two drifting apart is an
+// account joining guilds its daemon drops.
+func TestTheJoinedCeilingsBoundIsTheWiresBound(t *testing.T) {
+	field, ok := reflect.TypeOf(Config{}).FieldByName("MaxJoinedGuildsPerAccount")
+	require.True(t, ok)
+	assert.Contains(t, strings.Split(field.Tag.Get("validate"), ","), "lte="+strconv.Itoa(gatewayproto.MaxGuilds))
 }
 
 // TestTheJoinedCeilingStopsAtWhatADaemonKeeps: a daemon keeps 1000 guilds (state.maxGuilds), so a ceiling

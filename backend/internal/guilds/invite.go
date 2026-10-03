@@ -54,38 +54,21 @@ const (
 	MaxInviteUses = 1000
 )
 
-// PublicUser is the part of an account other people see: messages' author shape (M20a), here naming who
-// issued an invite and who joined.
-type PublicUser struct {
-	ID          snowflake.ID `json:"id"`
-	Username    string       `json:"username"`
-	DisplayName string       `json:"display_name"`
-}
-
-// publicUser builds one from a LEFT JOIN on users that drops a deleted account, as messages' author
-// does: an id that resolves to no name is a deleted account, and is null rather than the placeholder.
-func publicUser(id int64, username, displayName *string) *PublicUser {
-	if username == nil || displayName == nil {
-		return nil
-	}
-	return &PublicUser{ID: snowflake.ID(id), Username: *username, DisplayName: *displayName}
-}
-
 // Invite is a guild invite as its guild sees it: the code in full, because the guild needs it back.
 type Invite struct {
-	ID        snowflake.ID `json:"id"`
-	Code      string       `json:"code"`
-	GuildID   snowflake.ID `json:"guild_id"`
-	ChannelID snowflake.ID `json:"channel_id"`
-	InviterID snowflake.ID `json:"inviter_id"`
-	Inviter   *PublicUser  `json:"inviter"`
-	MaxUses   *int32       `json:"max_uses"`
-	Uses      int32        `json:"uses"`
-	ExpiresAt *time.Time   `json:"expires_at"`
-	CreatedAt time.Time    `json:"created_at"`
+	ID        snowflake.ID     `json:"id"`
+	Code      string           `json:"code"`
+	GuildID   snowflake.ID     `json:"guild_id"`
+	ChannelID snowflake.ID     `json:"channel_id"`
+	InviterID snowflake.ID     `json:"inviter_id"`
+	Inviter   *auth.PublicUser `json:"inviter"`
+	MaxUses   *int32           `json:"max_uses"`
+	Uses      int32            `json:"uses"`
+	ExpiresAt *time.Time       `json:"expires_at"`
+	CreatedAt time.Time        `json:"created_at"`
 }
 
-func inviteFromRow(row db.Invite, inviter *PublicUser) Invite {
+func inviteFromRow(row db.Invite, inviter *auth.PublicUser) Invite {
 	return Invite{
 		ID:        snowflake.ID(row.ID),
 		Code:      row.Code,
@@ -106,11 +89,11 @@ func inviteFromRow(row db.Invite, inviter *PublicUser) Invite {
 // channel the joiner will land in. Not its owner, its settings or its membership — the person reading this
 // is not in it yet.
 type InvitePreview struct {
-	Code      string         `json:"code"`
-	ExpiresAt *time.Time     `json:"expires_at"`
-	Guild     PreviewGuild   `json:"guild"`
-	Channel   PreviewChannel `json:"channel"`
-	Inviter   *PublicUser    `json:"inviter"`
+	Code      string           `json:"code"`
+	ExpiresAt *time.Time       `json:"expires_at"`
+	Guild     PreviewGuild     `json:"guild"`
+	Channel   PreviewChannel   `json:"channel"`
+	Inviter   *auth.PublicUser `json:"inviter"`
 }
 
 // PreviewGuild is the guild an invite leads to, as a stranger may see it.
@@ -257,7 +240,7 @@ func (s *Service) CreateInvite(ctx context.Context, actor auth.Actor, in CreateI
 		if err != nil {
 			return fmt.Errorf("guilds: get inviter: %w", err)
 		}
-		out = inviteFromRow(row, &PublicUser{
+		out = inviteFromRow(row, &auth.PublicUser{
 			ID: actor.UserID, Username: creator.Username, DisplayName: creator.DisplayName,
 		})
 		return nil
@@ -314,7 +297,7 @@ func (s *Service) ListInvites(ctx context.Context, actor auth.Actor, guildID sno
 		if !allowed.AllowsInChannel(channel, byChannel[channel], roles.PermViewChannel) {
 			continue
 		}
-		inviter := publicUser(r.Invite.InviterID, r.InviterUsername, r.InviterDisplayName)
+		inviter := auth.PublicUserOf(r.Invite.InviterID, r.InviterUsername, r.InviterDisplayName)
 		out = append(out, inviteFromRow(r.Invite, inviter))
 	}
 	return out, nil
@@ -346,7 +329,7 @@ func (s *Service) PreviewInvite(ctx context.Context, rawCode string) (InvitePrev
 			Description: row.GuildDescription, IconHash: row.GuildIconHash,
 		},
 		Channel: PreviewChannel{ID: snowflake.ID(row.ChannelID), Name: row.ChannelName},
-		Inviter: publicUser(row.InviterID, row.InviterUsername, row.InviterDisplayName),
+		Inviter: auth.PublicUserOf(row.InviterID, row.InviterUsername, row.InviterDisplayName),
 	}, nil
 }
 
@@ -394,12 +377,11 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 		}
 		guildID := snowflake.ID(invite.GuildID)
 
-		// The guild before the invite, which is the order deleting a guild takes them in (FOR UPDATE on
-		// the guild, then the cascade to its invites). The spend below locks the invite and the membership
-		// insert would then take this lock through its foreign key: the other order, and the two
-		// deadlocked (M20a /code-review). A guild deleted before this point is the 404 an unknown code
-		// gets; one being deleted now is waited for, after which there is no guild and no invite either.
-		guild, err := q.LockGuildForKeyShare(ctx, invite.GuildID)
+		// The guild before the invite, which is the order deleting a guild takes them in, and FOR SHARE so
+		// the row answered with is not one a transfer or rename in flight is changing. LockGuildForShare
+		// says why each half matters; both were /code-review findings on M20a. A guild deleted before this
+		// point is the 404 an unknown code gets.
+		guild, err := q.LockGuildForShare(ctx, invite.GuildID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.ErrNotFound
@@ -501,11 +483,11 @@ func (s *Service) RevokeInvite(ctx context.Context, actor auth.Actor, rawCode st
 		}
 		guildID := snowflake.ID(invite.GuildID)
 
-		need := roles.PermManageGuild
-		if snowflake.ID(invite.InviterID) == actor.UserID {
-			need = 0
-		}
-		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, need)
+		// Membership, then the channel, then the permission, so the refusals come in that order: a caller
+		// who cannot see the invite's channel is answered as though the code named nothing, 404, before
+		// anything about their authority is said. Asking for PermManageGuild first answered such a caller
+		// 403 (M20a's second /code-review), which says the channel is there.
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, 0)
 		if err != nil {
 			return err
 		}
@@ -517,6 +499,9 @@ func (s *Service) RevokeInvite(ctx context.Context, actor auth.Actor, rawCode st
 		}
 		if !allowed.AllowsInChannel(snowflake.ID(invite.ChannelID), overwrites, roles.PermViewChannel) {
 			return httpx.ErrNotFound
+		}
+		if snowflake.ID(invite.InviterID) != actor.UserID && !allowed.Allows(roles.PermManageGuild) {
+			return httpx.ErrForbidden
 		}
 
 		// The row as deleted, so the entry records the uses it had when it went: the read above was

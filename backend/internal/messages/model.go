@@ -6,6 +6,7 @@ package messages
 import (
 	"time"
 
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
@@ -43,7 +44,7 @@ type Message struct {
 	// author_id is null too, and for an author whose account was deleted, where author_id survives. The
 	// second is how a client tells "deleted account" from "nobody" without a name M76a's placeholder rename
 	// would otherwise put in front of every reader.
-	Author *PublicUser `json:"author"`
+	Author *auth.PublicUser `json:"author"`
 
 	Content   string        `json:"content"`
 	Type      int16         `json:"type"`
@@ -62,20 +63,6 @@ type Message struct {
 	// Resolved for a whole page in one statement (see Service.attachTags), never once per message —
 	// fetching them per message is what M17's optimization review found the API forcing on every client.
 	Tags []AppliedTag `json:"tags"`
-}
-
-// PublicUser is the part of an account a message's readers see.
-//
-// Nothing could name another account before M20a: a message carried author_id alone, and there is no
-// `GET /users/{id}`. A username is a public handle by construction (M10 answers a taken one with 409), and
-// the display name is what the account chose to be shown as, so neither discloses anything the act of
-// posting did not. Carried on the message rather than resolved through a user endpoint, because a client
-// drawing a page would otherwise make one request per author — M17's tags lesson. Never the email, and
-// built field by field for the reason the User response is.
-type PublicUser struct {
-	ID          snowflake.ID `json:"id"`
-	Username    string       `json:"username"`
-	DisplayName string       `json:"display_name"`
 }
 
 // AppliedTag is a tag as it appears on a message, and it is the same wire shape as tags.AppliedTag.
@@ -123,9 +110,7 @@ func messageFromRow(row authoredRow) Message {
 		m.AuthorID = &id
 		// The join drops a deleted account's name, so a NULL username here is that, never a nameless one:
 		// users.username is NOT NULL.
-		if row.AuthorUsername != nil && row.AuthorDisplayName != nil {
-			m.Author = &PublicUser{ID: id, Username: *row.AuthorUsername, DisplayName: *row.AuthorDisplayName}
-		}
+		m.Author = auth.PublicUserOf(*row.AuthorID, row.AuthorUsername, row.AuthorDisplayName)
 	}
 	if row.ReplyToID != nil {
 		id := snowflake.ID(*row.ReplyToID)

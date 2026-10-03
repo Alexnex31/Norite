@@ -133,8 +133,9 @@ func (e *env) attached(ctx context.Context) (daemonclient.Caller, error) {
 const argsKey = "ids"
 
 // codeArg is the one positional argument that is not an id: an invite code (M20a), as M10's
-// `instance invite revoke <code>` takes one.
-const codeArg = "code"
+// `instance invite revoke <code>` takes one. Its name is one no id could plausibly be given, since an id
+// declared with it would lose the digits check (M20a's second /code-review).
+const codeArg = "invite code"
 
 // maxCodeArg bounds a code as typed. A code is sixteen letters; dashes and spaces a chat client added are
 // the instance's to strip, so the bound is loose, and the instance's own parser decides what is a code.

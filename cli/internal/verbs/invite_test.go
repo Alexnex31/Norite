@@ -102,3 +102,16 @@ func TestAPreviewIsInertInTextAndExactInJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(js.out), &back))
 	assert.Equal(t, hostile, back["guild"].(map[string]any)["name"], "lossless")
 }
+
+// TestAHugeDayCountIsRefusedNotWrapped: the day count is bounded before it is multiplied, so a number that
+// would overflow into a short, valid-looking duration is a usage error (M20a's second /code-review).
+func TestAHugeDayCountIsRefusedNotWrapped(t *testing.T) {
+	// 106752 days is the first count whose nanoseconds overflow int64; this one wraps to under a day.
+	for _, days := range []string{"31d", "106752d", "213504d", "-1d"} {
+		f := newFake(t)
+		r := runVerb(t, f, "", "invite", "create", "20", "--expires-in", days)
+		var usage *clierr.UsageError
+		require.ErrorAs(t, r.err, &usage, "%s: %v", days, r.err)
+		assert.Empty(t, f.Requests(), days)
+	}
+}

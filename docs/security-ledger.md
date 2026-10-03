@@ -1124,16 +1124,19 @@ carries the condition that would reopen it.
 - **Reopens if**: a preview starts carrying more of the channel than its name (its topic, its messages),
   or invites can be created by somebody who cannot see the channel.
 
-### A refused redemption holds the guild's key-share lock for its transaction
-- **Raised**: M20a, `/security-sweep`, against M13a's "refuse on unlocked data, then lock"
+### A refused redemption holds a share lock on the guild for its transaction
+- **Raised**: M20a, `/security-sweep`, against M13a's "refuse on unlocked data, then lock"; re-judged after
+  M20a's second `/code-review` strengthened the lock
 - **Verdict**: not a vulnerability
-- **Why**: since the deadlock fix, `RedeemInvite` takes `FOR KEY SHARE` on the guild before it checks
-  membership and the joined ceiling, so a caller refused at the ceiling holds it briefly. That lock conflicts
-  only with `FOR UPDATE` and key changes — guild deletion — and blocks no rename, transfer (`FOR NO KEY
-  UPDATE`) or child insert, unlike the `FOR UPDATE` M13a's lesson was about. Reaching it needs a live code
-  and runs inside the 30-a-minute bucket.
-- **Reopens if**: the lock taken there becomes stronger than `FOR KEY SHARE`, or a path reaches it without
-  a live code.
+- **Why**: `RedeemInvite` locks the guild before it checks membership and the joined ceiling, so a caller
+  refused at the ceiling holds the lock for its short transaction. The lock was `FOR KEY SHARE`, which
+  conflicts only with deletion, and became `FOR SHARE` so a join cannot answer with an owner a transfer is
+  changing: it now also makes a rename, an ownership transfer or a deletion of that guild wait for the
+  redemption to finish. It still blocks no insert into a child table, so messages and other joins do not
+  queue behind it, unlike the `FOR UPDATE` M13a's lesson was about. Reaching it needs a live code, and each
+  attempt is one short transaction inside the 30-a-minute bucket.
+- **Reopens if**: the lock taken there becomes `FOR NO KEY UPDATE` or stronger, a path reaches it without a
+  live code, or the bucket is removed.
 
 ### An invite code typed on the command line is in the process list and the shell history
 - **Raised**: M20a, `/security-sweep`

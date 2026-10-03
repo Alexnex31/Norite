@@ -1346,10 +1346,12 @@ const lockAccountOwnership = `-- name: LockAccountOwnership :exec
 SELECT pg_advisory_xact_lock(1313033476, ($1::bigint & 2147483647)::int)
 `
 
-// Serializes everything that changes how many guilds one account owns or is in: Create, for the creating
-// account, TransferOwnership, for the recipient, and since M20a an invite's redemption, for the joiner. Each counts owned guilds against the ceiling and then writes;
-// without this, two of them for the same account both read the count below the ceiling and both commit —
-// transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
+// Serializes everything that changes how many guilds one account owns or is in, three callers since M20a:
+// Create, for the creating account, which counts both its owned and its joined guilds; TransferOwnership,
+// for the recipient, which counts owned; and RedeemInvite, for the joiner, which counts joined. Each counts
+// and then writes; without this, two of them for the same account both read a count below its ceiling and
+// both commit — transfers from different guilds lock only their own guild rows, so nothing else serializes
+// them. Found
 // by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
 // account past the ceiling.
 //
@@ -1362,21 +1364,29 @@ func (q *Queries) LockAccountOwnership(ctx context.Context, userID int64) error 
 	return err
 }
 
-const lockGuildForKeyShare = `-- name: LockGuildForKeyShare :one
-SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR KEY SHARE
+const lockGuildForShare = `-- name: LockGuildForShare :one
+SELECT id, name, owner_id, icon_hash, description, system_channel_id, created_at, updated_at, message_audit_enabled FROM guilds WHERE id = $1 FOR SHARE
 `
 
-// The lock an insert into a child table's foreign key takes anyway, taken first (M20a).
+// The guild a redemption joins, locked before anything else of it (M20a).
 //
-// Redeeming an invite updates the invite and then inserts a membership, whose foreign-key check takes
-// FOR KEY SHARE on the guild. Deleting a guild locks the guild FOR UPDATE and then cascades to the
-// invite. Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first
-// puts redemption in the deletion's order: guild, then invite.
+// **Before the invite.** Redeeming updates the invite and then inserts a membership, whose foreign-key
+// check locks the guild; deleting a guild locks the guild FOR UPDATE and then cascades to the invite.
+// Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first puts
+// redemption in the deletion's order: guild, then invite.
 //
-// The whole row, because redemption answers with the guild and sends it to the joiner: reading it here
-// spares a second read (M20a /optimization-review).
-func (q *Queries) LockGuildForKeyShare(ctx context.Context, id int64) (Guild, error) {
-	row := q.db.QueryRow(ctx, lockGuildForKeyShare, id)
+// **FOR SHARE, not FOR KEY SHARE**, which it was until M20a's second /code-review. Redemption answers with
+// this row and sends it to the joiner as GUILD_CREATE, so it must not read an owner a transfer is changing:
+// KEY SHARE does not wait for a transfer's FOR NO KEY UPDATE, so a join racing one returned the old
+// owner, and the transfer's GUILD_UPDATE, fanned out before the membership committed, never reached the
+// joiner. FOR SHARE waits for a transfer or a rename in flight and reads what it committed, and one that
+// starts later waits for the join, whose member then receives its update. It still blocks no insert into
+// a child table, so joins and messages do not queue behind one another.
+//
+// The whole row, because it is the answer: reading it here spares a second read (M20a
+// /optimization-review).
+func (q *Queries) LockGuildForShare(ctx context.Context, id int64) (Guild, error) {
+	row := q.db.QueryRow(ctx, lockGuildForShare, id)
 	var i Guild
 	err := row.Scan(
 		&i.ID,

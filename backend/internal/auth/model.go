@@ -235,3 +235,26 @@ type TokenPair struct {
 	ExpiresAt    time.Time
 	TokenType    string
 }
+
+// PublicUser is the part of an account other people see (M20a): a message's author, an invite's issuer. A
+// username is a public handle by construction (M10 answers a taken one with 409), and the display name is
+// what the account chose to be shown as; never the email, and built field by field for the reason the user
+// response is.
+//
+// Here because auth owns accounts and both packages that name one, messages and guilds, already import it.
+// It was declared once in each until M20a's second /code-review, held together by a test of JSON keys that
+// a changed field type would have passed.
+type PublicUser struct {
+	ID          snowflake.ID `json:"id"`
+	Username    string       `json:"username"`
+	DisplayName string       `json:"display_name"`
+}
+
+// PublicUserOf builds one from a LEFT JOIN on users that drops a deleted account: an id that resolves to no
+// name is a deleted account, and is nil rather than the placeholder M76a renames it to.
+func PublicUserOf(id int64, username, displayName *string) *PublicUser {
+	if username == nil || displayName == nil {
+		return nil
+	}
+	return &PublicUser{ID: snowflake.ID(id), Username: *username, DisplayName: *displayName}
+}

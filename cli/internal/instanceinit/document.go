@@ -142,7 +142,9 @@ public_base_url = {{ .PublicBaseURL | toml }}
 channels_per_guild = 500
 roles_per_guild = 250
 guilds_per_account = 50
-joined_guilds_per_account = 100
+# Every guild an account may be in, owned ones included. Left unset it follows guilds_per_account when that
+# is raised past 100, up to 1000; set it below guilds_per_account and the instance refuses to start.
+# joined_guilds_per_account = 100
 invites_per_guild = 500
 
 [database]

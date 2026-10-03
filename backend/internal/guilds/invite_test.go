@@ -648,3 +648,47 @@ func TestAnInviteExpiresOnTheDatabasesClock(t *testing.T) {
 		int64(inv.ID)).Scan(&exact))
 	assert.True(t, exact, "the expiry is the creating transaction's now() plus exactly what was asked for")
 }
+
+// TestAJoinRacingATransferSeesTheNewOwner is M20a's second /code-review: the redemption's guild lock was FOR
+// KEY SHARE, which does not wait for a transfer's FOR NO KEY UPDATE, so a join racing one answered with the
+// old owner and sent it to the joiner, whose session the transfer's GUILD_UPDATE never reached. Staged: an
+// ownership change is held open, the redemption must block on it, and once it commits the guild the
+// redemption answers with names the new owner.
+func TestAJoinRacingATransferSeesTheNewOwner(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	inv := f.invite(t, CreateInviteInput{})
+
+	var joined Guild
+	err := f.holdAndRace(t, func(tx pgx.Tx) {
+		_, err := tx.Exec(t.Context(), `UPDATE guilds SET owner_id = $1 WHERE id = $2`,
+			int64(f.member), int64(f.guildID))
+		require.NoError(t, err)
+	}, func() error {
+		var err error
+		joined, err = f.svc.RedeemInvite(context.Background(), userActor(f.outsider), inv.Code)
+		return err
+	})
+	require.NoError(t, err)
+	assert.Equal(t, f.member, joined.OwnerID, "the owner the transfer committed, not the one it replaced")
+}
+
+// TestRevokingRefusesInTheOrderTheGuildRoutesDo: a caller who cannot see the invite's channel gets the 404
+// an unknown code gets, before anything is said about their authority; one who can see it and lacks
+// MANAGE_GUILD gets 403. Asking for the permission first answered the first caller 403 (M20a's second
+// /code-review), which says the channel is there.
+func TestRevokingRefusesInTheOrderTheGuildRoutesDo(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	ctx := t.Context()
+	hidden := f.newChannel(ctx, f.guildID)
+	f.overwrite(ctx, hidden, roles.OverwriteTargetMember, f.member, 0, roles.PermViewChannel)
+
+	secret, err := f.svc.CreateInvite(ctx, userActor(f.owner), CreateInviteInput{ChannelID: hidden})
+	require.NoError(t, err)
+	open, err := f.svc.CreateInvite(ctx, userActor(f.owner), CreateInviteInput{ChannelID: f.channelID})
+	require.NoError(t, err)
+
+	assert.Equal(t, httpx.ErrNotFound, f.svc.RevokeInvite(ctx, userActor(f.member), secret.Code))
+	assert.Equal(t, httpx.ErrForbidden, f.svc.RevokeInvite(ctx, userActor(f.member), open.Code))
+}

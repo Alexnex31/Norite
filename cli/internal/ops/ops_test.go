@@ -119,3 +119,34 @@ func TestASentMessageComesBackAsAnEvent(t *testing.T) {
 	_, err = ops.ListGuilds(context.Background(), watcher)
 	assert.Error(t, err, "a dropped client performs nothing")
 }
+
+// TestTheFakeSurvivesDispatchesRacingADrop: a client's program sending while the test dispatches and its
+// cleanup drops every client is the ordinary shape of a client test, and the fake must neither panic on a
+// closed channel nor race on its numbering. Run under -race.
+func TestTheFakeSurvivesDispatchesRacingADrop(t *testing.T) {
+	d := daemontest.New(t)
+	ready := ipc.Ready{Standing: "signed_in", Guilds: []ipc.GuildSummary{}}
+	clients := []*daemontest.Client{d.Attach(ready, true), d.Attach(ready, true)}
+	for _, c := range clients {
+		go func() {
+			for range c.Events() {
+			}
+		}()
+	}
+	done := make(chan struct{})
+	for range 4 {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for range 200 {
+				d.Dispatch("MESSAGE_CREATE", []byte(`{}`))
+			}
+		}()
+	}
+	d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "resync"})
+	for range 4 {
+		<-done
+	}
+	for _, c := range clients {
+		<-c.Done()
+	}
+}
