@@ -366,3 +366,17 @@ func TestEveryUsageMistakeIsExitTwoAndPrintsNoHelp(t *testing.T) {
 		assert.Empty(t, out, "%v printed to stdout", args)
 	}
 }
+
+// TestTheClientNeedsATerminal: bare `norite` opens the terminal client only when it has one, so a script
+// that ran it still gets help (TestBareInvocationShowsHelp). --channel asks for the client by name, so
+// without a terminal it is a usage error naming what reads a channel instead; a --channel that is not an id
+// is refused before anything else (M20a).
+func TestTheClientNeedsATerminal(t *testing.T) {
+	_, _, err := runArgs(t, "--channel", "20")
+	require.ErrorIs(t, err, clierr.ErrNoTerminal)
+	assert.Contains(t, err.Error(), "norite message list 20")
+
+	_, _, err = runArgs(t, "--channel", "../auth")
+	var usage *clierr.UsageError
+	require.ErrorAs(t, err, &usage)
+}
