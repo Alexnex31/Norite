@@ -29,7 +29,12 @@ func (h *Handler) InviteRoutes(r chi.Router) {
 	// server's logger omits and a reverse proxy's does not. Rule 4 forbids writing from a GET; it does not
 	// require reading through one.
 	r.With(read).Post("/invites/preview", h.previewInvite)
-	r.With(write).Post("/invites/redeem", h.redeemInvite)
+	// A logged-in person, never an API token: joining puts the account into a guild in front of its members,
+	// and hands every token the account holds the reach of everything in it. A delegated credential that
+	// could do that on its own would be choosing its owner's company (/security-sweep, M20a). RequireUserActor
+	// first, so a token is told the true reason rather than to go and get a scope, as the ownership transfer
+	// does. Lifting this later is additive; imposing it after bots relied on it would not be.
+	r.With(auth.RequireUserActor, write).Post("/invites/redeem", h.redeemInvite)
 	r.With(write).Post("/invites/revoke", h.revokeInvite)
 }
 

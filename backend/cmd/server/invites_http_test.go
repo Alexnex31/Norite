@@ -200,3 +200,33 @@ func TestEveryMalformedCodeIsTheOneNotFound(t *testing.T) {
 		}
 	}
 }
+
+// TestOnlyAPersonJoinsAGuild: an API token, whatever its scopes, is refused at redemption. Reproduced by
+// /security-sweep before the fix: a token holding guilds.write and messages.read joined its owner to a guild
+// and then read the guild's backlog — a delegated credential choosing its owner's company and widening its
+// own reach. The refusal names the credential's kind, not a scope that would not help.
+func TestOnlyAPersonJoinsAGuild(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
+	invite := f.api.call(http.MethodPost, "/api/v1/channels/"+general+"/invites", map[string]any{},
+		withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, invite.Code, invite)
+	code := map[string]any{"code": invite.field(t, "code")}
+
+	minted := f.api.call(http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+		"name": "bot", "scopes": []string{"guilds.read", "guilds.write", "messages.read"},
+	}, withToken(f.strangerToken))
+	require.Equal(t, http.StatusCreated, minted.Code, minted)
+	token := withToken(minted.field(t, "value"))
+
+	res := f.api.call(http.MethodPost, "/api/v1/invites/redeem", code, token)
+	require.Equal(t, http.StatusForbidden, res.Code, res)
+	assert.Contains(t, string(res.Body), "logged-in session", "the refusal names the credential's kind")
+
+	preview := f.api.call(http.MethodPost, "/api/v1/invites/preview", code, token)
+	assert.Equal(t, http.StatusOK, preview.Code, "a token may still look: %s", preview)
+
+	joined := f.api.call(http.MethodPost, "/api/v1/invites/redeem", code, withToken(f.strangerToken))
+	assert.Equal(t, http.StatusOK, joined.Code, "the person it belongs to may join: %s", joined)
+}

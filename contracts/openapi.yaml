@@ -3731,7 +3731,8 @@ paths:
     post:
       summary: Join the guild an invite leads to
       description: >
-        Joins the caller and answers with the guild. **A caller already in the guild gets the same 200 and
+        **A logged-in session only, never an API token.** Joins the caller and answers with the guild.
+        **A caller already in the guild gets the same 200 and
         spends no use**, so a second click is not an error. Exactly `max_uses` concurrent redemptions of a
         counted invite succeed; the one spending the last use deletes it. Joining is recorded in the audit
         log as `member.join`, and dispatches `GUILD_CREATE` to the joiner and `GUILD_MEMBER_ADD` to the
@@ -3760,7 +3761,9 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
-          description: An API token without the `guilds.write` scope.
+          description: >
+            The credential is an API token, whatever its scopes: joining a guild is a logged-in person's
+            to do, as transferring a guild's ownership is.
           content:
             application/json:
               schema:

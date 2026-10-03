@@ -1102,3 +1102,58 @@ carries the condition that would reopen it.
   M72. The same gap M16a's entry records for the edit-history read.
 - **Reopens if**: M72 builds `instance_audit_log` and the tier's guild actions are not routed into it, or a
   tier action ever stops appearing in the guild's own log.
+
+### Any signed-in account can test codes through preview and redemption
+- **Raised**: M20a, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: a code is sixteen characters of a twenty-letter alphabet, about 69 bits, so guessing one is
+  hopeless at any rate; preview, redemption and revocation also share a 30-a-minute bucket built through
+  `internal/platform/ratelimit` (the /64 grouping rule included), and every dead, unknown or malformed
+  code is one 404. Preview requires a signed-in account (G1), so the probe is not anonymous either.
+- **Reopens if**: codes get shorter, the shared bucket is removed or loosened, or Phase O opens an
+  unauthenticated preview without a bucket of its own.
+
+### A preview names a channel to a code holder who cannot see it
+- **Raised**: M20a, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `PreviewInvite` returns the channel's name and id to anyone holding a live code, including a
+  member of the guild an overwrite hides that channel from. The invite's creator held view of the channel
+  (creation folds `PermViewChannel` in) and chose to hand a way into it to whoever holds the code; the name
+  is what a joiner needs to know where they will land. Listing and revoking, which act on invites rather
+  than reading one the caller was given, do filter by the channel's view.
+- **Reopens if**: a preview starts carrying more of the channel than its name (its topic, its messages),
+  or invites can be created by somebody who cannot see the channel.
+
+### A refused redemption holds the guild's key-share lock for its transaction
+- **Raised**: M20a, `/security-sweep`, against M13a's "refuse on unlocked data, then lock"
+- **Verdict**: not a vulnerability
+- **Why**: since the deadlock fix, `RedeemInvite` takes `FOR KEY SHARE` on the guild before it checks
+  membership and the joined ceiling, so a caller refused at the ceiling holds it briefly. That lock conflicts
+  only with `FOR UPDATE` and key changes — guild deletion — and blocks no rename, transfer (`FOR NO KEY
+  UPDATE`) or child insert, unlike the `FOR UPDATE` M13a's lesson was about. Reaching it needs a live code
+  and runs inside the 30-a-minute bucket.
+- **Reopens if**: the lock taken there becomes stronger than `FOR KEY SHARE`, or a path reaches it without
+  a live code.
+
+### An invite code typed on the command line is in the process list and the shell history
+- **Raised**: M20a, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `norite invite show|join|revoke <code>` take the code as an argument, as M10's `norite instance
+  invite revoke <code>` already does, so another account on the same machine can read it from the process
+  list while the command runs, and it stays in the shell's history. A code is meant to be handed to people,
+  and what it grants still needs a signed-in account to use. The request carries it in a body, never a
+  path, so it reaches no server log (ADR 0029).
+- **Reopens if**: Norite targets shared multi-user hosts as a supported client environment, at which point
+  the code verbs gain a stdin form, as `message send --content -` has.
+
+### An API token holding `guilds.write` can create invites
+- **Raised**: M20a, `/security-sweep`, beside the redemption fix
+- **Verdict**: not a vulnerability
+- **Why**: creating an invite is bounded by the owner's `PermCreateInvite` on the channel, as every
+  delegated guild action is bounded by its owner's permissions, and a bot handing out invites is an
+  ordinary use of a guild-management token. Redeeming is where the line is drawn: joining puts the
+  account itself into a guild, so since M20a's sweep it needs a logged-in person, as an ownership transfer
+  does.
+- **Reopens if**: invites gain a power beyond letting an account in (a role granted on joining, say), or
+  tokens gain per-guild scoping, at which point a token's invite into a guild it was not scoped to is
+  the escalation.
