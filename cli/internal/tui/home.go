@@ -231,6 +231,13 @@ func (h homeModel) locate(channelID string) (apicontract.Guild, apicontract.Chan
 	return apicontract.Guild{}, apicontract.Channel{}, false
 }
 
+// forget drops what home holds for a sign-in that ended. What the code box holds stays, being the person's;
+// its preview does not, having been resolved as the account that is gone.
+func (h *homeModel) forget() {
+	h.guilds, h.loaded, h.cut, h.selected = nil, false, false, 0
+	h.preview, h.pending = nil, ""
+}
+
 func (h *homeModel) clampSelection() {
 	n := len(h.rows())
 	h.selected = max(0, min(h.selected, n-1))
@@ -420,18 +427,22 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 
 	list := []string{sLabel.Render("YOUR GUILDS")}
 	avail := height - len(top) - len(box) - 2
-	switch rows := h.rows(); {
+	// Empty means no guilds, not no rows: a guild whose text channels are all hidden or deleted is still one
+	// the account is in, and calling that "no guilds yet" would be false (M20a's manual pass).
+	switch {
+	case !h.loaded && account == nil:
+		list = append(list, sDim.Render("  Sign in with `norite login` to see your guilds."))
 	case !h.loaded:
 		list = append(list, sDim.Render("  loading…"))
-	case len(rows) == 0:
+	case len(h.guilds) == 0:
 		list = append(list, "  "+sBold.Render("NO GUILDS YET"),
 			sDim.Render("  Redeem an invite below, or start one with `norite guild create --name NAME`."))
 	case h.cut:
-		list = append(list, h.listLines(rows, width, avail-2)...)
+		list = append(list, h.listLines(width, avail-2)...)
 		list = append(list, clip(sWarn.Render("  the instance listed more than this client keeps; not all are shown"),
 			width))
 	default:
-		list = append(list, h.listLines(rows, width, avail-1)...)
+		list = append(list, h.listLines(width, avail-1)...)
 	}
 
 	lines := append(append(top, list...), "")
@@ -439,24 +450,28 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 	return fit(lines, height)
 }
 
-// listLines draws the guilds and their channels, scrolled so the selected row is in view.
-func (h homeModel) listLines(rows []row, width, avail int) []string {
+// listLines draws every guild and its channels, scrolled so the selected row is in view. A guild with no
+// text channel the account can see is drawn too, and says so; only channels are selectable.
+func (h homeModel) listLines(width, avail int) []string {
 	type line struct {
 		text string
-		row  int // -1 for a guild's heading
+		row  int // -1 for a line that is not a channel
 	}
 	var all []line
-	last := ""
-	for i, r := range rows {
-		if r.guild.Id != last {
-			all = append(all, line{text: "  " + sBold.Render(termsafe.Text(r.guild.Name)), row: -1})
-			last = r.guild.Id
+	i := 0
+	for _, e := range h.guilds {
+		all = append(all, line{text: "  " + sBold.Render(termsafe.Text(e.guild.Name)), row: -1})
+		if len(e.channels) == 0 {
+			all = append(all, line{text: sDim.Render("    no text channel you can see"), row: -1})
 		}
-		name := "# " + termsafe.Text(deref(r.channel.Name))
-		if i == h.selected {
-			all = append(all, line{text: "  " + sSelect.Render("› "+name), row: i})
-		} else {
-			all = append(all, line{text: "    " + name, row: i})
+		for _, ch := range e.channels {
+			name := "# " + termsafe.Text(deref(ch.Name))
+			if i == h.selected {
+				all = append(all, line{text: "  " + sSelect.Render("› "+name), row: i})
+			} else {
+				all = append(all, line{text: "    " + name, row: i})
+			}
+			i++
 		}
 	}
 	at := 0

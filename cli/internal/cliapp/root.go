@@ -120,6 +120,10 @@ func New(out, errOut io.Writer) *cli.Command {
 			&cli.StringFlag{
 				Name:  channelFlagName,
 				Usage: "open the terminal client on this channel `ID` rather than home",
+				// The root's alone. urfave/cli v3 hands a root flag to every subcommand by default, so
+				// `norite guild list --channel 5` parsed, ignored the flag and exited 0 — a flag a verb
+				// accepts and does nothing with (M20a's manual pass). Local, it is a usage error there.
+				Local: true,
 			},
 		},
 

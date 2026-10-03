@@ -379,4 +379,9 @@ func TestTheClientNeedsATerminal(t *testing.T) {
 	_, _, err = runArgs(t, "--channel", "../auth")
 	var usage *clierr.UsageError
 	require.ErrorAs(t, err, &usage)
+
+	// The root's flag, not every verb's: urfave/cli hands a root flag down by default, and a verb then
+	// accepted --channel and did nothing with it.
+	_, _, err = runArgs(t, "guild", "list", "--channel", "5")
+	require.ErrorAs(t, err, &usage, "a verb refuses --channel")
 }

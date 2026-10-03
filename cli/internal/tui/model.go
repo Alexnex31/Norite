@@ -134,7 +134,9 @@ func (m *Model) backOff(why string) tea.Cmd {
 	} else {
 		m.retry = min(m.retry*2, retryMost)
 	}
-	m.setStatus(fmt.Sprintf("%s; trying again in %s", why, m.retry), true)
+	// When comes first: a dial error carries a socket path, and a row cut to the terminal's width should
+	// lose the detail rather than the one thing the person is waiting to learn.
+	m.setStatus(fmt.Sprintf("trying again in %s · %s", m.retry, why), true)
 	gen := m.gen
 	return tea.Tick(m.retry, func(time.Time) tea.Msg { return retryMsg{gen: gen} })
 }
@@ -147,7 +149,7 @@ func (m *Model) onAttached(msg attachedMsg) tea.Cmd {
 		return nil
 	}
 	if msg.err != nil {
-		return m.backOff("the daemon is unavailable: " + termsafe.Text(msg.err.Error()))
+		return m.backOff(termsafe.Text(msg.err.Error()))
 	}
 	m.sess, m.retry = msg.sess, 0
 	cmds := []tea.Cmd{listen(m.gen, m.sess)}
@@ -155,10 +157,16 @@ func (m *Model) onAttached(msg attachedMsg) tea.Cmd {
 	ready := m.sess.Ready()
 	switch ready.Standing {
 	case ipc.StandingSignedIn:
+		if m.account != nil && !sameAccount(m.account, ready.Account) {
+			m.forget()
+		}
 		m.account = ready.Account
 		m.setStatus("", false)
 		cmds = append(cmds, loadHome(m.gen, m.sess))
 		if m.pane != nil {
+			// Read afresh rather than merged into what the pane held: a resync means the daemon's view was
+			// cleared, and a message deleted in the gap would otherwise stay on screen as history.
+			m.pane.msgs, m.pane.loaded, m.pane.scroll = nil, false, 0
 			cmds = append(cmds, m.pane.fetch(m.gen, m.sess))
 		}
 	case ipc.StandingStarting:
@@ -167,10 +175,32 @@ func (m *Model) onAttached(msg attachedMsg) tea.Cmd {
 		m.setStatus("the daemon is starting; waiting for it", false)
 	default:
 		// The same: a login starts the daemon a fresh session, which resyncs every watching client.
+		m.forget()
 		m.account = nil
 		m.setStatus("signed out; run `norite login`, and this will carry on", true)
 	}
 	return tea.Batch(cmds...)
+}
+
+// forget drops everything drawn for the sign-in that ended: home's guilds and the open pane, its draft
+// included. The daemon forgets on a sign-in's end and closes this client so it resyncs (M19, M20); a client
+// that went on drawing the old account's conversation after a logout, or under the next account's name,
+// would undo that on the one screen it matters. Only what the code box holds survives, being the person's.
+func (m *Model) forget() {
+	m.home.forget()
+	m.pane = nil
+}
+
+// sameAccount reports whether two sign-ins name one account on one instance.
+func sameAccount(a, b *ipc.Account) bool {
+	return a != nil && b != nil && a.UserID == b.UserID && a.InstanceURL == b.InstanceURL
+}
+
+// paneGone stops the open pane's composer, saying why, and clears a status line about the pane as it was:
+// a refused send's error describes nothing the person can still act on.
+func (m *Model) paneGone(why string) {
+	m.pane.gone = why
+	m.setStatus("", false)
 }
 
 func (m *Model) onEnded(msg endedMsg) tea.Cmd {
@@ -228,7 +258,7 @@ func (m *Model) onEvent(ev ipc.Event) tea.Cmd {
 		if json.Unmarshal(ev.Data, &d) == nil {
 			m.home.dropGuild(d.ID)
 			if m.pane != nil && m.pane.guildID == d.ID {
-				m.pane.gone = "this guild was deleted, or you are no longer in it"
+				m.paneGone("this guild was deleted, or you are no longer in it")
 			}
 		}
 	case "CHANNEL_CREATE", "CHANNEL_UPDATE":
@@ -245,7 +275,7 @@ func (m *Model) onEvent(ev ipc.Event) tea.Cmd {
 		if json.Unmarshal(ev.Data, &d) == nil {
 			m.home.dropChannel(d.GuildID, d.ID)
 			if m.pane != nil && m.pane.channelID == d.ID {
-				m.pane.gone = "this channel was deleted"
+				m.paneGone("this channel was deleted")
 			}
 		}
 	case "GUILD_PERMISSIONS_UPDATE":
@@ -324,7 +354,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshPaneNames()
 		if m.pane != nil && m.pane.guildID == msg.entry.guild.Id {
 			if _, _, found := m.home.locate(m.pane.channelID); !found {
-				m.pane.gone = "you can no longer see this channel"
+				m.paneGone("you can no longer see this channel")
 			}
 		}
 		return m, nil

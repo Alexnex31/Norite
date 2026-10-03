@@ -350,7 +350,7 @@ func TestAStoppedDaemonIsWaitedFor(t *testing.T) {
 	c := drive(t, Options{Dial: func(context.Context) (Session, error) {
 		return nil, errors.New("the daemon is not running")
 	}}, 80, 24)
-	c.shows("the daemon is unavailable: the daemon is not running; trying again in 1s")
+	c.shows("trying again in 1s · the daemon is not running")
 	c.press("ctrl+x", "ctrl+c")
 	c.settle()
 	assert.True(t, c.quit)
@@ -483,4 +483,119 @@ func TestScrollingUpStaysPut(t *testing.T) {
 	assert.Equal(t, before, c.screen(), "scrolled up, the view does not move")
 	c.press("pgdown", "pgdown", "pgdown")
 	c.shows("newest")
+}
+
+// ---------- what the manual pass found (M20a, part 10) ----------
+
+// signedInAs is signedIn for a named account: sameAccount tells sign-ins apart by user id.
+func signedInAs(name, userID string) ipc.Ready {
+	r := signedIn(name)
+	r.Account.UserID = userID
+	return r
+}
+
+// switchable dials whatever READY the test last set, so a resync can land on a different sign-in.
+type switchable struct {
+	f     *fixture
+	mu    sync.Mutex
+	ready ipc.Ready
+}
+
+func (s *switchable) set(r ipc.Ready) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready = r
+}
+
+func (s *switchable) dial(context.Context) (Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.d.Attach(s.ready, true), nil
+}
+
+// TestASignOutForgetsWhatWasDrawn: after a logout, the conversation the ended sign-in was shown is gone from
+// the screen, as it is from the daemon, and home says how to get it back.
+func TestASignOutForgetsWhatWasDrawn(t *testing.T) {
+	f := newFixture(t)
+	f.held = []apicontract.Message{message("60", "20", "2", "Bob", "only bob may read this")}
+	s := &switchable{f: f, ready: signedInAs("bob", "2")}
+	c := drive(t, Options{Dial: s.dial, Channel: "20"}, 80, 24)
+	c.shows("only bob may read this")
+
+	s.set(ipc.Ready{Standing: ipc.StandingSignedOut, Guilds: []ipc.GuildSummary{}})
+	f.d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "the daemon's sign-in ended"})
+	c.shows("signed out; run `norite login`")
+	assert.NotContains(t, c.screen(), "only bob may read this")
+	c.shows("Sign in with `norite login` to see your guilds")
+}
+
+// TestAnotherAccountDoesNotInheritTheScreen: a resync landing on a different account drops the open pane,
+// draft included, rather than drawing one account's conversation under the other's name.
+func TestAnotherAccountDoesNotInheritTheScreen(t *testing.T) {
+	f := newFixture(t)
+	s := &switchable{f: f, ready: signedInAs("bob", "2")}
+	c := drive(t, Options{Dial: s.dial, Channel: "20"}, 80, 24)
+	c.shows("No messages yet")
+	c.typeText("typed as bob")
+
+	s.set(signedInAs("alice", "3"))
+	f.d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "the daemon's sign-in ended"})
+	c.shows("signed in as @alice")
+	c.settle()
+	assert.Nil(t, c.m.(Model).pane, "the pane opened as bob is closed")
+	assert.NotContains(t, c.screen(), "typed as bob")
+}
+
+// TestAResyncDropsWhatWasDeletedInTheGap: a resync reads the open channel afresh rather than merging into it,
+// so a message deleted while the client was detached does not stay on screen.
+func TestAResyncDropsWhatWasDeletedInTheGap(t *testing.T) {
+	f := newFixture(t)
+	f.held = []apicontract.Message{message("60", "20", "2", "Bob", "deleted while away")}
+	c := drive(t, Options{Dial: f.dialer(signedIn("bob"), nil), Channel: "20"}, 80, 24)
+	c.shows("deleted while away")
+
+	f.mu.Lock()
+	f.held = nil
+	f.mu.Unlock()
+	f.d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "resync"})
+	c.shows("No messages yet")
+	assert.NotContains(t, c.screen(), "deleted while away")
+}
+
+// TestAGoneChannelClearsAnOldRefusal: once the channel is gone, a refused send's error no longer describes
+// anything, and the status row stops showing it.
+func TestAGoneChannelClearsAnOldRefusal(t *testing.T) {
+	f := newFixture(t)
+	f.d.On("sendMessage", func(daemontest.Request) (int, any) {
+		return 403, map[string]any{"error": map[string]any{"code": "forbidden", "message": "forbidden",
+			"request_id": "r1"}}
+	})
+	c := drive(t, Options{Dial: f.dialer(signedIn("bob"), nil), Channel: "20"}, 80, 24)
+	c.shows("No messages yet")
+	c.typeText("let me speak")
+	c.press("enter")
+	c.shows("not sent")
+	f.d.Dispatch("CHANNEL_DELETE", json.RawMessage(`{"id":"20","guild_id":"10"}`))
+	c.shows("this channel was deleted")
+	assert.NotContains(t, c.screen(), "not sent")
+}
+
+// TestAGuildWithNoTextChannelIsStillListed: a guild whose text channels are all hidden or deleted is one the
+// account is still in, so home lists it rather than saying there are no guilds.
+func TestAGuildWithNoTextChannelIsStillListed(t *testing.T) {
+	f := newFixture(t)
+	f.d.On("listGuildChannels", daemontest.OK([]apicontract.Channel{}))
+	c := drive(t, Options{Dial: f.dialer(signedIn("bob"), nil)}, 80, 24)
+	c.shows("no text channel you can see")
+	assert.Contains(t, c.screen(), "Guild")
+	assert.NotContains(t, c.screen(), "NO GUILDS YET")
+}
+
+// TestANarrowTerminalStillSaysWhenItRetries: the retry leads the status row, so the width cuts the dial
+// error's socket path rather than when the client will try again.
+func TestANarrowTerminalStillSaysWhenItRetries(t *testing.T) {
+	c := drive(t, Options{Dial: func(context.Context) (Session, error) {
+		return nil, errors.New("the daemon is not running: nothing is listening at /tmp/a/rather/long/state/dir/norite/daemon.sock")
+	}}, 40, 12)
+	c.shows("trying again in 1s")
 }
