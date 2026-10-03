@@ -216,6 +216,9 @@ func (m *Model) onEvent(ev ipc.Event) tea.Cmd {
 				m.refreshPaneNames()
 				return nil
 			}
+			if m.home.full(g.Id) {
+				return nil
+			}
 			return loadGuild(m.gen, m.sess, g)
 		}
 	case "GUILD_DELETE":
@@ -309,7 +312,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus("could not load your guilds: "+termsafe.Text(msg.err.Error()), true)
 			return m, nil
 		}
-		m.home.load(msg.entries)
+		m.home.load(msg.entries, msg.over)
 		m.refreshPaneNames()
 		return m, nil
 	case guildMsg:
@@ -317,6 +320,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.home.putGuild(msg.entry)
+		m.home.cut = m.home.cut || msg.over
 		m.refreshPaneNames()
 		if m.pane != nil && m.pane.guildID == msg.entry.guild.Id {
 			if _, _, found := m.home.locate(m.pane.channelID); !found {

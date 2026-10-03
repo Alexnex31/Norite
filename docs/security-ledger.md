@@ -1160,3 +1160,44 @@ carries the condition that would reopen it.
 - **Reopens if**: invites gain a power beyond letting an account in (a role granted on joining, say), or
   tokens gain per-guild scoping, at which point a token's invite into a guild it was not scoped to is
   the escalation.
+
+### A message's content can draw lines shaped like another message
+- **Raised**: M20a, second `/security-sweep`, against the terminal client
+- **Verdict**: not a vulnerability
+- **Why**: `termsafe.Block` keeps line breaks, so one message can carry text reading "Alice  12:00". The pane
+  draws every content line indented two columns and unstyled (`messageLines`), while an author's line starts
+  at column zero in bold, which no content can produce: everything that could move the cursor or set a style
+  is removed. A message saying something untrue is a message, as in any chat client.
+- **Reopens if**: content is drawn unindented, or M43's renderer interprets markup able to style text the
+  way an author's line is styled.
+
+### The composer and the code box draw a pasted bidi override as typed
+- **Raised**: M20a, second `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: Bubbles' input sanitizer removes control characters from what is typed or pasted, and leaves
+  format characters such as U+202E. What the box shows is the person's own input, which `termsafe` leaves
+  out of scope ("a person cannot attack their own terminal by typing into it"). Once sent, the message
+  reaches every reader through `termsafe.Block`, which replaces it.
+- **Reopens if**: either box is ever filled from somewhere other than the keyboard and the clipboard, for
+  example a draft synced from another device or a quoted reply, without passing through `termsafe` first.
+
+### The live-invite ceiling is a count and an insert, and concurrent creates can overshoot it
+- **Raised**: M20a, second `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `CreateInvite` counts live invites and then inserts, unlocked, the shape the channel ceiling and
+  the private-tag ceiling already take (see "The private-tag ceiling is a count and an insert"). The ceiling
+  bounds a listing that is returned whole. A burst-sized overshoot needs `PermCreateInvite`, and does not
+  make that listing unbounded.
+- **Reopens if**: something starts relying on the ceiling as a guarantee rather than a bound, or creation
+  becomes reachable without `PermCreateInvite` on the channel.
+
+### A resync makes the client read its whole home again at once
+- **Raised**: M20a, second `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: on resync (4100) the client reattaches without backing off and reloads home: one guild listing,
+  then one channel listing per guild. Since the same sweep, that is at most `maxHomeGuilds` listings. An
+  instance sending READY repeatedly provokes these requests, and every one goes back to that same instance
+  through the daemon, so the cost lands on whoever caused it. The client's own work is paced by the
+  instance's frames, and what it holds is bounded.
+- **Reopens if**: a resync makes the client fetch from anybody other than the instance (link previews,
+  media), or home's guild bound is lifted.

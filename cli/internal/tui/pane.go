@@ -88,10 +88,31 @@ func (p *paneModel) fetch(gen int, s Session) tea.Cmd {
 	}
 }
 
+// hold is what the pane keeps of a message: what it draws, each part bounded by what a correct instance can
+// send. maxHeld counts messages, and without this a hostile instance makes each one as large as a frame —
+// four megabytes on the gateway, so two gigabytes for a full pane, re-wrapped on every keystroke. Kept, a
+// message is at most its 4,000 runes and two names.
+func hold(m apicontract.Message) apicontract.Message {
+	m.Content = cut(m.Content, ops.MaxContent)
+	if m.Author != nil {
+		a := *m.Author
+		a.Id, a.Username, a.DisplayName = cut(a.Id, 20), cut(a.Username, maxName), cut(a.DisplayName, maxName)
+		m.Author = &a
+	}
+	if m.AuthorId != nil {
+		id := cut(*m.AuthorId, 20) // only its presence is read: it tells a deleted account from a system message
+		m.AuthorId = &id
+	}
+	m.ReplyToId, m.Tags = nil, nil // neither is drawn yet
+	return m
+}
+
 // merge adds a page, replacing any message it already holds by id.
 func (p *paneModel) merge(page []apicontract.Message) {
 	for _, m := range page {
-		p.upsert(m)
+		if m.ChannelId == p.channelID {
+			p.upsert(m)
+		}
 	}
 	p.loaded = true
 	p.trim()
@@ -115,6 +136,7 @@ func (p *paneModel) upsert(m apicontract.Message) {
 	if !ops.IsID(m.Id) {
 		return
 	}
+	m = hold(m)
 	i, found := slices.BinarySearchFunc(p.msgs, m.Id, func(have apicontract.Message, id string) int {
 		return compareIDs(have.Id, id)
 	})

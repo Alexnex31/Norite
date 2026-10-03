@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -19,6 +20,36 @@ import (
 
 // textChannel is the one channel type this client opens, and the one a message can be sent into (M15).
 const textChannel = 0
+
+// Home's bounds, against a hostile instance. A ListGuilds answer can name a hundred thousand guilds inside
+// the relay's eight megabytes, and an instance can announce a new guild in every frame; unbounded, home
+// would grow with them and ask for each one's channels. Neither bound is reached by a correct instance at
+// its default ceilings, and past either home says it is showing part of the list rather than refusing it.
+const (
+	// maxHomeGuilds is the most guilds a server lets an account be in: the joined ceiling's own limit.
+	maxHomeGuilds = gatewayproto.MaxGuilds
+	// maxHomeRows bounds the channel rows across every guild: the default ceilings' product, a hundred
+	// joined guilds of five hundred channels each. An instance raising both can exceed it honestly, and then
+	// home lists the first fifty thousand and says so.
+	maxHomeRows = 50_000
+)
+
+// keepGuild is what home holds of a guild: what it draws, bounded.
+func keepGuild(g apicontract.Guild) apicontract.Guild {
+	g.Name, g.Description = cut(g.Name, maxName), nil
+	return g
+}
+
+// keepChannel is what home holds of a channel: what it draws and sorts by, bounded. The overwrites are the
+// one field of a channel that grows with the guild, and nothing here reads them.
+func keepChannel(ch apicontract.Channel) apicontract.Channel {
+	if ch.Name != nil {
+		name := cut(*ch.Name, maxName)
+		ch.Name = &name
+	}
+	ch.Topic, ch.PermissionOverwrites = nil, nil
+	return ch
+}
 
 // guildEntry is one guild on home, with the text channels the account can see, in position order.
 type guildEntry struct {
@@ -35,7 +66,8 @@ type guildEntry struct {
 type homeModel struct {
 	guilds   []guildEntry
 	loaded   bool
-	selected int // index into rows()
+	cut      bool // the instance listed more than the bounds above keep
+	selected int  // index into rows()
 
 	code    textinput.Model
 	preview *previewMsg // the code resolved, while the field still holds it
@@ -75,7 +107,7 @@ func textChannels(chs []apicontract.Channel) []apicontract.Channel {
 	var out []apicontract.Channel
 	for _, ch := range chs {
 		if ch.Type == textChannel && ops.IsID(ch.Id) {
-			out = append(out, ch)
+			out = append(out, keepChannel(ch))
 		}
 	}
 	slices.SortStableFunc(out, func(a, b apicontract.Channel) int {
@@ -87,8 +119,9 @@ func textChannels(chs []apicontract.Channel) []apicontract.Channel {
 	return out
 }
 
-func (h *homeModel) load(entries []guildEntry) {
-	h.guilds, h.loaded = entries, true
+func (h *homeModel) load(entries []guildEntry, over bool) {
+	h.guilds, h.loaded, h.cut = entries, true, over
+	h.bound()
 	if h.pending != "" {
 		for i, r := range h.rows() {
 			if r.guild.Id == h.pending {
@@ -111,12 +144,39 @@ func (h *homeModel) putGuild(e guildEntry) {
 	}
 	h.guilds = append(h.guilds, e)
 	h.loaded = true
+	h.bound()
+}
+
+// full reports whether a guild home does not hold yet would be past maxHomeGuilds, so that it is not
+// fetched at all: the requests a hostile instance can provoke are bounded with what home keeps.
+func (h *homeModel) full(id string) bool {
+	if _, known := h.guild(id); known || len(h.guilds) < maxHomeGuilds {
+		return false
+	}
+	h.cut = true
+	return true
+}
+
+// bound holds home to maxHomeGuilds guilds and maxHomeRows channel rows, dropping what is past either and
+// noting that it did.
+func (h *homeModel) bound() {
+	if len(h.guilds) > maxHomeGuilds {
+		h.guilds, h.cut = h.guilds[:maxHomeGuilds], true
+	}
+	left := maxHomeRows
+	for i := range h.guilds {
+		if chs := h.guilds[i].channels; len(chs) > left {
+			h.guilds[i].channels, h.cut = chs[:left], true
+		}
+		left -= len(h.guilds[i].channels)
+	}
+	h.clampSelection()
 }
 
 func (h *homeModel) rename(g apicontract.Guild) bool {
 	for i := range h.guilds {
 		if h.guilds[i].guild.Id == g.Id {
-			h.guilds[i].guild = g
+			h.guilds[i].guild = keepGuild(g)
 			return true
 		}
 	}
@@ -140,7 +200,7 @@ func (h *homeModel) putChannel(ch apicontract.Channel) {
 		e.channels = slices.DeleteFunc(e.channels, func(c apicontract.Channel) bool { return c.Id == ch.Id })
 		e.channels = textChannels(append(e.channels, ch))
 	}
-	h.clampSelection()
+	h.bound()
 }
 
 func (h *homeModel) dropChannel(guildID, id string) {
@@ -181,12 +241,14 @@ func (h *homeModel) clampSelection() {
 type homeMsg struct {
 	gen     int
 	entries []guildEntry
+	over    bool // the instance listed more than home's bounds keep
 	err     error
 }
 
 type guildMsg struct {
 	gen   int
 	entry guildEntry
+	over  bool
 	err   error
 }
 
@@ -200,10 +262,18 @@ func loadHome(gen int, s Session) tea.Cmd {
 		if err != nil {
 			return homeMsg{gen: gen, err: err}
 		}
+		// Bounded as it is read, not only once it is held: past maxHomeGuilds nothing more is asked for, and
+		// past maxHomeRows no more channels are kept, so neither the requests nor the memory follow the
+		// length of the instance's answer.
 		var entries []guildEntry
+		over, left := false, maxHomeRows
 		for _, g := range guilds {
 			if !ops.IsID(g.Id) {
 				continue
+			}
+			if len(entries) == maxHomeGuilds {
+				over = true
+				break
 			}
 			chs, err := call(s, func(ctx context.Context, s Session) ([]apicontract.Channel, error) {
 				return ops.ListChannels(ctx, s, g.Id)
@@ -211,9 +281,14 @@ func loadHome(gen int, s Session) tea.Cmd {
 			if err != nil {
 				return homeMsg{gen: gen, err: err}
 			}
-			entries = append(entries, guildEntry{guild: g, channels: textChannels(chs)})
+			kept := textChannels(chs)
+			if len(kept) > left {
+				kept, over = kept[:left], true
+			}
+			left -= len(kept)
+			entries = append(entries, guildEntry{guild: keepGuild(g), channels: kept})
 		}
-		return homeMsg{gen: gen, entries: entries}
+		return homeMsg{gen: gen, entries: entries, over: over}
 	}
 }
 
@@ -225,7 +300,11 @@ func loadGuild(gen int, s Session, g apicontract.Guild) tea.Cmd {
 		chs, err := call(s, func(ctx context.Context, s Session) ([]apicontract.Channel, error) {
 			return ops.ListChannels(ctx, s, g.Id)
 		})
-		return guildMsg{gen: gen, entry: guildEntry{guild: g, channels: textChannels(chs)}, err: err}
+		kept, over := textChannels(chs), false
+		if len(kept) > maxHomeRows {
+			kept, over = kept[:maxHomeRows], true // the rest of home's bound is bound()'s, once it is held
+		}
+		return guildMsg{gen: gen, entry: guildEntry{guild: keepGuild(g), channels: kept}, over: over, err: err}
 	}
 }
 
@@ -347,6 +426,10 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 	case len(rows) == 0:
 		list = append(list, "  "+sBold.Render("NO GUILDS YET"),
 			sDim.Render("  Redeem an invite below, or start one with `norite guild create --name NAME`."))
+	case h.cut:
+		list = append(list, h.listLines(rows, width, avail-2)...)
+		list = append(list, clip(sWarn.Render("  the instance listed more than this client keeps; not all are shown"),
+			width))
 	default:
 		list = append(list, h.listLines(rows, width, avail-1)...)
 	}
