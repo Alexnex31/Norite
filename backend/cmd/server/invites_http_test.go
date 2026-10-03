@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,9 +98,9 @@ func TestTheInviteResponsesMatchTheContract(t *testing.T) {
 
 // TestJoiningAddsTheGuildToTheJoinerAndTheJoinerToTheGuild is the gateway half of a redemption. The
 // joiner's open connection receives GUILD_CREATE first, which is what adds the guild to it, and then the
-// GUILD_MEMBER_ADD every member receives, naming who joined — the one way a client can put a name to an
-// account it has never seen, since no route returns another account. Every frame is schema-checked on the
-// way in, so this is also the event's contract test.
+// GUILD_MEMBER_ADD every member receives. That event is a Member and carries no name: no REST read returns
+// another member's name, and the gateway never discloses more than REST (/code-review). Every frame is
+// schema-checked on the way in, so this is also the event's contract test.
 func TestJoiningAddsTheGuildToTheJoinerAndTheJoinerToTheGuild(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
@@ -123,9 +124,7 @@ func TestJoiningAddsTheGuildToTheJoinerAndTheJoinerToTheGuild(t *testing.T) {
 		added := c.expect("GUILD_MEMBER_ADD")
 		assert.Equal(t, f.guildID, added.field(t, "guild_id"))
 		assert.Equal(t, f.strangerID, added.field(t, "user_id"))
-		user, ok := added.field(t, "user").(map[string]any)
-		require.True(t, ok, "the event names who joined: %s", added.raw)
-		assert.Equal(t, "stranger", user["username"])
+		assert.NotContains(t, string(added.raw), "stranger", "the event carries no name REST would not give")
 	}
 
 	// And the joiner's connection now carries the guild's events, with no reconnect.
@@ -162,4 +161,42 @@ func TestTheRoutesTakingACodeCarryTheirOwnRateLimit(t *testing.T) {
 
 	me := a.call(http.MethodGet, "/api/v1/users/@me", nil, token, fromIP(client))
 	assert.Equal(t, http.StatusOK, me.Code, "ordinary traffic is counted in the base bucket alone")
+}
+
+// TestListingLiveCodesNeedsTheWriteScope: a guild's invite list is live codes, each a way into the guild,
+// so a read-only API token minted by somebody holding MANAGE_GUILD must not be able to fetch them. Found by
+// /code-review on M20a's first version, which mounted the listing under guilds.read.
+func TestListingLiveCodesNeedsTheWriteScope(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	path := "/api/v1/guilds/" + f.guildID + "/invites"
+
+	for _, tc := range []struct {
+		scopes []string
+		want   int
+	}{
+		{[]string{"guilds.read"}, http.StatusForbidden},
+		{[]string{"guilds.read", "guilds.write"}, http.StatusOK},
+	} {
+		minted := f.api.call(http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+			"name": "bot", "scopes": tc.scopes,
+		}, withToken(f.ownerToken))
+		require.Equal(t, http.StatusCreated, minted.Code, minted)
+		res := f.api.call(http.MethodGet, path, nil, withToken(minted.field(t, "value")))
+		assert.Equal(t, tc.want, res.Code, "%v: %s", tc.scopes, res)
+	}
+}
+
+// TestEveryMalformedCodeIsTheOneNotFound: the contract promises one 404 for a malformed code as for an
+// unknown one, and a validator on the field answered an empty or oversized code with 400 instead
+// (/code-review). Over HTTP, because the validator was the handler's and the service never saw them.
+func TestEveryMalformedCodeIsTheOneNotFound(t *testing.T) {
+	t.Parallel()
+	f := newGuildFixture(t)
+	for _, code := range []string{"", strings.Repeat("B", 65), strings.Repeat("B", 15), "not a code at all"} {
+		for _, route := range []string{"/api/v1/invites/preview", "/api/v1/invites/redeem", "/api/v1/invites/revoke"} {
+			res := f.api.call(http.MethodPost, route, map[string]any{"code": code}, withToken(f.memberToken))
+			assert.Equal(t, http.StatusNotFound, res.Code, "%s with %q: %s", route, code, res)
+		}
+	}
 }

@@ -100,9 +100,10 @@ func (h *Handler) Routes(r chi.Router) {
 
 		r.With(audit).Get("/audit-log", h.listAuditLog)
 
-		// M20a. Read scope, though the list carries live codes: PermManageGuild is what bounds it, and a
-		// scope only restricts (see invitehttp.go for the routes that take a code).
-		r.With(read).Get("/invites", h.listInvites)
+		// M20a. The write scope, though it is a read: the list is live codes, each a way into the guild, so
+		// a token that can read them can change who is in it. A read-only token stays read-only
+		// (/code-review). PermManageGuild still bounds it underneath.
+		r.With(write).Get("/invites", h.listInvites)
 
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)

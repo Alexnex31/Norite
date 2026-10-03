@@ -42,18 +42,20 @@ func (q *Queries) CountLiveGuildInvites(ctx context.Context, guildID int64) (int
 const createGuildInvite = `-- name: CreateGuildInvite :one
 
 INSERT INTO invites (id, code, guild_id, channel_id, inviter_id, max_uses, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6::integer, $7::timestamptz)
+VALUES ($1, $2, $3, $4, $5, $6::integer,
+        now() + $7::bigint * interval '1 second')
+ON CONFLICT (code) DO NOTHING
 RETURNING id, code, guild_id, channel_id, inviter_id, max_uses, uses, expires_at, created_at
 `
 
 type CreateGuildInviteParams struct {
-	ID        int64
-	Code      string
-	GuildID   int64
-	ChannelID int64
-	InviterID int64
-	MaxUses   *int32
-	ExpiresAt pgtype.Timestamptz
+	ID               int64
+	Code             string
+	GuildID          int64
+	ChannelID        int64
+	InviterID        int64
+	MaxUses          *int32
+	ExpiresInSeconds *int64
 }
 
 // Guild invites (Milestone M20a).
@@ -62,6 +64,16 @@ type CreateGuildInviteParams struct {
 // redemption that spends an invite's last use deletes it and the sweep removes expired ones, but neither
 // is what makes a dead code answer as an unknown one: a deletion that fails or a sweep that has not run
 // must not turn tidiness into a disclosure.
+// Insert an invite, or nothing if its code is taken.
+//
+// ON CONFLICT rather than letting the unique violation arrive: this runs inside the creating transaction,
+// and a statement that errors aborts it, so a retry after a collision could only fail again. No row back
+// means the code collided, and the caller draws another (M20a /code-review).
+//
+// The expiry is computed here, on the database's clock, because every read asks about it against the
+// database's now(). Computed in Go, an application host whose clock lags the database's stored an invite
+// already expired, and one running ahead stored one that lived longer than asked. NULL seconds never
+// expires: NULL times an interval is NULL.
 func (q *Queries) CreateGuildInvite(ctx context.Context, arg CreateGuildInviteParams) (Invite, error) {
 	row := q.db.QueryRow(ctx, createGuildInvite,
 		arg.ID,
@@ -70,7 +82,7 @@ func (q *Queries) CreateGuildInvite(ctx context.Context, arg CreateGuildInvitePa
 		arg.ChannelID,
 		arg.InviterID,
 		arg.MaxUses,
-		arg.ExpiresAt,
+		arg.ExpiresInSeconds,
 	)
 	var i Invite
 	err := row.Scan(
@@ -100,16 +112,27 @@ func (q *Queries) DeleteExpiredGuildInvites(ctx context.Context) (int64, error) 
 	return result.RowsAffected(), nil
 }
 
-const deleteGuildInvite = `-- name: DeleteGuildInvite :execrows
-DELETE FROM invites WHERE id = $1
+const deleteGuildInvite = `-- name: DeleteGuildInvite :one
+DELETE FROM invites WHERE id = $1 RETURNING id, code, guild_id, channel_id, inviter_id, max_uses, uses, expires_at, created_at
 `
 
-func (q *Queries) DeleteGuildInvite(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteGuildInvite, id)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+// Returns the row as it was deleted, so a revocation's audit entry records the uses the invite had when it
+// went rather than a count read before a concurrent redemption committed.
+func (q *Queries) DeleteGuildInvite(ctx context.Context, id int64) (Invite, error) {
+	row := q.db.QueryRow(ctx, deleteGuildInvite, id)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.GuildID,
+		&i.ChannelID,
+		&i.InviterID,
+		&i.MaxUses,
+		&i.Uses,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const getGuildInvitePreview = `-- name: GetGuildInvitePreview :one

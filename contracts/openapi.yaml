@@ -3608,9 +3608,11 @@ paths:
       summary: List a guild's live invites
       description: >
         **Requires `MANAGE_GUILD`**, which is more than creating an invite takes: whoever can list the
-        guild's live codes can hand any of them on. Codes are returned in full, because the guild needs
-        them back. Expired invites are absent, and an invite is deleted by the redemption that spends its
-        last use, so nothing here is dead.
+        guild's live codes can hand any of them on. And **the `guilds.write` scope, though this is a read**:
+        each code is a way into the guild, so a token able to read them can change who is in it. Codes are
+        returned in full, because the guild needs them back. Invites into channels the caller cannot see
+        are left out, as the channel listing leaves those channels out. Expired and used-up invites are
+        absent, so nothing here is dead.
 
 
         Not paginated, and bounded at creation instead by `[limits].invites_per_guild` (500 by default).
@@ -3629,7 +3631,7 @@ paths:
                   $ref: "#/components/schemas/GuildInvite"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
-          description: A member without `MANAGE_GUILD`, or an API token without the `guilds.read` scope.
+          description: A member without `MANAGE_GUILD`, or an API token without the `guilds.write` scope.
           content:
             application/json:
               schema:
@@ -3776,8 +3778,9 @@ paths:
       summary: Revoke an invite
       description: >
         The invite's creator may, while still a member, and so may a holder of `MANAGE_GUILD`. Recorded in
-        the audit log as `invite.revoke`. A caller who is not in the invite's guild gets the 404 an unknown
-        code gets. The code is in the body for the reason preview's is.
+        the audit log as `invite.revoke`. A caller who is not in the invite's guild, or cannot see the
+        channel it leads into, gets the 404 an unknown code gets. The code is in the body for the reason
+        preview's is.
       operationId: revokeInvite
       tags: [guilds]
       security:
@@ -6385,10 +6388,10 @@ components:
       properties:
         code:
           type: string
-          maxLength: 64
           description: >
             As typed or pasted: case, spaces and dashes are ignored. In the body because a path or a query
-            string is written to request logs (ADR 0029).
+            string is written to request logs (ADR 0029). An empty, oversized or otherwise malformed code
+            is the same 404 as an unknown one, not a 400.
 
     GuildInvite:
       description: A guild invite as its guild sees it (M20a), the code in full.

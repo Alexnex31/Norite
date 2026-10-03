@@ -1362,6 +1362,22 @@ func (q *Queries) LockAccountOwnership(ctx context.Context, userID int64) error 
 	return err
 }
 
+const lockGuildForKeyShare = `-- name: LockGuildForKeyShare :one
+SELECT id FROM guilds WHERE id = $1 FOR KEY SHARE
+`
+
+// The lock an insert into a child table's foreign key takes anyway, taken first (M20a).
+//
+// Redeeming an invite updates the invite and then inserts a membership, whose foreign-key check takes
+// FOR KEY SHARE on the guild. Deleting a guild locks the guild FOR UPDATE and then cascades to the
+// invite. Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first
+// puts redemption in the deletion's order: guild, then invite.
+func (q *Queries) LockGuildForKeyShare(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, lockGuildForKeyShare, id)
+	err := row.Scan(&id)
+	return id, err
+}
+
 const lockGuildRolePositions = `-- name: LockGuildRolePositions :exec
 SELECT pg_advisory_xact_lock(1313033475, ($1::bigint & 2147483647)::int)
 `

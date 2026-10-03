@@ -610,6 +610,15 @@ WHERE c.guild_id = sqlc.arg(guild_id)::bigint
 -- name: GetGuildForUpdate :one
 SELECT * FROM guilds WHERE id = $1 FOR UPDATE;
 
+-- name: LockGuildForKeyShare :one
+-- The lock an insert into a child table's foreign key takes anyway, taken first (M20a).
+--
+-- Redeeming an invite updates the invite and then inserts a membership, whose foreign-key check takes
+-- FOR KEY SHARE on the guild. Deleting a guild locks the guild FOR UPDATE and then cascades to the
+-- invite. Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first
+-- puts redemption in the deletion's order: guild, then invite.
+SELECT id FROM guilds WHERE id = $1 FOR KEY SHARE;
+
 -- name: GetGuildForNoKeyUpdate :one
 -- The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points
 -- at. FOR NO KEY UPDATE rather than FOR UPDATE, which is the difference that matters: FOR UPDATE also

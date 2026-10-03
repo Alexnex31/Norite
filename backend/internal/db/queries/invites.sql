@@ -5,9 +5,22 @@
 -- is what makes a dead code answer as an unknown one: a deletion that fails or a sweep that has not run
 -- must not turn tidiness into a disclosure.
 
+-- Insert an invite, or nothing if its code is taken.
+--
+-- ON CONFLICT rather than letting the unique violation arrive: this runs inside the creating transaction,
+-- and a statement that errors aborts it, so a retry after a collision could only fail again. No row back
+-- means the code collided, and the caller draws another (M20a /code-review).
+--
+-- The expiry is computed here, on the database's clock, because every read asks about it against the
+-- database's now(). Computed in Go, an application host whose clock lags the database's stored an invite
+-- already expired, and one running ahead stored one that lived longer than asked. NULL seconds never
+-- expires: NULL times an interval is NULL.
+--
 -- name: CreateGuildInvite :one
 INSERT INTO invites (id, code, guild_id, channel_id, inviter_id, max_uses, expires_at)
-VALUES ($1, $2, $3, $4, $5, sqlc.narg(max_uses)::integer, sqlc.narg(expires_at)::timestamptz)
+VALUES ($1, $2, $3, $4, $5, sqlc.narg(max_uses)::integer,
+        now() + sqlc.narg(expires_in_seconds)::bigint * interval '1 second')
+ON CONFLICT (code) DO NOTHING
 RETURNING *;
 
 -- How many live invites a guild has, for the creation ceiling. invites_guild_id_idx serves it.
@@ -81,8 +94,11 @@ WHERE code = $1
   AND (max_uses IS NULL OR uses < max_uses)
 RETURNING *;
 
--- name: DeleteGuildInvite :execrows
-DELETE FROM invites WHERE id = $1;
+-- Returns the row as it was deleted, so a revocation's audit entry records the uses the invite had when it
+-- went rather than a count read before a concurrent redemption committed.
+--
+-- name: DeleteGuildInvite :one
+DELETE FROM invites WHERE id = $1 RETURNING *;
 
 -- How many guilds an account is in, owned ones included, for the joined ceiling (M20a). Counted under
 -- LockAccountOwnership; guild_members_user_id_idx serves it.

@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
@@ -115,6 +116,10 @@ type Service struct {
 	// M20a's: every guild an account is in, and a guild's live invites.
 	maxJoinedGuildsPerAccount int32
 	maxInvitesPerGuild        int32
+
+	// newInviteCode mints a guild invite's code: auth.NewInviteCode, replaced by a test that needs a
+	// collision on demand.
+	newInviteCode func() (string, error)
 }
 
 // ServiceOptions configures NewService.
@@ -163,6 +168,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 
 		maxJoinedGuildsPerAccount: opts.MaxJoinedGuildsPerAccount,
 		maxInvitesPerGuild:        opts.MaxInvitesPerGuild,
+		newInviteCode:             auth.NewInviteCode,
 	}, nil
 }
 

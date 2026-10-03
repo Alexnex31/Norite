@@ -1082,58 +1082,6 @@
         }
       }
     },
-    "MemberAdded": {
-      "type": "object",
-      "description": "GUILD_MEMBER_ADD: a Member, and the name nobody in the guild could look up otherwise, since no route returns another account (M20a).",
-      "required": [
-        "guild_id",
-        "user_id",
-        "nickname",
-        "joined_at",
-        "deaf",
-        "mute",
-        "roles",
-        "user"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "guild_id": {
-          "$ref": "#/$defs/Snowflake"
-        },
-        "user_id": {
-          "$ref": "#/$defs/Snowflake"
-        },
-        "nickname": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "A per-guild display name. Null means the account's own display name is used."
-        },
-        "joined_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "deaf": {
-          "type": "boolean",
-          "description": "Server-side deafen, set by a moderator. Distinct from the self-deafen a client sets on itself, which lives in voice state.\n"
-        },
-        "mute": {
-          "type": "boolean",
-          "description": "Server-side mute, set by a moderator. See `deaf`."
-        },
-        "roles": {
-          "type": "array",
-          "description": "The roles this member holds, excluding `@everyone` — which every member holds and which appears in no grant. An empty array rather than null when there are none: a client that has to handle both writes the check once per field and forgets it somewhere.\n",
-          "items": {
-            "$ref": "#/$defs/Snowflake"
-          }
-        },
-        "user": {
-          "$ref": "#/$defs/PublicUser"
-        }
-      }
-    },
     "PermissionsUpdated": {
       "type": "object",
       "description": "GUILD_PERMISSIONS_UPDATE: which channels you may see, or what you may do, may have changed. Refetch the guild`s channels.",
@@ -1352,7 +1300,7 @@
     },
     "GuildMemberAddDispatch": {
       "type": "object",
-      "description": "To members, after somebody joins through an invite (M20a). The joiner receives it too, after the GUILD_CREATE that adds the guild to their connection.",
+      "description": "To members, after somebody joins through an invite (M20a). A Member and not the joiner's name: no REST read returns another member's name, and the gateway never discloses more than REST. The joiner receives it too, after the GUILD_CREATE that adds the guild to their connection.",
       "required": [
         "op",
         "d",
@@ -1365,7 +1313,7 @@
           "const": 0
         },
         "d": {
-          "$ref": "#/$defs/MemberAdded"
+          "$ref": "#/$defs/Member"
         },
         "s": {
           "type": "integer",

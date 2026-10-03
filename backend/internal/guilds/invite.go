@@ -127,13 +127,6 @@ type PreviewChannel struct {
 	Name *string      `json:"name"`
 }
 
-// MemberAdded is GUILD_MEMBER_ADD's payload: the new member, and the name nobody in the guild could look up
-// otherwise (there is no GET /users/{id}).
-type MemberAdded struct {
-	Member
-	User PublicUser `json:"user"`
-}
-
 func timeOrNil(t pgtype.Timestamptz) *time.Time {
 	if !t.Valid {
 		return nil
@@ -208,23 +201,36 @@ func (s *Service) CreateInvite(ctx context.Context, actor auth.Actor, in CreateI
 			params.MaxUses = &in.MaxUses
 		}
 		if in.MaxAge > 0 {
-			params.ExpiresAt = pgtype.Timestamptz{Time: time.Now().Add(in.MaxAge), Valid: true}
+			// Seconds, and the database adds them to its own clock: see CreateGuildInvite.
+			seconds := int64(in.MaxAge / time.Second)
+			params.ExpiresInSeconds = &seconds
 		}
 
-		// Retried on collision rather than checked first, as M10's are: the unique constraint cannot race,
-		// and three collisions at 69 bits is a broken generator, reported rather than looped on.
+		// Retried on collision rather than checked first, as M10's are, and three collisions at 69 bits is a
+		// broken generator, reported rather than looped on. The statement answers a collision with no row
+		// instead of an error: this runs in a transaction, and an error would abort it, so the first version
+		// of this loop could never actually retry (M20a /code-review).
 		var row db.Invite
 		for attempt := 0; ; attempt++ {
-			if params.Code, err = auth.NewInviteCode(); err != nil {
+			if params.Code, err = s.newInviteCode(); err != nil {
 				return err
 			}
 			row, err = q.CreateGuildInvite(ctx, params)
 			if err == nil {
 				break
 			}
+			if errors.Is(err, pgx.ErrNoRows) {
+				if attempt < 2 {
+					continue
+				}
+				return errors.New("guilds: could not generate an unused invite code")
+			}
+			// The channel or its guild was deleted after the unlocked authorization read it: the insert's
+			// foreign-key check waited for that deletion and then refused. That is the 404 the read would
+			// have given a moment later, as messages' channelVanished maps it.
 			var pgErr *pgconn.PgError
-			if attempt < 2 && errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
-				continue
+			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
+				return httpx.ErrNotFound
 			}
 			return fmt.Errorf("guilds: create invite: %w", err)
 		}
@@ -259,20 +265,55 @@ func (s *Service) CreateInvite(ctx context.Context, actor auth.Actor, in CreateI
 	return out, err
 }
 
-// ListInvites returns a guild's live invites, codes in full.
+// ListInvites returns a guild's live invites, codes in full, into the channels the caller can see.
 //
 // PermManageGuild, the bit that decides who the guild is for. Creating an invite is a smaller grant than
 // reading every outstanding one: whoever can list them can hand any of them on.
+//
+// **Filtered by channel visibility**, as the channel listing is. An invite names its channel, so listing
+// one into a channel hidden from the caller tells them the channel exists and hands them a way into it —
+// M14's "a channel you cannot see is not yours to manage", which M20a's first version missed
+// (/code-review).
 func (s *Service) ListInvites(ctx context.Context, actor auth.Actor, guildID snowflake.ID) ([]Invite, error) {
-	if _, err := guildauth.Authorize(ctx, s.queries, actor, guildID, 0, roles.PermManageGuild); err != nil {
+	allowed, err := guildauth.Authorize(ctx, s.queries, actor, guildID, 0, roles.PermManageGuild)
+	if err != nil {
 		return nil, err
 	}
 	rows, err := s.queries.ListGuildInvites(ctx, int64(guildID))
 	if err != nil {
 		return nil, fmt.Errorf("guilds: list invites: %w", err)
 	}
+	if len(rows) == 0 {
+		return []Invite{}, nil
+	}
+
+	// One read of the overwrites for every channel the invites lead into, grouped once, as ListChannels
+	// does for the same reason.
+	seen := make(map[int64]bool, len(rows))
+	var channelIDs []int64
+	for _, r := range rows {
+		if !seen[r.Invite.ChannelID] {
+			seen[r.Invite.ChannelID] = true
+			channelIDs = append(channelIDs, r.Invite.ChannelID)
+		}
+	}
+	overwrites, err := s.queries.ListGuildPermissionOverwrites(ctx, db.ListGuildPermissionOverwritesParams{
+		ChannelIds: channelIDs, GuildID: int64(guildID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("guilds: list invite channels' overwrites: %w", err)
+	}
+	byChannel := make(map[snowflake.ID][]db.PermissionOverwrite, len(channelIDs))
+	for _, ow := range overwrites {
+		byChannel[snowflake.ID(ow.ChannelID)] = append(byChannel[snowflake.ID(ow.ChannelID)], ow)
+	}
+
 	out := make([]Invite, 0, len(rows))
 	for _, r := range rows {
+		channel := snowflake.ID(r.Invite.ChannelID)
+		if !allowed.AllowsInChannel(channel, byChannel[channel], roles.PermViewChannel) {
+			continue
+		}
 		inviter := publicUser(r.Invite.InviterID, r.InviterUsername, r.InviterDisplayName)
 		out = append(out, inviteFromRow(r.Invite, inviter))
 	}
@@ -353,6 +394,18 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 		}
 		guildID := snowflake.ID(invite.GuildID)
 
+		// The guild before the invite, which is the order deleting a guild takes them in (FOR UPDATE on
+		// the guild, then the cascade to its invites). The spend below locks the invite and the membership
+		// insert would then take this lock through its foreign key: the other order, and the two
+		// deadlocked (M20a /code-review). A guild deleted before this point is the 404 an unknown code
+		// gets; one being deleted now is waited for, after which there is no guild and no invite either.
+		if _, err := q.LockGuildForKeyShare(ctx, invite.GuildID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: lock guild: %w", err)
+		}
+
 		if _, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{
 			GuildID: invite.GuildID, UserID: int64(actor.UserID),
 		}); err == nil {
@@ -388,17 +441,12 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 			}
 		}
 
+		// Neither a unique violation nor a foreign-key one can reach here: the account lock serializes this
+		// account's redemptions, the membership read above saw none, and the guild is held FOR KEY SHARE.
 		member, err := q.AddGuildMember(ctx, db.AddGuildMemberParams{
 			GuildID: spent.GuildID, UserID: int64(actor.UserID),
 		})
 		if err != nil {
-			// The guild was deleted after the invite was read; the cascade took the invite too, so the
-			// answer is the one an unknown code gets. A unique violation cannot reach here — the account
-			// lock serializes this account's redemptions and the membership read above saw none.
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
-				return httpx.ErrNotFound
-			}
 			return fmt.Errorf("guilds: add member: %w", err)
 		}
 
@@ -416,10 +464,6 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 			return fmt.Errorf("guilds: get guild: %w", err)
 		}
 		out = guildFromRow(guild)
-		account, err := q.GetUserByID(ctx, int64(actor.UserID))
-		if err != nil {
-			return fmt.Errorf("guilds: get joiner: %w", err)
-		}
 
 		// The joiner first, by name, as Create does for an owner: the event is what adds the guild to their
 		// live connections, so the guild's later events — the next one included — find them.
@@ -428,12 +472,13 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 		}, out); err != nil {
 			return err
 		}
+		// A Member, as GUILD_MEMBER_UPDATE carries and the member listing returns: not the joiner's name.
+		// No REST read returns another member's name, and the gateway never discloses more than REST
+		// (M18). The first version carried it and /code-review found the gap; the name reaches the
+		// guild when the joiner first posts, on the message, which REST serves too.
 		return s.events.Queue(ctx, dispatch.Event{
 			Type: "GUILD_MEMBER_ADD", Audience: dispatch.Guild, GuildID: guildID,
-		}, MemberAdded{
-			Member: memberFromRow(member, []snowflake.ID{}),
-			User:   PublicUser{ID: actor.UserID, Username: account.Username, DisplayName: account.DisplayName},
-		})
+		}, memberFromRow(member, []snowflake.ID{}))
 	})
 	if err != nil {
 		return Guild{}, err
@@ -447,6 +492,9 @@ func (s *Service) RedeemInvite(ctx context.Context, actor auth.Actor, rawCode st
 // guild they are not in gets the 404 an unknown code gets, from the same chokepoint every guild route uses.
 // The creator still needs to be a member, so an invite outlives its creator's departure until a moderator
 // revokes it or it expires.
+//
+// And against its channel: an invite into a channel the caller cannot see answers 404, as the listing
+// leaves it out, rather than letting a manager act on a channel they are not shown (M14's rule).
 func (s *Service) RevokeInvite(ctx context.Context, actor auth.Actor, rawCode string) error {
 	code, err := auth.ParseInviteCode(rawCode)
 	if err != nil {
@@ -466,24 +514,36 @@ func (s *Service) RevokeInvite(ctx context.Context, actor auth.Actor, rawCode st
 		if snowflake.ID(invite.InviterID) == actor.UserID {
 			need = 0
 		}
-		if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, need); err != nil {
+		allowed, err := guildauth.Authorize(ctx, q, actor, guildID, 0, need)
+		if err != nil {
 			return err
 		}
-
-		deleted, err := q.DeleteGuildInvite(ctx, invite.ID)
+		overwrites, err := q.ListChannelPermissionOverwrites(ctx, db.ListChannelPermissionOverwritesParams{
+			ChannelID: invite.ChannelID, GuildID: invite.GuildID,
+		})
 		if err != nil {
-			return fmt.Errorf("guilds: delete invite: %w", err)
+			return fmt.Errorf("guilds: list channel overwrites: %w", err)
 		}
-		if deleted == 0 {
-			// Revoked or spent by somebody else since the read.
+		if !allowed.AllowsInChannel(snowflake.ID(invite.ChannelID), overwrites, roles.PermViewChannel) {
 			return httpx.ErrNotFound
 		}
 
+		// The row as deleted, so the entry records the uses it had when it went: the read above was
+		// unlocked, and a redemption committing in between would otherwise go unrecorded.
+		deleted, err := q.DeleteGuildInvite(ctx, invite.ID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Revoked or spent by somebody else since the read.
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("guilds: delete invite: %w", err)
+		}
+
 		changes := auditDiff{}
-		changes.context("channel_id", snowflake.ID(invite.ChannelID))
-		changes.context("inviter_id", snowflake.ID(invite.InviterID))
-		changes.context("uses", invite.Uses)
-		inviteID := snowflake.ID(invite.ID)
+		changes.context("channel_id", snowflake.ID(deleted.ChannelID))
+		changes.context("inviter_id", snowflake.ID(deleted.InviterID))
+		changes.context("uses", deleted.Uses)
+		inviteID := snowflake.ID(deleted.ID)
 		return s.writeAudit(ctx, q, guildID, actor.UserID, ActionInviteRevoke, &inviteID, changes.payload())
 	})
 }

@@ -82,10 +82,14 @@ func (h *Handler) listInvites(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, r, http.StatusOK, invites)
 }
 
-// inviteCodeRequest carries a code in the body. Bounded so an oversized one is refused before anything
-// normalizes it; the parser then refuses anything that is not a code this instance could have issued.
+// inviteCodeRequest carries a code in the body.
+//
+// No validator: an empty code or an oversized one is a malformed code, and the contract promises one 404
+// for every malformed, unknown or dead code. A validator answered those two with 400 (/code-review). The
+// parser refuses anything it could not have issued, and stops reading as soon as the code is too long; the
+// body's own size is bounded by the decoder.
 type inviteCodeRequest struct {
-	Code string `json:"code" validate:"required,max=64"`
+	Code string `json:"code"`
 }
 
 func (h *Handler) previewInvite(w http.ResponseWriter, r *http.Request) {

@@ -265,6 +265,17 @@ type Querier interface {
 	// redemption that spends an invite's last use deletes it and the sweep removes expired ones, but neither
 	// is what makes a dead code answer as an unknown one: a deletion that fails or a sweep that has not run
 	// must not turn tidiness into a disclosure.
+	// Insert an invite, or nothing if its code is taken.
+	//
+	// ON CONFLICT rather than letting the unique violation arrive: this runs inside the creating transaction,
+	// and a statement that errors aborts it, so a retry after a collision could only fail again. No row back
+	// means the code collided, and the caller draws another (M20a /code-review).
+	//
+	// The expiry is computed here, on the database's clock, because every read asks about it against the
+	// database's now(). Computed in Go, an application host whose clock lags the database's stored an invite
+	// already expired, and one running ahead stored one that lived longer than asked. NULL seconds never
+	// expires: NULL times an interval is NULL.
+	//
 	CreateGuildInvite(ctx context.Context, arg CreateGuildInviteParams) (Invite, error)
 	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
@@ -404,7 +415,10 @@ type Querier interface {
 	// report the difference, which would be the membership oracle authorize exists to close, but to avoid
 	// answering 204 for a guild that never existed.
 	DeleteGuild(ctx context.Context, id int64) (int64, error)
-	DeleteGuildInvite(ctx context.Context, id int64) (int64, error)
+	// Returns the row as it was deleted, so a revocation's audit entry records the uses the invite had when it
+	// went rather than a count read before a concurrent redemption committed.
+	//
+	DeleteGuildInvite(ctx context.Context, id int64) (Invite, error)
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
@@ -1152,6 +1166,13 @@ type Querier interface {
 	// "NOR" plus a slot. Keyed per account; two accounts whose low 31 bits collide serialize unnecessarily and
 	// stay correct.
 	LockAccountOwnership(ctx context.Context, userID int64) error
+	// The lock an insert into a child table's foreign key takes anyway, taken first (M20a).
+	//
+	// Redeeming an invite updates the invite and then inserts a membership, whose foreign-key check takes
+	// FOR KEY SHARE on the guild. Deleting a guild locks the guild FOR UPDATE and then cascades to the
+	// invite. Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first
+	// puts redemption in the deletion's order: guild, then invite.
+	LockGuildForKeyShare(ctx context.Context, id int64) (int64, error)
 	// Serializes role creation within one guild, for the whole of the calling transaction.
 	//
 	// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and

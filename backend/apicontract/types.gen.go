@@ -898,7 +898,7 @@ type GuildInvite struct {
 
 // GuildInviteCodeRequest defines model for GuildInviteCodeRequest.
 type GuildInviteCodeRequest struct {
-	// Code As typed or pasted: case, spaces and dashes are ignored. In the body because a path or a query string is written to request logs (ADR 0029).
+	// Code As typed or pasted: case, spaces and dashes are ignored. In the body because a path or a query string is written to request logs (ADR 0029). An empty, oversized or otherwise malformed code is the same 404 as an unknown one, not a 400.
 	Code string `json:"code"`
 }
 

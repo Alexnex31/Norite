@@ -468,3 +468,183 @@ func TestAnInviteNamesNobodyOnceItsCreatorIsDeleted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, preview.Inviter)
 }
+
+// TestARedemptionAndAGuildDeletionDoNotDeadlock is /code-review's first M20a finding, staged rather than
+// raced. Deleting a guild locks it FOR UPDATE and then cascades to its invites; redemption locked the
+// invite and then took the guild's key-share lock through the membership's foreign key — the other order.
+// Here the guild is held as deletion holds it, the redemption is started and seen blocked, and then the
+// deletion goes on to cascade. Locking the guild first, redemption is waiting without the invite, so the
+// deletion completes and the redemption finds nothing. In the old order Postgres detected the cycle and
+// aborted one of them, a 500 on one side.
+func TestARedemptionAndAGuildDeletionDoNotDeadlock(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	ctx := t.Context()
+	inv := f.invite(t, CreateInviteInput{})
+
+	tx, err := f.pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, err = tx.Exec(ctx, `SELECT 1 FROM guilds WHERE id = $1 FOR UPDATE`, int64(f.guildID))
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.svc.RedeemInvite(context.Background(), userActor(f.outsider), inv.Code)
+		done <- err
+	}()
+	f.waitUntilBlocked(t, done)
+
+	_, err = tx.Exec(ctx, `DELETE FROM guilds WHERE id = $1`, int64(f.guildID))
+	require.NoError(t, err, "the deletion cascades to the invite without meeting the redemption")
+	require.NoError(t, tx.Commit(ctx))
+
+	select {
+	case err := <-done:
+		assert.Equal(t, httpx.ErrNotFound, err, "the guild is gone, and the code with it")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the redemption did not finish after the deletion committed")
+	}
+}
+
+// waitUntilBlocked returns once Postgres reports a backend waiting on a lock, and fails if the operation
+// whose result arrives on done finishes first.
+func (f *inviteFixture) waitUntilBlocked(t *testing.T, done <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("the operation finished (err=%v) before it met the held lock", err)
+		default:
+		}
+		var blocked bool
+		require.NoError(t, f.pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			                WHERE datname = current_database() AND wait_event_type = 'Lock')`).Scan(&blocked))
+		if blocked {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the operation never blocked on the held lock")
+}
+
+// TestACodeCollisionIsRetried: the retry ran inside the creating transaction, and Postgres aborts a
+// transaction on an error, so the attempt after a unique violation failed too and the request was a 500
+// (/code-review). A collision is now an empty RETURNING, and the next code is tried. Forced through the
+// service's generator, since a real collision at 69 bits never happens.
+func TestACodeCollisionIsRetried(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	ctx := t.Context()
+	taken := f.invite(t, CreateInviteInput{}).Code
+
+	codes := []string{taken, taken, "QQQQQQQQQQQQQQQQ"}
+	f.svc.newInviteCode = func() (string, error) {
+		next := codes[0]
+		codes = codes[1:]
+		return next, nil
+	}
+	inv, err := f.svc.CreateInvite(ctx, userActor(f.inviter), CreateInviteInput{ChannelID: f.channelID})
+	require.NoError(t, err, "two collisions and then a free code")
+	assert.Equal(t, "QQQQQQQQQQQQQQQQ", inv.Code)
+
+	f.svc.newInviteCode = func() (string, error) { return taken, nil }
+	_, err = f.svc.CreateInvite(ctx, userActor(f.inviter), CreateInviteInput{ChannelID: f.channelID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not generate an unused invite code",
+		"three collisions is a broken generator, reported rather than looped on")
+}
+
+// TestAnInviteIntoAChannelBeingDeletedIs404: the channel is authorized without a lock, so its deletion can
+// commit while the invite is inserted; the insert's foreign-key check waits for it and refuses. That was a
+// 500 where messages and tags answer 404 (/code-review).
+func TestAnInviteIntoAChannelBeingDeletedIs404(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	ctx := t.Context()
+
+	err := f.holdAndRace(t, func(tx pgx.Tx) {
+		_, err := tx.Exec(ctx, `DELETE FROM channels WHERE id = $1`, int64(f.channelID))
+		require.NoError(t, err)
+	}, func() error {
+		_, err := f.svc.CreateInvite(context.Background(), userActor(f.inviter),
+			CreateInviteInput{ChannelID: f.channelID})
+		return err
+	})
+	assert.Equal(t, httpx.ErrNotFound, err)
+}
+
+// TestAnInviteIntoAHiddenChannelIsNotTheirsToManage: a MANAGE_GUILD holder who cannot see a channel is not
+// shown the invites into it and cannot revoke them — the channel listing hides it from them, and M14's rule
+// is that a channel you cannot see is not yours to manage (/code-review).
+func TestAnInviteIntoAHiddenChannelIsNotTheirsToManage(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	ctx := t.Context()
+
+	hidden := f.newChannel(ctx, f.guildID)
+	manager := f.newUser(ctx, "manager")
+	f.join(ctx, f.guildID, manager)
+	f.grantRole(ctx, f.guildID, manager, f.newRole(ctx, f.guildID, 2, roles.PermManageGuild))
+	f.overwrite(ctx, hidden, roles.OverwriteTargetMember, manager, 0, roles.PermViewChannel)
+
+	open, err := f.svc.CreateInvite(ctx, userActor(f.owner), CreateInviteInput{ChannelID: f.channelID})
+	require.NoError(t, err)
+	secret, err := f.svc.CreateInvite(ctx, userActor(f.owner), CreateInviteInput{ChannelID: hidden})
+	require.NoError(t, err)
+
+	listed, err := f.svc.ListInvites(ctx, userActor(manager), f.guildID)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, open.Code, listed[0].Code, "only the invite into a channel they can see")
+
+	assert.Equal(t, httpx.ErrNotFound, f.svc.RevokeInvite(ctx, userActor(manager), secret.Code))
+	require.NoError(t, f.svc.RevokeInvite(ctx, userActor(manager), open.Code))
+
+	all, err := f.svc.ListInvites(ctx, userActor(f.owner), f.guildID)
+	require.NoError(t, err)
+	assert.Len(t, all, 1, "the owner, who sees every channel, still sees the other")
+}
+
+// TestARevocationRecordsTheUsesItEndedAt: the revoke read the invite without a lock, so a redemption
+// committing before its delete went unrecorded (/code-review). The count now comes from the delete.
+func TestARevocationRecordsTheUsesItEndedAt(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	ctx := t.Context()
+	inv := f.invite(t, CreateInviteInput{MaxUses: 5})
+
+	err := f.holdAndRace(t, func(tx pgx.Tx) {
+		_, err := tx.Exec(ctx, `UPDATE invites SET uses = uses + 1 WHERE id = $1`, int64(inv.ID))
+		require.NoError(t, err)
+	}, func() error {
+		return f.svc.RevokeInvite(context.Background(), userActor(f.inviter), inv.Code)
+	})
+	require.NoError(t, err)
+
+	var changes []byte
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT changes FROM audit_log_entries WHERE guild_id = $1 AND action = $2`,
+		int64(f.guildID), ActionInviteRevoke).Scan(&changes))
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(changes, &payload))
+	assert.EqualValues(t, 1, payload["uses"], "the use committed while the revocation waited")
+}
+
+// TestAnInviteExpiresOnTheDatabasesClock: every read asks about expiry against the database's now(), so the
+// expiry is computed there too. It was the application's clock, and a host lagging the database stored an
+// invite already expired (/code-review). Both columns are now() in one transaction, so the difference is
+// exactly what was asked for; a clock read in Go cannot produce that.
+func TestAnInviteExpiresOnTheDatabasesClock(t *testing.T) {
+	t.Parallel()
+	f := newInviteFixture(t)
+	inv := f.invite(t, CreateInviteInput{MaxAge: 90 * time.Minute})
+
+	// Compared as intervals, to the microsecond: rounding to seconds could not tell two clocks apart.
+	var exact bool
+	require.NoError(t, f.pool.QueryRow(t.Context(),
+		`SELECT expires_at - created_at = interval '90 minutes' FROM invites WHERE id = $1`,
+		int64(inv.ID)).Scan(&exact))
+	assert.True(t, exact, "the expiry is the creating transaction's now() plus exactly what was asked for")
+}

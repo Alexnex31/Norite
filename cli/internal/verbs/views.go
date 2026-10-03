@@ -426,14 +426,16 @@ func (m messageView) Text(t *output.Text) {
 	}
 }
 
-// byline is who wrote the message, as a person reads it: the display name and the handle, or what stands
-// in for them. Both names are an instance's text and are sanitized (rule 19).
+// byline is who wrote the message, as a person reads it — the display name and the handle, or what stands
+// in for them — followed by the author's id, which `member update` and `member remove` take. The id was the
+// whole byline before M20a and dropping it for the names left a moderator nothing to act on without
+// --json (/code-review). Both names are an instance's text and are sanitized (rule 19).
 func (m messageView) byline() string {
 	switch {
 	case m.Author != nil:
-		return fmt.Sprintf("%s (@%s)", c(m.Author.DisplayName), c(m.Author.Username))
+		return fmt.Sprintf("%s (@%s) %s", c(m.Author.DisplayName), c(m.Author.Username), c(m.Author.ID))
 	case m.AuthorID != nil:
-		return "deleted account"
+		return "deleted account " + c(*m.AuthorID)
 	}
 	return "-"
 }

@@ -70,7 +70,13 @@ type Config struct {
 	MaxGuildsPerAccount int32 `validate:"required,gte=1,lte=10000"`
 	// M20a's two. The joined ceiling counts every membership, owned guilds included, and is what bounds
 	// READY's guild list; the invite ceiling counts a guild's live invites, which its listing returns whole.
-	MaxJoinedGuildsPerAccount int32 `validate:"required,gte=1,lte=10000,gtefield=MaxGuildsPerAccount"`
+	//
+	// The joined ceiling stops at 1000 because that is what a daemon keeps (state.maxGuilds): past it the
+	// daemon would drop guilds the instance had let the account join. It is not required to be at least
+	// the owned ceiling: one below it simply binds first, since creating a guild counts against both. The
+	// first version required it, which refused to start any instance whose owned ceiling had been raised
+	// past the new default (/code-review).
+	MaxJoinedGuildsPerAccount int32 `validate:"required,gte=1,lte=1000"`
 	MaxInvitesPerGuild        int32 `validate:"required,gte=1,lte=10000"`
 	DBMinConns                int32 `validate:"gte=0,ltefield=DBMaxConns"`
 
@@ -311,7 +317,10 @@ const (
 	defaultMaxGuildsPerAccount = 50
 	// M72a's figure, and the bound READY's guild list already assumed (M18).
 	defaultMaxJoinedGuildsPerAccount = 100
-	defaultMaxInvitesPerGuild        = 500
+	// maxJoinedGuildsPerAccount is the validator's lte on the joined ceiling, which the default never
+	// exceeds.
+	maxJoinedGuildsPerAccount = 1000
+	defaultMaxInvitesPerGuild = 500
 )
 
 // Load reads configuration, applies defaults, and validates the result.
@@ -420,8 +429,11 @@ func Load(configPath string) (Config, error) {
 	}
 	cfg.MaxGuildsPerAccount = guildsPerAccount
 
+	// Unset, the joined ceiling follows a raised owned one, up to what a daemon keeps, so an instance that
+	// raised guilds_per_account before M20a keeps letting its accounts own that many.
+	joinedDefault := min(max(defaultMaxJoinedGuildsPerAccount, guildsPerAccount), maxJoinedGuildsPerAccount)
 	joinedPerAccount, err := getEnvInt32("MAX_JOINED_GUILDS_PER_ACCOUNT",
-		fileInt32(file.Limits.JoinedGuildsPerAccount, defaultMaxJoinedGuildsPerAccount))
+		fileInt32(file.Limits.JoinedGuildsPerAccount, joinedDefault))
 	if err != nil {
 		return Config{}, err
 	}
@@ -610,7 +622,16 @@ func describeFieldError(fe validator.FieldError, sourcePath string) string {
 	if fe.Param() == "" {
 		return fmt.Sprintf("%s: failed %q", name, fe.Tag())
 	}
-	return fmt.Sprintf("%s: failed %q (%s)", name, fe.Tag(), fe.Param())
+	param := fe.Param()
+	// A cross-field rule's parameter is a Go field name, which an operator never writes: name the other
+	// setting the way this one is named.
+	if strings.HasSuffix(fe.Tag(), "field") {
+		param = envVarFor(param)
+		if key := fileKeyFor(fe.Param()); sourcePath != "" && key != "" {
+			param = fmt.Sprintf("%s or %s", param, key)
+		}
+	}
+	return fmt.Sprintf("%s: failed %q (%s)", name, fe.Tag(), param)
 }
 
 // fileKeyFor maps a Go field name to its key in the instance config file. Kept beside envVarFor because

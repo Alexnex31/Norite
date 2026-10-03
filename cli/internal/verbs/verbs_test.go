@@ -392,8 +392,8 @@ func TestAHostileNameIsInertInTextAndExactInJSON(t *testing.T) {
 }
 
 // TestAMessageIsNamedByItsAuthor: the backlog says who wrote each message (M20a), as a person reads it —
-// display name and handle, "deleted account" where only the id survived, and "-" for a message with no
-// author — and both names are an instance's text, inert in a terminal and exact in JSON.
+// display name, handle and id, "deleted account" and the id where only the id survived, and "-" for a
+// message with no author — and both names are an instance's text, inert in a terminal and exact in JSON.
 func TestAMessageIsNamedByItsAuthor(t *testing.T) {
 	hostile := "Evil\x1b[2J\u202eesrever"
 	named := apiMessage("33", "20", "named")
@@ -408,11 +408,11 @@ func TestAMessageIsNamedByItsAuthor(t *testing.T) {
 	require.NoError(t, text.err)
 	lines := strings.Split(text.out, "\n")
 	require.GreaterOrEqual(t, len(lines), 6)
-	assert.Contains(t, lines[0], "(@alice)")
+	assert.Contains(t, lines[0], "(@alice) 1", "the handle, then the id member verbs take")
 	assert.Contains(t, lines[0], "Evil")
 	assert.NotContains(t, text.out, "\x1b")
 	assert.NotContains(t, text.out, "\u202e")
-	assert.True(t, strings.HasSuffix(lines[2], "  deleted account"), "%q", lines[2])
+	assert.True(t, strings.HasSuffix(lines[2], "  deleted account 1"), "%q", lines[2])
 	assert.True(t, strings.HasSuffix(lines[4], "  -"), "%q", lines[4])
 
 	js := runVerb(t, f, "", "--json", "message", "list", "20")

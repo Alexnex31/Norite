@@ -90,8 +90,9 @@ url = "https://github.com/Alexnex31/Norite"
 channels_per_guild = 500
 roles_per_guild = 250
 guilds_per_account = 50
-# Every guild an account is in, owned ones included: what an invite redemption is refused past (M20a).
-# At least guilds_per_account.
+# Every guild an account is in, owned ones included: what an invite redemption, and creating a guild, is
+# refused past (M20a). At most 1000, which is what a daemon keeps. Left unset it follows a raised
+# guilds_per_account, so an instance that raised that one keeps its accounts' reach.
 joined_guilds_per_account = 100
 # Live invites per guild, which its invite list returns whole (M20a).
 invites_per_guild = 500
