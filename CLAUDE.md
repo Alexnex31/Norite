@@ -2339,6 +2339,10 @@ should be fixed, not tolerated:
   decision here has somewhere durable — ADRs, roadmap entries, the optimization review's "deliberate
   non-optimizations confirmed" — and security rejections were the one kind with nowhere, so they came
   back. **Read it before reporting a finding**; each entry carries the condition that would reopen it.
+- `docs/trying-the-alpha.md` — **how somebody runs an instance and joins it from other machines**, linked
+  from the README rather than inside it. It is the alpha's guide, not self-hosting documentation, which is
+  M96's and replaces it. Its commands are ones a stranger will paste, so a change to a flag, a default or a
+  config key it names is a reason to walk it again.
 - `docs/adr/` — **why the contested calls went the way they did.** Superseded ADRs stay, marked as such in
   both directions. `SECURITY.md` covers vulnerability-reporting
 process, not architecture.
