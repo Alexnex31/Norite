@@ -1245,7 +1245,19 @@ of this section.
     prefix, under its own exit code, 4, rather than 2. 4 keeps "the instance said no" apart from "my
     arguments were wrong", which a script retrying or reporting needs to tell apart (C2, decided at
     planning).
-- **M20a — First usable client, end to end**: the smallest thing two people can actually hold a
+- **M20a — First usable client, end to end**: done. Bare `norite` on a terminal opens the client
+  (`cli/internal/tui`): home with the account's guilds and channels and a two-step invite redeem, and one
+  channel pane drawn live over the attach socket. Guild invites (five routes, migration `000025`, three audit
+  verbs, `GUILD_MEMBER_ADD`), `Message.author`, `cli/internal/ops` shared by the verbs and the client,
+  `norite invite`, `norite register`, `norite about`, and the first release's pipeline: goreleaser pinned,
+  one client archive, cosign keyless over `checksums.txt`. Decisions are in this entry, in
+  `docs/architecture.md`, and in `docs/security-ledger.md`.
+
+  **`norite register` was not in this entry**, and writing "Trying the alpha" found it was needed: on an
+  instance without a configured provider, the second person this milestone is for could only be created
+  with curl. It talks to the instance directly, as `norite login` does, and stores nothing.
+
+  What follows is the entry as planned. It describes the smallest thing two people can actually hold a
   conversation in. Bare `norite` on a terminal opens a home screen naming the signed-in account, listing
   its guilds with their text channels, and offering a box to redeem an invite; opening a channel shows one
   pane with a message list, a composer and quit, and ESC returns home. No guild rail, no panes or splits,
