@@ -61,6 +61,9 @@ And the words:
 
 ## Getting the programs
 
+**Joining from Windows?** [Trying the alpha on Windows](trying-the-alpha-on-windows.md) covers a PC's side
+from start to finish: getting or building the programs, creating an account, signing in, joining and talking.
+
 **From a release.** Download from the [releases page](https://github.com/Alexnex31/Norite/releases):
 
 - the **server archive** for the server machine's operating system and architecture;
@@ -259,7 +262,8 @@ machine its owner uses, skipping step 5 — the account already exists.
 
 ## Part 2 — each person's machine
 
-Every person does this on their own machine, with only the client archive: no server, no Postgres.
+Every person does this on their own machine, with only the client archive: no server, no Postgres. On
+Windows, [Trying the alpha on Windows](trying-the-alpha-on-windows.md) covers this part and joining a guild.
 
 ### Step 5 — create an account
 
