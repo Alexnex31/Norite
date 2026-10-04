@@ -2262,6 +2262,13 @@ And on guild invites and the first client, from M20a:
 - **Testing the client**: drive `Update` and `View` at a fixed size with the harness in `tui_test.go`
   (teatest has never been tagged), against `daemontest`'s contract-checked fake; play a hostile instance
   with `bounds_test.go`'s stub, which the fake cannot be, since it holds every answer to the contract.
+- **The installers in `scripts/` restate what a release publishes**: the archive names, `checksums.txt`,
+  and the cosign identity pinned to `release.yml` at the tag. A change to any of those in
+  `.goreleaser.yaml` changes `install.sh` and `install.ps1` in the same commit. `install-server.sh` gets its
+  programs through `install.sh`, so downloading and checking exist once. Test them against `dist/` served
+  over HTTP with `NORITE_RELEASE_BASE_URL`, and **never run `install-server.sh` in a test without `--dir`
+  and `--bin-dir`**: its defaults are a real instance and a real `~/.local/bin`, and a run without them
+  once registered a second server on a live one's port.
 - **A release is proved by `just release-dry-run`** before a tag. Builds run with `GOWORK=off`, there is no
   `go work sync` hook, and the release footer, which carries the `cosign verify-blob` command pinned to
   `release.yml` at the tag, is configuration.

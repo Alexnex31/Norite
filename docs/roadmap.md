@@ -1257,6 +1257,12 @@ of this section.
   instance without a configured provider, the second person this milestone is for could only be created
   with curl. It talks to the instance directly, as `norite login` does, and stores nothing.
 
+  **Neither were the installers.** `scripts/install.sh` and `scripts/install.ps1` set a client up in one
+  command, and `scripts/install-server.sh` an instance, after the first person to try the alpha on a second
+  machine met an older build with no `register`. They restate the release's archive names and signing
+  identity, so they change with `.goreleaser.yaml`. M24's updater and M96's self-hosting documentation
+  inherit them rather than replace them.
+
   What follows is the entry as planned. It describes the smallest thing two people can actually hold a
   conversation in. Bare `norite` on a terminal opens a home screen naming the signed-in account, listing
   its guilds with their text channels, and offering a box to redeem an invite; opening a channel shows one

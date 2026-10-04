@@ -13,6 +13,7 @@ worth reporting as a [GitHub issue](https://github.com/Alexnex31/Norite/issues).
 ## Contents
 
 - [What you need](#what-you-need)
+- [The quick way: the installer](#the-quick-way-the-installer)
 - [Getting the programs](#getting-the-programs)
 - [Step 1 — check you can reach the instance](#step-1--check-you-can-reach-the-instance)
 - [Step 2 — create an account](#step-2--create-an-account)
@@ -34,6 +35,43 @@ worth reporting as a [GitHub issue](https://github.com/Alexnex31/Norite/issues).
   - **the instance URL**, such as `http://192.168.1.20:8080` or `https://chat.example.com`;
   - **an instance invite code**, only if the instance's registration is `invite` — ask;
   - **a guild invite code**, to join their guild once you have an account.
+
+## The quick way: the installer
+
+[`scripts/install.ps1`](../scripts/install.ps1) does the rest of this guide in one go: it gets the two
+programs, puts them in `%LOCALAPPDATA%\Programs\Norite` and on your `PATH`, starts the daemon, and offers
+to create an account or sign in. In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex
+```
+
+From a checkout, with Go installed, it builds that checkout instead — the way to use it before a release
+exists. Windows does not run a downloaded script file by default, so allow it for this one window first:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\install.ps1
+```
+
+What to know about it:
+
+- **It has run the least of anything here.** Its downloading and checking were exercised under PowerShell
+  on Linux, tampered archive included. Everything after the files are in place — the `PATH`, the daemon,
+  the questions — had not run on a real Windows machine when this was written. If it stops, the steps
+  below do the same by hand, and its output is worth an issue.
+- **A download is checked before it is installed**: the archive must match the release's `checksums.txt`,
+  and with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) installed that file's
+  signature is verified too. Without it the script says the signature was not checked.
+- **The daemon is started hidden, for now.** It does not come back after Windows restarts unless you pass
+  `-AutoStart`, which registers it at logon and is the least-tried path of all (see step 3).
+- **Options need the longer form**, since `irm | iex` cannot carry any:
+
+  ```powershell
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Instance https://chat.example.com
+  ```
+
+  `Get-Help .\scripts\install.ps1 -Detailed` lists them, `-Uninstall` among them.
 
 ## Getting the programs
 

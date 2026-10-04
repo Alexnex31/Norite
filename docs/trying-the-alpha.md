@@ -18,6 +18,7 @@ things in ways that need you to start over.
 ## Contents
 
 - [The pieces, and the words this guide uses](#the-pieces-and-the-words-this-guide-uses)
+- [The quick way: the installers](#the-quick-way-the-installers)
 - [Getting the programs](#getting-the-programs)
 - [Decide how people will reach the server](#decide-how-people-will-reach-the-server)
 - [Part 1 — the server](#part-1--the-server)
@@ -58,6 +59,50 @@ And the words:
   | Made by | the administrator, on the server machine | the guild's owner, from any machine |
   | Made with | `norite instance invite create` | `norite invite create CHANNEL_ID` |
   | Used with | `norite register --invite-code CODE` | the box on the client's home screen |
+
+## The quick way: the installers
+
+Three scripts in [`scripts/`](../scripts) do most of this guide for you. The rest of the guide is what they
+do, step by step, and is where to look when one of them stops.
+
+**On each person's machine**, macOS or Linux, this installs the client and the daemon, starts the daemon,
+and offers to create an account or sign in. It replaces [Part 2](#part-2--each-persons-machine):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh
+```
+
+On Windows, it is `install.ps1`; see [Trying the alpha on Windows](trying-the-alpha-on-windows.md).
+
+**On the server machine**, Linux with systemd, this sets up the instance. It replaces
+[Part 1](#part-1--the-server), apart from making the address reach the machine, which is the section
+[Decide how people will reach the server](#decide-how-people-will-reach-the-server) and is still yours:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install-server.sh |
+    sh -s -- --url http://192.168.1.20:8080 --docker-postgres
+```
+
+Add `--behind-proxy` when a reverse proxy or a tunnel on the same machine handles HTTPS, with the `https://`
+address as `--url`. `--docker-postgres` starts Postgres 16 in Docker with a generated password; without it,
+the script asks how to reach a Postgres you already have.
+
+What to know about them:
+
+- **Nothing needs root.** The programs go in `~/.local/bin`, the instance in `~/norite-instance`, and the
+  server runs as a systemd *user* service. The server script asks systemd to keep that service running
+  after you log out ("lingering"); where that is refused, it says so and gives the one `sudo` command.
+- **From a checkout they build that checkout**, with Go installed: `./scripts/install.sh`, and
+  `./scripts/install-server.sh` with the same options. That is the way to use them before a release exists.
+- **A download is checked before it is installed.** Each archive must match the release's `checksums.txt`,
+  and with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) installed, that file's
+  signature is verified too. Without cosign the script says plainly that the signature was not checked;
+  `--require-signature` makes that a failure instead.
+- **Running one again is an upgrade.** The programs are replaced and the daemon or the server restarted.
+  The server script leaves an existing `instance.toml`, and so the database and every account, alone.
+- **`--help` lists the switches**, including `--no-daemon`, `--no-account`, `--no-service` and, for the
+  client, `--uninstall`.
+- **If you would rather read a script before running it**, download it, read it, then run it with `sh`.
 
 ## Getting the programs
 
