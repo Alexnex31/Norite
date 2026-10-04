@@ -128,6 +128,7 @@ func New(out, errOut io.Writer) *cli.Command {
 		},
 
 		Commands: append([]*cli.Command{
+			login.RegisterCommand(),
 			login.Command(),
 			login.LogoutCommand(),
 			daemonctl.GroupCommand(),

@@ -390,8 +390,15 @@ func (r *Runner) finish(ctx context.Context, s session, pair tokenPair, fallback
 // Flag, then environment, then the instance a previous login recorded. The last is what makes re-logging-in
 // after a password change a single word rather than a URL someone has to remember.
 func (r *Runner) resolveInstance(previous credentials.Record) (string, error) {
-	if r.Options.Instance != "" {
-		return credentials.ParseInstanceURL(r.Options.Instance)
+	return resolveInstanceURL(r.Options.Instance, previous)
+}
+
+// resolveInstanceURL is where a command that talks to an instance directly is pointed: the flag, then the
+// environment, then the instance the last login recorded. `norite login` and `norite register` both use it,
+// so a URL one of them would refuse the other refuses too.
+func resolveInstanceURL(flag string, previous credentials.Record) (string, error) {
+	if flag != "" {
+		return credentials.ParseInstanceURL(flag)
 	}
 	if fromEnv := strings.TrimSpace(os.Getenv(instanceEnvVar)); fromEnv != "" {
 		return credentials.ParseInstanceURL(fromEnv)
@@ -405,7 +412,7 @@ func (r *Runner) resolveInstance(previous credentials.Record) (string, error) {
 	}
 
 	return "", fmt.Errorf(
-		"no instance to log in to: pass --instance https://chat.example.com, or set %s", instanceEnvVar)
+		"no instance given: pass --instance https://chat.example.com, or set %s", instanceEnvVar)
 }
 
 // loadPrevious reads the stored record, treating "nothing stored yet" as an empty one.
