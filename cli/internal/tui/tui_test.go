@@ -599,3 +599,46 @@ func TestANarrowTerminalStillSaysWhenItRetries(t *testing.T) {
 	}}, 40, 12)
 	c.shows("trying again in 1s")
 }
+
+// TestAChannelWhoseHistoryCannotBeReadSaysSo: a member who may view and post but not read the backlog (M15's
+// support-thread configuration) is told the earlier messages could not be read, not that there are none.
+func TestAChannelWhoseHistoryCannotBeReadSaysSo(t *testing.T) {
+	f := newFixture(t)
+	f.d.On("listChannelMessages", func(daemontest.Request) (int, any) {
+		return 403, map[string]any{"error": map[string]any{"code": "forbidden", "message": "forbidden",
+			"request_id": "r1"}}
+	})
+	c := drive(t, Options{Dial: f.dialer(signedIn("bob"), nil), Channel: "20"}, 100, 24)
+	c.shows("earlier messages could not be read")
+	assert.NotContains(t, c.screen(), "No messages yet")
+
+	// And what arrives live is still drawn.
+	raw, _ := json.Marshal(message("300", "20", "2", "Bob", "arrived live"))
+	f.d.Dispatch("MESSAGE_CREATE", raw)
+	c.shows("arrived live")
+}
+
+// TestALateSendAnswerLeavesAReopenedPaneAlone: a send answered after its pane was closed and the channel
+// reopened belongs to the closed pane, and does not clear what is being typed in the new one.
+func TestALateSendAnswerLeavesAReopenedPaneAlone(t *testing.T) {
+	f := newFixture(t)
+	release := make(chan struct{})
+	f.d.On("sendMessage", func(r daemontest.Request) (int, any) {
+		<-release
+		return 201, message("400", "20", "1", "Alice", "first")
+	})
+	c := drive(t, Options{Dial: f.dialer(signedIn("alice"), nil)}, 80, 24)
+	c.shows("# general")
+	c.press("enter")
+	c.shows("No messages yet")
+	c.typeText("first")
+	c.press("enter")
+	c.press("esc")
+	c.shows("YOUR GUILDS")
+	c.press("enter")
+	c.shows("No messages yet")
+	c.typeText("the new draft")
+	close(release)
+	c.settle()
+	assert.Contains(t, c.screen(), "the new draft", "the reopened pane keeps its draft")
+}

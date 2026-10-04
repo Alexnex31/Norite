@@ -141,6 +141,7 @@ public_base_url = {{ .PublicBaseURL | toml }}
 # it was protecting.
 channels_per_guild = 500
 roles_per_guild = 250
+# Guilds an account may own. At most 1000, like the joined ceiling below: an owned guild is a membership too.
 guilds_per_account = 50
 # Every guild an account may be in, owned ones included. Left unset it follows guilds_per_account when that
 # is raised past 100, up to 1000; set it below guilds_per_account and the instance refuses to start.

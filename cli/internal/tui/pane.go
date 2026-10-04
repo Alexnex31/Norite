@@ -35,6 +35,7 @@ type paneModel struct {
 
 	msgs   []apicontract.Message // ascending by id, at most maxHeld
 	loaded bool
+	unread bool   // the backlog could not be read, so an empty pane is not an empty channel
 	gone   string // why the channel can no longer be used, once it cannot
 
 	scroll   int // rows above the bottom; 0 follows new messages
@@ -67,10 +68,12 @@ type historyMsg struct {
 	err       error
 }
 
+// sentMsg answers one send, naming the pane that sent it rather than its channel: a pane closed and the same
+// channel reopened before the answer came is another pane, and the answer must not reset its composer.
 type sentMsg struct {
-	channelID string
-	msg       apicontract.Message
-	err       error
+	pane *paneModel
+	msg  apicontract.Message
+	err  error
 }
 
 // fetch reads one page of the channel's backlog.
@@ -114,7 +117,7 @@ func (p *paneModel) merge(page []apicontract.Message) {
 			p.upsert(m)
 		}
 	}
-	p.loaded = true
+	p.loaded, p.unread = true, false
 	p.trim()
 }
 
@@ -208,7 +211,7 @@ func (m Model) paneKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			sent, err := call(s, func(ctx context.Context, s Session) (apicontract.Message, error) {
 				return ops.SendMessage(ctx, s, channel, text, nil)
 			})
-			return sentMsg{channelID: channel, msg: sent, err: err}
+			return sentMsg{pane: p, msg: sent, err: err}
 		}
 	}
 	if p.gone != "" {
@@ -305,7 +308,13 @@ func (p *paneModel) view(width, height int) string {
 	case !p.loaded:
 		body = []string{sDim.Render("loading…")}
 	case len(p.msgs) == 0:
-		body = []string{sDim.Render("No messages yet. Say something.")}
+		if p.unread {
+			// A member may view and post without READ_MESSAGE_HISTORY (M15), and an empty pane would claim
+			// the channel holds nothing. New messages still arrive while it is open.
+			body = []string{sWarn.Render("This channel's earlier messages could not be read; new ones will appear here.")}
+		} else {
+			body = []string{sDim.Render("No messages yet. Say something.")}
+		}
 	default:
 		end := max(len(all)-p.scroll, 0)
 		start := max(end-area, 0)

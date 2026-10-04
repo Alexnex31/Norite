@@ -37,7 +37,7 @@ func TestAnInstanceThatRaisedItsOwnedCeilingStillStarts(t *testing.T) {
 	}{
 		{"50", 100},    // the defaults
 		{"200", 200},   // raised past the joined default: followed
-		{"5000", 1000}, // past what a daemon keeps: capped there
+		{"1000", 1000}, // at what a daemon keeps; past it is refused (TestTheOwnedCeilingCannotOutgrowTheJoinedOne)
 	} {
 		t.Run(tc.owned, func(t *testing.T) {
 			cfg, err := loadWithEnv(t, map[string]string{"MAX_GUILDS_PER_ACCOUNT": tc.owned})
@@ -65,9 +65,25 @@ func TestAnInstanceThatRaisedItsOwnedCeilingStillStarts(t *testing.T) {
 // the daemon keeps as its own bound: a struct tag cannot name a constant, and the two drifting apart is an
 // account joining guilds its daemon drops.
 func TestTheJoinedCeilingsBoundIsTheWiresBound(t *testing.T) {
-	field, ok := reflect.TypeOf(Config{}).FieldByName("MaxJoinedGuildsPerAccount")
-	require.True(t, ok)
-	assert.Contains(t, strings.Split(field.Tag.Get("validate"), ","), "lte="+strconv.Itoa(gatewayproto.MaxGuilds))
+	// Both ceilings: an owned guild is a membership too, so an owned ceiling above the wire's bound is one the
+	// joined ceiling silently caps.
+	for _, name := range []string{"MaxJoinedGuildsPerAccount", "MaxGuildsPerAccount"} {
+		field, ok := reflect.TypeOf(Config{}).FieldByName(name)
+		require.True(t, ok)
+		assert.Contains(t, strings.Split(field.Tag.Get("validate"), ","), "lte="+strconv.Itoa(gatewayproto.MaxGuilds), name)
+	}
+}
+
+// TestTheOwnedCeilingCannotOutgrowTheJoinedOne: guilds_per_account past what a daemon keeps refuses to start,
+// naming the setting, where it used to start and be capped at 1000 by the joined ceiling it implies.
+func TestTheOwnedCeilingCannotOutgrowTheJoinedOne(t *testing.T) {
+	_, err := loadWithEnv(t, map[string]string{"MAX_GUILDS_PER_ACCOUNT": "1001"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NORITE_MAX_GUILDS_PER_ACCOUNT")
+
+	cfg, err := loadWithEnv(t, map[string]string{"MAX_GUILDS_PER_ACCOUNT": "1000"})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1000, cfg.MaxJoinedGuildsPerAccount, "and at the bound, the joined ceiling follows it")
 }
 
 // TestTheJoinedCeilingStopsAtWhatADaemonKeeps: a daemon keeps 1000 guilds (state.maxGuilds), so a ceiling

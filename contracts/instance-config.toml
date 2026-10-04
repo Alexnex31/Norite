@@ -89,6 +89,7 @@ url = "https://github.com/Alexnex31/Norite"
 [limits]
 channels_per_guild = 500
 roles_per_guild = 250
+# Guilds an account may own. At most 1000, like the joined ceiling below: an owned guild is a membership too.
 guilds_per_account = 50
 # Every guild an account is in, owned ones included: what an invite redemption, and creating a guild, is
 # refused past (M20a). At most 1000, which is what a daemon keeps. Left unset it follows a raised

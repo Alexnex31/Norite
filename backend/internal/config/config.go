@@ -69,7 +69,10 @@ type Config struct {
 	// limit, it has removed the thing the limit was protecting.
 	MaxChannelsPerGuild int32 `validate:"required,gte=1,lte=10000"`
 	MaxRolesPerGuild    int32 `validate:"required,gte=1,lte=10000"`
-	MaxGuildsPerAccount int32 `validate:"required,gte=1,lte=10000"`
+	// The owned ceiling stops where the joined one does, gatewayproto.MaxGuilds: every owned guild is also a
+	// membership, so owning more than READY names and a daemon keeps could never work. At 10000 it accepted
+	// a value the unset joined ceiling then capped at 1000 without a word (M20a's review).
+	MaxGuildsPerAccount int32 `validate:"required,gte=1,lte=1000"`
 	// M20a's two. The joined ceiling counts every membership, owned guilds included, and is what bounds
 	// READY's guild list; the invite ceiling counts a guild's live invites, which its listing returns whole.
 	//

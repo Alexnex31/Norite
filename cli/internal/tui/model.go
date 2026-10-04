@@ -166,7 +166,7 @@ func (m *Model) onAttached(msg attachedMsg) tea.Cmd {
 		if m.pane != nil {
 			// Read afresh rather than merged into what the pane held: a resync means the daemon's view was
 			// cleared, and a message deleted in the gap would otherwise stay on screen as history.
-			m.pane.msgs, m.pane.loaded, m.pane.scroll = nil, false, 0
+			m.pane.msgs, m.pane.loaded, m.pane.unread, m.pane.scroll = nil, false, false, 0
 			cmds = append(cmds, m.pane.fetch(m.gen, m.sess))
 		}
 	case ipc.StandingStarting:
@@ -364,13 +364,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.setStatus("could not read this channel: "+termsafe.Text(msg.err.Error()), true)
-			m.pane.loaded = true
+			m.pane.loaded, m.pane.unread = true, true
 			return m, nil
 		}
 		m.pane.merge(msg.msgs)
 		return m, nil
 	case sentMsg:
-		if m.pane == nil || m.pane.channelID != msg.channelID {
+		if m.pane == nil || m.pane != msg.pane {
 			return m, nil
 		}
 		m.pane.sending = false
