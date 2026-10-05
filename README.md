@@ -18,14 +18,25 @@ software.
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
 [![Milestone](https://img.shields.io/badge/milestone-M20a%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
-> [!WARNING]
-> **Early implementation. The first usable thing exists, and it is small.** Since `M20a` two people can
-> hold a text conversation in the terminal client: one invites the other into a guild, the other redeems
-> the code from the client's home screen, and both see each other's messages as they are sent. That is
-> nearly all it does. Voice does not exist, there are no DMs, no presence, no GUI, one channel at a time and
-> no formatting. Underneath it, accounts, two-factor, OAuth, the permission core, moderation and the
-> real-time gateway are built and reviewed. See [Status](#status) for exactly what is built,
-> [Trying the alpha](docs/trying-the-alpha.md) to run it, and note that the full scope here is multi-year work.
+**You can run it and talk on it today.** The first client landed at `M20a`, and with it:
+
+- **Host your own instance** — one server program and a Postgres database, with open or invite-only
+  registration. [`scripts/install-server.sh`](scripts/install-server.sh) sets one up on Linux.
+- **Create an account from the terminal** with `norite register`, and protect it with two-factor.
+- **Build a guild** — channels, roles, per-channel permissions — and invite people into it with a code.
+- **Talk in it.** Bare `norite` opens the terminal client: your guilds and their channels, a box to redeem
+  an invite, and a channel that draws messages as they arrive and sends what you type.
+- **Script it.** More than forty `norite` verbs cover guilds, channels, roles, members, messages, reports
+  and tags, each with `--json`.
+- **Moderate it** — an audit log of who changed what, reports with a moderation queue, and message edit
+  history.
+
+[Trying the alpha](docs/trying-the-alpha.md) walks through all of it, on one machine or several.
+
+> [!NOTE]
+> **It is still early, and text only.** Voice, DMs, presence and the GUI are not built yet; the client
+> shows one channel at a time, in plain text; and no third party has reviewed the code. The full scope is
+> multi-year work — [Status](#status) says exactly what exists.
 
 ---
 
@@ -91,7 +102,8 @@ Registering an address that already has an account is indistinguishable from reg
 an address is confirmed by email before its account can be used.
 
 **The honest threshold was always when two people can hold a text conversation, and `M20a` is where it was
-crossed.** It is a narrow product on purpose: a home screen and one channel at a time, plain text, no voice.
+crossed.** The client is deliberately small — a home screen and one channel at a time, plain text, no voice —
+and everything under it is the real thing rather than a demo.
 What `M12` through `M14` built is the permission model those conversations happen inside and the record of who
 changed it; `M15` is the conversation itself, `M16` is how it gets moderated, `M16a` is what a moderator reads
 when the message was edited after it was reported, and `M16b` is what a guild can choose to keep. The client
@@ -101,7 +113,7 @@ with the full frame the [TUI screens](docs/design/tui/) specify.
 One consequence of `M16b` is worth stating plainly rather than leaving in the changelog: a guild whose
 owner switches recording on keeps every message sent in it, including edits and deletions, and the
 member-facing screen that would tell people so is `M62a`. Until then the setting is readable through the
-API by anyone in the guild and rendered by nothing, because there is no client to render it in.
+API by anyone in the guild, and the first client does not draw it.
 
 > [!NOTE]
 > **On releases.** Norite uses [Semantic Versioning](https://semver.org/).
@@ -181,7 +193,8 @@ first-class client rather than a companion is in
 The CLI and the TUI ship in one binary and share one command tree, which is what keeps the scriptable
 surface and the interactive one from drifting apart: every verb is runnable from the TUI's `M-x`.
 
-The shape it is aiming for, once `M43` renders messages:
+Today's client is the first cut of it: a home screen listing your guilds and channels, and one channel
+drawn live. The shape it is growing into, through `M43`:
 
 ```
 ┌───┬──────────────┬────────────────────────────────────────────┬──────────────┐
@@ -205,7 +218,9 @@ The shape it is aiming for, once `M43` renders messages:
 
 ## Planned v1 scope
 
-None of this is built. All of it is v1 rather than a later phase — the roadmap is ordered so the
+The first part of this is built — guilds, channels, roles and permissions, real-time text messaging,
+guild invites, message tagging, reports and registration gating — and [Status](#status) says exactly
+which. The rest is not yet. All of it is v1 rather than a later phase — the roadmap is ordered so the
 foundations land first, not so that scope gets dropped at the end.
 
 - **Guilds, channels, roles and permissions**, with real-time messaging over a WebSocket gateway
@@ -238,7 +253,8 @@ foundations land first, not so that scope gets dropped at the end.
 
 Norite borrows Discord's shape deliberately — guilds, channels, roles, a gateway protocol built on the
 same ideas — because that shape works and relearning it buys nobody anything. What follows is where it
-goes somewhere else. Almost none of it is built yet; this is what the plan is for.
+goes somewhere else. The first three already hold in their first form — a terminal client you can talk in,
+an instance you can host, and the source in front of you. The rest is what the plan is for.
 
 - **The terminal as a real client, not a curiosity.** A full-screen TUI with pane splitting and chorded
   keybindings, and a scriptable CLI with `--json` on every verb. Voice calls from both.
@@ -255,9 +271,9 @@ goes somewhere else. Almost none of it is built yet; this is what the plan is fo
 - **In-channel whispers, message tagging, and bandwidth toggles** for constrained connections.
 
 Where Discord is ahead, and will stay ahead for a long time: video and screen-share are deferred here,
-there are no mobile clients planned for v1, and there is no ecosystem, no user base, and — today — no
-messaging at all. Discord also end-to-end encrypts every voice and video call by default; Norite's
-end-to-end encryption covers text DMs only.
+there are no mobile clients planned for v1, and there is no ecosystem and no user base. Today Norite does
+text in guild channels and nothing else: no voice yet, no DMs, no presence. Discord also end-to-end
+encrypts every voice and video call by default; Norite's end-to-end encryption covers text DMs only.
 
 ---
 
