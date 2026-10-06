@@ -28,6 +28,9 @@ single shared, hand-editable TOML config file (`pelletier/go-toml` v2, document-
 comments) holds theme/keybindings/notification-filter data; a second, daemon-owned state file holds anything
 daemon-written-only (plugin capability grants + pinned hashes, the voice-channel breadcrumb). Every writer
 uses atomic writes plus `gofrs/flock` locking; the daemon hot-reloads on external changes via `fsnotify`.
+*(Corrected at M21: `go-toml` v2 has no document-editing mode. Comments are kept by
+replacing the byte range of the value being changed, over v2's `unstable.Parser`. See
+`docs/architecture.md` §3, "Config file".)*
 
 ## Consequences
 - A stalled/frozen attach client can never block the daemon's core loop: the daemon's write path to each
@@ -42,7 +45,7 @@ uses atomic writes plus `gofrs/flock` locking; the daemon hot-reloads on externa
 - Cross-client pane splitting is a requirement for all three clients but is never synced across clients or
   devices by default — each client implements its own split-pane engine, and layout lives in the daemon/
   config-file state (CLI/GUI, same machine) or `localStorage` (web, separate codebase). A same-machine
-  CLI/GUI toggle can opt into separate config files instead of the default shared one; `norite config export`/
+  TUI/GUI toggle can opt into separate config files instead of the default shared one; `norite config export`/
   `import` carries preferences across separate daemons/machines manually.
 - The daemon proactively raises `RLIMIT_NOFILE` at startup — it's effectively a local server holding many
   simultaneous handles (gateway WS, N attach sockets, bot-automation TCP, voice-worker pipes, SQLite/log

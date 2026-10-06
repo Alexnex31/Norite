@@ -127,7 +127,9 @@ Locked-in decisions:
 │   ├── internal/relay/           # attach clients' REST calls, made with the daemon's token (M20)
 │   ├── ipc/                      # the attach socket's protocol and client half, outside internal/ for the
 │   │                             #   CLI and GUI (M20); the bot-automation TCP listener joins at M22
-│   ├── config/                   # go-toml v2 document-editing, fsnotify hot-reload, flock, config split
+│   ├── config/                   # the client config: byte-range edits over go-toml v2, flock, the
+│   │                             #   fsnotify watch, the split toggle (M21); outside internal/
+│   ├── atomicfile/               # the one temp-file-plus-rename writer, directory fsync included (M21)
 │   ├── plugins/                  # wazero host, capability manifest + hash-pinning
 │   ├── voiceworker/               # os/exec spawn/supervise, stdin/stdout IPC framing
 │   ├── e2e/                       # keystore (modernc.org/sqlite), ratchet, single-writer goroutine, FTS5
@@ -1691,20 +1693,50 @@ durable concern**: `channel_read_states` (§2) is Postgres-backed and synced via
 event — a channel is marked read automatically when the client's viewport reaches the latest message,
 debounced, so opening any client on any machine shows accurate unread state.
 
-**Config file** (`~/.config/norite/config.toml`, TOML, `pelletier/go-toml` v2 document-editing mode —
-preserves hand-written comments/formatting): covers theme, keybindings, notification filters, pane-layout
-preferences — anything a user should freely hand-edit. Keys are namespaced `[shared]`, `[tui]`, `[gui]`:
-cross-cutting settings live in `[shared]` and a client section overrides them. There is deliberately **no
-`[cli]` section** — the scriptable command tree has nothing to style, and the section that used to carry
-that name was really about chords and colours, which belong to the TUI (§4a, ADR 0026). Chords are
-`[tui.keys]`. Namespacing this way and `norite config get`/`norite config set` expose the
-same file as a scriptable interface rather than a second source of truth. Every writer (CLI, TUI, GUI,
-daemon)
-uses atomic writes
-(temp file + rename) **plus `gofrs/flock`-based locking** around each read-modify-write cycle. The daemon
-hot-reloads on external changes via `fsnotify`. A **second, daemon-owned state file** holds anything
+**Config file** (`~/.config/norite/config.toml`, TOML): covers theme, keybindings, notification filters,
+pane-layout preferences — anything a user should freely hand-edit. The directory is `$XDG_CONFIG_HOME/norite`
+when that is set and absolute, `~/.config/norite` otherwise on Linux **and macOS** (where
+`~/Library/Application Support` stays the *state* directory), and `%APPDATA%\Norite` on Windows. The service
+definition captures `XDG_CONFIG_HOME` as it does the state home, so the daemon and a shell resolve one file.
+
+Keys are namespaced `[shared]`, `[tui]`, `[gui]`: cross-cutting settings live in `[shared]` and a client
+section overrides them. There is deliberately **no `[cli]` section** — the scriptable command tree has
+nothing to style, and the section that used to carry that name was really about chords and colours, which
+belong to the TUI (§4a, ADR 0026). Chords are `[tui.keys]`. `contracts/client-config.toml` lists every key,
+each marked portable or machine-local and with the milestone that gives it a consumer; a key with no
+consumer yet is kept and acted on by nothing. **An unknown key is kept and warned about, never refused** —
+the opposite of the instance config's rule, because an export from a newer client is read by an older one
+and a writer must not delete what it does not understand. Invalid TOML leaves the last good configuration
+in force. **No secret is ever a config key** (rule 8).
+
+**Comments survive a programmatic write because the write is a splice.** `pelletier/go-toml` v2 has no
+document-editing mode — this section said it did until M21's planning read the library, and v2's
+`Marshal` re-emits a document without its comments. v2's `unstable.Parser` gives each node
+the byte range it was read from, so `norite config set` replaces exactly the value's bytes, inserts a
+missing key at the end of its table, and parses the result again before writing. Everything outside the
+edit is untouched by construction rather than by a serializer's good behaviour. The package's name is its
+stability promise; the dependency is pinned, so a change arrives as a compile error on a chosen upgrade.
+
+`norite config path|get|set|unset` expose the same file as a scriptable interface rather than a second
+source of truth, and work with no daemon running. Every writer (CLI, TUI, GUI, daemon) goes through
+`daemon/atomicfile` — temp file, fsync, rename, **and an fsync of the parent directory**, without which
+the rename is not durable across a crash; Windows cannot fsync a directory and says so rather than
+pretending parity — **plus `gofrs/flock`-based locking** around each read-modify-write cycle. The lock is
+a sibling file, never the config itself, whose inode a rename replaces. An editor takes no lock, so a
+writer checks immediately before its rename that the file is still what it read, and reapplies if not:
+the person's save is the edit that must not be lost. For this file the helper **follows a symlink to the
+real file and keeps its mode**, because a config meant to be riced lives in somebody's dotfiles
+repository, and a rename over the link would silently detach it.
+
+**Hot reload**: the daemon watches the real file's directory with `fsnotify` (a directory, because most
+editors save by rename) and sends attach clients a local `CONFIG_UPDATE` dispatch carrying no data. Each
+client reads the file again through `daemon/config`. The daemon interprets nothing on a client's behalf;
+a client attached to no daemon reads once at start.
+
+A **second, daemon-owned state file** (`state.json` in the state directory, `0600`) holds anything
 daemon-written-only: plugin capability grants + pinned `.wasm` hashes (§8), the voice-channel breadcrumb, and
-the same-machine config-toggle setting below — never hand-edited, never included in export.
+the same-machine config-toggle setting below — never hand-edited, never included in export. The daemon is
+its only writer.
 
 **Themes are files, and files are untrusted.** A theme lives at `~/.config/norite/themes/<name>.toml` and
 is selected by name from `[tui]`; a few ship built in. The default maps the token roles onto the terminal's
@@ -1716,15 +1748,24 @@ must be exactly one cell wide** — a two-cell glyph shears every row it lands i
 bans emoji in the first place. A theme sets appearance only; it cannot bind keys, run commands, or reach
 the network.
 
-**Same-machine config toggle**: default off (all local clients share one `config.toml`, as above). An
-app-settings toggle (living in the daemon state file) lets them diverge into separate files on one machine;
-flipping on copies the current shared file to both as a starting point, flipping off reconciles via
-last-write-wins onto one shared file.
+**Same-machine config toggle**: default off (all local clients share one `config.toml`, as above).
+`norite config split` (and, from M82, the settings screen) lets the TUI and the GUI diverge into
+`config.tui.toml` and `config.gui.toml` on one machine; flipping on copies the current shared file to both
+as a starting point and leaves `config.toml` in place, unread. Flipping off (`unsplit`) reconciles onto one
+shared file, and **last-write-wins is per key, not per file**: the more recently written file is the base,
+and a key only the other sets is merged in, since a whole-file winner would drop one client's
+customization. Both split files are kept beside it as `*.before-unsplit`. The setting lives in the daemon
+state file, so both verbs are requests to the daemon over the attach socket (first-party,
+OS-permission-protected, rule 16).
 
 **Config export/import**: `norite config export` / `norite config import` — a portable file covering the
-`config.toml` scope only (never the daemon state file, which is machine-local by nature), for carrying
-preferences between separate daemons/machines. Import merges key-by-key, preserving the target's existing
-customization.
+`config.toml` scope only (never the daemon state file, which is machine-local by nature), and within it
+the keys the contract marks portable, for carrying preferences between separate daemons/machines. **An
+imported file is text from a stranger.** It is bounded before it is parsed, its strings pass `termsafe`
+(rule 19), it is shown and confirmed before anything is written, and it is refused, by name, if it sets a
+machine-local key: a chord bound to a shell command or a plugin path, once those exist, would make an
+import code execution by file. Import merges key-by-key, keeping the target's value for a key both set
+unless `--overwrite` is passed.
 
 **Concurrency model**: the daemon leans on a deliberate family of Go concurrency patterns, not incidental
 goroutine use — a bounded per-connection writer goroutine for each attach client; a single dedicated writer
@@ -1982,7 +2023,7 @@ its structure.
 **Theming**: the shared theme spec (named roles: background/accent/danger/muted/etc.), mapped to Gio's
 native rendering, defined once in config and shared with the TUI's ANSI mapping.
 
-**Settings**: config read/write via the same `go-toml` v2 document-editing approach as the TUI, plus a voice
+**Settings**: config read/write through `daemon/config`, the byte-range editor the TUI uses (§3), plus a voice
 input/output device-selection tab.
 
 **Voice UI**: participant list, mute/deafen controls, an active-speaker indicator (a highlight/ring around
