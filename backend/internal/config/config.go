@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/go-playground/validator/v10"
+
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 )
 
 // Environment names the deployment shape. It only changes cross-cutting defaults (log format, error
@@ -67,8 +69,22 @@ type Config struct {
 	// limit, it has removed the thing the limit was protecting.
 	MaxChannelsPerGuild int32 `validate:"required,gte=1,lte=10000"`
 	MaxRolesPerGuild    int32 `validate:"required,gte=1,lte=10000"`
-	MaxGuildsPerAccount int32 `validate:"required,gte=1,lte=10000"`
-	DBMinConns          int32 `validate:"gte=0,ltefield=DBMaxConns"`
+	// The owned ceiling stops where the joined one does, gatewayproto.MaxGuilds: every owned guild is also a
+	// membership, so owning more than READY names and a daemon keeps could never work. At 10000 it accepted
+	// a value the unset joined ceiling then capped at 1000 without a word (M20a's review).
+	MaxGuildsPerAccount int32 `validate:"required,gte=1,lte=1000"`
+	// M20a's two. The joined ceiling counts every membership, owned guilds included, and is what bounds
+	// READY's guild list; the invite ceiling counts a guild's live invites, which its listing returns whole.
+	//
+	// The joined ceiling stops at 1000, gatewayproto.MaxGuilds, because that is what a daemon keeps: past it
+	// the daemon would drop guilds the instance had let the account join. Left unset it follows a raised
+	// owned ceiling (see Load); set explicitly below the owned ceiling it refuses to start, naming both,
+	// rather than capping it without a word. The first version required it to be at least the owned
+	// ceiling even when unset, which refused to start any instance that had raised that one (/code-review),
+	// and the second dropped the rule, which capped it silently (the second /code-review).
+	MaxJoinedGuildsPerAccount int32 `validate:"required,gte=1,lte=1000"`
+	MaxInvitesPerGuild        int32 `validate:"required,gte=1,lte=10000"`
+	DBMinConns                int32 `validate:"gte=0,ltefield=DBMaxConns"`
 
 	// DBConnectTimeout bounds how long startup waits for the very first successful connection.
 	DBConnectTimeout time.Duration `validate:"required,gt=0"`
@@ -305,6 +321,13 @@ const (
 	defaultMaxChannelsPerGuild = 500
 	defaultMaxRolesPerGuild    = 250
 	defaultMaxGuildsPerAccount = 50
+	// M72a's figure, and the bound READY's guild list already assumed (M18).
+	defaultMaxJoinedGuildsPerAccount = 100
+	// maxJoinedGuildsPerAccount is the validator's lte on the joined ceiling, which the default never
+	// exceeds: gatewayproto.MaxGuilds, what READY names and a daemon keeps. A struct tag cannot name a
+	// constant, so TestTheJoinedCeilingsBoundIsTheWiresBound holds the tag's literal to it.
+	maxJoinedGuildsPerAccount = gatewayproto.MaxGuilds
+	defaultMaxInvitesPerGuild = 500
 )
 
 // Load reads configuration, applies defaults, and validates the result.
@@ -412,6 +435,36 @@ func Load(configPath string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.MaxGuildsPerAccount = guildsPerAccount
+
+	// Unset, the joined ceiling follows a raised owned one, up to what a daemon keeps, so an instance that
+	// raised guilds_per_account before M20a keeps letting its accounts own that many.
+	joinedDefault := min(max(defaultMaxJoinedGuildsPerAccount, guildsPerAccount), maxJoinedGuildsPerAccount)
+	joinedPerAccount, err := getEnvInt32("MAX_JOINED_GUILDS_PER_ACCOUNT",
+		fileInt32(file.Limits.JoinedGuildsPerAccount, joinedDefault))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxJoinedGuildsPerAccount = joinedPerAccount
+
+	// Set explicitly below the owned ceiling, the joined one would cap it without a word: an operator who
+	// raised guilds_per_account to 200 beside a joined_guilds_per_account of 100 would find accounts
+	// refused at 100. Refused at startup instead, naming both. Unset, it follows the owned ceiling above, so
+	// only a value somebody wrote can disagree (M20a /code-review).
+	raw, fromEnv := os.LookupEnv(envPrefix + "MAX_JOINED_GUILDS_PER_ACCOUNT")
+	explicit := file.Limits.JoinedGuildsPerAccount != nil || (fromEnv && raw != "")
+	if explicit && joinedPerAccount < guildsPerAccount {
+		return Config{}, fmt.Errorf("config: %s ([limits].joined_guilds_per_account) is %d, below %s "+
+			"([limits].guilds_per_account), %d: an account could never own as many guilds as that allows. Raise "+
+			"it, or remove it to follow guilds_per_account", envPrefix+"MAX_JOINED_GUILDS_PER_ACCOUNT",
+			joinedPerAccount, envPrefix+"MAX_GUILDS_PER_ACCOUNT", guildsPerAccount)
+	}
+
+	invitesPerGuild, err := getEnvInt32("MAX_INVITES_PER_GUILD",
+		fileInt32(file.Limits.InvitesPerGuild, defaultMaxInvitesPerGuild))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxInvitesPerGuild = invitesPerGuild
 
 	maxConns, err := getEnvInt32("DB_MAX_CONNS", fileInt32(file.Database.MaxConns, defaultDBMaxConns()))
 	collect(err)
@@ -589,7 +642,16 @@ func describeFieldError(fe validator.FieldError, sourcePath string) string {
 	if fe.Param() == "" {
 		return fmt.Sprintf("%s: failed %q", name, fe.Tag())
 	}
-	return fmt.Sprintf("%s: failed %q (%s)", name, fe.Tag(), fe.Param())
+	param := fe.Param()
+	// A cross-field rule's parameter is a Go field name, which an operator never writes: name the other
+	// setting the way this one is named.
+	if strings.HasSuffix(fe.Tag(), "field") {
+		param = envVarFor(param)
+		if key := fileKeyFor(fe.Param()); sourcePath != "" && key != "" {
+			param = fmt.Sprintf("%s or %s", param, key)
+		}
+	}
+	return fmt.Sprintf("%s: failed %q (%s)", name, fe.Tag(), param)
 }
 
 // fileKeyFor maps a Go field name to its key in the instance config file. Kept beside envVarFor because
@@ -618,6 +680,10 @@ func fileKeyFor(field string) string {
 		return "[limits].roles_per_guild"
 	case "MaxGuildsPerAccount":
 		return "[limits].guilds_per_account"
+	case "MaxJoinedGuildsPerAccount":
+		return "[limits].joined_guilds_per_account"
+	case "MaxInvitesPerGuild":
+		return "[limits].invites_per_guild"
 	case "DBMaxConns":
 		return "[database].max_conns"
 	case "DBMinConns":
@@ -706,6 +772,10 @@ func envVarFor(field string) string {
 		return envPrefix + "MAX_ROLES_PER_GUILD"
 	case "MaxGuildsPerAccount":
 		return envPrefix + "MAX_GUILDS_PER_ACCOUNT"
+	case "MaxJoinedGuildsPerAccount":
+		return envPrefix + "MAX_JOINED_GUILDS_PER_ACCOUNT"
+	case "MaxInvitesPerGuild":
+		return envPrefix + "MAX_INVITES_PER_GUILD"
 	case "DatabaseURL":
 		return envPrefix + "DATABASE_URL"
 	case "DBMaxConns":

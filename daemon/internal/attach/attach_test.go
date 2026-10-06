@@ -14,9 +14,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,7 +255,8 @@ func guildPayload(id, name string) json.RawMessage {
 }
 
 func messagePayload(id, channelID, content string) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"id":%q,"channel_id":%q,"author_id":"1","content":%q,"type":0,`+
+	return json.RawMessage(fmt.Sprintf(`{"id":%q,"channel_id":%q,"author_id":"1",`+
+		`"author":{"id":"1","username":"alice","display_name":"Alice"},"content":%q,"type":0,`+
 		`"reply_to_id":null,"edited_at":null,"created_at":"2026-01-01T00:00:00Z","tags":null}`,
 		id, channelID, content))
 }
@@ -494,8 +495,15 @@ func TestTheForwardedFramesAreTheContracts(t *testing.T) {
 // off mid-frame and closes without a Close frame: the design for a client that never reads again, and what
 // made this test fail in CI while the property it is about held.
 //
-// The producer yields after each event, as the gateway's read loop does on every read from the network. One
-// that never yields keeps the healthy client's reader off a single CPU until its queue fills too.
+// **The healthy client is one that keeps up, so the producer waits for it.** It sends a batch well inside
+// the queue's bounds, then waits until the healthy client has read that far. The fan-out itself never
+// waits, by design, so a producer allowed to run ahead outran the healthy reader too whenever the reader
+// was short of CPU, and the healthy client was dropped as too slow: ten runs in ten at -cpu=1, and five in
+// ten with every core busy, which is a CI runner sharing its machine. Yielding after each event, the first
+// fix, narrowed that and did not close it. Waiting for the healthy client between batches is not waiting
+// for the frozen one, so the property holds the same, and the removal still fails: a blocking enqueue
+// stops the producer inside Dispatch at the frozen client's full queue, the next batch never comes, and
+// the healthy client stalls.
 func TestAFrozenClientIsDroppedWithoutStallingAHealthyOne(t *testing.T) {
 	ts := newTestServer(t, echoRelay(), func(s *Server) { s.closeGrace = time.Minute })
 
@@ -505,14 +513,25 @@ func TestAFrozenClientIsDroppedWithoutStallingAHealthyOne(t *testing.T) {
 	healthy := ts.attach(t, true)
 
 	// Enough, in number and in bytes, to fill the frozen client's socket buffer and then its queue.
-	const events = 2000
+	// A batch is a quarter of the queue's frames and well under its bytes, so a client that has read the
+	// last one can always take the next.
+	const events, batch = 2000, queueFrames / 4
 	content := strings.Repeat("x", 3500)
+	var read atomic.Int64
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
 	fanned := make(chan struct{})
 	go func() {
 		defer close(fanned)
 		for i := range events {
+			for i%batch == 0 && read.Load() < int64(i) {
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
 			ts.Dispatch("MESSAGE_CREATE", messagePayload(fmt.Sprint(1000+i), "30", content))
-			runtime.Gosched()
 		}
 	}()
 
@@ -523,6 +542,7 @@ func TestAFrozenClientIsDroppedWithoutStallingAHealthyOne(t *testing.T) {
 		case ev, ok := <-healthy.Events():
 			require.True(t, ok, "the healthy client was closed: %v", healthy.Err())
 			received++
+			read.Store(int64(received))
 			require.Equal(t, int64(received+1), ev.Seq, "in order, none missing")
 		case <-deadline:
 			t.Fatalf("the healthy client stalled after %d of %d events", received, events)

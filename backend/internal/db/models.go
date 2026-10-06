@@ -114,6 +114,18 @@ type InstanceInvite struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type Invite struct {
+	ID        int64
+	Code      string
+	GuildID   int64
+	ChannelID int64
+	InviterID int64
+	MaxUses   *int32
+	Uses      int32
+	ExpiresAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
 type Message struct {
 	ID        int64
 	ChannelID int64

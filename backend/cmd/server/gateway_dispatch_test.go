@@ -86,6 +86,17 @@ func send(t *testing.T, f *guildFixture, token, channelID, content string) strin
 	return res.field(t, "id")
 }
 
+// assertAuthor checks a message event names who sent it (M20a). The schema allows a null author, for a
+// deleted account, so a frame carrying null would pass every schema check and still name nobody.
+func assertAuthor(t *testing.T, d dispatched, id, username string) {
+	t.Helper()
+	author, ok := d.field(t, "author").(map[string]any)
+	require.True(t, ok, "the message names its author: %s", d.raw)
+	assert.Equal(t, id, author["id"])
+	assert.Equal(t, username, author["username"])
+	assert.NotEmpty(t, author["display_name"])
+}
+
 func rename(t *testing.T, f *guildFixture, name string) {
 	t.Helper()
 	res := f.api.call(http.MethodPatch, "/api/v1/guilds/"+f.guildID, map[string]any{"name": name}, withToken(f.ownerToken))
@@ -109,6 +120,7 @@ func TestGuildActivityIsDispatchedToItsMembers(t *testing.T) {
 		assert.Equal(t, "hello", got.field(t, "content"))
 		assert.Nil(t, got.field(t, "tags"), "the gateway never carries tags: private ones differ per reader")
 		assert.Equal(t, int64(2), got.s, "READY was 1")
+		assertAuthor(t, got, f.memberID, "member")
 	}
 
 	res := f.api.call(http.MethodPatch, "/api/v1/channels/"+general+"/messages/"+id,
@@ -118,7 +130,9 @@ func TestGuildActivityIsDispatchedToItsMembers(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, res.Code, res)
 
 	for _, c := range []*gatewayClient{owner, member} {
-		assert.Equal(t, "hello, edited", c.expect("MESSAGE_UPDATE").field(t, "content"))
+		edited := c.expect("MESSAGE_UPDATE")
+		assert.Equal(t, "hello, edited", edited.field(t, "content"))
+		assertAuthor(t, edited, f.memberID, "member")
 		assert.Equal(t, id, c.expect("MESSAGE_DELETE").field(t, "id"))
 	}
 }

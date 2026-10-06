@@ -78,7 +78,8 @@ func noContent() answerFunc { return func(request) (int, any) { return http.Stat
 func apiMessage(id, channel, content string) apicontract.Message {
 	return apicontract.Message{
 		Id: id, ChannelId: channel, AuthorId: ptr("1"), Content: content, CreatedAt: at,
-		Tags: &[]apicontract.AppliedMessageTag{},
+		Author: &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: "Alice"},
+		Tags:   &[]apicontract.AppliedMessageTag{},
 	}
 }
 
@@ -123,4 +124,24 @@ func apiApplied(id, name string) apicontract.AppliedMessageTag {
 	return apicontract.AppliedMessageTag{
 		Id: id, GuildId: "10", Name: name, CreatedBy: "1", CreatedAt: at, AppliedBy: "1", AppliedAt: at,
 	}
+}
+
+func apiInvite(id, code string) apicontract.GuildInvite {
+	five := 5
+	expiry := at.Add(7 * 24 * time.Hour)
+	return apicontract.GuildInvite{
+		Id: id, Code: code, GuildId: "10", ChannelId: "20", InviterId: "1",
+		Inviter: &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: "Alice"},
+		MaxUses: &five, ExpiresAt: &expiry, CreatedAt: at,
+	}
+}
+
+func apiPreview(code, guildName string) apicontract.GuildInvitePreview {
+	p := apicontract.GuildInvitePreview{
+		Code:    code,
+		Inviter: &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: "Alice"},
+	}
+	p.Guild.Id, p.Guild.Name, p.Guild.Description = "10", guildName, ptr("a place to talk")
+	p.Channel.Id, p.Channel.Name = "20", ptr("general")
+	return p
 }

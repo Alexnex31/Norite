@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
@@ -108,10 +109,18 @@ type Service struct {
 	// The owned-guild ceiling stopped being one of these at M13a. A transfer made a second writer of the
 	// same count, driven by another account, so an account could be handed guilds past its limit by
 	// concurrent transfers; that count is now taken under a per-account advisory lock
-	// (LockAccountOwnership), by Create and TransferOwnership both.
+	// (LockAccountOwnership), by Create and TransferOwnership both — and since M20a by RedeemInvite too, for
+	// the joined count, which Create also checks.
 	maxChannelsPerGuild int32
 	maxRolesPerGuild    int32
 	maxGuildsPerAccount int32
+	// M20a's: every guild an account is in, and a guild's live invites.
+	maxJoinedGuildsPerAccount int32
+	maxInvitesPerGuild        int32
+
+	// newInviteCode mints a guild invite's code: auth.NewInviteCode, replaced by a test that needs a
+	// collision on demand.
+	newInviteCode func() (string, error)
 }
 
 // ServiceOptions configures NewService.
@@ -128,6 +137,11 @@ type ServiceOptions struct {
 	MaxChannelsPerGuild int32
 	MaxRolesPerGuild    int32
 	MaxGuildsPerAccount int32
+	// MaxJoinedGuildsPerAccount bounds every membership an account holds, owned guilds included — what
+	// READY's guild list is bounded by. MaxInvitesPerGuild bounds a guild's live invites, which its listing
+	// returns whole.
+	MaxJoinedGuildsPerAccount int32
+	MaxInvitesPerGuild        int32
 }
 
 // NewService builds the guild service.
@@ -137,7 +151,8 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		return nil, errors.New("guilds: a database pool is required")
 	case opts.IDs == nil:
 		return nil, errors.New("guilds: an ID generator is required")
-	case opts.MaxChannelsPerGuild < 1, opts.MaxRolesPerGuild < 1, opts.MaxGuildsPerAccount < 1:
+	case opts.MaxChannelsPerGuild < 1, opts.MaxRolesPerGuild < 1, opts.MaxGuildsPerAccount < 1,
+		opts.MaxJoinedGuildsPerAccount < 1, opts.MaxInvitesPerGuild < 1:
 		// Fails here rather than at the first create. A zero ceiling refuses every creation with a
 		// conflict, which reads as a bug in the endpoint rather than as an unset setting.
 		return nil, errors.New("guilds: every creation ceiling must be at least 1")
@@ -151,6 +166,10 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		maxChannelsPerGuild: opts.MaxChannelsPerGuild,
 		maxRolesPerGuild:    opts.MaxRolesPerGuild,
 		maxGuildsPerAccount: opts.MaxGuildsPerAccount,
+
+		maxJoinedGuildsPerAccount: opts.MaxJoinedGuildsPerAccount,
+		maxInvitesPerGuild:        opts.MaxInvitesPerGuild,
+		newInviteCode:             auth.NewInviteCode,
 	}, nil
 }
 

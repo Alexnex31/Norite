@@ -204,6 +204,9 @@
           "$ref": "#/$defs/GuildRolesUpdateDispatch"
         },
         {
+          "$ref": "#/$defs/GuildMemberAddDispatch"
+        },
+        {
           "$ref": "#/$defs/GuildMemberUpdateDispatch"
         },
         {
@@ -816,12 +819,34 @@
       },
       "description": "Generated from contracts/openapi.yaml#/components/schemas/Member; a test holds the two equal. "
     },
+    "PublicUser": {
+      "description": "The part of an account other people see (M20a): a message's author, an invite's issuer. A username is a public handle and the display name is what the account chose to be shown as; never the email. Not carried by GUILD_MEMBER_ADD, which is a Member: no REST read returns another member's name.\n",
+      "type": "object",
+      "required": [
+        "id",
+        "username",
+        "display_name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "username": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        }
+      }
+    },
     "Message": {
       "type": "object",
       "required": [
         "id",
         "channel_id",
         "author_id",
+        "author",
         "content",
         "type",
         "reply_to_id",
@@ -847,6 +872,17 @@
             }
           ],
           "description": "Null for a message with no author — a system or webhook message. Never null because the author's account was deleted: a deleted account is soft-deleted and its messages survive attributed to it, which is what `messages.author_id` carrying no `ON DELETE` guarantees.\n"
+        },
+        "author": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PublicUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who wrote it. Null when `author_id` is null, and null when the author's account was deleted, where `author_id` survives: a client renders the second as a deleted account, and never shows the placeholder name a deleted account is renamed to.\n"
         },
         "content": {
           "type": "string",
@@ -1082,7 +1118,7 @@
     },
     "GuildCreateDispatch": {
       "type": "object",
-      "description": "To the account that created it; adds the guild to its connections.",
+      "description": "To an account that has just come into the guild — the account that created it, or since M20a one that joined it through an invite — adding the guild to its connections. Not a statement that the recipient created it: compare owner_id.",
       "required": [
         "op",
         "d",
@@ -1259,6 +1295,32 @@
         },
         "t": {
           "const": "GUILD_ROLES_UPDATE"
+        }
+      }
+    },
+    "GuildMemberAddDispatch": {
+      "type": "object",
+      "description": "To members, after somebody joins through an invite (M20a). A Member and not the joiner's name: no REST read returns another member's name, and the gateway never discloses more than REST. The joiner receives it too, after the GUILD_CREATE that adds the guild to their connection.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/Member"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "GUILD_MEMBER_ADD"
         }
       }
     },

@@ -222,7 +222,10 @@ func run() error {
 		MaxChannelsPerGuild: cfg.MaxChannelsPerGuild,
 		MaxRolesPerGuild:    cfg.MaxRolesPerGuild,
 		MaxGuildsPerAccount: cfg.MaxGuildsPerAccount,
-		Events:              publisher,
+
+		MaxJoinedGuildsPerAccount: cfg.MaxJoinedGuildsPerAccount,
+		MaxInvitesPerGuild:        cfg.MaxInvitesPerGuild,
+		Events:                    publisher,
 	})
 	if err != nil {
 		return err

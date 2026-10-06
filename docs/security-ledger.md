@@ -70,8 +70,12 @@ would flip them.
   rows unguarded. Guarding it would let a member become **unkickable** by holding an overwrite whose bits
   the moderator lacks, trading an escalation for a denial of moderation. The residual is that a kick
   clears a member-tier deny, which only matters once that member can return.
-- **Reopens if**: a join path exists. That is M57 (invites) and M72a (discovery join), and both entries
-  already carry the rejoin question.
+- **Reopened at M20a, and answered**: the join path exists — guild invites moved from M57 to M20a — and
+  the rejoin question was decided at its planning (F1): a departure still deletes the member's own
+  overwrites, so a rejoin is a clean slate. The kick stays unguarded for the reason above, and the residual
+  is now live and accepted: see M20a's "Leaving and rejoining sheds a member-tier restriction" below.
+- **Reopens if**: M74 decides that a member-tier restriction must survive a departure, at which point a kick
+  that deletes it is the hole this entry describes rather than a residual.
 
 ### A moderator can shed a low role that restricts them
 - **Raised**: M13, escalation audit (gap 13)
@@ -279,9 +283,12 @@ would flip them.
   asymmetry is already guarded in the direction that would be an escalation: `DeleteRole` refuses to
   remove overwrites whose bits the caller lacks, while `RemoveMember` deliberately does not, so a member
   cannot become unkickable.
-- **Reopens if**: a join path exists (M57, M72a) — at which point the rejoin question and this one are the
-  same question and should be answered together, since what makes a silently-restored deny dangerous is
-  exactly that nothing in the log explains it.
+- **Reopened at M20a, and answered with the rejoin question**, as this entry asked: nothing is restored on
+  a rejoin (F1), so no silently-restored deny exists for the missing bits to explain. What a reader still
+  cannot recover from the log is which denies a kick removed; `member.join` now names the invite an
+  arrival came through, so the round trip itself is visible.
+- **Reopens if**: overwrites ever survive a departure (M74's question), since a restored row is then exactly
+  the unexplained deny this entry was about; or a rejoin path appears that writes no `member.join`.
 
 ## M15 — core messaging CRUD
 
@@ -351,7 +358,8 @@ would flip them.
 - **Reopens if**: the role-assignment path is ever made to serialize against sends — at which point the
   two paths agree again and this one becomes the odd one out — or if a moderation feature arrives whose
   correctness depends on "no message exists after this timestamp", which timeouts (`PermModerateMembers`,
-  M74) and guild bans (M57) plausibly could. Also reopens if `SetChannelLastMessage` stops being
+  M74) and guild bans plausibly could. This entry said guild bans were M57's; no milestone builds them, and
+  M74 owns the question since M20a. Also reopens if `SetChannelLastMessage` stops being
   monotonic, since `GREATEST` is what replaced the lock's other job and a plain assignment would walk the
   channel's unread pointer backwards — reproduced in psql, pointer 100 with message 101 present.
 
@@ -1061,3 +1069,135 @@ carries the condition that would reopen it.
   nothing. The chmod is for a directory somebody loosened.
 - **Reopens if**: the socket moves out of the state directory, or the directory's mode stops being
   enforced (`paths.tighten`).
+
+## M20a — first usable client, end to end
+
+### Leaving and rejoining sheds a member-tier restriction
+- **Raised**: M20a planning (question F), from the rejoin question M13 routed to the first join path
+- **Verdict**: accepted risk
+- **Why**: `RemoveMember` deletes the departing member's own overwrites, so a rejoin restores nothing — the
+  property M13 wanted, since a silently restored deny is one nothing explains. Read the other way, a
+  moderator's member-tier deny ("may not post in #general") lasts until its subject leaves, which needs no
+  permission, and redeems any live invite. Keeping the deny's bits across a departure was weighed and not
+  taken (F1): it is restrictions that should outlive a departure, and they belong with timeouts and bans,
+  which are M74's. `TestARejoinIsACleanSlate` pins the behavior, and `member.join` records each arrival
+  with the invite it used, so the cycle is visible in the audit log if not prevented.
+- **Reopens if**: M74 lands without settling it, or M72a's direct join lands before M74, which makes the
+  cycle free of any invite a moderator could revoke.
+
+### A kicked member can rejoin through any live invite
+- **Raised**: M20a planning
+- **Verdict**: accepted risk
+- **Why**: no guild ban exists. `PermBanMembers` anticipates one and no milestone builds it, so a kick
+  removes a member until they hold a live invite, which is also what a kick means on Discord. A guild's
+  answer today is to revoke its invites, which `MANAGE_GUILD` can list and revoke.
+- **Reopens if**: M74 builds guild bans and they do not gate both invite redemption and M72a's direct join.
+
+### An Instance Admin can create and revoke invites into any guild, and only the guild's log records it
+- **Raised**: M20a, part 3
+- **Verdict**: accepted risk
+- **Why**: `guildauth` passes the tier at layer 1, so invites reach as far for it as for an owner — M17's
+  settlement for tags, chosen over a second layer-1 exception. The guild's own audit log names the admin as
+  the actor of `invite.create` and `invite.revoke`; rule 14's `instance_audit_log` does not exist until
+  M72. The same gap M16a's entry records for the edit-history read.
+- **Reopens if**: M72 builds `instance_audit_log` and the tier's guild actions are not routed into it, or a
+  tier action ever stops appearing in the guild's own log.
+
+### Any signed-in account can test codes through preview and redemption
+- **Raised**: M20a, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: a code is sixteen characters of a twenty-letter alphabet, about 69 bits, so guessing one is
+  hopeless at any rate; preview, redemption and revocation also share a 30-a-minute bucket built through
+  `internal/platform/ratelimit` (the /64 grouping rule included), and every dead, unknown or malformed
+  code is one 404. Preview requires a signed-in account (G1), so the probe is not anonymous either.
+- **Reopens if**: codes get shorter, the shared bucket is removed or loosened, or Phase O opens an
+  unauthenticated preview without a bucket of its own.
+
+### A preview names a channel to a code holder who cannot see it
+- **Raised**: M20a, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `PreviewInvite` returns the channel's name and id to anyone holding a live code, including a
+  member of the guild an overwrite hides that channel from. The invite's creator held view of the channel
+  (creation folds `PermViewChannel` in) and chose to hand a way into it to whoever holds the code; the name
+  is what a joiner needs to know where they will land. Listing and revoking, which act on invites rather
+  than reading one the caller was given, do filter by the channel's view.
+- **Reopens if**: a preview starts carrying more of the channel than its name (its topic, its messages),
+  or invites can be created by somebody who cannot see the channel.
+
+### A refused redemption holds a share lock on the guild for its transaction
+- **Raised**: M20a, `/security-sweep`, against M13a's "refuse on unlocked data, then lock"; re-judged after
+  M20a's second `/code-review` strengthened the lock
+- **Verdict**: not a vulnerability
+- **Why**: `RedeemInvite` locks the guild before it checks membership and the joined ceiling, so a caller
+  refused at the ceiling holds the lock for its short transaction. The lock was `FOR KEY SHARE`, which
+  conflicts only with deletion, and became `FOR SHARE` so a join cannot answer with an owner a transfer is
+  changing: it now also makes a rename, an ownership transfer or a deletion of that guild wait for the
+  redemption to finish. It still blocks no insert into a child table, so messages and other joins do not
+  queue behind it, unlike the `FOR UPDATE` M13a's lesson was about. Reaching it needs a live code, and each
+  attempt is one short transaction inside the 30-a-minute bucket.
+- **Reopens if**: the lock taken there becomes `FOR NO KEY UPDATE` or stronger, a path reaches it without a
+  live code, or the bucket is removed.
+
+### An invite code typed on the command line is in the process list and the shell history
+- **Raised**: M20a, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `norite invite show|join|revoke <code>` take the code as an argument, as M10's `norite instance
+  invite revoke <code>` already does, so another account on the same machine can read it from the process
+  list while the command runs, and it stays in the shell's history. A code is meant to be handed to people,
+  and what it grants still needs a signed-in account to use. The request carries it in a body, never a
+  path, so it reaches no server log (ADR 0029).
+- **Reopens if**: Norite targets shared multi-user hosts as a supported client environment, at which point
+  the code verbs gain a stdin form, as `message send --content -` has.
+
+### An API token holding `guilds.write` can create invites
+- **Raised**: M20a, `/security-sweep`, beside the redemption fix
+- **Verdict**: not a vulnerability
+- **Why**: creating an invite is bounded by the owner's `PermCreateInvite` on the channel, as every
+  delegated guild action is bounded by its owner's permissions, and a bot handing out invites is an
+  ordinary use of a guild-management token. Redeeming is where the line is drawn: joining puts the
+  account itself into a guild, so since M20a's sweep it needs a logged-in person, as an ownership transfer
+  does.
+- **Reopens if**: invites gain a power beyond letting an account in (a role granted on joining, say), or
+  tokens gain per-guild scoping, at which point a token's invite into a guild it was not scoped to is
+  the escalation.
+
+### A message's content can draw lines shaped like another message
+- **Raised**: M20a, second `/security-sweep`, against the terminal client
+- **Verdict**: not a vulnerability
+- **Why**: `termsafe.Block` keeps line breaks, so one message can carry text reading "Alice  12:00". The pane
+  draws every content line indented two columns and unstyled (`messageLines`), while an author's line starts
+  at column zero in bold, which no content can produce: everything that could move the cursor or set a style
+  is removed. A message saying something untrue is a message, as in any chat client.
+- **Reopens if**: content is drawn unindented, or M43's renderer interprets markup able to style text the
+  way an author's line is styled.
+
+### The composer and the code box draw a pasted bidi override as typed
+- **Raised**: M20a, second `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: Bubbles' input sanitizer removes control characters from what is typed or pasted, and leaves
+  format characters such as U+202E. What the box shows is the person's own input, which `termsafe` leaves
+  out of scope ("a person cannot attack their own terminal by typing into it"). Once sent, the message
+  reaches every reader through `termsafe.Block`, which replaces it.
+- **Reopens if**: either box is ever filled from somewhere other than the keyboard and the clipboard, for
+  example a draft synced from another device or a quoted reply, without passing through `termsafe` first.
+
+### The live-invite ceiling is a count and an insert, and concurrent creates can overshoot it
+- **Raised**: M20a, second `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `CreateInvite` counts live invites and then inserts, unlocked, the shape the channel ceiling and
+  the private-tag ceiling already take (see "The private-tag ceiling is a count and an insert"). The ceiling
+  bounds a listing that is returned whole. A burst-sized overshoot needs `PermCreateInvite`, and does not
+  make that listing unbounded.
+- **Reopens if**: something starts relying on the ceiling as a guarantee rather than a bound, or creation
+  becomes reachable without `PermCreateInvite` on the channel.
+
+### A resync makes the client read its whole home again at once
+- **Raised**: M20a, second `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: on resync (4100) the client reattaches without backing off and reloads home: one guild listing,
+  then one channel listing per guild. Since the same sweep, that is at most `maxHomeGuilds` listings. An
+  instance sending READY repeatedly provokes these requests, and every one goes back to that same instance
+  through the daemon, so the cost lands on whoever caused it. The client's own work is paced by the
+  instance's frames, and what it holds is bounded.
+- **Reopens if**: a resync makes the client fetch from anybody other than the instance (link previews,
+  media), or home's guild bound is lifted.

@@ -100,6 +100,11 @@ func (h *Handler) Routes(r chi.Router) {
 
 		r.With(audit).Get("/audit-log", h.listAuditLog)
 
+		// M20a. The write scope, though it is a read: the list is live codes, each a way into the guild, so
+		// a token that can read them can change who is in it. A read-only token stays read-only
+		// (/code-review). PermManageGuild still bounds it underneath.
+		r.With(write).Get("/invites", h.listInvites)
+
 		r.With(read).Get("/members", h.listMembers)
 		r.With(write).Patch("/members/{user_id}", h.updateMember)
 		r.With(write).Delete("/members/{user_id}", h.removeMember)
@@ -113,6 +118,7 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Route("/channels/{channel_id}", func(r chi.Router) {
 		r.With(write).Patch("/", h.updateChannel)
 		r.With(write).Delete("/", h.deleteChannel)
+		r.With(write).Post("/invites", h.createInvite)
 
 		// The overwrite pair. Scoped like everything else — M12 shipped fifteen guild routes with no
 		// scope at all and a review found an identify-only API token deleting a guild, so a new route

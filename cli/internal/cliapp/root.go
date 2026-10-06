@@ -10,16 +10,22 @@ package cliapp
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/urfave/cli/v3"
+	"golang.org/x/term"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonctl"
 	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
+	"github.com/Alexnex31/Norite/cli/internal/output"
+	"github.com/Alexnex31/Norite/cli/internal/tui"
 	"github.com/Alexnex31/Norite/cli/internal/verbs"
 )
 
@@ -34,6 +40,16 @@ var Version = "dev"
 // command; `norite instance init` is a conversation rather than a data-printing command, so it has no JSON
 // form and none is faked for it.
 const JSONFlagName = "json"
+
+// channelFlagName opens the terminal client on one channel rather than home (M20a). ESC still leads home.
+const channelFlagName = "channel"
+
+// interactive reports whether the root command reads from and writes to a terminal: the terminal client
+// needs both, and the root's own writer is what a test substitutes.
+func interactive(cmd *cli.Command) bool {
+	out, ok := cmd.Root().Writer.(*os.File)
+	return ok && term.IsTerminal(int(out.Fd())) && term.IsTerminal(int(os.Stdin.Fd()))
+}
 
 // New builds the root command.
 func New(out, errOut io.Writer) *cli.Command {
@@ -68,7 +84,7 @@ func New(out, errOut io.Writer) *cli.Command {
 		// A mistyped command must fail, not print help and succeed. The default behavior returns no error,
 		// so `norite instnace init && echo ok` would print "ok" without having configured anything — exactly
 		// the kind of silent success a scriptable CLI must never produce.
-		Action: func(_ context.Context, cmd *cli.Command) error {
+		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if arg := cmd.Args().First(); arg != "" {
 				// Taking over the not-found path means the library's own "did you mean" never fires, so
 				// the suggestion is built here instead of being silently lost.
@@ -78,8 +94,22 @@ func New(out, errOut io.Writer) *cli.Command {
 				}
 				return clierr.Usage("unknown command %q; run `norite --help` to see the available commands", arg)
 			}
-			// Bare `norite` with no arguments: show what it can do rather than erroring.
-			return cli.ShowAppHelp(cmd)
+			// Bare `norite` on a terminal opens the client (M20a); anywhere else it shows what it can do, so a
+			// script that ran it is unchanged. Both ends must be a terminal: the client reads keys from one
+			// and draws on the other.
+			channel := cmd.String(channelFlagName)
+			if channel != "" && !ops.IsID(channel) {
+				return clierr.Usage("--channel %q is not a channel id: ids are the numbers `norite channel list` prints",
+					output.Clean(channel))
+			}
+			if !interactive(cmd) {
+				if channel != "" {
+					return fmt.Errorf("%w: --channel opens the terminal client, which needs one; "+
+						"`norite message list %s` reads the channel without", clierr.ErrNoTerminal, channel)
+				}
+				return cli.ShowAppHelp(cmd)
+			}
+			return tui.Run(ctx, tui.Options{Dial: tui.DaemonDialer(Version), Channel: channel})
 		},
 
 		Flags: []cli.Flag{
@@ -87,14 +117,24 @@ func New(out, errOut io.Writer) *cli.Command {
 				Name:  JSONFlagName,
 				Usage: "print machine-readable JSON instead of human-formatted output",
 			},
+			&cli.StringFlag{
+				Name:  channelFlagName,
+				Usage: "open the terminal client on this channel `ID` rather than home",
+				// The root's alone. urfave/cli v3 hands a root flag to every subcommand by default, so
+				// `norite guild list --channel 5` parsed, ignored the flag and exited 0 — a flag a verb
+				// accepts and does nothing with (M20a's manual pass). Local, it is a usage error there.
+				Local: true,
+			},
 		},
 
 		Commands: append([]*cli.Command{
+			login.RegisterCommand(),
 			login.Command(),
 			login.LogoutCommand(),
 			daemonctl.GroupCommand(),
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
+			aboutCommand(verbs.Daemon(Version)),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

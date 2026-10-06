@@ -292,6 +292,7 @@ func TestEventsArriveInOrderAndEndWithTheConnection(t *testing.T) {
 		id := d.handshake("dev", signedIn())
 		require.True(t, id.Events)
 		msg := json.RawMessage(`{"id":"300","channel_id":"201","author_id":"100",` +
+			`"author":{"id":"100","username":"alice","display_name":"Alice"},` +
 			`"content":"hi","type":0,"reply_to_id":null,"created_at":"2026-10-02T00:00:00Z","edited_at":null,` +
 			`"tags":null}`)
 		d.send(gatewayproto.OpDispatch, msg, ptr(int64(2)), ptr("MESSAGE_CREATE"))

@@ -137,6 +137,16 @@ func (s *Service) DeleteInstanceInvite(ctx context.Context, rawCode string) erro
 	return nil
 }
 
+// NewInviteCode mints a code in the format every invite on an instance shares: M10's instance invites and,
+// since M20a, guild invites.
+//
+// One generator and one parser (ParseInviteCode) for both, so the two kinds cannot drift into two formats
+// and a code pasted into the wrong box fails as an unknown code rather than as a malformed one. The guild
+// half lives in another package and the constants that decide the format stay here.
+func NewInviteCode() (string, error) {
+	return randomCode(inviteCodeLength)
+}
+
 // ParseInviteCode normalizes what somebody typed into the form the database stores.
 //
 // The same treatment ParseUserCode gives a device code, and for the same reason: case, spaces and dashes

@@ -76,6 +76,12 @@ const (
 	CloseInvalidIntents       = 4013
 )
 
+// MaxGuilds is the most guilds READY names for one account, and so the most an instance lets an account be
+// in (M20a). The server refuses to be configured past it — [limits].joined_guilds_per_account's validator,
+// held to this by a test — and a daemon keeps no more than this many guild summaries, so an account never
+// joins a guild its own daemon would drop. One value for both sides, here because both import this package.
+const MaxGuilds = 1000
+
 // Hello is the first frame the server sends.
 type Hello struct {
 	// HeartbeatInterval is how often, in milliseconds, the client must send a heartbeat.

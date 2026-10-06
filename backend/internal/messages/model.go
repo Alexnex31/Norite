@@ -6,6 +6,7 @@ package messages
 import (
 	"time"
 
+	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/db"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
@@ -38,6 +39,13 @@ type Message struct {
 	ID        snowflake.ID  `json:"id"`
 	ChannelID snowflake.ID  `json:"channel_id"`
 	AuthorID  *snowflake.ID `json:"author_id"`
+
+	// Author names who wrote it (M20a), and is null twice over: for a message with no author, where
+	// author_id is null too, and for an author whose account was deleted, where author_id survives. The
+	// second is how a client tells "deleted account" from "nobody" without a name M76a's placeholder rename
+	// would otherwise put in front of every reader.
+	Author *auth.PublicUser `json:"author"`
+
 	Content   string        `json:"content"`
 	Type      int16         `json:"type"`
 	ReplyToID *snowflake.ID `json:"reply_to_id"`
@@ -75,13 +83,21 @@ type AppliedTag struct {
 	AppliedAt time.Time    `json:"applied_at"`
 }
 
+// authoredRow is a message row with its author's name beside it, the shape all three statements that
+// produce a Message return (CreateMessage, ListChannelMessages and UpdateMessageContent).
+//
+// sqlc generates a row type per statement, and the three are identical field for field, so each converts
+// to this one. The conversion is the pin: a statement whose columns drift from the others stops compiling
+// rather than building a Message with a field silently left zero.
+type authoredRow db.CreateMessageRow
+
 // messageFromRow converts a stored row to the wire shape.
 //
 // `is_e2e` and `deleted_at` are deliberately not on the wire. The first is server-side bookkeeping that
 // nothing sets until M97 and no client may choose — a client-settable flag would let a guild message
 // claim an encryption the instance is not providing. The second never reaches a caller here because every
 // read filters it, and M16's moderation surface will decide its own shape for the rows it can see.
-func messageFromRow(row db.Message) Message {
+func messageFromRow(row authoredRow) Message {
 	m := Message{
 		ID:        snowflake.ID(row.ID),
 		ChannelID: snowflake.ID(row.ChannelID),
@@ -92,6 +108,9 @@ func messageFromRow(row db.Message) Message {
 	if row.AuthorID != nil {
 		id := snowflake.ID(*row.AuthorID)
 		m.AuthorID = &id
+		// The join drops a deleted account's name, so a NULL username here is that, never a nameless one:
+		// users.username is NOT NULL.
+		m.Author = auth.PublicUserOf(*row.AuthorID, row.AuthorUsername, row.AuthorDisplayName)
 	}
 	if row.ReplyToID != nil {
 		id := snowflake.ID(*row.ReplyToID)

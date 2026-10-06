@@ -57,6 +57,42 @@ func TestSweepRemovesExpiredRowsAndKeepsLiveOnes(t *testing.T) {
 	}
 }
 
+// TestExpiredGuildInvitesAreSwept is M20a's table in the instance's one sweep. One invite expired, one
+// live and one that never expires: only the first goes. Seeded by direct insert, because the guild half
+// lives in another package and only the rows matter here.
+func TestExpiredGuildInvitesAreSwept(t *testing.T) {
+	svc, _ := newService(t, RegistrationOpen)
+	ctx := t.Context()
+	user, _ := registerAndLogin(t, svc, "owner@example.com", "laptop")
+	owner := user.ID
+
+	_, err := svc.pool.Exec(ctx, `INSERT INTO guilds (id, name, owner_id) VALUES (900, 'g', $1)`, owner)
+	require.NoError(t, err)
+	_, err = svc.pool.Exec(ctx, `INSERT INTO channels (id, guild_id, name, type, position) VALUES (901, 900, 'c', 0, 0)`)
+	require.NoError(t, err)
+	_, err = svc.pool.Exec(ctx, `
+		INSERT INTO invites (id, code, guild_id, channel_id, inviter_id, expires_at) VALUES
+		  (910, 'BBBBBBBBBBBBBBBB', 900, 901, $1, now() - interval '1 hour'),
+		  (911, 'CCCCCCCCCCCCCCCC', 900, 901, $1, now() + interval '1 hour'),
+		  (912, 'DDDDDDDDDDDDDDDD', 900, 901, $1, NULL)`, owner)
+	require.NoError(t, err)
+
+	swept, err := svc.SweepExpired(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), swept.GuildInvites)
+
+	var left []int64
+	rows, err := svc.pool.Query(ctx, `SELECT id FROM invites ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		left = append(left, id)
+	}
+	assert.Equal(t, []int64{911, 912}, left, "the live and the never-expiring invite survive")
+}
+
 // A spent row is swept exactly like an unspent one. This is the case the partial indexes got wrong — they
 // were predicated on the row being unconsumed, while the sweep never looks at that — so it is worth
 // asserting the behavior and not only the plan.

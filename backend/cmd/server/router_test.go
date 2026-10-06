@@ -26,15 +26,17 @@ func testConfig() config.Config {
 		DBMaxConns:  4,
 		DBMinConns:  0,
 		// The production defaults, so a test asserting a ceiling asserts the shipped one.
-		MaxChannelsPerGuild: 500,
-		MaxRolesPerGuild:    250,
-		MaxGuildsPerAccount: 50,
-		DBConnectTimeout:    10 * time.Second,
-		MigrateLockTimeout:  time.Minute,
-		LogLevel:            "info",
-		LogFormat:           "json",
-		RateLimit:           "600-M",
-		ShutdownTimeout:     15 * time.Second,
+		MaxChannelsPerGuild:       500,
+		MaxRolesPerGuild:          250,
+		MaxGuildsPerAccount:       50,
+		MaxJoinedGuildsPerAccount: 100,
+		MaxInvitesPerGuild:        500,
+		DBConnectTimeout:          10 * time.Second,
+		MigrateLockTimeout:        time.Minute,
+		LogLevel:                  "info",
+		LogFormat:                 "json",
+		RateLimit:                 "600-M",
+		ShutdownTimeout:           15 * time.Second,
 		// A hand-built Config skips Load, where the default lives, so this has to be set explicitly. In a
 		// real instance an empty value cannot happen: the field is `required`, so Load refuses to start —
 		// see config's TestAnEmptySourceURLIsRefused.

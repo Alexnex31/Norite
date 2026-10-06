@@ -159,7 +159,7 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 			return err
 		}
 
-		out = messageFromRow(row)
+		out = messageFromRow(authoredRow(row))
 		// A message that did not exist a moment ago cannot carry a tag, so no query: the right array is
 		// empty, or null for a credential that may not read tags.
 		if actor.HasScope(auth.ScopeTagsRead) {
@@ -296,7 +296,7 @@ func (s *Service) List(ctx context.Context, actor auth.Actor, in ListInput) ([]M
 
 	out := make([]Message, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, messageFromRow(row))
+		out = append(out, messageFromRow(authoredRow(row)))
 	}
 	if err := s.attachTags(ctx, s.queries, actor, out); err != nil {
 		return nil, err
@@ -446,7 +446,7 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 			return err
 		}
 
-		out = messageFromRow(updated)
+		out = messageFromRow(authoredRow(updated))
 		// An edit changes content, not tags, but the response is a whole Message and a client replaces
 		// its copy with it — so it carries the tags the message already has, read in this transaction.
 		single := []Message{out}

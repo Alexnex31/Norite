@@ -29,6 +29,7 @@
         "id",
         "channel_id",
         "author_id",
+        "author",
         "content",
         "reply_to_id",
         "created_at",
@@ -54,6 +55,17 @@
           ],
           "pattern": "^[0-9]+$",
           "description": "A Snowflake ID as a decimal string, or null."
+        },
+        "author": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/user"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who wrote it. Null with author_id null for a message with no author, and null with author_id set for one whose author's account was deleted."
         },
         "content": {
           "type": "string",

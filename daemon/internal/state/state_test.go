@@ -43,6 +43,7 @@ func guild(id, name string) map[string]any {
 func message(id, channelID, content string) json.RawMessage {
 	return mustJSON(map[string]any{
 		"id": id, "channel_id": channelID, "author_id": "1", "content": content, "type": 0,
+		"author":      map[string]any{"id": "1", "username": "alice", "display_name": "Alice"},
 		"reply_to_id": nil, "edited_at": nil, "created_at": "2026-01-01T00:00:00Z", "tags": nil,
 	})
 }
@@ -318,6 +319,7 @@ func TestAMessageIsChargedItsWholePayload(t *testing.T) {
 	}
 	padded := mustJSON(map[string]any{
 		"id": "1", "channel_id": "30", "author_id": "1", "content": "hi", "type": 0,
+		"author":      map[string]any{"id": "1", "username": "alice", "display_name": "Alice"},
 		"reply_to_id": nil, "edited_at": nil, "created_at": "2026-01-01T00:00:00Z", "tags": tags,
 	})
 	s, _ := newState(Limits{})

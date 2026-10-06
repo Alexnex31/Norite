@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package verbs is the command tree's account-facing half: guilds, channels, roles, members, overwrites,
-// messages, reports and tags, each verb relayed through the daemon as the signed-in account (M20, folding
-// in M17a).
+// messages, reports, tags and invites, each verb relayed through the daemon as the signed-in account (M20,
+// folding in M17a).
 //
 // Every verb has the same shape, and that shape is the package:
 //
@@ -21,13 +21,15 @@ import (
 	"context"
 	"io"
 	"os"
-	"regexp"
+	"strings"
+	"unicode"
 
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -56,6 +58,7 @@ func Commands(connect Connector) []*cli.Command {
 		messageCommand(connect),
 		reportCommand(connect),
 		tagCommand(connect),
+		inviteCommand(connect),
 	}
 }
 
@@ -126,26 +129,38 @@ func (e *env) attached(ctx context.Context) (daemonclient.Caller, error) {
 
 // ---------- arguments ----------
 
-// snowflake is what an id argument may be: digits, and no more than a 64-bit integer has. Checked here
-// because an id goes into a request path, and the relay refusing a path that climbs out of /api/v1 is the
-// second line, not the first.
-var snowflake = regexp.MustCompile(`^[0-9]{1,20}$`)
-
 // argsKey is where a command records the ids it takes, for checkArgs to read.
 const argsKey = "ids"
 
-// ids declares a command's positional arguments, all of them ids, by name: `ids("guild", "role")` takes
-// `<guild-id> <role-id>`.
+// codeArg is the one positional argument that is not an id: an invite code (M20a), as M10's
+// `instance invite revoke <code>` takes one. Its name is one no id could plausibly be given, since an id
+// declared with it would lose the digits check (M20a's second /code-review).
+const codeArg = "invite code"
+
+// maxCodeArg bounds a code as typed. A code is sixteen letters; dashes and spaces a chat client added are
+// the instance's to strip, so the bound is loose, and the instance's own parser decides what is a code.
+const maxCodeArg = 64
+
+// ids declares a command's positional arguments by name, all of them ids except codeArg:
+// `ids("guild", "role")` takes `<guild-id> <role-id>`, and `ids("code")` takes `<code>`.
 func ids(names ...string) (usage string, meta map[string]any) {
 	for i, n := range names {
 		if i > 0 {
 			usage += " "
+		}
+		if n == codeArg {
+			usage += "<code>"
+			continue
 		}
 		usage += "<" + n + "-id>"
 	}
 	return usage, map[string]any{argsKey: names}
 }
 
+// checkArgs holds a command's arguments to what it declared. An id must be what ops.IsID accepts — digits,
+// and no more than a 64-bit integer has — checked before anything is attached to, because an id goes into
+// a request path, and the relay refusing a path that climbs out of /api/v1 is the second line, not the
+// first.
 func checkArgs(cmd *cli.Command) error {
 	names, _ := cmd.Metadata[argsKey].([]string)
 	args := cmd.Args().Slice()
@@ -157,7 +172,16 @@ func checkArgs(cmd *cli.Command) error {
 		return clierr.Usage("%s takes %s; see `%s --help`", cmd.FullName(), usage, cmd.FullName())
 	}
 	for i, a := range args {
-		if !snowflake.MatchString(a) {
+		if names[i] == codeArg {
+			// Not shaped here beyond what keeps it a code a person could have pasted: the instance answers
+			// any code it did not issue with one 404, and a second judgement here would be one that drifts.
+			// It goes into a request body, never a path (ADR 0029).
+			if a == "" || len(a) > maxCodeArg || strings.ContainsFunc(a, unicode.IsControl) {
+				return clierr.Usage("%q is not an invite code", output.Clean(a))
+			}
+			continue
+		}
+		if !ops.IsID(a) {
 			return clierr.Usage("%q is not a %s id: ids are the numbers the list commands print",
 				output.Clean(a), names[i])
 		}
@@ -171,7 +195,7 @@ func flagID(cmd *cli.Command, name string) (*string, error) {
 		return nil, nil
 	}
 	v := cmd.String(name)
-	if !snowflake.MatchString(v) {
+	if !ops.IsID(v) {
 		return nil, clierr.Usage("--%s %q is not an id", name, output.Clean(v))
 	}
 	return &v, nil

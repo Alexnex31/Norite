@@ -13,6 +13,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 )
 
 // ---------- confirming ----------
@@ -81,7 +82,7 @@ func newPage[T any](items []T, limit int, cursor func(T) string) Page[T] {
 // limitFlag is a list's page size. Bounded here as the instance bounds it, so a value it would refuse is a
 // usage error before anything is asked.
 func limitFlag(def int) *cli.IntFlag {
-	return &cli.IntFlag{Name: "limit", Value: def, Usage: "how many to list, 1 to 100"}
+	return &cli.IntFlag{Name: "limit", Value: def, Usage: "how many to list, 1 to " + strconv.Itoa(ops.MaxPage)}
 }
 
 func beforeFlag(what string) *cli.StringFlag {
@@ -90,6 +91,20 @@ func beforeFlag(what string) *cli.StringFlag {
 
 func afterFlag(what string) *cli.StringFlag {
 	return &cli.StringFlag{Name: "after", Usage: "list " + what + " after this `ID`"}
+}
+
+// pageOf reads a message list's paging flags into ops.Page, checked as query checks them.
+func pageOf(cmd *cli.Command) (ops.Page, error) {
+	p := ops.Page{Limit: int(cmd.Int("limit"))}
+	if p.Limit < 1 || p.Limit > ops.MaxPage {
+		return p, clierr.Usage("--limit must be between 1 and %d", ops.MaxPage)
+	}
+	var err error
+	if p.Before, err = flagID(cmd, "before"); err != nil {
+		return p, err
+	}
+	p.After, err = flagID(cmd, "after")
+	return p, err
 }
 
 // query builds a paged list's query string from its flags. names says which of before and after the verb
@@ -103,8 +118,8 @@ func query(cmd *cli.Command, names []string, extra url.Values) (string, int, err
 		q[k] = v
 	}
 	limit := int(cmd.Int("limit"))
-	if limit < 1 || limit > 100 {
-		return "", 0, clierr.Usage("--limit must be between 1 and 100")
+	if limit < 1 || limit > ops.MaxPage {
+		return "", 0, clierr.Usage("--limit must be between 1 and %d", ops.MaxPage)
 	}
 	q.Set("limit", strconv.Itoa(limit))
 	for _, n := range names {

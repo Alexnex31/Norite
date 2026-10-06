@@ -268,8 +268,15 @@ func (s *Service) RemoveMember(
 			//
 			// The one self-action exempt from the hierarchy entirely, and the reason is not that it is a
 			// demotion — removing a role looked like one too and stopped being one when roles gained
-			// channel denies. Leaving forfeits every permission in the guild at once, so it cannot be a
-			// route to gaining one. That property, not the shape of the operation, is what earns it.
+			// channel denies.
+			//
+			// **This said leaving "cannot be a route to gaining" a permission, and since M20a that is
+			// false.** It was true while nobody could come back. Invites made leaving the first half of a
+			// round trip, and the overwrite deletion below means the trip sheds every member-tier deny: a
+			// moderator's "may not post in #general" lasts until its subject leaves and redeems any live
+			// invite. The exemption stays, because a permission to leave would lock people into guilds,
+			// and the evasion is accepted and carried to M74, which owns the restrictions meant to outlive
+			// a departure (docs/security-ledger.md). TestARejoinIsACleanSlate pins the behavior.
 			if _, err := guildauth.Authorize(ctx, q, actor, guildID, 0, 0); err != nil {
 				return err
 			}
@@ -365,6 +372,10 @@ func (s *Service) RemoveMember(
 		// cannot be a foreign key — and a leftover row is not merely clutter: rejoin the guild later and
 		// applyOverwrites matches the member tier again, silently restoring a channel-level deny that
 		// nothing in the UI or the audit log explains.
+		//
+		// The converse is the cost, and since M20a it is reachable: a rejoin is a clean slate, so leaving
+		// and coming back sheds a deny as well as an allow. Decided rather than inherited (M20a's F1); see
+		// the note on leaving, above.
 		//
 		// Their role grants do cascade, through guild_member_roles' composite FK to guild_members.
 		if err := q.DeleteOverwritesForTarget(ctx, db.DeleteOverwritesForTargetParams{

@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/guild-invite.schema.json",
+  "title": "norite invite --json",
+  "description": "The machine-readable output of `norite invite create`, `list`, `show`, `join` and `revoke` (M20a): guild invites, which are not `norite instance invite`'s.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/invite",
+      "title": "create"
+    },
+    {
+      "$ref": "#/$defs/inviteList",
+      "title": "list"
+    },
+    {
+      "$ref": "#/$defs/preview",
+      "title": "show"
+    },
+    {
+      "$ref": "guild.schema.json#/$defs/guild",
+      "title": "join: the guild joined"
+    },
+    {
+      "$ref": "#/$defs/revoked",
+      "title": "revoke"
+    }
+  ],
+  "$defs": {
+    "invite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "code",
+        "guild_id",
+        "channel_id",
+        "inviter_id",
+        "inviter",
+        "max_uses",
+        "uses",
+        "expires_at",
+        "created_at"
+      ],
+      "description": "One live invite, its code in full.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[BCDFGHJKMNPQRSTVWXYZ]{16}$",
+          "description": "Sixteen characters of the alphabet instance invites use, as the instance issued it."
+        },
+        "guild_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "channel_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "The channel whoever joins lands in."
+        },
+        "inviter_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "inviter": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/user"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who created it, or null when that account was deleted; inviter_id survives."
+        },
+        "max_uses": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "How many accounts may join with it, or null for unlimited."
+        },
+        "uses": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "Null never expires."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "inviteList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/invite"
+      },
+      "description": "A guild's live invites into channels the caller can see, newest first."
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "expires_at",
+        "guild",
+        "channel",
+        "inviter"
+      ],
+      "description": "Where an invite leads, before it is used: the guild as it shows itself to a stranger, and the channel a joiner lands in. Every name is exactly as sent, escaped where a terminal would act on it.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[BCDFGHJKMNPQRSTVWXYZ]{16}$",
+          "description": "Sixteen characters of the alphabet instance invites use, as the instance issued it."
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "guild": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "name",
+            "description",
+            "icon_hash"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "A Snowflake ID, as a decimal string."
+            },
+            "name": {
+              "type": "string"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "icon_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "channel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "name"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "A Snowflake ID, as a decimal string."
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "inviter": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/$defs/user"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "revoked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revoked"
+      ],
+      "description": "What `revoke` prints, after `norite instance invite revoke`: the code as given, since the instance answers with no object.",
+      "properties": {
+        "revoked": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

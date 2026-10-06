@@ -545,7 +545,7 @@ func TestTheGatewaySchemaMirrorsTheRESTShapes(t *testing.T) {
 
 	for _, name := range []string{
 		"User", "Guild", "Channel", "PermissionOverwrite", "Role", "Permissions", "Member", "Message",
-		"AppliedMessageTag", "Snowflake",
+		"AppliedMessageTag", "PublicUser", "Snowflake",
 	} {
 		rest, ok := doc.Components.Schemas[name]
 		require.True(t, ok, "openapi.yaml has no %s", name)

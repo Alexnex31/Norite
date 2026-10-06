@@ -1,12 +1,11 @@
 # Norite
 
-**Voice-and-text chat with a terminal client that does everything the desktop one does — voice calls
-included.**
+**Discord-shaped chat, built terminal-first: free software, self-hostable, voice and text.**
 
 Norite is a chat platform in the shape most people already know: servers, channels, roles, DMs, voice.
 What it does differently is refuse to treat the terminal as a second-class place to use it. The CLI and
-the full-screen TUI are not companions to a "real" app — they share one command tree with it, and they
-place and receive voice calls.
+the full-screen TUI are not companions to a "real" app — they share one command tree with it, and voice
+calls are planned for both.
 
 Four clients, one backend, one local daemon per machine. You can use the **public flagship** — the open
 instance operated by the project's author — or run your own, on your own terms. Both are the same
@@ -16,17 +15,30 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
-[![Milestone](https://img.shields.io/badge/milestone-M20%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M20a%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
-> [!WARNING]
-> **Early implementation. There is no product yet.** Accounts, sessions, two-factor and OAuth work, so
-> does the guild, channel, role and permission core, and since `M15` so do messages, with reporting and
-> moderator triage on top of them since `M16`, and since `M18` a real-time gateway that pushes all of it
-> live, which since `M19` the background daemon holds on its own. Since `M20` the `norite` command line can
-> drive all of it, one command at a time — create a guild, post a message, read a channel's last fifty.
-> Nobody can hold a conversation on this: voice does not exist, and there is no client that shows a
-> conversation as it happens. See [Status](#status) for exactly what is built, and note that the full scope
-> here is multi-year work.
+**You can run it and talk on it today.** The first client landed at `M20a`, and with it:
+
+- **Host your own instance** — one server program and a Postgres database, with open or invite-only
+  registration. [`scripts/install-server.sh`](scripts/install-server.sh) sets one up on Linux.
+- **Create an account from the terminal** with `norite register`, and protect it with two-factor.
+- **Build a guild** — channels, roles, per-channel permissions — and invite people into it with a code.
+- **Talk in it.** Bare `norite` opens the terminal client: your guilds and their channels, a box to redeem
+  an invite, and a channel that draws messages as they arrive and sends what you type.
+- **Script it.** More than forty `norite` verbs cover guilds, channels, roles, members, messages, reports
+  and tags, each with `--json`.
+- **Moderate it** — an audit log of who changed what, reports with a moderation queue, and message edit
+  history.
+
+[Trying the alpha](docs/trying-the-alpha.md) walks through all of it, on one machine or several.
+
+**Would rather not host one?** The author runs a small test instance ahead of the public one.
+Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invite.
+
+> [!NOTE]
+> **It is still early, and text only.** Voice, DMs, presence and the GUI are not built yet; the client
+> shows one channel at a time, in plain text; and no third party has reviewed the code. The full scope is
+> multi-year work — [Status](#status) says exactly what exists.
 
 ---
 
@@ -51,8 +63,8 @@ software.
 
 **Foundation, auth, the permission core, messages, guild-level reports, the moderation read over a
 message's edit history, a guild's opt-in message recording, message tagging, the real-time gateway and the
-daemon that holds it, and the command-line verbs over all of it, are done — `M0` through `M20`. `M20a` is
-the first thing a person can actually use.**
+daemon that holds it, the command-line verbs over all of it, and the first client two people can talk in,
+are done — `M0` through `M20a`.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -84,32 +96,32 @@ the first thing a person can actually use.**
 | `M18` | The real-time gateway — a WebSocket that pushes every guild, channel, role, member and message change to the members allowed to see it, decided per event against the database rather than remembered; resuming after a disconnect without losing anything; signing out closes the connection, on every path that signs out; and the same across several servers over Redis |
 | `M19` | The daemon as gateway client — the background daemon holds the account's live connection by itself, with nothing attached to it; keeps its sign-in renewed by the server's clock, so a machine whose clock is hours out stays signed in; keeps recent messages in memory, bounded; notices `norite login` and `norite logout` the moment they happen; and treats the server it talks to as a stranger's, sanitizing every name it is sent |
 | `M20` | The command line, through the daemon — clients attach to the daemon over a socket only your own account can open and get its live events, a client that stops reading is dropped rather than slowing the others, and the CLI's requests are made with the daemon's sign-in without the token ever leaving it; forty `norite` verbs over guilds, channels, roles, members, messages, reports and tags, each with `--json` output that is exact for a script and harmless if printed to a terminal, and exit codes that tell a script its own mistake from the server's refusal |
+| `M20a` | The first usable client — bare `norite` opens a terminal client listing your guilds and their channels, with a box to redeem an invite in two presses, and a channel that draws messages as they arrive and sends what you type; guild invites, so a second person can join at all; messages that name their authors; `norite register`, `norite invite` and `norite about`; and a release pipeline that signs what it ships |
 
 </details>
 
 Registering an address that already has an account is indistinguishable from registering a new one, and
 an address is confirmed by email before its account can be used.
 
-**No usable product features exist yet.** Since `M20` every part of the backend can be driven from the
-command line, a verb at a time, which is enough to script it and not enough to use it: there is no client
-that shows a conversation as it happens, nothing to type into but a shell. The honest threshold is when two
-people can hold a text conversation, and as of `M15` the only thing still missing for that is `M20a`'s first
-client. What `M12` through `M14` built is the permission model those conversations happen inside and the
-record of who changed it; `M15` is the conversation itself, `M16` is how it gets moderated, `M16a` is what a
-moderator reads when the message was edited after it was reported, and `M16b` is what a guild can choose to
-keep — all reachable since `M20` through `norite`'s verbs, and before that only with an HTTP client and a
-token.
+**The honest threshold was always when two people can hold a text conversation, and `M20a` is where it was
+crossed.** The client is deliberately small — a home screen and one channel at a time, plain text, no voice —
+and everything under it is the real thing rather than a demo.
+What `M12` through `M14` built is the permission model those conversations happen inside and the record of who
+changed it; `M15` is the conversation itself, `M16` is how it gets moderated, `M16a` is what a moderator reads
+when the message was edited after it was reported, and `M16b` is what a guild can choose to keep. The client
+draws the conversation; the rest is reachable through `norite`'s verbs. `M41` through `M43` replace the client
+with the full frame the [TUI screens](docs/design/tui/) specify.
 
 One consequence of `M16b` is worth stating plainly rather than leaving in the changelog: a guild whose
 owner switches recording on keeps every message sent in it, including edits and deletions, and the
 member-facing screen that would tell people so is `M62a`. Until then the setting is readable through the
-API by anyone in the guild and rendered by nothing, because there is no client to render it in.
+API by anyone in the guild, and the first client does not draw it.
 
 > [!NOTE]
-> **On releases.** Norite uses [Semantic Versioning](https://semver.org/). No release exists yet.
+> **On releases.** Norite uses [Semantic Versioning](https://semver.org/).
 >
 > **When versions are cut:**
-> - **`v0.1.0-alpha`** ships when `M20a`, the first usable client, is done.
+> - **`v0.1.0-alpha`** is cut from `M20a`, the first usable client.
 > - **`v0.1.0`** ships at the end of Phase D.
 > - **A MINOR version** follows at the end of each feature phase after that: `v0.2.0`, `v0.3.0`, and so on.
 > - **`v1.0.0`** comes only after every milestone is done and a release-candidate stage has reviewed and
@@ -120,7 +132,8 @@ API by anyone in the guild and rendered by nothing, because there is no client t
 > before it, there is no guaranteed migration path between them, and no third party has reviewed the code.
 >
 > **The public flagship is not open yet.** It stays closed to non-developer accounts until the feature set
-> is well advanced and its Kubernetes deployment is ready.
+> is well advanced and its Kubernetes deployment is ready. Until then the author's test instance takes
+> testers by invite: email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for one.
 >
 > The status badge above says `pre-alpha` and will until `v0.1.0-alpha` ships. See
 > [ADR 0033](docs/adr/0033-semver-release-progression.md).
@@ -183,7 +196,8 @@ first-class client rather than a companion is in
 The CLI and the TUI ship in one binary and share one command tree, which is what keeps the scriptable
 surface and the interactive one from drifting apart: every verb is runnable from the TUI's `M-x`.
 
-The shape it is aiming for, once `M43` renders messages:
+Today's client is the first cut of it: a home screen listing your guilds and channels, and one channel
+drawn live. The shape it is growing into, through `M43`:
 
 ```
 ┌───┬──────────────┬────────────────────────────────────────────┬──────────────┐
@@ -207,7 +221,9 @@ The shape it is aiming for, once `M43` renders messages:
 
 ## Planned v1 scope
 
-None of this is built. All of it is v1 rather than a later phase — the roadmap is ordered so the
+The first part of this is built — guilds, channels, roles and permissions, real-time text messaging,
+guild invites, message tagging, reports and registration gating — and [Status](#status) says exactly
+which. The rest is not yet. All of it is v1 rather than a later phase — the roadmap is ordered so the
 foundations land first, not so that scope gets dropped at the end.
 
 - **Guilds, channels, roles and permissions**, with real-time messaging over a WebSocket gateway
@@ -240,7 +256,8 @@ foundations land first, not so that scope gets dropped at the end.
 
 Norite borrows Discord's shape deliberately — guilds, channels, roles, a gateway protocol built on the
 same ideas — because that shape works and relearning it buys nobody anything. What follows is where it
-goes somewhere else. Almost none of it is built yet; this is what the plan is for.
+goes somewhere else. The first three already hold in their first form — a terminal client you can talk in,
+an instance you can host, and the source in front of you. The rest is what the plan is for.
 
 - **The terminal as a real client, not a curiosity.** A full-screen TUI with pane splitting and chorded
   keybindings, and a scriptable CLI with `--json` on every verb. Voice calls from both.
@@ -257,9 +274,9 @@ goes somewhere else. Almost none of it is built yet; this is what the plan is fo
 - **In-channel whispers, message tagging, and bandwidth toggles** for constrained connections.
 
 Where Discord is ahead, and will stay ahead for a long time: video and screen-share are deferred here,
-there are no mobile clients planned for v1, and there is no ecosystem, no user base, and — today — no
-messaging at all. Discord also end-to-end encrypts every voice and video call by default; Norite's
-end-to-end encryption covers text DMs only.
+there are no mobile clients planned for v1, and there is no ecosystem and no user base. Today Norite does
+text in guild channels and nothing else: no voice yet, no DMs, no presence. Discord also end-to-end
+encrypts every voice and video call by default; Norite's end-to-end encryption covers text DMs only.
 
 ---
 
@@ -288,8 +305,7 @@ The backend is configured entirely through `NORITE_*` environment variables — 
 Postgres advisory lock so two processes never race, and `GET /api/v1/healthz` returns 200 only once that
 has completed.
 
-There is nothing to look at yet beyond the auth surface. `norite instance init` followed by
-`norite instance bootstrap` sets up an instance and its first administrator.
+To use what this builds rather than develop it, see [Trying the alpha](docs/trying-the-alpha.md).
 
 ---
 

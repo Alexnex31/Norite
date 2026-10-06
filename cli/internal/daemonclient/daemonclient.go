@@ -45,11 +45,21 @@ type Caller interface {
 // It never starts a daemon (E1 in M20's planning): one started from a shell is not the service, and would
 // hold the lock the service then fails to take.
 func Connect(ctx context.Context, version string) (*ipc.Client, error) {
+	return connect(ctx, ipc.Options{Client: "norite", Version: version})
+}
+
+// Watch attaches as Connect does, and asks for the daemon's event stream as well: the terminal client's
+// connection (M20a), which draws what the instance sends as it arrives. Every failure maps as Connect's do.
+func Watch(ctx context.Context, version string) (*ipc.Client, error) {
+	return connect(ctx, ipc.Options{Client: "norite", Version: version, Events: true})
+}
+
+func connect(ctx context.Context, opts ipc.Options) (*ipc.Client, error) {
 	// Bounded, because a daemon can accept a connection and never answer — stopped under a debugger, or
 	// wedged — and a scripted verb waiting on it would wait for ever where exit 3 would let it retry.
 	ctx, cancel := context.WithTimeout(ctx, attachTimeout)
 	defer cancel()
-	c, err := ipc.Connect(ctx, ipc.Options{Client: "norite", Version: version})
+	c, err := ipc.Connect(ctx, opts)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, clierr.Unavailable("the daemon accepted the connection and did not answer within %s; "+

@@ -313,6 +313,7 @@ func TestARecipientAtTheOwnedGuildCeilingIsRefused(t *testing.T) {
 	tiny, err := NewService(ServiceOptions{
 		Pool: tf.pool, IDs: tf.svc.ids,
 		MaxChannelsPerGuild: 500, MaxRolesPerGuild: 250, MaxGuildsPerAccount: 1,
+		MaxJoinedGuildsPerAccount: 100, MaxInvitesPerGuild: 500,
 	})
 	require.NoError(t, err)
 
@@ -348,6 +349,7 @@ func TestTwoTransfersToOneAccountCannotBothPassTheCeiling(t *testing.T) {
 	tiny, err := NewService(ServiceOptions{
 		Pool: f.pool, IDs: f.svc.ids,
 		MaxChannelsPerGuild: 500, MaxRolesPerGuild: 250, MaxGuildsPerAccount: 1,
+		MaxJoinedGuildsPerAccount: 100, MaxInvitesPerGuild: 500,
 	})
 	require.NoError(t, err)
 

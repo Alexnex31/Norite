@@ -8,6 +8,9 @@ the policy this replaces. The release posture 0032 carried across from
 [ADR 0007](0007-licensing-and-project-posture.md) ends here, so the chain for that one section is
 0007 → 0032 → 0033.
 
+Amended at `M20a`'s planning (2026-10-02) in one place: release signing moved from `M24` to the first
+release. See the code-signing consequence below.
+
 ## Context
 0032 kept 0007's release posture: nothing ships as a release before every milestone is done, a beta build
 goes to a small group of testers at each phase boundary, there is exactly one official v1, and the public
@@ -128,10 +131,15 @@ gate on *trusting* end-to-end encryption, and belongs in this stage if it has no
 - **Distribution starts at `v0.1.0-alpha`, and two obligations 0032 dated to "the first phase beta" move
   to that tag.** Attribution: every release archive already carries its binary's `THIRD-PARTY-NOTICES.txt`
   and `LICENSE`. Disclosure: `SECURITY.md`'s coordinated-fix workflow first has somebody to coordinate with.
-- **Code signing arrives after the first release, unless it is moved.** `M24` wires Sigstore/cosign
-  signing and verification, and it is Phase D's last milestone, so `v0.1.0-alpha` at `M20a` ships with the
-  checksum file GoReleaser produces and no signature. [ADR 0020](0020-operations.md) already describes
-  signing as absent in the early-use phase; the release notes of every unsigned release must say so.
+- **Release artifacts are signed from the first release.** *Amended 2026-10-02, at `M20a`'s planning.*
+  This consequence originally read "code signing arrives after the first release, unless it is moved":
+  `M24` wired Sigstore/cosign signing and verification, so `v0.1.0-alpha` would have shipped GoReleaser's
+  checksum file and no signature. It was moved. `M20a`'s release workflow signs `checksums.txt` with
+  cosign, keyless, under its own GitHub OIDC identity, publishes the Sigstore bundle beside it, and every
+  release's notes give the `cosign verify-blob` command that checks it. `M24` keeps the updater's
+  verification before a swap, which can then rely on every release having been signed. What stays
+  unsigned is the operating system's own code signing, macOS notarization and Windows Authenticode, which
+  [ADR 0020](0020-operations.md) tracks as a gap before distribution; the release notes say that too.
 - **`M67a`'s scheduling argument now covers the flagship alone.** 0032 made registration anti-automation
   "not urgent" because nothing was publicly open. The flagship stays closed, so that still holds for it;
   a self-hoster who opens registration on a `0.x` instance before `M67a` does so without that protection.

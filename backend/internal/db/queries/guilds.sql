@@ -118,10 +118,12 @@ SELECT EXISTS (
 );
 
 -- name: LockAccountOwnership :exec
--- Serializes everything that changes how many guilds one account owns: Create, for the creating account,
--- and TransferOwnership, for the recipient. Each counts owned guilds against the ceiling and then writes;
--- without this, two of them for the same account both read the count below the ceiling and both commit —
--- transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
+-- Serializes everything that changes how many guilds one account owns or is in, three callers since M20a:
+-- Create, for the creating account, which counts both its owned and its joined guilds; TransferOwnership,
+-- for the recipient, which counts owned; and RedeemInvite, for the joiner, which counts joined. Each counts
+-- and then writes; without this, two of them for the same account both read a count below its ceiling and
+-- both commit — transfers from different guilds lock only their own guild rows, so nothing else serializes
+-- them. Found
 -- by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
 -- account past the ceiling.
 --
@@ -610,6 +612,26 @@ WHERE c.guild_id = sqlc.arg(guild_id)::bigint
 -- name: GetGuildForUpdate :one
 SELECT * FROM guilds WHERE id = $1 FOR UPDATE;
 
+-- name: LockGuildForShare :one
+-- The guild a redemption joins, locked before anything else of it (M20a).
+--
+-- **Before the invite.** Redeeming updates the invite and then inserts a membership, whose foreign-key
+-- check locks the guild; deleting a guild locks the guild FOR UPDATE and then cascades to the invite.
+-- Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first puts
+-- redemption in the deletion's order: guild, then invite.
+--
+-- **FOR SHARE, not FOR KEY SHARE**, which it was until M20a's second /code-review. Redemption answers with
+-- this row and sends it to the joiner as GUILD_CREATE, so it must not read an owner a transfer is changing:
+-- KEY SHARE does not wait for a transfer's FOR NO KEY UPDATE, so a join racing one returned the old
+-- owner, and the transfer's GUILD_UPDATE, fanned out before the membership committed, never reached the
+-- joiner. FOR SHARE waits for a transfer or a rename in flight and reads what it committed, and one that
+-- starts later waits for the join, whose member then receives its update. It still blocks no insert into
+-- a child table, so joins and messages do not queue behind one another.
+--
+-- The whole row, because it is the answer: reading it here spares a second read (M20a
+-- /optimization-review).
+SELECT * FROM guilds WHERE id = $1 FOR SHARE;
+
 -- name: GetGuildForNoKeyUpdate :one
 -- The guild row held for an ownership transfer, which rewrites owner_id and nothing a foreign key points
 -- at. FOR NO KEY UPDATE rather than FOR UPDATE, which is the difference that matters: FOR UPDATE also
@@ -723,9 +745,9 @@ LIMIT sqlc.arg(lim);
 -- what GET /users/@me/guilds serves (M20).
 --
 -- Unpaginated, like the channel and role lists, and bounded the same way: at creation rather than at read.
--- An account owns at most [limits].guilds_per_account (M12), nothing adds a membership except creating a
--- guild until M57, and M72a caps joined guilds at 100. guild_members_user_id_idx serves the lookup, and the
--- join reaches each guild through its primary key.
+-- An account is in at most [limits].joined_guilds_per_account (M20a, 100 by default, M72a's figure),
+-- checked when an invite is redeemed and when a guild is created. guild_members_user_id_idx serves the
+-- lookup, and the join reaches each guild through its primary key.
 SELECT g.*
 FROM guilds g
 JOIN guild_members gm ON gm.guild_id = g.id

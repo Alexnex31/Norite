@@ -194,6 +194,10 @@ type Querier interface {
 	// buffers on a 25,000-role instance.
 	CountGuildRoles(ctx context.Context, guildID int64) (int64, error)
 	CountGuildSharedTags(ctx context.Context, guildID int64) (int64, error)
+	// How many guilds an account is in, owned ones included, for the joined ceiling (M20a). Counted under
+	// LockAccountOwnership; guild_members_user_id_idx serves it.
+	//
+	CountGuildsJoinedBy(ctx context.Context, userID int64) (int64, error)
 	// How many guilds an account owns, for the creation cap.
 	//
 	// Served by guilds_owner_id_idx, which 000015 added for the account-deletion FK check and which answers
@@ -210,6 +214,9 @@ type Querier interface {
 	// Called after LockInstanceBootstrap and inside the same transaction as the insert. Both halves are
 	// required: the lock is what makes the count a decision rather than an observation.
 	CountInstanceAdmins(ctx context.Context) (int64, error)
+	// How many live invites a guild has, for the creation ceiling. invites_guild_id_idx serves it.
+	//
+	CountLiveGuildInvites(ctx context.Context, guildID int64) (int64, error)
 	// Served by user_recovery_codes_live_idx (000014). One caller — the profile response — so it scales with
 	// the codes an account has left rather than with every set it has ever had.
 	CountLiveRecoveryCodes(ctx context.Context, userID int64) (int64, error)
@@ -252,11 +259,41 @@ type Querier interface {
 	// The guild row. Its @everyone role and the owner's membership are written in the same transaction — see
 	// guilds.Service.Create, which is the only caller and does all three in one RunInTx.
 	CreateGuild(ctx context.Context, arg CreateGuildParams) (Guild, error)
+	// Guild invites (Milestone M20a).
+	//
+	// "Live" means not expired and not used up, and every statement that answers for a code asks both. The
+	// redemption that spends an invite's last use deletes it and the sweep removes expired ones, but neither
+	// is what makes a dead code answer as an unknown one: a deletion that fails or a sweep that has not run
+	// must not turn tidiness into a disclosure.
+	// Insert an invite, or nothing if its code is taken.
+	//
+	// ON CONFLICT rather than letting the unique violation arrive: this runs inside the creating transaction,
+	// and a statement that errors aborts it, so a retry after a collision could only fail again. No row back
+	// means the code collided, and the caller draws another (M20a /code-review).
+	//
+	// The expiry is computed here, on the database's clock, because every read asks about it against the
+	// database's now(). Computed in Go, an application host whose clock lags the database's stored an invite
+	// already expired, and one running ahead stored one that lived longer than asked. NULL seconds never
+	// expires: NULL times an interval is NULL.
+	//
+	CreateGuildInvite(ctx context.Context, arg CreateGuildInviteParams) (Invite, error)
 	// granted_by is NULL for the bootstrap admin: nobody in this table granted it. See 000008.
 	CreateInstanceAdmin(ctx context.Context, arg CreateInstanceAdminParams) (InstanceAdmin, error)
 	// created_by is NULL when the instance operator issued it, who is not an account. See 000009.
 	CreateInstanceInvite(ctx context.Context, arg CreateInstanceInviteParams) (InstanceInvite, error)
-	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
+	// Every statement that returns a message names its author (Milestone M20a): this one,
+	// ListChannelMessages and UpdateMessageContent, the only three a `Message` is built from.
+	//
+	// The author's username and display name ride on the statement that produced the row, rather than in a
+	// second read per message or a batch read per page: an author is one primary-key lookup on `users`. The
+	// three return the same columns in the same order, which is what lets the Go side convert all three to one
+	// type — a fourth that drifted would not compile.
+	//
+	// `deleted_at IS NULL` is in the join, not the WHERE: a soft-deleted account's messages survive (000020)
+	// and are returned with a NULL author, which the client renders as a deleted account. M76a renames a
+	// deleted account to a placeholder, and that placeholder must not reach a reader as somebody's name.
+	//
+	CreateMessage(ctx context.Context, arg CreateMessageParams) (CreateMessageRow, error)
 	// Message tags (Milestone M17).
 	// The uniqueness guards are the two partial indexes in 000024, not a check here: a read-then-insert races
 	// under READ COMMITTED the way M10's invite redemption did, where four of four concurrent racers got in.
@@ -320,6 +357,9 @@ type Querier interface {
 	DeleteExpiredDeviceCodes(ctx context.Context) (int64, error)
 	// Called by auth.RunSweeper. Non-partial index behind it — see 000010, and 000005 for why.
 	DeleteExpiredEmailVerificationTokens(ctx context.Context) (int64, error)
+	// The sweep (auth.SweepExpired), served by invites_expires_at_idx.
+	//
+	DeleteExpiredGuildInvites(ctx context.Context) (int64, error)
 	// Called by auth.RunSweeper.
 	//
 	// The IS NOT NULL is redundant against SQL's own semantics — a NULL expires_at makes the comparison NULL
@@ -375,6 +415,10 @@ type Querier interface {
 	// report the difference, which would be the membership oracle authorize exists to close, but to avoid
 	// answering 204 for a guild that never existed.
 	DeleteGuild(ctx context.Context, id int64) (int64, error)
+	// Returns the row as it was deleted, so a revocation's audit entry records the uses the invite had when it
+	// went rather than a count read before a concurrent redemption committed.
+	//
+	DeleteGuildInvite(ctx context.Context, id int64) (Invite, error)
 	// Revocation. execrows rather than :exec so the caller can tell a code that was deleted from one that was
 	// never there, which is the difference between "done" and "check what you typed".
 	DeleteInstanceInvite(ctx context.Context, code string) (int64, error)
@@ -489,6 +533,14 @@ type Querier interface {
 	// ReorderRoles needs none of this: it takes the guild's advisory lock (LockGuildRolePositions) before
 	// reading positions, which serializes it against itself and against role creation.
 	GetGuildForUpdate(ctx context.Context, id int64) (Guild, error)
+	// What a preview shows: where a live code leads, and who issued it.
+	//
+	// Every join is inner except the inviter's, so a code whose guild or channel is mid-deletion answers as an
+	// unknown one. Nothing here is gated on the caller beyond being signed in, deliberately: an invite is the
+	// guild's own decision to show itself to whoever holds the code, and the preview is how the person given
+	// it decides whether to use it.
+	//
+	GetGuildInvitePreview(ctx context.Context, code string) (GetGuildInvitePreviewRow, error)
 	GetGuildMember(ctx context.Context, arg GetGuildMemberParams) (GuildMember, error)
 	GetGuildMemberForUpdate(ctx context.Context, arg GetGuildMemberForUpdateParams) (GuildMember, error)
 	// One report in full: the only place this milestone returns reported content.
@@ -516,6 +568,9 @@ type Querier interface {
 	// that "closed by construction" stops being true quietly, and it was given a test anyway.
 	//
 	GetGuildReport(ctx context.Context, arg GetGuildReportParams) (GetGuildReportRow, error)
+	// A live invite by its code: what revoking reads before deciding who may.
+	//
+	GetLiveGuildInvite(ctx context.Context, code string) (Invite, error)
 	// The target's standing: the highest position among the roles one member holds (Milestone M13).
 	//
 	// The actor's standing comes free from ListGuildMemberAuthority above. This is the other side of every
@@ -713,7 +768,13 @@ type Querier interface {
 	// Deleted messages are excluded here and not by a partial index. 000020 says why: M16's moderation
 	// surface reads them on purpose, so an index that could not serve that reader would be the wrong shape.
 	//
-	ListChannelMessages(ctx context.Context, arg ListChannelMessagesParams) ([]Message, error)
+	// # The author is joined to the page, never the page to the authors (M20a)
+	//
+	// The page is chosen in a subquery and only its rows meet `users`, so no plan — generic or custom, fresh
+	// statistics or none — can join before it limits. M13a and M18 each found a generic plan taking a choice
+	// a literal-valued EXPLAIN never showed; the shape is written so the planner has no such choice to take.
+	//
+	ListChannelMessages(ctx context.Context, arg ListChannelMessagesParams) ([]ListChannelMessagesRow, error)
 	// Every overwrite on one channel: ADR 0008 layer 5, in one lookup, ordered in Go by the precedence the ADR
 	// fixes rather than by SQL.
 	//
@@ -812,6 +873,11 @@ type Querier interface {
 	// four conversions to keep in step for no measurable gain. The cost this avoids is the one that multiplies
 	// by the number of channels, and that is this query alone.
 	ListGuildChannels(ctx context.Context, guildID *int64) ([]ListGuildChannelsRow, error)
+	// A guild's live invites with each inviter's name, newest first. Unpaginated, like the channel and role
+	// lists, and bounded the same way: at creation, by [limits].invites_per_guild. The inviter is joined by
+	// primary key and dropped for a deleted account, as a message's author is (M20a).
+	//
+	ListGuildInvites(ctx context.Context, guildID int64) ([]ListGuildInvitesRow, error)
 	// Permission resolution queries (ADR 0008 layers 2 through 5).
 	// The guild, whether this account is in it, and every role whose permissions apply to them — in one round
 	// trip rather than three.
@@ -986,9 +1052,9 @@ type Querier interface {
 	// what GET /users/@me/guilds serves (M20).
 	//
 	// Unpaginated, like the channel and role lists, and bounded the same way: at creation rather than at read.
-	// An account owns at most [limits].guilds_per_account (M12), nothing adds a membership except creating a
-	// guild until M57, and M72a caps joined guilds at 100. guild_members_user_id_idx serves the lookup, and the
-	// join reaches each guild through its primary key.
+	// An account is in at most [limits].joined_guilds_per_account (M20a, 100 by default, M72a's figure),
+	// checked when an invite is redeemed and when a guild is created. guild_members_user_id_idx serves the
+	// lookup, and the join reaches each guild through its primary key.
 	ListGuildsForMember(ctx context.Context, userID int64) ([]Guild, error)
 	// Everything outstanding, newest first.
 	//
@@ -1088,10 +1154,12 @@ type Querier interface {
 	// tag must not appear on a message you can read, or "private" describes only who may apply it.
 	//
 	ListTagsForMessages(ctx context.Context, arg ListTagsForMessagesParams) ([]ListTagsForMessagesRow, error)
-	// Serializes everything that changes how many guilds one account owns: Create, for the creating account,
-	// and TransferOwnership, for the recipient. Each counts owned guilds against the ceiling and then writes;
-	// without this, two of them for the same account both read the count below the ceiling and both commit —
-	// transfers from different guilds lock only their own guild rows, so nothing else serializes them. Found
+	// Serializes everything that changes how many guilds one account owns or is in, three callers since M20a:
+	// Create, for the creating account, which counts both its owned and its joined guilds; TransferOwnership,
+	// for the recipient, which counts owned; and RedeemInvite, for the joiner, which counts joined. Each counts
+	// and then writes; without this, two of them for the same account both read a count below its ceiling and
+	// both commit — transfers from different guilds lock only their own guild rows, so nothing else serializes
+	// them. Found
 	// by /code-review on the M13a branch, against a ledger entry claiming a transfer could never push an
 	// account past the ceiling.
 	//
@@ -1100,6 +1168,24 @@ type Querier interface {
 	// "NOR" plus a slot. Keyed per account; two accounts whose low 31 bits collide serialize unnecessarily and
 	// stay correct.
 	LockAccountOwnership(ctx context.Context, userID int64) error
+	// The guild a redemption joins, locked before anything else of it (M20a).
+	//
+	// **Before the invite.** Redeeming updates the invite and then inserts a membership, whose foreign-key
+	// check locks the guild; deleting a guild locks the guild FOR UPDATE and then cascades to the invite.
+	// Taken in those orders the two deadlock, and Postgres aborts one with a 500. Taking this first puts
+	// redemption in the deletion's order: guild, then invite.
+	//
+	// **FOR SHARE, not FOR KEY SHARE**, which it was until M20a's second /code-review. Redemption answers with
+	// this row and sends it to the joiner as GUILD_CREATE, so it must not read an owner a transfer is changing:
+	// KEY SHARE does not wait for a transfer's FOR NO KEY UPDATE, so a join racing one returned the old
+	// owner, and the transfer's GUILD_UPDATE, fanned out before the membership committed, never reached the
+	// joiner. FOR SHARE waits for a transfer or a rename in flight and reads what it committed, and one that
+	// starts later waits for the join, whose member then receives its update. It still blocks no insert into
+	// a child table, so joins and messages do not queue behind one another.
+	//
+	// The whole row, because it is the answer: reading it here spares a second read (M20a
+	// /optimization-review).
+	LockGuildForShare(ctx context.Context, id int64) (Guild, error)
 	// Serializes role creation within one guild, for the whole of the calling transaction.
 	//
 	// NextRolePosition below is read and then acted on, which under READ COMMITTED — Postgres's default and
@@ -1221,6 +1307,14 @@ type Querier interface {
 	// said here and we cannot tell you what" is an exclusion written twice.
 	//
 	RecordMessageAudit(ctx context.Context, arg RecordMessageAuditParams) error
+	// Spend one use of a live code, M10's RedeemInstanceInvite shape.
+	//
+	// Every guard is in the WHERE, so concurrent redemptions are decided by the row lock this UPDATE takes and
+	// the re-check READ COMMITTED does under it: exactly max_uses of them match. Written as a read and then an
+	// update, four of four of M10's concurrent racers got in. `max_uses IS NULL` is its own branch because
+	// `uses < NULL` is NULL, which would make an unlimited invite match nothing.
+	//
+	RedeemGuildInvite(ctx context.Context, code string) (Invite, error)
 	// Instance invite queries.
 	//
 	// The codes that gate account creation while registration_mode = "invite". Distinct from the per-guild
@@ -1458,7 +1552,10 @@ type Querier interface {
 	// caller has to be able to tell 403 from 404.
 	UpdateGuild(ctx context.Context, arg UpdateGuildParams) (Guild, error)
 	UpdateGuildMember(ctx context.Context, arg UpdateGuildMemberParams) (GuildMember, error)
-	UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (Message, error)
+	// `messages.id` is qualified because sqlc cannot resolve a bare `id` once the CTE meets `users`; Postgres
+	// could.
+	//
+	UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (UpdateMessageContentRow, error)
 	// Same COALESCE shape as UpdateGuild, and the same guild scoping as GetRole.
 	//
 	// position is not updatable here. Reordering roles is a multi-row swap and role *hierarchy* — who may

@@ -127,7 +127,12 @@ func TestEveryContractPathIsDecided(t *testing.T) {
 		"/guilds/{guild_id}/audit-log":                               relayed, "/reports": relayed,
 		"/guilds/{guild_id}/reports": relayed, "/guilds/{guild_id}/reports/{report_id}": relayed,
 		"/guilds/{guild_id}/reports/{report_id}/resolve": relayed,
-		"/guilds/{guild_id}/members":                     relayed, "/guilds/{guild_id}/members/{user_id}": relayed,
+
+		// M20a. Guild invites are the account acting in guilds like every route above, and joining one is
+		// the client's whole reason to reach them; none manages a credential.
+		"/guilds/{guild_id}/invites": relayed, "/channels/{channel_id}/invites": relayed,
+		"/invites/preview": relayed, "/invites/redeem": relayed, "/invites/revoke": relayed,
+		"/guilds/{guild_id}/members": relayed, "/guilds/{guild_id}/members/{user_id}": relayed,
 	}
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "openapi.yaml"))

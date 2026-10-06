@@ -234,6 +234,10 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just spdx-check` — fail if any hand-written `.go` file is missing its rule-24 header, if a generated one
   grew a header, or if a non-Go file did. Sees untracked files too, so it answers the same as CI on a file
   you have written but not yet staged.
+- `just release-dry-run` — the release short of signing and publishing: `goreleaser check`, every archive
+  for every OS and arch into `dist/`, then `norite about` from this machine's archive must report a stamped
+  revision `git cat-file` finds. Signing needs the release workflow's identity, so a `v*` tag is its first
+  real run (M20a). CI's `build` job runs the same snapshot release on every push.
 - `just build-local` — plain `go build` of all four binaries into `./bin/`, at paths that do not vary by
   platform the way `just build`'s goreleaser output does. `just notices` and CI's assertions both read them.
 - `just notices` — regenerate each binary's `internal/notices/THIRD-PARTY-NOTICES.txt` from
@@ -387,7 +391,7 @@ Install and authenticate `gh` if you want that to change.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D under way, M20 done**. Full
+**Phase D under way, M20a done**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -983,6 +987,52 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   in flight printed one thing twice and did not say the request might have arrived anyway. Everything the
   done-when names was walked by hand.
 
+- **M20a — First usable client, end to end**: done. Bare `norite` on a terminal opens `cli/internal/tui`:
+  home, with the account's guilds and channels and a two-step invite redeem, and one channel pane drawn
+  live. Guild invites in `guilds` (five routes, migration `000025`, `invite.create`/`invite.revoke`/
+  `member.join`, `GUILD_MEMBER_ADD`), `Message.author`, `cli/internal/ops` and `cli/internal/daemontest`,
+  `norite invite`, `norite register`, `norite about`, and the first release's pipeline. Decisions are in the
+  roadmap entry and in `docs/security-ledger.md`.
+
+  **Planning found a first client two people could not share** — eight milestones running. No route added a
+  guild member, and M20's manual pass had used psql; guild invites moved here from M57. Nothing could name
+  another account, so `Message` gained its author. The daemon's scrollback had no socket operation, so
+  history comes over the relay. And writing the README found the second person could only register with
+  curl, which `norite register` answers.
+
+  **Joining is a person's act, never a token's.** `/security-sweep` reproduced an API token holding
+  `guilds.write` redeeming an invite as its owner and then reading the guild's backlog: a delegated
+  credential choosing its owner's company. Redemption takes `RequireUserActor`, as an ownership transfer
+  does. A token may still create invites.
+
+  **Lock order was found twice by review, and both times staged rather than raced.** A redemption racing a
+  guild deletion deadlocked (the invite, then the guild through the membership's foreign key, against the
+  guild, then the cascade); it now locks the guild first. And `FOR KEY SHARE` let a join race an ownership
+  transfer and answer with the old owner; it is `FOR SHARE`. Each test holds the other transaction open and
+  waits for Postgres to report the block.
+
+  **A ceiling that follows another must be bounded with it.** The joined ceiling follows a raised owned one
+  up to `gatewayproto.MaxGuilds`, and the owned one accepted ten times that, so an instance could start
+  cleanly and refuse accounts at 1,000 without a word — pinned by a test as "capped there". Both now stop at
+  the wire's bound, and an explicit joined value below the owned one refuses to start.
+
+  **The client holds what a correct instance could send, not what this one sends.** `/security-sweep` found
+  home growing with every guild a hostile instance announced and the pane holding 500 messages of 4 MiB
+  each. M19's rule for the daemon applies to the client: home stops at `maxHomeGuilds` and `maxHomeRows`,
+  and a held message is cut to the instance's own validators.
+
+  **The manual pass found five things, every one in what a person sees.** A logout left the conversation on
+  screen; a guild with no visible channels made home say "no guilds yet"; the root's `--channel` was
+  inherited by every verb; the retry line's width cut off when it would retry; a dead pane kept an old
+  refusal. **A schema-checked fake cannot see a screen**, the M19 lesson about wording, one layer out.
+
+  **A frame lays out what it draws.** The optimization pass measured 59 ms a keystroke with a full pane of
+  long messages, from re-wrapping all 500 to draw thirty rows; laying out only the tail is 0.22 ms.
+
+  **The release had never run, and its dry run found it would not have built the commit it stamped.** A
+  `go work sync` hook rewrote two modules' `go.mod` during every release, and goreleaser built in workspace
+  mode while the notices are generated standalone. Both gone: every release build sets `GOWORK=off`.
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -1058,6 +1108,11 @@ re-derive:
   and `go install golang.org/x/vuln/cmd/govulncheck@latest` after a toolchain upgrade is the fix. CI never
   sees this because it installs the binary fresh with the same Go it builds with. Note the failure is loud
   in the right direction: it refused to run rather than reporting a clean scan it had not performed.
+
+  **And a seventh, from M20a: `goreleaser_version` / `GORELEASER_VERSION`**, in the justfile and in both
+  `ci.yml` and `release.yml`, with release.yml's `COSIGN_VERSION` and the cosign-installer tag beside it. It
+  was `latest`, which would have made an upstream release the first thing a tag tests, on the one run that
+  publishes. The justfile runs it through `go run`, like the generators below.
 - **Every generator is invoked as `go run …@{{version}}`** — `sqlc`, `oapi-codegen`, and since M14
   `go-licenses` — rather than from a binary on `PATH`. Nothing has to be installed, and the pinned version
   cannot be shadowed by whatever a distro package put in `/usr/bin`. That is not hypothetical: the
@@ -1771,7 +1826,8 @@ And on hierarchy and overwrites, from M13:
 - **`RemoveMember` deliberately does not get the overwrite guard the other two deletion paths have.**
   Guarding a kick would let a member become unkickable by holding an overwrite whose bits the moderator
   lacks, trading an escalation for a denial of moderation. The residual — a kick clears a member-tier deny
-  — only matters once that member can return, which is M57's and M72a's.
+  — matters once that member can return, which they can since M20a's invites: a rejoin is a clean slate
+  (F1), so leave-and-rejoin sheds a deny, accepted and carried to M74 (`docs/security-ledger.md`).
 - **Category permissions are copied at creation, never inherited at read time.** A channel does not follow
   its category's later changes, so "sync permissions with category" is a client re-copying through the
   overwrite endpoints rather than a flag anything stores. Without the copy, a channel created inside a
@@ -2177,6 +2233,46 @@ And on the attach socket and the relayed verbs, from M20:
   the instance always sends fails, and the output is validated against its `contracts/cli-json/`
   definition.
 
+And on guild invites and the first client, from M20a:
+
+- **An invite code travels in a body, never a path**, on all three routes that take one (ADR 0029's
+  reasoning: a path is in every log line). Unknown, malformed, expired, revoked and used up are one 404.
+  Codes are M10's format, from `auth.NewInviteCode`.
+- **Redemption's order is the lock order**: the account's slot-4 advisory lock, the guild `FOR SHARE`,
+  then membership, the joined ceiling and a single-statement spend with every guard in its `WHERE`. A
+  member redeeming again spends nothing and writes nothing. Anything new that locks a guild and an invite
+  takes the guild first.
+- **A rejoin is a clean slate.** `RemoveMember` deletes the departing member's overwrites, so
+  leave-and-rejoin sheds a member-tier deny; accepted and carried to M74, with guild bans, in the ledger.
+- **A new client action goes through `cli/internal/ops`**, which the verbs use too: the request's shape,
+  the instance's bounds and every outcome's exit code exist once. `ops` checks every id it puts into a path,
+  whoever supplied it, because the client's ids come from the instance.
+- **What the client holds is bounded against the instance**: `maxHomeGuilds`, `maxHomeRows`, and `hold()`
+  for a message. Anything new it keeps from an event or a listing gets a bound a correct instance never
+  reaches.
+- **A sign-in that ends clears the screen.** A sign-out or a different account drops home and the pane,
+  draft included (`Model.forget`); a resync rereads the open channel rather than merging into it. The daemon
+  forgets on a sign-in's end, and a client that kept drawing would undo it where it matters.
+- **An answer names what asked for it.** Every command's result carries the attachment's generation, and a
+  send's answer carries its pane, so an answer arriving after the thing it answers has gone is dropped.
+- **Draw the tail.** A frame lays out only the newest messages that fill it (`paneModel.tail`); anything
+  that needs the whole layout per keystroke is the 59 ms this replaced.
+- **A root-only flag is `Local: true`.** urfave/cli v3 hands a root flag to every subcommand, which then
+  accepts it and does nothing.
+- **Testing the client**: drive `Update` and `View` at a fixed size with the harness in `tui_test.go`
+  (teatest has never been tagged), against `daemontest`'s contract-checked fake; play a hostile instance
+  with `bounds_test.go`'s stub, which the fake cannot be, since it holds every answer to the contract.
+- **The installers in `scripts/` restate what a release publishes**: the archive names, `checksums.txt`,
+  and the cosign identity pinned to `release.yml` at the tag. A change to any of those in
+  `.goreleaser.yaml` changes `install.sh` and `install.ps1` in the same commit. `install-server.sh` gets its
+  programs through `install.sh`, so downloading and checking exist once. Test them against `dist/` served
+  over HTTP with `NORITE_RELEASE_BASE_URL`, and **never run `install-server.sh` in a test without `--dir`
+  and `--bin-dir`**: its defaults are a real instance and a real `~/.local/bin`, and a run without them
+  once registered a second server on a live one's port.
+- **A release is proved by `just release-dry-run`** before a tag. Builds run with `GOWORK=off`, there is no
+  `go work sync` hook, and the release footer, which carries the `cosign verify-blob` command pinned to
+  `release.yml` at the tag, is configuration.
+
 ## Project-specific skills
 
 **Not in the repository** — `.gitignore` excludes `.claude/`, so these live on the maintainer's machine
@@ -2250,6 +2346,11 @@ should be fixed, not tolerated:
   decision here has somewhere durable — ADRs, roadmap entries, the optimization review's "deliberate
   non-optimizations confirmed" — and security rejections were the one kind with nowhere, so they came
   back. **Read it before reporting a finding**; each entry carries the condition that would reopen it.
+- `docs/trying-the-alpha.md` — **how somebody runs an instance and joins it from other machines**, linked
+  from the README rather than inside it, with `docs/trying-the-alpha-on-windows.md` for joining from a
+  Windows PC. They are the alpha's guides, not self-hosting documentation, which is M96's and replaces
+  them. Their commands are ones a stranger will paste, so a change to a flag, a default or a config key
+  they name is a reason to walk them again.
 - `docs/adr/` — **why the contested calls went the way they did.** Superseded ADRs stay, marked as such in
   both directions. `SECURITY.md` covers vulnerability-reporting
 process, not architecture.

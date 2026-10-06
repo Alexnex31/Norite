@@ -52,10 +52,12 @@ func guildSurfaceRoutes(t *testing.T) []string {
 		// /reports is here because filing is top-level — the target vocabulary spans objects with no
 		// guild — and a route outside these prefixes is one neither test below can see. M15 shipped the
 		// message routes invisible to both for a version of this reason; the prefix list is the other
-		// half of that lesson.
+		// half of that lesson. /invites is the same case at M20a: the routes taking a code carry no guild
+		// in their path, so they joined both tests only when this list did.
 		if strings.HasPrefix(route, "/api/v1/guilds") ||
 			strings.HasPrefix(route, "/api/v1/channels") ||
-			strings.HasPrefix(route, "/api/v1/reports") {
+			strings.HasPrefix(route, "/api/v1/reports") ||
+			strings.HasPrefix(route, "/api/v1/invites") {
 			out = append(out, op)
 		}
 	}
@@ -168,6 +170,11 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		map[string]any{"name": "needs-review", "is_shared": true}, withToken(f.ownerToken))
 	require.Equal(t, http.StatusCreated, tag.Code, "seeding a tag: %s", tag)
 
+	// A real invite, for the same reason: revoking it as a stranger must answer as an unknown code does.
+	invite := f.api.call(http.MethodPost, "/api/v1/channels/"+channel.field(t, "id")+"/invites",
+		map[string]any{}, withToken(f.ownerToken))
+	require.Equal(t, http.StatusCreated, invite.Code, "seeding an invite: %s", invite)
+
 	ids := map[string]string{
 		"{guild_id}":     f.guildID,
 		"{channel_id}":   channel.field(t, "id"),
@@ -227,6 +234,22 @@ func TestEveryGuildRouteRefusesANonMember(t *testing.T) {
 		"POST /api/v1/guilds/{guild_id}/reports/{report_id}/resolve": {
 			body: map[string]any{"status": "dismissed"},
 		},
+
+		// M20a. Listing and creating name a guild or channel and refuse a stranger as every route above
+		// does. Previewing and redeeming are the opposite on purpose: an invite is the guild showing itself
+		// to whoever holds the code, so a stranger holding one is the caller those routes are for.
+		// Revoking is not: a stranger holding a real code must be answered as though it named nothing.
+		"GET /api/v1/guilds/{guild_id}/invites":      {},
+		"POST /api/v1/channels/{channel_id}/invites": {body: map[string]any{}},
+		"POST /api/v1/invites/preview": {
+			exempt: "a preview is for whoever holds the code, member or not (M20a); a dead code's 404 is " +
+				"TestEveryDeadCodeAnswersAsAnUnknownOne",
+		},
+		"POST /api/v1/invites/redeem": {
+			exempt: "joining is what a non-member holding a code does; the refusals are " +
+				"TestEveryDeadCodeAnswersAsAnUnknownOne",
+		},
+		"POST /api/v1/invites/revoke": {body: map[string]any{"code": invite.field(t, "code")}},
 
 		// M13a. The stranger names themselves as the recipient, which is the takeover attempt, and must be
 		// refused as though the guild did not exist — before anything asks whether they are a member.
@@ -408,6 +431,19 @@ func TestEveryGuildMutationWritesExactlyOneAuditEntry(t *testing.T) {
 		{route: "DELETE /api/v1/channels/{channel_id}/messages/{message_id}/tags/{tag_id}",
 			exempt: "removing your own writes nothing; tag.remove, for somebody else's, is asserted in " +
 				"the tags package"},
+
+		// M20a's invites. Creating one is administrative and is counted here. Revoking needs the code this
+		// run creates, and redeeming needs an account not yet in the guild, neither of which this sequence
+		// can name; both entries are counted in the guilds package by TestInvitesAndJoinsAreAudited.
+		{route: "GET /api/v1/guilds/{guild_id}/invites", exempt: readsWriteNothing},
+		{route: "POST /api/v1/channels/{channel_id}/invites", action: "invite.create",
+			body: map[string]any{}, want: http.StatusCreated},
+		{route: "POST /api/v1/invites/preview", exempt: "a preview writes nothing; it is a POST only so " +
+			"the code stays out of request logs"},
+		{route: "POST /api/v1/invites/redeem", exempt: "the fixture's owner is already a member, which " +
+			"changes nothing by design; member.join is counted in the guilds package"},
+		{route: "POST /api/v1/invites/revoke", exempt: "needs the code this run creates; invite.revoke " +
+			"is counted in the guilds package"},
 
 		{route: "GET /api/v1/guilds/{guild_id}", exempt: readsWriteNothing},
 		{route: "GET /api/v1/guilds/{guild_id}/channels", exempt: readsWriteNothing},

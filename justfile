@@ -25,6 +25,11 @@ golangci_lint_version := "2.12.2"
 # ADR 0032. Must match .github/workflows/ci.yml's GO_LICENSES_VERSION.
 go_licenses_version := "v2.0.1"
 
+# The release tool, the seventh pin (M20a). Must match GORELEASER_VERSION in .github/workflows/ci.yml and in
+# release.yml. Invoked through `go run` like the generators, so the dry run below builds exactly what the
+# tag will, whatever goreleaser a distro put on PATH; the first run compiles it, about two minutes.
+goreleaser_version := "v2.18.2"
+
 # Default connection string for the docker-compose Postgres. Override for any other target:
 #   just database_url=postgres://... db-migrate
 database_url := env_var_or_default("NORITE_DATABASE_URL", "postgres://norite:norite@localhost:5432/norite?sslmode=disable")
@@ -268,9 +273,37 @@ license-inventory:
     } > "$out"
     echo "wrote $out"
 
-# Build every binary via goreleaser, snapshot mode (no publish, no signing — that lands at Milestone M24).
+# Build every released binary via goreleaser, snapshot mode: no archives, no signing, no publishing.
 build:
-    goreleaser build --snapshot --clean
+    GOWORK=off go run github.com/goreleaser/goreleaser/v2@{{goreleaser_version}} build --snapshot --clean
+
+# The release short of signing and publishing, which both need the release workflow's identity: the
+# configuration checked, then every archive for every OS and arch and checksums.txt, into dist/. The tag is
+# signing's first real run (M20a). Then `norite about` from this machine's archive must report a revision
+# that was stamped and that this repository holds, which is the AGPL section 5(d) notice telling the truth.
+release-dry-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{justfile_directory()}}
+    gr() { GOWORK=off go run github.com/goreleaser/goreleaser/v2@{{goreleaser_version}} "$@"; }
+    gr check
+    gr release --snapshot --clean --skip=sign
+    echo "archives:"
+    ls dist/*.tar.gz dist/*.zip | sed 's/^/  /'
+    os=$(go env GOOS) arch=$(go env GOARCH)
+    archive=$(ls dist/norite_*_"${os}"_"${arch}".tar.gz)
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    tar -xzf "$archive" -C "$tmp"
+    for f in norite norite-daemon LICENSE README.md THIRD-PARTY-NOTICES-norite.txt THIRD-PARTY-NOTICES-norite-daemon.txt; do
+        [[ -e "$tmp/$f" ]] || { echo "$archive is missing $f" >&2; exit 1; }
+    done
+    about=$("$tmp/norite" about --json)
+    rev=$(sed -n 's/.*"revision": "\([^"]*\)".*/\1/p' <<<"$about")
+    from=$(sed -n 's/.*"revision_from": "\([^"]*\)".*/\1/p' <<<"$about")
+    [[ "$from" == stamped ]] || { echo "norite about: revision_from is '$from', not stamped" >&2; exit 1; }
+    git cat-file -e "$rev^{commit}" || { echo "norite about: '$rev' is not a commit here" >&2; exit 1; }
+    echo "norite about names $rev (stamped), a commit this repository holds"
 
 # Fail if any hand-written Go file is missing its two-line SPDX header (rule 24, ADR 0032).
 #
@@ -356,7 +389,8 @@ notices: build-local
 # `just build` goes through goreleaser, which writes to dist/<id>_<os>_<arch>/ — correct for a release and
 # unusable anywhere a path has to be written down, which is what a CI assertion and a verification checklist
 # both need. The names match .goreleaser.yaml's `binary:` fields exactly, because a second set of names for
-# the same four programs is a thing that drifts.
+# the same programs is a thing that drifts; norite-gui, which is not released until M78, keeps the name it
+# will ship under.
 #
 # GOWORK=off for build-standalone's reason: it is what a release build and a single-module consumer both do.
 build-local:

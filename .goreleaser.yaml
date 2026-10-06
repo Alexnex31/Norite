@@ -1,20 +1,29 @@
-# Builds and packages the four current binaries. No signing wired in yet — Sigstore/cosign release signing
-# lands at Milestone M24 (docs/architecture.md §13, ADR 0020), so a release cut before it carries only
-# checksums.txt. voiceworker/ joins once it exists (Phase E); frontend/ is never a goreleaser artifact (it's
-# embedded into the backend binary, or served by the later web SPA's own build, per docs/architecture.md §1).
+# Builds, packages and signs a release: the server, and the client — `norite` and `norite-daemon`, which are
+# one install and ship as one archive. voiceworker/ joins once it exists (Phase E); frontend/ is never a
+# goreleaser artifact (it's embedded into the backend binary, or served by the later web SPA's own build, per
+# docs/architecture.md §1). norite-gui is not released until M78 builds the GUI: today it is a stub, and an
+# archive of it would be a download that does nothing.
+#
+# checksums.txt is signed with cosign, keyless, under the release workflow's GitHub OIDC identity, and the
+# release footer gives the one command that verifies it (M20a; ADR 0033's amended consequence). The binaries
+# themselves are not OS code-signed (ADR 0020), and the footer says so. M24 keeps the updater's verification.
 #
 # Releases are published only by .github/workflows/release.yml, on a `v*` tag (ADR 0033). The repository
 # also carries `m<N>` milestone tags, which are not versions and which goreleaser's own tag discovery cannot
 # tell apart from one — a phase's last milestone commit carries both — so the workflow names the tag
 # explicitly rather than letting goreleaser pick it.
+#
+# `just release-dry-run` runs everything here but signing and publishing, which need the workflow's identity.
 version: 2
 
 project_name: norite
 
-before:
-  hooks:
-    - go work sync
-
+# Every build runs with the workspace off: each module as its own go.mod says, which is what `just notices`
+# reads to write the THIRD-PARTY-NOTICES each archive carries, and what anyone building one module on its
+# own gets. With go.work on, the release linked the workspace's build list instead — the same today, and a
+# notices file describing a different binary the day the two drift. There is no `go work sync` hook either:
+# it rewrote backend/ and daemon/'s go.mod on every release, so the binaries came from a tree that was not
+# the commit they are stamped with.
 builds:
   - id: backend
     dir: backend
@@ -22,6 +31,7 @@ builds:
     binary: norite-server
     env:
       - CGO_ENABLED=0
+      - GOWORK=off
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     # AGPL section 13 obliges this instance to offer the Corresponding Source *of the running version*, and
@@ -40,21 +50,16 @@ builds:
     binary: norite
     env:
       - CGO_ENABLED=0
+      - GOWORK=off
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     # Without this, `norite --version` reports "dev" in every shipped release — the variable's default.
-    # The other three binaries get the same treatment as they grow a version to report.
+    #
+    # And the revision, which `norite about` prints as AGPL section 5(d)'s notice (M20a): the full commit,
+    # for the backend's reason above, so it resolves in the repository the notice names. Unstamped, the CLI
+    # reads the commit `go build` recorded, and says so.
     ldflags:
-      - -s -w -X github.com/Alexnex31/Norite/cli/internal/cliapp.Version={{ .Version }}
-
-  - id: gui
-    dir: gui
-    main: ./cmd/gui
-    binary: norite-gui
-    env:
-      - CGO_ENABLED=0
-    goos: [linux, darwin, windows]
-    goarch: [amd64, arm64]
+      - -s -w -X github.com/Alexnex31/Norite/cli/internal/cliapp.Version={{ .Version }} -X github.com/Alexnex31/Norite/cli/internal/cliapp.Revision={{ .FullCommit }}
 
   - id: daemon
     dir: daemon
@@ -62,6 +67,7 @@ builds:
     binary: norite-daemon
     env:
       - CGO_ENABLED=0
+      - GOWORK=off
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     # The daemon writes its version into the first line of every log file, which is the first thing anyone
@@ -70,17 +76,18 @@ builds:
     ldflags:
       - -s -w -X main.Version={{ .Version }}
 
-# One archive per binary rather than one shared block, because each carries a different
-# THIRD-PARTY-NOTICES.txt: the four binaries link different dependency sets, and a notice file listing
-# modules a binary does not contain is as wrong as one omitting modules it does. Naming `files` at all
-# replaces goreleaser's default set, so LICENSE and README are listed explicitly — dropping LICENSE from a
-# release archive of AGPL software is the one omission that would actually matter.
+# The server is one archive and the client another: `norite` cannot do anything without `norite-daemon` on
+# the same machine, so a tester downloading one file must get both. Each binary's THIRD-PARTY-NOTICES.txt
+# travels with it, named for it in the client archive, because the binaries link different dependency sets
+# and a notice file listing modules a binary does not contain is as wrong as one omitting modules it does.
+# Naming `files` at all replaces goreleaser's default set, so LICENSE and README are listed explicitly —
+# dropping LICENSE from a release archive of AGPL software is the one omission that would actually matter.
 archives:
   - id: backend
     ids: [backend]
     formats: [tar.gz]
     name_template: >-
-      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      norite-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -90,11 +97,11 @@ archives:
       - src: backend/internal/notices/THIRD-PARTY-NOTICES.txt
         dst: THIRD-PARTY-NOTICES.txt
 
-  - id: cli
-    ids: [cli]
+  - id: client
+    ids: [cli, daemon]
     formats: [tar.gz]
     name_template: >-
-      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      norite_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -102,45 +109,54 @@ archives:
       - LICENSE
       - README.md
       - src: cli/internal/notices/THIRD-PARTY-NOTICES.txt
-        dst: THIRD-PARTY-NOTICES.txt
-
-  - id: gui
-    ids: [gui]
-    formats: [tar.gz]
-    name_template: >-
-      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-    format_overrides:
-      - goos: windows
-        formats: [zip]
-    files:
-      - LICENSE
-      - README.md
-      - src: gui/internal/notices/THIRD-PARTY-NOTICES.txt
-        dst: THIRD-PARTY-NOTICES.txt
-
-  - id: daemon
-    ids: [daemon]
-    formats: [tar.gz]
-    name_template: >-
-      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-    format_overrides:
-      - goos: windows
-        formats: [zip]
-    files:
-      - LICENSE
-      - README.md
+        dst: THIRD-PARTY-NOTICES-norite.txt
       - src: daemon/internal/notices/THIRD-PARTY-NOTICES.txt
-        dst: THIRD-PARTY-NOTICES.txt
+        dst: THIRD-PARTY-NOTICES-norite-daemon.txt
 
 checksum:
   name_template: "checksums.txt"
+
+# One signature, over checksums.txt, which names every archive's SHA-256: verifying it and then the sums
+# verifies everything. Keyless: cosign signs with a short-lived certificate Sigstore issues to the release
+# workflow's GitHub OIDC identity, so there is no key to hold or lose, and the certificate names the workflow
+# file and the tag it ran for. The bundle carries the certificate and the transparency-log entry, so the
+# footer's one command needs nothing else.
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --bundle=${signature}
+      - --yes
+      - ${artifact}
 
 # `auto` marks any version with a pre-release suffix (v0.1.0-alpha, v0.2.0-beta.1, v1.0.0-rc.1) as a
 # pre-release on GitHub, so the "latest release" a self-hoster is pointed at is never one. Every 0.x release
 # is still a *release* here, not a pre-release: SemVer's pre-release is the suffix, and ADR 0033 states the
 # 0.x instability in the docs rather than by flagging every version before 1.0.0.
+#
+# The footer is configuration, so no release can forget it. The identity it verifies against is exact:
+# this repository's release.yml, at this release's tag, so a bundle any other workflow or tag produced fails.
 release:
   prerelease: auto
+  footer: |
+    ## Verifying this release
+
+    `checksums.txt` is signed with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3, keylessly, by this repository's release workflow. Download `checksums.txt`, `checksums.txt.sigstore.json` and the archives you want into one directory, then:
+
+    ```sh
+    cosign verify-blob checksums.txt \
+      --bundle checksums.txt.sigstore.json \
+      --certificate-identity 'https://github.com/Alexnex31/Norite/.github/workflows/release.yml@refs/tags/{{ .Tag }}' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    sha256sum --ignore-missing -c checksums.txt    # macOS: shasum -a 256 --ignore-missing -c checksums.txt
+    ```
+
+    `Verified OK` and an `OK` per archive mean these are the files this repository's release workflow built for {{ .Tag }}. Anything else means do not run them.
+
+    **The binaries are not code-signed for macOS or Windows**, so Gatekeeper and SmartScreen will warn before the first run. That is a known gap (ADR 0020), not a sign of tampering; the check above is what tells you the files are genuine.
 
 changelog:
   disable: true

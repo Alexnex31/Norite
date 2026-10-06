@@ -73,6 +73,13 @@ const authRateLimit = "20-M"
 // everything else that does.
 const devicePollRateLimit = "120-M"
 
+// inviteRateLimit is the bucket the three routes taking a guild invite code sit in (M20a).
+//
+// A code is about 69 bits, so guessing is hopeless at any rate; the bucket is there so a client in a loop,
+// or somebody trying, costs the instance little. Thirty a minute is well past what a person pasting codes
+// does, and two people behind one NAT do not throttle each other at it.
+const inviteRateLimit = "30-M"
+
 // newRouter assembles the HTTP router and its middleware chain.
 //
 // The chain order is fixed by docs/architecture.md §2 and is load-bearing rather than stylistic:
@@ -101,6 +108,15 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 	authLimiter, err := ratelimit.Middleware(ratelimit.Options{
 		Rate:    authRateLimit,
 		Bucket:  "auth",
+		Backend: opts.RateLimitBackend,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	inviteLimiter, err := ratelimit.Middleware(ratelimit.Options{
+		Rate:    inviteRateLimit,
+		Bucket:  "invites",
 		Backend: opts.RateLimitBackend,
 	})
 	if err != nil {
@@ -305,6 +321,9 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			// a group mounted on a service would vanish from rule 6's check exactly as /instance did.
 			if opts.Guilds != nil {
 				opts.Guilds.Routes(r)
+
+				// The routes taking an invite code, in their own bucket as well as the base one (M20a).
+				opts.Guilds.InviteRoutes(r.With(inviteLimiter))
 			}
 
 			// Channel messages (M15), mounted the same way and in the same bucket for the same reasons.

@@ -89,7 +89,16 @@ url = "https://github.com/Alexnex31/Norite"
 [limits]
 channels_per_guild = 500
 roles_per_guild = 250
+# Guilds an account may own. At most 1000, like the joined ceiling below: an owned guild is a membership too.
 guilds_per_account = 50
+# Every guild an account is in, owned ones included: what an invite redemption, and creating a guild, is
+# refused past (M20a). At most 1000, which is what a daemon keeps. Left unset it follows a raised
+# guilds_per_account, so an instance that raised that one keeps its accounts' reach, and the wizard writes
+# it commented out for that reason. Set below guilds_per_account, the instance refuses to start rather than
+# capping the owned ceiling without a word.
+joined_guilds_per_account = 100
+# Live invites per guild, which its invite list returns whole (M20a).
+invites_per_guild = 500
 
 [database]
 # Postgres connection string. No default — there is no safe guess. Carries the password: see the 0600 note
