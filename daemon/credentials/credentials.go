@@ -40,6 +40,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Alexnex31/Norite/daemon/atomicfile"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
 )
 
@@ -631,43 +632,10 @@ func (s *Store) writeRecord(record Record) error {
 
 // writeFileAtomically replaces a file in the store's directory, owner-only, with no observable half-state.
 //
-// Temp file plus rename, as every writer of shared client state does (architecture.md §3): a half-written
-// file here is a daemon that cannot start, and a crash mid-write is exactly when someone is least able to
-// diagnose one. The temp file is created 0600 rather than tightened afterwards, so its contents are never
-// briefly world-readable — this writes a refresh token as well as the two plain files beside it.
-//
-// The temp file is created in the destination's own directory because a rename is only atomic within one
-// filesystem, and it is removed on every path out; once the rename has succeeded that removal is a no-op.
+// A half-written file here is a daemon that cannot start, and a crash mid-write is exactly when someone is
+// least able to diagnose one. The mode is forced on every write rather than kept, and a symbolic link is
+// replaced rather than followed: this writes a refresh token as well as the two plain files beside it, and
+// neither a loosened mode nor a planted link should be able to move where one lands.
 func writeFileAtomically(path string, data []byte) error {
-	dir, name := filepath.Split(path)
-
-	tmp, err := os.CreateTemp(dir, name+".*")
-	if err != nil {
-		return fmt.Errorf("creating a temporary file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if err := tmp.Chmod(filePerm); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("restricting %s: %w", tmpName, err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("writing %s: %w", tmpName, err)
-	}
-	// Flushed before the rename, so a crash between the two cannot leave the new name pointing at an empty
-	// file — which is the one outcome a rename is supposed to rule out.
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("flushing %s: %w", tmpName, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpName, err)
-	}
-
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("replacing %s: %w", path, err)
-	}
-	return nil
+	return atomicfile.Write(path, data, atomicfile.Options{Mode: filePerm})
 }

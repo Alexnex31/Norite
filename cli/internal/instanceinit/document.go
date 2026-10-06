@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/Alexnex31/Norite/daemon/atomicfile"
 )
 
 // FileMode is the permission the config file is created with.
@@ -287,46 +289,9 @@ func (d Document) Write(path string, force bool) error {
 // Writing in place would mean a full disk or a lost power rail could truncate a working configuration
 // halfway through — and on a real deployment this file holds the only copy of the database credentials,
 // so a half-written one is an instance that cannot start and an operator with nothing to restore from.
-// Staging into a sibling file and renaming makes the swap atomic: readers see either the old file or the
-// complete new one.
+// The mode is forced on every write, since the file holds a password from its first byte.
 func writeAtomically(path, body string) error {
-	dir := filepath.Dir(path)
-
-	// Same directory, so the rename stays within one filesystem — across a mount boundary it would fall
-	// back to a copy and lose the atomicity this exists for.
-	tmp, err := os.CreateTemp(dir, ".instance-*.toml")
-	if err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	tmpName := tmp.Name()
-
-	// Any failure from here on leaves the destination as it was, and takes the staging file with it.
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}()
-
-	// CreateTemp already makes the file 0600, but say so explicitly rather than depending on that: this
-	// file holds a password from the moment the first byte lands.
-	if err := tmp.Chmod(FileMode); err != nil {
-		return fmt.Errorf("securing %s to %#o: %w", tmpName, FileMode, err)
-	}
-	if _, err := tmp.WriteString(body); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	// Get the bytes to disk before the rename publishes the name. Without this, a crash right after the
-	// rename can leave the new name pointing at empty content on some filesystems.
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	return nil
+	return atomicfile.Write(path, []byte(body), atomicfile.Options{Mode: FileMode})
 }
 
 // tomlString renders a Go string as a TOML basic string.
