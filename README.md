@@ -1,12 +1,11 @@
 # Norite
 
-**Voice-and-text chat with a terminal client that does everything the desktop one does — voice calls
-included.**
+**Discord-shaped chat, built terminal-first: free software, self-hostable, voice and text.**
 
 Norite is a chat platform in the shape most people already know: servers, channels, roles, DMs, voice.
 What it does differently is refuse to treat the terminal as a second-class place to use it. The CLI and
-the full-screen TUI are not companions to a "real" app — they share one command tree with it, and they
-place and receive voice calls.
+the full-screen TUI are not companions to a "real" app — they share one command tree with it, and voice
+calls are planned for both.
 
 Four clients, one backend, one local daemon per machine. You can use the **public flagship** — the open
 instance operated by the project's author — or run your own, on your own terms. Both are the same
@@ -32,6 +31,9 @@ software.
   history.
 
 [Trying the alpha](docs/trying-the-alpha.md) walks through all of it, on one machine or several.
+
+**Would rather not host one?** The author runs a small test instance ahead of the public one.
+Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invite.
 
 > [!NOTE]
 > **It is still early, and text only.** Voice, DMs, presence and the GUI are not built yet; the client
@@ -130,7 +132,8 @@ API by anyone in the guild, and the first client does not draw it.
 > before it, there is no guaranteed migration path between them, and no third party has reviewed the code.
 >
 > **The public flagship is not open yet.** It stays closed to non-developer accounts until the feature set
-> is well advanced and its Kubernetes deployment is ready.
+> is well advanced and its Kubernetes deployment is ready. Until then the author's test instance takes
+> testers by invite: email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for one.
 >
 > The status badge above says `pre-alpha` and will until `v0.1.0-alpha` ships. See
 > [ADR 0033](docs/adr/0033-semver-release-progression.md).
