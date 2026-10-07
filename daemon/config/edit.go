@@ -303,27 +303,50 @@ func oneValue(literal string) error {
 // on the lines above stays: nothing says which key it belonged to, and deleting somebody's words on a
 // guess is the thing this file exists not to do.
 func unsetRaw(data []byte, path []string) ([]byte, error) {
+	return unsetAll(data, [][]string{path})
+}
+
+// unsetAll returns data without the lines of every path that is set. The document is read once and every
+// line to go is found in it, for the reason setAll plans against one read: an unsplit may have a whole
+// table's worth of keys to remove, and one read per key is the cubic import again.
+func unsetAll(data []byte, paths [][]string) ([]byte, error) {
 	body, bom := cutBOM(data)
 	doc, err := parseDocument(body)
 	if err != nil {
 		return nil, err
 	}
-	if err := doc.reachable(path); err != nil {
-		return nil, err
+	existing := doc.index()
+	var cuts []span
+	for _, path := range paths {
+		if err := doc.reachable(path); err != nil {
+			return nil, err
+		}
+		a, ok := existing[strings.Join(path, "\x00")]
+		if !ok {
+			continue
+		}
+		start := lineStart(body, a.expr.start)
+		// Only when the key has the line to itself. `a = 1; b = 2` is not TOML, so the tail can only be
+		// blanks and a comment, but the head is checked rather than assumed.
+		if len(bytes.TrimSpace(body[start:a.expr.start])) != 0 {
+			return nil, fmt.Errorf("%s shares its line with something else; remove it by hand", strings.Join(path, "."))
+		}
+		cuts = append(cuts, span{start, lineEnd(body, a.expr.end)})
 	}
-	a, ok := doc.find(path)
-	if !ok {
+	if len(cuts) == 0 {
 		return data, nil
 	}
-	data = body
-	start := lineStart(data, a.expr.start)
-	end := lineEnd(data, a.expr.end)
-	// Only when the key has the line to itself. `a = 1; b = 2` is not TOML, so the tail can only be
-	// blanks and a comment, but the head is checked rather than assumed.
-	if len(bytes.TrimSpace(data[start:a.expr.start])) != 0 {
-		return nil, errors.New("shares its line with something else; remove it by hand")
+	slices.SortFunc(cuts, func(a, b span) int { return a.start - b.start })
+	out := make([]byte, 0, len(body))
+	at := 0
+	for _, c := range cuts {
+		if c.start < at {
+			continue // the same line asked for twice
+		}
+		out = append(out, body[at:c.start]...)
+		at = c.end
 	}
-	out := append(append([]byte{}, data[:start]...), data[end:]...)
+	out = append(out, body[at:]...)
 	if err := valid(out); err != nil {
 		return nil, fmt.Errorf("removing the key would leave a file that is not valid TOML: %w", err)
 	}
@@ -346,16 +369,7 @@ func (d *document) reachable(path []string) error {
 	return nil
 }
 
-func (d *document) find(path []string) (assignment, bool) {
-	for _, a := range d.assignments {
-		if equal(a.path, path) {
-			return a, true
-		}
-	}
-	return assignment{}, false
-}
-
-// index returns the document's assignments by path, the first for each, as find reports them.
+// index returns the document's assignments by path, the first for each.
 func (d *document) index() map[string]assignment {
 	out := make(map[string]assignment, len(d.assignments))
 	for _, a := range d.assignments {

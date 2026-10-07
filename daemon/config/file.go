@@ -240,3 +240,86 @@ func resolve(section Section, name, input string, withValue bool) (segments []st
 	}
 	return segments, literal, nil
 }
+
+// errMoved reports that the file a client reads changed while a write to it was waiting: the toggle was
+// flipped.
+var errMoved = errors.New("the config toggle changed")
+
+// UpdateFor is Update on the file client reads right now, which the same-machine toggle decides, and
+// returns which file that was. fn is also told whether that is the client's own file.
+//
+// Which file is asked again once the file's lock is held. The daemon holds that lock while it flips the
+// toggle, so a write that was waiting behind a flip finds it has the wrong file and starts again on the
+// right one, where otherwise it would land in a file just set aside, or bring back one just moved away,
+// and report success (M21 /code-review).
+func UpdateFor(client Section, fn func(path string, split bool, current []byte) ([]byte, error)) (string, error) {
+	var path string
+	for range maxAttempts {
+		var split bool
+		var err error
+		path, split, err = PathFor(client)
+		if err != nil {
+			return "", err
+		}
+		err = Update(path, func(current []byte) ([]byte, error) {
+			now, _, err := PathFor(client)
+			if err != nil {
+				return nil, err
+			}
+			if now != path {
+				return nil, errMoved
+			}
+			return fn(path, split, current)
+		})
+		if errors.Is(err, errMoved) {
+			continue
+		}
+		return path, err
+	}
+	return path, ErrKeepsChanging
+}
+
+// SetFor is Set on the file client reads right now.
+func SetFor(client, section Section, name, input string) (string, error) {
+	segments, literal, err := resolve(section, name, input, true)
+	if err != nil {
+		return "", err
+	}
+	path, err := UpdateFor(client, func(_ string, _ bool, current []byte) ([]byte, error) {
+		return setRaw(current, segments, literal)
+	})
+	return path, named(path, err)
+}
+
+// UnsetFor is Unset on the file client reads right now.
+func UnsetFor(client, section Section, name string) (string, error) {
+	segments, _, err := resolve(section, name, "", false)
+	if err != nil {
+		return "", err
+	}
+	path, err := UpdateFor(client, func(_ string, _ bool, current []byte) ([]byte, error) {
+		return unsetRaw(current, segments)
+	})
+	return path, named(path, err)
+}
+
+// Lock takes the lock a write to the config at path takes, and returns what releases it. It is for the
+// daemon's toggle, which must keep `norite config set` out of a file from the moment it reads it until the
+// toggle says who reads it next. It waits as a write does and reports ErrLocked the same way.
+func Lock(path string) (unlock func(), err error) {
+	lockPath, err := lockFor(path)
+	if err != nil {
+		return nil, err
+	}
+	lock := flock.New(lockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), lockWait)
+	defer cancel()
+	locked, err := lock.TryLockContext(ctx, lockPoll)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("locking the config file: %w", err)
+	}
+	if !locked {
+		return nil, ErrLocked
+	}
+	return func() { _ = lock.Unlock() }, nil
+}

@@ -225,14 +225,14 @@
           "items": {
             "type": "string"
           },
-          "description": "The keys an unsplit added to the base from the other file."
+          "description": "The keys an unsplit wrote into the base from the other file: that file's own client section, and any [shared] key the base lacked."
         },
         "kept": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "The keys both files set differently, where the base's value stayed."
+          "description": "The [shared] keys both files set differently, where the base's value stayed."
         },
         "skipped": {
           "type": "array",

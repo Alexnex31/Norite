@@ -248,3 +248,36 @@ func TestWatchSeesEveryFileItWasGiven(t *testing.T) {
 	require.NoError(t, os.WriteFile(tui+".before-unsplit", []byte("x"), 0o600))
 	require.True(t, silent(), "a set-aside copy is not a config anybody reads")
 }
+
+// A config that is a link to a file one directory up has its real file in the directory the config's own
+// is in, which is watched already, for another reason: it is what notices the config directory being
+// removed and put back. Pointing the link somewhere else must not take that watch away.
+func TestRepointingALinkDoesNotCostTheWatchOnTheParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "norite")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	up := filepath.Join(root, "norite.toml")
+	require.NoError(t, os.WriteFile(up, []byte("[shared]\nclock = \"24h\"\n"), 0o600))
+	link := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.Symlink(up, link))
+	next, silent := watching(t, link)
+
+	// Re-pointed at a plain file beside it: the real file is no longer in the parent.
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.WriteFile(link, []byte("[shared]\nclock = \"12h\"\n"), 0o600))
+	require.True(t, next(), "the link being replaced")
+	require.True(t, silent(), "settled")
+
+	// The case the parent's watch is for.
+	require.NoError(t, os.RemoveAll(dir))
+	require.True(t, next(), "the directory going away")
+	require.True(t, silent(), "settled")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.True(t, next(), "the directory coming back")
+	require.True(t, silent(), "settled")
+	require.NoError(t, os.WriteFile(link, []byte("[shared]\nclock = \"24h\"\n"), 0o600))
+	require.True(t, next(), "a save in the directory that replaced it")
+}

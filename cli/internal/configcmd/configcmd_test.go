@@ -6,6 +6,7 @@ package configcmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -321,9 +322,19 @@ type fakeDaemon struct {
 	res   ipc.Result
 	err   error
 	asked []string
+	// dir is where this daemon says it keeps configs; empty is where the test's own shell does.
+	dir string
 }
 
 func (f *fakeDaemon) Do(_ context.Context, method, path string, _ any) (ipc.Result, error) {
+	if method == "GET" && path == ipc.PathConfig {
+		dir := f.dir
+		if dir == "" {
+			dir, _ = config.Dir()
+		}
+		body, _ := json.Marshal(ipc.ConfigLocation{Dir: dir})
+		return ipc.Result{Status: 200, Body: body}, nil
+	}
 	f.asked = append(f.asked, method+" "+path)
 	return f.res, f.err
 }
@@ -368,7 +379,7 @@ func TestSplitAndUnsplitAskTheDaemonAndReportWhatItDid(t *testing.T) {
 	require.NoError(t, err)
 	for _, want := range []string{
 		"unsplit: both clients read one file again", "started from /c/config.gui.toml",
-		"add      tui.colors.dim", "keep     shared.clock", "skip     tui.x", "nothing was deleted",
+		"take     tui.colors.dim", "keep     shared.clock", "skip     tui.x", "nothing was deleted",
 		"/c/config.tui.toml.before-unsplit",
 	} {
 		assert.Contains(t, out, want)
@@ -480,4 +491,81 @@ func TestNotSplitEveryCommandMeansTheOneFile(t *testing.T) {
 	_, _, err = norite(t, false, "--client", "cli", "path")
 	requireUsage(t, err)
 	assert.Contains(t, err.Error(), "tui or gui")
+}
+
+// A daemon whose environment names another config directory than this shell's would split a directory no
+// client here reads, and every client would then find its own file missing. The command asks first, and
+// when the two differ it asks for nothing: it says which is which and how to make them agree.
+func TestAToggleIsNotAskedOfADaemonThatMeansAnotherDirectory(t *testing.T) {
+	home(t)
+	d := &fakeDaemon{dir: filepath.Join(t.TempDir(), "elsewhere", "norite")}
+	withDaemon(t, d)
+	for _, verb := range []string{"split", "unsplit"} {
+		_, _, err := norite(t, false, verb)
+		var unavailable *clierr.UnavailableError
+		require.ErrorAs(t, err, &unavailable)
+		assert.Contains(t, err.Error(), "elsewhere")
+		assert.Contains(t, err.Error(), "norite daemon install")
+	}
+	assert.Empty(t, d.asked, "nothing was asked of it")
+
+	// The same directory spelled another way is the same directory.
+	mine, err := config.Dir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(mine, 0o700))
+	d.dir = filepath.Join(mine, "..", filepath.Base(mine)) + string(filepath.Separator)
+	if runtime.GOOS != "windows" {
+		// Or reached through a link, as a dotfiles manager lays a config directory out.
+		d.dir = filepath.Join(t.TempDir(), "linked")
+		require.NoError(t, os.Symlink(mine, d.dir))
+	}
+	d.res = ipc.Result{Status: 200, Body: []byte(`{"split":true,"files":[],"base":"","merged":[],"kept":[],"skipped":[],"backups":[]}`)}
+	_, _, err = norite(t, false, "split")
+	require.NoError(t, err)
+}
+
+// While split, an import means one client's file, and the other client's section is not read from it.
+// It is left out and said, where `set` on the same key is refused: before, it was written and counted as
+// imported.
+func TestAnImportWhileSplitLeavesTheOtherClientsSectionOut(t *testing.T) {
+	shared := home(t)
+	split(t)
+	gui := filepath.Join(filepath.Dir(shared), "config.gui.toml")
+	incoming := filepath.Join(t.TempDir(), "in.toml")
+	write(t, incoming, "[shared]\nclock = \"12h\"\n[tui.colors]\naccent = 5\n")
+
+	out, _, err := norite(t, false, "--client", "gui", "import", incoming, "--yes")
+	require.NoError(t, err)
+	assert.Contains(t, out, "add      shared.clock = 12h")
+	assert.Contains(t, out, "skip     tui.colors.accent")
+	assert.Contains(t, out, "--client tui")
+	assert.Contains(t, out, "imported 1 setting(s)")
+	assert.Equal(t, "[shared]\nclock = \"12h\"\n", read(t, gui))
+
+	out, _, err = norite(t, true, "--client", "gui", "import", incoming, "--dry-run")
+	require.NoError(t, err)
+	daemontest.MatchesCLISchema(t, out, "config.schema.json", "imported")
+
+	// And what is shown before anything is written says the same as what is then done.
+	out, _, err = norite(t, false, "--client", "gui", "import", incoming, "--dry-run", "--overwrite")
+	require.NoError(t, err)
+	assert.Contains(t, out, "skip     tui.colors.accent")
+	assert.NotContains(t, out, "add      tui.colors.accent")
+}
+
+// TOML has inf and nan and JSON does not. One such value in a table nothing reads yet must not fail every
+// script that lists the config.
+func TestANumberJSONCannotWriteDoesNotFailTheListing(t *testing.T) {
+	path := home(t)
+	write(t, path, "[tui.keys]\na = inf\nb = -inf\nc = nan\nd = \"x\"\n")
+	for _, args := range [][]string{{"get"}, {"get", "tui.keys"}} {
+		out, _, err := norite(t, true, args...)
+		require.NoError(t, err, "%v", args)
+		assert.Contains(t, out, `"a": "inf"`)
+		assert.Contains(t, out, `"b": "-inf"`)
+		assert.Contains(t, out, `"c": "nan"`)
+	}
+	out, _, err := norite(t, true, "get", "tui.keys")
+	require.NoError(t, err)
+	daemontest.MatchesCLISchema(t, out, "config.schema.json", "entry")
 }

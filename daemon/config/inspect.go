@@ -192,6 +192,15 @@ type ImportPlan struct {
 	MoreSkipped int
 }
 
+// skip records something the incoming file holds that was not carried over.
+func (p *ImportPlan) skip(key, problem string) {
+	if len(p.Skipped) < MaxWarnings {
+		p.Skipped = append(p.Skipped, Warning{Key: termsafe.Text(key), Problem: problem})
+		return
+	}
+	p.MoreSkipped++
+}
+
 // Empty reports an import that would change nothing.
 func (p *ImportPlan) Empty() bool { return len(p.Apply) == 0 }
 
@@ -205,12 +214,43 @@ func (p *ImportPlan) Empty() bool { return len(p.Apply) == 0 }
 // A key both files set is kept as this machine has it unless overwrite is true. That is the direction
 // under which importing never disturbs settings somebody already made.
 func PlanImport(current, incoming []byte, overwrite bool) (*ImportPlan, error) {
-	return planMerge(current, incoming, overwrite, false)
+	return PlanImportInto(current, incoming, overwrite, "")
 }
 
-// planMerge is PlanImport, and with own set it is the plan for folding together two files that are both
-// this machine's: a machine-local key is then exactly what must not be left behind.
-func planMerge(current, incoming []byte, overwrite, own bool) (*ImportPlan, error) {
+// PlanImportInto is PlanImport for one client's own file while the same-machine toggle is on, client
+// being whose it is; "" is config.toml, which both read. The other client's section is then left out,
+// each of its keys skipped with the reason: nothing reads [gui] from the terminal client's file, and an
+// import that wrote it there would report settings imported that do nothing, which `set` refuses to do.
+func PlanImportInto(current, incoming []byte, overwrite bool, client Section) (*ImportPlan, error) {
+	return planMerge(current, incoming, overwrite, mergeOptions{
+		sections: []Section{Shared, TUI, GUI}, notRead: otherClient(client),
+	})
+}
+
+// otherClient is the client that is not this one, or "" when given neither.
+func otherClient(client Section) Section {
+	switch client {
+	case TUI:
+		return GUI
+	case GUI:
+		return TUI
+	}
+	return ""
+}
+
+// mergeOptions says which merge planMerge is planning.
+type mergeOptions struct {
+	// own is set when both files are this machine's, so a machine-local key is carried and not refused.
+	own bool
+	// sections are the ones taken from the incoming file.
+	sections []Section
+	// notRead, when set, is a section the target file is not read for: its keys are skipped, and said.
+	notRead Section
+}
+
+// planMerge works out what taking opt.sections of incoming into current would do.
+func planMerge(current, incoming []byte, overwrite bool, opt mergeOptions) (*ImportPlan, error) {
+	own := opt.own
 	have, err := Inspect(current)
 	if err != nil {
 		return nil, err
@@ -224,13 +264,21 @@ func planMerge(current, incoming []byte, overwrite, own bool) (*ImportPlan, erro
 	}
 
 	plan := &ImportPlan{Skipped: want.Warnings, MoreSkipped: want.MoreWarnings}
-	for _, section := range []Section{Shared, TUI, GUI} {
+	for _, section := range opt.sections {
 		for _, name := range slices.Sorted(maps.Keys(want.set[section])) {
 			key, _ := lookup(section, name)
+			if opt.notRead != "" && section == opt.notRead {
+				plan.skip(string(section)+"."+name, fmt.Sprintf("is the %s client's, and this file is read "+
+					"for [shared] and [%s] while the config is split; import it with --client %s",
+					section, otherClient(section), section))
+				continue
+			}
 			if !key.Portable && !own {
 				return nil, fmt.Errorf("%s.%s %w", section, name, ErrMachineLocal)
 			}
-			for inner, to := range flatten(section, name, want.set[section][name], plan) {
+			values := flatten(section, name, want.set[section][name], plan)
+			for _, inner := range slices.Sorted(maps.Keys(values)) {
+				to := values[inner]
 				from, isSet, same := "", false, false
 				if e, err := have.Get(section, inner); err == nil && e.Source == FromFile {
 					from, isSet = fmt.Sprint(e.Value), true
@@ -254,21 +302,45 @@ func planMerge(current, incoming []byte, overwrite, own bool) (*ImportPlan, erro
 	return plan, nil
 }
 
-// Merge folds other into base, both of them this machine's own config files, and returns the result with
-// what it did. It is what turning the same-machine toggle off does with the two clients' files.
+// MergeClients folds the two clients' own config files back into one, and returns it with what it did. It
+// is what turning the same-machine toggle off does. newer names the client whose file was written more
+// recently, and that file's bytes are the starting point, comments included.
 //
-// base wins wherever both set a key: the caller passes the more recently written file as base, which is
-// what "last write wins" means once it is asked per key rather than per file. A key only other sets is
-// added, so neither file's customization is dropped by the other being newer. base's bytes are otherwise
-// kept as they are, comments included; other's comments have nowhere to go, and the caller keeps that
-// file.
+// Each client's section is its own file's, exactly. A split starts both files as copies of config.toml,
+// so the GUI's file holds a [tui] nobody has read since and the terminal's a [gui]: stale copies of how
+// things were. Merged key by key with no regard for whose section a key is in, the stale copy brought back
+// a setting its owner had removed, and overrode one its owner had changed whenever the other file happened
+// to be the newer (M21 /code-review). So [tui] is taken from the terminal client's file and [gui] from the
+// GUI's, removals included, whichever is newer.
 //
-// What other holds that this version does not understand is in the plan's Skipped, not in the result.
-func Merge(base, other []byte) ([]byte, *ImportPlan, error) {
-	plan, err := planMerge(base, other, false, true)
+// [shared] is the one section both read, and the one where "last write wins" is a question. It is asked
+// per key: a key only one file sets is kept, and where both set one the newer file's value stays and the
+// key is in the plan's Kept.
+//
+// What the older file holds that this version does not understand is in the plan's Skipped, not in the
+// result; the caller keeps that file.
+func MergeClients(tui, gui []byte, newer Section) ([]byte, *ImportPlan, error) {
+	base, other, theirs := tui, gui, GUI
+	if newer == GUI {
+		base, other, theirs = gui, tui, TUI
+	}
+	// [shared]: what the base lacks is added, and what both set stays the base's.
+	plan, err := planMerge(base, other, false, mergeOptions{own: true, sections: []Section{Shared}})
 	if err != nil {
 		return nil, nil, err
 	}
+	// The other client's section: its own file's values over the base's stale copy of them.
+	own, err := planMerge(base, other, true, mergeOptions{own: true, sections: []Section{theirs}})
+	if err != nil {
+		return nil, nil, err
+	}
+	plan.Apply = append(plan.Apply, own.Apply...)
+	slices.SortFunc(plan.Apply, func(a, b Change) int { return strings.Compare(a.Key(), b.Key()) })
+	// Skipped is everything the other file holds that was not understood. What it says about the base's
+	// client's section is about a stale copy nobody was going to carry anyway.
+	mine := string(otherClient(theirs)) + "."
+	plan.Skipped = slices.DeleteFunc(plan.Skipped, func(w Warning) bool { return strings.HasPrefix(w.Key, mine) })
+
 	edits := make([]edit, 0, len(plan.Apply))
 	for _, change := range plan.Apply {
 		segments, literal, err := resolve(change.Section, change.name, change.to, true)
@@ -281,7 +353,56 @@ func Merge(base, other []byte) ([]byte, *ImportPlan, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// And what the base's stale copy of that section sets that its owner's file no longer does.
+	stale, err := Inspect(base)
+	if err != nil {
+		return nil, nil, err
+	}
+	current, err := Inspect(other)
+	if err != nil {
+		return nil, nil, err
+	}
+	var gone [][]string
+	for _, name := range slices.Sorted(maps.Keys(stale.set[theirs])) {
+		for _, inner := range settable(name, stale.set[theirs][name]) {
+			if current.sets(theirs, inner) {
+				continue
+			}
+			segments, _, err := resolve(theirs, inner, "", false)
+			if err != nil {
+				return nil, nil, err
+			}
+			gone = append(gone, segments)
+		}
+	}
+	merged, err = unsetAll(merged, gone)
+	if err != nil {
+		return nil, nil, err
+	}
 	return merged, plan, nil
+}
+
+// settable lists the keys under name that the file sets: the key itself for a scalar, and every entry of
+// a table whatever its type, since this is for removing them.
+func settable(name string, value any) []string {
+	table, isTable := value.(map[string]any)
+	if !isTable {
+		return []string{name}
+	}
+	var out []string
+	for _, inner := range slices.Sorted(maps.Keys(table)) {
+		if inner != "" {
+			out = append(out, name+"."+inner)
+		}
+	}
+	return out
+}
+
+// sets reports whether the file sets name under section, a table's entry included.
+func (f *File) sets(section Section, name string) bool {
+	e, err := f.Get(section, name)
+	return err == nil && e.Source == FromFile
 }
 
 // flatten yields the settable keys under name: the key itself for a scalar, and each string entry of a
@@ -294,15 +415,12 @@ func flatten(section Section, name string, value any, plan *ImportPlan) map[stri
 	}
 	out := map[string]string{}
 	skip := func(inner, problem string) {
-		if len(plan.Skipped) < MaxWarnings {
-			plan.Skipped = append(plan.Skipped, Warning{
-				Key: termsafe.Text(string(section) + "." + name + "." + inner), Problem: problem,
-			})
-		} else {
-			plan.MoreSkipped++
-		}
+		plan.skip(string(section)+"."+name+"."+inner, problem)
 	}
-	for inner, v := range table {
+	// In the keys' own order: what is skipped is shown, and which fifty are named when there are more must
+	// not change from one run to the next.
+	for _, inner := range slices.Sorted(maps.Keys(table)) {
+		v := table[inner]
 		if inner == "" {
 			// TOML allows an empty key. Joined on, it is the table's own name with a dot after it, which names
 			// no entry, and one such line would otherwise fail a whole export or import.
@@ -326,27 +444,50 @@ func flatten(section Section, name string, value any, plan *ImportPlan) map[stri
 func Import(path string, incoming []byte, overwrite bool) (*ImportPlan, error) {
 	var done *ImportPlan
 	err := Update(path, func(current []byte) ([]byte, error) {
-		plan, err := PlanImport(current, incoming, overwrite)
-		if err != nil {
-			return nil, err
-		}
-		edits := make([]edit, 0, len(plan.Apply))
-		for _, change := range plan.Apply {
-			segments, literal, err := resolve(change.Section, change.name, change.to, true)
-			if err != nil {
-				return nil, err
-			}
-			edits = append(edits, edit{segments, literal})
-		}
-		next, err := setAll(current, edits)
-		if err != nil {
-			return nil, err
-		}
+		next, plan, err := importInto(current, incoming, overwrite, "")
 		done = plan
-		return next, nil
+		return next, err
 	})
 	if err != nil {
 		return nil, named(path, err)
 	}
 	return done, nil
+}
+
+// ImportFor is Import into the file client reads right now, and returns which that was.
+func ImportFor(client Section, incoming []byte, overwrite bool) (string, *ImportPlan, error) {
+	var done *ImportPlan
+	path, err := UpdateFor(client, func(_ string, split bool, current []byte) ([]byte, error) {
+		whose := Section("")
+		if split {
+			whose = client
+		}
+		next, plan, err := importInto(current, incoming, overwrite, whose)
+		done = plan
+		return next, err
+	})
+	if err != nil {
+		return path, nil, named(path, err)
+	}
+	return path, done, nil
+}
+
+func importInto(current, incoming []byte, overwrite bool, client Section) ([]byte, *ImportPlan, error) {
+	plan, err := PlanImportInto(current, incoming, overwrite, client)
+	if err != nil {
+		return nil, nil, err
+	}
+	edits := make([]edit, 0, len(plan.Apply))
+	for _, change := range plan.Apply {
+		segments, literal, err := resolve(change.Section, change.name, change.to, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		edits = append(edits, edit{segments, literal})
+	}
+	next, err := setAll(current, edits)
+	if err != nil {
+		return nil, nil, err
+	}
+	return next, plan, nil
 }

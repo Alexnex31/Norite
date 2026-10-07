@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/urfave/cli/v3"
@@ -264,9 +265,13 @@ func setVerb(cmd *cli.Command, e *env) (output.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := config.Set(e.path, section, name, cmd.Args().Get(1)); err != nil {
+	// The file is asked for again under its lock: a toggle flipped while this waited moves the write to
+	// the file the client now reads.
+	path, err := config.SetFor(e.client, section, name, cmd.Args().Get(1))
+	if err != nil {
 		return nil, err
 	}
+	e.path = path
 	return after(e, section, name)
 }
 
@@ -275,9 +280,11 @@ func unsetVerb(cmd *cli.Command, e *env) (output.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := config.Unset(e.path, section, name); err != nil {
+	path, err := config.UnsetFor(e.client, section, name)
+	if err != nil {
 		return nil, err
 	}
+	e.path = path
 	return after(e, section, name)
 }
 
@@ -333,12 +340,37 @@ func toggleVerb(connect Connector, path string) verb {
 			return nil, err
 		}
 		defer detach()
+		// First, that the daemon and this shell mean the same directory. A service installed before its
+		// definition carried XDG_CONFIG_HOME, with that variable set only in a shell profile, would split a
+		// directory no client reads, and every client would then find its own file missing.
+		var where ipc.ConfigLocation
+		if err := daemonclient.LocalRead(e.ctx, c, ipc.PathConfig, &where); err != nil {
+			return nil, err
+		}
+		if mine, err := config.Dir(); err != nil {
+			return nil, err
+		} else if !sameDir(mine, where.Dir) {
+			return nil, clierr.Unavailable("the running daemon keeps configs in %s and this shell in %s, so it "+
+				"would change files no client here reads. It was started with a different XDG_CONFIG_HOME: "+
+				"`norite daemon install` records this shell's, then `norite daemon restart`",
+				output.Clean(where.Dir), output.Clean(mine))
+		}
 		var done ipc.ConfigToggle
 		if err := daemonclient.Local(e.ctx, c, path, &done); err != nil {
 			return nil, err
 		}
 		return toggledView(done), nil
 	}
+}
+
+// sameDir reports whether two paths name one directory, however each is spelled.
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ia, errA := os.Stat(a)
+	ib, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(ia, ib)
 }
 
 // beforeImport runs between the plan somebody was shown and the import itself, which is where another
@@ -356,7 +388,12 @@ func importVerb(cmd *cli.Command, e *env) (output.Result, error) {
 		return nil, err
 	}
 	overwrite := cmd.Bool("overwrite")
-	plan, err := config.PlanImport(current, incoming, overwrite)
+	// While split this is one client's file, and the other client's section is not read from it.
+	whose := config.Section("")
+	if e.split {
+		whose = e.client
+	}
+	plan, err := config.PlanImportInto(current, incoming, overwrite, whose)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +418,7 @@ func importVerb(cmd *cli.Command, e *env) (output.Result, error) {
 	}
 	beforeImport()
 	// The plan is worked out again under the lock, so what is reported is what was written.
-	done, err := config.Import(e.path, incoming, overwrite)
+	_, done, err := config.ImportFor(e.client, incoming, overwrite)
 	if err != nil {
 		return nil, err
 	}

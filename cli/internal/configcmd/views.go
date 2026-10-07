@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 
 	"github.com/Alexnex31/Norite/cli/internal/output"
@@ -52,11 +53,41 @@ type entryView struct {
 func viewOf(e config.Entry) entryView {
 	return entryView{
 		Key:      string(e.Section) + "." + e.Name,
-		Value:    e.Value,
+		Value:    encodable(e.Value),
 		Source:   string(e.Source),
 		Live:     e.Key.Live,
 		Consumer: e.Key.Consumer,
 	}
+}
+
+// encodable makes a table's values safe to write as JSON. TOML has inf and nan and JSON does not, so one
+// hand-typed `a = inf` in a table nothing reads yet failed every `--json config get` that listed it. They
+// are written as the words the file used.
+func encodable(v any) any {
+	switch v := v.(type) {
+	case float64:
+		switch {
+		case math.IsNaN(v):
+			return "nan"
+		case math.IsInf(v, 1):
+			return "inf"
+		case math.IsInf(v, -1):
+			return "-inf"
+		}
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, inner := range v {
+			out[k] = encodable(inner)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, inner := range v {
+			out[i] = encodable(inner)
+		}
+		return out
+	}
+	return v
 }
 
 func (v entryView) Text(t *output.Text) {
@@ -208,10 +239,10 @@ func (v toggledView) Text(t *output.Text) {
 		t.Line("started from %s, the more recently saved", output.Clean(v.Base))
 	}
 	for _, k := range v.Merged {
-		t.Line("  add      %s  (only the other file set it)", output.Clean(k))
+		t.Line("  take     %s  (from the other client's file)", output.Clean(k))
 	}
 	for _, k := range v.Kept {
-		t.Line("  keep     %s  (both set it; the more recent file's value stays)", output.Clean(k))
+		t.Line("  keep     %s  (both set it differently; the more recent file's value stays)", output.Clean(k))
 	}
 	for _, s := range v.Skipped {
 		t.Line("  skip     %s", output.Clean(s))

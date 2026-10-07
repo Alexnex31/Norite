@@ -1293,17 +1293,17 @@ carries the condition that would reopen it.
 - **Reopens if**: a local request carries a body, or a path segment holding something of the user's. An
   older daemon would then deliver that to a stranger's server, and the request needs a frame of its own.
 
-### Which file wins an unsplit is decided by modification times anything can set
-- **Raised**: M21, while building the toggle
+### Which file wins a shared key at unsplit is decided by modification times anything can set
+- **Raised**: M21, while building the toggle; narrowed by `/code-review`
 - **Verdict**: accepted risk
 - **Why**: unsplit takes the more recently written of the two client files as its base, read from the
-  file's own time, which `touch` changes and a restore from backup resets. The wrong file as base changes
-  which value a key both set ends with, and nothing else: every key either file sets is in the result,
-  the answer lists each key where the base's value stayed, and both files and the replaced `config.toml`
-  are kept as `*.before-unsplit`.
-- **Reopens if**: unsplit starts deleting what it replaces, or a key appears whose value choosing wrongly
-  does harm that reading the answer would not catch, a key binding to a command (M44) being the first
-  candidate.
+  file's own time, which `touch` changes and a restore from backup resets. The time decides one thing:
+  which value a `[shared]` key ends with when both files set it differently. `[tui]` and `[gui]` are each
+  taken from their own client's file whatever the times say (`config.MergeClients`), every such shared
+  key is listed in the answer, and both files and the replaced `config.toml` are kept as
+  `*.before-unsplit`, never overwriting an earlier copy.
+- **Reopens if**: unsplit starts deleting what it replaces, or `[shared]` gains a key whose value
+  choosing wrongly does harm that reading the answer would not catch.
 
 ### The daemon watches the directory its config directory is in, and hears what else is written there
 - **Raised**: M21, `/security-sweep` of the finished branch

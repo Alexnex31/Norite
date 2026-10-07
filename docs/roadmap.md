@@ -1410,8 +1410,9 @@ of this section.
   exported. It holds the same-machine toggle here; the voice breadcrumb (M36) and plugin grants and hashes
   (M89) join it. **The same-machine TUI/GUI separate-config toggle** is `norite config split` /
   `unsplit`, requests to the daemon, which is the state file's only writer: split copies `config.toml` to
-  one file per client, and unsplit reconciles them onto it key by key, the more recently written file
-  winning a conflict and neither client's other settings dropped. Nothing is deleted: the split files and
+  one file per client, and unsplit reconciles them onto it: each client's own section from its own file,
+  and `[shared]` key by key, the more recently written file winning a conflict there and neither client's
+  other settings dropped. Nothing is deleted: the split files and
   the `config.toml` they replace are kept as `*.before-unsplit`. While split the config verbs mean the
   terminal client's file, and `--client gui` the other. The two requests are the first the daemon answers
   itself rather than relaying, under `/@daemon/` on the existing request frame (`architecture.md` §3). The

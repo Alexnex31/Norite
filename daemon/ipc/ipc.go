@@ -81,7 +81,20 @@ const EventConfigUpdate = LocalEventPrefix + "CONFIG_UPDATE"
 // when it tried and could not.
 const LocalPathPrefix = "/@daemon/"
 
-// The local requests. Both are POST with no body, and both answer a ConfigToggle.
+// PathConfig is GET, and answers a ConfigLocation: where this daemon keeps configs, and how the toggle
+// stands. A command asks it before asking for a toggle, to find a daemon whose environment names another
+// directory than the shell's before that daemon splits a directory no client reads.
+const PathConfig = LocalPathPrefix + "config"
+
+// ConfigLocation is the answer to PathConfig.
+type ConfigLocation struct {
+	// Dir is the directory the daemon reads and writes config.toml in.
+	Dir string `json:"dir"`
+	// Split is the same-machine toggle.
+	Split bool `json:"split"`
+}
+
+// The requests that change the toggle. Both are POST with no body, and both answer a ConfigToggle.
 const (
 	// PathConfigSplit turns the same-machine config toggle on: each client gets its own config file,
 	// starting as a copy of config.toml.

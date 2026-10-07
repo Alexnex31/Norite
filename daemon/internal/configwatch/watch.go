@@ -67,7 +67,8 @@ func Watch(ctx context.Context, paths []string, changed func()) error {
 	// ~/.config/norite is removed and restored, or is a link a dotfiles manager re-points, the watch above
 	// is on a directory nothing uses any more, and every later save is silence until the daemon restarts
 	// (M21 /code-review). The parent sees the name change hands. Without it the watch is as good as it was.
-	if parent := filepath.Dir(dir); parent != dir {
+	parent := filepath.Dir(dir)
+	if parent != dir {
 		_ = w.Add(parent)
 	}
 
@@ -88,7 +89,11 @@ func Watch(ctx context.Context, paths []string, changed func()) error {
 			}
 			real := filepath.Clean(resolved)
 			nextReals[real] = true
-			if d := filepath.Dir(real); d != dir {
+			// Not the two watched already. A config that is a link to a file one directory up has its real
+			// file in the parent, and counting that as a target meant taking the watch off the parent the
+			// day the link was pointed elsewhere, which is the watch that notices the directory itself
+			// being replaced (M21 /code-review).
+			if d := filepath.Dir(real); d != dir && d != parent {
 				nextTargets[d] = true
 			}
 		}

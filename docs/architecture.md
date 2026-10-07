@@ -1771,14 +1771,30 @@ the network.
 `norite config split` (and, from M82, the settings screen) lets the TUI and the GUI diverge into
 `config.tui.toml` and `config.gui.toml` on one machine; flipping on copies the current shared file to both
 as a starting point and leaves `config.toml` in place, unread. Flipping off (`unsplit`) reconciles onto one
-shared file, and **last-write-wins is per key, not per file**: the more recently written file is the base,
-and a key only the other sets is merged in, since a whole-file winner would drop one client's
-customization. Where both set a key the base's value stays, and the answer lists each such key. Nothing is
-deleted: both split files are kept beside it as `*.before-unsplit`, and so is `config.toml` as it was,
-which nobody had read since the split and somebody may have edited all the same. A split file that is not
-valid TOML refuses the unsplit with nothing changed, since a merge by key has no keys to take from it.
+shared file, and what "reconciles" means depends on the section:
+
+- **`[tui]` and `[gui]` are each taken from their own client's file, exactly**, removals included. Split
+  starts both files as copies of `config.toml`, so the GUI's file holds a `[tui]` nobody has read since and
+  the terminal's a `[gui]`: stale copies of how things stood. Merged without regard for whose section a
+  key is in, the stale copy brought back a setting its owner had removed and overrode one its owner had
+  changed whenever the other file happened to be newer.
+- **`[shared]` is the one section both read, and there last-write-wins is per key, not per file**: a key
+  only one file sets is kept, and where both set one the more recently written file's value stays, each
+  such key listed in the answer.
+
+The more recently written file's bytes are the starting point, comments included. Nothing is deleted:
+both split files are kept beside it as `*.before-unsplit`, and so is `config.toml` as it stood when it
+was replaced, which nobody had read since the split and somebody may have edited all the same. A second
+unsplit numbers its copies (`.before-unsplit.2`) rather than overwrite the first's. A split file that is
+not valid TOML refuses the unsplit with nothing changed, since a merge by key has no keys to take from it.
 Files are written before the state in both directions, and the state before anything is moved aside, so
 a daemon killed partway leaves the toggle where it was with every file a client reads in place.
+
+**Other writers.** `norite config set` takes a lock on the file it writes; the toggle holds that lock on
+every file it reads until the state says who reads what, and the command asks which file is its own
+again once it holds the lock (`config.UpdateFor`), so a write that waited through a flip goes to the file
+now read rather than into one just set aside. An editor takes no lock, so each file is read again after
+the work is done and the work redone if somebody saved, four times at most.
 
 The setting lives in the daemon state file, so both verbs are requests to the daemon over the attach
 socket (first-party, OS-permission-protected, rule 16). **A request to the daemon itself reuses the
@@ -1787,11 +1803,15 @@ answers it rather than relaying it, signed in or not, with status 200 and a body
 (`conflict` when it understood and did not do it, `failed` when it could not) and never a status, which
 is the instance's to give. The relay refuses the prefix as well and no REST route may be given it, both
 held by tests. A daemon from before the prefix existed relays the path like any other; the command reads
-whatever comes back as "restart the daemon".
+whatever comes back as "restart the daemon". Before either, the command asks `GET /@daemon/config`
+where the daemon keeps configs, and asks for nothing more when that is not the shell's own directory: a
+service whose definition predates the captured `XDG_CONFIG_HOME` would otherwise split a directory no
+client reads.
 
 While split, `norite config get|set|unset|path|export|import` mean the terminal client's file, the
 command tree being that client's sibling in one binary, and `--client gui` means the GUI's. A `[tui]` key
-aimed at the GUI's file, or the reverse, is refused: nothing would read it. The daemon's watch covers all
+aimed at the GUI's file, or the reverse, is refused, and an import leaves that section out and says so:
+nothing would read it. The daemon's watch covers all
 three files, and a toggle that has moved is announced as `DAEMON_CONFIG_UPDATE` like any other change.
 
 **Config export/import**: `norite config export` / `norite config import` — a portable file covering the

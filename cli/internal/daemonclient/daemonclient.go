@@ -151,9 +151,18 @@ func Call(ctx context.Context, c Caller, method, path string, body, out any) err
 // Whatever comes of that — a status from an instance, or the relay declining because nobody is signed in —
 // means the same thing to the person who asked, and is said as that: restart the daemon.
 func Local(ctx context.Context, c Caller, path string, out any) error {
+	return local(ctx, c, http.MethodPost, path, out)
+}
+
+// LocalRead is Local for a request that only asks, sent with GET.
+func LocalRead(ctx context.Context, c Caller, path string, out any) error {
+	return local(ctx, c, http.MethodGet, path, out)
+}
+
+func local(ctx context.Context, c Caller, method, path string, out any) error {
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	res, err := c.Do(callCtx, http.MethodPost, path, nil)
+	res, err := c.Do(callCtx, method, path, nil)
 	older := clierr.Unavailable("the running daemon is older than this command and does not know the request; " +
 		"restart it with `norite daemon restart`")
 	if err != nil {
