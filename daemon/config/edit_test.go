@@ -247,11 +247,14 @@ func TestUnsetOnTheLastLineWithoutANewline(t *testing.T) {
 
 // Every string this file writes must read back as the string it was given, control characters and all.
 func TestAStringSurvivesBeingWritten(t *testing.T) {
-	for _, s := range []string{"plain", `back\slash`, `"quoted"`, "tab\there", "line\nbreak", "esc\x1b[2J", "\b\f", "\u202eover", "é漢🎉", "\x7f"} {
+	for _, s := range []string{"plain", `back\slash`, `"quoted"`, "tab\there", "line\nbreak", "esc\x1b[2J", "\b\f", "c1\u0085next", "\u202eover", "é漢🎉", "\x7f"} {
 		var got struct{ V string }
 		require.NoError(t, toml.Unmarshal([]byte("V = "+BasicString(s)+"\n"), &got), "%q", s)
 		assert.Equal(t, s, got.V)
 		assert.NotContains(t, BasicString(s), "\x1b", "a control character is written as an escape, never raw")
+		// More than TOML asks: a bidi override and a C1 control are legal raw, and an export is printed.
+		assert.NotContains(t, BasicString(s), "\u202e")
+		assert.NotContains(t, BasicString(s), "\u0085")
 	}
 }
 

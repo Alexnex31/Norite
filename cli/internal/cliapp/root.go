@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/configcmd"
 	"github.com/Alexnex31/Norite/cli/internal/daemonctl"
 	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
@@ -135,6 +136,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
 			aboutCommand(verbs.Daemon(Version)),
+			configcmd.Command(),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

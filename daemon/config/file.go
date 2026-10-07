@@ -44,6 +44,17 @@ var ErrKeepsChanging = errors.New("the config file kept changing while Norite wa
 // reads is how a typo becomes a setting that silently does nothing.
 var ErrUnknownKey = errors.New("not a key Norite knows")
 
+// ValueError reports a value a key does not accept. It is the caller's mistake rather than a fault in the
+// file, which is the difference a command line turns into its exit code.
+type ValueError struct {
+	// Key is the full key, "tui.colors.accent".
+	Key string
+	// Problem says what the key accepts instead.
+	Problem string
+}
+
+func (e *ValueError) Error() string { return e.Key + " " + e.Problem }
+
 var errChanged = errors.New("changed underneath")
 
 // Update rewrites the file at path with what fn returns for its current contents.
@@ -141,6 +152,9 @@ func lockFor(path string) (string, error) {
 	return filepath.Join(dir, "config-"+hex.EncodeToString(sum[:8])+".lock"), nil
 }
 
+// ReadFile returns the config at path, or no bytes when there is none. It is bounded like every read here.
+func ReadFile(path string) ([]byte, error) { return snapshot(path) }
+
 // snapshot reads the file, with a missing one read as empty.
 func snapshot(path string) ([]byte, error) {
 	data, err := read(path)
@@ -209,7 +223,8 @@ func resolve(section Section, name, input string, withValue bool) (segments []st
 		inner := strings.TrimPrefix(name, key.Name)
 		inner = strings.TrimPrefix(inner, ".")
 		if inner == "" {
-			return nil, "", fmt.Errorf("%s.%s is a table; name a key inside it", section, name)
+			return nil, "", &ValueError{Key: string(section) + "." + name,
+				Problem: "is a table; name a key inside it, as in " + key.Name + ".C-x b"}
 		}
 		segments = append(segments, inner)
 		if withValue {
@@ -220,7 +235,7 @@ func resolve(section Section, name, input string, withValue bool) (segments []st
 	if withValue {
 		literal, err = Literal(key, input)
 		if err != nil {
-			return nil, "", fmt.Errorf("%s.%s %w", section, name, err)
+			return nil, "", &ValueError{Key: string(section) + "." + name, Problem: err.Error()}
 		}
 	}
 	return segments, literal, nil

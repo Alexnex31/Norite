@@ -14,6 +14,8 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
+
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // This file changes a config.toml without rewriting it.
@@ -394,6 +396,11 @@ func formatKey(part string) string {
 // BasicString spells s as a TOML basic string. strconv.Quote is close and wrong: it writes \x1b, which
 // TOML does not have. Exported because the instance wizard writes TOML by template and needs the same
 // escaping; two encoders of one rule had already drifted on \b and \f.
+//
+// It escapes more than TOML requires: every rune termsafe would remove, the bidi overrides and the C1
+// controls among them, is written as a \u escape. TOML allows those raw, and the decoded value is the
+// same either way, but a config is a file people `cat`, and `norite config export` prints one to a
+// terminal. A value that came out of somebody else's file should not be able to reorder that output.
 func BasicString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
@@ -413,8 +420,12 @@ func BasicString(s string) string {
 			b.WriteString(`\b`)
 		case r == '\f':
 			b.WriteString(`\f`)
-		case r < 0x20 || r == 0x7f:
-			fmt.Fprintf(&b, `\u%04X`, r)
+		case r < 0x20 || r == 0x7f || termsafe.Removes(r):
+			if r > 0xFFFF {
+				fmt.Fprintf(&b, `\U%08X`, r)
+			} else {
+				fmt.Fprintf(&b, `\u%04X`, r)
+			}
 		default:
 			b.WriteRune(r)
 		}
@@ -433,7 +444,7 @@ func Literal(key Key, input string) (string, error) {
 		}
 	}
 	if key.Kind == KindTable {
-		return "", fmt.Errorf("%s is a table; set a key inside it", key.Name)
+		return "", errors.New("is a table; name a key inside it, as in keys.C-x b")
 	}
 	value, problem := check(key, raw)
 	if problem != "" {

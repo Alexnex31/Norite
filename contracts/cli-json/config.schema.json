@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/config.schema.json",
+  "title": "norite config --json",
+  "description": "The machine-readable output of `norite config path | get | set | unset | export | import` (M21): this machine's client settings, config.toml.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The keys themselves are listed in contracts/client-config.toml. Every string here may have come out of a hand-edited file, or out of a file somebody was sent, and is escaped where a terminal would act on it.\n\n`norite config export` with no --output prints the exported TOML document itself, whatever --json says: that output is a config file, not a result.",
+  "$defs": {
+    "path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "exists"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Where config.toml is for this user."
+        },
+        "exists": {
+          "type": "boolean"
+        }
+      },
+      "description": "`norite config path`."
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "value",
+        "source",
+        "live",
+        "consumer"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "The full key, section.name, as in `tui.colors.accent`."
+        },
+        "value": {
+          "type": [
+            "string",
+            "object",
+            "null"
+          ],
+          "description": "The value in force: a string (a color is `\"6\"` or `\"#1e90ff\"`), an object for a whole table, or null when nothing sets the key and it has no default."
+        },
+        "source": {
+          "enum": [
+            "file",
+            "shared",
+            "default",
+            "unset"
+          ],
+          "description": "`file`: the section asked about sets it. `shared`: a client's section does not, and [shared] does. `default`: nothing in the file sets it. `unset`: nothing sets it and it has no default."
+        },
+        "live": {
+          "type": "boolean",
+          "description": "False for a key whose format is settled and which nothing reads yet."
+        },
+        "consumer": {
+          "type": "string",
+          "pattern": "^M[0-9]+[a-z]?$",
+          "description": "The milestone that gives the key a reader."
+        }
+      },
+      "description": "One setting as a section sees it. Printed by `get <key>`, `set` and `unset`; the latter two print the key as it is after the change."
+    },
+    "entries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "warnings",
+        "more_warnings"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the file holds that was not applied, one sentence each: an unknown key, a value of the wrong kind. At most fifty."
+        },
+        "more_warnings": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many further warnings were counted and not kept."
+        }
+      },
+      "description": "`norite config get` with no key: every key the contract defines, then any shared key a client's section overrides."
+    },
+    "exported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file the export was written to."
+        }
+      },
+      "description": "`norite config export --output FILE`."
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "from",
+        "to"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "The full key, section.name."
+        },
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What this machine's file set, or null when it did not set the key."
+        },
+        "to": {
+          "type": "string",
+          "description": "The value in the imported file."
+        }
+      }
+    },
+    "imported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "written",
+        "applied",
+        "kept",
+        "skipped",
+        "more_skipped"
+      ],
+      "properties": {
+        "written": {
+          "type": "boolean",
+          "description": "True when the file was changed. False for --dry-run and for an import with nothing to change."
+        },
+        "applied": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/change"
+          },
+          "description": "The keys written, or that would be."
+        },
+        "kept": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/change"
+          },
+          "description": "Keys both files set differently, left as this machine has them because --overwrite was not passed. `from` is never null here."
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the imported file holds that was not understood, and why."
+        },
+        "more_skipped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "`norite config import <file>`."
+    }
+  }
+}

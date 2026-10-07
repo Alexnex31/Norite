@@ -1774,7 +1774,11 @@ imported file is text from a stranger.** It is bounded before it is parsed, its 
 (rule 19), it is shown and confirmed before anything is written, and it is refused, by name, if it sets a
 machine-local key: a chord bound to a shell command or a plugin path, once those exist, would make an
 import code execution by file. Import merges key-by-key, keeping the target's value for a key both set
-unless `--overwrite` is passed.
+unless `--overwrite` is passed. `--dry-run` shows the plan and writes nothing, and with no terminal and
+no `--yes` nothing is written either. The export is written by `daemon/config`'s own encoder rather than
+the TOML library's, which emits a bidi override or a C1 control raw: TOML permits that, and an export is
+printed to a terminal. `norite config get`, `set` and `unset` exit 2 for a key or a value the caller got
+wrong, and 1 for a file that is not valid TOML, which is the file's fault and not the command line's.
 
 **Concurrency model**: the daemon leans on a deliberate family of Go concurrency patterns, not incidental
 goroutine use — a bounded per-connection writer goroutine for each attach client; a single dedicated writer

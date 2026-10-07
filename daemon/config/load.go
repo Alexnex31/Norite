@@ -138,6 +138,34 @@ func read(path string) ([]byte, error) {
 
 // Parse is Load for bytes already in hand.
 func Parse(data []byte, client Section) (*Config, error) {
+	f, err := Inspect(data)
+	if err != nil {
+		return nil, err
+	}
+	c := Defaults()
+	c.Warnings, c.MoreWarnings = f.Warnings, f.MoreWarnings
+	// [shared] first and the client's own section over it. The other client's section was checked for
+	// problems worth a warning and applies to nothing here.
+	for _, section := range []Section{Shared, client} {
+		for name, value := range f.set[section] {
+			c.values[name] = value
+		}
+	}
+	return c, nil
+}
+
+// File is what a config.toml sets, section by section, before any client's view of it is taken. Parse
+// reads one client's settings out of it; the `norite config` verbs read the file itself.
+type File struct {
+	// set holds each section's validated values by Key.Name: a string, a Color, or a map for a table.
+	set map[Section]map[string]any
+	// Warnings holds at most MaxWarnings; MoreWarnings counts the ones past that.
+	Warnings     []Warning
+	MoreWarnings int
+}
+
+// Inspect reads what data sets. Its errors and warnings are Load's.
+func Inspect(data []byte) (*File, error) {
 	if len(data) > MaxFileSize {
 		return nil, ErrTooLarge
 	}
@@ -147,31 +175,44 @@ func Parse(data []byte, client Section) (*Config, error) {
 		return nil, parseError(err)
 	}
 
-	c := Defaults()
+	f := &File{set: map[Section]map[string]any{Shared: {}, TUI: {}, GUI: {}}}
 	// Sorted, so the warnings come out in one order whatever order a map walks in.
 	for _, top := range slices.Sorted(maps.Keys(doc)) {
 		if !validSection(top) {
-			c.warn(top, "not a section Norite knows; the sections are [shared], [tui] and [gui]")
+			f.warn(top, "not a section Norite knows; the sections are [shared], [tui] and [gui]")
 		}
 	}
-	// [shared] first and the client's own section over it. The other client's section is checked for
-	// problems worth a warning and applies to nothing here.
 	for _, section := range []Section{Shared, TUI, GUI} {
 		table, ok := doc[string(section)].(map[string]any)
 		if !ok {
 			if _, present := doc[string(section)]; present {
-				c.warn(string(section), "must be a table, written ["+string(section)+"]")
+				f.warn(string(section), "must be a table, written ["+string(section)+"]")
 			}
 			continue
 		}
-		apply := section == Shared || section == client
-		c.walk(section, "", table, apply)
+		f.walk(section, "", table)
 	}
-	return c, nil
+	return f, nil
+}
+
+// InspectFile is Inspect for the file at path, with a missing file read as one that sets nothing.
+func InspectFile(path string) (*File, error) {
+	data, err := read(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Inspect(nil)
+	}
+	if err != nil {
+		return nil, err
+	}
+	f, err := Inspect(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return f, nil
 }
 
 // walk visits a section's keys, flattening nested tables into dotted names until one is a known key.
-func (c *Config) walk(section Section, prefix string, table map[string]any, apply bool) {
+func (f *File) walk(section Section, prefix string, table map[string]any) {
 	for _, name := range slices.Sorted(maps.Keys(table)) {
 		full := prefix + name
 		raw := table[name]
@@ -179,27 +220,25 @@ func (c *Config) walk(section Section, prefix string, table map[string]any, appl
 		// a path. Joining it into one would let two different spellings mean the same setting, and the
 		// editor, which works on paths, would then change one and leave the other in force.
 		if strings.Contains(name, ".") {
-			c.warn(string(section)+"."+prefix+strconv.Quote(name),
-				"not a key this version of Norite knows; it is kept and ignored")
+			f.warn(string(section)+"."+prefix+strconv.Quote(name),
+				"not a key this version of Norite knows")
 			continue
 		}
 		key, known := lookup(section, full)
 		if !known {
 			if nested, ok := raw.(map[string]any); ok && hasKeyUnder(section, full) {
-				c.walk(section, full+".", nested, apply)
+				f.walk(section, full+".", nested)
 				continue
 			}
-			c.warn(string(section)+"."+full, "not a key this version of Norite knows; it is kept and ignored")
+			f.warn(string(section)+"."+full, "not a key this version of Norite knows")
 			continue
 		}
 		value, problem := check(key, raw)
 		if problem != "" {
-			c.warn(string(section)+"."+full, problem)
+			f.warn(string(section)+"."+full, problem)
 			continue
 		}
-		if apply {
-			c.values[key.Name] = value
-		}
+		f.set[section][key.Name] = value
 	}
 }
 
@@ -261,12 +300,12 @@ func checkColor(raw any) (any, string) {
 	return nil, want
 }
 
-func (c *Config) warn(key, problem string) {
-	if len(c.Warnings) >= MaxWarnings {
-		c.MoreWarnings++
+func (f *File) warn(key, problem string) {
+	if len(f.Warnings) >= MaxWarnings {
+		f.MoreWarnings++
 		return
 	}
-	c.Warnings = append(c.Warnings, Warning{Key: termsafe.Text(key), Problem: termsafe.Text(problem)})
+	f.Warnings = append(f.Warnings, Warning{Key: termsafe.Text(key), Problem: termsafe.Text(problem)})
 }
 
 // ParseError is a file that is not TOML, with where it stopped being.
