@@ -3,23 +3,53 @@
 
 package tui
 
-import "charm.land/lipgloss/v2"
+import (
+	"charm.land/lipgloss/v2"
 
-// The palette roles docs/design/tui/TOKENS.md names, on the terminal's own ANSI colors, which is the
-// default its theme model ships: a tuned terminal is inherited rather than overridden. text is the
-// terminal's own foreground, so it carries no color at all. No document fixes which index each role takes;
-// this does, and themes (M45) will make it a choice.
-var (
-	accent  = lipgloss.Color("6")  // cyan: focus, selection, the cursor row
-	warn    = lipgloss.Color("3")  // yellow: hints, the armed prefix
-	danger  = lipgloss.Color("1")  // red: errors, a channel that is gone
-	dim     = lipgloss.Color("8")  // bright black: timestamps, labels, hints
-	bright  = lipgloss.Color("15") // bright white: names, active headers
-	sAccent = lipgloss.NewStyle().Foreground(accent)
-	sBold   = lipgloss.NewStyle().Foreground(bright).Bold(true)
-	sDim    = lipgloss.NewStyle().Foreground(dim)
-	sWarn   = lipgloss.NewStyle().Foreground(warn)
-	sDanger = lipgloss.NewStyle().Foreground(danger)
-	sLabel  = lipgloss.NewStyle().Foreground(dim).Bold(true)
-	sSelect = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	"github.com/Alexnex31/Norite/daemon/config"
 )
+
+// look is how the client draws: the palette roles docs/design/tui/TOKENS.md names, as styles, and the
+// layout a time of day is written in. text is the terminal's own foreground, so it carries no color at all.
+//
+// It is built once for each time config.toml is read (M21) and shared by home and the pane, never per
+// frame: a frame is drawn on every keystroke, and seven styles rebuilt for each would be paid there. The
+// defaults are the terminal's own ANSI colors, so a tuned terminal is inherited rather than overridden;
+// `[tui.colors]` moves a role to another index or to an exact color, and themes (M45) will name sets of
+// them.
+type look struct {
+	accent   lipgloss.Style // focus, the resolved-invite mark
+	bold     lipgloss.Style // names, active headers
+	dim      lipgloss.Style // timestamps, hints
+	warn     lipgloss.Style // hints that matter, the armed prefix
+	danger   lipgloss.Style // errors, a channel that is gone
+	label    lipgloss.Style // section labels
+	selected lipgloss.Style // the cursor row
+
+	clock string // time.Format's layout for a time of day
+}
+
+// defaultLook is what a client draws with before, or without, a config: the contract's defaults.
+var defaultLook = newLook(config.Defaults())
+
+func newLook(c *config.Config) *look {
+	color := func(key string) lipgloss.Style {
+		// Validated by the loader as an ANSI index or #rrggbb, the two forms lipgloss reads.
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(string(c.Color(key))))
+	}
+	accent, dim := color(config.KeyColorAccent), color(config.KeyColorDim)
+	l := &look{
+		accent:   accent,
+		bold:     color(config.KeyColorBright).Bold(true),
+		dim:      dim,
+		warn:     color(config.KeyColorWarn),
+		danger:   color(config.KeyColorDanger),
+		label:    dim.Bold(true),
+		selected: accent.Bold(true),
+		clock:    "15:04",
+	}
+	if c.Clock() == config.Clock12h {
+		l.clock = "3:04 PM"
+	}
+	return l
+}

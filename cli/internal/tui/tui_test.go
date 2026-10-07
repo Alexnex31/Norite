@@ -460,9 +460,9 @@ func TestWhatThePaneCannotNameItSaysSo(t *testing.T) {
 	strange := message("3", "20", "2", "Bob", "hi")
 	strange.Type = 9
 
-	assert.Contains(t, ansi.Strip(strings.Join(messageLines(deleted, 80), "\n")), "deleted account")
-	assert.Contains(t, ansi.Strip(strings.Join(messageLines(system, 80), "\n")), "system")
-	assert.Contains(t, ansi.Strip(strings.Join(messageLines(strange, 80), "\n")), "cannot show")
+	assert.Contains(t, ansi.Strip(strings.Join(defaultLook.messageLines(deleted, 80), "\n")), "deleted account")
+	assert.Contains(t, ansi.Strip(strings.Join(defaultLook.messageLines(system, 80), "\n")), "system")
+	assert.Contains(t, ansi.Strip(strings.Join(defaultLook.messageLines(strange, 80), "\n")), "cannot show")
 }
 
 // TestScrollingUpStaysPut: PgUp leaves the bottom, and a message arriving then does not move the view; only

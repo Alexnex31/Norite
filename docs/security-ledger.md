@@ -1232,9 +1232,11 @@ carries the condition that would reopen it.
   repository of dotfiles from a stranger can hold a link whose target is named with escape sequences.
   Every error the command tree prints goes through `termsafe.Block` in `cli/cmd/app/main.go`
   (`errorText`), so the text is inert there. A `ParseError` and a `Warning` are sanitized where they are
-  made.
+  made. The terminal client draws a load error in its hint row since M21's part 7, which is the
+  condition below arriving: it passes the whole line through `termsafe.Text` in `applyConfig`, and
+  `TestAConfigErrorIsDrawnInert` fails without it.
 - **Reopens if**: a client prints an error from `daemon/config` or `daemon/atomicfile` without
-  `termsafe`. The terminal client's hint row is the first candidate, at M21's own client part.
+  `termsafe`. The GUI's equivalent of that row is the next candidate.
 
 ### A crash between writing the temporary file and the rename leaves the temporary file
 - **Raised**: M21, `/security-sweep`
