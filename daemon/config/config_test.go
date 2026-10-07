@@ -274,3 +274,15 @@ func TestWhereTheFileIs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(`C:\Users\ada\AppData\Roaming`, "Norite"), dir)
 }
+
+// A config path that leads to something other than a file is refused, by every way of reading one.
+func TestAConfigThatIsNotAFileIsRefusedWithoutWaiting(t *testing.T) {
+	dir := t.TempDir()
+	asDir := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.Mkdir(asDir, 0o700))
+	_, err := Load(asDir, TUI)
+	require.ErrorIs(t, err, ErrNotAFile)
+	_, err = ReadFile(asDir)
+	require.ErrorIs(t, err, ErrNotAFile)
+
+}

@@ -326,3 +326,68 @@ func TestOnlyTheTwoRequestsAndOnlyByPost(t *testing.T) {
 	assert.False(t, f.isSplit())
 	assert.Zero(t, f.changed)
 }
+
+// With neither client's file there, removed by hand or never written, there is nothing to fold back.
+// Folding nothing onto config.toml would empty it; it is left exactly as it is, and the toggle goes off.
+func TestUnsplitWithNeitherFileLeavesTheSharedConfigAlone(t *testing.T) {
+	f := newFixture(t)
+	f.write(f.files.Shared, shared)
+	f.ok(ipc.PathConfigSplit)
+	require.NoError(t, os.Remove(f.files.TUI))
+	require.NoError(t, os.Remove(f.files.GUI))
+
+	out := f.ok(ipc.PathConfigUnsplit)
+	assert.Equal(t, shared, f.read(f.files.Shared))
+	assert.Empty(t, out.Backups)
+	assert.False(t, f.isSplit())
+	f.missing(f.files.Shared + config.BackupSuffix)
+}
+
+// With one of the two gone, the other is the whole of what the clients had, and is what config.toml
+// becomes.
+func TestUnsplitWithOneFileTakesIt(t *testing.T) {
+	f := newFixture(t)
+	f.write(f.files.Shared, shared)
+	f.ok(ipc.PathConfigSplit)
+	require.NoError(t, os.Remove(f.files.TUI))
+	f.write(f.files.GUI, "[shared]\nclock = \"24h\"\n")
+
+	out := f.ok(ipc.PathConfigUnsplit)
+	assert.Equal(t, f.files.GUI, out.Base)
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", f.read(f.files.Shared))
+}
+
+// Something where a client's file would go that is not a file is not read and not replaced.
+func TestSplitRefusesWhatIsNotAFileWithoutReadingIt(t *testing.T) {
+	f := newFixture(t)
+	f.write(f.files.Shared, shared)
+	require.NoError(t, os.Mkdir(f.files.TUI, 0o700))
+	assert.Contains(t, f.refused(ipc.PathConfigSplit), "config.tui.toml")
+	assert.False(t, f.isSplit())
+
+}
+
+// The files an unsplit sets aside are moved while it still holds the state's lock. Let go first, a split
+// asked for at that moment could find them in place as copies of config.toml, take them as its own, and
+// have them moved out from under it: the toggle on, and no file behind either client. A split made from
+// inside the move is told to wait instead.
+func TestUnsplitSetsItsFilesAsideBeforeLettingAnotherRequestIn(t *testing.T) {
+	f := newFixture(t)
+	f.write(f.files.Shared, shared)
+	f.ok(ipc.PathConfigSplit)
+
+	asked := 0
+	f.h.rename = func(from, to string) error {
+		asked++
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		resp := f.h.Do(ctx, ipc.Request{ID: "2", Method: "POST", Path: ipc.PathConfigSplit})
+		require.NotNil(t, resp.Error, "a split got in while the unsplit was still moving files")
+		assert.Contains(t, resp.Error.Message, "another request")
+		return os.Rename(from, to)
+	}
+	f.ok(ipc.PathConfigUnsplit)
+	assert.Equal(t, 2, asked)
+	assert.False(t, f.isSplit())
+	f.missing(f.files.TUI)
+}

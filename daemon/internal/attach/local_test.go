@@ -6,6 +6,8 @@ package attach
 import (
 	"context"
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,15 +129,20 @@ func (f localFunc) Do(ctx context.Context, req ipc.Request) ipc.Response { retur
 // would send it to the instance. It is answered with nobody signed in, since it is about this machine. The
 // client-side frame is validated by rawClient, so a local request is the contract's Request unchanged.
 func TestALocalRequestIsAnsweredHereAndNeverRelayed(t *testing.T) {
-	var relayed []string
+	// Each is answered on the connection's own goroutine, so what was asked is kept under a lock.
+	var mu sync.Mutex
+	var relayed, asked []string
 	relay := relayFunc(func(_ context.Context, req ipc.Request) ipc.Response {
+		mu.Lock()
 		relayed = append(relayed, req.Path)
+		mu.Unlock()
 		status := 200
 		return ipc.Response{Status: &status, Body: json.RawMessage(`{}`)}
 	})
-	var asked []string
 	local := localFunc(func(_ context.Context, req ipc.Request) ipc.Response {
+		mu.Lock()
 		asked = append(asked, req.Method+" "+req.Path)
+		mu.Unlock()
 		status := 200
 		return ipc.Response{Status: &status, Body: json.RawMessage(`{"split":true}`)}
 	})
@@ -157,15 +164,17 @@ func TestALocalRequestIsAnsweredHereAndNeverRelayed(t *testing.T) {
 
 	raw.send(ipc.OpRequest, ipc.Request{ID: "b", Method: "GET", Path: "/guilds/1"})
 	raw.expect(ipc.OpResponse)
+	mu.Lock()
+	defer mu.Unlock()
 	assert.Equal(t, []string{"POST " + ipc.PathConfigSplit}, asked)
 	assert.Equal(t, []string{"/guilds/1"}, relayed, "and an ordinary request still goes to the relay, and only it")
 }
 
 // A daemon with nothing to answer local requests refuses them itself. The relay is not asked.
 func TestALocalRequestWithNothingToAnswerItIsRefusedNotRelayed(t *testing.T) {
-	relayed := false
+	var relayed atomic.Bool
 	relay := relayFunc(func(context.Context, ipc.Request) ipc.Response {
-		relayed = true
+		relayed.Store(true)
 		return ipc.Response{}
 	})
 	ts := newTestServer(t, relay)
@@ -174,5 +183,5 @@ func TestALocalRequestWithNothingToAnswerItIsRefusedNotRelayed(t *testing.T) {
 	var re *ipc.RelayError
 	require.ErrorAs(t, err, &re)
 	assert.Equal(t, ipc.RelayBadRequest, re.Code)
-	assert.False(t, relayed)
+	assert.False(t, relayed.Load())
 }

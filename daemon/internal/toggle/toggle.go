@@ -57,6 +57,9 @@ type Handler struct {
 	// file each one reads has just become another file.
 	Changed func()
 	Log     zerolog.Logger
+
+	// rename is os.Rename, and something a test can stand inside.
+	rename func(from, to string) error
 }
 
 // refusal is a request understood and not carried out. Its text is for the person who asked.
@@ -133,14 +136,18 @@ func (h *Handler) split(ctx context.Context) (ipc.ConfigToggle, error) {
 		for _, path := range []string{files.TUI, files.GUI} {
 			// Something already there that is not this copy is somebody's file, made by hand or left by a
 			// split that never finished against a config that has since changed. It is not overwritten.
-			have, err := os.ReadFile(path) //nolint:gosec // a fixed name in the user's config directory
+			_, err := os.Lstat(path)
 			switch {
 			case errors.Is(err, fs.ErrNotExist):
 			case err != nil:
 				return err
-			case string(have) == string(shared):
-				continue
 			default:
+				// Read as a config is read: bounded, and only if it is a file. Anything else there, a
+				// directory or a pipe or a file too large to be a config, is not this copy either.
+				have, err := config.ReadFile(path)
+				if err == nil && string(have) == string(shared) {
+					continue
+				}
 				return refuse("%s already exists and is not a copy of config.toml; move it away, or delete "+
 					"it, and split again", termsafe.Text(path))
 			}
@@ -153,7 +160,7 @@ func (h *Handler) split(ctx context.Context) (ipc.ConfigToggle, error) {
 		}
 		s.ConfigSplit = true
 		return nil
-	})
+	}, nil)
 	return out, err
 }
 
@@ -161,8 +168,6 @@ func (h *Handler) unsplit(ctx context.Context) (ipc.ConfigToggle, error) {
 	files := config.FilesIn(h.ConfigDir)
 	out := ipc.ConfigToggle{Split: false, Files: []string{files.Shared},
 		Merged: []string{}, Kept: []string{}, Skipped: []string{}, Backups: []string{}}
-	var setAside []string
-
 	err := internalstate.Update(ctx, h.StateDir, func(s *statefile.State) error {
 		if !s.ConfigSplit {
 			return refuse("the config is not split: both clients read %s", termsafe.Text(files.Shared))
@@ -174,6 +179,12 @@ func (h *Handler) unsplit(ctx context.Context) (ipc.ConfigToggle, error) {
 		gui, guiAt, err := readWithTime(files.GUI)
 		if err != nil {
 			return err
+		}
+		if tuiAt == 0 && guiAt == 0 {
+			// Neither client's file is there: removed by hand, or never written. There is nothing to fold
+			// back, and folding nothing onto config.toml would empty it. It is left exactly as it is.
+			s.ConfigSplit = false
+			return nil
 		}
 		// Both must parse before either is touched. A merge is by key, and a file that is not TOML has no
 		// keys to carry over: going on would drop everything in it while reporting success.
@@ -231,29 +242,33 @@ func (h *Handler) unsplit(ctx context.Context) (ipc.ConfigToggle, error) {
 			return err
 		}
 		s.ConfigSplit = false
-		setAside = []string{files.TUI, files.GUI}
 		return nil
-	})
-	if err != nil {
-		return out, err
-	}
-
-	// Only now, with the state saying nobody reads them: moved aside, not deleted. A failure here leaves a
-	// split file in place, which the next split refuses by name unless it is still a copy, so it is said
-	// rather than swallowed.
-	for _, path := range setAside {
-		backup := path + config.BackupSuffix
-		err := os.Rename(path, backup)
-		switch {
-		case err == nil:
-			out.Backups = append(out.Backups, backup)
-		case errors.Is(err, fs.ErrNotExist):
-		default:
-			h.Log.Warn().Str("error", termsafe.Text(err.Error())).Msg("could not set a split config file aside")
-			out.Skipped = append(out.Skipped, termsafe.Text(filepath.Base(path))+" could not be moved aside, and is still there")
+	}, func() {
+		// Only now, with the state saying nobody reads them, and still under the state's lock: moved aside,
+		// not deleted. Outside the lock, a split asked for at this moment could find the two files still in
+		// place as copies of config.toml, take them as its own, and have them moved out from under it,
+		// leaving the toggle on with no file behind either client (M21 /security-sweep).
+		//
+		// A failure here leaves a split file in place, which the next split refuses by name unless it is
+		// still a copy, so it is said rather than swallowed.
+		for _, path := range []string{files.TUI, files.GUI} {
+			backup := path + config.BackupSuffix
+			rename := h.rename
+			if rename == nil {
+				rename = os.Rename
+			}
+			err := rename(path, backup)
+			switch {
+			case err == nil:
+				out.Backups = append(out.Backups, backup)
+			case errors.Is(err, fs.ErrNotExist):
+			default:
+				h.Log.Warn().Str("error", termsafe.Text(err.Error())).Msg("could not set a split config file aside")
+				out.Skipped = append(out.Skipped, termsafe.Text(filepath.Base(path))+" could not be moved aside, and is still there")
+			}
 		}
-	}
-	return out, nil
+	})
+	return out, err
 }
 
 // readWithTime reads a config file and when it was last written. A missing file is empty and older than

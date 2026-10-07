@@ -36,9 +36,13 @@ var ErrLocked = errors.New("the state file is locked by another process")
 // else the file held is written back with it. fn may do the work the change stands for, so that the state
 // and the thing it describes change together or not at all; an error from fn leaves the file as it was.
 //
+// then, when not nil, runs after the file has been written and before the lock is let go: for what must
+// follow the state rather than lead it, and must still not be interleaved with the next update. It does
+// not run when nothing was written because fn failed.
+//
 // One daemon runs per user, so the lock is not against a second daemon. It is against a second request to
 // this one: two clients asking for a toggle at once are two goroutines.
-func Update(ctx context.Context, stateDir string, fn func(s *statefile.State) error) error {
+func Update(ctx context.Context, stateDir string, fn func(s *statefile.State) error, then func()) error {
 	lock := flock.New(filepath.Join(stateDir, lockName))
 	lctx, cancel := context.WithTimeout(ctx, lockWait)
 	defer cancel()
@@ -62,6 +66,9 @@ func Update(ctx context.Context, stateDir string, fn func(s *statefile.State) er
 	state.Version = statefile.Version
 	if state == before {
 		// Nothing to record. No file is the defaults, and stays no file.
+		if then != nil {
+			then()
+		}
 		return nil
 	}
 
@@ -82,7 +89,10 @@ func Update(ctx context.Context, stateDir string, fn func(s *statefile.State) er
 	if errors.Is(err, atomicfile.ErrNotDurable) {
 		// Written and renamed. The toggle it records has been carried out, and reporting failure would
 		// tell a caller the opposite of what is on disk.
-		return nil
+		err = nil
+	}
+	if err == nil && then != nil {
+		then()
 	}
 	return err
 }

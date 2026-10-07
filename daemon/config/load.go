@@ -37,6 +37,10 @@ const MaxFileSize = 64 << 10
 const MaxWarnings = 50
 
 // ErrTooLarge reports a file over MaxFileSize.
+// ErrNotAFile reports a config path that leads to something other than a regular file: a directory, a
+// pipe, a device.
+var ErrNotAFile = errors.New("is not a regular file, and a config is one")
+
 var ErrTooLarge = errors.New("the config file is larger than 64 KiB, which no config written for Norite is")
 
 // Color is a color as config.toml gives one: an ANSI palette index or "#rrggbb".
@@ -122,6 +126,17 @@ func Load(path string, client Section) (*Config, error) {
 }
 
 func read(path string) ([]byte, error) {
+	// Asked before it is opened: opening a named pipe waits for a writer, and reading a terminal device
+	// waits for somebody to type. A config that is a link to either, which a dotfiles repository can hold,
+	// hung every command, the client before it drew a frame, and the daemon's toggle with the state file's
+	// lock held (M21 /security-sweep, reproduced with a pipe). A config is a file.
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w", path, ErrNotAFile)
+	}
 	f, err := os.Open(path) //nolint:gosec // the user's own config file, at the path this package resolved
 	if err != nil {
 		return nil, err

@@ -1304,3 +1304,16 @@ carries the condition that would reopen it.
 - **Reopens if**: unsplit starts deleting what it replaces, or a key appears whose value choosing wrongly
   does harm that reading the answer would not catch, a key binding to a command (M44) being the first
   candidate.
+
+### The daemon watches the directory its config directory is in, and hears what else is written there
+- **Raised**: M21, `/security-sweep` of the finished branch
+- **Verdict**: accepted risk
+- **Why**: a watch is on an inode, so `~/.config` is watched as well as `~/.config/norite`, or a config
+  directory that is removed and restored is never noticed again. Every program that creates or renames a
+  file directly in `~/.config` therefore wakes `configwatch`, which compares the name to the config
+  directory's and drops the event; nothing is read, logged or sent. With `XDG_CONFIG_HOME` pointed under a
+  directory other accounts can write to, those accounts can generate such events, and enough of them to
+  overflow the queue is treated as "the config may have changed", at most one notification per 100 ms,
+  each costing an attached client about 30 µs to re-read a config that did not change.
+- **Reopens if**: an event's name is ever logged or forwarded, or a reload becomes expensive enough for ten
+  a second to matter (a theme file read on every reload, M45, is the first candidate).

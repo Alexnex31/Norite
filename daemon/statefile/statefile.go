@@ -71,10 +71,19 @@ func ReadIn(stateDir string) (State, error) {
 // is what a writer puts back so that an older daemon does not drop what a newer one stored.
 func Load(stateDir string) (State, map[string]json.RawMessage, error) {
 	path := PathIn(stateDir)
-	f, err := os.Open(path) //nolint:gosec // a fixed name in the user's own state directory
+	// A file, asked before it is opened: a pipe or a device there would hang whoever reads it, and every
+	// client reads this to find its config.
+	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return State{Version: Version}, map[string]json.RawMessage{}, nil
 	}
+	if err != nil {
+		return State{}, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return State{}, nil, fmt.Errorf("%s is not a state file Norite wrote: it is not a regular file", path)
+	}
+	f, err := os.Open(path) //nolint:gosec // a fixed name in the user's own state directory
 	if err != nil {
 		return State{}, nil, err
 	}

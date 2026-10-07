@@ -36,7 +36,7 @@ func TestNoFileIsTheDefaults(t *testing.T) {
 // What is written is what is read back, in a file only its owner can read: it will hold plugin grants.
 func TestAnUpdateIsReadBackAndIsPrivate(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, Update(context.Background(), dir, split(true)))
+	require.NoError(t, Update(context.Background(), dir, split(true), nil))
 	s, err := statefile.ReadIn(dir)
 	require.NoError(t, err)
 	assert.True(t, s.ConfigSplit)
@@ -51,18 +51,18 @@ func TestAnUpdateIsReadBackAndIsPrivate(t *testing.T) {
 // An update that changes nothing writes nothing, and one that fails leaves the file as it was.
 func TestAnUpdateThatChangesNothingOrFailsLeavesTheFile(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, Update(context.Background(), dir, split(false)))
+	require.NoError(t, Update(context.Background(), dir, split(false), nil))
 	_, err := os.Stat(statefile.PathIn(dir))
 	require.ErrorIs(t, err, os.ErrNotExist, "nothing to record is no file")
 
-	require.NoError(t, Update(context.Background(), dir, split(true)))
+	require.NoError(t, Update(context.Background(), dir, split(true), nil))
 	before, err := os.ReadFile(statefile.PathIn(dir))
 	require.NoError(t, err)
 	boom := errors.New("the work the state stands for failed")
 	err = Update(context.Background(), dir, func(s *statefile.State) error {
 		s.ConfigSplit = false
 		return boom
-	})
+	}, func() { t.Error("then ran after an update that failed") })
 	require.ErrorIs(t, err, boom)
 	after, err := os.ReadFile(statefile.PathIn(dir))
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestAFieldThisBuildDoesNotKnowSurvivesAWrite(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(statefile.PathIn(dir),
 		[]byte(`{"version":1,"config_split":false,"voice_breadcrumb":{"channel_id":"42"}}`), 0o600))
-	require.NoError(t, Update(context.Background(), dir, split(true)))
+	require.NoError(t, Update(context.Background(), dir, split(true), nil))
 	data, err := os.ReadFile(statefile.PathIn(dir))
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"version":1,"config_split":true,"voice_breadcrumb":{"channel_id":"42"}}`, string(data))
@@ -98,7 +98,7 @@ func TestAFileThisBuildCannotReadIsRefusedAndNotRewritten(t *testing.T) {
 			if name == "newer" {
 				require.ErrorIs(t, err, statefile.ErrNewer)
 			}
-			require.Error(t, Update(context.Background(), dir, split(false)))
+			require.Error(t, Update(context.Background(), dir, split(false), nil))
 			data, err := os.ReadFile(statefile.PathIn(dir))
 			require.NoError(t, err)
 			assert.Equal(t, body, string(data))
@@ -136,7 +136,7 @@ func TestUpdatesDoNotInterleave(t *testing.T) {
 				flips.Add(1)
 				inside.Add(-1)
 				return nil
-			})
+			}, nil)
 			assert.NoError(t, err)
 		})
 	}
@@ -146,4 +146,33 @@ func TestUpdatesDoNotInterleave(t *testing.T) {
 	assert.EqualValues(t, 1, most.Load(), "updates ran one at a time")
 	assert.EqualValues(t, 12, flips.Load())
 	assert.False(t, s.ConfigSplit, "an even number of flips, each made on the last one's result")
+}
+
+// What follows the write runs before the lock is let go, so the next update cannot get between the state
+// and the work that had to come after it. A second update started from inside it is told the file is
+// locked.
+func TestWhatFollowsTheWriteRunsUnderTheLock(t *testing.T) {
+	dir := t.TempDir()
+	ran := false
+	err := Update(context.Background(), dir, split(true), func() {
+		ran = true
+		written, err := statefile.ReadIn(dir)
+		require.NoError(t, err)
+		assert.True(t, written.ConfigSplit, "the state is already on disk")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		assert.ErrorIs(t, Update(ctx, dir, split(false), nil), ErrLocked)
+	})
+	require.NoError(t, err)
+	assert.True(t, ran)
+}
+
+// A state file that is a pipe or a directory is refused before it is opened: opening a pipe waits for a
+// writer that never comes.
+func TestAStateFileThatIsNotAFileIsRefusedWithoutWaiting(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(statefile.PathIn(dir), 0o700))
+	_, err := statefile.ReadIn(dir)
+	require.ErrorContains(t, err, "not a regular file")
 }
