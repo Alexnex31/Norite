@@ -2,22 +2,35 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://norite.chat/contracts/cli-json/config.schema.json",
   "title": "norite config --json",
-  "description": "The machine-readable output of `norite config path | get | set | unset | export | import` (M21): this machine's client settings, config.toml.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The keys themselves are listed in contracts/client-config.toml. Every string here may have come out of a hand-edited file, or out of a file somebody was sent, and is escaped where a terminal would act on it.\n\n`norite config export` with no --output prints the exported TOML document itself, whatever --json says: that output is a config file, not a result.",
+  "description": "The machine-readable output of `norite config path | get | set | unset | export | import | split | unsplit` (M21): this machine's client settings, config.toml.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The keys themselves are listed in contracts/client-config.toml. Every string here may have come out of a hand-edited file, or out of a file somebody was sent, and is escaped where a terminal would act on it.\n\n`norite config export` with no --output prints the exported TOML document itself, whatever --json says: that output is a config file, not a result.",
   "$defs": {
     "path": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "path",
-        "exists"
+        "exists",
+        "split",
+        "client"
       ],
       "properties": {
         "path": {
           "type": "string",
-          "description": "Where config.toml is for this user."
+          "description": "The config file these commands mean: config.toml, or one client's own file while the config is split."
         },
         "exists": {
           "type": "boolean"
+        },
+        "split": {
+          "type": "boolean",
+          "description": "True while `norite config split` has given the terminal client and the GUI a config file each."
+        },
+        "client": {
+          "enum": [
+            "tui",
+            "gui"
+          ],
+          "description": "The client whose file `path` is, from --client. Both clients read that file while not split."
         }
       },
       "description": "`norite config path`."
@@ -178,6 +191,65 @@
         }
       },
       "description": "`norite config import <file>`."
+    },
+    "toggled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "split",
+        "files",
+        "base",
+        "merged",
+        "kept",
+        "skipped",
+        "backups"
+      ],
+      "properties": {
+        "split": {
+          "type": "boolean",
+          "description": "The same-machine toggle as it now stands."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The config files now in use: config.toml when not split, the two clients' own files when split."
+        },
+        "base": {
+          "type": "string",
+          "description": "The file an unsplit started from, the more recently saved of the two. Empty for a split."
+        },
+        "merged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The keys an unsplit added to the base from the other file."
+        },
+        "kept": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The keys both files set differently, where the base's value stayed."
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the other file held that could not be carried over, each with its reason."
+        },
+        "backups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The files an unsplit set aside, named with .before-unsplit, rather than deleted."
+        }
+      },
+      "description": "`norite config split` and `norite config unsplit`: what the daemon did. The same shape as daemon-ipc.schema.json's ConfigToggle, which it relays."
     }
   }
 }

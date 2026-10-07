@@ -74,10 +74,18 @@ type Relay interface {
 }
 
 // Options configure a Server.
+// Local performs a request addressed to the daemon itself. Its answer's ID is ignored and set by the
+// server. It is asked whether or not anybody is signed in.
+type Local interface {
+	Do(ctx context.Context, req ipc.Request) ipc.Response
+}
+
 type Options struct {
 	Session Session
 	State   State
 	Relay   Relay
+	// Local answers the requests the daemon performs itself (ipc.LocalPathPrefix). Nil answers none.
+	Local Local
 	// Version is the daemon's release version, sent in HELLO and checked against each client's.
 	Version string
 	Log     zerolog.Logger
@@ -103,6 +111,7 @@ type Server struct {
 	session Session
 	state   State
 	relay   Relay
+	local   Local
 	version string
 	log     zerolog.Logger
 
@@ -127,6 +136,7 @@ func New(opts Options) *Server {
 		session:    opts.Session,
 		state:      opts.State,
 		relay:      opts.Relay,
+		local:      opts.Local,
 		version:    version,
 		log:        opts.Log,
 		maxClients: ipc.MaxClients,

@@ -1751,7 +1751,11 @@ a client attached to no daemon reads once at start.
 A **second, daemon-owned state file** (`state.json` in the state directory, `0600`) holds anything
 daemon-written-only: plugin capability grants + pinned `.wasm` hashes (§8), the voice-channel breadcrumb, and
 the same-machine config-toggle setting below — never hand-edited, never included in export. The daemon is
-its only writer.
+its only writer, and that is the compiler's to hold: reading is `daemon/statefile`, which a client imports
+to learn which config file is its own with or without a daemon running, and writing is
+`daemon/internal/statefile`, which nothing outside the daemon module can import. The file is versioned,
+a newer format is refused rather than half-read, and a write puts back every field it did not
+understand, so an older daemon does not drop what a newer one stored.
 
 **Themes are files, and files are untrusted.** A theme lives at `~/.config/norite/themes/<name>.toml` and
 is selected by name from `[tui]`; a few ship built in. The default maps the token roles onto the terminal's
@@ -1769,9 +1773,26 @@ the network.
 as a starting point and leaves `config.toml` in place, unread. Flipping off (`unsplit`) reconciles onto one
 shared file, and **last-write-wins is per key, not per file**: the more recently written file is the base,
 and a key only the other sets is merged in, since a whole-file winner would drop one client's
-customization. Both split files are kept beside it as `*.before-unsplit`. The setting lives in the daemon
-state file, so both verbs are requests to the daemon over the attach socket (first-party,
-OS-permission-protected, rule 16).
+customization. Where both set a key the base's value stays, and the answer lists each such key. Nothing is
+deleted: both split files are kept beside it as `*.before-unsplit`, and so is `config.toml` as it was,
+which nobody had read since the split and somebody may have edited all the same. A split file that is not
+valid TOML refuses the unsplit with nothing changed, since a merge by key has no keys to take from it.
+Files are written before the state in both directions, and the state before anything is moved aside, so
+a daemon killed partway leaves the toggle where it was with every file a client reads in place.
+
+The setting lives in the daemon state file, so both verbs are requests to the daemon over the attach
+socket (first-party, OS-permission-protected, rule 16). **A request to the daemon itself reuses the
+relay's request and response frames under a path prefix, `/@daemon/`**, so no frame changes: the daemon
+answers it rather than relaying it, signed in or not, with status 200 and a body, or with its own error
+(`conflict` when it understood and did not do it, `failed` when it could not) and never a status, which
+is the instance's to give. The relay refuses the prefix as well and no REST route may be given it, both
+held by tests. A daemon from before the prefix existed relays the path like any other; the command reads
+whatever comes back as "restart the daemon".
+
+While split, `norite config get|set|unset|path|export|import` mean the terminal client's file, the
+command tree being that client's sibling in one binary, and `--client gui` means the GUI's. A `[tui]` key
+aimed at the GUI's file, or the reverse, is refused: nothing would read it. The daemon's watch covers all
+three files, and a toggle that has moved is announced as `DAEMON_CONFIG_UPDATE` like any other change.
 
 **Config export/import**: `norite config export` / `norite config import` — a portable file covering the
 `config.toml` scope only (never the daemon state file, which is machine-local by nature), and within it

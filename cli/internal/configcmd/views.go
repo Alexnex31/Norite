@@ -4,12 +4,14 @@
 package configcmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/daemon/config"
+	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
 // The shapes here are contracts/cli-json/config.schema.json's (rule 15). Every string that came out of a
@@ -19,10 +21,20 @@ import (
 type pathView struct {
 	Path   string `json:"path"`
 	Exists bool   `json:"exists"`
+	// Split is the same-machine toggle, and Client whose file Path is: both clients' while it is off.
+	Split  bool   `json:"split"`
+	Client string `json:"client"`
 }
 
 func (v pathView) Text(t *output.Text) {
 	t.Line("%s", output.Clean(v.Path))
+	if v.Split {
+		whose := "terminal client"
+		if v.Client == string(config.GUI) {
+			whose = "GUI"
+		}
+		t.Line("(the config is split; this is the %s's own file)", whose)
+	}
 	if !v.Exists {
 		t.Line("(not created yet; `norite config set` creates it)")
 	}
@@ -171,5 +183,43 @@ func (v importView) Text(t *output.Text) {
 		t.Line("nothing to import")
 	default:
 		t.Line("%d setting(s) would be imported; nothing was changed", len(v.Applied))
+	}
+}
+
+// toggledView is what `norite config split` and `unsplit` did. Its fields are the daemon's answer.
+type toggledView ipc.ConfigToggle
+
+func (v toggledView) MarshalJSON() ([]byte, error) { return json.Marshal(ipc.ConfigToggle(v)) }
+
+func (v toggledView) Text(t *output.Text) {
+	if v.Split {
+		t.Line("split: the terminal client and the GUI now read a config file each")
+		for _, f := range v.Files {
+			t.Line("  %s", output.Clean(f))
+		}
+		t.Line("config.toml is left where it is, and is read by neither. `norite config unsplit` undoes this.")
+		return
+	}
+	t.Line("unsplit: both clients read one file again")
+	for _, f := range v.Files {
+		t.Line("  %s", output.Clean(f))
+	}
+	if v.Base != "" {
+		t.Line("started from %s, the more recently saved", output.Clean(v.Base))
+	}
+	for _, k := range v.Merged {
+		t.Line("  add      %s  (only the other file set it)", output.Clean(k))
+	}
+	for _, k := range v.Kept {
+		t.Line("  keep     %s  (both set it; the more recent file's value stays)", output.Clean(k))
+	}
+	for _, s := range v.Skipped {
+		t.Line("  skip     %s", output.Clean(s))
+	}
+	if len(v.Backups) > 0 {
+		t.Line("nothing was deleted; what was replaced is kept as:")
+		for _, f := range v.Backups {
+			t.Line("  %s", output.Clean(f))
+		}
 	}
 }

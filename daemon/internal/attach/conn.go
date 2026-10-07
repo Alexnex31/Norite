@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -225,7 +226,18 @@ func (c *conn) handle(req ipc.Request) {
 	}
 
 	c.requests.Go(func() {
-		resp := c.srv.relay.Do(c.ctx, req)
+		var resp ipc.Response
+		switch {
+		case !strings.HasPrefix(req.Path, ipc.LocalPathPrefix):
+			resp = c.srv.relay.Do(c.ctx, req)
+		case c.srv.local != nil:
+			// The daemon's own, and never the relay's: it is not sent to the instance, and does not wait on a
+			// sign-in.
+			resp = c.srv.local.Do(c.ctx, req)
+		default:
+			resp = ipc.Response{Error: &ipc.RelayError{Code: ipc.RelayBadRequest,
+				Message: "this daemon answers no request of its own at that path"}}
+		}
 		resp.ID = req.ID
 		c.inflightMu.Lock()
 		delete(c.inflight, req.ID)

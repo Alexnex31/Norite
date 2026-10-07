@@ -20,6 +20,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/daemon/config"
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/statefile"
 )
 
 // What a color looks like once drawn: lipgloss writes an exact color as 38;2;r;g;b and the terminal's own
@@ -359,6 +360,41 @@ func TestASyntaxErrorIsNamedByItsLineAndNotItsPath(t *testing.T) {
 	assert.True(t, m.configBroken)
 	assert.Contains(t, m.configNote, "config.toml was not applied · line 3")
 	assert.NotContains(t, m.configNote, home)
+}
+
+// TestWhileSplitTheClientReadsItsOwnFile: the same-machine toggle gives the terminal client
+// config.tui.toml, and config.toml is then read by neither client. The toggle is the daemon's to change
+// and is read here from its state file, so this holds with no daemon running.
+func TestWhileSplitTheClientReadsItsOwnFile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("writes the state file where Linux keeps it; the lookup itself is tested in daemon/config")
+	}
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("XDG_STATE_HOME", home)
+	dir := filepath.Join(home, "norite")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte(redAccent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.tui.toml"), []byte(blueAccent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.gui.toml"), []byte(greenBright), 0o600))
+
+	m := New(Options{})
+	require.Contains(t, m.look.selected.Render("x"), sgrRed, "not split: config.toml")
+
+	require.NoError(t, os.WriteFile(statefile.PathIn(dir), []byte(`{"version":1,"config_split":true}`), 0o600))
+	next, _ := m.Update(m.reloadConfig()())
+	got := next.(Model)
+	assert.Contains(t, got.look.selected.Render("x"), sgrBlue, "split: the terminal client's own file")
+	assert.NotContains(t, got.look.bold.Render("x"), sgrGreen, "and nothing of the GUI's")
+
+	// A state file the client cannot read is said, and the settings in use stay: guessing which file is
+	// its own would draw somebody else's.
+	require.NoError(t, os.WriteFile(statefile.PathIn(dir), []byte(`{"version":99}`), 0o600))
+	next, _ = got.Update(got.reloadConfig()())
+	got = next.(Model)
+	assert.True(t, got.configBroken)
+	assert.Contains(t, got.configNote, "newer version")
+	assert.Contains(t, got.look.selected.Render("x"), sgrBlue)
 }
 
 // TestAClientGivenNoReaderReadsTheUsersFile: the default is the real file, so a caller that names no reader

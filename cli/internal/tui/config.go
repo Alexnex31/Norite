@@ -16,9 +16,10 @@ import (
 // ConfigReader reads config.toml as this client sees it.
 type ConfigReader func() (*config.Config, error)
 
-// FileConfig reads the user's config.toml. A missing file is the defaults.
+// FileConfig reads the config the terminal client reads: the user's config.toml, or config.tui.toml while
+// the same-machine toggle has given each client its own. A missing file is the defaults.
 func FileConfig() (*config.Config, error) {
-	path, err := config.Path()
+	path, _, err := config.PathFor(config.TUI)
 	if err != nil {
 		return nil, err
 	}

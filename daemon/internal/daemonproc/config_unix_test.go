@@ -7,6 +7,8 @@ package daemonproc
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Alexnex31/Norite/daemon/config"
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/statefile"
 )
 
 // M21's first done-when, at the daemon: with a real daemon running and a client attached for events,
@@ -96,5 +99,107 @@ func TestTheDaemonTellsAnAttachedClientTheConfigChanged(t *testing.T) {
 
 	if err := stop(); err != nil {
 		t.Fatalf("stop: %v", err)
+	}
+}
+
+// The toggle, through a real daemon: a client asks for the split over the socket, with nobody signed in,
+// and the daemon copies the config, records the toggle where any client can read it, and tells the client
+// attached for events to read its config again. Then back.
+func TestTheDaemonSplitsAndUnsplitsTheConfigOnRequest(t *testing.T) {
+	dir, err := os.MkdirTemp("", "nd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "st"))
+	cfgDir, err := config.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := config.FilesIn(cfgDir)
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const shared = "# mine\n[shared]\nclock = \"12h\"\n"
+	if err := os.WriteFile(files.Shared, []byte(shared), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	startDaemon(t, Options{StateDir: dir, Version: "dev"})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	conn, err := ipc.DialAt(ctx, ipc.SocketPath(dir))
+	if err != nil {
+		t.Fatalf("dialing the daemon: %v", err)
+	}
+	client, err := ipc.Attach(ctx, conn, ipc.Options{Client: "norite-test", Version: "dev", Events: true})
+	if err != nil {
+		t.Fatalf("attaching: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	if client.Ready().Account != nil {
+		t.Fatal("the test means to run signed out")
+	}
+
+	toggle := func(path string) ipc.ConfigToggle {
+		t.Helper()
+		res, err := client.Do(ctx, "POST", path, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		var out ipc.ConfigToggle
+		if res.Status != 200 || json.Unmarshal(res.Body, &out) != nil {
+			t.Fatalf("%s answered %d %s", path, res.Status, res.Body)
+		}
+		select {
+		case ev := <-client.Events():
+			if ev.Type != ipc.EventConfigUpdate {
+				t.Fatalf("%s: got %s", path, ev.Type)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: the attached client was never told", path)
+		}
+		return out
+	}
+	readFile := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	if out := toggle(ipc.PathConfigSplit); !out.Split {
+		t.Fatalf("split answered %+v", out)
+	}
+	if got := readFile(files.TUI); got != shared {
+		t.Errorf("config.tui.toml is %q", got)
+	}
+	state, err := statefile.ReadIn(dir)
+	if err != nil || !state.ConfigSplit {
+		t.Fatalf("the state file says %+v, %v", state, err)
+	}
+
+	// The terminal client's own setting, made while split, is in config.toml after.
+	if err := os.WriteFile(files.TUI, []byte(shared+"\n[tui.colors]\naccent = 208\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := toggle(ipc.PathConfigUnsplit); out.Split {
+		t.Fatalf("unsplit answered %+v", out)
+	}
+	if got := readFile(files.Shared); got != shared+"\n[tui.colors]\naccent = 208\n" {
+		t.Errorf("config.toml is %q", got)
+	}
+	if state, err := statefile.ReadIn(dir); err != nil || state.ConfigSplit {
+		t.Fatalf("the state file says %+v, %v", state, err)
+	}
+
+	// Asked again it is refused, with the daemon's own error and no status: nothing went to an instance.
+	_, err = client.Do(ctx, "POST", ipc.PathConfigUnsplit, nil)
+	var re *ipc.RelayError
+	if !errors.As(err, &re) || re.Code != ipc.RelayConflict {
+		t.Fatalf("a second unsplit: %v", err)
 	}
 }

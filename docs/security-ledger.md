@@ -1268,3 +1268,39 @@ carries the condition that would reopen it.
 - **Reopens if**: `MaxFileSize` is raised (`TestTheSizeBoundIsTheOneThatWasMeasured` pins it), the config
   gains a reader that parses on every frame or keystroke, or theme files (M45) are read with a larger
   bound.
+
+### Any program running as the user can flip the same-machine config toggle
+- **Raised**: M21, while building the toggle
+- **Verdict**: accepted risk
+- **Why**: `POST /@daemon/config/split` and `/unsplit` are served to every attach client, and the attach
+  socket's tier is first-party and OS-permission-protected (rule 16): whatever can connect runs as the
+  account that owns `config.toml` and can rewrite it, and the files beside it, without asking anybody.
+  The request adds no authority that account lacks. It takes no body, deletes nothing, and sets aside
+  everything it replaces (`internal/toggle`).
+- **Reopens if**: the daemon answers a request of its own on the bot-automation port (M22), whose tier is
+  a secret and not the account; or a local request gains an effect the account could not have by itself,
+  a plugin grant (M89) being the obvious one.
+
+### A daemon older than the toggle sends the request's path to its instance
+- **Raised**: M21, while building the toggle
+- **Verdict**: accepted risk
+- **Why**: a request to the daemon itself reuses the relay's frame under `/@daemon/`, so that no frame
+  changes. A daemon from before the prefix existed has no reason to treat it differently and relays
+  `POST /api/v1/@daemon/config/split` with its token, as it relays any path. What the instance learns is
+  that this account's client asked its daemon to split a config. There is no body. The current daemon
+  never relays it: the attach server answers first, and `relay.Target` refuses the prefix on its own
+  (`TestTheDaemonsOwnPathsAreNeitherRelayedNorInTheContract`).
+- **Reopens if**: a local request carries a body, or a path segment holding something of the user's. An
+  older daemon would then deliver that to a stranger's server, and the request needs a frame of its own.
+
+### Which file wins an unsplit is decided by modification times anything can set
+- **Raised**: M21, while building the toggle
+- **Verdict**: accepted risk
+- **Why**: unsplit takes the more recently written of the two client files as its base, read from the
+  file's own time, which `touch` changes and a restore from backup resets. The wrong file as base changes
+  which value a key both set ends with, and nothing else: every key either file sets is in the result,
+  the answer lists each key where the base's value stayed, and both files and the replaced `config.toml`
+  are kept as `*.before-unsplit`.
+- **Reopens if**: unsplit starts deleting what it replaces, or a key appears whose value choosing wrongly
+  does harm that reading the answer would not catch, a key binding to a command (M44) being the first
+  candidate.

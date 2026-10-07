@@ -160,6 +160,9 @@ func Run(ctx context.Context, opts Options) error {
 		// carry the key twice and a reader would keep whichever its parser happens to prefer.
 		part := func(name string) zerolog.Logger { return log.With().Str("subsystem", name).Logger() }
 		st := state.New(part("state"), state.DefaultLimits)
+		// The requests the daemon answers itself. They are about this machine, so they are served whichever
+		// branch below is taken: signed in or not, credential store or none.
+		local := newLocal(stateDir, part("config"))
 
 		store, err := credentials.OpenIn(stateDir)
 		if err != nil {
@@ -168,7 +171,9 @@ func Run(ctx context.Context, opts Options) error {
 			log.Error().Err(err).Msg("the credential store could not be opened")
 			server := attach.New(attach.Options{
 				Session: storeless{}, State: st, Relay: storeless{}, Version: opts.Version, Log: part("attach"),
+				Local: local,
 			})
+			local.bind(server)
 			components.Go(func() { server.Serve(ctx, listener) })
 			components.Go(func() { watchConfig(ctx, server, part("config")) })
 		} else {
@@ -193,7 +198,9 @@ func Run(ctx context.Context, opts Options) error {
 			server := attach.New(attach.Options{
 				Session: src, State: st, Version: opts.Version, Log: part("attach"),
 				Relay: relay.New(relay.Options{Credentials: src, Version: opts.Version, Log: part("relay")}),
+				Local: local,
 			})
+			local.bind(server)
 			gw := gatewayclient.New(gatewayclient.Options{
 				Credentials: src, Sink: server, Version: opts.Version,
 				Log: part("gateway"),

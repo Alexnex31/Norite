@@ -10,6 +10,7 @@ package configwatch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -27,11 +28,13 @@ const watchSettle = 100 * time.Millisecond
 // creates it.
 const dirMode = 0o700
 
-// Watch calls changed whenever the config at path may have changed, until ctx is done.
+// Watch calls changed whenever one of the config files at paths may have changed, until ctx is done. They
+// are config.toml and, for the same-machine toggle, the file each client reads while it is on; all of
+// them are in one directory, the first one's, which is the one created when it is missing.
 //
-// Directories are watched, never the file. Nearly every editor and this package's own writer save by
-// renaming a new file into place, and a watch on the old file follows it into oblivion. Two directories
-// when the config is a link into a dotfiles repository: the one the link is in, where it can be replaced
+// Directories are watched, never the files. Nearly every editor and this package's own writer save by
+// renaming a new file into place, and a watch on the old file follows it into oblivion. More directories
+// when a config is a link into a dotfiles repository: the one the link is in, where it can be replaced
 // or re-pointed, and the one the real file is in, which is where a save actually lands.
 //
 // changed is told that something happened, not what. It runs on Watch's goroutine and must not block.
@@ -40,7 +43,10 @@ const dirMode = 0o700
 //
 // It returns an error only when no watch could be set up at all; the caller logs that and carries on, and
 // a client then picks a change up when it next starts.
-func Watch(ctx context.Context, path string, changed func()) error {
+func Watch(ctx context.Context, paths []string, changed func()) error {
+	if len(paths) == 0 {
+		return errors.New("configwatch: no file to watch")
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -50,7 +56,7 @@ func Watch(ctx context.Context, path string, changed func()) error {
 	// The directory has to exist to be watched, and a config that does not exist yet is the ordinary
 	// state of a new install. Creating it is the one thing a daemon does to this directory, and it is done
 	// once: a directory that is later removed is waited for, not put back under whoever is replacing it.
-	dir := filepath.Dir(path)
+	dir := filepath.Dir(paths[0])
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return err
 	}
@@ -65,27 +71,38 @@ func Watch(ctx context.Context, path string, changed func()) error {
 		_ = w.Add(parent)
 	}
 
-	// The real file, when it is somewhere else, and its directory. Looked up again after every change,
-	// since the change may have been the link being pointed at another file.
-	real, target := "", ""
+	// The names themselves, which is where a link is replaced or re-pointed.
+	links := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		links[filepath.Clean(path)] = true
+	}
+	// The real files, where they are somewhere else, and their directories. Looked up again after every
+	// change, since the change may have been a link being pointed at another file.
+	reals, targets := map[string]bool{}, map[string]bool{}
 	follow := func() {
-		real = ""
-		resolved, err := atomicfile.Resolve(path)
-		if err != nil {
-			return
+		nextReals, nextTargets := map[string]bool{}, map[string]bool{}
+		for _, path := range paths {
+			resolved, err := atomicfile.Resolve(path)
+			if err != nil {
+				continue
+			}
+			real := filepath.Clean(resolved)
+			nextReals[real] = true
+			if d := filepath.Dir(real); d != dir {
+				nextTargets[d] = true
+			}
 		}
-		real = filepath.Clean(resolved)
-		next := filepath.Dir(real)
-		if next == dir || next == target {
-			return
+		for d := range targets {
+			if !nextTargets[d] {
+				_ = w.Remove(d)
+			}
 		}
-		if target != "" {
-			_ = w.Remove(target)
+		for d := range nextTargets {
+			if !targets[d] && w.Add(d) != nil {
+				delete(nextTargets, d)
+			}
 		}
-		target = ""
-		if w.Add(next) == nil {
-			target = next
-		}
+		reals, targets = nextReals, nextTargets
 	}
 	follow()
 
@@ -104,8 +121,8 @@ func Watch(ctx context.Context, path string, changed func()) error {
 				// leads to now; if that is nothing, the parent says when it is something again.
 				_ = w.Remove(dir)
 				_ = w.Add(dir)
-			case name == filepath.Clean(path), real != "" && name == real:
-				// The link itself, or the file it resolves to. Everything else in these directories is
+			case links[name], reals[name]:
+				// A link itself, or the file one resolves to. Everything else in these directories is
 				// somebody else's file.
 			default:
 				continue

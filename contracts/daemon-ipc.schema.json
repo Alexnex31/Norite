@@ -338,7 +338,7 @@
               "minLength": 1,
               "maxLength": 2048,
               "pattern": "^/",
-              "description": "Under /api/v1, which the daemon prefixes, with any query string. The daemon builds the URL from its own instance URL and refuses a path that could leave it, and anything under /auth or /instance."
+              "description": "Under /api/v1, which the daemon prefixes, with any query string. The daemon builds the URL from its own instance URL and refuses a path that could leave it, and anything under /auth or /instance. A path under /@daemon/ is not relayed: the daemon answers it itself, signed in or not, with status 200 and a body or with an error (M21). Those are POST /@daemon/config/split and POST /@daemon/config/unsplit, both without a body, both answering a ConfigToggle."
             },
             "body": {
               "description": "The JSON to send, or null for none."
@@ -446,7 +446,9 @@
             "refused",
             "bad_request",
             "too_many_requests",
-            "too_large"
+            "too_large",
+            "conflict",
+            "failed"
           ]
         },
         "message": {
@@ -561,6 +563,65 @@
           "enum": [
             "DAEMON_CONFIG_UPDATE"
           ]
+        }
+      }
+    },
+    "ConfigToggle": {
+      "type": "object",
+      "description": "The body of a 200 answer to POST /@daemon/config/split and POST /@daemon/config/unsplit: what the daemon did to the same-machine config toggle. It is carried in a Response's body like a relayed answer; no frame refers to it.",
+      "required": [
+        "split",
+        "files",
+        "base",
+        "merged",
+        "kept",
+        "skipped",
+        "backups"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "split": {
+          "type": "boolean",
+          "description": "The toggle as it now stands."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The config files now in use: config.toml when not split, the two clients' files when split."
+        },
+        "base": {
+          "type": "string",
+          "description": "The file an unsplit started from, the more recently written of the two. Empty for a split."
+        },
+        "merged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The keys an unsplit added to the base from the other file."
+        },
+        "kept": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The keys both files set differently, where the base's value stayed."
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the other file held that could not be carried over, each with its reason."
+        },
+        "backups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The files an unsplit set aside rather than deleted."
         }
       }
     }

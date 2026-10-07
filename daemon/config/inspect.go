@@ -205,12 +205,21 @@ func (p *ImportPlan) Empty() bool { return len(p.Apply) == 0 }
 // A key both files set is kept as this machine has it unless overwrite is true. That is the direction
 // under which importing never disturbs settings somebody already made.
 func PlanImport(current, incoming []byte, overwrite bool) (*ImportPlan, error) {
+	return planMerge(current, incoming, overwrite, false)
+}
+
+// planMerge is PlanImport, and with own set it is the plan for folding together two files that are both
+// this machine's: a machine-local key is then exactly what must not be left behind.
+func planMerge(current, incoming []byte, overwrite, own bool) (*ImportPlan, error) {
 	have, err := Inspect(current)
 	if err != nil {
 		return nil, err
 	}
 	want, err := Inspect(incoming)
 	if err != nil {
+		if own {
+			return nil, err
+		}
 		return nil, fmt.Errorf("the file to import: %w", err)
 	}
 
@@ -218,7 +227,7 @@ func PlanImport(current, incoming []byte, overwrite bool) (*ImportPlan, error) {
 	for _, section := range []Section{Shared, TUI, GUI} {
 		for _, name := range slices.Sorted(maps.Keys(want.set[section])) {
 			key, _ := lookup(section, name)
-			if !key.Portable {
+			if !key.Portable && !own {
 				return nil, fmt.Errorf("%s.%s %w", section, name, ErrMachineLocal)
 			}
 			for inner, to := range flatten(section, name, want.set[section][name], plan) {
@@ -243,6 +252,36 @@ func PlanImport(current, incoming []byte, overwrite bool) (*ImportPlan, error) {
 	slices.SortFunc(plan.Apply, func(a, b Change) int { return strings.Compare(a.Key(), b.Key()) })
 	slices.SortFunc(plan.Kept, func(a, b Change) int { return strings.Compare(a.Key(), b.Key()) })
 	return plan, nil
+}
+
+// Merge folds other into base, both of them this machine's own config files, and returns the result with
+// what it did. It is what turning the same-machine toggle off does with the two clients' files.
+//
+// base wins wherever both set a key: the caller passes the more recently written file as base, which is
+// what "last write wins" means once it is asked per key rather than per file. A key only other sets is
+// added, so neither file's customization is dropped by the other being newer. base's bytes are otherwise
+// kept as they are, comments included; other's comments have nowhere to go, and the caller keeps that
+// file.
+//
+// What other holds that this version does not understand is in the plan's Skipped, not in the result.
+func Merge(base, other []byte) ([]byte, *ImportPlan, error) {
+	plan, err := planMerge(base, other, false, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	edits := make([]edit, 0, len(plan.Apply))
+	for _, change := range plan.Apply {
+		segments, literal, err := resolve(change.Section, change.name, change.to, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		edits = append(edits, edit{segments, literal})
+	}
+	merged, err := setAll(base, edits)
+	if err != nil {
+		return nil, nil, err
+	}
+	return merged, plan, nil
 }
 
 // flatten yields the settable keys under name: the key itself for a scalar, and each string entry of a

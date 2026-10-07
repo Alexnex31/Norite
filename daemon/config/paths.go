@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/Alexnex31/Norite/daemon/statefile"
 )
 
 const (
@@ -26,6 +28,64 @@ func Path() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, fileName), nil
+}
+
+// The two files the clients read instead of config.toml while the same-machine toggle is on.
+const (
+	tuiFileName = "config.tui.toml"
+	guiFileName = "config.gui.toml"
+)
+
+// BackupSuffix is added to a file's name for the copy that turning the toggle off keeps of it.
+const BackupSuffix = ".before-unsplit"
+
+// Files names the three config files in one directory.
+type Files struct {
+	// Shared is config.toml, which both clients read while the toggle is off.
+	Shared string
+	// TUI and GUI are the files each client reads while it is on.
+	TUI, GUI string
+}
+
+// FilesIn returns the config files' paths in dir.
+func FilesIn(dir string) Files {
+	return Files{
+		Shared: filepath.Join(dir, fileName),
+		TUI:    filepath.Join(dir, tuiFileName),
+		GUI:    filepath.Join(dir, guiFileName),
+	}
+}
+
+// SplitPath returns the file a client reads while the same-machine toggle is on: config.tui.toml or
+// config.gui.toml, beside config.toml. Only the two clients have one.
+func SplitPath(client Section) (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	switch client {
+	case TUI:
+		return filepath.Join(dir, tuiFileName), nil
+	case GUI:
+		return filepath.Join(dir, guiFileName), nil
+	}
+	return "", fmt.Errorf("[%s] has no config file of its own: the clients are tui and gui", client)
+}
+
+// PathFor returns the config file a client reads right now, and whether that is its own because the
+// toggle is on. The toggle is the daemon's to change and anybody's to read, so this works with no daemon
+// running.
+func PathFor(client Section) (path string, split bool, err error) {
+	state, err := statefile.Read()
+	if err != nil {
+		return "", false, err
+	}
+	if !state.ConfigSplit {
+		path, err = Path()
+		return path, false, err
+	}
+	path, err = SplitPath(client)
+	return path, true, err
 }
 
 // dirFor resolves the directory for a named GOOS, so all three platforms' rules are tested from any one.

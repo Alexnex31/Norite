@@ -65,6 +65,50 @@ const LocalEventPrefix = "DAEMON_"
 // know, as it would a gateway event added later, so this needs nothing of the version rule.
 const EventConfigUpdate = LocalEventPrefix + "CONFIG_UPDATE"
 
+// LocalPathPrefix begins the path of a request the daemon answers itself rather than relaying to the
+// instance (M21). The request and response frames are the relay's own, so nothing about a frame changes;
+// what changes is who answers. It is a first path segment no REST route has or can be given (a test holds
+// openapi.yaml to that), and the relay refuses it too, so a request under it never leaves the machine.
+//
+// Trust tier (rule 16): the attach socket's. First-party clients running as the daemon's own OS account,
+// kept to that account by the socket's permissions and the peer check. No secret is involved and none is
+// needed; the local bot-automation port (M22) is a different surface with a different tier, and serves
+// none of these.
+//
+// Unlike a relayed request, a local one is answered whether or not anybody is signed in: it is about the
+// user's machine. Success is status 200 and a body. Anything else is an Error and never a status, since a
+// status is the instance's to give: RelayConflict when the daemon understood and did not do it, RelayFailed
+// when it tried and could not.
+const LocalPathPrefix = "/@daemon/"
+
+// The local requests. Both are POST with no body, and both answer a ConfigToggle.
+const (
+	// PathConfigSplit turns the same-machine config toggle on: each client gets its own config file,
+	// starting as a copy of config.toml.
+	PathConfigSplit = LocalPathPrefix + "config/split"
+	// PathConfigUnsplit turns it off, folding the two files back onto config.toml.
+	PathConfigUnsplit = LocalPathPrefix + "config/unsplit"
+)
+
+// ConfigToggle is what a split or an unsplit did.
+type ConfigToggle struct {
+	// Split is the toggle as it now stands.
+	Split bool `json:"split"`
+	// Files are the config files now in use: one when not split, the two clients' when split.
+	Files []string `json:"files"`
+	// Base is the file an unsplit took as its starting point, the more recently written of the two, or
+	// empty for a split.
+	Base string `json:"base"`
+	// Merged lists the keys an unsplit added to the base from the other file.
+	Merged []string `json:"merged"`
+	// Kept lists the keys both files set differently, where the base's value stayed.
+	Kept []string `json:"kept"`
+	// Skipped lists what the other file held that this version could not carry over, each with its reason.
+	Skipped []string `json:"skipped"`
+	// Backups are the files an unsplit set aside rather than deleted.
+	Backups []string `json:"backups"`
+}
+
 // The local ops, numbered from 100. HELLO, IDENTIFY and DISPATCH keep the gateway's numbers.
 const (
 	// OpRequest asks the daemon to perform a REST call. Client to daemon.
@@ -215,6 +259,12 @@ const (
 	RelayTooManyRequests = "too_many_requests"
 	// RelayTooLarge: the instance's answer exceeded MaxResponseBody.
 	RelayTooLarge = "too_large"
+	// RelayConflict: a request to the daemon itself (LocalPathPrefix) that it understood and did not carry
+	// out, because of what it found: the toggle already where it was asked to go, a file that does not
+	// parse. Nothing was changed, and the message says what to do.
+	RelayConflict = "conflict"
+	// RelayFailed: a request to the daemon itself that it tried and could not complete.
+	RelayFailed = "failed"
 )
 
 // RelayError is why the daemon could not perform a request. Its message is the daemon's own wording, never

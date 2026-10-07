@@ -46,7 +46,7 @@ func watching(t *testing.T, path string) (next, silent func() bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	notified := make(chan struct{}, 64)
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, path, func() { notified <- struct{}{} }) }()
+	go func() { done <- Watch(ctx, []string{path}, func() { notified <- struct{}{} }) }()
 	t.Cleanup(func() {
 		cancel()
 		require.NoError(t, <-done)
@@ -102,7 +102,7 @@ func TestWatchCoalescesABurstAndIgnoresOtherFiles(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	count := make(chan struct{}, 64)
-	go func() { _ = Watch(ctx, path, func() { count <- struct{}{} }) }()
+	go func() { _ = Watch(ctx, []string{path}, func() { count <- struct{}{} }) }()
 	time.Sleep(50 * time.Millisecond)
 
 	// Somebody else's files in the same directory: a theme, an editor's swap file, a lock.
@@ -206,4 +206,45 @@ func TestWatchFollowsItsDirectoryBeingRepointed(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(filepath.Join(second, "config.toml"), []byte("[shared]\nclock = \"12h\"\n"), 0o600))
 	require.True(t, next(), "a save where the link now leads")
+}
+
+// While the same-machine toggle is on each client reads its own file, and a save to either is a change.
+// Their neighbors, the set-aside copies among them, are not.
+func TestWatchSeesEveryFileItWasGiven(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	dir := filepath.Dir(path)
+	tui, gui := filepath.Join(dir, "config.tui.toml"), filepath.Join(dir, "config.gui.toml")
+	ctx, cancel := context.WithCancel(context.Background())
+	notified := make(chan struct{}, 64)
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, []string{path, tui, gui}, func() { notified <- struct{}{} }) }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-done)
+	})
+	time.Sleep(50 * time.Millisecond)
+	next := func() bool {
+		select {
+		case <-notified:
+			return true
+		case <-time.After(2 * time.Second):
+			return false
+		}
+	}
+	silent := func() bool {
+		select {
+		case <-notified:
+			return false
+		case <-time.After(4 * watchSettle):
+			return true
+		}
+	}
+
+	for _, file := range []string{tui, gui, path} {
+		require.NoError(t, os.WriteFile(file, []byte("[shared]\nclock = \"12h\"\n"), 0o600))
+		require.True(t, next(), filepath.Base(file))
+		require.True(t, silent(), "settled")
+	}
+	require.NoError(t, os.WriteFile(tui+".before-unsplit", []byte("x"), 0o600))
+	require.True(t, silent(), "a set-aside copy is not a config anybody reads")
 }

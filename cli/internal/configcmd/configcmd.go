@@ -20,21 +20,38 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/cli/internal/prompt"
 	"github.com/Alexnex31/Norite/daemon/atomicfile"
 	"github.com/Alexnex31/Norite/daemon/config"
+	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
+// Connector attaches to the daemon for one command, returning a caller and a function that detaches. Only
+// split and unsplit use it: every other verb here reads and writes files, and works with no daemon running.
+type Connector func(ctx context.Context) (daemonclient.Caller, func(), error)
+
+// clientFlag names whose config file a command means, while the two clients have one each.
+const clientFlag = "client"
+
 // Command returns the `norite config` group.
-func Command() *cli.Command {
+func Command(connect Connector) *cli.Command {
 	return &cli.Command{
-		Name:  "config",
+		Name: "config",
+		Flags: []cli.Flag{&cli.StringFlag{
+			Name:  clientFlag,
+			Value: string(config.TUI),
+			Usage: "while the config is split, the client whose file is meant: `tui` or gui",
+		}},
 		Usage: "Read and change this machine's client settings (config.toml)",
 		Description: "The client's settings live in one file you can edit by hand. These commands read and\n" +
 			"change the same file, and never touch a comment or a line they were not asked about.\n\n" +
 			"A key is written section.name, as in tui.colors.accent or shared.clock. `norite config get`\n" +
-			"with no key lists every one. This is not the instance's configuration, which is instance.toml.",
+			"with no key lists every one. This is not the instance's configuration, which is instance.toml.\n\n" +
+			"The terminal client and the GUI read the same file unless `norite config split` gave each its\n" +
+			"own. While split, these commands mean the terminal client's file, and --client gui means the\n" +
+			"GUI's.",
 		Commands: []*cli.Command{
 			{
 				Name:   "path",
@@ -84,30 +101,51 @@ func Command() *cli.Command {
 				},
 				Action: run(1, 1, importVerb),
 			},
+			{
+				Name:  "split",
+				Usage: "Give the terminal client and the GUI a config file each",
+				Description: "Copies config.toml to config.tui.toml and config.gui.toml beside it, and from then on\n" +
+					"each client reads its own. config.toml stays where it is and is read by neither.\n" +
+					"The running daemon does this, so it has to be running.",
+				Action: run(0, 0, toggleVerb(connect, ipc.PathConfigSplit)),
+			},
+			{
+				Name:  "unsplit",
+				Usage: "Fold the two clients' config files back into one",
+				Description: "Merges config.tui.toml and config.gui.toml onto config.toml, key by key: the file saved\n" +
+					"more recently is the starting point, and every setting only the other has is added to\n" +
+					"it. Nothing is deleted. Both files, and config.toml as it was, are kept beside it with\n" +
+					".before-unsplit after their names. The running daemon does this.",
+				Action: run(0, 0, toggleVerb(connect, ipc.PathConfigUnsplit)),
+			},
 		},
 	}
 }
 
 // env is what a verb runs with.
 type env struct {
+	ctx         context.Context
 	out, errOut io.Writer
 	in          io.Reader
 	json        bool
 	interactive bool
-	// path is this machine's config.toml.
+	// path is the config file these commands mean: config.toml, or one client's own while split.
 	path string
+	// split reports that the two clients have a file each, and client whose file path is.
+	split  bool
+	client config.Section
 }
 
 type verb func(cmd *cli.Command, e *env) (output.Result, error)
 
 // run checks the argument count, runs the verb and renders what it produced.
 func run(minArgs, maxArgs int, v verb) cli.ActionFunc {
-	return func(_ context.Context, cmd *cli.Command) error {
+	return func(ctx context.Context, cmd *cli.Command) error {
 		if n := cmd.Args().Len(); n < minArgs || n > maxArgs {
 			return clierr.Usage("usage: norite config %s %s", cmd.Name, cmd.ArgsUsage)
 		}
 		root := cmd.Root()
-		e := &env{out: root.Writer, errOut: root.ErrWriter, in: root.Reader, json: root.Bool("json")}
+		e := &env{ctx: ctx, out: root.Writer, errOut: root.ErrWriter, in: root.Reader, json: root.Bool("json")}
 		if e.out == nil {
 			e.out = os.Stdout
 		}
@@ -120,11 +158,16 @@ func run(minArgs, maxArgs int, v verb) cli.ActionFunc {
 		if f, ok := e.in.(*os.File); ok {
 			e.interactive = term.IsTerminal(int(f.Fd()))
 		}
-		path, err := config.Path()
+		e.client = config.Section(cmd.String(clientFlag))
+		if e.client != config.TUI && e.client != config.GUI {
+			return clierr.Usage("--%s %q is not a client: it is tui or gui", clientFlag, output.Clean(string(e.client)))
+		}
+		// The toggle is read from the daemon's state file, with or without a daemon running.
+		path, split, err := config.PathFor(e.client)
 		if err != nil {
 			return err
 		}
-		e.path = path
+		e.path, e.split = path, split
 
 		result, err := v(cmd, e)
 		if err != nil {
@@ -157,6 +200,24 @@ func classify(err error) error {
 	return err
 }
 
+// key reads a key argument and checks it is one this command's file is read for.
+//
+// While split, each client reads [shared] and its own section from its own file. A [gui] setting written
+// into the terminal client's file, or a [tui] one into the GUI's, is read by nobody: a setting that
+// silently does nothing, which is what an unknown key is refused for. It is refused the same way, naming
+// the flag that means the other file.
+func (e *env) key(arg string) (config.Section, string, error) {
+	section, name, err := splitKey(arg)
+	if err != nil {
+		return "", "", err
+	}
+	if e.split && (section == config.TUI || section == config.GUI) && section != e.client {
+		return "", "", clierr.Usage("the config is split, and [%s] is read from the %s client's own file: "+
+			"pass --%s %s", section, section, clientFlag, section)
+	}
+	return section, name, nil
+}
+
 // splitKey reads "tui.colors.accent" as section "tui" and name "colors.accent".
 func splitKey(arg string) (config.Section, string, error) {
 	section, name, ok := strings.Cut(arg, ".")
@@ -172,7 +233,7 @@ func pathVerb(_ *cli.Command, e *env) (output.Result, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	return pathView{Path: e.path, Exists: err == nil}, nil
+	return pathView{Path: e.path, Exists: err == nil, Split: e.split, Client: string(e.client)}, nil
 }
 
 func getVerb(cmd *cli.Command, e *env) (output.Result, error) {
@@ -187,7 +248,7 @@ func getVerb(cmd *cli.Command, e *env) (output.Result, error) {
 		}
 		return view, nil
 	}
-	section, name, err := splitKey(cmd.Args().First())
+	section, name, err := e.key(cmd.Args().First())
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +260,7 @@ func getVerb(cmd *cli.Command, e *env) (output.Result, error) {
 }
 
 func setVerb(cmd *cli.Command, e *env) (output.Result, error) {
-	section, name, err := splitKey(cmd.Args().Get(0))
+	section, name, err := e.key(cmd.Args().Get(0))
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +271,7 @@ func setVerb(cmd *cli.Command, e *env) (output.Result, error) {
 }
 
 func unsetVerb(cmd *cli.Command, e *env) (output.Result, error) {
-	section, name, err := splitKey(cmd.Args().First())
+	section, name, err := e.key(cmd.Args().First())
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +319,26 @@ func exportVerb(cmd *cli.Command, e *env) (output.Result, error) {
 		return nil, err
 	}
 	return exportedView{Path: dest}, nil
+}
+
+// toggleVerb asks the running daemon to turn the same-machine toggle on or off. The daemon is the state
+// file's only writer, so this is the one pair of config commands that needs it running.
+func toggleVerb(connect Connector, path string) verb {
+	return func(_ *cli.Command, e *env) (output.Result, error) {
+		if connect == nil {
+			return nil, errors.New("this build has no way to reach the daemon")
+		}
+		c, detach, err := connect(e.ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer detach()
+		var done ipc.ConfigToggle
+		if err := daemonclient.Local(e.ctx, c, path, &done); err != nil {
+			return nil, err
+		}
+		return toggledView(done), nil
+	}
 }
 
 // beforeImport runs between the plan somebody was shown and the import itself, which is where another

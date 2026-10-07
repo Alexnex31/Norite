@@ -136,7 +136,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
 			aboutCommand(verbs.Daemon(Version)),
-			configcmd.Command(),
+			configcmd.Command(configcmd.Connector(verbs.Daemon(Version))),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

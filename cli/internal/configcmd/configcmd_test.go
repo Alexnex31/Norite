@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,8 +17,11 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/daemontest"
 	"github.com/Alexnex31/Norite/daemon/config"
+	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/statefile"
 )
 
 // home points every directory the commands resolve at a throwaway one, and returns where config.toml is.
@@ -48,6 +52,9 @@ func read(t *testing.T, path string) string {
 	return string(data)
 }
 
+// testDaemon is how the commands under test reach a daemon. Nil is none, which is every verb but two.
+var testDaemon Connector
+
 // norite runs `norite [--json] config args...` with nothing on stdin, which is not a terminal.
 func norite(t *testing.T, asJSON bool, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
@@ -56,7 +63,7 @@ func norite(t *testing.T, asJSON bool, args ...string) (stdout, stderr string, e
 		Name: "norite", Writer: &out, ErrWriter: &errOut, Reader: strings.NewReader(""),
 		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
-		Commands:       []*cli.Command{Command()},
+		Commands:       []*cli.Command{Command(testDaemon)},
 	}
 	argv := []string{"norite"}
 	if asJSON {
@@ -307,4 +314,170 @@ func TestAnImportThatIsNotAConfigIsRefused(t *testing.T) {
 
 	_, statErr := os.Stat(path)
 	assert.True(t, os.IsNotExist(statErr))
+}
+
+// fakeDaemon answers the two toggle requests as scripted, and records what it was asked.
+type fakeDaemon struct {
+	res   ipc.Result
+	err   error
+	asked []string
+}
+
+func (f *fakeDaemon) Do(_ context.Context, method, path string, _ any) (ipc.Result, error) {
+	f.asked = append(f.asked, method+" "+path)
+	return f.res, f.err
+}
+
+func withDaemon(t *testing.T, f *fakeDaemon) {
+	t.Helper()
+	testDaemon = func(context.Context) (daemonclient.Caller, func(), error) { return f, func() {}, nil }
+	t.Cleanup(func() { testDaemon = nil })
+}
+
+// split writes the state file as the daemon would after a split.
+func split(t *testing.T) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "norite")
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		t.Skip("the state directory is laid out differently here; the toggle's lookup is tested in daemon/config")
+	}
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(statefile.PathIn(dir), []byte(`{"version":1,"config_split":true}`), 0o600))
+}
+
+// The two verbs ask the daemon, by POST at its own paths, and print what it says it did: as text, and as
+// JSON matching the contract.
+func TestSplitAndUnsplitAskTheDaemonAndReportWhatItDid(t *testing.T) {
+	home(t)
+	d := &fakeDaemon{res: ipc.Result{Status: 200, Body: []byte(
+		`{"split":true,"files":["/c/config.tui.toml","/c/config.gui.toml"],"base":"","merged":[],"kept":[],"skipped":[],"backups":[]}`)}}
+	withDaemon(t, d)
+
+	out, _, err := norite(t, false, "split")
+	require.NoError(t, err)
+	assert.Contains(t, out, "split: the terminal client and the GUI now read a config file each")
+	assert.Contains(t, out, "/c/config.tui.toml")
+	out, _, err = norite(t, true, "split")
+	require.NoError(t, err)
+	daemontest.MatchesCLISchema(t, out, "config.schema.json", "toggled")
+
+	d.res.Body = []byte(`{"split":false,"files":["/c/config.toml"],"base":"/c/config.gui.toml",` +
+		`"merged":["tui.colors.dim"],"kept":["shared.clock"],"skipped":["tui.x: not a key this version of Norite knows"],` +
+		`"backups":["/c/config.tui.toml.before-unsplit","/c/config.gui.toml.before-unsplit"]}`)
+	out, _, err = norite(t, false, "unsplit")
+	require.NoError(t, err)
+	for _, want := range []string{
+		"unsplit: both clients read one file again", "started from /c/config.gui.toml",
+		"add      tui.colors.dim", "keep     shared.clock", "skip     tui.x", "nothing was deleted",
+		"/c/config.tui.toml.before-unsplit",
+	} {
+		assert.Contains(t, out, want)
+	}
+	out, _, err = norite(t, true, "unsplit")
+	require.NoError(t, err)
+	daemontest.MatchesCLISchema(t, out, "config.schema.json", "toggled")
+
+	assert.Equal(t, []string{
+		"POST " + ipc.PathConfigSplit, "POST " + ipc.PathConfigSplit,
+		"POST " + ipc.PathConfigUnsplit, "POST " + ipc.PathConfigUnsplit,
+	}, d.asked)
+}
+
+// What the daemon says about a toggle is text with file names in it, and is printed inert.
+func TestAToggleAnswerIsPrintedInert(t *testing.T) {
+	home(t)
+	withDaemon(t, &fakeDaemon{res: ipc.Result{Status: 200, Body: []byte(
+		`{"split":true,"files":["/c\u001b[2J/config.tui.toml"],"base":"","merged":[],"kept":[],"skipped":[],"backups":[]}`)}})
+	out, _, err := norite(t, false, "split")
+	require.NoError(t, err)
+	assert.NotContains(t, out, "\x1b")
+}
+
+// The daemon refusing is exit 4 in its own words; no daemon is whatever attaching said, which is exit 3.
+// Neither is a usage error, and neither touches a file.
+func TestAToggleTheDaemonRefusesOrCannotBeAskedFor(t *testing.T) {
+	home(t)
+	withDaemon(t, &fakeDaemon{err: &ipc.RelayError{Code: ipc.RelayConflict, Message: "the config is already split"}})
+	_, _, err := norite(t, false, "split")
+	var refused *clierr.RefusedError
+	require.ErrorAs(t, err, &refused)
+	assert.Contains(t, err.Error(), "already split")
+
+	testDaemon = func(context.Context) (daemonclient.Caller, func(), error) {
+		return nil, nil, clierr.Unavailable("the daemon is not running; start it with `norite daemon start`")
+	}
+	_, _, err = norite(t, false, "unsplit")
+	var unavailable *clierr.UnavailableError
+	require.ErrorAs(t, err, &unavailable)
+
+	_, _, err = norite(t, false, "split", "now")
+	requireUsage(t, err)
+}
+
+// While split, these commands mean the terminal client's own file, and --client gui means the GUI's. With
+// no daemon running: the toggle is read from the state file.
+func TestWhileSplitTheCommandsMeanOneClientsFile(t *testing.T) {
+	shared := home(t)
+	split(t)
+	dir := filepath.Dir(shared)
+	tui, gui := filepath.Join(dir, "config.tui.toml"), filepath.Join(dir, "config.gui.toml")
+	write(t, shared, "[shared]\nclock = \"24h\"\n")
+	write(t, tui, "[shared]\nclock = \"24h\"\n")
+	write(t, gui, "[shared]\nclock = \"24h\"\n")
+
+	out, _, err := norite(t, true, "path")
+	require.NoError(t, err)
+	daemontest.MatchesCLISchema(t, out, "config.schema.json", "path")
+	assert.Contains(t, out, `config.tui.toml`)
+	assert.Contains(t, out, `"split": true`)
+	out, _, err = norite(t, false, "--client", "gui", "path")
+	require.NoError(t, err)
+	assert.Contains(t, out, "config.gui.toml")
+	assert.Contains(t, out, "the GUI's own file")
+
+	// A shared setting is one client's while split: it goes in the file that was meant, and only there.
+	_, _, err = norite(t, false, "set", "shared.clock", "12h")
+	require.NoError(t, err)
+	_, _, err = norite(t, false, "set", "tui.colors.accent", "208")
+	require.NoError(t, err)
+	assert.Equal(t, "[shared]\nclock = \"12h\"\n\n[tui.colors]\naccent = 208\n", read(t, tui))
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", read(t, gui))
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", read(t, shared), "config.toml is read by nobody and written by nothing")
+
+	out, _, err = norite(t, false, "--client", "gui", "get", "shared.clock")
+	require.NoError(t, err)
+	assert.Contains(t, out, "24h")
+	out, _, err = norite(t, false, "get", "shared.clock")
+	require.NoError(t, err)
+	assert.Contains(t, out, "12h")
+
+	// A terminal-client setting in the GUI's file would be read by nobody. Refused, naming the flag, for
+	// every verb that takes a key; nothing is written.
+	for _, args := range [][]string{
+		{"--client", "gui", "set", "tui.colors.accent", "9"},
+		{"--client", "gui", "get", "tui.colors.accent"},
+		{"--client", "gui", "unset", "tui.colors.accent"},
+	} {
+		_, _, err = norite(t, false, args...)
+		requireUsage(t, err)
+		assert.Contains(t, err.Error(), "--client tui", "%v", args)
+	}
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", read(t, gui))
+}
+
+// Not split, both clients read config.toml, so every section is at home in it and --client changes
+// nothing. A client that is not one is a usage error either way.
+func TestNotSplitEveryCommandMeansTheOneFile(t *testing.T) {
+	shared := home(t)
+	_, _, err := norite(t, false, "--client", "gui", "set", "tui.colors.accent", "9")
+	require.NoError(t, err)
+	assert.Equal(t, "[tui.colors]\naccent = 9\n", read(t, shared))
+	out, _, err := norite(t, true, "--client", "gui", "path")
+	require.NoError(t, err)
+	assert.Contains(t, out, `"split": false`)
+	assert.Contains(t, out, "config.toml")
+
+	_, _, err = norite(t, false, "--client", "cli", "path")
+	requireUsage(t, err)
+	assert.Contains(t, err.Error(), "tui or gui")
 }
