@@ -34,6 +34,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -224,6 +225,26 @@ func (s *Server) Dispatch(eventType string, data json.RawMessage) {
 		return
 	}
 
+	s.fanOutLocked(eventType, data)
+}
+
+// Local sends a dispatch the daemon originates itself to every client that asked for events: something
+// that happened on this machine rather than at the instance (ipc.LocalEventPrefix).
+//
+// It does not touch the state, which holds what the instance sent, and it is not held back while the
+// session and the state name different sign-ins or while nobody is signed in at all: a local event is
+// about the user's machine, and is true whichever account the daemon holds. data must be valid JSON.
+func (s *Server) Local(eventType string, data json.RawMessage) {
+	if !strings.HasPrefix(eventType, ipc.LocalEventPrefix) || !json.Valid(data) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fanOutLocked(eventType, data)
+}
+
+// fanOutLocked queues one dispatch for every watching client. The caller holds s.mu.
+func (s *Server) fanOutLocked(eventType string, data json.RawMessage) {
 	// Nothing is built for nobody: with no client watching — the ordinary case, a daemon with no TUI open —
 	// the payload is not copied at all.
 	watching := false

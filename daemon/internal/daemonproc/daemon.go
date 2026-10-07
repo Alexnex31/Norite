@@ -170,6 +170,7 @@ func Run(ctx context.Context, opts Options) error {
 				Session: storeless{}, State: st, Relay: storeless{}, Version: opts.Version, Log: part("attach"),
 			})
 			components.Go(func() { server.Serve(ctx, listener) })
+			components.Go(func() { watchConfig(ctx, server, part("config")) })
 		} else {
 			// The store's own account of anything it could not finish — a credential left in a backend this
 			// process cannot reach, most likely. Nobody is watching a daemon's terminal, so it goes to the
@@ -199,6 +200,7 @@ func Run(ctx context.Context, opts Options) error {
 			})
 			components.Go(func() { gw.Run(ctx) })
 			components.Go(func() { server.Serve(ctx, listener) })
+			components.Go(func() { watchConfig(ctx, server, part("config")) })
 		}
 	}
 

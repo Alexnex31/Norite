@@ -47,6 +47,11 @@ ExecStart={{ .ExecStart }}
 # hand-started daemon and a different one from the service — so the two take *different* single-instance
 # locks, both start, and the one-daemon-per-user invariant is broken with no error anywhere.
 Environment=XDG_STATE_HOME={{ .StateHome }}
+{{ end }}{{ if .ConfigHome }}
+# The same hazard for config.toml, since M21: the daemon watches that file so a running client hears when
+# it changes. A service that resolved a different config directory from your shell would watch one file
+# while ` + "`norite config set`" + ` and your editor wrote another, and a change would reach nobody.
+Environment=XDG_CONFIG_HOME={{ .ConfigHome }}
 {{ end }}
 # Restart on a crash, but not when the daemon exits 0 — a clean stop is a decision, and restarting after
 # one would make ` + "`systemctl --user stop`" + ` impossible.
@@ -117,10 +122,18 @@ func (s *systemdUser) Install(ctx context.Context, daemonBinary string) error {
 		stateHome = systemdEscape(stateHome)
 	}
 
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(configHome) {
+		configHome = ""
+	} else {
+		configHome = systemdEscape(configHome)
+	}
+
 	var unit strings.Builder
-	err = unitTemplate.Execute(&unit, struct{ ExecStart, StateHome string }{
-		ExecStart: systemdEscape(daemonBinary),
-		StateHome: stateHome,
+	err = unitTemplate.Execute(&unit, struct{ ExecStart, StateHome, ConfigHome string }{
+		ExecStart:  systemdEscape(daemonBinary),
+		StateHome:  stateHome,
+		ConfigHome: configHome,
 	})
 	if err != nil {
 		return fmt.Errorf("rendering the unit file: %w", err)

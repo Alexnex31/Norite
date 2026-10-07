@@ -5,6 +5,7 @@ package daemonctl
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -312,4 +313,57 @@ func TestEnvironmentSuppliedBinaryIsNotBlamedOnTheCommandLine(t *testing.T) {
 	if !strings.Contains(err.Error(), DaemonBinaryEnvVar) {
 		t.Errorf("the error does not name the variable that supplied the path: %v", err)
 	}
+}
+
+// The same hazard as the state home, for config.toml (M21): the daemon watches that file, and a service
+// that resolved another directory would watch one file while the shell wrote a different one.
+func TestTheServiceDefinitionCarriesXDGConfigHome(t *testing.T) {
+	t.Run("systemd, when set", func(t *testing.T) {
+		s, _, unitPath := newSystemd(t)
+		configHome := os.Getenv("XDG_CONFIG_HOME") // newSystemd points it at a temporary directory
+		if err := s.Install(t.Context(), "/opt/norite/norite-daemon"); err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		body, err := os.ReadFile(unitPath)
+		if err != nil {
+			t.Fatalf("reading the unit file: %v", err)
+		}
+		if !strings.Contains(string(body), "\nEnvironment=XDG_CONFIG_HOME="+configHome+"\n") {
+			t.Errorf("the unit does not pin the config directory:\n%s", body)
+		}
+	})
+
+	t.Run("launchd, when set, and escaped", func(t *testing.T) {
+		l, _, plistPath := newLaunchd(t)
+		configHome := filepath.Join(t.TempDir(), "a&b<c")
+		t.Setenv("XDG_CONFIG_HOME", configHome)
+		if err := l.Install(t.Context(), "/opt/norite/norite-daemon"); err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		body, err := os.ReadFile(plistPath)
+		if err != nil {
+			t.Fatalf("reading the plist: %v", err)
+		}
+		want := "<key>XDG_CONFIG_HOME</key>\n\t\t<string>" + strings.NewReplacer("&", "&amp;", "<", "&lt;").Replace(configHome) + "</string>"
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the agent does not pin the config directory, or does not escape it:\n%s", body)
+		}
+	})
+
+	t.Run("launchd, not when unset or relative", func(t *testing.T) {
+		for _, value := range []string{"", "relative/config"} {
+			l, _, plistPath := newLaunchd(t)
+			t.Setenv("XDG_CONFIG_HOME", value)
+			if err := l.Install(t.Context(), "/opt/norite/norite-daemon"); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			body, err := os.ReadFile(plistPath)
+			if err != nil {
+				t.Fatalf("reading the plist: %v", err)
+			}
+			if strings.Contains(string(body), "EnvironmentVariables") {
+				t.Errorf("XDG_CONFIG_HOME=%q was baked into the agent:\n%s", value, body)
+			}
+		}
+	})
 }

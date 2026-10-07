@@ -1697,8 +1697,9 @@ debounced, so opening any client on any machine shows accurate unread state.
 pane-layout preferences — anything a user should freely hand-edit. On Linux **and macOS** the
 directory is `$XDG_CONFIG_HOME/norite` when that is set and absolute and `~/.config/norite` otherwise
 (`~/Library/Application Support` stays the *state* directory on macOS). On Windows it is always
-`%APPDATA%\Norite`; `XDG_CONFIG_HOME` is not read there. The service
-definition captures `XDG_CONFIG_HOME` as it does the state home, so the daemon and a shell resolve one file.
+`%APPDATA%\Norite`; `XDG_CONFIG_HOME` is not read there. The systemd
+unit and the launchd agent both capture `XDG_CONFIG_HOME` at install, as the unit does the state home, so
+the daemon and a shell resolve one file.
 
 Keys are namespaced `[shared]`, `[tui]`, `[gui]`: cross-cutting settings live in `[shared]` and a client
 section overrides them. There is deliberately **no `[cli]` section** — the scriptable command tree has
@@ -1737,9 +1738,14 @@ repository, and a rename over the link would silently detach it. A file its owne
 refused rather than replaced, and a UTF-8 byte-order mark, which Windows editors add and TOML forbids, is
 read past and kept.
 
-**Hot reload**: the daemon watches the real file's directory with `fsnotify` (a directory, because most
-editors save by rename) and sends attach clients a local `CONFIG_UPDATE` dispatch carrying no data. Each
-client reads the file again through `daemon/config`. The daemon interprets nothing on a client's behalf;
+**Hot reload**: the daemon watches with `fsnotify` (`daemon/internal/configwatch`): a directory, because
+most editors save by rename, and both the link's directory and the real file's when the config is a link.
+It sends attach clients a local `DAEMON_CONFIG_UPDATE` dispatch carrying an empty object. A dispatch the
+daemon originates itself has a type beginning `DAEMON_`, which the gateway never uses, as the local ops
+are numbered from 100; it is sent whoever is signed in, and nobody, since the file is the user's and not
+the account's. A new dispatch type is not a change to any frame, and a client that predates it ignores
+it, so it needs nothing of the socket's version rule. Each client reads the file again through
+`daemon/config`. The daemon interprets nothing on a client's behalf;
 a client attached to no daemon reads once at start.
 
 A **second, daemon-owned state file** (`state.json` in the state directory, `0600`) holds anything

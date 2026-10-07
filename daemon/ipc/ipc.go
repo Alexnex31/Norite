@@ -32,6 +32,9 @@
 //     socket does not have.
 //   - IDENTIFY carries the client's properties and whether it wants events. It carries no token.
 //   - READY is the daemon's own: the signed-in account, if any, and the guild summaries it holds.
+//   - Dispatches the daemon originates itself, about this machine rather than the instance. Their types
+//     begin LocalEventPrefix, which no gateway dispatch does, and they are numbered with the forwarded
+//     ones. EventConfigUpdate is the first.
 //   - Request and Response, ops 100 and 101, and Close, op 102. Numbered from 100 so they can never meet an
 //     op the gateway assigns later. A raw socket has no close frame of its own, so the daemon sends Close
 //     with a code and a reason, then closes.
@@ -46,6 +49,21 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
 )
+
+// LocalEventPrefix begins the type of every dispatch the daemon originates itself, as opposed to one it
+// forwards from the gateway. It is what the local ops' numbering from 100 is for op codes: a name the
+// gateway never assigns, so a dispatch added there later cannot be mistaken for one of these. A test holds
+// the gateway's schema to it.
+const LocalEventPrefix = "DAEMON_"
+
+// EventConfigUpdate tells a watching client that the user's config.toml changed (M21). It carries an
+// empty object and nothing else: the daemon interprets the file on nobody's behalf, so the client reads
+// it again through daemon/config. Sent whether or not anybody is signed in, since the file is the
+// user's and not the account's.
+//
+// A new dispatch type is not a change to any frame. A client that predates it ignores a type it does not
+// know, as it would a gateway event added later, so this needs nothing of the version rule.
+const EventConfigUpdate = LocalEventPrefix + "CONFIG_UPDATE"
 
 // The local ops, numbered from 100. HELLO, IDENTIFY and DISPATCH keep the gateway's numbers.
 const (
