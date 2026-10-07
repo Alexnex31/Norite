@@ -21,13 +21,23 @@ import (
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
-// MaxFileSize bounds what is read. A config written by hand is a few kilobytes; a megabyte is room for
-// every key this project will ever define, and a bound means a file somebody was sent cannot be the thing
-// that exhausts memory.
-const MaxFileSize = 1 << 20
+// MaxFileSize bounds what is read and what is written.
+//
+// The number is a measurement, not a guess. go-toml's decoder is quadratic in the keys of one table: a
+// file of nothing but short keys took 6 ms at 16 KiB, 71 ms at 64 KiB, 612 ms at 256 KiB and 9.99 s at
+// 1 MiB, which is where this bound first sat. An edit decodes three times, under the lock, and a client
+// reloads on every save, so at 1 MiB one file somebody was sent froze a client for ten seconds a reload.
+// A config written by hand is a few kilobytes; 64 KiB is room for every key this project defines several
+// times over, and its worst case is a pause nobody sees.
+const MaxFileSize = 64 << 10
+
+// MaxWarnings bounds how many problems one load reports. The rest are counted, not kept: a file at the
+// size bound can hold thousands of unknown keys, and a client that printed each would be flooded by the
+// file it was trying to say was wrong.
+const MaxWarnings = 50
 
 // ErrTooLarge reports a file over MaxFileSize.
-var ErrTooLarge = errors.New("the config file is larger than 1 MiB, which no config written for Norite is")
+var ErrTooLarge = errors.New("the config file is larger than 64 KiB, which no config written for Norite is")
 
 // Color is a color as config.toml gives one: an ANSI palette index or "#rrggbb".
 type Color string
@@ -35,6 +45,10 @@ type Color string
 var hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 // Warning is one thing in the file that was not applied. The file still loads.
+//
+// Both fields are safe to print. The key came from a file, which is text from wherever the file came
+// from, and it is sanitized when the warning is made rather than when it is shown (rule 19), so a caller
+// that formats the fields itself cannot be the one that forgets.
 type Warning struct {
 	// Key is the full path as written, "tui.colors.acent".
 	Key string
@@ -42,15 +56,14 @@ type Warning struct {
 	Problem string
 }
 
-// String is safe to print: the key came from a file, which is text from wherever the file came from.
-func (w Warning) String() string {
-	return termsafe.Text(w.Key) + ": " + termsafe.Text(w.Problem)
-}
+func (w Warning) String() string { return w.Key + ": " + w.Problem }
 
 // Config is what one client reads out of config.toml: defaults, then [shared], then its own section.
 type Config struct {
-	values   map[string]any // by Key.Name; string, Color, or map[string]any for a table
-	Warnings []Warning
+	values map[string]any // by Key.Name; string, Color, or map[string]any for a table
+	// Warnings holds at most MaxWarnings; MoreWarnings counts the ones past that.
+	Warnings     []Warning
+	MoreWarnings int
 }
 
 // Defaults is the configuration with no file at all.
@@ -249,7 +262,11 @@ func checkColor(raw any) (any, string) {
 }
 
 func (c *Config) warn(key, problem string) {
-	c.Warnings = append(c.Warnings, Warning{Key: key, Problem: problem})
+	if len(c.Warnings) >= MaxWarnings {
+		c.MoreWarnings++
+		return
+	}
+	c.Warnings = append(c.Warnings, Warning{Key: termsafe.Text(key), Problem: termsafe.Text(problem)})
 }
 
 // ParseError is a file that is not TOML, with where it stopped being.

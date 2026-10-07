@@ -1201,3 +1201,68 @@ carries the condition that would reopen it.
   instance's frames, and what it holds is bounded.
 - **Reopens if**: a resync makes the client fetch from anybody other than the instance (link previews,
   media), or home's guild bound is lifted.
+
+### A write through a symlinked `config.toml` reaches whatever file the link names
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `config.Update` follows the link on purpose (`atomicfile.Options.FollowSymlink`), because the
+  config is somebody's dotfile and a rename over the link would detach it. Planting a link means writing
+  the user's own config directory, which is already their account. What can be written is narrow as well:
+  a target that exists and is not TOML is refused before anything is written (`valid` in
+  `daemon/config/edit.go`), and the bytes written are one validated value for a key the contract lists.
+  The credential store and the instance wizard do not follow links at all.
+- **Reopens if**: a value written by `set` or `import` can carry text chosen by somebody other than the
+  user (an import that is not shown and confirmed first), or a second caller sets `FollowSymlink` on a
+  file that holds a secret.
+
+### A config keeps the mode its owner gave it, readable or writable by others
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `atomicfile.Options.KeepMode` copies the existing file's permission bits, so a `config.toml`
+  published at `0644` stays `0644`, and one left `0666` stays that too. No key holds a secret
+  (`TestEveryKeyIsWellFormed` refuses a name shaped like one) and no key runs anything: the live keys are
+  five colors and a clock. A new file is created `0600`.
+- **Reopens if**: a key can name a command, a path that is loaded, or anything else that acts. That is
+  M44's chords, whose roadmap entry now carries the refusal of a file others can write.
+
+### An error can name a symbolic link's target, which is text from a filesystem
+- **Raised**: M21, `/security-review`, confirmed by `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `atomicfile.ErrReadOnly` and the permission-read error quote the resolved target, and a
+  repository of dotfiles from a stranger can hold a link whose target is named with escape sequences.
+  Every error the command tree prints goes through `termsafe.Block` in `cli/cmd/app/main.go`
+  (`errorText`), so the text is inert there. A `ParseError` and a `Warning` are sanitized where they are
+  made.
+- **Reopens if**: a client prints an error from `daemon/config` or `daemon/atomicfile` without
+  `termsafe`. The terminal client's hint row is the first candidate, at M21's own client part.
+
+### A crash between writing the temporary file and the rename leaves the temporary file
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `atomicfile.Write` removes its temporary file on every return, and a killed process returns
+  from nothing. For the credential store that file holds a refresh token. It is `0600` from before its
+  first byte, in the `0700` state directory, beside the token file it was about to replace, so it is
+  readable by exactly who could already read the token. Both older writers behaved the same way before
+  they were unified. For `config.toml` the leftover is a dot-file of settings beside the real file.
+- **Reopens if**: a temporary file is created anywhere but the destination's own directory, or a writer
+  of a secret sets `KeepMode`.
+
+### Another program of the same user can hold the config's lock and stall every write for five seconds
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the lock is a file in the `0700` state directory (`lockFor` in `daemon/config/file.go`), so
+  only the user's own processes can take it. A writer waits `lockWait` and then fails with `ErrLocked`,
+  naming the cause; it never waits without bound, and reading the config takes no lock at all.
+- **Reopens if**: the lock moves somewhere another account can open, or a read starts taking it.
+
+### The TOML decoder is quadratic in the keys of one table
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: accepted risk, after the bound was lowered
+- **Why**: measured on a file of nothing but short keys: 6 ms at 16 KiB, 71 ms at 64 KiB, 612 ms at
+  256 KiB, 9.99 s at 1 MiB. `MaxFileSize` was 1 MiB and is now 64 KiB, on read and on write, so the worst
+  file a client will parse costs about 71 ms a load and about three times that for an edit, which decodes
+  three times. The cost is in `go-toml`, not in this repository. Depth is not a problem: the library
+  refuses deep nesting outright, in milliseconds.
+- **Reopens if**: `MaxFileSize` is raised (`TestTheSizeBoundIsTheOneThatWasMeasured` pins it), the config
+  gains a reader that parses on every frame or keystroke, or theme files (M45) are read with a larger
+  bound.

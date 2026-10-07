@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -205,9 +206,11 @@ func TestWhatTheFileSaysIsSanitizedBeforeItIsShown(t *testing.T) {
 	c, err := Parse([]byte("[shared]\n\"evil\\u001b[2J\\u202e\" = 1\n"), TUI)
 	require.NoError(t, err)
 	require.Len(t, c.Warnings, 1)
-	shown := c.Warnings[0].String()
-	assert.NotContains(t, shown, "\x1b")
-	assert.NotContains(t, shown, "\u202e")
+	// The fields, not only String(): a caller that formats them itself must get safe text too.
+	for _, shown := range []string{c.Warnings[0].Key, c.Warnings[0].Problem, c.Warnings[0].String()} {
+		assert.NotContains(t, shown, "\x1b")
+		assert.NotContains(t, shown, "\u202e")
+	}
 
 	_, err = Parse([]byte("[shared]\nclock = \"a\x1b[2Jb\n"), TUI)
 	require.Error(t, err)
@@ -221,6 +224,26 @@ func TestAFileOverTheBoundIsRefusedBeforeItIsParsed(t *testing.T) {
 	_, err := Load(path, TUI)
 	require.ErrorIs(t, err, ErrTooLarge)
 	assert.Contains(t, err.Error(), path, "the error names the file")
+}
+
+// The bound is a measurement (see MaxFileSize), so raising it is a decision and not an edit. At 1 MiB,
+// where it first sat, the decoder took ten seconds on a file of short keys.
+func TestTheSizeBoundIsTheOneThatWasMeasured(t *testing.T) {
+	assert.Equal(t, 64<<10, MaxFileSize)
+}
+
+func TestWarningsAreCountedPastTheirBound(t *testing.T) {
+	var doc strings.Builder
+	doc.WriteString("[shared]\n")
+	for i := range MaxWarnings + 25 {
+		doc.WriteString("unknown_" + strconv.Itoa(i) + " = 1\n")
+	}
+	doc.WriteString("clock = \"12h\"\n")
+	c, err := Parse([]byte(doc.String()), TUI)
+	require.NoError(t, err)
+	assert.Len(t, c.Warnings, MaxWarnings)
+	assert.Equal(t, 25, c.MoreWarnings)
+	assert.Equal(t, Clock12h, c.Clock(), "the file still loads")
 }
 
 func TestWhereTheFileIs(t *testing.T) {

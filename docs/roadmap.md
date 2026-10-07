@@ -1626,6 +1626,13 @@ of this section.
   chords as a status-bar error rather than a modal, `[tui.keys]` in the config file with hot reload, the
   help overlay, and the rebinding UI with its overrides panel. Depends on M21 for the config file.
 
+  **A chord that runs something is the first config key that can do harm, and two things M21 left for
+  it.** M21 keeps a `config.toml`'s mode as its owner set it, which is right while every key is a color
+  or a clock. From the first key that names a command, a config another local account can write is a way
+  to run code as its owner: refuse to honor such a binding from a file that is group- or world-writable,
+  and say so, as `ssh` does for its own files. And mark every such key machine-local in
+  `contracts/client-config.toml`, which is what makes `norite config import` refuse it (M21).
+
   `6d` (about & licenses) sits here too, on `C-c ?`: the build's version, revision and source URL — the
   same three values `GET /api/v1/meta` serves — plus the embedded `THIRD-PARTY-NOTICES.txt` the CLI prints
   as `norite licenses`. It lands here rather than in its own milestone because it is a help surface and

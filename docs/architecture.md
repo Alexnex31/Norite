@@ -1708,7 +1708,9 @@ each marked portable or machine-local and with the milestone that gives it a con
 consumer yet is kept and acted on by nothing. **An unknown key is kept and warned about, never refused** —
 the opposite of the instance config's rule, because an export from a newer client is read by an older one
 and a writer must not delete what it does not understand. Invalid TOML leaves the last good configuration
-in force. **No secret is ever a config key** (rule 8).
+in force. **No secret is ever a config key** (rule 8). The file is bounded at 64 KiB on read and on write,
+a measured figure: the TOML decoder is quadratic in one table's keys, and at 1 MiB a file of short keys
+took ten seconds a load.
 
 **Comments survive a programmatic write because the write is a splice.** `pelletier/go-toml` v2 has no
 document-editing mode — this section said it did until M21's planning read the library, and v2's
