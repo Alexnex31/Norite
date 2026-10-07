@@ -69,16 +69,19 @@ type Model struct {
 
 // New builds the client. Nothing is attached until Init.
 func New(opts Options) Model {
+	if opts.Config == nil {
+		// The user's own file, unless a caller says otherwise: a caller that forgot would otherwise run a
+		// client that ignores its user's settings and says nothing.
+		opts.Config = FileConfig
+	}
 	// Generation 1 is the attachment Init starts. Init has a value receiver, so it cannot advance the count
 	// itself; every later attachment advances it first (redial).
 	m := Model{opts: opts, home: newHome(), gen: 1, look: defaultLook}
-	if opts.Config != nil {
-		// Read here rather than by a command, so the first frame is already drawn as configured: the file is
-		// bounded at 64 KiB and this happens once.
-		m.applyConfig(opts.Config())
-		// Nobody has just saved anything: what the client is waiting for comes first.
-		m.configNews = false
-	}
+	// Read here rather than by a command, so the first frame is already drawn as configured: the file is
+	// bounded at 64 KiB and this happens once. Nobody has just saved anything, so it is not news: what the
+	// client is waiting for comes first.
+	m.applyConfig(opts.Config())
+	m.configNews = false
 	if opts.Channel != "" {
 		m.pane = m.newPane("", opts.Channel)
 	}

@@ -67,8 +67,8 @@ type Options struct {
 	Dial Dialer
 	// Channel, when set, opens that channel directly rather than home. ESC still leads home.
 	Channel string
-	// Config reads the client's settings, at start and whenever the daemon says the file changed. Nil draws
-	// the defaults and reads nothing.
+	// Config reads the client's settings, at start and whenever the daemon says the file changed. Nil is
+	// FileConfig, the user's own config.toml.
 	Config ConfigReader
 }
 

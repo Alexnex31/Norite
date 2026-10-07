@@ -37,9 +37,6 @@ type configMsg struct {
 // network one.
 func (m *Model) reloadConfig() tea.Cmd {
 	read := m.opts.Config
-	if read == nil {
-		return nil
-	}
 	m.configSeq++
 	seq := m.configSeq
 	return func() tea.Msg {

@@ -92,9 +92,9 @@ func TestAClientDrawsAsItsConfigSays(t *testing.T) {
 	assert.Regexp(t, `\d{1,2}:00 [AP]M`, c.screen(), "and writes the time on a twelve-hour clock")
 }
 
-// TestWithNoConfigNothingIsReadAndTheDefaultsAreDrawn: the contract's defaults, which are the colors and
-// the clock this client had before it had a config.
-func TestWithNoConfigNothingIsReadAndTheDefaultsAreDrawn(t *testing.T) {
+// TestWithNoFileTheDefaultsAreDrawn: the contract's defaults, which are the colors and the clock this
+// client had before it had a config.
+func TestWithNoFileTheDefaultsAreDrawn(t *testing.T) {
 	f := newFixture(t)
 	f.held = []apicontract.Message{message("50", "20", "2", "Bob", "earlier")}
 	c := drive(t, Options{Dial: f.dialer(signedIn("alice"), nil)}, 80, 24)
@@ -321,6 +321,27 @@ func TestASyntaxErrorIsNamedByItsLineAndNotItsPath(t *testing.T) {
 	assert.True(t, m.configBroken)
 	assert.Contains(t, m.configNote, "config.toml was not applied · line 3")
 	assert.NotContains(t, m.configNote, home)
+}
+
+// TestAClientGivenNoReaderReadsTheUsersFile: the default is the real file, so a caller that names no reader
+// still runs a client that honors its user's settings. TestMain is why that is safe to be the default
+// here.
+func TestAClientGivenNoReaderReadsTheUsersFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+	t.Setenv("HOME", home)
+	path, err := config.Path()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte(blueAccent), 0o600))
+
+	m := New(Options{})
+	assert.Contains(t, m.look.selected.Render("x"), sgrBlue, "read at start")
+
+	require.NoError(t, os.WriteFile(path, []byte(redAccent), 0o600))
+	next, _ := m.Update(m.reloadConfig()())
+	assert.Contains(t, next.(Model).look.selected.Render("x"), sgrRed, "and read again on a change")
 }
 
 // TestALookIsBuiltOncePerReadAndNotPerFrame: a frame is drawn on every keystroke, and the styles are the
