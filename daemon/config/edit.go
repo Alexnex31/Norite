@@ -67,6 +67,12 @@ func parseDocument(data []byte) (*document, error) {
 	if err := valid(data); err != nil {
 		return nil, err
 	}
+	return scanDocument(data)
+}
+
+// scanDocument is parseDocument without the decoder, for bytes the decoder has already read: it is the
+// quadratic one, and a merge that has inspected both files has no reason to pay for it again.
+func scanDocument(data []byte) (*document, error) {
 	doc := &document{data: data}
 	p := unstable.Parser{KeepComments: true}
 	p.Reset(data)

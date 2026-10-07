@@ -238,18 +238,35 @@ func pathVerb(_ *cli.Command, e *env) (output.Result, error) {
 }
 
 func getVerb(cmd *cli.Command, e *env) (output.Result, error) {
-	f, err := config.InspectFile(e.path)
-	if err != nil {
-		return nil, err
+	// While split this is one client's file, read for [shared] and that client's own section.
+	whose := config.Section("")
+	if e.split {
+		whose = e.client
 	}
 	if cmd.Args().Len() == 0 {
+		f, err := config.InspectFile(e.path)
+		if err != nil {
+			return nil, err
+		}
 		view := entriesView{Items: []entryView{}, Warnings: warnings(f.Warnings), MoreWarnings: f.MoreWarnings}
-		for _, entry := range f.Entries() {
+		for _, entry := range f.EntriesFor(whose) {
 			view.Items = append(view.Items, viewOf(entry))
 		}
 		return view, nil
 	}
 	section, name, err := e.key(cmd.Args().First())
+	if err != nil {
+		return nil, err
+	}
+	// The key is checked before the file is read, against no file at all: a key that does not exist is
+	// the command line's mistake whatever state the file is in, and with the file mid-edit it was reported
+	// as the file's, exit 1, where `set` and `unset` said exit 2.
+	if none, err := config.Inspect(nil); err != nil {
+		return nil, err
+	} else if _, err := none.Get(section, name); err != nil {
+		return nil, err
+	}
+	f, err := config.InspectFile(e.path)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +323,11 @@ func exportVerb(cmd *cli.Command, e *env) (output.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	doc, err := f.Export()
+	whose := config.Section("")
+	if e.split {
+		whose = e.client
+	}
+	doc, err := f.ExportFor(whose)
 	if err != nil {
 		return nil, err
 	}

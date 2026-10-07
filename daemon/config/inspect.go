@@ -98,13 +98,35 @@ func (f *File) Get(section Section, name string) (Entry, error) {
 
 // Entries lists every key the contract defines, each under its own section, followed by any shared key a
 // client's section overrides. It is what `norite config get` prints with no key named.
-func (f *File) Entries() []Entry {
+func (f *File) Entries() []Entry { return f.EntriesFor("") }
+
+// readFor lists the sections a file is read for: all of them when it is config.toml, which both clients
+// read, and [shared] with one client's own when it is that client's file while the toggle is on. The
+// other client's section in such a file is a copy of how things stood at the split, in force nowhere.
+func readFor(client Section) []Section {
+	if client == TUI || client == GUI {
+		return []Section{Shared, client}
+	}
+	return []Section{Shared, TUI, GUI}
+}
+
+// EntriesFor is Entries for the file one client reads while the toggle is on, client being whose; "" is
+// config.toml. A listing that showed the other client's stale section as set would be showing settings
+// that are not in force, beside a `get` of the same key that refuses to (M21 /code-review).
+func (f *File) EntriesFor(client Section) []Entry {
+	read := readFor(client)
 	var out []Entry
 	for _, key := range keys {
+		if !slices.Contains(read, key.Section) {
+			continue
+		}
 		e, _ := f.Get(key.Section, key.Name)
 		out = append(out, e)
 	}
 	for _, section := range []Section{TUI, GUI} {
+		if !slices.Contains(read, section) {
+			continue
+		}
 		for _, key := range keys {
 			if key.Section != Shared {
 				continue
@@ -135,11 +157,16 @@ func plain(value any) any {
 // the library writes a bidi override or a C1 control raw, which TOML permits, and an export is printed to
 // a terminal. BasicString escapes them. A table entry that is not a string is left out, as import leaves
 // it out: its milestone has not said what it means.
-func (f *File) Export() ([]byte, error) {
+func (f *File) Export() ([]byte, error) { return f.ExportFor("") }
+
+// ExportFor is Export of the file one client reads while the toggle is on, client being whose; "" is
+// config.toml. The other client's section is left out, as EntriesFor leaves it out: an export of a stale
+// copy is settings in force nowhere, carried to another machine and applied there.
+func (f *File) ExportFor(client Section) ([]byte, error) {
 	var edits []edit
 	doc := []byte("# Exported by `norite config export`. Merge it into another machine's config with\n" +
 		"# `norite config import <this file>`, which shows what it would change before changing it.\n")
-	for _, section := range []Section{Shared, TUI, GUI} {
+	for _, section := range readFor(client) {
 		for _, name := range slices.Sorted(maps.Keys(f.set[section])) {
 			key, ok := lookup(section, name)
 			if !ok || !key.Portable {
@@ -250,19 +277,23 @@ type mergeOptions struct {
 
 // planMerge works out what taking opt.sections of incoming into current would do.
 func planMerge(current, incoming []byte, overwrite bool, opt mergeOptions) (*ImportPlan, error) {
-	own := opt.own
 	have, err := Inspect(current)
 	if err != nil {
 		return nil, err
 	}
 	want, err := Inspect(incoming)
 	if err != nil {
-		if own {
+		if opt.own {
 			return nil, err
 		}
 		return nil, fmt.Errorf("the file to import: %w", err)
 	}
+	return planFiles(have, want, overwrite, opt)
+}
 
+// planFiles is planMerge on two files already read.
+func planFiles(have, want *File, overwrite bool, opt mergeOptions) (*ImportPlan, error) {
+	own := opt.own
 	plan := &ImportPlan{Skipped: want.Warnings, MoreSkipped: want.MoreWarnings}
 	for _, section := range opt.sections {
 		for _, name := range slices.Sorted(maps.Keys(want.set[section])) {
@@ -302,45 +333,63 @@ func planMerge(current, incoming []byte, overwrite bool, opt mergeOptions) (*Imp
 	return plan, nil
 }
 
+// ClientFileError is a failure to read one of the two clients' files, saying which.
+type ClientFileError struct {
+	Client Section
+	Err    error
+}
+
+func (e *ClientFileError) Error() string { return e.Err.Error() }
+func (e *ClientFileError) Unwrap() error { return e.Err }
+
 // MergeClients folds the two clients' own config files back into one, and returns it with what it did. It
 // is what turning the same-machine toggle off does. newer names the client whose file was written more
 // recently, and that file's bytes are the starting point, comments included.
 //
-// Each client's section is its own file's, exactly. A split starts both files as copies of config.toml,
-// so the GUI's file holds a [tui] nobody has read since and the terminal's a [gui]: stale copies of how
-// things were. Merged key by key with no regard for whose section a key is in, the stale copy brought back
-// a setting its owner had removed, and overrode one its owner had changed whenever the other file happened
+// Each client's section is its own file's. A split starts both files as copies of config.toml, so the
+// GUI's file holds a [tui] nobody has read since and the terminal's a [gui]: stale copies of how things
+// were. Merged key by key with no regard for whose section a key is in, the stale copy brought back a
+// setting its owner had removed, and overrode one its owner had changed whenever the other file happened
 // to be the newer (M21 /code-review). So [tui] is taken from the terminal client's file and [gui] from the
 // GUI's, removals included, whichever is newer.
 //
+// It is taken as the file wrote it, not through the key table: every assignment under the section, at any
+// depth, with its value's own bytes. A number in a table, a nested table and a key from a newer Norite
+// are carried like any other, where going through the keys this version knows carried strings only and
+// said nothing about the rest. Two things cannot be carried by a splice, a value that spans lines and a
+// key under an array of tables, and each is in the plan's Skipped by name.
+//
 // [shared] is the one section both read, and the one where "last write wins" is a question. It is asked
 // per key: a key only one file sets is kept, and where both set one the newer file's value stays and the
-// key is in the plan's Kept.
-//
-// What the older file holds that this version does not understand is in the plan's Skipped, not in the
-// result; the caller keeps that file.
+// key is in the plan's Kept. What the older file's [shared] holds that this version does not understand
+// is in Skipped too; the caller keeps that file.
 func MergeClients(tui, gui []byte, newer Section) ([]byte, *ImportPlan, error) {
-	base, other, theirs := tui, gui, GUI
+	base, other, mine, theirs := tui, gui, TUI, GUI
 	if newer == GUI {
-		base, other, theirs = gui, tui, TUI
+		base, other, mine, theirs = gui, tui, GUI, TUI
 	}
-	// [shared]: what the base lacks is added, and what both set stays the base's.
-	plan, err := planMerge(base, other, false, mergeOptions{own: true, sections: []Section{Shared}})
+	// Each file is decoded once, here. Everything below works from what that found, or from this
+	// package's own parser, which is linear.
+	have, err := Inspect(base)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, &ClientFileError{Client: mine, Err: err}
 	}
-	// The other client's section: its own file's values over the base's stale copy of them.
-	own, err := planMerge(base, other, true, mergeOptions{own: true, sections: []Section{theirs}})
+	want, err := Inspect(other)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, &ClientFileError{Client: theirs, Err: err}
 	}
-	plan.Apply = append(plan.Apply, own.Apply...)
-	slices.SortFunc(plan.Apply, func(a, b Change) int { return strings.Compare(a.Key(), b.Key()) })
-	// Skipped is everything the other file holds that was not understood. What it says about the base's
-	// client's section is about a stale copy nobody was going to carry anyway.
-	mine := string(otherClient(theirs)) + "."
-	plan.Skipped = slices.DeleteFunc(plan.Skipped, func(w Warning) bool { return strings.HasPrefix(w.Key, mine) })
 
+	// [shared]: what the base lacks is added, and what both set stays the base's.
+	plan, err := planFiles(have, want, false, mergeOptions{own: true, sections: []Section{Shared}})
+	if err != nil {
+		return nil, nil, err
+	}
+	// The warnings are about the whole of the other file. Its own section is carried as written, known
+	// to this version or not, and its copy of the base's section is nobody's to carry.
+	plan.Skipped = slices.DeleteFunc(plan.Skipped, func(w Warning) bool {
+		return !strings.HasPrefix(w.Key, string(Shared)+".") && w.Key != string(Shared)
+	})
+	plan.MoreSkipped = 0
 	edits := make([]edit, 0, len(plan.Apply))
 	for _, change := range plan.Apply {
 		segments, literal, err := resolve(change.Section, change.name, change.to, true)
@@ -349,60 +398,83 @@ func MergeClients(tui, gui []byte, newer Section) ([]byte, *ImportPlan, error) {
 		}
 		edits = append(edits, edit{segments, literal})
 	}
-	merged, err := setAll(base, edits)
-	if err != nil {
-		return nil, nil, err
-	}
 
-	// And what the base's stale copy of that section sets that its owner's file no longer does.
-	stale, err := Inspect(base)
+	// The other client's section: what its own file assigns, over the base's stale copy.
+	baseBody, _ := cutBOM(base)
+	stale, err := scanDocument(baseBody)
 	if err != nil {
 		return nil, nil, err
 	}
-	current, err := Inspect(other)
+	otherBody, _ := cutBOM(other)
+	theirDoc, err := scanDocument(otherBody)
 	if err != nil {
 		return nil, nil, err
 	}
+	was := stale.under(theirs)
+	now := map[string]bool{}
+	for _, a := range theirDoc.assignments {
+		if a.path[0] != string(theirs) {
+			continue
+		}
+		id, key := strings.Join(a.path, "\x00"), strings.Join(a.path, ".")
+		now[id] = true
+		literal := string(otherBody[a.value.start:a.value.end])
+		switch {
+		case theirDoc.inArray(a.path):
+			plan.skip(key, "is under an array of tables, which cannot be placed in another file; it is in the copy set aside")
+			continue
+		case oneValue(literal) != nil:
+			plan.skip(key, "has a value that spans more than one line, which cannot be placed in another file; it is in the copy set aside")
+			continue
+		}
+		old, had := was[id]
+		if had && old == literal {
+			continue
+		}
+		edits = append(edits, edit{a.path, literal})
+		plan.Apply = append(plan.Apply, Change{Section: theirs, Name: termsafe.Text(strings.Join(a.path[1:], ".")),
+			From: termsafe.Text(old), To: termsafe.Text(literal), Replace: had})
+	}
+	slices.SortFunc(plan.Apply, func(a, b Change) int { return strings.Compare(a.Key(), b.Key()) })
+
+	// What the stale copy assigns that its owner's file no longer does goes first, so that a table the
+	// owner now writes another way is out of the way before it is written.
 	var gone [][]string
-	for _, name := range slices.Sorted(maps.Keys(stale.set[theirs])) {
-		for _, inner := range settable(name, stale.set[theirs][name]) {
-			if current.sets(theirs, inner) {
-				continue
-			}
-			segments, _, err := resolve(theirs, inner, "", false)
-			if err != nil {
-				return nil, nil, err
-			}
-			gone = append(gone, segments)
+	for _, a := range stale.assignments {
+		if a.path[0] == string(theirs) && !now[strings.Join(a.path, "\x00")] {
+			gone = append(gone, a.path)
 		}
 	}
-	merged, err = unsetAll(merged, gone)
+	merged, err := unsetAll(base, gone)
+	if err != nil {
+		return nil, nil, err
+	}
+	merged, err = setAll(merged, edits)
 	if err != nil {
 		return nil, nil, err
 	}
 	return merged, plan, nil
 }
 
-// settable lists the keys under name that the file sets: the key itself for a scalar, and every entry of
-// a table whatever its type, since this is for removing them.
-func settable(name string, value any) []string {
-	table, isTable := value.(map[string]any)
-	if !isTable {
-		return []string{name}
-	}
-	var out []string
-	for _, inner := range slices.Sorted(maps.Keys(table)) {
-		if inner != "" {
-			out = append(out, name+"."+inner)
+// under returns what the document assigns under a section, by path, each value as its own bytes.
+func (d *document) under(section Section) map[string]string {
+	out := map[string]string{}
+	for _, a := range d.assignments {
+		if a.path[0] == string(section) {
+			out[strings.Join(a.path, "\x00")] = string(d.data[a.value.start:a.value.end])
 		}
 	}
 	return out
 }
 
-// sets reports whether the file sets name under section, a table's entry included.
-func (f *File) sets(section Section, name string) bool {
-	e, err := f.Get(section, name)
-	return err == nil && e.Source == FromFile
+// inArray reports a path that lies under an array of tables.
+func (d *document) inArray(path []string) bool {
+	for _, t := range d.tables {
+		if t.array && isPrefix(t.path, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // flatten yields the settable keys under name: the key itself for a scalar, and each string entry of a
@@ -437,11 +509,12 @@ func flatten(section Section, name string, value any, plan *ImportPlan) map[stri
 	return out
 }
 
-// Import merges incoming into the file at path and returns what it did.
+// importAt merges incoming into the file at path and returns what it did. A caller outside this package
+// uses ImportFor, which knows which file a client reads; this is the half of it that writes.
 //
 // The plan is worked out again inside the write, on the file as it is under the lock, so what is returned
 // is what happened even if the file changed after a caller showed somebody an earlier plan.
-func Import(path string, incoming []byte, overwrite bool) (*ImportPlan, error) {
+func importAt(path string, incoming []byte, overwrite bool) (*ImportPlan, error) {
 	var done *ImportPlan
 	err := Update(path, func(current []byte) ([]byte, error) {
 		next, plan, err := importInto(current, incoming, overwrite, "")

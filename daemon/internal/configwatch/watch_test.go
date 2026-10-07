@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/Alexnex31/Norite/daemon/config"
 )
 
 // The config's lock lives in the state directory, so config.Set here would otherwise take one in the real
@@ -75,7 +73,10 @@ func watching(t *testing.T, path string) (next, silent func() bool) {
 func TestWatchSeesAFileThatDidNotExistBeingCreated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "norite", "config.toml")
 	next, _ := watching(t, path)
-	require.NoError(t, config.Set(path, config.Shared, config.KeyClock, "12h"))
+	// As `norite config set` writes one: a temporary file beside it, renamed into place.
+	tmp := filepath.Join(filepath.Dir(path), ".config.toml.new")
+	require.NoError(t, os.WriteFile(tmp, []byte("[shared]\nclock = \"12h\"\n"), 0o600))
+	require.NoError(t, os.Rename(tmp, path))
 	require.True(t, next(), "the first `norite config set` on a new install must be noticed")
 }
 

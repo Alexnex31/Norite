@@ -36,7 +36,7 @@ func readFile(t *testing.T, path string) string {
 
 func TestSetCreatesTheFileAndItsDirectory(t *testing.T) {
 	path := tempConfig(t, "")
-	require.NoError(t, Set(path, Shared, KeyClock, "12h"))
+	require.NoError(t, setAt(path, Shared, KeyClock, "12h"))
 	assert.Equal(t, "[shared]\nclock = \"12h\"\n", readFile(t, path))
 
 	c, err := Load(path, TUI)
@@ -46,13 +46,13 @@ func TestSetCreatesTheFileAndItsDirectory(t *testing.T) {
 
 func TestSetThenUnsetThroughTheFile(t *testing.T) {
 	path := tempConfig(t, dense)
-	require.NoError(t, Set(path, TUI, KeyColorAccent, "#1E90FF"))
+	require.NoError(t, setAt(path, TUI, KeyColorAccent, "#1E90FF"))
 	c, err := Load(path, TUI)
 	require.NoError(t, err)
 	assert.Equal(t, Color("#1e90ff"), c.Color(KeyColorAccent))
 	assert.Empty(t, c.Warnings)
 
-	require.NoError(t, Unset(path, TUI, KeyColorAccent))
+	require.NoError(t, unsetAt(path, TUI, KeyColorAccent))
 	c, err = Load(path, TUI)
 	require.NoError(t, err)
 	assert.Equal(t, Color("6"), c.Color(KeyColorAccent), "unset falls back to the default")
@@ -60,7 +60,7 @@ func TestSetThenUnsetThroughTheFile(t *testing.T) {
 
 func TestASharedKeyCanBeSetForOneClient(t *testing.T) {
 	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
-	require.NoError(t, Set(path, TUI, KeyClock, "12h"))
+	require.NoError(t, setAt(path, TUI, KeyClock, "12h"))
 	tui, err := Load(path, TUI)
 	require.NoError(t, err)
 	gui, err := Load(path, GUI)
@@ -71,16 +71,16 @@ func TestASharedKeyCanBeSetForOneClient(t *testing.T) {
 
 func TestAKeyInsideATableKeepsItsDots(t *testing.T) {
 	path := tempConfig(t, "")
-	require.NoError(t, Set(path, TUI, "keys.C-x 4.0", "split"))
+	require.NoError(t, setAt(path, TUI, "keys.C-x 4.0", "split"))
 	assert.Equal(t, "[tui.keys]\n\"C-x 4.0\" = \"split\"\n", readFile(t, path))
 }
 
 func TestSetRefusesWhatItShould(t *testing.T) {
 	path := tempConfig(t, dense)
-	require.ErrorIs(t, Set(path, TUI, "colors.acent", "3"), ErrUnknownKey)
-	require.ErrorIs(t, Set(path, GUI, KeyColorAccent, "3"), ErrUnknownKey, "the terminal's colors are not [gui]'s")
-	require.Error(t, Set(path, TUI, KeyColorAccent, "red"))
-	require.Error(t, Set(path, TUI, "keys", "x"))
+	require.ErrorIs(t, setAt(path, TUI, "colors.acent", "3"), ErrUnknownKey)
+	require.ErrorIs(t, setAt(path, GUI, KeyColorAccent, "3"), ErrUnknownKey, "the terminal's colors are not [gui]'s")
+	require.Error(t, setAt(path, TUI, KeyColorAccent, "red"))
+	require.Error(t, setAt(path, TUI, "keys", "x"))
 	assert.Equal(t, dense, readFile(t, path), "a refused set writes nothing")
 }
 
@@ -173,7 +173,7 @@ func TestAHeldLockIsReportedNotWaitedOnForever(t *testing.T) {
 		})
 	}()
 	<-inside
-	require.ErrorIs(t, Set(path, Shared, KeyClock, "12h"), ErrLocked)
+	require.ErrorIs(t, setAt(path, Shared, KeyClock, "12h"), ErrLocked)
 	close(release)
 	require.NoError(t, <-done)
 }
@@ -193,7 +193,7 @@ func TestSetWritesThroughASymlinkAndKeepsTheMode(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
 	require.NoError(t, os.Symlink(real, link))
 
-	require.NoError(t, Set(link, Shared, KeyClock, "12h"))
+	require.NoError(t, setAt(link, Shared, KeyClock, "12h"))
 
 	info, err := os.Lstat(link)
 	require.NoError(t, err)
@@ -224,7 +224,7 @@ func TestNothingIsLeftInAConfigDirectoryThatIsItselfALink(t *testing.T) {
 	linkDir := filepath.Join(dir, "norite")
 	require.NoError(t, os.Symlink(repo, linkDir))
 
-	require.NoError(t, Set(filepath.Join(linkDir, "config.toml"), Shared, KeyClock, "12h"))
+	require.NoError(t, setAt(filepath.Join(linkDir, "config.toml"), Shared, KeyClock, "12h"))
 
 	entries, err := os.ReadDir(repo)
 	require.NoError(t, err)
@@ -234,7 +234,7 @@ func TestNothingIsLeftInAConfigDirectoryThatIsItselfALink(t *testing.T) {
 
 func TestUnsetWithNoConfigCreatesNothing(t *testing.T) {
 	path := tempConfig(t, "")
-	require.NoError(t, Unset(path, Shared, KeyClock))
+	require.NoError(t, unsetAt(path, Shared, KeyClock))
 	_, err := os.Stat(filepath.Dir(path))
 	assert.True(t, os.IsNotExist(err), "not even the directory")
 }
@@ -243,8 +243,8 @@ func TestUnsetWithNoConfigCreatesNothing(t *testing.T) {
 func TestSetRefusesASectionNoriteDoesNotRead(t *testing.T) {
 	path := tempConfig(t, "")
 	for _, section := range []Section{"cli", "", "shared.x", "Shared"} {
-		require.ErrorIs(t, Set(path, section, KeyClock, "12h"), ErrUnknownKey, "%q", section)
-		require.ErrorIs(t, Unset(path, section, KeyClock), ErrUnknownKey, "%q", section)
+		require.ErrorIs(t, setAt(path, section, KeyClock, "12h"), ErrUnknownKey, "%q", section)
+		require.ErrorIs(t, unsetAt(path, section, KeyClock), ErrUnknownKey, "%q", section)
 	}
 	_, err := os.Stat(path)
 	assert.True(t, os.IsNotExist(err))
@@ -253,15 +253,15 @@ func TestSetRefusesASectionNoriteDoesNotRead(t *testing.T) {
 // One write must not produce a file every later read refuses, Unset included.
 func TestAWriteThatWouldPassTheBoundIsRefused(t *testing.T) {
 	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
-	err := Set(path, TUI, "keys.x", strings.Repeat("a", MaxFileSize))
+	err := setAt(path, TUI, "keys.x", strings.Repeat("a", MaxFileSize))
 	require.ErrorIs(t, err, ErrTooLarge)
 	assert.Equal(t, "[shared]\nclock = \"24h\"\n", readFile(t, path))
-	require.NoError(t, Unset(path, Shared, KeyClock), "the file is still one Norite can edit")
+	require.NoError(t, unsetAt(path, Shared, KeyClock), "the file is still one Norite can edit")
 }
 
 func TestAnErrorAboutTheFilesContentsNamesTheFile(t *testing.T) {
 	path := tempConfig(t, "[shared]\nclock = \"24h\"\n[tui.colors\naccent = 1\n")
-	for _, err := range []error{Set(path, Shared, KeyClock, "12h"), Unset(path, Shared, KeyClock)} {
+	for _, err := range []error{setAt(path, Shared, KeyClock, "12h"), unsetAt(path, Shared, KeyClock)} {
 		var pe *ParseError
 		require.ErrorAs(t, err, &pe)
 		assert.Equal(t, 3, pe.Line, "the same position Load reports")
@@ -275,7 +275,7 @@ func TestAReadOnlyConfigIsNotReplaced(t *testing.T) {
 	}
 	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
 	require.NoError(t, os.Chmod(path, 0o444))
-	require.ErrorIs(t, Set(path, Shared, KeyClock, "12h"), atomicfile.ErrReadOnly)
+	require.ErrorIs(t, setAt(path, Shared, KeyClock, "12h"), atomicfile.ErrReadOnly)
 	assert.Equal(t, "[shared]\nclock = \"24h\"\n", readFile(t, path))
 }
 
@@ -283,7 +283,7 @@ func TestSettingTheSameValueDoesNotRewriteTheFile(t *testing.T) {
 	path := tempConfig(t, "[shared]\nclock = \"12h\"\n")
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(path, old, old))
-	require.NoError(t, Set(path, Shared, KeyClock, "12h"))
+	require.NoError(t, setAt(path, Shared, KeyClock, "12h"))
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.WithinDuration(t, old, info.ModTime(), time.Second, "an unchanged file must not wake every watcher")

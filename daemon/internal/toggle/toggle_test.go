@@ -333,18 +333,23 @@ func TestUnsplitRefusesAFileThatDoesNotParse(t *testing.T) {
 	assert.Equal(t, shared, f.read(f.files.Shared))
 }
 
-// What the older file holds that this version does not understand cannot be carried over by key. It is
-// said, and it is still in the copy set aside.
+// A client's own section is carried as its file wrote it, a key from a newer Norite included. What the
+// older file's [shared] holds that this version does not understand cannot be merged by key: it is said,
+// and it is still in the copy set aside.
 func TestWhatUnsplitCannotCarryOverIsSaid(t *testing.T) {
 	f := newFixture(t)
 	f.ok(ipc.PathConfigSplit)
-	f.writeAt(f.files.TUI, "[tui]\nfrom_a_newer_norite = 1\n", time.Now().Add(-2*time.Hour))
-	f.writeAt(f.files.GUI, "[shared]\nclock = \"24h\"\n", time.Now().Add(-time.Hour))
+	f.writeAt(f.files.TUI, "[shared]\nfrom_a_newer_norite = 1\n\n[tui]\nalso_newer = 2\n\n[tui.layout]\nwidth = 100\n", time.Now().Add(-2*time.Hour))
+	f.writeAt(f.files.GUI, "[shared]\nclock = \"24h\"\n\n[tui.layout]\nwidth = 80\n", time.Now().Add(-time.Hour))
 
 	out := f.ok(ipc.PathConfigUnsplit)
 	require.Len(t, out.Skipped, 1)
-	assert.Contains(t, out.Skipped[0], "tui.from_a_newer_norite")
+	assert.Contains(t, out.Skipped[0], "shared.from_a_newer_norite")
 	assert.Contains(t, f.read(f.files.TUI+config.BackupSuffix), "from_a_newer_norite")
+	got := f.read(f.files.Shared)
+	assert.Contains(t, got, "also_newer = 2")
+	assert.Contains(t, got, "width = 100", "a number in the terminal's own table is the terminal's file's")
+	assert.NotContains(t, got, "width = 80")
 }
 
 // A name in a refusal is the filesystem's text, and the answer is printed by a client.
@@ -568,10 +573,21 @@ func TestAFileTheToggleCannotWriteIsARefusalNotAFailure(t *testing.T) {
 	assert.True(t, f.isSplit())
 	require.NoError(t, os.Chmod(f.files.Shared, 0o600))
 
-	f.writeAt(f.files.GUI, "[tui]\ncolors = { accent = 6 }\n", time.Now().Add(time.Hour))
+	// [shared] written as an inline table in the newer file, and a shared key only the older file sets:
+	// placing it would mean rewriting that table.
+	f.write(f.files.TUI, "[shared]\nclock = \"12h\"\n")
+	f.writeAt(f.files.GUI, "shared = {}\n", time.Now().Add(time.Hour))
 	msg = f.refused(ipc.PathConfigUnsplit)
 	assert.Contains(t, msg, "inline table")
 	assert.True(t, f.isSplit())
+
+	// A client's own section written that way in the other file's stale copy is no obstacle: the stale
+	// copy goes before the owner's is written.
+	f.write(f.files.TUI, "[tui.colors]\naccent = 5\n")
+	f.writeAt(f.files.GUI, "[tui]\ncolors = { accent = 6 }\n", time.Now().Add(time.Hour))
+	f.ok(ipc.PathConfigUnsplit)
+	assert.Contains(t, f.read(f.files.Shared), "accent = 5")
+	assert.NotContains(t, f.read(f.files.Shared), "accent = 6")
 }
 
 // Where the daemon keeps configs and how the toggle stands, asked with GET and changing nothing. A command
@@ -632,4 +648,50 @@ func TestASecondPassDoesNotKeepTheFirstPassesWorkAsThePersons(t *testing.T) {
 	assert.Equal(t, 2, saves)
 	assert.Contains(t, f.read(f.files.Shared), `clock = "24h"`, "the second pass wrote something else")
 	assert.Equal(t, "# edited while split, read by nobody\n", f.read(f.files.Shared+config.BackupSuffix))
+}
+
+// A refused unsplit leaves nothing behind. The copy of config.toml is made inside the write that replaces
+// it, and when that write does not happen the copy is of a file that was not replaced: each refused
+// attempt left another, and after a hundred the unsplit refused for want of a name.
+func TestARefusedUnsplitLeavesNoCopyBehind(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes")
+	}
+	f := newFixture(t)
+	f.write(f.files.Shared, shared)
+	f.ok(ipc.PathConfigSplit)
+	f.write(f.files.TUI, "[tui.colors]\naccent = 5\n")
+	require.NoError(t, os.Chmod(f.files.Shared, 0o400))
+	for range 3 {
+		f.refused(ipc.PathConfigUnsplit)
+	}
+	left, err := filepath.Glob(f.files.Shared + config.BackupSuffix + "*")
+	require.NoError(t, err)
+	assert.Empty(t, left)
+
+	require.NoError(t, os.Chmod(f.files.Shared, 0o600))
+	out := f.ok(ipc.PathConfigUnsplit)
+	assert.Contains(t, out.Backups, f.files.Shared+config.BackupSuffix, "and the one that works takes the first name")
+}
+
+// Whether a file is there is not read off its time. Two files restored from an archive can both carry the
+// epoch, and were taken for two missing ones: the toggle went off with no merge and both were set aside.
+func TestFilesDatedAtTheEpochAreStillThere(t *testing.T) {
+	f := newFixture(t)
+	f.write(f.files.Shared, shared)
+	f.ok(ipc.PathConfigSplit)
+	epoch := time.Unix(0, 0)
+	f.writeAt(f.files.TUI, "[tui.colors]\naccent = 5\n", epoch)
+	f.writeAt(f.files.GUI, "[shared]\nclock = \"24h\"\n", epoch)
+
+	out := f.ok(ipc.PathConfigUnsplit)
+	assert.Equal(t, f.files.TUI, out.Base, "a tie is the terminal client's")
+	assert.Equal(t, "[tui.colors]\naccent = 5\n\n[shared]\nclock = \"24h\"\n", f.read(f.files.Shared))
+
+	// And a file that is there is newer than one that is not, whatever it is dated.
+	f.ok(ipc.PathConfigSplit)
+	require.NoError(t, os.Remove(f.files.TUI))
+	f.writeAt(f.files.GUI, "[shared]\nclock = \"12h\"\n", epoch)
+	out = f.ok(ipc.PathConfigUnsplit)
+	assert.Equal(t, f.files.GUI, out.Base)
 }

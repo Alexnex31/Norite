@@ -432,7 +432,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case configMsg:
 		if msg.seq == m.configSeq {
-			m.applyConfig(msg.cfg, msg.err)
+			m.applyConfig(msg.cfg, msg.file, msg.err)
 		}
 		return m, nil
 

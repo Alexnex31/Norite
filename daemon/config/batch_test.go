@@ -101,7 +101,7 @@ func TestAnImportAtTheSizeBoundIsNotCubic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 
 	start := time.Now()
-	plan, err := Import(path, incoming, false)
+	plan, err := importAt(path, incoming, false)
 	require.NoError(t, err)
 	took := time.Since(start)
 	assert.Greater(t, len(plan.Apply), 4000)
@@ -161,6 +161,6 @@ func TestAnEmptyKeyInATableIsSkippedAndTheRestGoesThrough(t *testing.T) {
 	assert.Contains(t, plan.Skipped[0].Problem, "empty name")
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	_, err = Import(path, []byte(doc), false)
+	_, err = importAt(path, []byte(doc), false)
 	require.NoError(t, err)
 }

@@ -6,6 +6,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -13,25 +14,30 @@ import (
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
-// ConfigReader reads config.toml as this client sees it.
-type ConfigReader func() (*config.Config, error)
+// ConfigReader reads the config as this client sees it, and says which file that was by its name alone:
+// config.toml, or config.tui.toml while the same-machine toggle has given each client its own. The name
+// is what the hint row calls the file when something in it needs a look.
+type ConfigReader func() (cfg *config.Config, file string, err error)
 
 // FileConfig reads the config the terminal client reads: the user's config.toml, or config.tui.toml while
 // the same-machine toggle has given each client its own. A missing file is the defaults.
-func FileConfig() (*config.Config, error) {
+func FileConfig() (*config.Config, string, error) {
 	path, _, err := config.PathFor(config.TUI)
 	if err != nil {
-		return nil, err
+		// Which file could not be worked out, so the one everybody knows is named.
+		return nil, "", err
 	}
-	return config.Load(path, config.TUI)
+	cfg, err := config.Load(path, config.TUI)
+	return cfg, filepath.Base(path), err
 }
 
 // configMsg answers one read. seq numbers the reads: the daemon reports every save, each read runs on its
 // own goroutine, and an older read finishing last must not put back the settings a newer one replaced.
 type configMsg struct {
-	seq int
-	cfg *config.Config
-	err error
+	seq  int
+	cfg  *config.Config
+	file string
+	err  error
 }
 
 // reloadConfig reads the config again, off the update loop: the file is on a disk, and may be on a
@@ -41,8 +47,8 @@ func (m *Model) reloadConfig() tea.Cmd {
 	m.configSeq++
 	seq := m.configSeq
 	return func() tea.Msg {
-		cfg, err := read()
-		return configMsg{seq: seq, cfg: cfg, err: err}
+		cfg, file, err := read()
+		return configMsg{seq: seq, cfg: cfg, file: file, err: err}
 	}
 }
 
@@ -58,7 +64,13 @@ func (m *Model) reloadConfig() tea.Cmd {
 // is not: the file is read on every attach, and a warning somebody has already pressed a key past would
 // otherwise come back over the status line each time the daemon restarted, with nothing saved (M21
 // /code-review).
-func (m *Model) applyConfig(cfg *config.Config, err error) {
+func (m *Model) applyConfig(cfg *config.Config, file string, err error) {
+	// The file is named as it is: while split it is config.tui.toml, and a note sending somebody to line 3
+	// of config.toml, which is read by nobody then and parses fine, sent them to the wrong file (M21
+	// /code-review). The name is a file's and is drawn, so it is made safe like the rest.
+	if file == "" {
+		file = "config.toml"
+	}
 	note, broken := "", err != nil
 	switch {
 	case broken:
@@ -72,12 +84,12 @@ func (m *Model) applyConfig(cfg *config.Config, err error) {
 			// home directory's worth of path pushed the line number off an 80-column terminal.
 			why = pe.Error()
 		}
-		note = termsafe.Text("config.toml was not applied · " + why)
+		note = termsafe.Text(file + " was not applied · " + why)
 	default:
 		m.setLook(newLook(cfg))
 		if len(cfg.Warnings) > 0 {
 			// One is enough to say the file needs a look; `norite config get` lists them all.
-			note = "config.toml: " + cfg.Warnings[0].String()
+			note = file + ": " + cfg.Warnings[0].String()
 			if more := len(cfg.Warnings) - 1 + cfg.MoreWarnings; more > 0 {
 				note += fmt.Sprintf(" (and %d more; see `norite config get`)", more)
 			}

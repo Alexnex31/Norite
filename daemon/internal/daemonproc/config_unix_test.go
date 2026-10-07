@@ -66,14 +66,14 @@ func TestTheDaemonTellsAnAttachedClientTheConfigChanged(t *testing.T) {
 	// The watch is set up after the socket is served, so the first write is retried until it is seen.
 	deadline := time.Now().Add(5 * time.Second)
 	for seen := false; !seen; {
-		if err := config.Set(path, config.Shared, config.KeyClock, "12h"); err != nil {
+		if _, err := config.SetFor(config.TUI, config.Shared, config.KeyClock, "12h"); err != nil {
 			t.Fatal(err)
 		}
 		select {
 		case ev := <-client.Events():
 			seen = ev.Type == ipc.EventConfigUpdate
 		case <-time.After(300 * time.Millisecond):
-			if err := config.Unset(path, config.Shared, config.KeyClock); err != nil {
+			if _, err := config.UnsetFor(config.TUI, config.Shared, config.KeyClock); err != nil {
 				t.Fatal(err)
 			}
 			if time.Now().After(deadline) {

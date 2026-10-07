@@ -51,13 +51,14 @@ func (f *file) save(text string) {
 	f.text, f.err = text, nil
 }
 
-func (f *file) read() (*config.Config, error) {
+func (f *file) read() (*config.Config, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
-		return nil, f.err
+		return nil, "config.toml", f.err
 	}
-	return config.Parse([]byte(f.text), config.TUI)
+	cfg, err := config.Parse([]byte(f.text), config.TUI)
+	return cfg, "config.toml", err
 }
 
 // untilRaw waits on the frame with its styling, which is where a color is.
@@ -326,7 +327,7 @@ func TestTheUsersOwnFileIsWhatIsRead(t *testing.T) {
 	t.Setenv("APPDATA", home)
 	t.Setenv("HOME", home)
 
-	cfg, err := FileConfig()
+	cfg, _, err := FileConfig()
 	require.NoError(t, err, "no file is the defaults")
 	assert.Equal(t, config.Clock24h, cfg.Clock())
 
@@ -338,7 +339,7 @@ func TestTheUsersOwnFileIsWhatIsRead(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"),
 		[]byte("[shared]\nclock = \"12h\"\n[tui.colors]\naccent = 5\n[gui.colors]\naccent = 9\n"), 0o600))
 
-	cfg, err = FileConfig()
+	cfg, _, err = FileConfig()
 	require.NoError(t, err)
 	assert.Equal(t, config.Clock12h, cfg.Clock())
 	assert.EqualValues(t, "5", cfg.Color(config.KeyColorAccent))
@@ -395,6 +396,17 @@ func TestWhileSplitTheClientReadsItsOwnFile(t *testing.T) {
 	assert.True(t, got.configBroken)
 	assert.Contains(t, got.configNote, "newer version")
 	assert.Contains(t, got.look.selected.Render("x"), sgrBlue)
+
+	// And a mistake in its own file is said of its own file. config.toml is read by nobody while split
+	// and parses fine: named in the note, it is where somebody would go looking for line 2.
+	require.NoError(t, os.WriteFile(statefile.PathIn(dir), []byte(`{"version":1,"config_split":true}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.tui.toml"), []byte("[tui.colors]\naccent = \n"), 0o600))
+	next, _ = got.Update(got.reloadConfig()())
+	got = next.(Model)
+	assert.Contains(t, got.configNote, "config.tui.toml was not applied · line 2")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.tui.toml"), []byte("[tui.colors]\ndim = \"grey\"\n"), 0o600))
+	next, _ = got.Update(got.reloadConfig()())
+	assert.Contains(t, next.(Model).configNote, "config.tui.toml: tui.colors.dim")
 }
 
 // TestAClientGivenNoReaderReadsTheUsersFile: the default is the real file, so a caller that names no reader

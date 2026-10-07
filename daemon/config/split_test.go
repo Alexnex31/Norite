@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -108,7 +110,9 @@ func TestEachClientsSectionIsItsOwnFilesWhicheverIsNewer(t *testing.T) {
 
 		f, err := Inspect(merged)
 		require.NoError(t, err)
-		assert.False(t, f.sets(TUI, "theme"), "a setting its owner removed does not come back")
+		gone, err := f.Get(TUI, "theme")
+		require.NoError(t, err)
+		assert.Equal(t, NotSet, gone.Source, "a setting its owner removed does not come back")
 		e, err := f.Get(TUI, "colors.accent")
 		require.NoError(t, err)
 		assert.Equal(t, "5", e.Value, "a setting its owner changed stays changed")
@@ -169,19 +173,122 @@ func TestMergingClientsRefusesAFileThatDoesNotParse(t *testing.T) {
 	require.ErrorAs(t, err, &pe)
 }
 
-// What the stale copy of a section holds that this version does not understand is not reported: nobody
-// was going to carry it. What the owner's own file holds that it does not understand is.
-func TestOnlyTheOwnersUnknownKeysAreReportedSkipped(t *testing.T) {
-	tui := "[tui]\nfrom_a_newer_norite = 1\n"
-	gui := "[tui]\nstale_and_unknown = 2\n"
-	_, plan, err := MergeClients([]byte(tui), []byte(gui), GUI)
-	require.NoError(t, err)
-	require.Len(t, plan.Skipped, 1)
-	assert.Equal(t, "tui.from_a_newer_norite", plan.Skipped[0].Key)
+// A client's section is carried as its file wrote it, not through the keys this version knows: a number
+// in a table, a table inside a table and a key from a newer Norite all arrive, and what the stale copy
+// held of any of them goes. Carried through the key table, only strings arrived, the stale copy's values
+// stayed, and the answer said nothing was skipped (M21 /code-review).
+func TestAClientsSectionIsCarriedAsWrittenWhateverItHolds(t *testing.T) {
+	tui := "[tui.layout]\nwidth = 100\nheight = 4\nratio = 0.5\npanes = [\"a\", \"b\"]\n\n" +
+		"[tui.keys.global]\n\"C-x b\" = \"buffers\"\n\n[tui]\nfrom_a_newer_norite = { on = true }\n"
+	gui := "# the window's\n[tui.layout]\nwidth = 80\ndepth = 2\n\n[tui]\nstale_and_unknown = 2\n"
 
-	_, plan, err = MergeClients([]byte(tui), []byte(gui), TUI)
+	merged, plan, err := MergeClients([]byte(tui), []byte(gui), GUI)
 	require.NoError(t, err)
 	assert.Empty(t, plan.Skipped)
+
+	var got, want map[string]any
+	require.NoError(t, toml.Unmarshal(merged, &got))
+	require.NoError(t, toml.Unmarshal([]byte(tui), &want))
+	assert.Equal(t, want["tui"], got["tui"], "[tui] is the terminal's file's, value for value:\n%s", merged)
+	assert.True(t, strings.HasPrefix(string(merged), "# the window's\n"), "in the newer file's bytes")
+
+	var applied []string
+	for _, c := range plan.Apply {
+		applied = append(applied, c.Key())
+	}
+	assert.Contains(t, applied, "tui.layout.width")
+	assert.Contains(t, applied, "tui.layout.height")
+	assert.Contains(t, applied, "tui.keys.global.C-x b")
+	assert.Contains(t, applied, "tui.from_a_newer_norite")
+}
+
+// Two shapes cannot be placed in another file by a splice: a value that spans lines, and a key under an
+// array of tables. Each is named in what was skipped, never dropped without a word, and the stale copy's
+// version of it is left rather than removed, since it is all the merged file would have of that key.
+func TestWhatCannotBeCarriedIsNamed(t *testing.T) {
+	tui := "[tui]\ntheme = \"\"\"\nspans\nlines\"\"\"\n\n[[tui.panes]]\nname = \"a\"\n"
+	gui := "[tui]\ntheme = \"old\"\n"
+	merged, plan, err := MergeClients([]byte(tui), []byte(gui), GUI)
+	require.NoError(t, err)
+	require.Len(t, plan.Skipped, 2)
+	assert.Equal(t, "tui.theme", plan.Skipped[0].Key)
+	assert.Contains(t, plan.Skipped[0].Problem, "more than one line")
+	assert.Equal(t, "tui.panes.name", plan.Skipped[1].Key)
+	assert.Contains(t, plan.Skipped[1].Problem, "array of tables")
+	assert.Equal(t, gui, string(merged))
+}
+
+// What [shared] holds that this version does not understand cannot be merged by key, and is reported. The
+// stale copy of a client's section is nobody's to carry and is not.
+func TestOnlySharedKeysThatAreNotUnderstoodAreReportedSkipped(t *testing.T) {
+	tui := "[shared]\nfrom_a_newer_norite = 1\n"
+	gui := "[tui]\nstale_and_unknown = 2\n"
+	merged, plan, err := MergeClients([]byte(tui), []byte(gui), GUI)
+	require.NoError(t, err)
+	require.Len(t, plan.Skipped, 1)
+	assert.Equal(t, "shared.from_a_newer_norite", plan.Skipped[0].Key)
+	assert.NotContains(t, string(merged), "stale_and_unknown")
+}
+
+// Which file failed to parse is said, so the toggle can name it.
+func TestAMergeSaysWhichFileItCouldNotRead(t *testing.T) {
+	var cf *ClientFileError
+	_, _, err := MergeClients([]byte("[tui\n"), nil, GUI)
+	require.ErrorAs(t, err, &cf)
+	assert.Equal(t, TUI, cf.Client)
+	_, _, err = MergeClients(nil, []byte("[gui\n"), GUI)
+	require.ErrorAs(t, err, &cf)
+	assert.Equal(t, GUI, cf.Client)
+}
+
+// While split, one client's file is read for [shared] and its own section. Its copy of the other client's
+// section is how things stood at the split, in force nowhere: listing it as set, or exporting it to be
+// applied on another machine, is showing settings nobody has.
+func TestAClientsFileIsListedAndExportedForTheSectionsItIsReadFor(t *testing.T) {
+	f := mustInspect(t, "[shared]\nclock = \"12h\"\n[tui.colors]\naccent = 5\n[gui]\nclock = \"24h\"\n")
+
+	keysOf := func(entries []Entry) (out []string) {
+		for _, e := range entries {
+			if e.Source == FromFile {
+				out = append(out, string(e.Section)+"."+e.Name)
+			}
+		}
+		return out
+	}
+	assert.Equal(t, []string{"shared.clock", "tui.colors.accent", "gui.clock"}, keysOf(f.Entries()))
+	assert.Equal(t, []string{"shared.clock", "tui.colors.accent"}, keysOf(f.EntriesFor(TUI)))
+	assert.Equal(t, []string{"shared.clock", "gui.clock"}, keysOf(f.EntriesFor(GUI)))
+
+	whole, err := f.Export()
+	require.NoError(t, err)
+	assert.Contains(t, string(whole), "accent = 5")
+	gui, err := f.ExportFor(GUI)
+	require.NoError(t, err)
+	assert.NotContains(t, string(gui), "accent", "the GUI's file is not exported for the terminal's section")
+	assert.Contains(t, string(gui), "[gui]")
+}
+
+// The lock is named for the directory as it really is. Reached by a link, as XDG_CONFIG_HOME pointing at
+// a link to ~/.config reaches it, the same file must be the same lock, or the daemon holds one while a
+// command takes the other.
+func TestOneConfigReachedByTwoNamesIsOneLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	require.NoError(t, os.MkdirAll(real, 0o700))
+	linked := filepath.Join(root, "linked")
+	require.NoError(t, os.Symlink(real, linked))
+
+	a, err := lockFor(filepath.Join(real, "config.toml"))
+	require.NoError(t, err)
+	b, err := lockFor(filepath.Join(linked, "config.toml"))
+	require.NoError(t, err)
+	assert.Equal(t, a, b)
+	c, err := lockFor(filepath.Join(real, "config.tui.toml"))
+	require.NoError(t, err)
+	assert.NotEqual(t, a, c, "another file is another lock")
 }
 
 // Removing many keys reads the document once, and removes exactly what removing them one at a time
@@ -286,4 +393,25 @@ func TestAWriteThatWaitedThroughAToggleGoesToTheFileNowRead(t *testing.T) {
 	assert.Equal(t, "[tui.colors]\naccent = 5\n", string(data))
 	_, err = os.Stat(files.TUI)
 	assert.ErrorIs(t, err, os.ErrNotExist, "nothing was written to the file that was set aside")
+}
+
+// An unsplit holds the state's lock and both clients' files while it merges, and a `norite config set`
+// waits five seconds for a file. Two files at the size bound with every key different is the most work a
+// merge can be given: each file is decoded once and the rest is this package's own linear parser, a
+// quarter of a second where decoding per step was several. The limit is far above that.
+func TestAMergeAtTheSizeBoundIsQuick(t *testing.T) {
+	big := func(v string) []byte {
+		var b strings.Builder
+		b.WriteString("[tui.keys]\n")
+		for i := 0; b.Len() < MaxFileSize-64; i++ {
+			fmt.Fprintf(&b, "k%04d = %q\n", i, v)
+		}
+		return []byte(b.String())
+	}
+	start := time.Now()
+	merged, plan, err := MergeClients(big("new"), big("old"), GUI)
+	require.NoError(t, err)
+	assert.Greater(t, len(plan.Apply), 4000)
+	assert.Equal(t, string(big("new")), string(merged))
+	assert.Less(t, time.Since(start), 3*time.Second)
 }

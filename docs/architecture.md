@@ -1773,7 +1773,11 @@ the network.
 as a starting point and leaves `config.toml` in place, unread. Flipping off (`unsplit`) reconciles onto one
 shared file, and what "reconciles" means depends on the section:
 
-- **`[tui]` and `[gui]` are each taken from their own client's file, exactly**, removals included. Split
+- **`[tui]` and `[gui]` are each taken from their own client's file, as that file wrote them**: every
+  assignment under the section at any depth, with its value's own bytes, so a number in a table, a nested
+  table and a key from a newer Norite arrive like any other, and what the other file's copy held goes.
+  Two shapes cannot be placed by a splice, a value spanning lines and a key under an array of tables, and
+  each is named in the answer's `skipped` rather than dropped. Split
   starts both files as copies of `config.toml`, so the GUI's file holds a `[tui]` nobody has read since and
   the terminal's a `[gui]`: stale copies of how things stood. Merged without regard for whose section a
   key is in, the stale copy brought back a setting its owner had removed and overrode one its owner had
@@ -1810,8 +1814,11 @@ client reads.
 
 While split, `norite config get|set|unset|path|export|import` mean the terminal client's file, the
 command tree being that client's sibling in one binary, and `--client gui` means the GUI's. A `[tui]` key
-aimed at the GUI's file, or the reverse, is refused, and an import leaves that section out and says so:
-nothing would read it. The daemon's watch covers all
+aimed at the GUI's file, or the reverse, is refused, an import leaves that section out and says so, and
+the listing and the export leave it out too: nothing reads it, and that file's copy of it is how things
+stood at the split. Anything outside `daemon/config` writes a setting by client (`SetFor`, `UnsetFor`,
+`ImportFor`), never by path, and the lock a write takes is named for the directory as it really is, so
+one config reached by two names is one lock. The daemon's watch covers all
 three files, and a toggle that has moved is announced as `DAEMON_CONFIG_UPDATE` like any other change.
 
 **Config export/import**: `norite config export` / `norite config import` — a portable file covering the

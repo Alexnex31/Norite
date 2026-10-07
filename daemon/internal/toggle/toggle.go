@@ -41,6 +41,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -272,36 +273,39 @@ func (h *Handler) unsplit(ctx context.Context) (ipc.ConfigToggle, error) {
 		}
 
 		for range attempts {
-			tui, tuiAt, err := readWithTime(files.TUI)
+			tui, tuiAt, tuiThere, err := readWithTime(files.TUI)
 			if err != nil {
 				return err
 			}
-			gui, guiAt, err := readWithTime(files.GUI)
+			gui, guiAt, guiThere, err := readWithTime(files.GUI)
 			if err != nil {
 				return err
 			}
-			if tuiAt == 0 && guiAt == 0 {
+			if !tuiThere && !guiThere {
 				// Neither client's file is there: removed by hand, or never written. There is nothing to
 				// fold back, and folding nothing onto config.toml would empty it. It is left as it is.
 				s.ConfigSplit = false
 				return nil
 			}
-			// Both must parse before either is touched. A merge is by key, and a file that is not TOML has
-			// no keys to carry over: going on would drop everything in it while reporting success.
-			for path, data := range map[string][]byte{files.TUI: tui, files.GUI: gui} {
-				if _, err := config.Inspect(data); err != nil {
-					return refuse("%s is not valid TOML (%s); fix it and unsplit again. Nothing was changed",
-						termsafe.Text(path), termsafe.Text(err.Error()))
-				}
-			}
-
 			// The more recently written file is the base, and wins where both set a shared key. The
 			// terminal client's on a tie, which is also what two untouched copies are.
+			// A file that is not there has no time at all, which is before any time a file can carry.
 			newer, baseName := config.TUI, files.TUI
 			if guiAt.After(tuiAt) {
 				newer, baseName = config.GUI, files.GUI
 			}
+			// Both must parse before anything is touched. A merge is by key, and a file that is not TOML has
+			// no keys to carry over: going on would drop everything in it while reporting success.
 			merged, plan, err := config.MergeClients(tui, gui, newer)
+			var unread *config.ClientFileError
+			if errors.As(err, &unread) {
+				path := files.TUI
+				if unread.Client == config.GUI {
+					path = files.GUI
+				}
+				return refuse("%s is not valid TOML (%s); fix it and unsplit again. Nothing was changed",
+					termsafe.Text(path), termsafe.Text(unread.Error()))
+			}
 			if err != nil {
 				return err
 			}
@@ -328,6 +332,7 @@ func (h *Handler) unsplit(ctx context.Context) (ipc.ConfigToggle, error) {
 			// keeping the file's mode. config.toml has been read by nobody since the split and may have
 			// been edited all the same, so what it holds at the moment it is replaced is kept, and that is
 			// asked inside the write: a save landing while this waited is the one kept, not lost.
+			keptNow := false
 			err = config.Update(files.Shared, func(current []byte) ([]byte, error) {
 				// What is the person's: the file as first found, or, if it no longer says what the last pass
 				// wrote, whatever they have saved over that since.
@@ -342,13 +347,21 @@ func (h *Handler) unsplit(ctx context.Context) (ipc.ConfigToggle, error) {
 					if err := write(aside[files.Shared], keep, newFileMode); err != nil {
 						return nil, err
 					}
-					keptShared = true
+					keptNow = true
 				}
 				return merged, nil
 			})
 			if err != nil {
+				// The copy is made inside the write, so that it is of what the file held at that moment, and
+				// the write then did not happen: a read-only config.toml, a lock held too long. A copy of a
+				// file that was not replaced is clutter that says otherwise, and each refused attempt left
+				// another, using up the names (M21 /code-review). Unless an earlier pass did replace it.
+				if keptNow && !keptShared {
+					_ = os.Remove(aside[files.Shared])
+				}
 				return err
 			}
+			keptShared = keptShared || keptNow
 			written = merged
 			if keptShared {
 				out.Backups = []string{aside[files.Shared]}
@@ -358,11 +371,11 @@ func (h *Handler) unsplit(ctx context.Context) (ipc.ConfigToggle, error) {
 			}
 			// An editor takes no lock. If either file was saved while it was being merged, config.toml
 			// holds what it used to say.
-			tuiNow, _, err := readWithTime(files.TUI)
+			tuiNow, _, _, err := readWithTime(files.TUI)
 			if err != nil {
 				return err
 			}
-			guiNow, _, err := readWithTime(files.GUI)
+			guiNow, _, _, err := readWithTime(files.GUI)
 			if err != nil {
 				return err
 			}
@@ -424,27 +437,23 @@ func freeBackup(path string) (string, error) {
 		"unsplit again. Nothing was changed", maxBackups, termsafe.Text(filepath.Base(path)))
 }
 
-// readWithTime reads a config file and when it was last written. A missing file is empty and older than
-// anything.
-func readWithTime(path string) ([]byte, int64Time, error) {
-	data, err := config.ReadFile(path)
+// readWithTime reads a config file, when it was last written, and whether it is there at all. A missing
+// file is empty. Whether it is there is said outright and not read off the time: a file restored from an
+// archive can carry the epoch, and two such files were taken for two missing ones.
+func readWithTime(path string) (data []byte, at time.Time, there bool, err error) {
+	data, err = config.ReadFile(path)
 	if err != nil {
-		return nil, 0, err
+		return nil, time.Time{}, false, err
 	}
 	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return data, 0, nil
+		return data, time.Time{}, false, nil
 	}
 	if err != nil {
-		return nil, 0, err
+		return nil, time.Time{}, false, err
 	}
-	return data, int64Time(info.ModTime().UnixNano()), nil
+	return data, info.ModTime(), true, nil
 }
-
-// int64Time is a modification time in nanoseconds, zero for a file that is not there.
-type int64Time int64
-
-func (t int64Time) After(u int64Time) bool { return t > u }
 
 func write(path string, data []byte, mode fs.FileMode) error {
 	err := atomicfile.Write(path, data, atomicfile.Options{Mode: mode})

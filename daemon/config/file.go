@@ -70,23 +70,11 @@ var errChanged = errors.New("changed underneath")
 // fn may run more than once and must not keep state between runs. A file that does not exist is given to
 // fn as no bytes, and is created if fn returns any.
 func Update(path string, fn func(current []byte) ([]byte, error)) error {
-	lockPath, err := lockFor(path)
+	unlock, err := Lock(path)
 	if err != nil {
 		return err
 	}
-	lock := flock.New(lockPath)
-	ctx, cancel := context.WithTimeout(context.Background(), lockWait)
-	defer cancel()
-	locked, err := lock.TryLockContext(ctx, lockPoll)
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("locking the config file: %w", err)
-	}
-	if !locked {
-		return ErrLocked
-	}
-	// The lock file stays. Removing it would let a second program lock a new file of the same name while
-	// a third still holds the old one.
-	defer func() { _ = lock.Unlock() }()
+	defer unlock()
 
 	for range maxAttempts {
 		current, err := snapshot(path)
@@ -144,6 +132,14 @@ func lockFor(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("locating %s: %w", path, err)
 	}
+	// Named for the directory as it really is, not as it was spelled. The daemon and a shell can reach one
+	// config directory by two names, a link to ~/.config in XDG_CONFIG_HOME being the ordinary way, and
+	// two names were two locks: the toggle held one while `norite config set` took the other (M21
+	// /code-review). The file's own name is kept as written, so a config that is itself a link into a
+	// dotfiles repository still has its lock named for the link.
+	if real, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		abs = filepath.Join(real, filepath.Base(abs))
+	}
 	dir, err := paths.StateDir()
 	if err != nil {
 		return "", err
@@ -174,7 +170,7 @@ func snapshot(path string) ([]byte, error) {
 //
 // name is the key as the contract lists it, "colors.accent", and section is where to write it. A shared
 // key may be written under a client's section, which is how one client is given its own value.
-func Set(path string, section Section, name, input string) error {
+func setAt(path string, section Section, name, input string) error {
 	segments, literal, err := resolve(section, name, input, true)
 	if err != nil {
 		return err
@@ -195,7 +191,7 @@ func named(path string, err error) error {
 }
 
 // Unset removes a key from the file at path, so its default or its [shared] value applies again.
-func Unset(path string, section Section, name string) error {
+func unsetAt(path string, section Section, name string) error {
 	segments, _, err := resolve(section, name, "", false)
 	if err != nil {
 		return err
@@ -279,7 +275,8 @@ func UpdateFor(client Section, fn func(path string, split bool, current []byte) 
 	return path, ErrKeepsChanging
 }
 
-// SetFor is Set on the file client reads right now.
+// SetFor sets one key in the file client reads right now. It is how anything outside this package writes
+// a setting: by client, never by path, so that a toggle flipped under the write cannot misdirect it.
 func SetFor(client, section Section, name, input string) (string, error) {
 	segments, literal, err := resolve(section, name, input, true)
 	if err != nil {
@@ -291,7 +288,7 @@ func SetFor(client, section Section, name, input string) (string, error) {
 	return path, named(path, err)
 }
 
-// UnsetFor is Unset on the file client reads right now.
+// UnsetFor removes one key from the file client reads right now.
 func UnsetFor(client, section Section, name string) (string, error) {
 	segments, _, err := resolve(section, name, "", false)
 	if err != nil {
@@ -303,7 +300,8 @@ func UnsetFor(client, section Section, name string) (string, error) {
 	return path, named(path, err)
 }
 
-// Lock takes the lock a write to the config at path takes, and returns what releases it. It is for the
+// Lock takes the lock a write to the config at path takes, and returns what releases it. Update takes it
+// through here, so there is one wait and one meaning of "locked". It is exported for the
 // daemon's toggle, which must keep `norite config set` out of a file from the moment it reads it until the
 // toggle says who reads it next. It waits as a write does and reports ErrLocked the same way.
 func Lock(path string) (unlock func(), err error) {
@@ -321,5 +319,7 @@ func Lock(path string) (unlock func(), err error) {
 	if !locked {
 		return nil, ErrLocked
 	}
+	// The lock file stays. Removing it would let a second program lock a new file of the same name while
+	// a third still holds the old one.
 	return func() { _ = lock.Unlock() }, nil
 }

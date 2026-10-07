@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -279,7 +280,7 @@ func TestAnImportThatFindsNothingLeftToChangeSaysItWroteNothing(t *testing.T) {
 		raced = true
 		data, err := os.ReadFile(incoming)
 		require.NoError(t, err)
-		_, err = config.Import(path, data, false)
+		_, _, err = config.ImportFor(config.TUI, data, false)
 		require.NoError(t, err)
 	}
 	t.Cleanup(func() { beforeImport = func() {} })
@@ -568,4 +569,51 @@ func TestANumberJSONCannotWriteDoesNotFailTheListing(t *testing.T) {
 	out, _, err := norite(t, true, "get", "tui.keys")
 	require.NoError(t, err)
 	daemontest.MatchesCLISchema(t, out, "config.schema.json", "entry")
+}
+
+// While split, the listing and the export are of the file that was meant, for the sections it is read
+// for. The terminal client's file still holds [gui] as it stood at the split: listed as set, or exported
+// to be applied on another machine, it is a setting in force nowhere, shown beside a `get` of the same key
+// that refuses to answer.
+func TestWhileSplitTheListingAndTheExportLeaveTheStaleSectionOut(t *testing.T) {
+	shared := home(t)
+	split(t)
+	dir := filepath.Dir(shared)
+	write(t, filepath.Join(dir, "config.tui.toml"), "[shared]\nclock = \"24h\"\n[tui.colors]\naccent = 5\n[gui]\nclock = \"12h\"\n")
+	write(t, filepath.Join(dir, "config.gui.toml"), "[shared]\nclock = \"24h\"\n[tui.colors]\naccent = 6\n[gui]\nclock = \"24h\"\n")
+
+	out, _, err := norite(t, false, "get")
+	require.NoError(t, err)
+	assert.Contains(t, out, "tui.colors.accent = 5")
+	assert.NotContains(t, out, "gui.clock")
+	out, _, err = norite(t, false, "--client", "gui", "get")
+	require.NoError(t, err)
+	assert.Contains(t, out, "gui.clock = 24h")
+	assert.NotContains(t, out, "tui.colors.accent")
+
+	out, _, err = norite(t, false, "export")
+	require.NoError(t, err)
+	assert.Contains(t, out, "accent = 5")
+	assert.NotContains(t, out, "[gui]")
+	out, _, err = norite(t, false, "--client", "gui", "export")
+	require.NoError(t, err)
+	assert.Contains(t, out, "[gui]")
+	assert.NotContains(t, out, "accent")
+}
+
+// A key that does not exist is the command line's mistake whatever state the file is in. With the file
+// mid-edit, `get` read it first and reported the file, exit 1, where `set` and `unset` said exit 2.
+func TestAMistypedKeyIsAUsageErrorEvenWhenTheFileDoesNotParse(t *testing.T) {
+	path := home(t)
+	write(t, path, "[tui.colors\naccent = \n")
+	for _, key := range []string{"nope", "tui.typo", "cli.colors.accent"} {
+		_, _, err := norite(t, false, "get", key)
+		requireUsage(t, err)
+	}
+	// A key that does exist still reports the file, which is what is wrong.
+	_, _, err := norite(t, false, "get", "tui.colors.accent")
+	require.Error(t, err)
+	var usage *clierr.UsageError
+	assert.False(t, errors.As(err, &usage))
+	assert.Contains(t, err.Error(), "line 1")
 }
