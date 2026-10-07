@@ -48,7 +48,8 @@ func Watch(ctx context.Context, path string, changed func()) error {
 	defer func() { _ = w.Close() }()
 
 	// The directory has to exist to be watched, and a config that does not exist yet is the ordinary
-	// state of a new install. Creating it is the one thing a daemon does to this directory.
+	// state of a new install. Creating it is the one thing a daemon does to this directory, and it is done
+	// once: a directory that is later removed is waited for, not put back under whoever is replacing it.
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return err
@@ -56,15 +57,24 @@ func Watch(ctx context.Context, path string, changed func()) error {
 	if err := w.Add(dir); err != nil {
 		return err
 	}
+	// And the directory the config's directory is in. A watch is on an inode, not a name: when
+	// ~/.config/norite is removed and restored, or is a link a dotfiles manager re-points, the watch above
+	// is on a directory nothing uses any more, and every later save is silence until the daemon restarts
+	// (M21 /code-review). The parent sees the name change hands. Without it the watch is as good as it was.
+	if parent := filepath.Dir(dir); parent != dir {
+		_ = w.Add(parent)
+	}
 
-	// The real file's directory, when it is somewhere else. Looked up again after every change, since
-	// the change may have been the link being pointed at another file.
-	target := ""
+	// The real file, when it is somewhere else, and its directory. Looked up again after every change,
+	// since the change may have been the link being pointed at another file.
+	real, target := "", ""
 	follow := func() {
-		real, err := atomicfile.Resolve(path)
+		real = ""
+		resolved, err := atomicfile.Resolve(path)
 		if err != nil {
 			return
 		}
+		real = filepath.Clean(resolved)
 		next := filepath.Dir(real)
 		if next == dir || next == target {
 			return
@@ -88,7 +98,16 @@ func Watch(ctx context.Context, path string, changed func()) error {
 			if !ok {
 				return nil
 			}
-			if !concerns(ev.Name, path) {
+			switch name := filepath.Clean(ev.Name); {
+			case name == dir:
+				// The directory itself was created, removed, renamed or replaced. Watch whatever the name
+				// leads to now; if that is nothing, the parent says when it is something again.
+				_ = w.Remove(dir)
+				_ = w.Add(dir)
+			case name == filepath.Clean(path), real != "" && name == real:
+				// The link itself, or the file it resolves to. Everything else in these directories is
+				// somebody else's file.
+			default:
 				continue
 			}
 			if settle == nil {
@@ -109,14 +128,4 @@ func Watch(ctx context.Context, path string, changed func()) error {
 			changed()
 		}
 	}
-}
-
-// concerns reports whether an event on name may be a change to the config at path: the link itself, or
-// the file it resolves to. Everything else in those directories is somebody else's file.
-func concerns(name, path string) bool {
-	if filepath.Base(name) == filepath.Base(path) && filepath.Dir(name) == filepath.Dir(path) {
-		return true
-	}
-	real, err := atomicfile.Resolve(path)
-	return err == nil && filepath.Clean(name) == filepath.Clean(real)
 }

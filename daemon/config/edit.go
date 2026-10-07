@@ -135,30 +135,129 @@ func keyParts(it unstable.Iterator) (parts []string, end int) {
 	return parts, end
 }
 
+// edit is one key to set: its full path, and its value already spelled as the file will hold it.
+type edit struct {
+	path    []string
+	literal string
+}
+
 // setRaw returns data with path set to literal, a TOML value already spelled as the file will hold it.
 func setRaw(data []byte, path []string, literal string) ([]byte, error) {
-	if len(path) < 2 {
-		return nil, errors.New("a key lives in a section; the root of config.toml holds none")
-	}
-	if err := oneValue(literal); err != nil {
-		return nil, err
-	}
+	return setAll(data, []edit{{path, literal}})
+}
+
+// setAll returns data with every edit made.
+//
+// The document is read once and every edit is planned against it: a key that is set has its value's bytes
+// replaced, a key that is not is one line placed where a person would have put it, and keys of a table
+// that does not exist yet are gathered under one new header at the end. The plan is then applied in one
+// pass and the result read back once, checking every path.
+//
+// It was one edit at a time at first, each re-reading the document the last one left. The decoder is
+// quadratic in one table's keys and this file's own parser allocates per key, so an import of n keys was
+// cubic: a file inside the size bound took two minutes to import, holding the config's lock throughout
+// (M21 /code-review). Planned against one read, the same import is the cost of that read.
+//
+// Two edits to one path are one edit, the later value.
+func setAll(data []byte, edits []edit) ([]byte, error) {
 	body, bom := cutBOM(data)
+	// The decoder reads the file as it was given, so a fault already in it is reported as the file's.
 	doc, err := parseDocument(body)
 	if err != nil {
 		return nil, err
 	}
-	if err := doc.reachable(path); err != nil {
-		return nil, err
+	nl := newline(body)
+
+	seen := make(map[string]int, len(edits))
+	unique := make([]edit, 0, len(edits))
+	for _, e := range edits {
+		if len(e.path) < 2 {
+			return nil, errors.New("a key lives in a section; the root of config.toml holds none")
+		}
+		if err := oneValue(e.literal); err != nil {
+			return nil, err
+		}
+		if err := doc.reachable(e.path); err != nil {
+			return nil, err
+		}
+		id := strings.Join(e.path, "\x00")
+		if i, dup := seen[id]; dup {
+			unique[i].literal = e.literal
+			continue
+		}
+		seen[id] = len(unique)
+		unique = append(unique, e)
 	}
 
-	var out []byte
-	if a, ok := doc.find(path); ok {
-		out = splice(body, a.value, literal)
-	} else {
-		out = doc.insert(path, literal)
+	// Where each edit lands in the bytes as they are now. A replacement has a width; an inserted line has
+	// none, and several at one offset stay in the order they were asked for.
+	type change struct {
+		at   span
+		text string
 	}
-	if err := sameAfter(out, path); err != nil {
+	var changes []change
+	// New tables, in the order first asked for, each with the lines that go under its header.
+	var newTables []string
+	newLines := map[string][]string{}
+	existing := doc.index()
+	paths := make([][]string, 0, len(unique))
+	for _, e := range unique {
+		paths = append(paths, e.path)
+		if a, ok := existing[strings.Join(e.path, "\x00")]; ok {
+			changes = append(changes, change{a.value, e.literal})
+			continue
+		}
+		if at, line, ok := doc.place(e.path, e.literal); ok {
+			changes = append(changes, change{span{at, at}, line})
+			continue
+		}
+		parent, leaf := e.path[:len(e.path)-1], e.path[len(e.path)-1]
+		parts := make([]string, len(parent))
+		for i, part := range parent {
+			parts[i] = formatKey(part)
+		}
+		header := "[" + strings.Join(parts, ".") + "]"
+		if _, started := newLines[header]; !started {
+			newTables = append(newTables, header)
+		}
+		newLines[header] = append(newLines[header], formatKey(leaf)+" = "+e.literal)
+	}
+	slices.SortStableFunc(changes, func(a, b change) int { return a.at.start - b.at.start })
+
+	out := make([]byte, 0, len(body)+64*len(unique))
+	at := 0
+	for _, c := range changes {
+		if c.at.start < at {
+			// Two edits claiming the same bytes. The planner never produces it; a file is not worth risking
+			// on that being true.
+			return nil, errors.New("the edits overlap, so nothing was written")
+		}
+		out = append(out, body[at:c.at.start]...)
+		if c.at.start == c.at.end {
+			// A line, and the line before it may be the last of a file with no final newline.
+			if len(out) > 0 && out[len(out)-1] != '\n' {
+				out = append(out, nl...)
+			}
+			out = append(out, c.text+nl...)
+		} else {
+			out = append(out, c.text...)
+		}
+		at = c.at.end
+	}
+	out = append(out, body[at:]...)
+	for _, header := range newTables {
+		if len(out) > 0 && !bytes.HasSuffix(out, []byte("\n")) {
+			out = append(out, nl...)
+		}
+		if len(bytes.TrimSpace(out)) > 0 {
+			out = append(out, nl...)
+		}
+		out = append(out, header+nl...)
+		for _, line := range newLines[header] {
+			out = append(out, line+nl...)
+		}
+	}
+	if err := sameAfter(out, paths...); err != nil {
 		return nil, err
 	}
 	return restoreBOM(out, bom), nil
@@ -256,16 +355,28 @@ func (d *document) find(path []string) (assignment, bool) {
 	return assignment{}, false
 }
 
-// insert adds `key = literal` for a path that is not set, in the place a person would have put it.
-func (d *document) insert(path []string, literal string) []byte {
+// index returns the document's assignments by path, the first for each, as find reports them.
+func (d *document) index() map[string]assignment {
+	out := make(map[string]assignment, len(d.assignments))
+	for _, a := range d.assignments {
+		id := strings.Join(a.path, "\x00")
+		if _, have := out[id]; !have {
+			out[id] = a
+		}
+	}
+	return out
+}
+
+// place says where `key = literal` goes for a path that is not set and whose table already exists, in the
+// place a person would have put it: the offset of the line to add, and the line. It reports false when
+// nothing of the table exists, and the key then belongs under a new header at the end of the file.
+func (d *document) place(path []string, literal string) (at int, line string, ok bool) {
 	parent, leaf := path[:len(path)-1], path[len(path)-1]
-	nl := newline(d.data)
 
 	// 1. Its table has a header: the new key goes after that table's last key.
 	for i := len(d.tables) - 1; i >= 0; i-- {
 		if equal(d.tables[i].path, parent) {
-			at := lineEnd(d.data, d.tables[i].last)
-			return insertLine(d.data, at, formatKey(leaf)+" = "+literal, nl)
+			return lineEnd(d.data, d.tables[i].last), formatKey(leaf) + " = " + literal, true
 		}
 	}
 	// 2. Its table exists only through dotted keys in a shorter one ([tui] with `colors.warn = 3`). A
@@ -297,23 +408,9 @@ func (d *document) insert(path []string, literal string) []byte {
 		for _, part := range path[len(base):] {
 			rel = append(rel, formatKey(part))
 		}
-		return insertLine(d.data, lineEnd(d.data, last), strings.Join(rel, ".")+" = "+literal, nl)
+		return lineEnd(d.data, last), strings.Join(rel, ".") + " = " + literal, true
 	}
-	// 3. Nothing of it exists: a new table at the end of the file.
-	parts := make([]string, len(parent))
-	for i, part := range parent {
-		parts[i] = formatKey(part)
-	}
-	out := append([]byte{}, d.data...)
-	if len(out) > 0 && !bytes.HasSuffix(out, []byte("\n")) {
-		out = append(out, nl...)
-	}
-	if len(bytes.TrimSpace(out)) > 0 {
-		out = append(out, nl...)
-	}
-	out = append(out, "["+strings.Join(parts, ".")+"]"+nl...)
-	out = append(out, formatKey(leaf)+" = "+literal+nl...)
-	return out
+	return 0, "", false
 }
 
 // valid reports whether data is a TOML document, as the decoder every reader uses sees it.
@@ -327,40 +424,26 @@ func valid(data []byte) error {
 
 // sameAfter checks the edited bytes are TOML and that path now reads back, through the ordinary decoder
 // rather than this file's own parser, so a splice that fooled one is caught by the other.
-func sameAfter(out []byte, path []string) error {
+func sameAfter(out []byte, paths ...[]string) error {
 	var decoded map[string]any
 	if err := toml.Unmarshal(out, &decoded); err != nil {
 		return fmt.Errorf("the edit would leave a file that is not valid TOML, so nothing was written: %w",
 			parseError(err))
 	}
-	var at any = decoded
-	for _, part := range path {
-		table, ok := at.(map[string]any)
-		if !ok {
-			return errors.New("the edit did not land where it was aimed, so nothing was written")
-		}
-		at, ok = table[part]
-		if !ok {
-			return errors.New("the edit did not land where it was aimed, so nothing was written")
+	for _, path := range paths {
+		var at any = decoded
+		for _, part := range path {
+			table, ok := at.(map[string]any)
+			if !ok {
+				return errors.New("the edit did not land where it was aimed, so nothing was written")
+			}
+			at, ok = table[part]
+			if !ok {
+				return errors.New("the edit did not land where it was aimed, so nothing was written")
+			}
 		}
 	}
 	return nil
-}
-
-func splice(data []byte, at span, with string) []byte {
-	out := make([]byte, 0, len(data)-(at.end-at.start)+len(with))
-	out = append(out, data[:at.start]...)
-	out = append(out, with...)
-	return append(out, data[at.end:]...)
-}
-
-func insertLine(data []byte, at int, line, nl string) []byte {
-	prefix := ""
-	// The last line of a file with no final newline: the new line needs one in front of it.
-	if at > 0 && data[at-1] != '\n' {
-		prefix = nl
-	}
-	return splice(data, span{at, at}, prefix+line+nl)
 }
 
 func lineStart(data []byte, at int) int {

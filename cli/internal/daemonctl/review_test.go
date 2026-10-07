@@ -367,3 +367,34 @@ func TestTheServiceDefinitionCarriesXDGConfigHome(t *testing.T) {
 		}
 	})
 }
+
+// Environment= is not ExecStart: systemd expands specifiers in it and not variables. A `$` doubled as
+// ExecStart needs stays doubled, so the service would run in a directory spelled with one more `$` than
+// the shell's. The expected lines are what systemd itself reads back as the directory given.
+func TestAnXDGHomeIsEscapedForEnvironmentAndNotForExecStart(t *testing.T) {
+	s, _, unitPath := newSystemd(t)
+	t.Setenv("XDG_STATE_HOME", `/srv/st$1 a%b\c`)
+	if err := s.Install(t.Context(), "/opt/build$rev/norite-daemon"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	body, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("reading the unit file: %v", err)
+	}
+	if want := "\nEnvironment=XDG_STATE_HOME=\"/srv/st$1 a%%b\\\\c\"\n"; !strings.Contains(string(body), want) {
+		t.Errorf("the unit does not hold %q:\n%s", want, body)
+	}
+	if want := `"/opt/build$$rev/norite-daemon"`; !strings.Contains(string(body), want) {
+		t.Errorf("ExecStart still needs its `$` doubled, %q:\n%s", want, body)
+	}
+	for in, want := range map[string]string{
+		"/home/u/.config":  "/home/u/.config",
+		"/home/u/cfg$1":    "/home/u/cfg$1",
+		"/home/u/my cfg":   `"/home/u/my cfg"`,
+		"/home/u/100%/cfg": `"/home/u/100%%/cfg"`,
+	} {
+		if got := systemdEnvEscape(in); got != want {
+			t.Errorf("systemdEnvEscape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

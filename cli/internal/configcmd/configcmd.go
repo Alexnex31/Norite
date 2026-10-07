@@ -9,10 +9,8 @@
 package configcmd
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -23,6 +21,7 @@ import (
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/output"
+	"github.com/Alexnex31/Norite/cli/internal/prompt"
 	"github.com/Alexnex31/Norite/daemon/atomicfile"
 	"github.com/Alexnex31/Norite/daemon/config"
 )
@@ -261,6 +260,10 @@ func exportVerb(cmd *cli.Command, e *env) (output.Result, error) {
 	return exportedView{Path: dest}, nil
 }
 
+// beforeImport runs between the plan somebody was shown and the import itself, which is where another
+// writer can get in. It does nothing; a test puts that other writer there.
+var beforeImport = func() {}
+
 func importVerb(cmd *cli.Command, e *env) (output.Result, error) {
 	source := cmd.Args().First()
 	incoming, err := readBounded(source)
@@ -279,31 +282,31 @@ func importVerb(cmd *cli.Command, e *env) (output.Result, error) {
 	if plan.Empty() || cmd.Bool("dry-run") {
 		return planView(plan, false), nil
 	}
-	if !cmd.Bool("yes") {
-		if !e.interactive {
-			return nil, fmt.Errorf("%w: pass --yes to import without being asked, or --dry-run to see what "+
-				"it would change", clierr.ErrNoTerminal)
-		}
+	ask := prompt.Confirm{
+		Yes: cmd.Bool("yes"), Interactive: e.interactive, In: e.in, Out: e.errOut,
+		Question:  "Apply to " + output.Clean(e.path) + "?",
+		Otherwise: "pass --yes to import without being asked, or --dry-run to see what it would change",
+	}
+	if ask.Asks() {
 		// On stderr, with the question: stdout is the result, which --json pipes into a parser.
 		t := output.NewText(e.errOut)
 		planView(plan, false).changes(t)
 		if err := t.Err(); err != nil {
 			return nil, err
 		}
-		if _, err := fmt.Fprintf(e.errOut, "Apply to %s? [y/N] ", output.Clean(e.path)); err != nil {
-			return nil, err
-		}
-		line, _ := bufio.NewReader(e.in).ReadString('\n')
-		if answer := strings.ToLower(strings.TrimSpace(line)); answer != "y" && answer != "yes" {
-			return nil, clierr.Usage("not confirmed; nothing was changed")
-		}
 	}
+	if err := ask.Ask(); err != nil {
+		return nil, err
+	}
+	beforeImport()
 	// The plan is worked out again under the lock, so what is reported is what was written.
 	done, err := config.Import(e.path, incoming, overwrite)
 	if err != nil {
 		return nil, err
 	}
-	return planView(done, true), nil
+	// Written is whether the file changed, and it may not have: somebody else's import or an editor's save
+	// can have made every change between the plan shown and the lock.
+	return planView(done, !done.Empty()), nil
 }
 
 // readBounded reads the file to import, refusing one over the config's own size bound before parsing it.

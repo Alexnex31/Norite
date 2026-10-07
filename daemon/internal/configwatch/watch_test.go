@@ -160,3 +160,50 @@ func TestWatchFollowsALinkToWhereTheFileReallyIs(t *testing.T) {
 	require.NoError(t, os.WriteFile(second, []byte("[shared]\nclock = \"12h\"\n"), 0o600))
 	require.True(t, next(), "a save at the link's new target")
 }
+
+// A watch is on a directory, not on its name. When the config's directory is removed and put back, the
+// watch that was on it is on nothing, and a daemon that runs for weeks would never notice a save again.
+func TestWatchSurvivesItsDirectoryBeingReplaced(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	dir := filepath.Dir(path)
+	next, silent := watching(t, path)
+
+	require.NoError(t, os.RemoveAll(dir))
+	require.True(t, next(), "the directory going away is a change: the config is now the defaults")
+	require.True(t, silent(), "settled")
+	_, err := os.Stat(dir)
+	require.ErrorIs(t, err, os.ErrNotExist, "the watch does not put the directory back under whoever removed it")
+
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.True(t, next(), "the directory coming back")
+	require.True(t, silent(), "settled")
+
+	require.NoError(t, os.WriteFile(path, []byte("[shared]\nclock = \"12h\"\n"), 0o600))
+	require.True(t, next(), "a save in the directory that replaced the one first watched")
+}
+
+// The directory is a link a dotfiles manager owns, and re-points: nothing happens in either directory it
+// has pointed at, only to the name.
+func TestWatchFollowsItsDirectoryBeingRepointed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	root := t.TempDir()
+	first, second := filepath.Join(root, "dots-a"), filepath.Join(root, "dots-b")
+	for _, d := range []string{first, second} {
+		require.NoError(t, os.MkdirAll(d, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(d, "config.toml"), []byte("[shared]\nclock = \"24h\"\n"), 0o600))
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "cfg"), 0o700))
+	link := filepath.Join(root, "cfg", "norite")
+	require.NoError(t, os.Symlink(first, link))
+	next, silent := watching(t, filepath.Join(link, "config.toml"))
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink(second, link))
+	require.True(t, next(), "the directory link being re-pointed")
+	require.True(t, silent(), "settled")
+
+	require.NoError(t, os.WriteFile(filepath.Join(second, "config.toml"), []byte("[shared]\nclock = \"12h\"\n"), 0o600))
+	require.True(t, next(), "a save where the link now leads")
+}

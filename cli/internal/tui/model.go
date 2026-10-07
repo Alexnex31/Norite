@@ -65,6 +65,7 @@ type Model struct {
 	configNote   string
 	configBroken bool
 	configNews   bool
+	configRead   string // the note the last read produced, whether or not it is still shown
 }
 
 // New builds the client. Nothing is attached until Init.

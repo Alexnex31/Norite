@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -226,6 +227,43 @@ func TestTheConfigNoteAndAStatusLineShareTheHintRow(t *testing.T) {
 
 	c.press("ctrl+n")
 	assert.Contains(t, hintRow(c.screen()), "signed out; run `norite login`")
+}
+
+// TestAWarningAlreadySeenIsNotRaisedAgainByAttaching: the file is read on every attach. A warning somebody
+// pressed a key past stays dismissed when the daemon restarts, and does not come back over the status line
+// the attach just set; a different warning, from a save made while detached, is news.
+func TestAWarningAlreadySeenIsNotRaisedAgainByAttaching(t *testing.T) {
+	f := newFixture(t)
+	cfg := &file{text: "[tui.colors]\ndim = \"grey\"\n"}
+	var dials atomic.Int64
+	sw := &switchable{f: f, ready: signedInAs("alice", "1")}
+	c := drive(t, Options{Dial: func(ctx context.Context) (Session, error) {
+		dials.Add(1)
+		return sw.dial(ctx)
+	}, Config: cfg.read}, 120, 24)
+	c.shows("# general")
+	c.settle()
+	require.Contains(t, hintRow(c.screen()), "config.toml: tui.colors.dim")
+	c.press("ctrl+n")
+	require.NotContains(t, c.screen(), "config.toml")
+
+	sw.set(ipc.Ready{Standing: ipc.StandingSignedOut, Guilds: []ipc.GuildSummary{}})
+	f.d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "resync"})
+	c.shows("signed out; run `norite login`")
+	c.settle()
+	require.EqualValues(t, 2, dials.Load())
+	assert.Contains(t, hintRow(c.screen()), "signed out", "the same warning, read again, is not news")
+
+	// Nor does it come back where there is no status line for it to hide behind.
+	sw.set(signedInAs("alice", "1"))
+	f.d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "resync"})
+	c.shows("# general")
+	c.settle()
+	assert.NotContains(t, c.screen(), "config.toml", "dismissed is dismissed until the file says something else")
+
+	cfg.save("[tui.colors]\nwarn = \"amber\"\n")
+	f.d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "resync"})
+	c.shows("config.toml: tui.colors.warn")
 }
 
 // TestABrokenConfigAtStartDoesNotHideWhatTheClientIsWaitingFor: with no daemon there is no attach to read

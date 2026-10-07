@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -39,6 +40,10 @@ type Entry struct {
 	// the string the file would hold: "6" or "#1e90ff".
 	Value  any
 	Source Source
+	// notString marks a table's entry the file sets to something other than a string. Value is then how
+	// it reads written out, so a caller printing it prints a string as it is promised one, and an import
+	// knows the two are not the same value however alike they are spelled.
+	notString bool
 }
 
 // ErrMachineLocal reports an import that sets a key the contract marks machine-local.
@@ -75,6 +80,11 @@ func (f *File) Get(section Section, name string) (Entry, error) {
 			table, _ := value.(map[string]any)
 			if value, set = table[inner]; !set {
 				continue
+			}
+			if _, isString := value.(string); !isString {
+				// An entry's meaning is its milestone's to define, and so far every one is a string. `a = 5`
+				// is shown as "5": what the file says, in the one type an entry's value is promised to be.
+				value, e.notString = fmt.Sprint(value), true
 			}
 		}
 		e.Value, e.Source = plain(value), place.source
@@ -126,6 +136,7 @@ func plain(value any) any {
 // a terminal. BasicString escapes them. A table entry that is not a string is left out, as import leaves
 // it out: its milestone has not said what it means.
 func (f *File) Export() ([]byte, error) {
+	var edits []edit
 	doc := []byte("# Exported by `norite config export`. Merge it into another machine's config with\n" +
 		"# `norite config import <this file>`, which shows what it would change before changing it.\n")
 	for _, section := range []Section{Shared, TUI, GUI} {
@@ -140,11 +151,13 @@ func (f *File) Export() ([]byte, error) {
 				if err != nil {
 					return nil, fmt.Errorf("exporting %s.%s: %w", section, inner, err)
 				}
-				if doc, err = setRaw(doc, segments, literal); err != nil {
-					return nil, fmt.Errorf("exporting %s.%s: %w", section, inner, err)
-				}
+				edits = append(edits, edit{segments, literal})
 			}
 		}
+	}
+	doc, err := setAll(doc, edits)
+	if err != nil {
+		return nil, fmt.Errorf("exporting: %w", err)
 	}
 	return doc, nil
 }
@@ -175,9 +188,8 @@ type ImportPlan struct {
 	// import was not told to overwrite.
 	Kept []Change
 	// Skipped lists what the incoming file holds that was not understood, and why.
-	Skipped      []Warning
-	MoreSkipped  int
-	incomingSets int
+	Skipped     []Warning
+	MoreSkipped int
 }
 
 // Empty reports an import that would change nothing.
@@ -210,15 +222,16 @@ func PlanImport(current, incoming []byte, overwrite bool) (*ImportPlan, error) {
 				return nil, fmt.Errorf("%s.%s %w", section, name, ErrMachineLocal)
 			}
 			for inner, to := range flatten(section, name, want.set[section][name], plan) {
-				plan.incomingSets++
-				from, isSet := "", false
+				from, isSet, same := "", false, false
 				if e, err := have.Get(section, inner); err == nil && e.Source == FromFile {
 					from, isSet = fmt.Sprint(e.Value), true
+					// `a = 5` and an incoming `a = "5"` are spelled alike here and are not the same value.
+					same = from == to && !e.notString
 				}
 				change := Change{Section: section, Name: termsafe.Text(inner), From: termsafe.Text(from),
 					To: termsafe.Text(to), Replace: isSet, name: inner, to: to}
 				switch {
-				case isSet && from == to:
+				case same:
 				case isSet && !overwrite:
 					plan.Kept = append(plan.Kept, change)
 				default:
@@ -241,17 +254,25 @@ func flatten(section Section, name string, value any, plan *ImportPlan) map[stri
 		return map[string]string{name: fmt.Sprint(plain(value))}
 	}
 	out := map[string]string{}
+	skip := func(inner, problem string) {
+		if len(plan.Skipped) < MaxWarnings {
+			plan.Skipped = append(plan.Skipped, Warning{
+				Key: termsafe.Text(string(section) + "." + name + "." + inner), Problem: problem,
+			})
+		} else {
+			plan.MoreSkipped++
+		}
+	}
 	for inner, v := range table {
+		if inner == "" {
+			// TOML allows an empty key. Joined on, it is the table's own name with a dot after it, which names
+			// no entry, and one such line would otherwise fail a whole export or import.
+			skip(strconv.Quote(inner), "has an empty name, which names no entry")
+			continue
+		}
 		s, ok := v.(string)
 		if !ok {
-			if len(plan.Skipped) < MaxWarnings {
-				plan.Skipped = append(plan.Skipped, Warning{
-					Key:     termsafe.Text(string(section) + "." + name + "." + inner),
-					Problem: "is not a string, and this version of Norite imports only strings inside a table",
-				})
-			} else {
-				plan.MoreSkipped++
-			}
+			skip(inner, "is not a string, and this version of Norite imports only strings inside a table")
 			continue
 		}
 		out[name+"."+inner] = s
@@ -270,15 +291,17 @@ func Import(path string, incoming []byte, overwrite bool) (*ImportPlan, error) {
 		if err != nil {
 			return nil, err
 		}
-		next := current
+		edits := make([]edit, 0, len(plan.Apply))
 		for _, change := range plan.Apply {
 			segments, literal, err := resolve(change.Section, change.name, change.to, true)
 			if err != nil {
 				return nil, err
 			}
-			if next, err = setRaw(next, segments, literal); err != nil {
-				return nil, fmt.Errorf("%s: %w", change.Key(), err)
-			}
+			edits = append(edits, edit{segments, literal})
+		}
+		next, err := setAll(current, edits)
+		if err != nil {
+			return nil, err
 		}
 		done = plan
 		return next, nil

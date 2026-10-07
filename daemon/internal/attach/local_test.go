@@ -98,3 +98,22 @@ func TestLocalSendsOnlyWhatIsLocalAndWellFormed(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// The instance cannot speak in the daemon's namespace. A gateway event typed as a local one is dropped: a
+// client could not tell it from the daemon's own, and would re-read its config for every frame a hostile
+// instance sent.
+func TestTheInstanceCannotForgeALocalEvent(t *testing.T) {
+	ts := newTestServer(t, echoRelay())
+	watcher := ts.attach(t, true)
+
+	ts.Dispatch(ipc.EventConfigUpdate, json.RawMessage(`{}`))
+	ts.Dispatch(ipc.LocalEventPrefix+"ANYTHING_LATER", json.RawMessage(`{"x":1}`))
+	ts.Dispatch("GUILD_CREATE", guildPayload("10", "Guild"))
+
+	select {
+	case got := <-watcher.Events():
+		assert.Equal(t, "GUILD_CREATE", got.Type, "the forged events were not forwarded, and the real one was")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the gateway's own event did not arrive")
+	}
+}

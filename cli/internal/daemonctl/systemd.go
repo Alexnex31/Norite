@@ -119,14 +119,14 @@ func (s *systemdUser) Install(ctx context.Context, daemonBinary string) error {
 	if !filepath.IsAbs(stateHome) {
 		stateHome = ""
 	} else {
-		stateHome = systemdEscape(stateHome)
+		stateHome = systemdEnvEscape(stateHome)
 	}
 
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if !filepath.IsAbs(configHome) {
 		configHome = ""
 	} else {
-		configHome = systemdEscape(configHome)
+		configHome = systemdEnvEscape(configHome)
 	}
 
 	var unit strings.Builder
@@ -245,5 +245,19 @@ func systemdEscape(path string) string {
 		return path
 	}
 	replaced := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `$$`, `%`, `%%`).Replace(path)
+	return `"` + replaced + `"`
+}
+
+// systemdEnvEscape quotes a path for the value of an Environment= assignment, which is not ExecStart's
+// rule: systemd expands specifiers there and does not expand variables, so `%` is doubled and `$` is left
+// alone. Doubling it, as ExecStart needs, wrote XDG_STATE_HOME=/home/u/st$$1 for a home of /home/u/st$1,
+// and the service then took its lock and watched its config in a directory no shell uses — the two
+// daemons the capture exists to prevent (M21 /code-review; read back from systemd itself, which reports
+// `$$` unchanged and `%%` as `%`).
+func systemdEnvEscape(path string) string {
+	if !strings.ContainsAny(path, " \t\"'\\%") {
+		return path
+	}
+	replaced := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(path)
 	return `"` + replaced + `"`
 }

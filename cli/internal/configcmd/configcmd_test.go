@@ -257,6 +257,39 @@ func TestImportAsksFirstAndADryRunWritesNothing(t *testing.T) {
 	assert.Contains(t, out, "replace  shared.clock = 12h  (was 24h)")
 }
 
+// The plan shown and the import are two reads of the file, and somebody else can write between them. What
+// is reported is what happened: when the other writer already made every change, nothing was written, and
+// the command says so rather than "imported 0 settings" under written: true.
+func TestAnImportThatFindsNothingLeftToChangeSaysItWroteNothing(t *testing.T) {
+	path := home(t)
+	write(t, path, "[shared]\nclock = \"24h\"\n")
+	incoming := filepath.Join(t.TempDir(), "in.toml")
+	write(t, incoming, "[tui]\ntheme = \"a\"\n")
+
+	raced := false
+	beforeImport = func() {
+		raced = true
+		data, err := os.ReadFile(incoming)
+		require.NoError(t, err)
+		_, err = config.Import(path, data, false)
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() { beforeImport = func() {} })
+
+	out, _, err := norite(t, true, "import", incoming, "--yes")
+	require.NoError(t, err)
+	require.True(t, raced)
+	daemontest.MatchesCLISchema(t, out, "config.schema.json", "imported")
+	assert.JSONEq(t, `{"written":false,"applied":[],"kept":[],"skipped":[],"more_skipped":0}`, out)
+
+	// And the ordinary case still says it wrote.
+	beforeImport = func() {}
+	write(t, path, "[shared]\nclock = \"24h\"\n")
+	out, _, err = norite(t, true, "import", incoming, "--yes")
+	require.NoError(t, err)
+	assert.Contains(t, out, `"written": true`)
+}
+
 func TestAnImportThatIsNotAConfigIsRefused(t *testing.T) {
 	path := home(t)
 	dir := t.TempDir()

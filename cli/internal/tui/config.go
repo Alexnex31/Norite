@@ -51,13 +51,16 @@ func (m *Model) reloadConfig() tea.Cmd {
 // back to its defaults on every half-typed line would flash between two palettes while somebody edits.
 // What was last read stays in force and the hint row says the file was not applied, until one loads.
 //
-// A note that differs from the last one is news, and until a key is pressed it is shown over whatever the
-// hint row was saying: somebody who has just saved is looking for the result, and a client that is signed
-// out or waiting for its daemon shows a status line for as long as that lasts.
+// A note that differs from the last read's is news, and until a key is pressed it is shown over whatever
+// the hint row was saying: somebody who has just saved is looking for the result, and a client that is
+// signed out or waiting for its daemon shows a status line for as long as that lasts. The same note again
+// is not: the file is read on every attach, and a warning somebody has already pressed a key past would
+// otherwise come back over the status line each time the daemon restarted, with nothing saved (M21
+// /code-review).
 func (m *Model) applyConfig(cfg *config.Config, err error) {
-	was := m.configNote
-	defer func() { m.configNews = m.configNote != "" && m.configNote != was }()
-	if err != nil {
+	note, broken := "", err != nil
+	switch {
+	case broken:
 		// What happened first: the error names the file by its whole path, and a row cut to the terminal's
 		// width should lose that rather than the consequence. The text is the file's and the filesystem's —
 		// a path can hold anything a filename can — so it is sanitized as any foreign text is (rule 19).
@@ -68,20 +71,24 @@ func (m *Model) applyConfig(cfg *config.Config, err error) {
 			// home directory's worth of path pushed the line number off an 80-column terminal.
 			why = pe.Error()
 		}
-		m.configNote = termsafe.Text("config.toml was not applied · " + why)
-		m.configBroken = true
-		return
-	}
-	m.setLook(newLook(cfg))
-	m.configNote, m.configBroken = "", false
-	if len(cfg.Warnings) > 0 {
-		// One is enough to say the file needs a look; `norite config get` lists them all.
-		note := "config.toml: " + cfg.Warnings[0].String()
-		if more := len(cfg.Warnings) - 1 + cfg.MoreWarnings; more > 0 {
-			note += fmt.Sprintf(" (and %d more; see `norite config get`)", more)
+		note = termsafe.Text("config.toml was not applied · " + why)
+	default:
+		m.setLook(newLook(cfg))
+		if len(cfg.Warnings) > 0 {
+			// One is enough to say the file needs a look; `norite config get` lists them all.
+			note = "config.toml: " + cfg.Warnings[0].String()
+			if more := len(cfg.Warnings) - 1 + cfg.MoreWarnings; more > 0 {
+				note += fmt.Sprintf(" (and %d more; see `norite config get`)", more)
+			}
+			note = termsafe.Text(note)
 		}
-		m.configNote = termsafe.Text(note)
 	}
+	changed := note != m.configRead
+	m.configRead, m.configBroken = note, broken
+	if changed || broken {
+		m.configNote = note
+	}
+	m.configNews = changed && note != ""
 }
 
 // setLook replaces how everything on screen is drawn. Nothing is laid out here: a frame lays out what it

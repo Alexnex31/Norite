@@ -193,6 +193,13 @@ func (s *Server) End() {
 // before this event and then the event, or the state after it and not the event — never the event twice in
 // one form and not at all in the other.
 func (s *Server) Dispatch(eventType string, data json.RawMessage) {
+	// The DAEMON_ namespace is the daemon's, and only Local sends in it. The schema says the instance never
+	// uses the prefix, which is true of a correct instance and no bound on the one somebody signed in to: it
+	// would otherwise forge the daemon's own events to every attached client, at whatever rate it chose
+	// (M21 /code-review). Dropped before the state sees it, since the state holds what the instance sent.
+	if strings.HasPrefix(eventType, ipc.LocalEventPrefix) {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.Dispatch(eventType, data)
