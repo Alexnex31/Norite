@@ -138,6 +138,70 @@ func TestAKeyInsideAnInlineTableIsRefusedAndNothingChanges(t *testing.T) {
 	}
 }
 
+// This parser leaves an array's own range zero. A value span taken from it starts at byte 0 of the file.
+func TestAValueThatIsAnArrayOrATableIsReplacedWhereItIs(t *testing.T) {
+	in := "# banner\n[tui]\ntheme = \"a\"\n[shared]\nclock = [\"24h\",\n  \"x\"] # c\nother = { a = 1 } # d\n"
+	assert.Equal(t, strings.Replace(in, "[\"24h\",\n  \"x\"]", "\"12h\"", 1),
+		mustSet(t, in, []string{"shared", "clock"}, `"12h"`))
+	assert.Equal(t, strings.Replace(in, "{ a = 1 }", "7", 1),
+		mustSet(t, in, []string{"shared", "other"}, "7"))
+}
+
+// A config with no headers at all is a config.
+func TestANewKeyBesideRootLevelDottedKeys(t *testing.T) {
+	in := "# flat\ntui.colors.accent = 6 # mine\nshared.other = 1\n"
+	out := mustSet(t, in, []string{"tui", "colors", "warn"}, "3")
+	assert.Equal(t, "# flat\ntui.colors.accent = 6 # mine\nshared.other = 1\ntui.colors.warn = 3\n", out)
+	out = mustSet(t, in, []string{"shared", "clock"}, `"12h"`)
+	assert.Equal(t, "# flat\ntui.colors.accent = 6 # mine\nshared.other = 1\nshared.clock = \"12h\"\n", out)
+
+	// With a table after them, the new root key still goes above the first header.
+	in = "tui.colors.accent = 6\n\n[shared]\nclock = \"24h\"\n"
+	assert.Equal(t, "tui.colors.accent = 6\ntui.colors.warn = 3\n\n[shared]\nclock = \"24h\"\n",
+		mustSet(t, in, []string{"tui", "colors", "warn"}, "3"))
+}
+
+// Notepad and PowerShell 5.1 save UTF-8 with a byte-order mark, which TOML does not allow.
+func TestAByteOrderMarkIsReadPastAndKept(t *testing.T) {
+	bom := "\xEF\xBB\xBF"
+	in := bom + "[shared]\r\nclock = \"24h\" # mine\r\n"
+
+	c, err := Parse([]byte(in), TUI)
+	require.NoError(t, err)
+	assert.Equal(t, Clock24h, c.Clock())
+
+	assert.Equal(t, bom+"[shared]\r\nclock = \"12h\" # mine\r\n", mustSet(t, in, []string{"shared", "clock"}, `"12h"`))
+	out, err := unsetRaw([]byte(in), []string{"shared", "clock"})
+	require.NoError(t, err)
+	assert.Equal(t, bom+"[shared]\r\n", string(out))
+}
+
+// A fault already in the file is the file's, reported with its line, and not rewritten around.
+func TestAFileAlreadyBrokenInWaysOnlyTheDecoderSeesIsNotEdited(t *testing.T) {
+	in := "[shared]\nclock = \"24h\"\n[tui]\ntheme = \"a\"\n[shared]\nother = 1\n"
+	for name, edit := range map[string]func() ([]byte, error){
+		"set":   func() ([]byte, error) { return setRaw([]byte(in), []string{"shared", "clock"}, `"12h"`) },
+		"unset": func() ([]byte, error) { return unsetRaw([]byte(in), []string{"tui", "theme"}) },
+	} {
+		_, err := edit()
+		var pe *ParseError
+		require.ErrorAs(t, err, &pe, name)
+		assert.Equal(t, 5, pe.Line, name)
+		assert.NotContains(t, err.Error(), "the edit would", name)
+	}
+}
+
+// sameAfter is the last thing between a wrong splice and the disk, and every input that used to reach it
+// is now refused earlier, so it is tested as itself.
+func TestSameAfterRefusesAResultThatIsNotTheEditAsked(t *testing.T) {
+	path := []string{"shared", "clock"}
+	require.NoError(t, sameAfter([]byte("[shared]\nclock = \"12h\"\n"), path))
+	require.Error(t, sameAfter([]byte("\"12h\" # c\n"), path), "a truncated file")
+	require.Error(t, sameAfter([]byte("[shared]\nclock = \n"), path), "not TOML")
+	require.Error(t, sameAfter([]byte("[shared]\nother = 1\n"), path), "valid, and the key is not there")
+	require.Error(t, sameAfter([]byte("shared = 1\n"), path), "valid, and the section is not a table")
+}
+
 func TestAnEditToAFileThatIsNotTOMLIsRefused(t *testing.T) {
 	_, err := setRaw([]byte("[shared\nclock = 1\n"), []string{"shared", "clock"}, `"12h"`)
 	var pe *ParseError
@@ -183,11 +247,11 @@ func TestUnsetOnTheLastLineWithoutANewline(t *testing.T) {
 
 // Every string this file writes must read back as the string it was given, control characters and all.
 func TestAStringSurvivesBeingWritten(t *testing.T) {
-	for _, s := range []string{"plain", `back\slash`, `"quoted"`, "tab\there", "line\nbreak", "esc\x1b[2J", "\u202eover", "é漢🎉", "\x7f"} {
+	for _, s := range []string{"plain", `back\slash`, `"quoted"`, "tab\there", "line\nbreak", "esc\x1b[2J", "\b\f", "\u202eover", "é漢🎉", "\x7f"} {
 		var got struct{ V string }
-		require.NoError(t, toml.Unmarshal([]byte("V = "+formatString(s)+"\n"), &got), "%q", s)
+		require.NoError(t, toml.Unmarshal([]byte("V = "+BasicString(s)+"\n"), &got), "%q", s)
 		assert.Equal(t, s, got.V)
-		assert.NotContains(t, formatString(s), "\x1b", "a control character is written as an escape, never raw")
+		assert.NotContains(t, BasicString(s), "\x1b", "a control character is written as an escape, never raw")
 	}
 }
 

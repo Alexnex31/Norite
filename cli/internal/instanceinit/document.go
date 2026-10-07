@@ -14,6 +14,7 @@
 package instanceinit
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"text/template"
 
 	"github.com/Alexnex31/Norite/daemon/atomicfile"
+	"github.com/Alexnex31/Norite/daemon/config"
 )
 
 // FileMode is the permission the config file is created with.
@@ -291,44 +293,18 @@ func (d Document) Write(path string, force bool) error {
 // so a half-written one is an instance that cannot start and an operator with nothing to restore from.
 // The mode is forced on every write, since the file holds a password from its first byte.
 func writeAtomically(path, body string) error {
-	return atomicfile.Write(path, []byte(body), atomicfile.Options{Mode: FileMode})
+	err := atomicfile.Write(path, []byte(body), atomicfile.Options{Mode: FileMode})
+	// The file is complete; only the directory flush failed. The caller removes the file on any error,
+	// which would delete a finished configuration for a durability shortfall.
+	if errors.Is(err, atomicfile.ErrNotDurable) {
+		return nil
+	}
+	return err
 }
 
 // tomlString renders a Go string as a TOML basic string.
 //
-// Hand-written rather than borrowed from the TOML library because the template emits the document
-// directly: an unescaped quote or backslash in a password would produce a file that either fails to parse
-// or, worse, parses into something other than what the operator typed.
-func tomlString(s string) string {
-	var sb strings.Builder
-	sb.Grow(len(s) + 2)
-	sb.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			sb.WriteString(`\"`)
-		case '\\':
-			sb.WriteString(`\\`)
-		case '\b':
-			sb.WriteString(`\b`)
-		case '\f':
-			sb.WriteString(`\f`)
-		case '\n':
-			sb.WriteString(`\n`)
-		case '\r':
-			sb.WriteString(`\r`)
-		case '\t':
-			sb.WriteString(`\t`)
-		default:
-			// TOML forbids raw control characters in basic strings; everything else goes through as-is so
-			// non-ASCII passwords and paths survive unmangled.
-			if r < 0x20 || r == 0x7f {
-				fmt.Fprintf(&sb, `\u%04X`, r)
-				continue
-			}
-			sb.WriteRune(r)
-		}
-	}
-	sb.WriteByte('"')
-	return sb.String()
-}
+// The template emits the document directly, so an unescaped quote or backslash in a password would produce
+// a file that either fails to parse or, worse, parses into something other than what the operator typed.
+// The escaping is daemon/config's, which edits the client's TOML and needs exactly the same rule.
+func tomlString(s string) string { return config.BasicString(s) }

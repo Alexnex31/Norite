@@ -62,8 +62,7 @@ func TestAFailedDirectoryFlushSaysTheFileWasReplaced(t *testing.T) {
 	syncDir = func(string) error { return errors.New("no") }
 
 	err := Write(path, []byte("new"), Options{Mode: 0o600})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "was replaced")
+	require.ErrorIs(t, err, ErrNotDurable, "a caller must be able to tell this from a write that did not happen")
 	got, readErr := os.ReadFile(path)
 	require.NoError(t, readErr)
 	assert.Equal(t, "new", string(got))
@@ -163,6 +162,47 @@ func TestALinkLoopIsAnErrorNotAHang(t *testing.T) {
 	err := Write(a, []byte("x"), Options{Mode: 0o600, FollowSymlink: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "loop")
+}
+
+// ~/.config/norite is itself a link (stow folds a whole directory), and the file in it links to
+// "../shared/config.toml". The ".." is relative to where the directory really is.
+func TestARelativeLinkIsResolvedFromItsRealDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symbolic link needs a privilege on Windows")
+	}
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real", "cfgdir")
+	require.NoError(t, os.MkdirAll(realDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "real", "shared"), 0o700))
+	target := filepath.Join(root, "real", "shared", "config.toml")
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join("..", "shared", "config.toml"), filepath.Join(realDir, "config.toml")))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "home"), 0o700))
+	linkDir := filepath.Join(root, "home", "norite")
+	require.NoError(t, os.Symlink(realDir, linkDir))
+
+	require.NoError(t, Write(filepath.Join(linkDir, "config.toml"), []byte("new"), Options{Mode: 0o600, FollowSymlink: true}))
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(got), "the file the operating system reads through the link")
+	_, err = os.Stat(filepath.Join(root, "home", "shared"))
+	assert.True(t, os.IsNotExist(err), "nothing may be created beside the link")
+}
+
+func TestKeepModeRefusesAReadOnlyFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not meaningful on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("old"), 0o600))
+	require.NoError(t, os.Chmod(path, 0o444))
+
+	err := Write(path, []byte("new"), Options{Mode: 0o600, KeepMode: true})
+	require.ErrorIs(t, err, ErrReadOnly)
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "old", string(got))
 }
 
 func TestBeforeCanAbandonTheWrite(t *testing.T) {

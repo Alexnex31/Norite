@@ -1363,7 +1363,8 @@ of this section.
   leave-and-rejoin. And `norite about` reports a revision that resolves in the repository it names.
 
 - **M21 — Config file**: the shared TOML config at `~/.config/norite/config.toml`
-  (`$XDG_CONFIG_HOME/norite/` when set; `%APPDATA%\Norite\` on Windows), namespaced `[shared]` / `[tui]` /
+  (on Linux and macOS, under `$XDG_CONFIG_HOME` instead when that is set; on Windows always
+  `%APPDATA%\Norite\`, where `XDG_CONFIG_HOME` is not read), namespaced `[shared]` / `[tui]` /
   `[gui]` — there is no `[cli]` section, because the scriptable command tree has nothing to style and the
   section that once carried that name was always about chords and colours (ADR 0026).
 
@@ -1380,7 +1381,9 @@ of this section.
   `credentials` already is. For `config.toml` it follows a symlink to the real file and keeps the file's
   mode, because a config meant to be riced is one people keep in a dotfiles repository.
 
-  **`gofrs/flock` around each read-modify-write cycle from every writer**, on a sibling lock file, plus a
+  **`gofrs/flock` around each read-modify-write cycle from every writer**, on a lock file in the state
+  directory named for the config's path — never beside the config, whose directory roams on Windows and
+  is often a link into a dotfiles repository — plus a
   re-check immediately before the rename that the file is still what was read: an editor takes no lock,
   and a person's save is the edit that must not be lost.
 

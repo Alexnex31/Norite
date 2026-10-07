@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -58,6 +59,12 @@ type document struct {
 }
 
 func parseDocument(data []byte) (*document, error) {
+	// The ordinary decoder first. It knows what this file's parser does not: that a table is defined
+	// twice, that a key is. A fault already in the file is then reported as the file's, with its line,
+	// rather than blamed on the edit or rewritten around.
+	if err := valid(data); err != nil {
+		return nil, err
+	}
 	doc := &document{data: data}
 	p := unstable.Parser{KeepComments: true}
 	p.Reset(data)
@@ -72,7 +79,7 @@ func parseDocument(data []byte) (*document, error) {
 			doc.tables = append(doc.tables, header{path: path, array: e.Kind == unstable.ArrayTable, last: last})
 			current = len(doc.tables) - 1
 		case unstable.KeyValue:
-			rel, _ := keyParts(e.Key())
+			rel, keyEnd := keyParts(e.Key())
 			var base []string
 			if current >= 0 {
 				base = doc.tables[current].path
@@ -80,11 +87,14 @@ func parseDocument(data []byte) (*document, error) {
 			path := append(append([]string{}, base...), rel...)
 			v := e.Value()
 			end := int(e.Raw.Offset + e.Raw.Length)
+			// The value starts after the key and its "=". Not at v.Raw: this parser leaves an array's
+			// range zero, so trusting it would start the splice at byte 0 of the file.
+			valueStart := afterEquals(data, keyEnd, end)
 			doc.assignments = append(doc.assignments, assignment{
 				path:   path,
 				table:  current,
 				expr:   span{int(e.Raw.Offset), end},
-				value:  span{int(v.Raw.Offset), end},
+				value:  span{valueStart, end},
 				opaque: v.Kind == unstable.InlineTable || v.Kind == unstable.Array,
 			})
 			if current >= 0 {
@@ -96,6 +106,22 @@ func parseDocument(data []byte) (*document, error) {
 		return nil, parseError(err)
 	}
 	return doc, nil
+}
+
+// afterEquals returns where a value begins: past the "=" that follows the key ending at keyEnd, and the
+// blanks after it. limit is the end of the expression, which the scan never passes.
+func afterEquals(data []byte, keyEnd, limit int) int {
+	i := keyEnd
+	for i < limit && data[i] != '=' {
+		i++
+	}
+	if i < limit {
+		i++
+	}
+	for i < limit && (data[i] == ' ' || data[i] == '\t') {
+		i++
+	}
+	return i
 }
 
 func keyParts(it unstable.Iterator) (parts []string, end int) {
@@ -115,7 +141,8 @@ func setRaw(data []byte, path []string, literal string) ([]byte, error) {
 	if err := oneValue(literal); err != nil {
 		return nil, err
 	}
-	doc, err := parseDocument(data)
+	body, bom := cutBOM(data)
+	doc, err := parseDocument(body)
 	if err != nil {
 		return nil, err
 	}
@@ -125,14 +152,21 @@ func setRaw(data []byte, path []string, literal string) ([]byte, error) {
 
 	var out []byte
 	if a, ok := doc.find(path); ok {
-		out = splice(data, a.value, literal)
+		out = splice(body, a.value, literal)
 	} else {
 		out = doc.insert(path, literal)
 	}
 	if err := sameAfter(out, path); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return restoreBOM(out, bom), nil
+}
+
+func restoreBOM(body []byte, had bool) []byte {
+	if !had {
+		return body
+	}
+	return append(append([]byte{}, utf8BOM...), body...)
 }
 
 // oneValue refuses a literal that is anything but a single one-line TOML value.
@@ -168,7 +202,8 @@ func oneValue(literal string) error {
 // on the lines above stays: nothing says which key it belonged to, and deleting somebody's words on a
 // guess is the thing this file exists not to do.
 func unsetRaw(data []byte, path []string) ([]byte, error) {
-	doc, err := parseDocument(data)
+	body, bom := cutBOM(data)
+	doc, err := parseDocument(body)
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +214,7 @@ func unsetRaw(data []byte, path []string) ([]byte, error) {
 	if !ok {
 		return data, nil
 	}
+	data = body
 	start := lineStart(data, a.expr.start)
 	end := lineEnd(data, a.expr.end)
 	// Only when the key has the line to itself. `a = 1; b = 2` is not TOML, so the tail can only be
@@ -187,10 +223,10 @@ func unsetRaw(data []byte, path []string) ([]byte, error) {
 		return nil, errors.New("shares its line with something else; remove it by hand")
 	}
 	out := append(append([]byte{}, data[:start]...), data[end:]...)
-	if _, err := parseDocument(out); err != nil {
+	if err := valid(out); err != nil {
 		return nil, fmt.Errorf("removing the key would leave a file that is not valid TOML: %w", err)
 	}
-	return out, nil
+	return restoreBOM(out, bom), nil
 }
 
 // reachable refuses a path a splice cannot address: one inside an inline table or array, or under an
@@ -235,10 +271,23 @@ func (d *document) insert(path []string, literal string) []byte {
 	// joins its siblings in the same spelling.
 	for i := len(d.assignments) - 1; i >= 0; i-- {
 		a := d.assignments[i]
-		if a.table < 0 || len(a.path) <= len(parent) || !isPrefix(parent, a.path) {
+		if len(a.path) <= len(parent) || !isPrefix(parent, a.path) {
 			continue
 		}
-		base := d.tables[a.table].path
+		// The root counts as a table with no path: `tui.colors.accent = 6` with no header at all is a
+		// config, and its sibling goes after the last key before the first header.
+		var base []string
+		last := a.expr.end
+		if a.table >= 0 {
+			base = d.tables[a.table].path
+			last = d.tables[a.table].last
+		} else {
+			for _, other := range d.assignments {
+				if other.table < 0 {
+					last = max(last, other.expr.end)
+				}
+			}
+		}
 		if len(base) >= len(parent) {
 			continue
 		}
@@ -246,8 +295,7 @@ func (d *document) insert(path []string, literal string) []byte {
 		for _, part := range path[len(base):] {
 			rel = append(rel, formatKey(part))
 		}
-		at := lineEnd(d.data, d.tables[a.table].last)
-		return insertLine(d.data, at, strings.Join(rel, ".")+" = "+literal, nl)
+		return insertLine(d.data, lineEnd(d.data, last), strings.Join(rel, ".")+" = "+literal, nl)
 	}
 	// 3. Nothing of it exists: a new table at the end of the file.
 	parts := make([]string, len(parent))
@@ -264,6 +312,15 @@ func (d *document) insert(path []string, literal string) []byte {
 	out = append(out, "["+strings.Join(parts, ".")+"]"+nl...)
 	out = append(out, formatKey(leaf)+" = "+literal+nl...)
 	return out
+}
+
+// valid reports whether data is a TOML document, as the decoder every reader uses sees it.
+func valid(data []byte) error {
+	var decoded map[string]any
+	if err := toml.Unmarshal(data, &decoded); err != nil {
+		return parseError(err)
+	}
+	return nil
 }
 
 // sameAfter checks the edited bytes are TOML and that path now reads back, through the ordinary decoder
@@ -331,12 +388,13 @@ func formatKey(part string) string {
 	if bareKey.MatchString(part) {
 		return part
 	}
-	return formatString(part)
+	return BasicString(part)
 }
 
-// formatString spells s as a TOML basic string. strconv.Quote is close and wrong: it writes \x1b, which
-// TOML does not have.
-func formatString(s string) string {
+// BasicString spells s as a TOML basic string. strconv.Quote is close and wrong: it writes \x1b, which
+// TOML does not have. Exported because the instance wizard writes TOML by template and needs the same
+// escaping; two encoders of one rule had already drifted on \b and \f.
+func BasicString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
 	for _, r := range s {
@@ -351,6 +409,10 @@ func formatString(s string) string {
 			b.WriteString(`\t`)
 		case r == '\r':
 			b.WriteString(`\r`)
+		case r == '\b':
+			b.WriteString(`\b`)
+		case r == '\f':
+			b.WriteString(`\f`)
 		case r < 0x20 || r == 0x7f:
 			fmt.Fprintf(&b, `\u%04X`, r)
 		default:
@@ -380,21 +442,11 @@ func Literal(key Key, input string) (string, error) {
 	if c, ok := value.(Color); ok && !strings.HasPrefix(string(c), "#") {
 		return string(c), nil
 	}
-	return formatString(fmt.Sprint(value)), nil
+	return BasicString(fmt.Sprint(value)), nil
 }
 
-func equal(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
+func equal(a, b []string) bool { return slices.Equal(a, b) }
 
 func isPrefix(prefix, path []string) bool {
-	return len(prefix) <= len(path) && equal(prefix, path[:len(prefix)])
+	return len(prefix) <= len(path) && slices.Equal(prefix, path[:len(prefix)])
 }

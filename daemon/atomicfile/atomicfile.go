@@ -17,6 +17,17 @@ import (
 	"path/filepath"
 )
 
+// ErrNotDurable reports a write that happened but whose directory could not be flushed: the file holds
+// the new contents, and whether the rename survives a crash is up to the filesystem. It is an error
+// because "written" and "written durably" are different facts, and it is distinguishable because a caller
+// that treats it as "nothing was written" will then act on a file that is not what it believes: delete a
+// config that is complete, or keep presenting a token the store no longer holds.
+var ErrNotDurable = errors.New("the file was replaced, but its directory could not be flushed, " +
+	"so the change may not survive a crash")
+
+// ErrReadOnly reports a destination its owner has made read-only, under KeepMode.
+var ErrReadOnly = errors.New("is read-only; make it writable to let Norite change it")
+
 // maxLinks bounds how many symbolic links Write follows, so a loop is an error rather than a hang.
 const maxLinks = 40
 
@@ -26,8 +37,11 @@ type Options struct {
 	Mode fs.FileMode
 
 	// KeepMode keeps the permission of a file that already exists, and uses Mode only for a new one. It is
-	// for files a person owns and may have chosen a mode for. A file holding a secret leaves it false, so
-	// that every write puts the file back to Mode whatever it had drifted to.
+	// for files a person owns and may have chosen a mode for, and it honors the mode as well as copying
+	// it: a file with no owner-write bit is refused with ErrReadOnly, since a rename would otherwise
+	// replace what its owner locked (and on Windows fails, so the platforms would disagree). A file
+	// holding a secret leaves KeepMode false, so that every write puts the file back to Mode whatever it
+	// had drifted to.
 	KeepMode bool
 
 	// FollowSymlink writes the file a symbolic link points at, and leaves the link in place. Without it
@@ -53,7 +67,7 @@ func Write(path string, data []byte, opt Options) error {
 
 	target := path
 	if opt.FollowSymlink {
-		resolved, err := resolve(path)
+		resolved, err := Resolve(path)
 		if err != nil {
 			return err
 		}
@@ -64,6 +78,9 @@ func Write(path string, data []byte, opt Options) error {
 	if opt.KeepMode {
 		if info, err := os.Stat(target); err == nil {
 			mode = info.Mode().Perm()
+			if mode&0o200 == 0 {
+				return fmt.Errorf("%s %w", target, ErrReadOnly)
+			}
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("reading the permissions of %s: %w", target, err)
 		}
@@ -113,17 +130,17 @@ func Write(path string, data []byte, opt Options) error {
 	}
 	// The rename changed the directory, and until the directory is flushed the change is only in memory.
 	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("%s was replaced, but its directory could not be flushed, so the change may not "+
-			"survive a crash: %w", target, err)
+		return fmt.Errorf("%s: %w: %w", target, ErrNotDurable, err)
 	}
 	return nil
 }
 
-// resolve follows path through any symbolic links to the file a write should replace.
+// Resolve follows path through any symbolic links to the file a write with FollowSymlink replaces. A
+// watcher needs it too: the directory to watch is the real file's, not the link's.
 //
 // It differs from filepath.EvalSymlinks in one way that matters: a link whose target does not exist yet
 // resolves to that target, so the first write through a dangling link creates the file it names.
-func resolve(path string) (string, error) {
+func Resolve(path string) (string, error) {
 	current := path
 	for range maxLinks {
 		info, err := os.Lstat(current)
@@ -141,13 +158,16 @@ func resolve(path string) (string, error) {
 			return "", fmt.Errorf("resolving %s: %w", path, err)
 		}
 		if !filepath.IsAbs(next) {
-			next = filepath.Join(filepath.Dir(current), next)
+			// Relative to the directory the link is really in. Joining onto the path as written would
+			// collapse a ".." before the directory's own link had been followed, and land beside the
+			// link instead of beside its target, in a file the operating system never reads.
+			dir := filepath.Dir(current)
+			if real, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = real
+			}
+			next = filepath.Join(dir, next)
 		}
 		current = next
 	}
 	return "", fmt.Errorf("resolving %s: more than %d symbolic links, which is probably a loop", path, maxLinks)
 }
-
-// Resolve reports the file a write to path with FollowSymlink would replace. A watcher needs it: the
-// directory to watch is the real file's, not the link's.
-func Resolve(path string) (string, error) { return resolve(path) }

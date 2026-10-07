@@ -5,8 +5,9 @@
 # hold, one [[key]] table each. daemon/config mirrors it in Go, and a test fails in both directions, so a
 # key cannot be added to one and not the other.
 #
-# Where config.toml lives: $XDG_CONFIG_HOME/norite/ when that is set and absolute; otherwise
-# ~/.config/norite/ on Linux and macOS, and %APPDATA%\Norite\ on Windows.
+# Where config.toml lives:
+#   Linux and macOS   $XDG_CONFIG_HOME/norite/ when that is set and absolute, otherwise ~/.config/norite/
+#   Windows           %APPDATA%\Norite\, always. XDG_CONFIG_HOME is not read there, even when set.
 #
 # How a key is written in config.toml: under its section, by its name. `name = "colors.accent"` with
 # `section = "tui"` is

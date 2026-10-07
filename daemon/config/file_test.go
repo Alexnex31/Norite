@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/daemon/atomicfile"
 )
 
 func tempConfig(t *testing.T, contents string) string {
@@ -203,6 +206,77 @@ func TestSetWritesThroughASymlinkAndKeepsTheMode(t *testing.T) {
 	entries, err := os.ReadDir(repo)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "nothing is left in the repository: no lock file, no temporary file")
+	entries, err = os.ReadDir(filepath.Dir(link))
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "nor beside the link: that directory roams on Windows and is often a link itself")
+}
+
+// stow folds a whole directory by default: ~/.config/norite is the link, and everything written beside
+// config.toml is written into the repository.
+func TestNothingIsLeftInAConfigDirectoryThatIsItselfALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "dotfiles", "norite")
+	require.NoError(t, os.MkdirAll(repo, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "config.toml"), []byte("[shared]\nclock = \"24h\"\n"), 0o600))
+	linkDir := filepath.Join(dir, "norite")
+	require.NoError(t, os.Symlink(repo, linkDir))
+
+	require.NoError(t, Set(filepath.Join(linkDir, "config.toml"), Shared, KeyClock, "12h"))
+
+	entries, err := os.ReadDir(repo)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "config.toml", entries[0].Name())
+}
+
+func TestUnsetWithNoConfigCreatesNothing(t *testing.T) {
+	path := tempConfig(t, "")
+	require.NoError(t, Unset(path, Shared, KeyClock))
+	_, err := os.Stat(filepath.Dir(path))
+	assert.True(t, os.IsNotExist(err), "not even the directory")
+}
+
+// lookup accepts a shared key under any section it is asked about, so the section is checked first.
+func TestSetRefusesASectionNoriteDoesNotRead(t *testing.T) {
+	path := tempConfig(t, "")
+	for _, section := range []Section{"cli", "", "shared.x", "Shared"} {
+		require.ErrorIs(t, Set(path, section, KeyClock, "12h"), ErrUnknownKey, "%q", section)
+		require.ErrorIs(t, Unset(path, section, KeyClock), ErrUnknownKey, "%q", section)
+	}
+	_, err := os.Stat(path)
+	assert.True(t, os.IsNotExist(err))
+}
+
+// One write must not produce a file every later read refuses, Unset included.
+func TestAWriteThatWouldPassTheBoundIsRefused(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	err := Set(path, TUI, "keys.x", strings.Repeat("a", MaxFileSize))
+	require.ErrorIs(t, err, ErrTooLarge)
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", readFile(t, path))
+	require.NoError(t, Unset(path, Shared, KeyClock), "the file is still one Norite can edit")
+}
+
+func TestAnErrorAboutTheFilesContentsNamesTheFile(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n[tui.colors\naccent = 1\n")
+	for _, err := range []error{Set(path, Shared, KeyClock, "12h"), Unset(path, Shared, KeyClock)} {
+		var pe *ParseError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, 3, pe.Line, "the same position Load reports")
+		assert.Contains(t, err.Error(), path)
+	}
+}
+
+func TestAReadOnlyConfigIsNotReplaced(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits")
+	}
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	require.NoError(t, os.Chmod(path, 0o444))
+	require.ErrorIs(t, Set(path, Shared, KeyClock, "12h"), atomicfile.ErrReadOnly)
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", readFile(t, path))
 }
 
 func TestSettingTheSameValueDoesNotRewriteTheFile(t *testing.T) {

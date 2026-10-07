@@ -4,13 +4,15 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -126,6 +128,7 @@ func Parse(data []byte, client Section) (*Config, error) {
 	if len(data) > MaxFileSize {
 		return nil, ErrTooLarge
 	}
+	data, _ = cutBOM(data)
 	var doc map[string]any
 	if err := toml.Unmarshal(data, &doc); err != nil {
 		return nil, parseError(err)
@@ -133,7 +136,7 @@ func Parse(data []byte, client Section) (*Config, error) {
 
 	c := Defaults()
 	// Sorted, so the warnings come out in one order whatever order a map walks in.
-	for _, top := range sortedKeys(doc) {
+	for _, top := range slices.Sorted(maps.Keys(doc)) {
 		if !validSection(top) {
 			c.warn(top, "not a section Norite knows; the sections are [shared], [tui] and [gui]")
 		}
@@ -156,14 +159,15 @@ func Parse(data []byte, client Section) (*Config, error) {
 
 // walk visits a section's keys, flattening nested tables into dotted names until one is a known key.
 func (c *Config) walk(section Section, prefix string, table map[string]any, apply bool) {
-	for _, name := range sortedKeys(table) {
+	for _, name := range slices.Sorted(maps.Keys(table)) {
 		full := prefix + name
 		raw := table[name]
 		// A quoted key with a dot in it ("colors.accent" = 1) is one key whose name contains a dot, not
 		// a path. Joining it into one would let two different spellings mean the same setting, and the
 		// editor, which works on paths, would then change one and leave the other in force.
 		if strings.Contains(name, ".") {
-			c.warn(string(section)+"."+strconv.Quote(full), "not a key this version of Norite knows; it is kept and ignored")
+			c.warn(string(section)+"."+prefix+strconv.Quote(name),
+				"not a key this version of Norite knows; it is kept and ignored")
 			continue
 		}
 		key, known := lookup(section, full)
@@ -180,7 +184,7 @@ func (c *Config) walk(section Section, prefix string, table map[string]any, appl
 			c.warn(string(section)+"."+full, problem)
 			continue
 		}
-		if apply && key.Name == full {
+		if apply {
 			c.values[key.Name] = value
 		}
 	}
@@ -272,13 +276,13 @@ func parseError(err error) error {
 	return &ParseError{msg: termsafe.Text(err.Error())}
 }
 
-func sortedKeys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+// utf8BOM is the byte-order mark some Windows editors put at the start of a UTF-8 file. TOML does not
+// allow one, and a config that loses every setting because Notepad saved it is not a reasonable outcome.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// cutBOM returns data without a leading byte-order mark, and whether there was one.
+func cutBOM(data []byte) ([]byte, bool) {
+	return bytes.CutPrefix(data, utf8BOM)
 }
 
 func quoted(values []string) string {

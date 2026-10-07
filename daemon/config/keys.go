@@ -56,15 +56,14 @@ type Key struct {
 
 // The names of the live keys, for the callers that read them.
 const (
-	KeyClock        = "clock"
-	KeyColorAccent  = "colors.accent"
-	KeyColorWarn    = "colors.warn"
-	KeyColorDanger  = "colors.danger"
-	KeyColorDim     = "colors.dim"
-	KeyColorBright  = "colors.bright"
-	Clock24h        = "24h"
-	Clock12h        = "12h"
-	colorKeysPrefix = "colors."
+	KeyClock       = "clock"
+	KeyColorAccent = "colors.accent"
+	KeyColorWarn   = "colors.warn"
+	KeyColorDanger = "colors.danger"
+	KeyColorDim    = "colors.dim"
+	KeyColorBright = "colors.bright"
+	Clock24h       = "24h"
+	Clock12h       = "12h"
 )
 
 var keys = []Key{

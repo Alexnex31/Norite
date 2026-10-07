@@ -185,6 +185,12 @@ func TestAQuotedDottedKeyIsNotAPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, Color("6"), c.Color(KeyColorAccent))
 	require.Len(t, c.Warnings, 1)
+
+	// The warning names the key as the file holds it: the path, then the quoted key.
+	c, err = Parse([]byte("[tui.colors]\n\"a.b\" = 1\n"), TUI)
+	require.NoError(t, err)
+	require.Len(t, c.Warnings, 1)
+	assert.Equal(t, `tui.colors."a.b"`, c.Warnings[0].Key)
 }
 
 func TestInvalidTOMLIsAnErrorWithItsLine(t *testing.T) {

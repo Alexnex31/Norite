@@ -1694,9 +1694,10 @@ event — a channel is marked read automatically when the client's viewport reac
 debounced, so opening any client on any machine shows accurate unread state.
 
 **Config file** (`~/.config/norite/config.toml`, TOML): covers theme, keybindings, notification filters,
-pane-layout preferences — anything a user should freely hand-edit. The directory is `$XDG_CONFIG_HOME/norite`
-when that is set and absolute, `~/.config/norite` otherwise on Linux **and macOS** (where
-`~/Library/Application Support` stays the *state* directory), and `%APPDATA%\Norite` on Windows. The service
+pane-layout preferences — anything a user should freely hand-edit. On Linux **and macOS** the
+directory is `$XDG_CONFIG_HOME/norite` when that is set and absolute and `~/.config/norite` otherwise
+(`~/Library/Application Support` stays the *state* directory on macOS). On Windows it is always
+`%APPDATA%\Norite`; `XDG_CONFIG_HOME` is not read there. The service
 definition captures `XDG_CONFIG_HOME` as it does the state home, so the daemon and a shell resolve one file.
 
 Keys are namespaced `[shared]`, `[tui]`, `[gui]`: cross-cutting settings live in `[shared]` and a client
@@ -1722,11 +1723,17 @@ source of truth, and work with no daemon running. Every writer (CLI, TUI, GUI, d
 `daemon/atomicfile` — temp file, fsync, rename, **and an fsync of the parent directory**, without which
 the rename is not durable across a crash; Windows cannot fsync a directory and says so rather than
 pretending parity — **plus `gofrs/flock`-based locking** around each read-modify-write cycle. The lock is
-a sibling file, never the config itself, whose inode a rename replaces. An editor takes no lock, so a
+never the config itself, whose inode a rename replaces, and never beside it: it is in the state directory,
+named for the config's path, because the config's directory roams on Windows and is often a link into a
+repository. `atomicfile.Write` reports a failed directory flush as `ErrNotDurable`, distinct from a failed
+write, since the file *was* replaced and a caller acting as though it was not deletes a finished config or
+keeps presenting a rotated token. An editor takes no lock, so a
 writer checks immediately before its rename that the file is still what it read, and reapplies if not:
 the person's save is the edit that must not be lost. For this file the helper **follows a symlink to the
 real file and keeps its mode**, because a config meant to be riced lives in somebody's dotfiles
-repository, and a rename over the link would silently detach it.
+repository, and a rename over the link would silently detach it. A file its owner made read-only is
+refused rather than replaced, and a UTF-8 byte-order mark, which Windows editors add and TOML forbids, is
+read past and kept.
 
 **Hot reload**: the daemon watches the real file's directory with `fsnotify` (a directory, because most
 editors save by rename) and sends attach clients a local `CONFIG_UPDATE` dispatch carrying no data. Each

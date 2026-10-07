@@ -637,5 +637,12 @@ func (s *Store) writeRecord(record Record) error {
 // replaced rather than followed: this writes a refresh token as well as the two plain files beside it, and
 // neither a loosened mode nor a planted link should be able to move where one lands.
 func writeFileAtomically(path string, data []byte) error {
-	return atomicfile.Write(path, data, atomicfile.Options{Mode: filePerm})
+	err := atomicfile.Write(path, data, atomicfile.Options{Mode: filePerm})
+	// The file holds the new contents; only the directory flush failed. Reporting that as a failed write
+	// would have the session keep presenting a token the store has already replaced, which reuse
+	// detection answers by ending the sign-in. Before M21 nothing flushed the directory at all.
+	if errors.Is(err, atomicfile.ErrNotDurable) {
+		return nil
+	}
+	return err
 }
