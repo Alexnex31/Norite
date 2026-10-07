@@ -194,7 +194,7 @@ func (v importView) changes(t *output.Text) {
 		}
 	}
 	for _, c := range v.Kept {
-		t.Line("  keep     %s = %s  (the file has %s; --overwrite takes it)",
+		t.Line("  keep     %s = %s  (the imported file has %s; --overwrite takes it)",
 			output.Clean(c.Key), output.Clean(*c.From), output.Clean(c.To))
 	}
 	for _, s := range v.Skipped {
