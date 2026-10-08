@@ -1387,7 +1387,8 @@ of this section.
   re-check immediately before the rename that the file is still what was read: an editor takes no lock,
   and a person's save is the edit that must not be lost.
 
-  **`fsnotify` hot-reload**: the daemon watches the real file's directory and sends attach clients a local
+  **`fsnotify` hot-reload**: the daemon watches directories, never files — the config's, the one that is
+  in, and the real file's when the config is a link — and sends attach clients a local
   `DAEMON_CONFIG_UPDATE` carrying no data, signed in or not; each client reads the file again. Every
   dispatch the daemon originates is named `DAEMON_…`, which the gateway never is. The daemon interprets
   nothing on a client's behalf. `norite daemon install` captures `XDG_CONFIG_HOME` into the service

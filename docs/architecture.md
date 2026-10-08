@@ -127,9 +127,14 @@ Locked-in decisions:
 │   ├── internal/relay/           # attach clients' REST calls, made with the daemon's token (M20)
 │   ├── ipc/                      # the attach socket's protocol and client half, outside internal/ for the
 │   │                             #   CLI and GUI (M20); the bot-automation TCP listener joins at M22
-│   ├── config/                   # the client config: byte-range edits over go-toml v2, flock, the
-│   │                             #   fsnotify watch, the split toggle (M21); outside internal/
+│   ├── config/                   # the client config: its keys, loader, byte-range edits over go-toml
+│   │                             #   v2 under a flock, export/import and the two clients' merge (M21);
+│   │                             #   outside internal/ for the CLI, the TUI and the GUI
 │   ├── atomicfile/               # the one temp-file-plus-rename writer, directory fsync included (M21)
+│   ├── statefile/                # reads state.json, the daemon's own file; outside internal/ (M21)
+│   ├── internal/statefile/       # writes it: internal, so only the daemon can (M21)
+│   ├── internal/configwatch/     # the fsnotify watch on the config files' directories (M21)
+│   ├── internal/toggle/          # the same-machine config toggle, as requests the daemon answers (M21)
 │   ├── plugins/                  # wazero host, capability manifest + hash-pinning
 │   ├── voiceworker/               # os/exec spawn/supervise, stdin/stdout IPC framing
 │   ├── e2e/                       # keystore (modernc.org/sqlite), ratchet, single-writer goroutine, FTS5

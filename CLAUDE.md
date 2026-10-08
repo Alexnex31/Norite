@@ -391,7 +391,7 @@ Install and authenticate `gh` if you want that to change.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D under way, M20a done**. Full
+**Phase D under way, M21 done**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -1032,6 +1032,49 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   **The release had never run, and its dry run found it would not have built the commit it stamped.** A
   `go work sync` hook rewrote two modules' `go.mod` during every release, and goreleaser built in workspace
   mode while the notices are generated standalone. Both gone: every release build sets `GOWORK=off`.
+
+- **M21 — Config file**: done. `daemon/config` (the keys, the loader, edits by byte range, export and
+  import, the two clients' merge), `daemon/atomicfile`, `daemon/statefile` and its internal writer,
+  `daemon/internal/configwatch` and `daemon/internal/toggle`; `cli/internal/configcmd` (`norite config
+  path|get|set|unset|export|import|split|unsplit`) and `cli/internal/prompt`; the terminal client reading
+  `[tui.colors]` and `[shared] clock` and redrawing on `DAEMON_CONFIG_UPDATE`; `contracts/client-config.toml`
+  and `contracts/cli-json/config.schema.json`. Decisions are in the roadmap entry, in `architecture.md` §3
+  and in `docs/security-ledger.md`.
+
+  **Planning found the library did not do what three documents said** — nine milestones running. The
+  roadmap, `architecture.md` and ADR 0010 all named "`go-toml` v2 document-editing mode" as what keeps
+  comments on a write. v2 has none. An edit is a splice at the byte range `unstable.Parser` reports, and
+  the test compares whole files rather than checking that a comment is still there. Every setting the
+  documents gave as an example also belonged to a later milestone, so the file had no reader; two keys
+  are live here and the rest are listed in the contract so the format is settled.
+
+  **A bound is a measurement.** The size limit sat at 1 MiB until the sweep timed the decoder, which is
+  quadratic in one table's keys: ten seconds at the bound. It is 64 KiB, pinned by a test. The same shape
+  came back twice more: an import made one key at a time was cubic (two minutes at the bound, with the
+  lock held), and so was the first repair. Every batch of edits is now planned against one read.
+
+  **The toggle took three review rounds, and each found something in the last round's fix.** Split copies
+  `config.toml` into both clients' files, so each holds a stale copy of the other's section. Merging by key
+  let that copy bring back a setting its owner had removed. Taking each section from its own file fixed
+  that, but through the key table, which carries strings: a number in a client's own table was dropped
+  without a word. It is carried as the file wrote it now. **When a fix narrows a rule, ask what the
+  narrower rule still cannot say**, and make it say so in the output.
+
+  **A file is whatever is at the path.** A config that was a link to a pipe hung every command, the client
+  before its first frame, and the daemon's toggle with a lock held. A directory reached by two names was
+  two locks. Two files dated 1970 were taken for two missing ones. Each was found by a review asking what
+  else could be there, not by anything a correct setup produces.
+
+  **The gates caught two of my own tests.** One raced, passing the race detector on the run before its
+  commit and failing the next. One proved a lock by counting, which a lost update leaves right half the
+  time. And the daemon's tests had been creating `~/.config/norite` in the home of whoever ran them since
+  the watch was added; every test package that starts a daemon or a client now points its roots at a
+  temporary directory in `TestMain`.
+
+  **The manual pass found one line of wording**, which after three review rounds is the result to expect
+  rather than to distrust. It is also where two consequences of the design were seen plainly: an unsplit
+  starts from the newer file, so the older file's comments are only in the copy set aside; and a table
+  whose last entry is removed keeps its header.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -2223,8 +2266,9 @@ And on the attach socket and the relayed verbs, from M20:
   print without the `norite: ` prefix.
 - **A verb attaches on its first request**, after every flag check and confirmation, so a usage error is
   exit 2 on a machine with no daemon running.
-- **Destructive verbs go through `confirm`**: `--yes` answers it, the question goes to stderr, and with no
-  terminal and no `--yes` it is `ErrNoTerminal` naming the flag.
+- **Destructive verbs go through `confirm`** (since M21 a wrapper over `cli/internal/prompt`): `--yes`
+  answers it, the question goes to stderr, and with no terminal and no `--yes` it is `ErrNoTerminal`
+  naming the flag.
 - **Text output passes every instance value through `termsafe`**, ids included; `--json` goes through
   `output.WriteJSON`, which escapes what `termsafe.Block` would remove and is lossless to a parser. Never
   `json.Marshal` straight to stdout.
@@ -2272,6 +2316,54 @@ And on guild invites and the first client, from M20a:
 - **A release is proved by `just release-dry-run`** before a tag. Builds run with `GOWORK=off`, there is no
   `go work sync` hook, and the release footer, which carries the `cosign verify-blob` command pinned to
   `release.yml` at the tag, is configuration.
+
+And on the client config and the daemon's own requests, from M21:
+
+- **A setting is a row in `contracts/client-config.toml` and in `daemon/config`'s key table**, in the same
+  commit; a test compares the two in both directions. Each key says whether it is portable and which
+  milestone reads it. A key with no reader yet is listed, kept by the loader, and read by nothing. No
+  secret is ever a key.
+- **Anything outside `daemon/config` writes a setting by client, never by path**: `SetFor`, `UnsetFor`,
+  `ImportFor`, all through `UpdateFor`, which asks which file the client reads again once it holds that
+  file's lock. The path-based writers are unexported for this reason.
+- **An edit is a splice, and many edits are one read.** `setAll` and `unsetAll` plan against one parse of
+  the document and read the result back once. Nothing re-serializes a config. A new way to change the file
+  goes through them, and a batch must write what the same edits one at a time write.
+- **The decoder is quadratic in a table's keys.** `MaxFileSize` is 64 KiB because of it, on read and on
+  write. Decode a file once and pass what that found; anything that decodes per key or per frame is the
+  cubic import again.
+- **A config is a regular file, asked before it is opened** (`config.read`, `statefile.Load`). Opening a
+  pipe waits for ever.
+- **The lock is in the state directory, named for the real directory and the file's own name.** Never
+  beside the config, which roams on Windows and is often a link into a dotfiles repository.
+- **An editor takes no lock.** Every writer re-reads before its rename, and the toggle re-reads each file
+  after its work and redoes it if somebody saved.
+- **What a file says is foreign text.** A `Warning` and a `ParseError` are sanitized where they are made;
+  a path in an error is the filesystem's, and goes through `termsafe` where it is drawn or printed.
+- **The daemon notices the file and interprets nothing.** `configwatch` watches directories, never files:
+  the config's, its parent, and a link target's. A client hears `DAEMON_CONFIG_UPDATE`, carrying nothing,
+  and reads the file itself.
+- **`DAEMON_` is the daemon's namespace for dispatches, and `Server.Dispatch` drops an instance event that
+  uses it.** A new local dispatch is a constant in `daemon/ipc`, a row in `daemon-ipc.schema.json`'s
+  `LocalDispatch`, and sent through `Server.Local`.
+- **A request the daemon answers itself lives under `/@daemon/`** on the relay's own request frame, so no
+  frame changes. It is answered signed in or not, with 200 and a body or with `conflict` or `failed`, never
+  a status. It takes no body and carries nothing of the user's in its path, because a daemon older than the
+  prefix relays the path to its instance (ledger). `relay.Target` refuses the prefix, and a test holds
+  `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and `LocalRead`.
+- **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
+  which nothing outside the daemon module can import. A write puts back the fields it did not understand.
+  A step that must follow the state and not be interleaved with the next update goes in `Update`'s `then`.
+- **While split, a client's file is read for `[shared]` and its own section.** Its copy of the other
+  client's section is stale. Every verb that lists, exports, imports or sets must leave it out or refuse
+  it, and unsplit takes each section from its owner's file as written.
+- **The toggle sets aside and never deletes**, and never overwrites an earlier copy.
+- **The terminal client builds its styles once per config read** (`look`), never per frame, and keeps the
+  last config that loaded. `Options.Config` defaults to the user's file, so the package's `TestMain` points
+  every root at a temporary directory; a new test package that starts a daemon or a client needs the same.
+- **A yes/no question is `cli/internal/prompt`**, for the verbs and for `norite config import` alike.
+- **Testing the editor**: compare whole files, not the presence of a comment. For a race with an editor
+  or another command, stand inside the handler (`Handler.saved`, `Handler.rename`) rather than race it.
 
 ## Project-specific skills
 
