@@ -240,7 +240,19 @@ var refused = []string{"/auth", "/instance", "/users/@me/sessions"}
 
 // Target checks a client's path and returns it parsed: a path under /api/v1 and its query, nothing that
 // could name another host or climb out, and nothing on a refused surface.
-func Target(path string) (*url.URL, error) {
+func Target(path string) (*url.URL, error) { return target(path, true) }
+
+// ScriptTarget is Target for a request arriving on the automation port (M22): the same rules with none of
+// the relay's exceptions, so every refused surface is refused whole.
+//
+// A script presents an API token, which the instance would refuse on the token routes anyway (they need a
+// user actor); refusing here means the port never carries a request to a surface that manages credentials,
+// whatever a later instance decides to allow on it. The exceptions are a parameter rather than something
+// this function takes back out: an exception added to the relay for another surface must not reach the
+// lower tier because nobody thought to subtract it (M22 /code-review).
+func ScriptTarget(path string) (*url.URL, error) { return target(path, false) }
+
+func target(path string, exceptions bool) (*url.URL, error) {
 	switch {
 	case path == "" || path[0] != '/':
 		return nil, errors.New("the path must start with /")
@@ -282,7 +294,7 @@ func Target(path string) (*url.URL, error) {
 		return nil, errors.New("the path is the daemon's own, and is not relayed to the instance")
 	}
 	// On the path as written, not lowered: a refusal errs wide and an exception must not.
-	if tokenRoute(u.Path) {
+	if exceptions && tokenRoute(u.Path) {
 		return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
 	}
 	for _, prefix := range refused {
@@ -292,22 +304,6 @@ func Target(path string) (*url.URL, error) {
 		}
 	}
 	return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
-}
-
-// ScriptTarget is Target for a request arriving on the automation port (M22): the same rules, and all of
-// /auth refused, the token routes included. A script presents an API token, which the instance would
-// refuse there anyway (they need a user actor); refusing here means the port never carries a request to
-// the surface that manages credentials, whatever a later instance decides to allow on it.
-func ScriptTarget(path string) (*url.URL, error) {
-	u, err := Target(path)
-	if err != nil {
-		return nil, err
-	}
-	if lower := strings.ToLower(u.Path); lower == "/auth" || strings.HasPrefix(lower, "/auth/") {
-		return nil, errors.New("the automation port does not carry /auth: it manages credentials, and " +
-			"a script uses one without managing any")
-	}
-	return u, nil
 }
 
 // tokenRoute reports whether a path is one of the API token routes, the exception to the /auth

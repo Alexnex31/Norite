@@ -1681,7 +1681,12 @@ socket it is the session's. Frames, connections (16) and the request rate (five 
 script) are bounded locally, the last because a script shares its owner's per-IP budget on the instance. A
 browser cannot speak the framing. A script that cannot either uses `norite automation request`.
 
-The switch and the port number (7717 by default) are in `state.json`, changed by
+**The port serves one instance.** A token is a credential for the instance that minted it, and the daemon
+cannot tell which that was. So enabling the port records the instance the daemon is signed in to, and a
+request made while it is signed in to any other is refused before the token goes anywhere. Without that,
+signing in to a second instance would hand the first one's tokens to the second's operator.
+
+The switch, the port number (7717 by default) and that instance are in `state.json`, changed by
 `norite automation enable|disable` through `/@daemon/` requests. A port that is taken leaves the listener
 closed and says so; the daemon never moves to another.
 

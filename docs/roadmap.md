@@ -1457,7 +1457,10 @@ of this section.
   stream is everything the account sees; a script reads over REST.
 
   **Closed until asked for.** `norite automation enable|disable|status`, requests to the daemon under
-  `/@daemon/`, which keeps the switch and the port number in `state.json` (M21). The port is 7717 unless
+  `/@daemon/`, which keeps the switch, the port number and the instance it was enabled for in `state.json`
+  (M21). The port serves that instance only: a token is a credential for the instance that minted it, the
+  daemon cannot tell which that was, and a sign-in to a second instance must not send it the first one's
+  tokens. The port is 7717 unless
   `enable --port` says otherwise. A port already taken is not walked past: the listener stays closed and
   the log and `status` say why, because a script would not find a port the daemon moved to.
 

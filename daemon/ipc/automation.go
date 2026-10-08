@@ -196,6 +196,8 @@ type AutomationClient struct {
 	mu   sync.Mutex
 	conn net.Conn
 	next int
+	// broken is why the connection can no longer be used, once a call on it was abandoned.
+	broken error
 	// Version is the daemon's, from Ready.
 	Version string
 }
@@ -271,6 +273,9 @@ func (c *AutomationClient) read() (gatewayproto.Frame, error) {
 func (c *AutomationClient) Do(ctx context.Context, method, path string, body json.RawMessage) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.broken != nil {
+		return Response{}, c.broken
+	}
 
 	c.next++
 	id := strconv.Itoa(c.next)
@@ -282,20 +287,44 @@ func (c *AutomationClient) Do(ctx context.Context, method, path string, body jso
 		return Response{}, err
 	}
 
-	// The context ends the wait by ending the read. The connection is not usable afterwards, which is the
-	// honest state: an answer may still be on its way for a request nobody is waiting on.
-	stop := context.AfterFunc(ctx, func() { _ = c.conn.SetDeadline(time.Now()) })
-	defer stop()
+	// The context ends the wait by ending the read, by moving the connection's deadline to now.
+	//
+	// That deadline outlives this call unless it is taken back. A cancel that lands just as the answer is
+	// read would otherwise leave a healthy connection failing its next write with a timeout (M22
+	// /code-review). So the hook is waited for when it has started, and the deadline cleared after it.
+	woke := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = c.conn.SetDeadline(time.Now())
+		close(woke)
+	})
+	settle := func() {
+		if !stop() {
+			<-woke
+			_ = c.conn.SetDeadline(time.Time{})
+		}
+	}
+	// A call given up on leaves an answer that may still arrive, for a request nobody is waiting on. The
+	// next call would read it as its own, so there is no next call on this connection.
+	abandon := func(err error) error {
+		c.broken = errors.New("this connection to the automation port was given up on mid-request; open another")
+		_ = c.conn.Close()
+		return err
+	}
 
 	if err := WriteFrame(c.conn, frame); err != nil {
-		return Response{}, fmt.Errorf("writing to the automation port: %w", err)
+		settle()
+		if ctx.Err() != nil {
+			return Response{}, abandon(ctx.Err())
+		}
+		return Response{}, abandon(fmt.Errorf("writing to the automation port: %w", err))
 	}
 	answer, err := c.read()
+	settle()
 	if err != nil {
 		if ctx.Err() != nil {
-			return Response{}, ctx.Err()
+			return Response{}, abandon(ctx.Err())
 		}
-		return Response{}, err
+		return Response{}, abandon(err)
 	}
 	var resp Response
 	if answer.Op != OpResponse || Decode(answer, &resp) != nil || resp.ID != id {

@@ -147,7 +147,7 @@
             "id": {
               "type": "string",
               "pattern": "^[0-9A-Za-z_-]{1,64}$",
-              "description": "Chosen by the script, echoed by the response."
+              "description": "Chosen by the script, echoed by the response. A request whose id does not match is not performed, and the connection is closed."
             },
             "method": {
               "enum": [
@@ -276,7 +276,7 @@
             },
             {
               "const": "refused",
-              "description": "A path the port does not carry."
+              "description": "A path the port does not carry, or a daemon signed in to another instance than the one the port was enabled for: a token is not sent to an instance it was not made on."
             },
             {
               "const": "bad_request",
@@ -365,7 +365,7 @@
         },
         {
           "const": 4101,
-          "description": "Too many scripts: the port already serves 16 connections."
+          "description": "Too many scripts: the port already serves 16. Sent only to a connection that presented the port secret; one that has not is closed without a frame, as is the thirty-third connection waiting to present it."
         }
       ]
     },

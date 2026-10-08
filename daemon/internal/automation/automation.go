@@ -24,10 +24,20 @@
 // The instance's status and body, as they came. A 401 is the script's to deal with: its token was refused,
 // and no session here can renew it. That is the difference from the relay, where a 401 is the session's.
 //
+// # One instance
+//
+// A token is a credential for the instance that minted it, and the daemon cannot tell which that was. So
+// the port serves the instance it was enabled for and no other: Options.EnabledFor is recorded when the
+// user turns the port on, and a request made while the daemon is signed in anywhere else is refused before
+// the token goes anywhere. Without it, signing in to a second instance would hand the first one's tokens
+// to the second's operator, one request at a time (M22 /code-review).
+//
 // # Bounds
 //
-// A fixed number of connections, one request at a time on each, a rate shared by all of them, and the
-// attach socket's bounds on a frame and on an answer. The rate exists because a script shares its owner's
+// A fixed number of scripts, one request at a time on each, a rate shared by all of them, and the
+// attach socket's bounds on a frame and on an answer. Connections that have not yet presented the secret
+// are counted apart from those that have, so that filling the port with silence does not use the places
+// scripts are served from; one over that count is closed like any other stranger, without a word. The rate exists because a script shares its owner's
 // address on the instance: a loop that spent the instance's per-address budget would get the owner's own
 // client answered 429.
 //
@@ -47,7 +57,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,8 +87,11 @@ type Options struct {
 	StateDir string
 	// Instance says where requests go. It carries no credential, by design.
 	Instance Instance
-	// HTTP performs the calls. It must follow no redirect: a redirect would carry the script's token to a
-	// path this package has not checked.
+	// EnabledFor is the instance the user turned the port on for. Requests are served while the daemon is
+	// signed in to it and refused while it is signed in to any other.
+	EnabledFor string
+	// HTTP performs the calls. Open takes a copy that follows no redirect, whatever this one does: a
+	// redirect would carry the script's token to a path this package has not checked.
 	HTTP *http.Client
 	// Version goes in Ready and in the User-Agent.
 	Version string
@@ -107,8 +123,20 @@ const (
 )
 
 // ErrPortTaken is a port something else is listening on. The daemon does not move to another: a script
-// would not find it.
+// would not find it. Only that: a port this account may not bind, or a machine with no loopback address,
+// is a different problem with a different remedy, and is reported as itself.
 var ErrPortTaken = errors.New("the automation port is taken")
+
+// listen is net.Listen, a variable so a test can make binding fail for a reason other than the port being
+// held, which nothing portable provokes.
+var listen = net.Listen
+
+// maxPending is how many connections may be waiting to present their secrets. Apart from the scripts being
+// served, so strangers holding connections open cost scripts nothing but this.
+const maxPending = 32
+
+// requestID is what a request's id may be: the contract's pattern, checked because the id is echoed back.
+var requestID = regexp.MustCompile(`^[0-9A-Za-z_-]{1,64}$`)
 
 // Server is the open port.
 type Server struct {
@@ -119,9 +147,32 @@ type Server struct {
 	userAgent string
 	bucket    *bucket
 
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
-	wg    sync.WaitGroup
+	enabledFor string
+
+	mu sync.Mutex
+	// conns is every open connection; identified counts those that have presented the secret.
+	conns      map[net.Conn]struct{}
+	identified int
+	wg         sync.WaitGroup
+}
+
+// Clean removes an automation file left in stateDir. The caller holds the daemon's lock, which is what makes
+// any file found there stale: left by a daemon that was killed, naming a port it no longer holds and that
+// anything may since have bound. Called when the daemon starts, whether or not the port is to open, and by
+// Open before it binds. It removes the name and never follows a link.
+func Clean(stateDir string) {
+	_ = os.Remove(ipc.AutomationFilePath(stateDir))
+}
+
+// sameInstance reports whether two instance URLs name one instance: scheme, host and path prefix.
+func sameInstance(a, b string) bool {
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil || ua.Host == "" || ub.Host == "" {
+		return false
+	}
+	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host) &&
+		strings.TrimRight(ua.Path, "/") == strings.TrimRight(ub.Path, "/")
 }
 
 // Open binds the port, mints this run's secret and writes both where a script can find them. The caller
@@ -130,6 +181,14 @@ func Open(opts Options) (*Server, error) {
 	if opts.Instance == nil || opts.HTTP == nil {
 		return nil, errors.New("automation: an instance and an HTTP client are required")
 	}
+	if !sameInstance(opts.EnabledFor, opts.EnabledFor) {
+		return nil, errors.New("automation: the instance the port was enabled for is required")
+	}
+	// A copy, so the caller's client is not changed under it, and so that the policy does not depend on
+	// the caller having remembered it.
+	client := *opts.HTTP
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	opts.HTTP = &client
 	if opts.Port < 0 || opts.Port > 65535 {
 		return nil, fmt.Errorf("automation: %d is not a port", opts.Port)
 	}
@@ -149,9 +208,16 @@ func Open(opts Options) (*Server, error) {
 
 	// The address is spelled out. ":7717" binds every interface and looks the same on a developer's
 	// machine (M8), and "localhost" is a name something else resolves.
-	l, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(opts.Port)))
+	//
+	// Whatever a killed daemon left is removed first, so that failing to bind does not leave a file
+	// naming this port with a secret for whoever did bind it.
+	Clean(opts.StateDir)
+	l, err := listen("tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(opts.Port)))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrPortTaken, termsafe.Text(err.Error()))
+		if addressInUse(err) {
+			return nil, fmt.Errorf("%w: %s", ErrPortTaken, termsafe.Text(err.Error()))
+		}
+		return nil, fmt.Errorf("automation: cannot listen on 127.0.0.1 port %d: %s", opts.Port, termsafe.Text(err.Error()))
 	}
 
 	raw := make([]byte, secretBytes)
@@ -168,9 +234,10 @@ func Open(opts Options) (*Server, error) {
 	opts.Version = version
 	s := &Server{
 		opts: opts, listener: l, file: file, secretSum: sha256.Sum256([]byte(file.Secret)),
-		userAgent: "norite-daemon/" + version + " (automation)",
-		bucket:    newBucket(opts.Rate, opts.Burst, opts.now),
-		conns:     map[net.Conn]struct{}{},
+		userAgent:  "norite-daemon/" + version + " (automation)",
+		bucket:     newBucket(opts.Rate, opts.Burst, opts.now),
+		conns:      map[net.Conn]struct{}{},
+		enabledFor: opts.EnabledFor,
 	}
 
 	// Written once the port is bound, so the file never names a port nothing answers on. 0600 and
@@ -199,11 +266,21 @@ func (s *Server) Serve(ctx context.Context) {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			break
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				break
+			}
+			// Most likely out of file descriptors, as on the attach socket. Leaving the loop would end the
+			// port for the rest of the daemon's run with its file still naming it.
+			s.opts.Log.Warn().Str("error", termsafe.Text(err.Error())).Msg("could not accept a script; trying again")
+			select {
+			case <-ctx.Done():
+			case <-time.After(100 * time.Millisecond):
+			}
+			continue
 		}
 		if !s.admit(conn) {
-			// Told why, briefly, and without having read anything from it.
-			s.closeWith(conn, ipc.CloseTooManyClients, "the automation port is serving as many scripts as it will")
+			// A stranger like any other: it has presented nothing, so it is told nothing.
+			_ = conn.Close()
 			continue
 		}
 		s.wg.Add(1)
@@ -235,14 +312,32 @@ func (s *Server) Close() {
 	}
 }
 
+// admit takes a place among the connections that have yet to present their secrets.
 func (s *Server) admit(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.conns) >= ipc.MaxAutomationConns {
+	if len(s.conns)-s.identified >= maxPending {
 		return false
 	}
 	s.conns[conn] = struct{}{}
 	return true
+}
+
+// promote moves a connection that presented the secret to a place among the scripts served, if there is one.
+func (s *Server) promote() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.identified >= ipc.MaxAutomationConns {
+		return false
+	}
+	s.identified++
+	return true
+}
+
+func (s *Server) demote() {
+	s.mu.Lock()
+	s.identified--
+	s.mu.Unlock()
 }
 
 func (s *Server) release(conn net.Conn) {
@@ -290,19 +385,28 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// Said only now, to something that has proved it is the user's.
+	if !s.promote() {
+		s.closeWith(conn, ipc.CloseTooManyClients, "the automation port is serving as many scripts as it will")
+		return
+	}
+	defer s.demote()
+
 	if !s.write(conn, ipc.OpAutomationReady, ipc.AutomationReady{Version: s.opts.Version}) {
 		return
 	}
 
 	for {
-		// Asked before the deadline is set again: Serve wakes a waiting connection by moving its deadline,
-		// and one that was in the middle of a request would otherwise set it back and wait out the idle
-		// time on a daemon that is stopping.
+		// The deadline first, then the question. Serve wakes a waiting connection by moving its deadline
+		// to now, after the context has ended. Asked in the other order, a connection could see a live
+		// context, lose the processor, and then set its deadline back over Serve's: five minutes of a
+		// stopping daemon waiting on it (M22 /code-review). This way either the context is seen ended
+		// here, or Serve's deadline lands after this one and ends the read.
+		_ = conn.SetReadDeadline(time.Now().Add(idleWait))
 		if ctx.Err() != nil {
 			s.closeWith(conn, ipc.CloseGoingAway, "the daemon is stopping")
 			return
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(idleWait))
 		f, err := ipc.ReadFrame(conn, ipc.MaxClientFrame)
 		switch {
 		case err == nil:
@@ -329,7 +433,9 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var req ipc.Request
-		if err := ipc.Decode(f, &req); err != nil {
+		if err := ipc.Decode(f, &req); err != nil || !requestID.MatchString(req.ID) {
+			// Before anything is asked of the instance: the id is echoed, and a request whose answer
+			// could not be a valid frame is not performed.
 			s.closeWith(conn, ipc.CloseDecodeError, "a request that is not valid")
 			return
 		}
@@ -384,6 +490,12 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 	instanceURL, ok := s.opts.Instance.InstanceURL()
 	if !ok {
 		return failure(ipc.RelayNotSignedIn, "the daemon is not signed in to an instance; run `norite login`")
+	}
+	// Asked on every request, not once per connection: a sign-in can change under an open one.
+	if !sameInstance(instanceURL, s.enabledFor) {
+		return failure(ipc.RelayRefused, "the automation port was turned on for another instance than the one "+
+			"the daemon is signed in to now, and a token is not sent to an instance it was not made on; "+
+			"run `norite automation enable` to use the port with this one")
 	}
 	u, err := relay.Build(instanceURL, target)
 	if err != nil {

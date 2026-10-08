@@ -1340,3 +1340,42 @@ carries the condition that would reopen it.
   a relay, M88, is the obvious one), a token gains a scope that reaches credential or session management,
   or the refresh token moves somewhere the user's other processes cannot read it, since the argument
   above is a comparison with that.
+
+### A script's token for another account on the same instance is forwarded
+- **Raised**: M22, at planning
+- **Verdict**: accepted risk
+- **Why**: the port forwards whatever API token a script presents to the instance the port was enabled
+  for. It does not check that the token belongs to the account the daemon is signed in as, and cannot:
+  listing tokens is refused to a token by design (ADR 0022), so no route says whose one is. What the
+  script gains is nothing it lacked. It holds that token already and could present it to the instance
+  directly; the port adds an address and a local rate limit. The instance still decides everything the
+  token may do.
+- **Reopens if**: the port gives a script anything that comes from the daemon's own sign-in rather than
+  from the script's token (events, state, a cache), since that would then reach somebody else's account.
+
+### Between a killed daemon and the next start, its automation file names a port anything may bind
+- **Raised**: M22, `/code-review` of the listener
+- **Verdict**: accepted risk, narrowed
+- **Why**: `automation.json` is removed when the port closes, and a daemon that is killed removes
+  nothing. Until the next daemon starts, the file names a port and a secret, and another account on the
+  machine can bind that port and be sent the secret and a script's token by a script that reads the
+  file. Narrowed by removing whatever is found before binding and when the daemon starts with the port
+  disabled (`automation.Clean`), and by never leaving the file when the port cannot be bound. The window
+  that remains needs a second account on the machine, acting while the daemon is dead and a script is
+  running. Closing it means the daemon proving it knows the secret before a script sends the token, a
+  challenge every script in every language would have to implement.
+- **Reopens if**: the port is offered on a machine shared by accounts that do not trust each other as a
+  supported case, or a script-side library is published, since it could carry the challenge once for
+  everybody.
+
+### Another account on the machine can keep scripts waiting on the automation port
+- **Raised**: M22, `/code-review` of the listener
+- **Verdict**: accepted risk, narrowed
+- **Why**: a loopback port accepts connections from every account. Connections that have not presented
+  the secret are counted apart from scripts (32 against 16), are told nothing, and are dropped after
+  five seconds, so they take no script's place. An account that keeps 32 of them open is still refusing
+  every new script its turn to present the secret. It learns nothing and reaches nothing; it denies a
+  service on a machine it already runs code on.
+- **Reopens if**: the count of waiting connections is ever shared with the scripts being served again, or
+  a connection that has presented nothing is sent a frame.
+

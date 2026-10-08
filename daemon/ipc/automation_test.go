@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -123,4 +124,110 @@ func TestDialingAPortNothingAnswersOnIsThePortBeingOff(t *testing.T) {
 
 	_, err = DialAutomation(context.Background(), AutomationFile{Address: addr, Secret: "s"}, exampleToken)
 	require.ErrorIs(t, err, ErrAutomationOff)
+}
+
+// fakePort answers one script the way the daemon does, with each request handed to answer.
+func fakePort(t *testing.T, answer func(conn net.Conn, req Request)) AutomationFile {
+	t.Helper()
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				if _, err := ReadFrame(conn, MaxAutomationIdentify); err != nil {
+					return
+				}
+				ready, _ := Encode(OpAutomationReady, AutomationReady{Version: "dev"})
+				_ = WriteFrame(conn, ready)
+				for {
+					f, err := ReadFrame(conn, MaxClientFrame)
+					if err != nil {
+						return
+					}
+					var req Request
+					if Decode(f, &req) != nil {
+						return
+					}
+					answer(conn, req)
+				}
+			}()
+		}
+	}()
+	return AutomationFile{Address: l.Addr().String(), Secret: "s"}
+}
+
+func respond(conn net.Conn, id string) {
+	status := 200
+	f, _ := Encode(OpResponse, Response{ID: id, Status: &status})
+	_ = WriteFrame(conn, f)
+}
+
+// TestACallGivenUpOnEndsTheConnection: its answer may still arrive, and the next call would read it as its
+// own. So there is no next call, and the error says to open another connection.
+func TestACallGivenUpOnEndsTheConnection(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	file := fakePort(t, func(conn net.Conn, req Request) {
+		<-release
+		respond(conn, req.ID)
+	})
+	c, err := DialAutomation(context.Background(), file, exampleToken)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = c.Do(ctx, "GET", "/users/@me", nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	_, err = c.Do(context.Background(), "GET", "/users/@me", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open another")
+}
+
+// TestACancelThatLosesTheRaceWithAnAnswerLeavesTheConnectionUsable: the context is canceled the moment
+// the answer is written, so the cancel and the read race. Whichever wins, a call that returned an answer
+// must leave a connection the next call can use: the cancel moves the connection's deadline to now, and a
+// deadline left there fails the next write (M22 /code-review).
+func TestACancelThatLosesTheRaceWithAnAnswerLeavesTheConnectionUsable(t *testing.T) {
+	var cancelNext func()
+	var mu sync.Mutex
+	file := fakePort(t, func(conn net.Conn, req Request) {
+		respond(conn, req.ID)
+		mu.Lock()
+		if cancelNext != nil {
+			cancelNext()
+		}
+		mu.Unlock()
+	})
+
+	answered := 0
+	for range 300 {
+		c, err := DialAutomation(context.Background(), file, exampleToken)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		mu.Lock()
+		cancelNext = cancel
+		mu.Unlock()
+		_, err = c.Do(ctx, "GET", "/users/@me", nil)
+		mu.Lock()
+		cancelNext = nil
+		mu.Unlock()
+		cancel()
+
+		if err == nil {
+			answered++
+			_, err = c.Do(context.Background(), "GET", "/users/@me", nil)
+			require.NoError(t, err, "a call that was answered left its connection unusable")
+		}
+		_ = c.Close()
+	}
+	require.NotZero(t, answered, "the answer never won the race, so the test saw nothing")
 }

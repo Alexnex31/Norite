@@ -154,9 +154,11 @@ func newFixture(t *testing.T, tune func(*Options)) *fixture {
 	}))
 	t.Cleanup(f.instance.Close)
 
+	// http.DefaultClient follows redirects. Open must not let that decide: see
+	// TestTheInstancesAnswerComesBackAsItIs, whose 302 is asked once.
 	opts := Options{
-		StateDir: f.dir, Instance: f, Version: "1.2.3", Log: zerolog.Nop(), now: f.now,
-		HTTP: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		StateDir: f.dir, Instance: f, EnabledFor: f.instance.URL + "/norite/", Version: "1.2.3",
+		Log: zerolog.Nop(), now: f.now, HTTP: http.DefaultClient,
 	}
 	if tune != nil {
 		tune(&opts)
@@ -610,14 +612,156 @@ func TestTheBucketNeverHoldsMoreThanItsBurstAndSurvivesAClockGoingBack(t *testin
 	require.True(t, b.take())
 }
 
-func TestTheSeventeenthScriptIsToldThePortIsFull(t *testing.T) {
+// TestTheSeventeenthScriptIsToldThePortIsFullOnceItHasProvedItIsOne: the reason goes to something that
+// presented the secret, and only then. A connection over the count that has presented nothing is a
+// stranger, and hears nothing.
+func TestTheSeventeenthScriptIsToldThePortIsFullOnceItHasProvedItIsOne(t *testing.T) {
 	f := newFixture(t, nil)
 	for range ipc.MaxAutomationConns {
 		f.raw().identify(f)
 	}
 	over := f.raw()
-	cl := over.closed()
-	assert.Equal(t, ipc.CloseTooManyClients, cl.Code)
+	assert.False(t, over.silence(300*time.Millisecond), "nothing is said to it before its secrets")
+	over.send(ipc.OpAutomationIdentify, ipc.AutomationIdentify{Secret: f.file().Secret, Token: botToken})
+	assert.Equal(t, ipc.CloseTooManyClients, over.closed().Code)
+}
+
+// TestStrangersHoldingConnectionsOpenDoNotTakeAScriptsPlace: connections that never present the secret are
+// counted apart. Thirty-two of them, the most the port keeps waiting, leave every script's place free, and
+// the one after is closed without a word like any other stranger.
+func TestStrangersHoldingConnectionsOpenDoNotTakeAScriptsPlace(t *testing.T) {
+	f := newFixture(t, nil)
+	for range maxPending {
+		f.raw()
+	}
+	// The accept loop takes them in order, so once this one is refused all thirty-two are counted.
+	// Well inside the five seconds every quiet connection is given, so this is the count closing it and
+	// not the wait running out.
+	assert.True(t, f.raw().silence(2*time.Second), "the thirty-third stranger is closed at once, silently")
+}
+
+func TestAScriptIsServedWhileStrangersWait(t *testing.T) {
+	f := newFixture(t, nil)
+	for range maxPending - 1 {
+		f.raw()
+	}
+	r := f.raw()
+	r.identify(f)
+	require.Nil(t, r.request("1", "GET", "/users/@me", "null").Error)
+	// Having identified, it no longer counts among those waiting: there is room for another.
+	f.raw().identify(f)
+}
+
+// TestATokenIsNotSentToAnInstanceThePortWasNotEnabledFor: a token is a credential for the instance that
+// minted it, and the daemon cannot tell which that was. Signing in to another instance must not hand the
+// first one's tokens to the second, on a new connection or on one already open.
+func TestATokenIsNotSentToAnInstanceThePortWasNotEnabledFor(t *testing.T) {
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the other instance was sent a request, and with it the script's token")
+	}))
+	defer other.Close()
+
+	f := newFixture(t, nil)
+	open := f.raw()
+	open.identify(f)
+	require.Nil(t, open.request("1", "GET", "/users/@me", "null").Error)
+
+	// The user signs in somewhere else.
+	real := f.instance
+	f.mu.Lock()
+	f.instance = other
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.instance = real
+		f.mu.Unlock()
+	}()
+
+	for _, r := range []*raw{open, func() *raw { r := f.raw(); r.identify(f); return r }()} {
+		resp := r.request("2", "GET", "/users/@me", "null")
+		require.NotNil(t, resp.Error)
+		assert.Equal(t, ipc.RelayRefused, resp.Error.Code)
+		assert.Contains(t, resp.Error.Message, "norite automation enable")
+	}
+	assert.Len(t, f.seen(), 1)
+}
+
+func TestWhichURLsNameOneInstance(t *testing.T) {
+	assert.True(t, sameInstance("https://chat.example", "https://chat.example/"))
+	assert.True(t, sameInstance("https://Chat.Example/norite", "https://chat.example/norite/"))
+	for _, pair := range [][2]string{
+		{"https://chat.example", "http://chat.example"},
+		{"https://chat.example", "https://chat.example:8443"},
+		{"https://chat.example", "https://chat.example.evil.test"},
+		{"https://chat.example/a", "https://chat.example/b"},
+		{"https://chat.example", ""},
+		{"", ""},
+		{"chat.example", "chat.example"},
+	} {
+		assert.False(t, sameInstance(pair[0], pair[1]), "%q and %q", pair[0], pair[1])
+	}
+}
+
+// TestARequestWhoseIDCouldNotBeEchoedIsNotPerformed: the id goes back in the answer, so one the contract
+// forbids would make the answer a frame the contract forbids. Refused before the instance is asked.
+func TestARequestWhoseIDCouldNotBeEchoedIsNotPerformed(t *testing.T) {
+	f := newFixture(t, nil)
+	for _, id := range []string{"", "has space", strings.Repeat("a", 65), "new\nline", strings.Repeat("a", 100_000)} {
+		r := f.raw()
+		r.identify(f)
+		r.send(ipc.OpRequest, ipc.Request{ID: id, Method: "POST", Path: "/channels/20/messages", Body: json.RawMessage(`{"content":"x"}`)})
+		assert.Equal(t, ipc.CloseDecodeError, r.closed().Code, "%.20q", id)
+	}
+	assert.Empty(t, f.seen())
+}
+
+// flaky is a listener whose Accept fails a few times before it works, as one out of descriptors does.
+type flaky struct {
+	net.Listener
+	mu    sync.Mutex
+	fails int
+}
+
+func (l *flaky) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if l.fails > 0 {
+		l.fails--
+		l.mu.Unlock()
+		return nil, errors.New("accept: too many open files")
+	}
+	l.mu.Unlock()
+	return l.Listener.Accept()
+}
+
+// TestAFailedAcceptDoesNotEndThePort: leaving the loop on the first error would end the port for the rest
+// of the daemon's run, with its file still naming it.
+func TestAFailedAcceptDoesNotEndThePort(t *testing.T) {
+	instance := &fixture{signedIn: true}
+	instance.instance = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer instance.instance.Close()
+
+	dir := t.TempDir()
+	srv, err := Open(Options{StateDir: dir, Instance: instance, EnabledFor: instance.instance.URL + "/norite",
+		HTTP: http.DefaultClient, Log: zerolog.Nop()})
+	require.NoError(t, err)
+	defer srv.Close()
+	srv.listener = &flaky{Listener: srv.listener, fails: 3}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() { srv.Serve(ctx); close(served) }()
+	defer func() { cancel(); <-served }()
+
+	file, err := ipc.LoadAutomationFile(dir)
+	require.NoError(t, err)
+	c, err := ipc.DialAutomation(context.Background(), file, botToken)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	resp, err := c.Do(context.Background(), "GET", "/users/@me", nil)
+	require.NoError(t, err)
+	require.Nil(t, resp.Error)
 }
 
 // TestStoppingTellsAWaitingScriptAndReturns: a script blocked on its next request is told, and Serve does
@@ -719,11 +863,56 @@ func TestATakenPortIsReportedAndNothingIsWritten(t *testing.T) {
 	defer func() { _ = squatter.Close() }()
 	port := squatter.Addr().(*net.TCPAddr).Port
 
+	// A daemon that was killed left its file, naming this very port. Whoever holds the port now is not
+	// that daemon, and a script reading the file would send it the secret and a token.
 	dir := t.TempDir()
-	_, err = Open(Options{Port: port, StateDir: dir, Instance: &fixture{}, HTTP: http.DefaultClient, Log: zerolog.Nop()})
+	stale := `{"address":"` + squatter.Addr().String() + `","secret":"left-by-a-killed-daemon"}`
+	require.NoError(t, os.WriteFile(ipc.AutomationFilePath(dir), []byte(stale), 0o600))
+
+	_, err = Open(Options{Port: port, StateDir: dir, Instance: &fixture{}, EnabledFor: "https://chat.example",
+		HTTP: http.DefaultClient, Log: zerolog.Nop()})
 	require.ErrorIs(t, err, ErrPortTaken)
 	_, err = os.Stat(ipc.AutomationFilePath(dir))
+	assert.ErrorIs(t, err, os.ErrNotExist, "no file may name a port this daemon does not hold")
+}
+
+// TestOnlyAPortInUseIsATakenPort: "taken" sends somebody looking for the process that has it. A port this
+// account may not bind, or any other failure, has no such process.
+func TestOnlyAPortInUseIsATakenPort(t *testing.T) {
+	held, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = held.Close() }()
+	_, err = net.Listen("tcp4", held.Addr().String())
+	require.Error(t, err)
+	assert.True(t, addressInUse(err))
+
+	_, err = net.Listen("tcp4", "203.0.113.1:0") // not an address of this machine
+	require.Error(t, err)
+	assert.False(t, addressInUse(err), "%v", err)
+	assert.False(t, addressInUse(os.ErrPermission))
+
+	// And Open says so: an error that is not ErrPortTaken, with nothing left behind.
+	real := listen
+	listen = func(string, string) (net.Listener, error) {
+		return nil, &net.OpError{Op: "listen", Net: "tcp4", Err: os.ErrPermission}
+	}
+	defer func() { listen = real }()
+	dir := t.TempDir()
+	_, err = Open(Options{Port: 80, StateDir: dir, Instance: &fixture{}, EnabledFor: "https://chat.example",
+		HTTP: http.DefaultClient, Log: zerolog.Nop()})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPortTaken)
+	assert.Contains(t, err.Error(), "permission denied")
+	_, err = os.Stat(ipc.AutomationFilePath(dir))
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestOpeningNeedsToKnowWhichInstanceThePortIsFor(t *testing.T) {
+	for _, enabledFor := range []string{"", "chat.example", "/just/a/path"} {
+		_, err := Open(Options{StateDir: t.TempDir(), Instance: &fixture{}, EnabledFor: enabledFor,
+			HTTP: http.DefaultClient, Log: zerolog.Nop()})
+		require.Error(t, err, "%q", enabledFor)
+	}
 }
 
 func TestTheFileReplacesALinkRatherThanFollowingIt(t *testing.T) {
@@ -735,7 +924,8 @@ func TestTheFileReplacesALinkRatherThanFollowingIt(t *testing.T) {
 	require.NoError(t, os.WriteFile(elsewhere, []byte("untouched\n"), 0o644))
 	require.NoError(t, os.Symlink(elsewhere, ipc.AutomationFilePath(dir)))
 
-	srv, err := Open(Options{StateDir: dir, Instance: &fixture{}, HTTP: http.DefaultClient, Log: zerolog.Nop()})
+	srv, err := Open(Options{StateDir: dir, Instance: &fixture{}, EnabledFor: "https://chat.example",
+		HTTP: http.DefaultClient, Log: zerolog.Nop()})
 	require.NoError(t, err)
 	defer srv.Close()
 
