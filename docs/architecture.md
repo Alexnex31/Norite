@@ -1687,8 +1687,20 @@ request made while it is signed in to any other is refused before the token goes
 signing in to a second instance would hand the first one's tokens to the second's operator.
 
 The switch, the port number (7717 by default) and that instance are in `state.json`, changed by
-`norite automation enable|disable` through `/@daemon/` requests. A port that is taken leaves the listener
-closed and says so; the daemon never moves to another.
+`norite automation enable|disable` through `/@daemon/` requests on the attach socket, which are that
+socket's tier and are not reachable from the port they control. Enabling opens the port before anything
+is recorded, so a port that is taken is refused with nothing changed; the daemon never moves to another.
+A daemon that starts with the port enabled and cannot bind it runs with the port closed, and
+`norite automation status` says why. The port number travels in the request's path, the one thing of the
+user's a local path carries, and only after a request that says nothing has shown the daemon is new
+enough to answer it rather than relay it.
+
+A script reaches the port through two commands that never touch the attach socket.
+`norite automation run -- <command>` starts a program with `NORITE_AUTOMATION_ADDRESS` and
+`NORITE_AUTOMATION_SECRET` in its environment and takes no further part: on Unix the program replaces
+it, so a signal meant for the script reaches the script. `norite automation request <method> <path>`
+makes one request, with the token from `NORITE_API_TOKEN` and never from a flag, and prints the
+instance's answer. Neither secret is ever printed.
 
 **The instance tags what a token writes.** `messages.type` is 1 for a message an API token sent or last
 edited, whichever way the request arrived, and nothing sets it back. The daemon plays no part, so the tag

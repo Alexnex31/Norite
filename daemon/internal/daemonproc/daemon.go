@@ -137,6 +137,8 @@ func Run(ctx context.Context, opts Options) error {
 	// (a keyring that has not unlocked, an instance that is down) and can end at any moment (a revocation, a
 	// logout). A client has to handle "not signed in" whenever it attaches, so it may as well at startup.
 	var components sync.WaitGroup
+	// What the daemon answers itself, when it serves the attach socket at all.
+	var local *localRequests
 	if opts.SkipSession {
 		log.Debug().Msg("session establishment skipped")
 	} else {
@@ -162,13 +164,15 @@ func Run(ctx context.Context, opts Options) error {
 		st := state.New(part("state"), state.DefaultLimits)
 		// The requests the daemon answers itself. They are about this machine, so they are served whichever
 		// branch below is taken: signed in or not, credential store or none.
-		local := newLocal(stateDir, part("config"))
+		local = newLocal(stateDir, part("config"))
 
 		store, err := credentials.OpenIn(stateDir)
 		if err != nil {
 			// Still served, so a client is told what is wrong rather than that no daemon is running, which
 			// would send somebody to start one that is already up (M20 /code-review).
 			log.Error().Err(err).Msg("the credential store could not be opened")
+			// With no store there is no sign-in, so the port can be turned off and asked about, and not on.
+			local.automation = newAutomation(ctx, stateDir, storeless{}, opts.Version, part("automation"))
 			server := attach.New(attach.Options{
 				Session: storeless{}, State: st, Relay: storeless{}, Version: opts.Version, Log: part("attach"),
 				Local: local,
@@ -195,6 +199,9 @@ func Run(ctx context.Context, opts Options) error {
 			// The gateway connection, which waits on the session for a credential: a daemon nobody has
 			// signed in to holds no connection and makes no attempts. What it carries goes to the attach
 			// server, which keeps the state and fans each event out to the clients watching.
+			// The port for scripts is given the session's status and nothing else of it: which instance,
+			// never the credential.
+			local.automation = newAutomation(ctx, stateDir, src, opts.Version, part("automation"))
 			server := attach.New(attach.Options{
 				Session: src, State: st, Version: opts.Version, Log: part("attach"),
 				Relay: relay.New(relay.Options{Credentials: src, Version: opts.Version, Log: part("relay")}),
@@ -209,6 +216,16 @@ func Run(ctx context.Context, opts Options) error {
 			components.Go(func() { server.Serve(ctx, listener) })
 			components.Go(func() { watchConfig(ctx, server, part("config")) })
 		}
+	}
+
+	if local != nil && local.automation != nil {
+		// After the lock and before ready: whatever a killed daemon left is removed, and the port opens if
+		// its user turned it on. It closes with everything else.
+		local.automation.start()
+		components.Go(func() {
+			<-ctx.Done()
+			local.automation.stop()
+		})
 	}
 
 	log.Info().Msg("daemon ready")

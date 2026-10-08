@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/automation.schema.json",
+  "title": "norite automation --json",
+  "description": "The machine-readable output of `norite automation enable`, `disable` and `status` (M22): how the daemon's port for scripts stands.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. Every field is always present.\n\nThe port's secret is in none of it, and no command prints it. `norite automation run` prints nothing of its own: the program it starts takes its place. `norite automation request` prints the instance's JSON answer to the request it made, which is described by openapi.yaml and not here, with what a terminal would act on escaped as \\uXXXX; it prints nothing when the instance sent no body.",
+  "$ref": "#/$defs/status",
+  "$defs": {
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "port",
+        "instance",
+        "open",
+        "address",
+        "problem"
+      ],
+      "description": "How the port stands, after the command.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the port is turned on. It is off until `norite automation enable`."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port on 127.0.0.1 it is on, or would be on."
+        },
+        "instance": {
+          "type": "string",
+          "description": "The instance it was turned on for, the only one it serves, or empty when it is off."
+        },
+        "open": {
+          "type": "boolean",
+          "description": "Whether the daemon is listening. On and not open is a port that could not be bound when the daemon started; `problem` says why."
+        },
+        "address": {
+          "type": "string",
+          "pattern": "^(127\\.0\\.0\\.1:[0-9]{1,5})?$",
+          "description": "Where it listens, or empty when it is not open."
+        },
+        "problem": {
+          "type": "string",
+          "description": "Why a port that is on is not open, or empty."
+        }
+      }
+    }
+  }
+}

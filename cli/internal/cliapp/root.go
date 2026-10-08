@@ -18,6 +18,7 @@ import (
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
 
+	"github.com/Alexnex31/Norite/cli/internal/automationcmd"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/configcmd"
 	"github.com/Alexnex31/Norite/cli/internal/daemonctl"
@@ -137,6 +138,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			licensesCommand(),
 			aboutCommand(verbs.Daemon(Version)),
 			configcmd.Command(configcmd.Connector(verbs.Daemon(Version))),
+			automationcmd.Command(automationcmd.Connector(verbs.Daemon(Version))),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

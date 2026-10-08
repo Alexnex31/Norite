@@ -1294,6 +1294,13 @@ carries the condition that would reopen it.
   (`TestTheDaemonsOwnPathsAreNeitherRelayedNorInTheContract`).
 - **Reopens if**: a local request carries a body, or a path segment holding something of the user's. An
   older daemon would then deliver that to a stranger's server, and the request needs a frame of its own.
+- **Reopened at M22, and answered without a new frame**: `POST /@daemon/automation/enable/{port}` carries
+  a port number the user chose. `norite automation enable` sends `GET /@daemon/automation` first, which
+  says nothing, and sends the number only to a daemon that answered it. A daemon from before the prefix
+  relays that first request and is reported as older; a daemon from M21 answers that it knows no such
+  path and relays nothing. Neither is sent the number
+  (`TestEnableAsksHowThePortStandsBeforeItSendsAPortNumber`). The condition above stands for anything
+  more than that.
 
 ### Which file wins a shared key at unsplit is decided by modification times anything can set
 - **Raised**: M21, while building the toggle; narrowed by `/code-review`

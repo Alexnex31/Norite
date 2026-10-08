@@ -231,3 +231,21 @@ func TestACancelThatLosesTheRaceWithAnAnswerLeavesTheConnectionUsable(t *testing
 	}
 	require.NotZero(t, answered, "the answer never won the race, so the test saw nothing")
 }
+
+func TestThePortNumberInAnEnablePath(t *testing.T) {
+	for _, port := range []int{1, 80, 7717, 65535} {
+		got, ok := AutomationEnablePort(PathAutomationEnable(port))
+		require.True(t, ok, "%d", port)
+		assert.Equal(t, port, got)
+	}
+	for _, path := range []string{
+		PathAutomation, PathAutomationDisable, PathAutomation + "/enable", PathAutomation + "/enable/",
+		PathAutomation + "/enable/0", PathAutomation + "/enable/65536", PathAutomation + "/enable/07717",
+		PathAutomation + "/enable/7717/", PathAutomation + "/enable/7717/x", PathAutomation + "/enable/+7717",
+		PathAutomation + "/enable/-1", PathAutomation + "/enable/7717 ", PathAutomation + "/enable/999999",
+		"/@daemon/automationx/enable/7717", "/automation/enable/7717",
+	} {
+		_, ok := AutomationEnablePort(path)
+		assert.False(t, ok, "%q", path)
+	}
+}

@@ -5,9 +5,9 @@
 //
 // config.toml is the user's: hand-edited, commented, exported, kept in a dotfiles repository. This file is
 // the other half, in the state directory beside the daemon's lock: never edited by hand, never exported,
-// and machine-local by nature. At M21 it holds one thing, whether the terminal client and the GUI read
-// separate config files; the voice-channel breadcrumb (M36) and plugin grants and pinned hashes (M89) join
-// it.
+// and machine-local by nature. It holds whether the terminal client and the GUI read separate config files
+// (M21) and how the port for scripts is set (M22); the voice-channel breadcrumb (M36) and plugin grants and
+// pinned hashes (M89) join it.
 //
 // This package only reads. A client needs to know which config file is its own, with or without a daemon
 // running, so reading is public; writing is daemon/internal/statefile, which nothing outside the daemon
@@ -47,6 +47,16 @@ type State struct {
 	// ConfigSplit is the same-machine toggle: when set, the terminal client reads config.tui.toml and the
 	// GUI config.gui.toml, and config.toml is read by neither.
 	ConfigSplit bool `json:"config_split"`
+
+	// The port for scripts (M22), which is closed until its user turns it on.
+
+	// AutomationEnabled is whether the daemon opens the port.
+	AutomationEnabled bool `json:"automation_enabled"`
+	// AutomationPort is the port on 127.0.0.1, or zero for the default.
+	AutomationPort int `json:"automation_port"`
+	// AutomationInstance is the instance the port was turned on for, and the only one it serves: a script's
+	// token is a credential for the instance that minted it, and is not sent to another.
+	AutomationInstance string `json:"automation_instance"`
 }
 
 // PathIn returns where the file is in a state directory.

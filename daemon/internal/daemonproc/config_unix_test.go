@@ -203,3 +203,53 @@ func TestTheDaemonSplitsAndUnsplitsTheConfigOnRequest(t *testing.T) {
 		t.Fatalf("a second unsplit: %v", err)
 	}
 }
+
+// The requests about the port for scripts reach a real daemon through its attach socket (M22): asked how
+// the port stands, it answers; asked to turn it on with nobody signed in, it refuses and says why. That
+// they are routed at all is what this is for; what they do is tested on the controller.
+func TestARunningDaemonAnswersForItsAutomationPort(t *testing.T) {
+	dir, err := os.MkdirTemp("", "nd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// What a killed daemon left behind, which this one must not leave standing.
+	if err := os.WriteFile(ipc.AutomationFilePath(dir), []byte(`{"address":"127.0.0.1:7717","secret":"stale"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	startDaemon(t, Options{StateDir: dir, Version: "dev"})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	conn, err := ipc.DialAt(ctx, ipc.SocketPath(dir))
+	if err != nil {
+		t.Fatalf("dialing the daemon: %v", err)
+	}
+	client, err := ipc.Attach(ctx, conn, ipc.Options{Client: "norite-test", Version: "dev"})
+	if err != nil {
+		t.Fatalf("attaching: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	if _, err := os.Stat(ipc.AutomationFilePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stale automation file is still there: %v", err)
+	}
+
+	res, err := client.Do(ctx, "GET", ipc.PathAutomation, nil)
+	if err != nil {
+		t.Fatalf("asking how the port stands: %v", err)
+	}
+	var st ipc.AutomationStatus
+	if res.Status != 200 || json.Unmarshal(res.Body, &st) != nil {
+		t.Fatalf("answered %d %s", res.Status, res.Body)
+	}
+	if st.Enabled || st.Open || st.Port != ipc.DefaultAutomationPort {
+		t.Fatalf("a daemon nobody asked reports %+v", st)
+	}
+
+	_, err = client.Do(ctx, "POST", ipc.PathAutomationEnable(ipc.DefaultAutomationPort), nil)
+	var re *ipc.RelayError
+	if !errors.As(err, &re) || re.Code != ipc.RelayConflict {
+		t.Fatalf("turning the port on with nobody signed in: %v", err)
+	}
+}

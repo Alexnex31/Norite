@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/daemon/internal/paths"
 )
 
 // The automation port (M22): what a script speaks to the daemon, and the client half that speaks it.
@@ -184,6 +185,71 @@ func LooksLikeAPIToken(s string) bool {
 		}
 	}
 	return true
+}
+
+// ReadAutomationFile is LoadAutomationFile in the current user's state directory.
+func ReadAutomationFile() (AutomationFile, error) {
+	dir, err := paths.StateDir()
+	if err != nil {
+		return AutomationFile{}, err
+	}
+	return LoadAutomationFile(dir)
+}
+
+// ---------- turning the port on and off ----------
+
+// The requests that turn the port on and off are the daemon's own, under LocalPathPrefix on the attach
+// socket, and so are the attach socket's tier: first-party, the account itself. They are not on the
+// automation port, which carries no request of the daemon's own. Opening a listener on loopback is
+// nothing the account could not do without asking, and the port it opens still wants a secret and a token.
+const (
+	// PathAutomation asks how the port stands. GET, answering an AutomationStatus.
+	PathAutomation = LocalPathPrefix + "automation"
+	// PathAutomationDisable closes the port and records that it stays closed. POST, answering an
+	// AutomationStatus.
+	PathAutomationDisable = PathAutomation + "/disable"
+	// pathAutomationEnable begins the path that opens the port: PathAutomationEnable.
+	pathAutomationEnable = PathAutomation + "/enable/"
+)
+
+// PathAutomationEnable is the path that opens the port on a port number, for the instance the daemon is
+// signed in to, and records both. POST, answering an AutomationStatus.
+//
+// The number is in the path because a request to the daemon takes no body (M21). It is the one thing of
+// the user's a local path carries, and a command asks PathAutomation first: a daemon older than these
+// requests is found out by a request that says nothing, before this one is sent.
+func PathAutomationEnable(port int) string { return pathAutomationEnable + strconv.Itoa(port) }
+
+// AutomationEnablePort reads the port out of a PathAutomationEnable path, and reports whether it is one.
+func AutomationEnablePort(path string) (int, bool) {
+	if len(path) <= len(pathAutomationEnable) || path[:len(pathAutomationEnable)] != pathAutomationEnable {
+		return 0, false
+	}
+	digits := path[len(pathAutomationEnable):]
+	if len(digits) > 5 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != digits {
+		return 0, false
+	}
+	return n, true
+}
+
+// AutomationStatus is how the port stands: the body of every answer to the three requests above.
+type AutomationStatus struct {
+	// Enabled is whether the user has turned the port on.
+	Enabled bool `json:"enabled"`
+	// Port is the port it is, or would be, on.
+	Port int `json:"port"`
+	// Instance is the instance it was turned on for, or empty when it is off. Sanitized.
+	Instance string `json:"instance"`
+	// Open is whether the daemon is listening. Enabled and not open is a port that could not be bound.
+	Open bool `json:"open"`
+	// Address is where it listens, or empty when it is not open.
+	Address string `json:"address"`
+	// Problem says why an enabled port is not open, or is empty.
+	Problem string `json:"problem"`
 }
 
 // ---------- the client half ----------

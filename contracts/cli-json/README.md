@@ -25,6 +25,7 @@ verb's output a definition in it that the CLI's tests validate against.
 | `tag.schema.json` | `norite tag list \| create \| delete \| apply \| unapply \| on` |
 | `guild-invite.schema.json` | `norite invite create \| list \| show \| join \| revoke` |
 | `token.schema.json` | `norite token create \| list \| revoke` |
+| `automation.schema.json` | `norite automation enable \| disable \| status` |
 | `about.schema.json` | `norite about` |
 | `config.schema.json` | `norite config path \| get \| set \| unset \| export \| import \| split \| unsplit` |
 
