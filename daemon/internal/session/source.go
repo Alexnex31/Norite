@@ -376,11 +376,17 @@ func (s *Source) signIn(ctx context.Context, refused bool) bool {
 			// A logout, or nobody has signed in yet. A token this process still holds is the one live
 			// credential for this device and nobody else will ever present it, so it goes back to the
 			// instance that issued it rather than staying valid for thirty days in nobody's hands.
+			//
+			// Signed out first, then handed back. The hand-back is a request to the instance and may take
+			// its whole timeout, and until signOut runs Current still gives the credential out and Status
+			// still says signed in: a relayed request made in that window went out under a sign-in that
+			// had already ended, and READY named an account nobody was signed in as. It was the other way
+			// round until a test that checks for no credential right after the hand-back failed under load.
+			s.signOut(zerolog.InfoLevel, "no stored credential; run `norite login` to sign in")
 			if s.have {
 				handBackToken(ctx, s.log, s.http, s.record.InstanceURL, s.current)
 				s.dropSignIn()
 			}
-			s.signOut(zerolog.InfoLevel, "no stored credential; run `norite login` to sign in")
 			if !s.waitForStore(ctx, nil) {
 				return false
 			}
