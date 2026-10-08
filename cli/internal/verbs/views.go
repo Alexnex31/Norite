@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -402,7 +403,7 @@ type messageView struct {
 	// keeps its author_id: the API's distinction, kept.
 	Author  *userView `json:"author"`
 	Content string    `json:"content"`
-	// Type is the instance's: 0 for a message a signed-in person sent, 1 for one an API token sent or last
+	// Type is the instance's: 0 for a message a signed-in person sent, 1 for one an API token sent or has ever
 	// edited (M22). The instance decides it, so it says the same whichever client reads it.
 	Type      int        `json:"type"`
 	ReplyToID *string    `json:"reply_to_id"`
@@ -436,7 +437,7 @@ func (m messageView) Text(t *output.Text) {
 	// After everything an account chose, so no name can put the word there or push it off: the terminal
 	// client's AUTO badge, for a reader of this command's text.
 	auto := ""
-	if m.Type == typeAutomation {
+	if m.Type == ops.MessageTypeAutomation {
 		auto = "  AUTO"
 	}
 	t.Line("%s  %s  %s%s%s", c(m.ID), stamp(m.CreatedAt), m.byline(), edited, auto)
@@ -459,9 +460,6 @@ func (m messageView) byline() string {
 	}
 	return "-"
 }
-
-// typeAutomation is messages.type's value for a message written by automation (M22).
-const typeAutomation = 1
 
 type messagePage Page[messageView]
 

@@ -155,7 +155,7 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	}
 
 	switch {
-	case errors.Is(err, errTooLarge):
+	case errors.Is(err, ErrTooLarge):
 		return failure(ipc.RelayTooLarge, fmt.Sprintf("the instance's answer exceeds %d bytes", ipc.MaxResponseBody))
 	case err != nil:
 		if ctx.Err() != nil {
@@ -191,32 +191,44 @@ func (r *Relay) current(ctx context.Context) (session.Credential, *ipc.Response)
 	return session.Credential{}, &f
 }
 
-var errTooLarge = errors.New("response too large")
+// ErrTooLarge is an answer from the instance larger than the daemon will carry.
+var ErrTooLarge = errors.New("response too large")
 
 // send makes one attempt. A body that is not JSON comes back as nil: a proxy in front of an instance answers
 // a failure with HTML, and the status is what the client needs from it.
 func (r *Relay) send(ctx context.Context, req ipc.Request, target *url.URL, cred session.Credential) (int, json.RawMessage, error) {
-	u, err := Build(cred.InstanceURL, target)
+	return Perform(ctx, r.http, cred.InstanceURL, target, req.Method, req.Body, cred.AccessToken, r.userAgent)
+}
+
+// Perform makes one call to an instance with a bearer credential and returns its status and its body, or
+// nil for a body that is empty or is not JSON. It is the whole of how the daemon asks an instance something
+// on a client's behalf, for the relay and for the automation port alike (M22): the two differ in whose
+// credential they hold and which paths they allow, and a bound or a header changed here changes for both.
+//
+// target has been checked by Target or ScriptTarget. An answer over ipc.MaxResponseBody is ErrTooLarge.
+func Perform(ctx context.Context, client *http.Client, instanceURL string, target *url.URL, method string,
+	body json.RawMessage, bearer, userAgent string) (int, json.RawMessage, error) {
+	u, err := Build(instanceURL, target)
 	if err != nil {
 		return 0, nil, err
 	}
 
 	var reader io.Reader
-	if req.Body != nil {
-		reader = bytes.NewReader(req.Body)
+	if body != nil {
+		reader = bytes.NewReader(body)
 	}
-	hreq, err := http.NewRequestWithContext(ctx, req.Method, u.String(), reader)
+	hreq, err := http.NewRequestWithContext(ctx, method, u.String(), reader)
 	if err != nil {
 		return 0, nil, err
 	}
-	hreq.Header.Set("Authorization", "Bearer "+cred.AccessToken)
+	hreq.Header.Set("Authorization", "Bearer "+bearer)
 	hreq.Header.Set("Accept", "application/json")
-	hreq.Header.Set("User-Agent", r.userAgent)
-	if req.Body != nil {
+	hreq.Header.Set("User-Agent", userAgent)
+	if body != nil {
 		hreq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := r.http.Do(hreq)
+	resp, err := client.Do(hreq)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -227,7 +239,7 @@ func (r *Relay) send(ctx context.Context, req ipc.Request, target *url.URL, cred
 		return 0, nil, err
 	}
 	if len(raw) > ipc.MaxResponseBody {
-		return 0, nil, errTooLarge
+		return 0, nil, ErrTooLarge
 	}
 	if len(bytes.TrimSpace(raw)) == 0 || !json.Valid(raw) {
 		return resp.StatusCode, nil, nil

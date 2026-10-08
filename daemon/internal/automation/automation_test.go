@@ -6,6 +6,7 @@ package automation
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"go/parser"
@@ -100,13 +101,21 @@ type fixture struct {
 	requests []seen
 	answer   http.HandlerFunc
 	signedIn bool
-	clock    time.Time
+	// absent is why there is no instance while signedIn is false.
+	absent error
+	clock  time.Time
 }
 
-func (f *fixture) InstanceURL() (string, bool) {
+func (f *fixture) InstanceURL() (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.instance.URL + "/norite", f.signedIn
+	if !f.signedIn {
+		if f.absent != nil {
+			return "", f.absent
+		}
+		return "", ErrSignedOut
+	}
+	return f.instance.URL + "/norite", nil
 }
 
 func (f *fixture) now() time.Time {
@@ -380,6 +389,23 @@ func TestASignedOutDaemonHasNowhereToSendARequest(t *testing.T) {
 	assert.Empty(t, f.seen())
 }
 
+// TestADaemonStillReadingItsSignInIsNotCalledSignedOut: a daemon waiting on its keyring is signed in, and
+// "run norite login" would have its user replace a good sign-in. The script is told to try again.
+func TestADaemonStillReadingItsSignInIsNotCalledSignedOut(t *testing.T) {
+	f := newFixture(t, nil)
+	f.mu.Lock()
+	f.signedIn, f.absent = false, ErrSignInPending
+	f.mu.Unlock()
+
+	resp, err := f.script().Do(context.Background(), "GET", "/users/@me", nil)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, ipc.RelayUnreachable, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "try again")
+	assert.NotContains(t, resp.Error.Message, "norite login")
+	assert.Empty(t, f.seen())
+}
+
 func TestAnInstanceThatDoesNotAnswerIsUnreachableAndNamesNothing(t *testing.T) {
 	f := newFixture(t, nil)
 	f.instance.Close()
@@ -557,6 +583,16 @@ func TestWhatClosesAnIdentifiedConnection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ipc.CloseDecodeError, big.closed().Code)
 
+	// The same with the frame's bytes behind its length, as a real script sends one. Closed with those
+	// unread, the connection is reset and the script never learns why (M22 /code-review).
+	sent := f.raw()
+	sent.identify(f)
+	oversized := make([]byte, 4+256<<10)
+	binary.BigEndian.PutUint32(oversized, uint32(ipc.MaxClientFrame+1))
+	_, err = sent.conn.Write(oversized)
+	require.NoError(t, err)
+	assert.Equal(t, ipc.CloseDecodeError, sent.closed().Code)
+
 	method := f.raw()
 	method.identify(f)
 	// Not through request(), which holds what it sends to the contract: this is what the contract forbids.
@@ -595,6 +631,22 @@ func TestTheRateIsSharedAndARefusedRequestDoesNotSpendIt(t *testing.T) {
 	f.advance(time.Second)
 	require.Nil(t, b.request("4", "GET", "/users/@me", "null").Error)
 	require.NotNil(t, a.request("5", "GET", "/users/@me", "null").Error, "one second buys one request")
+
+	// Nor does one refused because the daemon has nowhere to send it: a script retrying while its user is
+	// signed out must not leave every other script rate-limited afterwards.
+	f.advance(2 * time.Second)
+	f.mu.Lock()
+	f.signedIn = false
+	f.mu.Unlock()
+	for i := range 5 {
+		resp := a.request("nowhere"+string(rune('0'+i)), "GET", "/users/@me", "null")
+		require.Equal(t, ipc.RelayNotSignedIn, resp.Error.Code)
+	}
+	f.mu.Lock()
+	f.signedIn = true
+	f.mu.Unlock()
+	require.Nil(t, a.request("6", "GET", "/users/@me", "null").Error)
+	require.Nil(t, b.request("7", "GET", "/users/@me", "null").Error)
 }
 
 func TestTheBucketNeverHoldsMoreThanItsBurstAndSurvivesAClockGoingBack(t *testing.T) {
@@ -856,24 +908,34 @@ func TestCloseLeavesAFileItDidNotWrite(t *testing.T) {
 }
 
 // TestATakenPortIsReportedAndNothingIsWritten: the daemon does not move to another port, which a script
-// would not find, and leaves no file naming a port it does not hold.
+// would not find, and writes no file naming a port it does not hold. A file already there is not this
+// call's to remove: it may be the port this daemon is still serving, which the new one was to replace.
 func TestATakenPortIsReportedAndNothingIsWritten(t *testing.T) {
 	squatter, err := net.Listen("tcp4", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer func() { _ = squatter.Close() }()
 	port := squatter.Addr().(*net.TCPAddr).Port
 
-	// A daemon that was killed left its file, naming this very port. Whoever holds the port now is not
-	// that daemon, and a script reading the file would send it the secret and a token.
 	dir := t.TempDir()
-	stale := `{"address":"` + squatter.Addr().String() + `","secret":"left-by-a-killed-daemon"}`
-	require.NoError(t, os.WriteFile(ipc.AutomationFilePath(dir), []byte(stale), 0o600))
-
-	_, err = Open(Options{Port: port, StateDir: dir, Instance: &fixture{}, EnabledFor: "https://chat.example",
-		HTTP: http.DefaultClient, Log: zerolog.Nop()})
+	open := func(port int) (*Server, error) {
+		return Open(Options{Port: port, StateDir: dir, Instance: &fixture{}, EnabledFor: "https://chat.example",
+			HTTP: http.DefaultClient, Log: zerolog.Nop()})
+	}
+	_, err = open(port)
 	require.ErrorIs(t, err, ErrPortTaken)
 	_, err = os.Stat(ipc.AutomationFilePath(dir))
 	assert.ErrorIs(t, err, os.ErrNotExist, "no file may name a port this daemon does not hold")
+
+	serving, err := open(0)
+	require.NoError(t, err)
+	defer serving.Close()
+	before, err := ipc.LoadAutomationFile(dir)
+	require.NoError(t, err)
+	_, err = open(port)
+	require.ErrorIs(t, err, ErrPortTaken)
+	after, err := ipc.LoadAutomationFile(dir)
+	require.NoError(t, err, "a refused port took the file of the one still serving")
+	assert.Equal(t, before, after)
 }
 
 // TestOnlyAPortInUseIsATakenPort: "taken" sends somebody looking for the process that has it. A port this

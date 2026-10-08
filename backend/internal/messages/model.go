@@ -35,7 +35,8 @@ const (
 const (
 	// TypeDefault is a message a signed-in person sent from a client.
 	TypeDefault int16 = 0
-	// TypeAutomation is a message an API token sent or last edited (M22); webhooks join it at M60.
+	// TypeAutomation is a message an API token sent or has ever edited (M22): the mark is not removed by a
+	// person editing afterwards (UpdateMessageContent). Webhooks join it at M60.
 	TypeAutomation int16 = 1
 )
 

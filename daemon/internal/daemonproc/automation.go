@@ -50,20 +50,32 @@ type automationControl struct {
 	cancel  context.CancelFunc
 	served  chan struct{}
 	problem string
+	// stopped is set as the daemon stops, after which nothing opens the port again.
+	stopped bool
 }
+
+// updateState is the state file's writer, a variable so a test can fail the write after the port has moved.
+var updateState = internalstate.Update
 
 func newAutomation(base context.Context, stateDir string, s signedIn, version string, log zerolog.Logger) *automationControl {
 	return &automationControl{stateDir: stateDir, session: s, version: version, log: log, base: base}
 }
 
 // InstanceURL is where the port's requests go: automation.Instance. A daemon still establishing its
-// sign-in names its instance already, and a signed-out one names none.
-func (a *automationControl) InstanceURL() (string, bool) {
+// sign-in names its instance already, once it has read the store.
+//
+// Before it has, it names none, and that is not being signed out: a daemon started before its keyring
+// unlocks stays there for as long as that takes, and told to log in again its user would replace a sign-in
+// that is perfectly good (M20's standing, M22 /code-review).
+func (a *automationControl) InstanceURL() (string, error) {
 	standing, account := a.session.Status()
-	if standing == session.SignedOut || account.InstanceURL == "" {
-		return "", false
+	switch {
+	case standing == session.SignedOut:
+		return "", automation.ErrSignedOut
+	case account.InstanceURL == "":
+		return "", automation.ErrSignInPending
 	}
-	return account.InstanceURL, true
+	return account.InstanceURL, nil
 }
 
 // start opens the port if the state file says it is on. Called once, as the daemon starts and holding its
@@ -92,12 +104,17 @@ func (a *automationControl) start() {
 	}
 }
 
-// stop closes the port as the daemon stops.
+// stop closes the port as the daemon stops, for good: a request still on its way in must not open it again
+// behind the daemon's back and leave a file naming a port nothing holds (M22 /code-review).
 func (a *automationControl) stop() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.stopped = true
 	a.closeLocked()
 }
+
+// errStopping is an attempt to open the port on a daemon that is stopping.
+var errStopping = errors.New("the daemon is stopping")
 
 func portOf(st statefile.State) int {
 	if st.AutomationPort == 0 {
@@ -108,6 +125,15 @@ func portOf(st statefile.State) int {
 
 // openLocked opens the port as st describes and serves it. The reason it could not is kept for status.
 func (a *automationControl) openLocked(st statefile.State) error {
+	if a.stopped {
+		a.problem = errStopping.Error()
+		return errStopping
+	}
+	if a.srv == nil {
+		// With no port of this daemon's own, a file here is one a killed daemon left.
+		automation.Clean(a.stateDir)
+	}
+	old, oldCancel, oldServed := a.srv, a.cancel, a.served
 	srv, err := automation.Open(automation.Options{
 		Port: portOf(st), StateDir: a.stateDir, Instance: a, EnabledFor: st.AutomationInstance,
 		HTTP: session.NewHTTPClient(), Version: a.version, Log: a.log,
@@ -128,7 +154,21 @@ func (a *automationControl) openLocked(st statefile.State) error {
 	}()
 	a.srv, a.cancel, a.served, a.problem = srv, cancel, served, ""
 	a.log.Info().Str("address", srv.Address()).Msg("the automation port is open")
+	// A port that was open on another number is closed only now, with the new one bound and its file
+	// written over the old one's: until here nothing had been taken from the scripts using it.
+	shut(old, oldCancel, oldServed)
 	return nil
+}
+
+// shut closes one port, waiting for every script's connection to end. Its file goes first, while it is
+// still this port's: the listener is gone the moment cancel runs, and the connections may take a while.
+func shut(srv *automation.Server, cancel context.CancelFunc, served chan struct{}) {
+	if srv == nil {
+		return
+	}
+	cancel()
+	srv.Close()
+	<-served
 }
 
 // closeLocked closes the port if it is open, waiting for every script's connection to end.
@@ -136,9 +176,7 @@ func (a *automationControl) closeLocked() {
 	if a.srv == nil {
 		return
 	}
-	a.cancel()
-	<-a.served
-	a.srv.Close()
+	shut(a.srv, a.cancel, a.served)
 	a.srv, a.cancel, a.served = nil, nil, nil
 	a.log.Info().Msg("the automation port is closed")
 }
@@ -155,9 +193,9 @@ func (a *automationControl) statusLocked(st statefile.State) ipc.AutomationStatu
 		out.Open, out.Address = true, a.srv.Address()
 		// An open port that will refuse every request says so here, where a person looks first, and not
 		// only to the script (M22 manual pass). The port asks the same two questions of each request.
-		switch now, ok := a.InstanceURL(); {
-		case !ok:
-			out.Problem = "the daemon is signed in to no instance; run `norite login`"
+		switch now, err := a.InstanceURL(); {
+		case err != nil:
+			out.Problem = err.Error()
 		case !automation.SameInstance(now, st.AutomationInstance):
 			out.Problem = "the daemon is signed in to " + termsafe.Text(now) + " now, and the port serves only the " +
 				"instance it was turned on for; run `norite automation enable` to use it with this one"
@@ -228,39 +266,72 @@ func (r *automationRefusal) Error() string { return r.msg }
 
 // enable opens the port on a port number for the instance the daemon is signed in to, and records both.
 //
-// The port is opened before anything is recorded, inside the state file's lock: a port that cannot be
-// bound is refused with the reason and leaves the file, and whatever was open before, as they were. It
-// is always opened afresh, so enabling again is also how the secret is replaced.
+// The port is opened before anything is recorded, inside the state file's lock, so one that cannot be
+// bound is refused with the reason and the file is left as it was. What happens to a port already open
+// depends on the number:
+//
+//   - Another number: the new port is bound while the old one still serves, and the old is closed only
+//     once the new is up. A refusal has then taken nothing from the scripts in use, and says so.
+//   - The same number: it has to be closed to be bound again, which is also how the secret is replaced.
+//     Should the bind then fail, what was open is opened again, with a new secret, and the refusal says
+//     that too rather than that nothing changed.
+//
+// If the port moved and the record of it could not be written, the port is put back as the file says.
 func (a *automationControl) enable(ctx context.Context, port int) (statefile.State, error) {
-	instanceURL, ok := a.InstanceURL()
-	if !ok {
+	instanceURL, err := a.InstanceURL()
+	switch {
+	case errors.Is(err, automation.ErrSignInPending):
+		return statefile.State{}, &automationRefusal{"the port is turned on for the instance the daemon is " +
+			"signed in to, and it has not finished reading its sign-in; try again in a moment"}
+	case err != nil:
 		return statefile.State{}, &automationRefusal{"the port is turned on for one instance, the one the " +
 			"daemon is signed in to, and it is signed in to none; run `norite login` first"}
 	}
-	var out statefile.State
-	err := internalstate.Update(ctx, a.stateDir, func(st *statefile.State) error {
+	var out, before statefile.State
+	moved := false
+	err = updateState(ctx, a.stateDir, func(st *statefile.State) error {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 
-		before, wasOpen, wasWrong := *st, a.srv != nil, a.problem
+		wasOpen, wasWrong := a.srv != nil, a.problem
+		before = *st
 		st.AutomationEnabled, st.AutomationPort, st.AutomationInstance = true, port, instanceURL
-		a.closeLocked()
+
+		beside := wasOpen && portOf(before) != port
+		if !beside {
+			a.closeLocked()
+		}
 		if err := a.openLocked(*st); err != nil {
 			reason := a.problem
-			// What was open is opened again, with a new secret: the old one went with the old listener.
 			// What was enabled and could not open still cannot, for the reason it had.
 			a.problem = wasWrong
-			if wasOpen {
-				if rerr := a.openLocked(before); rerr != nil {
-					a.log.Warn().Str("error", termsafe.Text(rerr.Error())).
-						Msg("the automation port could not be reopened as it was")
-				}
+			switch {
+			case !wasOpen || beside:
+				return &automationRefusal{reason + ". Nothing was changed"}
+			case a.openLocked(before) != nil:
+				return &automationRefusal{reason + ". The port it was open on could not be opened again " +
+					"either, and is closed: " + a.problem}
 			}
-			return &automationRefusal{reason + ". Nothing was changed"}
+			return &automationRefusal{reason + ". The port is open as it was, with a new secret: scripts " +
+				"started before this must be started again"}
 		}
-		out = *st
+		out, moved = *st, true
 		return nil
 	}, nil)
+	if err != nil && moved {
+		// The port is as asked and the file is as it was. The file is what the next start reads and what
+		// status reports, so the port is made to agree with it.
+		a.mu.Lock()
+		a.closeLocked()
+		a.problem = ""
+		if before.AutomationEnabled {
+			if rerr := a.openLocked(before); rerr != nil {
+				a.log.Warn().Str("error", termsafe.Text(rerr.Error())).
+					Msg("the automation port could not be reopened as it was")
+			}
+		}
+		a.mu.Unlock()
+	}
 	return out, err
 }
 
@@ -268,7 +339,7 @@ func (a *automationControl) enable(ctx context.Context, port int) (statefile.Sta
 // without naming one finds the one that was chosen. Asked of a port already off, it changes nothing.
 func (a *automationControl) disable(ctx context.Context) (statefile.State, error) {
 	var out statefile.State
-	err := internalstate.Update(ctx, a.stateDir, func(st *statefile.State) error {
+	err := updateState(ctx, a.stateDir, func(st *statefile.State) error {
 		st.AutomationEnabled, st.AutomationInstance = false, ""
 		out = *st
 		return nil

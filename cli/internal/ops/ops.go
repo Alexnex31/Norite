@@ -36,6 +36,11 @@ const MaxContent = 4000
 // MaxPage is the instance's bound on one page of messages.
 const MaxPage = 100
 
+// MessageTypeAutomation is messages.type's value for a message an API token sent or has ever edited (M22),
+// and a webhook's from M60. The instance sets it. Both front ends mark such a message, and read the value
+// here so that they cannot come to disagree about which one it is.
+const MessageTypeAutomation = 1
+
 var snowflake = regexp.MustCompile(`^[0-9]{1,20}$`)
 
 // IsID reports whether s can be a snowflake: digits, and no more than a 64-bit integer has.

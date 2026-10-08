@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -130,6 +131,13 @@ func freePort(t *testing.T) int {
 	require.NoError(t, err)
 	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+func (f *portFixture) secret() string {
+	f.t.Helper()
+	file, err := ipc.LoadAutomationFile(f.dir)
+	require.NoError(f.t, err)
+	return file.Secret
 }
 
 func (f *portFixture) fileExists() bool {
@@ -272,8 +280,11 @@ func TestATakenPortIsRefusedAndNothingChanges(t *testing.T) {
 
 	good := freePort(t)
 	f.ok("POST", ipc.PathAutomationEnable(good))
+	secret := f.secret()
 	resp = f.ask("POST", ipc.PathAutomationEnable(taken))
 	require.NotNil(t, resp.Error)
+	assert.Contains(t, resp.Error.Message, "Nothing was changed")
+	assert.Equal(t, secret, f.secret(), "\"nothing was changed\" after the secret every running script holds was replaced")
 	st := f.ok("GET", ipc.PathAutomation)
 	assert.True(t, st.Open)
 	assert.Equal(t, good, st.Port)
@@ -414,4 +425,88 @@ func TestARefusedEnableKeepsWhyTheEnabledPortIsNotOpen(t *testing.T) {
 	assert.False(t, st.Open)
 	assert.Equal(t, port, st.Port)
 	assert.Contains(t, st.Problem, itoa(port), "the reason the enabled port is not open was lost")
+}
+
+// TestAnEnableThatFailsOnTheSameNumberSaysTheSecretChanged: the port has to be closed to be bound again, so
+// a failure there cannot leave things as they were. What was open is opened again, and the refusal says
+// its secret is new rather than that nothing changed.
+func TestAnEnableThatFailsOnTheSameNumberSaysTheSecretChanged(t *testing.T) {
+	f := newPortFixture(t)
+	port := freePort(t)
+	f.ok("POST", ipc.PathAutomationEnable(port))
+	secret := f.secret()
+
+	// An instance the port cannot be opened for: the open fails after the old listener has gone.
+	f.signIn.set(session.Live, "not-a-url")
+	resp := f.ask("POST", ipc.PathAutomationEnable(port))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, ipc.RelayConflict, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "new secret")
+	assert.NotContains(t, resp.Error.Message, "Nothing was changed")
+	assert.NotEqual(t, secret, f.secret())
+
+	f.signIn.set(session.Live, f.instance.URL)
+	st := f.ok("GET", ipc.PathAutomation)
+	assert.True(t, st.Open)
+	assert.Equal(t, f.instance.URL, st.Instance)
+	require.Nil(t, f.send())
+}
+
+// TestADaemonStillReadingItsSignInIsNotToldToLogIn: started before its keyring unlocks, a daemon names no
+// instance and is not signed out. Sending its user to `norite login` would replace a good sign-in.
+func TestADaemonStillReadingItsSignInIsNotToldToLogIn(t *testing.T) {
+	f := newPortFixture(t)
+	f.ok("POST", ipc.PathAutomationEnable(freePort(t)))
+
+	f.signIn.set(session.Starting, "")
+	resp := f.ask("POST", ipc.PathAutomationEnable(freePort(t)))
+	require.NotNil(t, resp.Error)
+	assert.Contains(t, resp.Error.Message, "try again")
+	assert.NotContains(t, resp.Error.Message, "norite login")
+
+	st := f.ok("GET", ipc.PathAutomation)
+	assert.Contains(t, st.Problem, "try again")
+	assert.NotContains(t, st.Problem, "norite login")
+}
+
+// TestNothingOpensThePortOnceTheDaemonIsStopping: a request still on its way in when the daemon stops must
+// not open the port behind it, which would leave a file naming a port nothing holds after a clean exit.
+func TestNothingOpensThePortOnceTheDaemonIsStopping(t *testing.T) {
+	f := newPortFixture(t)
+	f.ok("POST", ipc.PathAutomationEnable(freePort(t)))
+	f.control.stop()
+	require.False(t, f.fileExists())
+
+	resp := f.ask("POST", ipc.PathAutomationEnable(freePort(t)))
+	require.NotNil(t, resp.Error)
+	assert.Contains(t, resp.Error.Message, "stopping")
+	assert.False(t, f.fileExists(), "a stopped daemon wrote a file naming a port")
+	assert.False(t, f.ok("GET", ipc.PathAutomation).Open)
+}
+
+// TestAPortWhoseRecordCouldNotBeWrittenIsPutBackAsTheFileSays: the port is opened before the state file is
+// written. If the write fails, the file is what status reports and what the next start reads, so a port
+// left open would be one its user is told is off.
+func TestAPortWhoseRecordCouldNotBeWrittenIsPutBackAsTheFileSays(t *testing.T) {
+	f := newPortFixture(t)
+	real := updateState
+	t.Cleanup(func() { updateState = real })
+	updateState = func(_ context.Context, dir string, fn func(*statefile.State) error, _ func()) error {
+		st, err := statefile.ReadIn(dir)
+		require.NoError(t, err)
+		if err := fn(&st); err != nil {
+			return err
+		}
+		return errors.New("no space left on device")
+	}
+
+	resp := f.ask("POST", ipc.PathAutomationEnable(freePort(t)))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, ipc.RelayFailed, resp.Error.Code)
+	assert.False(t, f.fileExists(), "the port stayed open with nothing recording it")
+
+	updateState = real
+	st := f.ok("GET", ipc.PathAutomation)
+	assert.False(t, st.Enabled)
+	assert.False(t, st.Open)
 }

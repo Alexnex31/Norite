@@ -272,7 +272,7 @@
             },
             {
               "const": "unreachable",
-              "description": "The instance did not answer, or not in time."
+              "description": "The instance did not answer, or not in time; or the daemon has not finished reading its sign-in, which is not being signed out. Worth sending again."
             },
             {
               "const": "refused",

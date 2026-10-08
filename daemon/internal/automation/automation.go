@@ -75,9 +75,17 @@ import (
 
 // Instance says where requests go. The daemon answers it from its stored sign-in.
 type Instance interface {
-	// InstanceURL is the instance the daemon is signed in to, or false when it is signed in to none.
-	InstanceURL() (string, bool)
+	// InstanceURL is the instance the daemon is signed in to. With none to name it is ErrSignedOut, or
+	// ErrSignInPending while the daemon has yet to read its sign-in.
+	InstanceURL() (string, error)
 }
+
+// Why there is no instance to name. They are told apart because the advice differs: a daemon waiting on a
+// keyring is signed in, and telling its user to log in again would replace a good sign-in (M20).
+var (
+	ErrSignedOut     = errors.New("the daemon is not signed in to an instance; run `norite login`")
+	ErrSignInPending = errors.New("the daemon has not finished reading its sign-in; try again in a moment")
+)
 
 // Options configure a Server.
 type Options struct {
@@ -158,8 +166,9 @@ type Server struct {
 
 // Clean removes an automation file left in stateDir. The caller holds the daemon's lock, which is what makes
 // any file found there stale: left by a daemon that was killed, naming a port it no longer holds and that
-// anything may since have bound. Called when the daemon starts, whether or not the port is to open, and by
-// Open before it binds. It removes the name and never follows a link.
+// anything may since have bound. Called when the daemon starts, whether or not the port is to open, and
+// before any Open made while this daemon has no port of its own. It removes the name and never follows a
+// link.
 func Clean(stateDir string) {
 	_ = os.Remove(ipc.AutomationFilePath(stateDir))
 }
@@ -209,9 +218,9 @@ func Open(opts Options) (*Server, error) {
 	// The address is spelled out. ":7717" binds every interface and looks the same on a developer's
 	// machine (M8), and "localhost" is a name something else resolves.
 	//
-	// Whatever a killed daemon left is removed first, so that failing to bind does not leave a file
-	// naming this port with a secret for whoever did bind it.
-	Clean(opts.StateDir)
+	// A file already there is left alone until the port is bound and this run's replaces it. The caller
+	// removes one a killed daemon left (Clean); one it finds otherwise is a port this daemon still serves,
+	// which a new port is opened beside before the old is closed.
 	l, err := listen("tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(opts.Port)))
 	if err != nil {
 		if addressInUse(err) {
@@ -360,6 +369,32 @@ func (s *Server) closeWith(conn net.Conn, code int, reason string) {
 	_ = conn.Close()
 }
 
+// lingerWait and lingerBytes bound how much of a refused frame is read, and for how long, so its sender can
+// be told why.
+const (
+	lingerWait  = time.Second
+	lingerBytes = 2 * ipc.MaxClientFrame
+)
+
+// closeAfterReading is closeWith for a script whose frame was refused before it was read: one too large.
+//
+// Closing a TCP connection with bytes unread resets it, and the script gets a reset in place of the reason
+// (M22 /code-review). So the Close frame is sent, this side says it will send no more, and what the script
+// is still writing is read and dropped, within bounds, until it stops.
+func (s *Server) closeAfterReading(conn net.Conn, code int, reason string) {
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
+	f, err := ipc.Encode(ipc.OpClose, ipc.Close{Code: code, Reason: reason})
+	if err != nil || ipc.WriteFrame(conn, f) != nil {
+		return
+	}
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(lingerWait))
+	_, _ = io.CopyN(io.Discard, conn, lingerBytes)
+}
+
 // refusal is the one answer to a first frame that does not open the port, whatever was wrong with it.
 const refusal = "the automation port did not accept that secret"
 
@@ -423,7 +458,7 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			s.closeWith(conn, ipc.CloseAutomationIdle, "nothing was asked for five minutes")
 			return
 		default:
-			s.closeWith(conn, ipc.CloseDecodeError, "a frame that is not valid, or is too large")
+			s.closeAfterReading(conn, ipc.CloseDecodeError, "a frame that is not valid, or is too large")
 			return
 		}
 
@@ -484,16 +519,12 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 		body = nil
 	}
 
-	// After the checks that cost nothing, so a refused request does not spend the budget, and before the
-	// one that reaches the instance.
-	if !s.bucket.take() {
-		return failure(ipc.RelayTooManyRequests, fmt.Sprintf("the automation port takes %g requests a second "+
-			"across every script; slow down and send it again", s.opts.Rate))
-	}
-
-	instanceURL, ok := s.opts.Instance.InstanceURL()
-	if !ok {
-		return failure(ipc.RelayNotSignedIn, "the daemon is not signed in to an instance; run `norite login`")
+	instanceURL, err := s.opts.Instance.InstanceURL()
+	switch {
+	case errors.Is(err, ErrSignInPending):
+		return failure(ipc.RelayUnreachable, err.Error())
+	case err != nil:
+		return failure(ipc.RelayNotSignedIn, ErrSignedOut.Error())
 	}
 	// Asked on every request, not once per connection: a sign-in can change under an open one.
 	if !SameInstance(instanceURL, s.enabledFor) {
@@ -501,51 +532,28 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 			"the daemon is signed in to now, and a token is not sent to an instance it was not made on; "+
 			"run `norite automation enable` to use the port with this one")
 	}
-	u, err := relay.Build(instanceURL, target)
-	if err != nil {
-		return failure(ipc.RelayUnreachable, err.Error())
+
+	// After every check that costs nothing, so that a request refused here does not spend a budget all
+	// scripts share, and before the one thing that reaches the instance.
+	if !s.bucket.take() {
+		return failure(ipc.RelayTooManyRequests, fmt.Sprintf("the automation port takes %g requests a second "+
+			"across every script; slow down and send it again", s.opts.Rate))
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	var reader io.Reader
-	if body != nil {
-		reader = bytes.NewReader(body)
-	}
-	hreq, err := http.NewRequestWithContext(ctx, req.Method, u.String(), reader)
-	if err != nil {
-		return failure(ipc.RelayBadRequest, "the request could not be built")
-	}
 	// The script's token, and only ever the script's: there is no other credential in reach of this
-	// function.
-	hreq.Header.Set("Authorization", "Bearer "+token)
-	hreq.Header.Set("Accept", "application/json")
-	hreq.Header.Set("User-Agent", s.userAgent)
-	if body != nil {
-		hreq.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := s.opts.HTTP.Do(hreq)
-	if err != nil {
+	// function. The call itself is the relay's, so the two tiers cannot drift apart in how they ask.
+	status, raw, err := relay.Perform(ctx, s.opts.HTTP, instanceURL, target, req.Method, body, token, s.userAgent)
+	switch {
+	case errors.Is(err, relay.ErrTooLarge):
+		return failure(ipc.RelayTooLarge, "the instance's answer is larger than the daemon will carry")
+	case err != nil:
 		// The error names the URL, which is the instance's and the path's; no secret is in it. Logged
 		// sanitized, and the script is told only that the instance did not answer.
 		s.opts.Log.Debug().Str("method", req.Method).Str("error", termsafe.Text(err.Error())).
 			Msg("an automation request did not reach the instance")
 		return failure(ipc.RelayUnreachable, "the instance did not answer")
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, ipc.MaxResponseBody+1))
-	if err != nil {
-		return failure(ipc.RelayUnreachable, "the instance's answer was cut short")
-	}
-	if len(raw) > ipc.MaxResponseBody {
-		return failure(ipc.RelayTooLarge, "the instance's answer is larger than the daemon will carry")
-	}
-	status := resp.StatusCode
-	out := ipc.Response{Status: &status}
-	if len(bytes.TrimSpace(raw)) != 0 && json.Valid(raw) {
-		out.Body = raw
-	}
-	return out
+	return ipc.Response{Status: &status, Body: raw}
 }
