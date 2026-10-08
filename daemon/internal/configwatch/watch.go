@@ -24,6 +24,11 @@ import (
 // write is a create and a rename, and vim writes a backup, renames, writes and changes the mode.
 const watchSettle = 100 * time.Millisecond
 
+// settleAfter starts the wait that ends a burst. A variable so that a test can end the burst itself: how
+// many writes fit in a tenth of a second is a fact about the machine, and a test that assumed ten did failed
+// on a CI runner, where they took three windows.
+var settleAfter = func() <-chan time.Time { return time.After(watchSettle) }
+
 // dirMode is what the config directory is created with when it does not exist yet, as daemon/config
 // creates it.
 const dirMode = 0o700
@@ -133,7 +138,7 @@ func Watch(ctx context.Context, paths []string, changed func()) error {
 				continue
 			}
 			if settle == nil {
-				settle = time.After(watchSettle)
+				settle = settleAfter()
 			}
 		case _, ok := <-w.Errors:
 			if !ok {
@@ -142,7 +147,7 @@ func Watch(ctx context.Context, paths []string, changed func()) error {
 			// An overflowed queue means events were dropped, and one may have been the config. Say it
 			// changed rather than guess that it did not.
 			if settle == nil {
-				settle = time.After(watchSettle)
+				settle = settleAfter()
 			}
 		case <-settle:
 			settle = nil
