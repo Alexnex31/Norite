@@ -1066,6 +1066,12 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   the watch was added; every test package that starts a daemon or a client now points its roots at a
   temporary directory in `TestMain`.
 
+  **CI found two more, on its first run of the branch.** A limit of three seconds on a merge, which a
+  runner under the race detector missed by 40 ms; and a test from M19 that reproduces under load on
+  unchanged code, because a logout handed its token back before it stopped giving the credential out. The
+  first was the test's fault and the second the daemon's: for the length of that request it was signed in,
+  to every attached client, as an account that had logged out.
+
   **The manual pass found one line of wording**, which after three review rounds is the result to expect
   rather than to distrust. It is also where two consequences of the design were seen plainly: an unsplit
   starts from the newer file, so the older file's comments are only in the copy set aside; and a table
@@ -2357,6 +2363,9 @@ And on the client config and the daemon's own requests, from M21:
   last config that loaded. `Options.Config` defaults to the user's file, so the package's `TestMain` points
   every root at a temporary directory; a new test package that starts a daemon or a client needs the same.
 - **A yes/no question is `cli/internal/prompt`**, for the verbs and for `norite config import` alike.
+- **Hold a cost by counting, not by timing.** `config.decodes` counts runs of the decoder, and the tests
+  hold an import, an export and a merge to the same count for two keys as for thousands. A three-second
+  limit on a merge failed in CI at 3.04, under the race detector, with nothing wrong.
 - **Testing the editor**: compare whole files, not the presence of a comment. For a race with an editor
   or another command, stand inside the handler (`Handler.saved`, `Handler.rename`) rather than race it.
 

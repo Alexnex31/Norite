@@ -396,22 +396,30 @@ func TestAWriteThatWaitedThroughAToggleGoesToTheFileNowRead(t *testing.T) {
 }
 
 // An unsplit holds the state's lock and both clients' files while it merges, and a `norite config set`
-// waits five seconds for a file. Two files at the size bound with every key different is the most work a
-// merge can be given: each file is decoded once and the rest is this package's own linear parser, a
-// quarter of a second where decoding per step was several. The limit is far above that.
-func TestAMergeAtTheSizeBoundIsQuick(t *testing.T) {
-	big := func(v string) []byte {
+// waits five seconds for a file. What a merge costs is how often it runs the decoder, which is quadratic in
+// a table's keys: each file once, and once before and once after each of the two batches of edits. That
+// number is the same for two files at the size bound with every key different, the most work a merge can
+// be given, as for two files of ten keys. Decoding per key, or per step, is what it must never go back to.
+func TestAMergeDecodesTheSameNumberOfTimesWhateverTheSize(t *testing.T) {
+	keysOf := func(n int, v string) []byte {
 		var b strings.Builder
 		b.WriteString("[tui.keys]\n")
-		for i := 0; b.Len() < MaxFileSize-64; i++ {
+		for i := 0; i < n && b.Len() < MaxFileSize-64; i++ {
 			fmt.Fprintf(&b, "k%04d = %q\n", i, v)
 		}
 		return []byte(b.String())
 	}
-	start := time.Now()
-	merged, plan, err := MergeClients(big("new"), big("old"), GUI)
-	require.NoError(t, err)
-	assert.Greater(t, len(plan.Apply), 4000)
-	assert.Equal(t, string(big("new")), string(merged))
-	assert.Less(t, time.Since(start), 3*time.Second)
+	count := func(n int) (int64, []byte, *ImportPlan) {
+		before := decodes.Load()
+		merged, plan, err := MergeClients(keysOf(n, "new"), keysOf(n, "old"), GUI)
+		require.NoError(t, err)
+		return decodes.Load() - before, merged, plan
+	}
+
+	small, _, _ := count(10)
+	large, merged, plan := count(1 << 20)
+	assert.Greater(t, len(plan.Apply), 4000, "the large one is at the size bound")
+	assert.Equal(t, string(keysOf(1<<20, "new")), string(merged))
+	assert.Equal(t, small, large, "the same number of decodes for ten keys as for thousands")
+	assert.LessOrEqual(t, large, int64(6))
 }

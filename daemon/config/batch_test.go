@@ -94,18 +94,31 @@ func manyKeys(t *testing.T) []byte {
 
 // An import is bounded by the file's size, and so must its cost be. Made one key at a time, a file inside
 // the bound took two minutes to import, with the config's lock held and every other `norite config`
-// refused for as long (M21 /code-review); planned, it is a fraction of a second. The limit here is far
-// above that and far below what it replaced, so it fails on the cubic shape and not on a slow machine.
+// refused for as long (M21 /code-review). The decoder is quadratic in a table's keys and ran once per key.
+// It now runs a fixed number of times however many keys there are, and that number is what is held here,
+// not a time: a time limit is only as reliable as the machine it runs on.
+//
+// The count would not see the other way an import was once slow, this package's own parser run once per
+// key, which took seven seconds. A limit far above anything a planned import takes on a slow machine
+// under the race detector, and far below that, is kept for it.
 func TestAnImportAtTheSizeBoundIsNotCubic(t *testing.T) {
 	incoming := manyKeys(t)
 	path := filepath.Join(t.TempDir(), "config.toml")
 
+	few := filepath.Join(t.TempDir(), "config.toml")
+	before := decodes.Load()
+	_, err := importAt(few, []byte("[tui.keys]\na = \"v\"\nb = \"v\"\n"), false)
+	require.NoError(t, err)
+	forTwo := decodes.Load() - before
+
+	before = decodes.Load()
 	start := time.Now()
 	plan, err := importAt(path, incoming, false)
 	require.NoError(t, err)
-	took := time.Since(start)
+	forThousands := decodes.Load() - before
 	assert.Greater(t, len(plan.Apply), 4000)
-	assert.Less(t, took, 10*time.Second, "importing %d keys", len(plan.Apply))
+	assert.Equal(t, forTwo, forThousands, "the same number of decodes for two keys as for thousands")
+	assert.Less(t, time.Since(start), 60*time.Second, "importing %d keys", len(plan.Apply))
 
 	written, err := ReadFile(path)
 	require.NoError(t, err)
@@ -114,10 +127,16 @@ func TestAnImportAtTheSizeBoundIsNotCubic(t *testing.T) {
 	// And the way back out: an export of that file is the same work.
 	f, err := Inspect(written)
 	require.NoError(t, err)
-	start = time.Now()
+	small, err := Inspect([]byte("[tui.keys]\na = \"v\"\n"))
+	require.NoError(t, err)
+	before = decodes.Load()
+	_, err = small.Export()
+	require.NoError(t, err)
+	forOne := decodes.Load() - before
+	before = decodes.Load()
 	_, err = f.Export()
 	require.NoError(t, err)
-	assert.Less(t, time.Since(start), 10*time.Second, "exporting them")
+	assert.Equal(t, forOne, decodes.Load()-before, "and an export decodes as often for one key as for thousands")
 }
 
 // A table's entry that is not a string is shown as a string, since that is the type an entry's value is

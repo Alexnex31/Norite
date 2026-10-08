@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -37,6 +38,18 @@ const MaxFileSize = 64 << 10
 const MaxWarnings = 50
 
 // ErrTooLarge reports a file over MaxFileSize.
+// decodes counts how often the TOML decoder has run. The decoder is quadratic in the keys of one table,
+// so what an operation costs at the size bound is how many times it decodes, and that is a number a test
+// can hold exactly, where a time limit holds only as long as the machine running it is quick: one set at
+// three seconds failed on a CI runner at 3.04, under the race detector, with nothing wrong.
+var decodes atomic.Int64
+
+// decode is the one way this package runs the decoder.
+func decode(data []byte, v any) error {
+	decodes.Add(1)
+	return toml.Unmarshal(data, v)
+}
+
 // ErrNotAFile reports a config path that leads to something other than a regular file: a directory, a
 // pipe, a device.
 var ErrNotAFile = errors.New("is not a regular file, and a config is one")
@@ -186,7 +199,7 @@ func Inspect(data []byte) (*File, error) {
 	}
 	data, _ = cutBOM(data)
 	var doc map[string]any
-	if err := toml.Unmarshal(data, &doc); err != nil {
+	if err := decode(data, &doc); err != nil {
 		return nil, parseError(err)
 	}
 

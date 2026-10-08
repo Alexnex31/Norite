@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
 
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -436,7 +435,7 @@ func (d *document) place(path []string, literal string) (at int, line string, ok
 // valid reports whether data is a TOML document, as the decoder every reader uses sees it.
 func valid(data []byte) error {
 	var decoded map[string]any
-	if err := toml.Unmarshal(data, &decoded); err != nil {
+	if err := decode(data, &decoded); err != nil {
 		return parseError(err)
 	}
 	return nil
@@ -446,7 +445,7 @@ func valid(data []byte) error {
 // rather than this file's own parser, so a splice that fooled one is caught by the other.
 func sameAfter(out []byte, paths ...[]string) error {
 	var decoded map[string]any
-	if err := toml.Unmarshal(out, &decoded); err != nil {
+	if err := decode(out, &decoded); err != nil {
 		return fmt.Errorf("the edit would leave a file that is not valid TOML, so nothing was written: %w",
 			parseError(err))
 	}
