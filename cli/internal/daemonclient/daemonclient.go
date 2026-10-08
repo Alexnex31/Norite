@@ -143,6 +143,55 @@ func Call(ctx context.Context, c Caller, method, path string, body, out any) err
 	return fmt.Errorf("the instance failed the request (HTTP %d)", res.Status)
 }
 
+// Local performs a request the daemon answers itself (ipc.LocalPathPrefix) and decodes its answer into out.
+// Nothing here is the instance's: a refusal is the daemon's own and in its own words, exit 4 like any
+// refusal, and a failure is exit 1.
+//
+// A daemon from before the request existed does not know the prefix and treats the path as one to relay.
+// Whatever comes of that — a status from an instance, or the relay declining because nobody is signed in —
+// means the same thing to the person who asked, and is said as that: restart the daemon.
+func Local(ctx context.Context, c Caller, path string, out any) error {
+	return local(ctx, c, http.MethodPost, path, out)
+}
+
+// LocalRead is Local for a request that only asks, sent with GET.
+func LocalRead(ctx context.Context, c Caller, path string, out any) error {
+	return local(ctx, c, http.MethodGet, path, out)
+}
+
+func local(ctx context.Context, c Caller, method, path string, out any) error {
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	res, err := c.Do(callCtx, method, path, nil)
+	older := clierr.Unavailable("the running daemon is older than this command and does not know the request; " +
+		"restart it with `norite daemon restart`")
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return clierr.Unavailable("the daemon did not answer within %s", callTimeout)
+		}
+		var re *ipc.RelayError
+		if !errors.As(err, &re) {
+			return fromRelay(err)
+		}
+		switch re.Code {
+		case ipc.RelayConflict:
+			return &clierr.RefusedError{Message: termsafe.Text(re.Message)}
+		case ipc.RelayFailed:
+			return fmt.Errorf("the daemon could not do it: %s", termsafe.Text(re.Message))
+		case ipc.RelayTooManyRequests:
+			return fromRelay(err)
+		}
+		return older
+	}
+	if res.Status != http.StatusOK {
+		return older
+	}
+	if err := json.Unmarshal(res.Body, out); err != nil {
+		return fmt.Errorf("the daemon's answer does not decode: %w", err)
+	}
+	return nil
+}
+
 // fromRelay maps the daemon's failure to perform a request.
 func fromRelay(err error) error {
 	var re *ipc.RelayError

@@ -1,0 +1,290 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/daemon/atomicfile"
+)
+
+func tempConfig(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "norite", "config.toml")
+	if contents != "" {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+	}
+	return path
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
+}
+
+func TestSetCreatesTheFileAndItsDirectory(t *testing.T) {
+	path := tempConfig(t, "")
+	require.NoError(t, setAt(path, Shared, KeyClock, "12h"))
+	assert.Equal(t, "[shared]\nclock = \"12h\"\n", readFile(t, path))
+
+	c, err := Load(path, TUI)
+	require.NoError(t, err)
+	assert.Equal(t, Clock12h, c.Clock())
+}
+
+func TestSetThenUnsetThroughTheFile(t *testing.T) {
+	path := tempConfig(t, dense)
+	require.NoError(t, setAt(path, TUI, KeyColorAccent, "#1E90FF"))
+	c, err := Load(path, TUI)
+	require.NoError(t, err)
+	assert.Equal(t, Color("#1e90ff"), c.Color(KeyColorAccent))
+	assert.Empty(t, c.Warnings)
+
+	require.NoError(t, unsetAt(path, TUI, KeyColorAccent))
+	c, err = Load(path, TUI)
+	require.NoError(t, err)
+	assert.Equal(t, Color("6"), c.Color(KeyColorAccent), "unset falls back to the default")
+}
+
+func TestASharedKeyCanBeSetForOneClient(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	require.NoError(t, setAt(path, TUI, KeyClock, "12h"))
+	tui, err := Load(path, TUI)
+	require.NoError(t, err)
+	gui, err := Load(path, GUI)
+	require.NoError(t, err)
+	assert.Equal(t, Clock12h, tui.Clock())
+	assert.Equal(t, Clock24h, gui.Clock())
+}
+
+func TestAKeyInsideATableKeepsItsDots(t *testing.T) {
+	path := tempConfig(t, "")
+	require.NoError(t, setAt(path, TUI, "keys.C-x 4.0", "split"))
+	assert.Equal(t, "[tui.keys]\n\"C-x 4.0\" = \"split\"\n", readFile(t, path))
+}
+
+func TestSetRefusesWhatItShould(t *testing.T) {
+	path := tempConfig(t, dense)
+	require.ErrorIs(t, setAt(path, TUI, "colors.acent", "3"), ErrUnknownKey)
+	require.ErrorIs(t, setAt(path, GUI, KeyColorAccent, "3"), ErrUnknownKey, "the terminal's colors are not [gui]'s")
+	require.Error(t, setAt(path, TUI, KeyColorAccent, "red"))
+	require.Error(t, setAt(path, TUI, "keys", "x"))
+	assert.Equal(t, dense, readFile(t, path), "a refused set writes nothing")
+}
+
+// Two Norite programs. Staged, not raced: the second is shown to be waiting while the first holds the
+// lock, and both edits are in the file afterwards.
+func TestTwoWritersTakeTurns(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+
+	inside, release := make(chan struct{}), make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		first <- Update(path, func(current []byte) ([]byte, error) {
+			close(inside)
+			<-release
+			return setRaw(current, []string{"shared", "clock"}, `"12h"`)
+		})
+	}()
+	<-inside
+
+	entered := make(chan struct{})
+	second := make(chan error, 1)
+	go func() {
+		second <- Update(path, func(current []byte) ([]byte, error) {
+			close(entered)
+			return setRaw(current, []string{"tui", "colors", "accent"}, "9")
+		})
+	}()
+
+	select {
+	case <-entered:
+		t.Fatal("the second writer read the file while the first still held the lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-first)
+	require.NoError(t, <-second)
+
+	c, err := Load(path, TUI)
+	require.NoError(t, err)
+	assert.Equal(t, Clock12h, c.Clock(), "the first writer's edit")
+	assert.Equal(t, Color("9"), c.Color(KeyColorAccent), "the second writer's edit, made on top of the first")
+}
+
+// A person saving in an editor takes no lock. Their save lands between this program's read and its rename,
+// and it is their edit that must not be lost.
+func TestAnEditorsSaveBetweenTheReadAndTheRenameIsKept(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+
+	runs := 0
+	err := Update(path, func(current []byte) ([]byte, error) {
+		runs++
+		if runs == 1 {
+			// The editor saves, by rename as most do, after Norite has read and before it has written.
+			tmp := path + ".editor"
+			require.NoError(t, os.WriteFile(tmp, []byte("# written by hand, just now\n[shared]\nclock = \"24h\"\n"), 0o600))
+			require.NoError(t, os.Rename(tmp, path))
+		}
+		return setRaw(current, []string{"tui", "colors", "accent"}, "9")
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, runs, "the edit is redone on the person's version")
+	assert.Equal(t, "# written by hand, just now\n[shared]\nclock = \"24h\"\n\n[tui.colors]\naccent = 9\n", readFile(t, path))
+}
+
+func TestAFileThatNeverStopsChangingIsGivenUpOn(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	n := 0
+	err := Update(path, func(current []byte) ([]byte, error) {
+		n++
+		require.NoError(t, os.WriteFile(path, []byte("# save "+string(rune('a'+n))+"\n"), 0o600))
+		return setRaw(current, []string{"shared", "clock"}, `"12h"`)
+	})
+	require.ErrorIs(t, err, ErrKeepsChanging)
+	assert.Equal(t, maxAttempts, n)
+	assert.Contains(t, readFile(t, path), "# save", "the person's last save is what is on disk")
+}
+
+func TestAHeldLockIsReportedNotWaitedOnForever(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the lock timeout")
+	}
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	inside, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- Update(path, func(current []byte) ([]byte, error) {
+			close(inside)
+			<-release
+			return current, nil
+		})
+	}()
+	<-inside
+	require.ErrorIs(t, setAt(path, Shared, KeyClock, "12h"), ErrLocked)
+	close(release)
+	require.NoError(t, <-done)
+}
+
+// The config is somebody's dotfile: a link into a repository, with a mode they chose.
+func TestSetWritesThroughASymlinkAndKeepsTheMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links and permission bits")
+	}
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "dotfiles")
+	require.NoError(t, os.MkdirAll(repo, 0o700))
+	real := filepath.Join(repo, "config.toml")
+	require.NoError(t, os.WriteFile(real, []byte("[shared]\nclock = \"24h\" # mine\n"), 0o644))
+	require.NoError(t, os.Chmod(real, 0o644))
+	link := filepath.Join(dir, "norite", "config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+	require.NoError(t, os.Symlink(real, link))
+
+	require.NoError(t, setAt(link, Shared, KeyClock, "12h"))
+
+	info, err := os.Lstat(link)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink, "the link must still be a link")
+	assert.Equal(t, "[shared]\nclock = \"12h\" # mine\n", readFile(t, real))
+	info, err = os.Stat(real)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+
+	entries, err := os.ReadDir(repo)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "nothing is left in the repository: no lock file, no temporary file")
+	entries, err = os.ReadDir(filepath.Dir(link))
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "nor beside the link: that directory roams on Windows and is often a link itself")
+}
+
+// stow folds a whole directory by default: ~/.config/norite is the link, and everything written beside
+// config.toml is written into the repository.
+func TestNothingIsLeftInAConfigDirectoryThatIsItselfALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symbolic links")
+	}
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "dotfiles", "norite")
+	require.NoError(t, os.MkdirAll(repo, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "config.toml"), []byte("[shared]\nclock = \"24h\"\n"), 0o600))
+	linkDir := filepath.Join(dir, "norite")
+	require.NoError(t, os.Symlink(repo, linkDir))
+
+	require.NoError(t, setAt(filepath.Join(linkDir, "config.toml"), Shared, KeyClock, "12h"))
+
+	entries, err := os.ReadDir(repo)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "config.toml", entries[0].Name())
+}
+
+func TestUnsetWithNoConfigCreatesNothing(t *testing.T) {
+	path := tempConfig(t, "")
+	require.NoError(t, unsetAt(path, Shared, KeyClock))
+	_, err := os.Stat(filepath.Dir(path))
+	assert.True(t, os.IsNotExist(err), "not even the directory")
+}
+
+// lookup accepts a shared key under any section it is asked about, so the section is checked first.
+func TestSetRefusesASectionNoriteDoesNotRead(t *testing.T) {
+	path := tempConfig(t, "")
+	for _, section := range []Section{"cli", "", "shared.x", "Shared"} {
+		require.ErrorIs(t, setAt(path, section, KeyClock, "12h"), ErrUnknownKey, "%q", section)
+		require.ErrorIs(t, unsetAt(path, section, KeyClock), ErrUnknownKey, "%q", section)
+	}
+	_, err := os.Stat(path)
+	assert.True(t, os.IsNotExist(err))
+}
+
+// One write must not produce a file every later read refuses, Unset included.
+func TestAWriteThatWouldPassTheBoundIsRefused(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	err := setAt(path, TUI, "keys.x", strings.Repeat("a", MaxFileSize))
+	require.ErrorIs(t, err, ErrTooLarge)
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", readFile(t, path))
+	require.NoError(t, unsetAt(path, Shared, KeyClock), "the file is still one Norite can edit")
+}
+
+func TestAnErrorAboutTheFilesContentsNamesTheFile(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n[tui.colors\naccent = 1\n")
+	for _, err := range []error{setAt(path, Shared, KeyClock, "12h"), unsetAt(path, Shared, KeyClock)} {
+		var pe *ParseError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, 3, pe.Line, "the same position Load reports")
+		assert.Contains(t, err.Error(), path)
+	}
+}
+
+func TestAReadOnlyConfigIsNotReplaced(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits")
+	}
+	path := tempConfig(t, "[shared]\nclock = \"24h\"\n")
+	require.NoError(t, os.Chmod(path, 0o444))
+	require.ErrorIs(t, setAt(path, Shared, KeyClock, "12h"), atomicfile.ErrReadOnly)
+	assert.Equal(t, "[shared]\nclock = \"24h\"\n", readFile(t, path))
+}
+
+func TestSettingTheSameValueDoesNotRewriteTheFile(t *testing.T) {
+	path := tempConfig(t, "[shared]\nclock = \"12h\"\n")
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(path, old, old))
+	require.NoError(t, setAt(path, Shared, KeyClock, "12h"))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.WithinDuration(t, old, info.ModTime(), time.Second, "an unchanged file must not wake every watcher")
+}

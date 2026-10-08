@@ -14,12 +14,16 @@
 package instanceinit
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/Alexnex31/Norite/daemon/atomicfile"
+	"github.com/Alexnex31/Norite/daemon/config"
 )
 
 // FileMode is the permission the config file is created with.
@@ -287,83 +291,20 @@ func (d Document) Write(path string, force bool) error {
 // Writing in place would mean a full disk or a lost power rail could truncate a working configuration
 // halfway through — and on a real deployment this file holds the only copy of the database credentials,
 // so a half-written one is an instance that cannot start and an operator with nothing to restore from.
-// Staging into a sibling file and renaming makes the swap atomic: readers see either the old file or the
-// complete new one.
+// The mode is forced on every write, since the file holds a password from its first byte.
 func writeAtomically(path, body string) error {
-	dir := filepath.Dir(path)
-
-	// Same directory, so the rename stays within one filesystem — across a mount boundary it would fall
-	// back to a copy and lose the atomicity this exists for.
-	tmp, err := os.CreateTemp(dir, ".instance-*.toml")
-	if err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
+	err := atomicfile.Write(path, []byte(body), atomicfile.Options{Mode: FileMode})
+	// The file is complete; only the directory flush failed. The caller removes the file on any error,
+	// which would delete a finished configuration for a durability shortfall.
+	if errors.Is(err, atomicfile.ErrNotDurable) {
+		return nil
 	}
-	tmpName := tmp.Name()
-
-	// Any failure from here on leaves the destination as it was, and takes the staging file with it.
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}()
-
-	// CreateTemp already makes the file 0600, but say so explicitly rather than depending on that: this
-	// file holds a password from the moment the first byte lands.
-	if err := tmp.Chmod(FileMode); err != nil {
-		return fmt.Errorf("securing %s to %#o: %w", tmpName, FileMode, err)
-	}
-	if _, err := tmp.WriteString(body); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	// Get the bytes to disk before the rename publishes the name. Without this, a crash right after the
-	// rename can leave the new name pointing at empty content on some filesystems.
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	return nil
+	return err
 }
 
 // tomlString renders a Go string as a TOML basic string.
 //
-// Hand-written rather than borrowed from the TOML library because the template emits the document
-// directly: an unescaped quote or backslash in a password would produce a file that either fails to parse
-// or, worse, parses into something other than what the operator typed.
-func tomlString(s string) string {
-	var sb strings.Builder
-	sb.Grow(len(s) + 2)
-	sb.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			sb.WriteString(`\"`)
-		case '\\':
-			sb.WriteString(`\\`)
-		case '\b':
-			sb.WriteString(`\b`)
-		case '\f':
-			sb.WriteString(`\f`)
-		case '\n':
-			sb.WriteString(`\n`)
-		case '\r':
-			sb.WriteString(`\r`)
-		case '\t':
-			sb.WriteString(`\t`)
-		default:
-			// TOML forbids raw control characters in basic strings; everything else goes through as-is so
-			// non-ASCII passwords and paths survive unmangled.
-			if r < 0x20 || r == 0x7f {
-				fmt.Fprintf(&sb, `\u%04X`, r)
-				continue
-			}
-			sb.WriteRune(r)
-		}
-	}
-	sb.WriteByte('"')
-	return sb.String()
-}
+// The template emits the document directly, so an unescaped quote or backslash in a password would produce
+// a file that either fails to parse or, worse, parses into something other than what the operator typed.
+// The escaping is daemon/config's, which edits the client's TOML and needs exactly the same rule.
+func tomlString(s string) string { return config.BasicString(s) }

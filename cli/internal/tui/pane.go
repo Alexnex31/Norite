@@ -41,6 +41,8 @@ type paneModel struct {
 	scroll   int // rows above the bottom; 0 follows new messages
 	composer textarea.Model
 	sending  bool
+
+	look *look // how it is drawn; the client's, replaced when the config is read again
 }
 
 func newPane(guildID, channelID string) *paneModel {
@@ -54,7 +56,7 @@ func newPane(guildID, channelID string) *paneModel {
 	// PasteMsg rather than as Enter.
 	c.KeyMap.InsertNewline.SetEnabled(false)
 	c.Focus()
-	return &paneModel{guildID: guildID, channelID: channelID, composer: c}
+	return &paneModel{guildID: guildID, channelID: channelID, composer: c, look: defaultLook}
 }
 
 func (p *paneModel) resize(width int) { p.composer.SetWidth(max(width, 10)) }
@@ -131,9 +133,9 @@ func (p *paneModel) put(m apicontract.Message, width int) {
 	// 400-character messages, against one message's wrap.
 	if p.scroll > 0 {
 		if old, found := p.find(m.Id); found {
-			p.scroll -= len(messageLines(old, width))
+			p.scroll -= len(p.look.messageLines(old, width))
 		}
-		p.scroll = max(p.scroll+len(messageLines(hold(m), width)), 0)
+		p.scroll = max(p.scroll+len(p.look.messageLines(hold(m), width)), 0)
 	}
 	p.upsert(m)
 	p.trim()
@@ -246,7 +248,7 @@ func (p *paneModel) tail(width, rows int) []string {
 	var chunks [][]string
 	n := 0
 	for i := len(p.msgs) - 1; i >= 0 && n < rows; i-- {
-		l := messageLines(p.msgs[i], width)
+		l := p.look.messageLines(p.msgs[i], width)
 		chunks = append(chunks, l)
 		n += len(l)
 	}
@@ -257,17 +259,17 @@ func (p *paneModel) tail(width, rows int) []string {
 	return out
 }
 
-func messageLines(msg apicontract.Message, width int) []string {
-	header := byline(msg) + "  " + sDim.Render(msg.CreatedAt.Local().Format("15:04"))
+func (l *look) messageLines(msg apicontract.Message, width int) []string {
+	header := l.byline(msg) + "  " + l.dim.Render(msg.CreatedAt.Local().Format(l.clock))
 	if msg.EditedAt != nil {
-		header += sDim.Render("  (edited)")
+		header += l.dim.Render("  (edited)")
 	}
 	lines := []string{clip(header, width)}
 
 	// Type 0 is a message a person typed and 1 one sent through automation (M22); anything else is a kind
 	// this client does not draw, and says so rather than guessing.
 	if msg.Type != 0 && msg.Type != 1 {
-		return append(lines, "  "+sDim.Render("(a kind of message this client cannot show)"))
+		return append(lines, "  "+l.dim.Render("(a kind of message this client cannot show)"))
 	}
 	// Plain text: rule 9 is met by interpreting no markup, and rule 19 by termsafe, which keeps line breaks
 	// and tabs and removes everything a terminal would act on. Tabs become spaces so wrapping can count them.
@@ -282,14 +284,14 @@ func messageLines(msg apicontract.Message, width int) []string {
 }
 
 // byline names who wrote a message: the display name, a deleted account, or nobody for a system message.
-func byline(msg apicontract.Message) string {
+func (l *look) byline(msg apicontract.Message) string {
 	switch {
 	case msg.Author != nil:
-		return sBold.Render(termsafe.Text(msg.Author.DisplayName))
+		return l.bold.Render(termsafe.Text(msg.Author.DisplayName))
 	case msg.AuthorId != nil:
-		return sDim.Render("deleted account")
+		return l.dim.Render("deleted account")
 	}
-	return sDim.Render("system")
+	return l.dim.Render("system")
 }
 
 func (p *paneModel) view(width, height int) string {
@@ -298,22 +300,22 @@ func (p *paneModel) view(width, height int) string {
 		name = "# " + p.channelID
 	}
 	if p.guildName != "" {
-		name += sDim.Render(" · " + termsafe.Text(p.guildName))
+		name += p.look.dim.Render(" · " + termsafe.Text(p.guildName))
 	}
-	out := []string{clip(sBold.Render(name), width)}
+	out := []string{clip(p.look.bold.Render(name), width)}
 
 	area := max(height-1-1-p.composerHeight(), 1)
 	var body []string
 	switch all := p.tail(width, p.scroll+area); {
 	case !p.loaded:
-		body = []string{sDim.Render("loading…")}
+		body = []string{p.look.dim.Render("loading…")}
 	case len(p.msgs) == 0:
 		if p.unread {
 			// A member may view and post without READ_MESSAGE_HISTORY (M15), and an empty pane would claim
 			// the channel holds nothing. New messages still arrive while it is open.
-			body = []string{sWarn.Render("This channel's earlier messages could not be read; new ones will appear here.")}
+			body = []string{p.look.warn.Render("This channel's earlier messages could not be read; new ones will appear here.")}
 		} else {
-			body = []string{sDim.Render("No messages yet. Say something.")}
+			body = []string{p.look.dim.Render("No messages yet. Say something.")}
 		}
 	default:
 		end := max(len(all)-p.scroll, 0)
@@ -325,9 +327,9 @@ func (p *paneModel) view(width, height int) string {
 		body = append([]string{""}, body...)
 	}
 	out = append(out, body...)
-	out = append(out, sDim.Render(strings.Repeat("─", max(width, 1))))
+	out = append(out, p.look.dim.Render(strings.Repeat("─", max(width, 1))))
 	if p.gone != "" {
-		out = append(out, clip(sDanger.Render(p.gone)+sDim.Render(" · ESC home"), width))
+		out = append(out, clip(p.look.danger.Render(p.gone)+p.look.dim.Render(" · ESC home"), width))
 	} else {
 		out = append(out, p.composer.View())
 	}

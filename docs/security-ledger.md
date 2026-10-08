@@ -1201,3 +1201,119 @@ carries the condition that would reopen it.
   instance's frames, and what it holds is bounded.
 - **Reopens if**: a resync makes the client fetch from anybody other than the instance (link previews,
   media), or home's guild bound is lifted.
+
+### A write through a symlinked `config.toml` reaches whatever file the link names
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `config.Update` follows the link on purpose (`atomicfile.Options.FollowSymlink`), because the
+  config is somebody's dotfile and a rename over the link would detach it. Planting a link means writing
+  the user's own config directory, which is already their account. What can be written is narrow as well:
+  a target that exists and is not TOML is refused before anything is written (`valid` in
+  `daemon/config/edit.go`), and the bytes written are one validated value for a key the contract lists.
+  The credential store and the instance wizard do not follow links at all.
+- **Reopens if**: a value written by `set` or `import` can carry text chosen by somebody other than the
+  user (an import that is not shown and confirmed first), or a second caller sets `FollowSymlink` on a
+  file that holds a secret.
+
+### A config keeps the mode its owner gave it, readable or writable by others
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `atomicfile.Options.KeepMode` copies the existing file's permission bits, so a `config.toml`
+  published at `0644` stays `0644`, and one left `0666` stays that too. No key holds a secret
+  (`TestEveryKeyIsWellFormed` refuses a name shaped like one) and no key runs anything: the live keys are
+  five colors and a clock. A new file is created `0600`.
+- **Reopens if**: a key can name a command, a path that is loaded, or anything else that acts. That is
+  M44's chords, whose roadmap entry now carries the refusal of a file others can write.
+
+### An error can name a symbolic link's target, which is text from a filesystem
+- **Raised**: M21, `/security-review`, confirmed by `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `atomicfile.ErrReadOnly` and the permission-read error quote the resolved target, and a
+  repository of dotfiles from a stranger can hold a link whose target is named with escape sequences.
+  Every error the command tree prints goes through `termsafe.Block` in `cli/cmd/app/main.go`
+  (`errorText`), so the text is inert there. A `ParseError` and a `Warning` are sanitized where they are
+  made. The terminal client draws a load error in its hint row since M21's part 7, which is the
+  condition below arriving: it passes the whole line through `termsafe.Text` in `applyConfig`, and
+  `TestAConfigErrorIsDrawnInert` fails without it.
+- **Reopens if**: a client prints an error from `daemon/config` or `daemon/atomicfile` without
+  `termsafe`. The GUI's equivalent of that row is the next candidate.
+
+### A crash between writing the temporary file and the rename leaves the temporary file
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `atomicfile.Write` removes its temporary file on every return, and a killed process returns
+  from nothing. For the credential store that file holds a refresh token. It is `0600` from before its
+  first byte, in the `0700` state directory, beside the token file it was about to replace, so it is
+  readable by exactly who could already read the token. Both older writers behaved the same way before
+  they were unified. For `config.toml` the leftover is a dot-file of settings beside the real file.
+- **Reopens if**: a temporary file is created anywhere but the destination's own directory, or a writer
+  of a secret sets `KeepMode`.
+
+### Another program of the same user can hold the config's lock and stall every write for five seconds
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the lock is a file in the `0700` state directory (`lockFor` in `daemon/config/file.go`), so
+  only the user's own processes can take it. A writer waits `lockWait` and then fails with `ErrLocked`,
+  naming the cause; it never waits without bound, and reading the config takes no lock at all.
+- **Reopens if**: the lock moves somewhere another account can open, or a read starts taking it.
+
+### The TOML decoder is quadratic in the keys of one table
+- **Raised**: M21, `/security-sweep`
+- **Verdict**: accepted risk, after the bound was lowered
+- **Why**: measured on a file of nothing but short keys: 6 ms at 16 KiB, 71 ms at 64 KiB, 612 ms at
+  256 KiB, 9.99 s at 1 MiB. `MaxFileSize` was 1 MiB and is now 64 KiB, on read and on write, so the worst
+  file a client will parse costs about 71 ms a load and about three times that for an edit, which decodes
+  three times. The cost is in `go-toml`, not in this repository. Depth is not a problem: the library
+  refuses deep nesting outright, in milliseconds.
+- **Reopens if**: `MaxFileSize` is raised (`TestTheSizeBoundIsTheOneThatWasMeasured` pins it), the config
+  gains a reader that parses on every frame or keystroke, or theme files (M45) are read with a larger
+  bound.
+
+### Any program running as the user can flip the same-machine config toggle
+- **Raised**: M21, while building the toggle
+- **Verdict**: accepted risk
+- **Why**: `POST /@daemon/config/split` and `/unsplit` are served to every attach client, and the attach
+  socket's tier is first-party and OS-permission-protected (rule 16): whatever can connect runs as the
+  account that owns `config.toml` and can rewrite it, and the files beside it, without asking anybody.
+  The request adds no authority that account lacks. It takes no body, deletes nothing, and sets aside
+  everything it replaces (`internal/toggle`).
+- **Reopens if**: the daemon answers a request of its own on the bot-automation port (M22), whose tier is
+  a secret and not the account; or a local request gains an effect the account could not have by itself,
+  a plugin grant (M89) being the obvious one.
+
+### A daemon older than the toggle sends the request's path to its instance
+- **Raised**: M21, while building the toggle
+- **Verdict**: accepted risk
+- **Why**: a request to the daemon itself reuses the relay's frame under `/@daemon/`, so that no frame
+  changes. A daemon from before the prefix existed has no reason to treat it differently and relays
+  `POST /api/v1/@daemon/config/split` with its token, as it relays any path. What the instance learns is
+  that this account's client asked its daemon to split a config. There is no body. The current daemon
+  never relays it: the attach server answers first, and `relay.Target` refuses the prefix on its own
+  (`TestTheDaemonsOwnPathsAreNeitherRelayedNorInTheContract`).
+- **Reopens if**: a local request carries a body, or a path segment holding something of the user's. An
+  older daemon would then deliver that to a stranger's server, and the request needs a frame of its own.
+
+### Which file wins a shared key at unsplit is decided by modification times anything can set
+- **Raised**: M21, while building the toggle; narrowed by `/code-review`
+- **Verdict**: accepted risk
+- **Why**: unsplit takes the more recently written of the two client files as its base, read from the
+  file's own time, which `touch` changes and a restore from backup resets. The time decides one thing:
+  which value a `[shared]` key ends with when both files set it differently. `[tui]` and `[gui]` are each
+  taken from their own client's file whatever the times say (`config.MergeClients`), every such shared
+  key is listed in the answer, and both files and the replaced `config.toml` are kept as
+  `*.before-unsplit`, never overwriting an earlier copy.
+- **Reopens if**: unsplit starts deleting what it replaces, or `[shared]` gains a key whose value
+  choosing wrongly does harm that reading the answer would not catch.
+
+### The daemon watches the directory its config directory is in, and hears what else is written there
+- **Raised**: M21, `/security-sweep` of the finished branch
+- **Verdict**: accepted risk
+- **Why**: a watch is on an inode, so `~/.config` is watched as well as `~/.config/norite`, or a config
+  directory that is removed and restored is never noticed again. Every program that creates or renames a
+  file directly in `~/.config` therefore wakes `configwatch`, which compares the name to the config
+  directory's and drops the event; nothing is read, logged or sent. With `XDG_CONFIG_HOME` pointed under a
+  directory other accounts can write to, those accounts can generate such events, and enough of them to
+  overflow the queue is treated as "the config may have changed", at most one notification per 100 ms,
+  each costing an attached client about 30 µs to re-read a config that did not change.
+- **Reopens if**: an event's name is ever logged or forwarded, or a reload becomes expensive enough for ten
+  a second to matter (a theme file read on every reload, M45, is the first candidate).

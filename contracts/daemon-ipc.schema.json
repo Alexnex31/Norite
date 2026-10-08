@@ -17,7 +17,7 @@
       ]
     },
     "DaemonFrame": {
-      "description": "What the daemon sends: HELLO on connect, READY in answer to IDENTIFY, then responses, forwarded dispatches (only to a client that asked for events) and, last, Close.",
+      "description": "What the daemon sends: HELLO on connect, READY in answer to IDENTIFY, then responses, forwarded and local dispatches (only to a client that asked for events) and, last, Close.",
       "oneOf": [
         {
           "$ref": "#/$defs/Hello"
@@ -27,6 +27,9 @@
         },
         {
           "$ref": "#/$defs/ForwardedDispatch"
+        },
+        {
+          "$ref": "#/$defs/LocalDispatch"
         },
         {
           "$ref": "#/$defs/Response"
@@ -335,7 +338,7 @@
               "minLength": 1,
               "maxLength": 2048,
               "pattern": "^/",
-              "description": "Under /api/v1, which the daemon prefixes, with any query string. The daemon builds the URL from its own instance URL and refuses a path that could leave it, and anything under /auth or /instance."
+              "description": "Under /api/v1, which the daemon prefixes, with any query string. The daemon builds the URL from its own instance URL and refuses a path that could leave it, and anything under /auth or /instance. A path under /@daemon/ is not relayed: the daemon answers it itself, signed in or not, with status 200 and a body or with an error (M21). Those are GET /@daemon/config, answering a ConfigLocation, and POST /@daemon/config/split and POST /@daemon/config/unsplit, both without a body, both answering a ConfigToggle."
             },
             "body": {
               "description": "The JSON to send, or null for none."
@@ -443,7 +446,9 @@
             "refused",
             "bad_request",
             "too_many_requests",
-            "too_large"
+            "too_large",
+            "conflict",
+            "failed"
           ]
         },
         "message": {
@@ -530,6 +535,113 @@
           "description": "Too many clients: the daemon already serves 64."
         }
       ]
+    },
+    "LocalDispatch": {
+      "type": "object",
+      "description": "A dispatch the daemon originates itself, about this machine rather than the instance. Its type begins DAEMON_, which no gateway dispatch does (a test holds gateway-events.schema.json to that), so one cannot be mistaken for the other. Sent only to a client that asked for events, numbered with the forwarded dispatches, and sent whether or not anybody is signed in.\n\nDAEMON_CONFIG_UPDATE (M21): the user's config.toml changed. It carries an empty object: the daemon interprets the file for nobody, and the client reads it again.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Empty. The event is the fact."
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "t": {
+          "enum": [
+            "DAEMON_CONFIG_UPDATE"
+          ]
+        }
+      }
+    },
+    "ConfigLocation": {
+      "type": "object",
+      "description": "The body of a 200 answer to GET /@daemon/config: where this daemon keeps configs, and how the same-machine toggle stands. A command asks it before asking for a toggle, so that a daemon started with another XDG_CONFIG_HOME than the shell's is found before it changes files no client reads.",
+      "required": [
+        "dir",
+        "split"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "The directory the daemon reads and writes config.toml in."
+        },
+        "split": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ConfigToggle": {
+      "type": "object",
+      "description": "The body of a 200 answer to POST /@daemon/config/split and POST /@daemon/config/unsplit: what the daemon did to the same-machine config toggle. It is carried in a Response's body like a relayed answer; no frame refers to it.",
+      "required": [
+        "split",
+        "files",
+        "base",
+        "merged",
+        "kept",
+        "skipped",
+        "backups"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "split": {
+          "type": "boolean",
+          "description": "The toggle as it now stands."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The config files now in use: config.toml when not split, the two clients' files when split."
+        },
+        "base": {
+          "type": "string",
+          "description": "The file an unsplit started from, the more recently written of the two. Empty for a split."
+        },
+        "merged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The keys an unsplit wrote into the base from the other file: that file's own client section, and any [shared] key the base lacked."
+        },
+        "kept": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The [shared] keys both files set differently, where the base's value stayed."
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the other file held that could not be carried over, each with its reason."
+        },
+        "backups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The files an unsplit set aside rather than deleted."
+        }
+      }
     }
   }
 }

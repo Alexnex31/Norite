@@ -72,6 +72,8 @@ type homeModel struct {
 	code    textinput.Model
 	preview *previewMsg // the code resolved, while the field still holds it
 	pending string      // a guild just joined, to select once home reloads
+
+	look *look // how it is drawn; the client's, replaced when the config is read again
 }
 
 func newHome() homeModel {
@@ -80,7 +82,7 @@ func newHome() homeModel {
 	code.Placeholder = "paste an invite code"
 	code.CharLimit = 64
 	code.Focus()
-	return homeModel{code: code}
+	return homeModel{code: code, look: defaultLook}
 }
 
 func (h *homeModel) resize(width int) { h.code.SetWidth(max(width-6, 10)) }
@@ -391,7 +393,7 @@ func (m Model) homeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		r := rows[h.selected]
-		m.pane = newPane(r.guild.Id, r.channel.Id)
+		m.pane = m.newPane(r.guild.Id, r.channel.Id)
 		m.pane.guildName, m.pane.channelName = r.guild.Name, deref(r.channel.Name)
 		m.pane.resize(m.width)
 		m.setStatus("", false)
@@ -415,31 +417,31 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 		// Read from a file a person can edit, and sanitized there; sanitized again, since it is drawn.
 		who = "signed in as @" + termsafe.Text(account.Username)
 	}
-	top = append(top, clip(sBold.Render("Norite")+sDim.Render(" · "+who), width), "")
+	top = append(top, clip(h.look.bold.Render("Norite")+h.look.dim.Render(" · "+who), width), "")
 
 	// The redeem box, drawn below the list but sized first, since the list takes whatever it leaves.
-	box := []string{sLabel.Render("REDEEM AN INVITE"), "  " + h.code.View()}
+	box := []string{h.look.label.Render("REDEEM AN INVITE"), "  " + h.code.View()}
 	if p := h.preview; p != nil {
-		box = append(box, clip("  "+sAccent.Render("✓ ")+previewLine(p.preview)+sDim.Render(" · RET join"), width))
+		box = append(box, clip("  "+h.look.accent.Render("✓ ")+h.look.previewLine(p.preview)+h.look.dim.Render(" · RET join"), width))
 	} else {
-		box = append(box, sDim.Render("  RET looks the code up; RET again joins"))
+		box = append(box, h.look.dim.Render("  RET looks the code up; RET again joins"))
 	}
 
-	list := []string{sLabel.Render("YOUR GUILDS")}
+	list := []string{h.look.label.Render("YOUR GUILDS")}
 	avail := height - len(top) - len(box) - 2
 	// Empty means no guilds, not no rows: a guild whose text channels are all hidden or deleted is still one
 	// the account is in, and calling that "no guilds yet" would be false (M20a's manual pass).
 	switch {
 	case !h.loaded && account == nil:
-		list = append(list, sDim.Render("  Sign in with `norite login` to see your guilds."))
+		list = append(list, h.look.dim.Render("  Sign in with `norite login` to see your guilds."))
 	case !h.loaded:
-		list = append(list, sDim.Render("  loading…"))
+		list = append(list, h.look.dim.Render("  loading…"))
 	case len(h.guilds) == 0:
-		list = append(list, "  "+sBold.Render("NO GUILDS YET"),
-			sDim.Render("  Redeem an invite below, or start one with `norite guild create --name NAME`."))
+		list = append(list, "  "+h.look.bold.Render("NO GUILDS YET"),
+			h.look.dim.Render("  Redeem an invite below, or start one with `norite guild create --name NAME`."))
 	case h.cut:
 		list = append(list, h.listLines(width, avail-2)...)
-		list = append(list, clip(sWarn.Render("  the instance listed more than this client keeps; not all are shown"),
+		list = append(list, clip(h.look.warn.Render("  the instance listed more than this client keeps; not all are shown"),
 			width))
 	default:
 		list = append(list, h.listLines(width, avail-1)...)
@@ -460,14 +462,14 @@ func (h homeModel) listLines(width, avail int) []string {
 	var all []line
 	i := 0
 	for _, e := range h.guilds {
-		all = append(all, line{text: "  " + sBold.Render(termsafe.Text(e.guild.Name)), row: -1})
+		all = append(all, line{text: "  " + h.look.bold.Render(termsafe.Text(e.guild.Name)), row: -1})
 		if len(e.channels) == 0 {
-			all = append(all, line{text: sDim.Render("    no text channel you can see"), row: -1})
+			all = append(all, line{text: h.look.dim.Render("    no text channel you can see"), row: -1})
 		}
 		for _, ch := range e.channels {
 			name := "# " + termsafe.Text(deref(ch.Name))
 			if i == h.selected {
-				all = append(all, line{text: "  " + sSelect.Render("› "+name), row: i})
+				all = append(all, line{text: "  " + h.look.selected.Render("› "+name), row: i})
 			} else {
 				all = append(all, line{text: "    " + name, row: i})
 			}
@@ -493,16 +495,16 @@ func (h homeModel) listLines(width, avail int) []string {
 
 // previewLine is `5b`'s resolved-preview row: guild, inviter, expiry. Every value is the instance's, and a
 // stranger's at that, until the person decides to join.
-func previewLine(p apicontract.GuildInvitePreview) string {
-	parts := []string{sBold.Render(termsafe.Text(p.Guild.Name)), "#" + termsafe.Text(deref(p.Channel.Name))}
+func (l *look) previewLine(p apicontract.GuildInvitePreview) string {
+	parts := []string{l.bold.Render(termsafe.Text(p.Guild.Name)), "#" + termsafe.Text(deref(p.Channel.Name))}
 	if p.Inviter != nil {
 		parts = append(parts, "invited by "+termsafe.Text(p.Inviter.DisplayName)+
 			" (@"+termsafe.Text(p.Inviter.Username)+")")
 	}
 	if p.ExpiresAt != nil {
-		parts = append(parts, "expires "+p.ExpiresAt.Local().Format("2006-01-02 15:04"))
+		parts = append(parts, "expires "+p.ExpiresAt.Local().Format("2006-01-02 "+l.clock))
 	} else {
 		parts = append(parts, "never expires")
 	}
-	return strings.Join(parts, sDim.Render(" · "))
+	return strings.Join(parts, l.dim.Render(" · "))
 }

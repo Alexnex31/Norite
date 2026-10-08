@@ -86,6 +86,31 @@ func TestBuildKeepsTheInstancesPathPrefix(t *testing.T) {
 // TestEveryContractPathIsDecided walks openapi.yaml and requires an explicit decision for every path, so a
 // route added to the contract is relayed or refused because somebody said so — never by default. It fails
 // in both directions: a path with no decision here, and a decision for a path the contract no longer has.
+// The daemon's own requests live under a first path segment the instance's API does not have. The relay
+// refuses it, so a request for the daemon that reached the relay is not told to the instance; and no REST
+// route may ever be given it, or a client asking the instance for that route would be answered by the
+// daemon instead.
+func TestTheDaemonsOwnPathsAreNeitherRelayedNorInTheContract(t *testing.T) {
+	for _, path := range []string{
+		ipc.PathConfigSplit, ipc.PathConfigUnsplit, "/@daemon", "/@daemon/anything", "/@DAEMON/config/split",
+	} {
+		_, err := Target(path)
+		require.Error(t, err, path)
+		assert.Contains(t, err.Error(), "the daemon's own", path)
+	}
+	_, err := Target("/users/@me")
+	require.NoError(t, err, "an @ elsewhere in a path is the API's own")
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "openapi.yaml"))
+	require.NoError(t, err)
+	paths := regexp.MustCompile(`(?m)^  (/[^:]*):\s*$`).FindAllStringSubmatch(string(raw), -1)
+	require.NotEmpty(t, paths)
+	for _, m := range paths {
+		assert.False(t, strings.HasPrefix(strings.ToLower(m[1])+"/", ipc.LocalPathPrefix),
+			"%s is under the prefix the daemon answers itself", m[1])
+	}
+}
+
 func TestEveryContractPathIsDecided(t *testing.T) {
 	const (
 		relayed = "relayed"

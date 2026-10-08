@@ -1,0 +1,121 @@
+# Norite client configuration — the contract for config.toml
+#
+# This file is a source-of-truth contract, alongside openapi.yaml, gateway-events.schema.json and
+# instance-config.toml. It is NOT a config file: it is the list of every key a client's config.toml may
+# hold, one [[key]] table each. daemon/config mirrors it in Go, and a test fails in both directions, so a
+# key cannot be added to one and not the other.
+#
+# Where config.toml lives:
+#   Linux and macOS   $XDG_CONFIG_HOME/norite/ when that is set and absolute, otherwise ~/.config/norite/
+#   Windows           %APPDATA%\Norite\, always. XDG_CONFIG_HOME is not read there, even when set.
+#
+# How a key is written in config.toml: under its section, by its name. `name = "colors.accent"` with
+# `section = "tui"` is
+#
+#     [tui.colors]
+#     accent = 6
+#
+# The fields of a [[key]]:
+#
+#   name      the key, dotted, without its section
+#   section   "shared": set under [shared], and a client may override it under [tui] or [gui]
+#             "tui" or "gui": that client's section only
+#   type      "enum"    one of `values`
+#             "color"   an integer 0-255 (an ANSI palette index) or a string "#rrggbb"
+#             "string"  any string
+#             "table"   a table whose contents the consuming milestone defines; kept as written
+#   default   what applies when the key is absent, as config.toml would spell it; absent for a table,
+#             and for a key whose consumer does not exist yet
+#   portable  true: `norite config export` writes it and `import` accepts it
+#             false: machine-local, never exported, and an import that sets it is refused by name
+#   consumer  the milestone that gives the key something that reads it
+#   live      true once that milestone is built. A key that is not live is kept, shown by `get`, written
+#             by `set`, and acted on by nothing.
+#
+# What is deliberately not here: any secret (rule 8). A token, a password or a per-session secret is never
+# a config key, and daemon/config's tests refuse a name shaped like one.
+#
+# A key that is not in this file is not an error in somebody's config.toml. It is kept and warned about,
+# because an export from a newer client is read by an older one. That is the opposite of
+# instance-config.toml's rule, on purpose.
+
+[[key]]
+name = "clock"
+section = "shared"
+type = "enum"
+values = ["24h", "12h"]
+default = "24h"
+portable = true
+consumer = "M21"
+live = true
+
+[[key]]
+name = "colors.accent"
+section = "tui"
+type = "color"
+default = "6"
+portable = true
+consumer = "M21"
+live = true
+
+[[key]]
+name = "colors.warn"
+section = "tui"
+type = "color"
+default = "3"
+portable = true
+consumer = "M21"
+live = true
+
+[[key]]
+name = "colors.danger"
+section = "tui"
+type = "color"
+default = "1"
+portable = true
+consumer = "M21"
+live = true
+
+[[key]]
+name = "colors.dim"
+section = "tui"
+type = "color"
+default = "8"
+portable = true
+consumer = "M21"
+live = true
+
+[[key]]
+name = "colors.bright"
+section = "tui"
+type = "color"
+default = "15"
+portable = true
+consumer = "M21"
+live = true
+
+# --- Reserved: the format is settled here, and nothing reads these until the milestone named. ---
+
+[[key]]
+name = "theme"
+section = "tui"
+type = "string"
+portable = true
+consumer = "M45"
+live = false
+
+[[key]]
+name = "keys"
+section = "tui"
+type = "table"
+portable = true
+consumer = "M44"
+live = false
+
+[[key]]
+name = "layout"
+section = "tui"
+type = "table"
+portable = true
+consumer = "M41"
+live = false

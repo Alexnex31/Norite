@@ -16,7 +16,7 @@ software.
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-alpha-yellow.svg)](#status)
 [![Release](https://img.shields.io/badge/release-v0.1.0--alpha-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0-alpha)
-[![Milestone](https://img.shields.io/badge/milestone-M20a%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M21%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -28,6 +28,8 @@ software.
   an invite, and a channel that draws messages as they arrive and sends what you type.
 - **Script it.** More than forty `norite` verbs cover guilds, channels, roles, members, messages, reports
   and tags, each with `--json`.
+- **Make it yours.** `~/.config/norite/config.toml` sets the client's colors and clock, and an open client
+  redraws the moment you save it. `norite config` edits the same file without touching your comments.
 - **Moderate it** — an audit log of who changed what, reports with a moderation queue, and message edit
   history.
 
@@ -64,8 +66,8 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 
 **Foundation, auth, the permission core, messages, guild-level reports, the moderation read over a
 message's edit history, a guild's opt-in message recording, message tagging, the real-time gateway and the
-daemon that holds it, the command-line verbs over all of it, and the first client two people can talk in,
-are done — `M0` through `M20a`.**
+daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
+and the settings file the clients share, are done — `M0` through `M21`.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -98,6 +100,7 @@ are done — `M0` through `M20a`.**
 | `M19` | The daemon as gateway client — the background daemon holds the account's live connection by itself, with nothing attached to it; keeps its sign-in renewed by the server's clock, so a machine whose clock is hours out stays signed in; keeps recent messages in memory, bounded; notices `norite login` and `norite logout` the moment they happen; and treats the server it talks to as a stranger's, sanitizing every name it is sent |
 | `M20` | The command line, through the daemon — clients attach to the daemon over a socket only your own account can open and get its live events, a client that stops reading is dropped rather than slowing the others, and the CLI's requests are made with the daemon's sign-in without the token ever leaving it; forty `norite` verbs over guilds, channels, roles, members, messages, reports and tags, each with `--json` output that is exact for a script and harmless if printed to a terminal, and exit codes that tell a script its own mistake from the server's refusal |
 | `M20a` | The first usable client — bare `norite` opens a terminal client listing your guilds and their channels, with a box to redeem an invite in two presses, and a channel that draws messages as they arrive and sends what you type; guild invites, so a second person can join at all; messages that name their authors; `norite register`, `norite invite` and `norite about`; and a release pipeline that signs what it ships |
+| `M21` | The settings file — `config.toml`, hand-editable and shared by the terminal client and the GUI, with the client's colors and clock live and an open client redrawing when the file is saved; `norite config` to read and change it from a script, replacing only the value it was asked about, so comments and formatting survive; export and import to carry settings between machines, an imported file being shown and confirmed before anything is written; and `norite config split`, for someone who wants the two clients on one machine to differ |
 
 </details>
 

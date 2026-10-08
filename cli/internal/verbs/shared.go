@@ -4,7 +4,6 @@
 package verbs
 
 import (
-	"bufio"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
+	"github.com/Alexnex31/Norite/cli/internal/prompt"
 )
 
 // ---------- confirming ----------
@@ -29,23 +29,11 @@ var yesFlag = &cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "do it w
 // the flag, so a script that forgot it fails with exit 2 rather than hanging on a question nobody sees, and
 // never proceeds by default.
 func confirm(cmd *cli.Command, e *env, question string) error {
-	if cmd.Bool("yes") {
-		return nil
-	}
-	if !e.interactive {
-		return fmt.Errorf("%w: pass --yes to %s without being asked", clierr.ErrNoTerminal, question)
-	}
-	// On stderr: stdout is the result, which --json pipes into a parser, and a question written there would
-	// both vanish into the pipe and corrupt the document.
-	if _, err := fmt.Fprintf(e.errOut, "%s? This cannot be undone. [y/N] ", upperFirst(question)); err != nil {
-		return err
-	}
-	line, _ := bufio.NewReader(e.in).ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return nil
-	}
-	return clierr.Usage("not confirmed; nothing was changed")
+	return prompt.Confirm{
+		Yes: cmd.Bool("yes"), Interactive: e.interactive, In: e.in, Out: e.errOut,
+		Question:  upperFirst(question) + "? This cannot be undone.",
+		Otherwise: fmt.Sprintf("pass --yes to %s without being asked", question),
+	}.Ask()
 }
 
 func upperFirst(s string) string {

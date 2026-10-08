@@ -54,15 +54,37 @@ type Model struct {
 	statusErr bool
 
 	armed bool // C-x has been pressed, and the next key completes the chord
+
+	// look is how everything is drawn, from the config last read successfully. configNote is the one line
+	// the hint row shows about the file when status has nothing to say: that it did not load
+	// (configBroken), which stays until it does, or the first thing in it that was not applied, which
+	// stays until a key is pressed. configNews is a note nobody has pressed a key past yet, which outranks
+	// status until they do.
+	look         *look
+	configSeq    int
+	configNote   string
+	configBroken bool
+	configNews   bool
+	configRead   string // the note the last read produced, whether or not it is still shown
 }
 
 // New builds the client. Nothing is attached until Init.
 func New(opts Options) Model {
+	if opts.Config == nil {
+		// The user's own file, unless a caller says otherwise: a caller that forgot would otherwise run a
+		// client that ignores its user's settings and says nothing.
+		opts.Config = FileConfig
+	}
 	// Generation 1 is the attachment Init starts. Init has a value receiver, so it cannot advance the count
 	// itself; every later attachment advances it first (redial).
-	m := Model{opts: opts, home: newHome(), gen: 1}
+	m := Model{opts: opts, home: newHome(), gen: 1, look: defaultLook}
+	// Read here rather than by a command, so the first frame is already drawn as configured: the file is
+	// bounded at 64 KiB and this happens once. Nobody has just saved anything, so it is not news: what the
+	// client is waiting for comes first.
+	m.applyConfig(opts.Config())
+	m.configNews = false
 	if opts.Channel != "" {
-		m.pane = newPane("", opts.Channel)
+		m.pane = m.newPane("", opts.Channel)
 	}
 	return m
 }
@@ -152,7 +174,9 @@ func (m *Model) onAttached(msg attachedMsg) tea.Cmd {
 		return m.backOff(termsafe.Text(msg.err.Error()))
 	}
 	m.sess, m.retry = msg.sess, 0
-	cmds := []tea.Cmd{listen(m.gen, m.sess)}
+	// The daemon reports a changed config only to clients attached when it changes, so whatever was saved
+	// while this one was not is read now.
+	cmds := []tea.Cmd{listen(m.gen, m.sess), m.reloadConfig()}
 
 	ready := m.sess.Ready()
 	switch ready.Standing {
@@ -226,6 +250,9 @@ func (m *Model) onEnded(msg endedMsg) tea.Cmd {
 
 func (m *Model) onEvent(ev ipc.Event) tea.Cmd {
 	switch ev.Type {
+	case ipc.EventConfigUpdate:
+		// The daemon's own event, carrying nothing: the file is this user's, and the client reads it.
+		return m.reloadConfig()
 	case "MESSAGE_CREATE", "MESSAGE_UPDATE":
 		var msg apicontract.Message
 		if json.Unmarshal(ev.Data, &msg) == nil && m.pane != nil && m.pane.channelID == msg.ChannelId {
@@ -403,7 +430,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, loadHome(m.gen, m.sess)
 
+	case configMsg:
+		if msg.seq == m.configSeq {
+			m.applyConfig(msg.cfg, msg.file, msg.err)
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
+		m.configNews = false
+		if !m.configBroken {
+			m.configNote = ""
+		}
 		return m.onKey(msg)
 	case tea.PasteMsg:
 		return m.onPaste(msg)
@@ -498,16 +535,22 @@ func (m Model) render() string {
 }
 
 func (m Model) hintRow() string {
-	if m.status != "" {
+	if m.status != "" && !m.configNews {
 		if m.statusErr {
-			return clip(sDanger.Render(m.status), m.width)
+			return clip(m.look.danger.Render(m.status), m.width)
 		}
-		return clip(sWarn.Render(m.status), m.width)
+		return clip(m.look.warn.Render(m.status), m.width)
+	}
+	if m.configNote != "" {
+		if m.configBroken {
+			return clip(m.look.danger.Render(m.configNote), m.width)
+		}
+		return clip(m.look.warn.Render(m.configNote), m.width)
 	}
 	if m.pane != nil {
-		return clip(sDim.Render("RET send · ESC home · PgUp/PgDn scroll · C-x C-c quit"), m.width)
+		return clip(m.look.dim.Render("RET send · ESC home · PgUp/PgDn scroll · C-x C-c quit"), m.width)
 	}
-	return clip(sDim.Render("RET open · C-n/C-p move · C-x C-c quit · norite about"), m.width)
+	return clip(m.look.dim.Render("RET open · C-n/C-p move · C-x C-c quit · norite about"), m.width)
 }
 
 func deref(s *string) string {

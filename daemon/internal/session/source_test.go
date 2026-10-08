@@ -132,6 +132,8 @@ type fakeInstance struct {
 	// beforeRefresh runs inside the handler, the one place a test can act while the daemon is between
 	// presenting a token and writing back its successor. Runs once and is then cleared.
 	beforeRefresh func()
+	// duringLogout runs inside the revoke handler, while the daemon's hand-back is still in flight.
+	duringLogout func()
 }
 
 func newFakeInstance(t *testing.T, clock *fakeClock) *fakeInstance {
@@ -147,8 +149,11 @@ func newFakeInstance(t *testing.T, clock *fakeClock) *fakeInstance {
 		if r.URL.Path == "/api/v1/auth/logout" {
 			f.mu.Lock()
 			f.handedBack = body.RefreshToken
-			broken, status := f.logoutBroken, f.logoutStatus
+			broken, status, during := f.logoutBroken, f.logoutStatus, f.duringLogout
 			f.mu.Unlock()
+			if during != nil {
+				during()
+			}
 			if broken {
 				conn, _, err := w.(http.Hijacker).Hijack()
 				if err == nil {
@@ -889,8 +894,31 @@ func TestALogoutEndsTheSessionAndHandsTheTokenBack(t *testing.T) {
 	_, err := h.current()
 	require.NoError(t, err)
 
+	// Asked while the hand-back is still in flight: the credential is already gone. The hand-back is a
+	// request to the instance and may take its whole timeout, and a daemon that went on giving the
+	// credential out until it returned was signed in, to every attached client, as an account that had
+	// logged out.
+	during := make(chan error, 1)
+	var standing Standing
+	h.f.set(func(f *fakeInstance) {
+		f.duringLogout = func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+			_, err := h.src.Current(ctx)
+			standing, _ = h.src.Status()
+			during <- err
+		}
+	})
+
 	require.NoError(t, h.store.Clear())
 	h.src.Reload()
+	select {
+	case err := <-during:
+		require.ErrorIs(t, err, context.DeadlineExceeded, "no credential is given out during the hand-back")
+		assert.Equal(t, SignedOut, standing)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the token was never handed back")
+	}
 	require.Eventually(t, func() bool { return h.f.handedBackToken() == "nrt_rotated_1" },
 		time.Second, 5*time.Millisecond)
 	h.noCredential()

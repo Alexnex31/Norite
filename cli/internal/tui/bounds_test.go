@@ -70,7 +70,7 @@ func TestHomeAsksForNoMoreGuildsThanAnAccountCanBeIn(t *testing.T) {
 	assert.EqualValues(t, maxHomeGuilds, s.listings.Load(), "one channel listing per guild kept, and no more")
 	assert.True(t, msg.over)
 
-	var h homeModel
+	h := newHome()
 	h.load(msg.entries, msg.over)
 	assert.Contains(t, h.view(nil, 100, 40), "not all are shown")
 

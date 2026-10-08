@@ -52,6 +52,17 @@ var plistTemplate = template.Must(template.New("plist").Funcs(template.FuncMap{
 		<string>-stderr-log=false</string>
 	</array>
 
+{{ if .ConfigHome }}
+	<!-- Captured at install time, because launchd does not read your shell profile. config.toml is under
+	     XDG_CONFIG_HOME on macOS too when that is set, and the daemon watches that file so a running
+	     client hears when it changes (M21). An agent that resolved a different directory from your shell
+	     would watch one file while you edited another. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>XDG_CONFIG_HOME</key>
+		<string>{{ xml .ConfigHome }}</string>
+	</dict>
+{{ end }}
 	<!-- Start at login. The daemon is what makes the CLI and GUI able to attach instantly rather than
 	     reconnecting from cold, so it should already be up by the time either is opened. -->
 	<key>RunAtLoad</key>
@@ -135,7 +146,14 @@ func (l *launchdAgent) Install(ctx context.Context, daemonBinary string) error {
 	}
 
 	var plist strings.Builder
-	err = plistTemplate.Execute(&plist, struct{ Label, Program, LogPath, StderrPath string }{
+	// Only an absolute value, as the daemon itself honors only that.
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(configHome) {
+		configHome = ""
+	}
+
+	err = plistTemplate.Execute(&plist, struct{ Label, Program, LogPath, StderrPath, ConfigHome string }{
+		ConfigHome: configHome,
 		Label:      launchdLabel,
 		Program:    daemonBinary,
 		LogPath:    filepath.Join(logDir, ServiceName+".log"),

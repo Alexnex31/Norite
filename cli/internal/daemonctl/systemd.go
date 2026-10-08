@@ -47,6 +47,11 @@ ExecStart={{ .ExecStart }}
 # hand-started daemon and a different one from the service — so the two take *different* single-instance
 # locks, both start, and the one-daemon-per-user invariant is broken with no error anywhere.
 Environment=XDG_STATE_HOME={{ .StateHome }}
+{{ end }}{{ if .ConfigHome }}
+# The same hazard for config.toml, since M21: the daemon watches that file so a running client hears when
+# it changes. A service that resolved a different config directory from your shell would watch one file
+# while ` + "`norite config set`" + ` and your editor wrote another, and a change would reach nobody.
+Environment=XDG_CONFIG_HOME={{ .ConfigHome }}
 {{ end }}
 # Restart on a crash, but not when the daemon exits 0 — a clean stop is a decision, and restarting after
 # one would make ` + "`systemctl --user stop`" + ` impossible.
@@ -114,13 +119,21 @@ func (s *systemdUser) Install(ctx context.Context, daemonBinary string) error {
 	if !filepath.IsAbs(stateHome) {
 		stateHome = ""
 	} else {
-		stateHome = systemdEscape(stateHome)
+		stateHome = systemdEnvEscape(stateHome)
+	}
+
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(configHome) {
+		configHome = ""
+	} else {
+		configHome = systemdEnvEscape(configHome)
 	}
 
 	var unit strings.Builder
-	err = unitTemplate.Execute(&unit, struct{ ExecStart, StateHome string }{
-		ExecStart: systemdEscape(daemonBinary),
-		StateHome: stateHome,
+	err = unitTemplate.Execute(&unit, struct{ ExecStart, StateHome, ConfigHome string }{
+		ExecStart:  systemdEscape(daemonBinary),
+		StateHome:  stateHome,
+		ConfigHome: configHome,
 	})
 	if err != nil {
 		return fmt.Errorf("rendering the unit file: %w", err)
@@ -232,5 +245,19 @@ func systemdEscape(path string) string {
 		return path
 	}
 	replaced := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `$$`, `%`, `%%`).Replace(path)
+	return `"` + replaced + `"`
+}
+
+// systemdEnvEscape quotes a path for the value of an Environment= assignment, which is not ExecStart's
+// rule: systemd expands specifiers there and does not expand variables, so `%` is doubled and `$` is left
+// alone. Doubling it, as ExecStart needs, wrote XDG_STATE_HOME=/home/u/st$$1 for a home of /home/u/st$1,
+// and the service then took its lock and watched its config in a directory no shell uses — the two
+// daemons the capture exists to prevent (M21 /code-review; read back from systemd itself, which reports
+// `$$` unchanged and `%%` as `%`).
+func systemdEnvEscape(path string) string {
+	if !strings.ContainsAny(path, " \t\"'\\%") {
+		return path
+	}
+	replaced := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(path)
 	return `"` + replaced + `"`
 }

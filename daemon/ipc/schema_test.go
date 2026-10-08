@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -119,6 +120,38 @@ func TestEveryGatewayDispatchButTheDaemonsOwnIsForwarded(t *testing.T) {
 	}
 	require.NotEmpty(t, want)
 	require.Equal(t, want, refs("daemon-ipc.schema.json", "ForwardedDispatch"))
+}
+
+// A local dispatch is told from a forwarded one by its name alone, so the gateway must never use the
+// prefix, and the schema's list of local types must be the ones this package defines.
+func TestLocalDispatchTypesAreTheirOwnNamespace(t *testing.T) {
+	raw, err := os.ReadFile(contractPath("gateway-events.schema.json"))
+	require.NoError(t, err)
+	names := regexp.MustCompile(`"(?:const|enum)":\s*\[?\s*"([A-Z][A-Z0-9_]+)"`).FindAllSubmatch(raw, -1)
+	require.Greater(t, len(names), 10, "the pattern must be finding the gateway's dispatch names, or this checks nothing")
+	for _, m := range names {
+		require.False(t, strings.HasPrefix(string(m[1]), LocalEventPrefix),
+			"the gateway schema names %s, which is the daemon's own namespace", m[1])
+	}
+
+	raw, err = os.ReadFile(contractPath("daemon-ipc.schema.json"))
+	require.NoError(t, err)
+	var doc struct {
+		Defs struct {
+			LocalDispatch struct {
+				Properties struct {
+					T struct {
+						Enum []string `json:"enum"`
+					} `json:"t"`
+				} `json:"properties"`
+			} `json:"LocalDispatch"`
+		} `json:"$defs"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	require.Equal(t, []string{EventConfigUpdate}, doc.Defs.LocalDispatch.Properties.T.Enum)
+	for _, name := range doc.Defs.LocalDispatch.Properties.T.Enum {
+		require.True(t, strings.HasPrefix(name, LocalEventPrefix))
+	}
 }
 
 // TestTheSchemaRefusesWhatTheProtocolForbids checks the contract can see the two properties that matter

@@ -7,7 +7,7 @@
 // redeem an invite — and a channel opens from it into one pane with a message list, a composer and quit.
 // It draws reduced forms of two screens docs/design/tui/SCREENS.md specifies, `5b`'s redeem box over `1a`'s
 // channel column folded into a list, and `1a`'s message area and composer; M41–M43 replace it with the real
-// frame, rail and renderer. No panes or splits, no chords beyond quit, no theming, no scrollback search.
+// frame, rail and renderer. No panes or splits, no chords beyond quit, no themes, no scrollback search.
 //
 // # Where it reaches the instance
 //
@@ -19,7 +19,8 @@
 //
 // Plain text. Every name and every message passes termsafe before it is drawn (rule 19), and no markup is
 // interpreted, which is how rule 9 is met before M43's renderer exists. Colors are TOKENS.md's roles on the
-// terminal's own ANSI 0–15, the default its theme model names, with no setting to change them yet.
+// terminal's own ANSI 0–15, the default its theme model names; `[tui.colors]` in config.toml moves a role
+// (M21), and the client redraws when the daemon reports the file changed.
 package tui
 
 import (
@@ -66,6 +67,9 @@ type Options struct {
 	Dial Dialer
 	// Channel, when set, opens that channel directly rather than home. ESC still leads home.
 	Channel string
+	// Config reads the client's settings, at start and whenever the daemon says the file changed. Nil is
+	// FileConfig, the user's own config.toml.
+	Config ConfigReader
 }
 
 // Run draws the client until it is quit, on the terminal's alternate screen.

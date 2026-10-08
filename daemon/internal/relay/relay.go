@@ -264,6 +264,11 @@ func Target(path string) (*url.URL, error) {
 	}
 
 	lower := strings.ToLower(u.Path)
+	// The daemon's own requests are answered before they reach here. One that did reach here is refused
+	// rather than sent to the instance, which has no business hearing what a client asked of the daemon.
+	if local := strings.TrimSuffix(ipc.LocalPathPrefix, "/"); lower == local || strings.HasPrefix(lower, ipc.LocalPathPrefix) {
+		return nil, errors.New("the path is the daemon's own, and is not relayed to the instance")
+	}
 	for _, prefix := range refused {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
 			return nil, fmt.Errorf("the daemon does not relay %s: it manages credentials or the instance, "+

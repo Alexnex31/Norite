@@ -34,6 +34,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,10 +74,18 @@ type Relay interface {
 }
 
 // Options configure a Server.
+// Local performs a request addressed to the daemon itself. Its answer's ID is ignored and set by the
+// server. It is asked whether or not anybody is signed in.
+type Local interface {
+	Do(ctx context.Context, req ipc.Request) ipc.Response
+}
+
 type Options struct {
 	Session Session
 	State   State
 	Relay   Relay
+	// Local answers the requests the daemon performs itself (ipc.LocalPathPrefix). Nil answers none.
+	Local Local
 	// Version is the daemon's release version, sent in HELLO and checked against each client's.
 	Version string
 	Log     zerolog.Logger
@@ -102,6 +111,7 @@ type Server struct {
 	session Session
 	state   State
 	relay   Relay
+	local   Local
 	version string
 	log     zerolog.Logger
 
@@ -126,6 +136,7 @@ func New(opts Options) *Server {
 		session:    opts.Session,
 		state:      opts.State,
 		relay:      opts.Relay,
+		local:      opts.Local,
 		version:    version,
 		log:        opts.Log,
 		maxClients: ipc.MaxClients,
@@ -192,6 +203,13 @@ func (s *Server) End() {
 // before this event and then the event, or the state after it and not the event — never the event twice in
 // one form and not at all in the other.
 func (s *Server) Dispatch(eventType string, data json.RawMessage) {
+	// The DAEMON_ namespace is the daemon's, and only Local sends in it. The schema says the instance never
+	// uses the prefix, which is true of a correct instance and no bound on the one somebody signed in to: it
+	// would otherwise forge the daemon's own events to every attached client, at whatever rate it chose
+	// (M21 /code-review). Dropped before the state sees it, since the state holds what the instance sent.
+	if strings.HasPrefix(eventType, ipc.LocalEventPrefix) {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.Dispatch(eventType, data)
@@ -224,6 +242,26 @@ func (s *Server) Dispatch(eventType string, data json.RawMessage) {
 		return
 	}
 
+	s.fanOutLocked(eventType, data)
+}
+
+// Local sends a dispatch the daemon originates itself to every client that asked for events: something
+// that happened on this machine rather than at the instance (ipc.LocalEventPrefix).
+//
+// It does not touch the state, which holds what the instance sent, and it is not held back while the
+// session and the state name different sign-ins or while nobody is signed in at all: a local event is
+// about the user's machine, and is true whichever account the daemon holds. data must be valid JSON.
+func (s *Server) Local(eventType string, data json.RawMessage) {
+	if !strings.HasPrefix(eventType, ipc.LocalEventPrefix) || !json.Valid(data) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fanOutLocked(eventType, data)
+}
+
+// fanOutLocked queues one dispatch for every watching client. The caller holds s.mu.
+func (s *Server) fanOutLocked(eventType string, data json.RawMessage) {
 	// Nothing is built for nobody: with no client watching — the ordinary case, a daemon with no TUI open —
 	// the payload is not copied at all.
 	watching := false

@@ -101,6 +101,13 @@ type Text struct {
 	err error
 }
 
+// NewText returns a Text writing to w, for a command that draws something outside its result: what an
+// import would change, shown on stderr beside the question that follows it.
+func NewText(w io.Writer) *Text { return &Text{w: w} }
+
+// Err returns the first write error, if any.
+func (t *Text) Err() error { return t.err }
+
 // Line writes one line. The first write error is kept and later writes are skipped, so a closed pipe stops
 // the output rather than failing at every line.
 func (t *Text) Line(format string, args ...any) {
