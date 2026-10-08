@@ -136,7 +136,7 @@ func (s *Service) Send(ctx context.Context, actor auth.Actor, in SendInput) (Mes
 			ChannelID: int64(in.ChannelID),
 			AuthorID:  &authorID,
 			Content:   in.Content,
-			Type:      0,
+			Type:      typeFor(actor),
 			ReplyToID: reply,
 		})
 		if err != nil {
@@ -430,7 +430,7 @@ func (s *Service) Update(ctx context.Context, actor auth.Actor, in UpdateInput) 
 		}
 
 		updated, err := q.UpdateMessageContent(ctx, db.UpdateMessageContentParams{
-			ID: row.ID, Content: in.Content,
+			ID: row.ID, Content: in.Content, Type: typeFor(actor),
 		})
 		if err != nil {
 			return fmt.Errorf("messages: update message: %w", err)

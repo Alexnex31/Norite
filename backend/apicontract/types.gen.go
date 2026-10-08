@@ -1055,7 +1055,7 @@ type Message struct {
 	// The channel listing resolves a whole page's tags at once, so a client drawing a channel needs no per-message request; `GET /channels/{channel_id}/messages/{message_id}/tags` remains for reading one message's tags on their own.
 	Tags *[]AppliedMessageTag `json:"tags"`
 
-	// Type 0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved.
+	// Type 0 default; 1 sent via automation, which the instance sets for a message an API token sent or last edited, however the request arrived, and for a webhook's. No request sets it. Higher values reserved.
 	Type int `json:"type"`
 }
 
