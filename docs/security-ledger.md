@@ -1393,3 +1393,54 @@ carries the condition that would reopen it.
 - **Reopens if**: the count of waiting connections is ever shared with the scripts being served again, or
   a connection that has presented nothing is sent a frame.
 
+
+### The port secret alone lets its holder take the port's places and spend its rate
+- **Raised**: M22, `/security-sweep` of the finished branch
+- **Verdict**: accepted risk
+- **Why**: a connection needs the port secret and any value shaped like an API token to be counted as a
+  script. `norite automation run` puts the secret in its program's environment, where every process that
+  program starts inherits it, so a holder that has no valid token can still take the sixteen places and
+  the shared five requests a second, and its requests reach the instance as 401s from the user's
+  address. It reaches nothing on the instance and nothing of the daemon's: the secret opens no request
+  of the daemon's own and carries no credential. Requests the daemon refuses itself (a path it does not
+  carry, a daemon signed in elsewhere) are deliberately not charged to the rate, so such a holder can
+  also keep sixteen goroutines parsing frames. Whoever holds the secret was started by the user or by
+  something the user started; turning the port on again replaces it.
+- **Reopens if**: the secret is ever given to something the user did not start (a plugin, M88, is the
+  obvious one), a refused request comes to cost more than parsing a frame, or the port's rate is raised
+  to where 401s from it could spend the instance's own per-address budget.
+
+### An API token can mark its owner's typed messages as automated, for good
+- **Raised**: M22, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: an edit by a token raises `messages.type` to 1 and nothing lowers it
+  (`UpdateMessageContent`'s `GREATEST`), and an edit that changes nothing is still an edit. So a token
+  holding `messages.write` can put `AUTO` on everything its owner ever typed. That is less than the same
+  scope already allows, which is rewriting those messages, and the mark is true: a token did edit them.
+  The direction that matters is closed, since nothing a token or a person does removes the mark.
+- **Reopens if**: the type comes to decide anything beyond a label, such as automated messages being
+  hidden, filtered, excluded from notifications or rate-limited apart (M60 and M64 are where that could
+  arrive), because a token could then make its owner's own messages subject to it.
+
+### Turning the port on just after signing in elsewhere records the instance the daemon has not left yet
+- **Raised**: M22, `/code-review` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: `enable` records the instance `session.Status` names, and after `norite login` to another
+  instance the daemon names the old one until it notices the store changed: a moment, or until the next
+  renewal if its watch of the store failed. The port is then recorded for the old instance. It fails
+  closed. Each request compares the instance the daemon is signed in to with the one recorded, so once
+  the daemon moves every request is refused before a token is sent, and `norite automation status` says
+  why and what to run. No token reaches an instance the port was not recorded for.
+- **Reopens if**: a request is ever sent to the recorded instance rather than to the one the daemon is
+  signed in to, or the per-request comparison is replaced by one made when the connection opens.
+
+### The daemon's debug log names the URL of an automation request that did not reach the instance
+- **Raised**: M22, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: when a script's request fails to reach the instance, the port logs Go's error at debug level,
+  which names the method and the URL, query string included. Rule 8 is about secrets, and the API puts
+  none in a URL: a token travels in a header, and an invite code, a password and a second factor travel
+  in bodies (ADR 0029). The token itself, the port secret and every body are logged at no level, which
+  the manual pass checked against both daemons' logs. The text is sanitized before it is logged.
+- **Reopens if**: any route a script can reach takes a credential or a code in its path or query, or
+  this line is raised above debug.
