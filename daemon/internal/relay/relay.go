@@ -294,6 +294,22 @@ func Target(path string) (*url.URL, error) {
 	return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
 }
 
+// ScriptTarget is Target for a request arriving on the automation port (M22): the same rules, and all of
+// /auth refused, the token routes included. A script presents an API token, which the instance would
+// refuse there anyway (they need a user actor); refusing here means the port never carries a request to
+// the surface that manages credentials, whatever a later instance decides to allow on it.
+func ScriptTarget(path string) (*url.URL, error) {
+	u, err := Target(path)
+	if err != nil {
+		return nil, err
+	}
+	if lower := strings.ToLower(u.Path); lower == "/auth" || strings.HasPrefix(lower, "/auth/") {
+		return nil, errors.New("the automation port does not carry /auth: it manages credentials, and " +
+			"a script uses one without managing any")
+	}
+	return u, nil
+}
+
 // tokenRoute reports whether a path is one of the API token routes, the exception to the /auth
 // refusal: the collection, or one token named by its id. An id is digits, so the second shape cannot be
 // stretched over a sibling route.

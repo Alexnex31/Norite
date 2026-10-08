@@ -215,6 +215,22 @@ func TestOnlyTheTokenRoutesAreRelayedUnderAuth(t *testing.T) {
 	}
 }
 
+// TestAScriptReachesWhatTheRelayDoesLessAllOfAuth: the automation port's paths (M22). The token routes the
+// relay opened for `norite token` are not opened to a script, which uses a credential and manages none.
+func TestAScriptReachesWhatTheRelayDoesLessAllOfAuth(t *testing.T) {
+	for _, path := range []string{"/users/@me", "/channels/2/messages?before=9", "/guilds/1/members", "/authors/1"} {
+		_, err := ScriptTarget(path)
+		assert.NoError(t, err, path)
+	}
+	for _, path := range []string{
+		"/auth/tokens", "/auth/tokens/1", "/AUTH/tokens", "/auth", "/auth/login",
+		"/instance/invites", "/users/@me/sessions", "/@daemon/config", "//host/x", "/guilds/../auth/tokens",
+	} {
+		_, err := ScriptTarget(path)
+		assert.Error(t, err, "%q must be refused to a script", path)
+	}
+}
+
 // ---------- performing a request ----------
 
 type fakeCreds struct {

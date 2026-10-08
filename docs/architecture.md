@@ -150,6 +150,7 @@ Locked-in decisions:
 │   ├── openapi.yaml               # REST contract — single source of truth
 │   ├── gateway-events.schema.json # WS dispatch payload contract
 │   ├── daemon-ipc.schema.json     # the daemon's attach socket, sharing the gateway's frames (M20)
+│   ├── daemon-automation.schema.json  # the daemon's port for scripts: its frames and its file (M22)
 │   └── cli-json/                  # CLI --json output schemas, versioned
 ├── docker/docker-compose.yml      # postgres, valkey, backend (air hot-reload) — local dev + self-hosted
 ├── deploy/helm/                   # flagship Kubernetes Helm chart (§12)
@@ -1667,14 +1668,18 @@ token** says what the script may do there. The daemon forwards it as the request
 stores or logs it, and **the daemon's own access token is never used on this path**: the forwarder is built
 with the instance's URL and no credential source, so it cannot lend first-party reach by mistake.
 
-It speaks the attach socket's framing with frames of its own, numbered apart from the attach socket's: a
-first frame carrying the secret and the token, then requests and responses shaped like the relay's. Paths
-are the REST API's, under the relay's path rules and refusals, and `/@daemon/` is refused, so nothing the
-daemon answers for a first-party client is reachable with a secret. The instance's status and body come
-back as they are; a 401 is the script's to deal with, where on the attach socket it is the session's.
-Frames, concurrent requests and request rate are bounded locally, the last because a script shares its
-owner's per-IP budget on the instance. A browser cannot speak the framing. A script that cannot either
-uses `norite automation request`.
+It speaks the attach socket's framing. A script's first frame carries the secret and the token, under an op
+of the port's own (200, answered by 201), and the daemon says nothing before it: a connection that does not
+present the secret is closed without a word, so a stranger on the port learns nothing, and a wrong secret
+gets one answer whatever was wrong with it. After that come the attach socket's request and response frames,
+one request at a time on a connection. Only a value shaped like an API token is forwarded, so an access
+token pasted into a script never crosses the port. Paths are the REST API's, under the relay's path rules
+and refusals plus all of `/auth`, and `/@daemon/` is refused, so nothing the daemon answers for a first-
+party client is reachable with a secret. `contracts/daemon-automation.schema.json` is the contract. The
+instance's status and body come back as they are; a 401 is the script's to deal with, where on the attach
+socket it is the session's. Frames, connections (16) and the request rate (five a second across every
+script) are bounded locally, the last because a script shares its owner's per-IP budget on the instance. A
+browser cannot speak the framing. A script that cannot either uses `norite automation request`.
 
 The switch and the port number (7717 by default) are in `state.json`, changed by
 `norite automation enable|disable` through `/@daemon/` requests. A port that is taken leaves the listener
