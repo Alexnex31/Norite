@@ -452,6 +452,33 @@ func TestAPaneHoldsAtMostFiveHundred(t *testing.T) {
 	assert.Equal(t, "1599", p.msgs[len(p.msgs)-1].Id)
 }
 
+// TestAMessageWrittenByAutomationIsDrawnTagged is the second half of M22's done-when: what a token wrote
+// says so beside its author, and what a person typed does not.
+func TestAMessageWrittenByAutomationIsDrawnTagged(t *testing.T) {
+	typed := message("1", "20", "2", "Bob", "by hand")
+	scripted := message("2", "20", "2", "Bob", "by a script")
+	scripted.Type = 1
+
+	header := func(m apicontract.Message, width int) string {
+		return ansi.Strip(defaultLook.messageLines(m, width)[0])
+	}
+	assert.NotContains(t, header(typed, 80), "AUTO")
+	assert.Regexp(t, `^Bob AUTO  `, header(scripted, 80))
+	assert.Contains(t, ansi.Strip(strings.Join(defaultLook.messageLines(scripted, 80), "\n")), "by a script")
+
+	// A name as long as an instance allows, in characters two cells wide, in the narrowest pane there is.
+	// The name is what is cut.
+	scripted.Author.DisplayName = strings.Repeat("名", 64)
+	for _, width := range []int{40, 20, 12} {
+		got := header(scripted, width)
+		assert.Contains(t, got, "AUTO", "at %d columns the tag was cut off: %q", width, got)
+		assert.LessOrEqual(t, ansi.StringWidth(got), width)
+	}
+	// And a person whose name is long is drawn as before, with no room taken for a tag.
+	typed.Author.DisplayName = strings.Repeat("名", 64)
+	assert.NotContains(t, header(typed, 40), "AUTO")
+}
+
 func TestWhatThePaneCannotNameItSaysSo(t *testing.T) {
 	deleted := message("1", "20", "2", "Bob", "hi")
 	deleted.Author = nil
