@@ -510,3 +510,40 @@ func TestAPortWhoseRecordCouldNotBeWrittenIsPutBackAsTheFileSays(t *testing.T) {
 	assert.False(t, st.Enabled)
 	assert.False(t, st.Open)
 }
+
+// TestStatusIsOneMomentsAnswer: the state file is written just after the port moves and is read by a
+// request that may land in between, and the attach socket answers before start has run. No answer may say
+// the port is off while it is open, or on and not open with no reason given.
+func TestStatusIsOneMomentsAnswer(t *testing.T) {
+	f := newPortFixture(t)
+	port := freePort(t)
+	enabled := `{"version":1,"automation_enabled":true,"automation_port":` + itoa(port) +
+		`,"automation_instance":"` + f.instance.URL + `"}`
+	disabled := `{"version":1,"automation_enabled":false,"automation_port":` + itoa(port) + `}`
+
+	// Open, with the file not yet saying so: what is open is what is reported.
+	f.ok("POST", ipc.PathAutomationEnable(port))
+	require.NoError(t, os.WriteFile(statefile.PathIn(f.dir), []byte(disabled), 0o600))
+	st := f.ok("GET", ipc.PathAutomation)
+	assert.True(t, st.Enabled, "the port is open and status says it is off")
+	assert.True(t, st.Open)
+	assert.Equal(t, f.instance.URL, st.Instance)
+	f.ok("POST", ipc.PathAutomationDisable)
+
+	// Recorded as on, asked before start has run.
+	require.NoError(t, os.WriteFile(statefile.PathIn(f.dir), []byte(enabled), 0o600))
+	early := newAutomation(context.Background(), f.dir, f.signIn, "dev", zerolog.Nop())
+	f.control = early
+	st = f.ok("GET", ipc.PathAutomation)
+	assert.True(t, st.Enabled)
+	assert.False(t, st.Open)
+	assert.Contains(t, st.Problem, "still starting")
+
+	// Started and then stopped: still a reason.
+	early.start()
+	assert.True(t, f.ok("GET", ipc.PathAutomation).Open)
+	early.stop()
+	st = f.ok("GET", ipc.PathAutomation)
+	assert.False(t, st.Open)
+	assert.Contains(t, st.Problem, "stopping")
+}

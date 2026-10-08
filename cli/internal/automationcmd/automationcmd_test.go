@@ -464,6 +464,7 @@ func TestEachOutcomeOfARequestHasItsExitCode(t *testing.T) {
 		"404 from the instance":      {status(404, `{"error":{"code":"not_found","message":"not found","request_id":"req-2"}}`), "refused", "req-2"},
 		"401: the token":             {status(401, instanceError), "unavailable", EnvToken},
 		"429 from the instance":      {status(429, instanceError), "unavailable", "rate-limiting"},
+		"200 with no JSON body":      {status(200, ""), "failure", "no JSON body"},
 		"500 from the instance":      {status(500, `{"error":{"code":"internal","message":"internal error","request_id":"req-3"}}`), "failure", "req-3"},
 		"a path the port refuses":    {failed(ipc.RelayRefused, "the automation port does not carry /auth"), "refused", "does not carry /auth"},
 		"the port's own rate":        {failed(ipc.RelayTooManyRequests, "the automation port takes 5 requests a second"), "unavailable", "5 requests a second"},
@@ -502,6 +503,15 @@ func TestARequestPrintsNumbersAsTheInstanceWroteThem(t *testing.T) {
 	require.NoError(t, r.err)
 	assert.Contains(t, r.out, "9007199254740993")
 	assert.Contains(t, r.out, "0.1")
+}
+
+// TestANoContentAnswerIsSuccessAndPrintsNothing: 204 is the one 2xx this API sends without a body.
+func TestANoContentAnswerIsSuccessAndPrintsNothing(t *testing.T) {
+	p := newFakePort(t, status(204, ""))
+	p.inRun(t)
+	r := norite(t, nil, "", false, "request", "DELETE", "/channels/20/messages/30")
+	require.NoError(t, r.err)
+	assert.Empty(t, r.out)
 }
 
 // TestAWrongSecretSaysToStartTheScriptAgain: the secret changes with every run of the daemon, so a script

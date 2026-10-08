@@ -280,6 +280,21 @@ const (
 	RelayFailed = "failed"
 )
 
+// ValidMethod reports whether a request may use method: the five the REST API uses, spelled in capitals.
+// One list for the attach socket, the automation port and the command that speaks to it.
+func ValidMethod(method string) bool {
+	switch method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE":
+		return true
+	}
+	return false
+}
+
+// Failure is a Response saying why the daemon did not perform a request. Its ID is the caller's to set.
+func Failure(code, msg string) Response {
+	return Response{Error: &RelayError{Code: code, Message: msg}}
+}
+
 // RelayError is why the daemon could not perform a request. Its message is the daemon's own wording, never
 // the instance's.
 type RelayError struct {

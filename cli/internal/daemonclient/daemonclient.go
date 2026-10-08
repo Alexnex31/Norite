@@ -103,44 +103,51 @@ func Call(ctx context.Context, c Caller, method, path string, body, out any) err
 		return fromRelay(err)
 	}
 
-	switch {
-	case res.Status >= 200 && res.Status < 300:
-		if out == nil {
-			return nil
-		}
-		// No body where one was owed: not success, whatever the status says. A proxy answering 200 with HTML
-		// arrives here, its body dropped by the relay as not JSON, and must not decode into an empty object.
-		if res.Body == nil || string(bytes.TrimSpace(res.Body)) == "null" {
-			return fmt.Errorf("the instance answered HTTP %d with no usable body", res.Status)
-		}
-		if err := json.Unmarshal(res.Body, out); err != nil {
-			return fmt.Errorf("the instance's answer does not decode: %w", err)
-		}
+	if res.Status < 200 || res.Status >= 300 {
+		return Refusal(res.Status, res.Body, "the instance refused the daemon's credential; run `norite login` again")
+	}
+	if out == nil {
 		return nil
+	}
+	// No body where one was owed: not success, whatever the status says. A proxy answering 200 with HTML
+	// arrives here, its body dropped by the relay as not JSON, and must not decode into an empty object.
+	if res.Body == nil || string(bytes.TrimSpace(res.Body)) == "null" {
+		return fmt.Errorf("the instance answered HTTP %d with no usable body", res.Status)
+	}
+	if err := json.Unmarshal(res.Body, out); err != nil {
+		return fmt.Errorf("the instance's answer does not decode: %w", err)
+	}
+	return nil
+}
 
-	case res.Status == http.StatusUnauthorized:
-		return clierr.Unavailable("the instance refused the daemon's credential; run `norite login` again")
-
-	case res.Status == http.StatusTooManyRequests:
+// Refusal is the error for an instance's answer that is not a 2xx, and with it the exit code: 401 and 429
+// are "not now" (3), any other 4xx is a refusal (4) in the instance's own words, and anything else is a
+// failure (1). It is the one place that decides, for a verb's relayed call and for a script's request
+// through the automation port alike (M22); they differ only in whose credential a 401 is about, which
+// unauthorized says.
+func Refusal(status int, body json.RawMessage, unauthorized string) error {
+	switch status {
+	case http.StatusUnauthorized:
+		return clierr.Unavailable("%s", unauthorized)
+	case http.StatusTooManyRequests:
 		// A throttle is transient, so it is "not now" rather than "no": exit 3, which a script may retry
 		// after a wait, where 4 would read as the request itself being refused.
 		return clierr.Unavailable("the instance is rate-limiting this account; try again shortly")
 	}
 
 	// The instance's own words, and a stranger's server: sanitized as they are lifted out (rule 19).
-	e, decoded := apiclient.ErrorFromBody(res.Status, res.Body)
-	if res.Status >= 400 && res.Status < 500 {
-		refused := &clierr.RefusedError{Status: res.Status}
+	e, decoded := apiclient.ErrorFromBody(status, body)
+	if status >= 400 && status < 500 {
+		refused := &clierr.RefusedError{Status: status}
 		if decoded {
 			refused.Code, refused.Message, refused.RequestID = e.Code, e.Message, e.RequestID
 		}
 		return refused
 	}
 	if decoded {
-		return fmt.Errorf("the instance failed the request (HTTP %d): %s (request %s)", res.Status,
-			e.Message, e.RequestID)
+		return fmt.Errorf("the instance failed the request (HTTP %d): %s (request %s)", status, e.Message, e.RequestID)
 	}
-	return fmt.Errorf("the instance failed the request (HTTP %d)", res.Status)
+	return fmt.Errorf("the instance failed the request (HTTP %d)", status)
 }
 
 // Local performs a request the daemon answers itself (ipc.LocalPathPrefix) and decodes its answer into out.

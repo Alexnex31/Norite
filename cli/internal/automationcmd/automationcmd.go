@@ -33,7 +33,6 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/Alexnex31/Norite/cli/internal/apiclient"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/output"
@@ -276,14 +275,12 @@ const maxBody = 512 << 10
 // requestTimeout bounds one request, connecting included.
 const requestTimeout = 2 * time.Minute
 
-var methods = map[string]bool{"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true}
-
 func request(ctx context.Context, cmd *cli.Command) error {
 	if cmd.Args().Len() != 2 {
 		return clierr.Usage("usage: norite automation request <method> <path>")
 	}
 	method, path := strings.ToUpper(cmd.Args().Get(0)), cmd.Args().Get(1)
-	if !methods[method] {
+	if !ipc.ValidMethod(method) {
 		return clierr.Usage("the method must be GET, POST, PUT, PATCH or DELETE")
 	}
 	if !strings.HasPrefix(path, "/") || len(path) > 2048 {
@@ -410,39 +407,29 @@ func outcome(w io.Writer, resp ipc.Response) error {
 	status := *resp.Status
 	empty := len(bytes.TrimSpace(resp.Body)) == 0 || string(bytes.TrimSpace(resp.Body)) == "null"
 
-	switch {
-	case status >= 200 && status < 300:
-		if empty {
+	if status < 200 || status >= 300 {
+		// Decided where every verb's is, so a script's request and a verb cannot come to disagree about
+		// what an answer means. Only the 401's wording is this command's: the credential is the token.
+		return daemonclient.Refusal(status, resp.Body, "the instance did not accept the token in "+EnvToken+
+			": it was revoked, or was made on another instance. `norite token list` shows what is live")
+	}
+	if empty {
+		if status == http.StatusNoContent {
 			return nil
 		}
-		// The instance's body, exactly, with what a terminal would act on escaped. A parser reads the
-		// same values either way.
-		// Numbers are kept as written. Decoded the ordinary way they become float64, and an integer above
-		// 2^53 would be printed as a different one.
-		var v any
-		dec := json.NewDecoder(bytes.NewReader(resp.Body))
-		dec.UseNumber()
-		if err := dec.Decode(&v); err != nil {
-			return fmt.Errorf("the instance's answer does not decode: %w", err)
-		}
-		return output.WriteJSON(w, v)
-	case status == http.StatusUnauthorized:
-		return clierr.Unavailable("the instance did not accept the token in %s: it was revoked, or was made on "+
-			"another instance. `norite token list` shows what is live", EnvToken)
-	case status == http.StatusTooManyRequests:
-		return clierr.Unavailable("the instance is rate-limiting this account; try again shortly")
+		// The daemon drops a body that is not JSON. A 2xx with none, where the API always sends one, is
+		// something in front of the instance answering for it, and is not success (M22 /code-review).
+		return fmt.Errorf("the instance answered HTTP %d with no JSON body, which this API never does: "+
+			"something between the daemon and the instance may be answering for it", status)
 	}
-
-	e, decoded := apiclient.ErrorFromBody(status, resp.Body)
-	if status >= 400 && status < 500 {
-		refused := &clierr.RefusedError{Status: status}
-		if decoded {
-			refused.Code, refused.Message, refused.RequestID = e.Code, e.Message, e.RequestID
-		}
-		return refused
+	// The instance's body, exactly, with what a terminal would act on escaped. A parser reads the same
+	// values either way. Numbers are kept as written: decoded the ordinary way they become float64, and
+	// an integer above 2^53 would be printed as a different one.
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(resp.Body))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return fmt.Errorf("the instance's answer does not decode: %w", err)
 	}
-	if decoded {
-		return fmt.Errorf("the instance failed the request (HTTP %d): %s (request %s)", status, e.Message, e.RequestID)
-	}
-	return fmt.Errorf("the instance failed the request (HTTP %d)", status)
+	return output.WriteJSON(w, v)
 }

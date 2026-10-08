@@ -272,7 +272,7 @@
             },
             {
               "const": "unreachable",
-              "description": "The instance did not answer, or not in time; or the daemon has not finished reading its sign-in, which is not being signed out. Worth sending again."
+              "description": "The instance did not answer, or not in time, or the port closed with the request in flight: in each case the request may or may not have reached the instance. Also a daemon that has not finished reading its sign-in, which is not being signed out; nothing was sent."
             },
             {
               "const": "refused",
@@ -341,7 +341,7 @@
       "oneOf": [
         {
           "const": 1001,
-          "description": "The daemon is stopping, or the port was disabled."
+          "description": "The port is closing: the daemon is stopping, or the port was turned off, or turned on again."
         },
         {
           "const": 4001,

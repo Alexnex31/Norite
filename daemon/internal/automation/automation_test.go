@@ -857,7 +857,13 @@ func TestStoppingDoesNotWaitOutTheIdleTimeBehindARequestInFlight(t *testing.T) {
 	require.NoError(t, ipc.Decode(r.next(), &resp))
 	require.NotNil(t, resp.Error)
 	assert.Equal(t, ipc.RelayUnreachable, resp.Error.Code)
-	assert.Equal(t, ipc.CloseGoingAway, r.closed().Code)
+	// The instance had the request. Told only that it "did not answer", a script sends it again.
+	assert.Contains(t, resp.Error.Message, "may or may not have reached the instance")
+	assert.NotContains(t, resp.Error.Message, "did not answer")
+	cl := r.closed()
+	assert.Equal(t, ipc.CloseGoingAway, cl.Code)
+	// The port closes when its user turns it off, too, with the daemon still running.
+	assert.Contains(t, cl.Reason, "the automation port is closing")
 	select {
 	case <-f.served:
 	case <-time.After(10 * time.Second):

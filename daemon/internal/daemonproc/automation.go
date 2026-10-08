@@ -50,8 +50,12 @@ type automationControl struct {
 	cancel  context.CancelFunc
 	served  chan struct{}
 	problem string
-	// stopped is set as the daemon stops, after which nothing opens the port again.
-	stopped bool
+	// running is what the open port was opened as. While a port is open it is what status reports, since
+	// the state file is written a moment after the port moves and read without this lock.
+	running statefile.State
+	// started is set once start has run, and stopped as the daemon stops, after which nothing opens the
+	// port again.
+	started, stopped bool
 }
 
 // updateState is the state file's writer, a variable so a test can fail the write after the port has moved.
@@ -84,6 +88,7 @@ func (a *automationControl) InstanceURL() (string, error) {
 func (a *automationControl) start() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.started = true
 	// The attach socket is already served when this runs, so a request may have opened the port first. Its
 	// file is this run's then, and removing it would leave a port no script can find.
 	if a.srv != nil {
@@ -152,7 +157,7 @@ func (a *automationControl) openLocked(st statefile.State) error {
 		srv.Serve(ctx)
 		close(served)
 	}()
-	a.srv, a.cancel, a.served, a.problem = srv, cancel, served, ""
+	a.srv, a.cancel, a.served, a.problem, a.running = srv, cancel, served, "", st
 	a.log.Info().Str("address", srv.Address()).Msg("the automation port is open")
 	// A port that was open on another number is closed only now, with the new one bound and its file
 	// written over the old one's: until here nothing had been taken from the scripts using it.
@@ -182,30 +187,55 @@ func (a *automationControl) closeLocked() {
 }
 
 // statusLocked is how the port stands, from the state file and from what is running.
+//
+// The two can differ for a moment: the file is written just after the port moves, and the attach socket
+// answers before start has run. What is open is reported as it was opened, and an enabled port that is not
+// open always says why, so no answer contradicts itself or leaves the reason blank (M22 /code-review).
 func (a *automationControl) statusLocked(st statefile.State) ipc.AutomationStatus {
-	out := ipc.AutomationStatus{Enabled: st.AutomationEnabled, Port: portOf(st)}
-	if st.AutomationEnabled {
-		// From a file a person can edit, and about to be printed.
-		out.Instance = termsafe.Text(st.AutomationInstance)
-		out.Problem = a.problem
-	}
 	if a.srv != nil {
-		out.Open, out.Address = true, a.srv.Address()
-		// An open port that will refuse every request says so here, where a person looks first, and not
-		// only to the script (M22 manual pass). The port asks the same two questions of each request.
-		switch now, err := a.InstanceURL(); {
-		case err != nil:
-			out.Problem = err.Error()
-		case !automation.SameInstance(now, st.AutomationInstance):
-			out.Problem = "the daemon is signed in to " + termsafe.Text(now) + " now, and the port serves only the " +
-				"instance it was turned on for; run `norite automation enable` to use it with this one"
+		st = a.running
+	}
+	out := ipc.AutomationStatus{Enabled: st.AutomationEnabled, Port: portOf(st)}
+	if !out.Enabled {
+		return out
+	}
+	// From a file a person can edit, and about to be printed.
+	out.Instance = termsafe.Text(st.AutomationInstance)
+	out.Problem = a.problem
+	if a.srv == nil {
+		switch {
+		case out.Problem != "":
+		case a.stopped:
+			out.Problem = errStopping.Error()
+		case !a.started:
+			out.Problem = "the daemon is still starting; ask again in a moment"
+		default:
+			out.Problem = "the port is recorded as on and this daemon has not opened it; run `norite automation enable`"
 		}
+		return out
+	}
+	out.Open, out.Address = true, a.srv.Address()
+	// An open port that will refuse every request says so here, where a person looks first, and not only
+	// to the script (M22 manual pass). The port asks the same two questions of each request.
+	switch now, err := a.InstanceURL(); {
+	case err != nil:
+		out.Problem = err.Error()
+	case !automation.SameInstance(now, st.AutomationInstance):
+		out.Problem = "the daemon is signed in to " + termsafe.Text(now) + " now, and the port serves only the " +
+			"instance it was turned on for; run `norite automation enable` to use it with this one"
 	}
 	return out
 }
 
-func automationFailure(code, msg string) ipc.Response {
-	return ipc.Response{Error: &ipc.RelayError{Code: code, Message: msg}}
+// status reads the state file and reports, under one lock.
+func (a *automationControl) status() (ipc.AutomationStatus, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	st, err := statefile.ReadIn(a.stateDir)
+	if err != nil {
+		return ipc.AutomationStatus{}, err
+	}
+	return a.statusLocked(st), nil
 }
 
 // handles reports whether a local request is one of the automation port's.
@@ -213,47 +243,41 @@ func (a *automationControl) handles(path string) bool {
 	return path == ipc.PathAutomation || strings.HasPrefix(path, ipc.PathAutomation+"/")
 }
 
-// Do answers one request about the port.
+// Do answers one request about the port. Each branch reports how the port stood while it held the lock, so
+// the answer is one moment's and not two.
 func (a *automationControl) Do(ctx context.Context, req ipc.Request) ipc.Response {
-	var st statefile.State
+	const wrongMethod = "the automation port is read with GET and changed with POST"
+	var out ipc.AutomationStatus
 	var err error
 	port, enabling := ipc.AutomationEnablePort(req.Path)
 	switch {
+	case req.Path == ipc.PathAutomation && req.Method != http.MethodGet:
+		return ipc.Failure(ipc.RelayBadRequest, wrongMethod)
 	case req.Path == ipc.PathAutomation:
-		if req.Method != http.MethodGet {
-			return automationFailure(ipc.RelayBadRequest, "the automation port is read with GET and changed with POST")
-		}
-		if st, err = statefile.ReadIn(a.stateDir); err == nil {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-		}
+		out, err = a.status()
 	case req.Method != http.MethodPost:
-		return automationFailure(ipc.RelayBadRequest, "the automation port is read with GET and changed with POST")
+		return ipc.Failure(ipc.RelayBadRequest, wrongMethod)
 	case enabling:
-		st, err = a.enable(ctx, port)
+		out, err = a.enable(ctx, port)
 	case req.Path == ipc.PathAutomationDisable:
-		st, err = a.disable(ctx)
+		out, err = a.disable(ctx)
 	default:
-		return automationFailure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
+		return ipc.Failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
 	}
 
 	var no *automationRefusal
 	switch {
 	case errors.As(err, &no):
-		return automationFailure(ipc.RelayConflict, no.msg)
+		return ipc.Failure(ipc.RelayConflict, no.msg)
 	case errors.Is(err, internalstate.ErrLocked):
-		return automationFailure(ipc.RelayConflict, "another request is changing the daemon's state; try again")
+		return ipc.Failure(ipc.RelayConflict, "another request is changing the daemon's state; try again")
 	case err != nil:
 		a.log.Error().Str("error", termsafe.Text(err.Error())).Msg("a request about the automation port failed")
-		return automationFailure(ipc.RelayFailed, termsafe.Text(err.Error()))
+		return ipc.Failure(ipc.RelayFailed, termsafe.Text(err.Error()))
 	}
-	if req.Path != ipc.PathAutomation {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-	}
-	body, err := json.Marshal(a.statusLocked(st))
+	body, err := json.Marshal(out)
 	if err != nil {
-		return automationFailure(ipc.RelayFailed, "the daemon could not encode its answer")
+		return ipc.Failure(ipc.RelayFailed, "the daemon could not encode its answer")
 	}
 	status := http.StatusOK
 	return ipc.Response{Status: &status, Body: body}
@@ -277,17 +301,18 @@ func (r *automationRefusal) Error() string { return r.msg }
 //     that too rather than that nothing changed.
 //
 // If the port moved and the record of it could not be written, the port is put back as the file says.
-func (a *automationControl) enable(ctx context.Context, port int) (statefile.State, error) {
+func (a *automationControl) enable(ctx context.Context, port int) (ipc.AutomationStatus, error) {
 	instanceURL, err := a.InstanceURL()
 	switch {
 	case errors.Is(err, automation.ErrSignInPending):
-		return statefile.State{}, &automationRefusal{"the port is turned on for the instance the daemon is " +
+		return ipc.AutomationStatus{}, &automationRefusal{"the port is turned on for the instance the daemon is " +
 			"signed in to, and it has not finished reading its sign-in; try again in a moment"}
 	case err != nil:
-		return statefile.State{}, &automationRefusal{"the port is turned on for one instance, the one the " +
+		return ipc.AutomationStatus{}, &automationRefusal{"the port is turned on for one instance, the one the " +
 			"daemon is signed in to, and it is signed in to none; run `norite login` first"}
 	}
-	var out, before statefile.State
+	var out ipc.AutomationStatus
+	var before statefile.State
 	moved := false
 	err = updateState(ctx, a.stateDir, func(st *statefile.State) error {
 		a.mu.Lock()
@@ -315,7 +340,7 @@ func (a *automationControl) enable(ctx context.Context, port int) (statefile.Sta
 			return &automationRefusal{reason + ". The port is open as it was, with a new secret: scripts " +
 				"started before this must be started again"}
 		}
-		out, moved = *st, true
+		out, moved = a.statusLocked(*st), true
 		return nil
 	}, nil)
 	if err != nil && moved {
@@ -337,17 +362,19 @@ func (a *automationControl) enable(ctx context.Context, port int) (statefile.Sta
 
 // disable closes the port and records that it stays closed. The port number is kept, so turning it on again
 // without naming one finds the one that was chosen. Asked of a port already off, it changes nothing.
-func (a *automationControl) disable(ctx context.Context) (statefile.State, error) {
-	var out statefile.State
+func (a *automationControl) disable(ctx context.Context) (ipc.AutomationStatus, error) {
+	var recorded statefile.State
+	var out ipc.AutomationStatus
 	err := updateState(ctx, a.stateDir, func(st *statefile.State) error {
 		st.AutomationEnabled, st.AutomationInstance = false, ""
-		out = *st
+		recorded = *st
 		return nil
 	}, func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		a.closeLocked()
 		a.problem = ""
+		out = a.statusLocked(recorded)
 	})
 	return out, err
 }

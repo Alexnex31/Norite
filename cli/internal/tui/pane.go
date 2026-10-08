@@ -261,27 +261,22 @@ func (p *paneModel) tail(width, rows int) []string {
 }
 
 func (l *look) messageLines(msg apicontract.Message, width int) []string {
-	name := l.byline(msg)
-	if msg.Type == ops.MessageTypeAutomation {
-		// The instance sets this for a message an API token sent or has ever edited (M22), and for a webhook's
-		// (M60). The name gives way to the badge, never the other way: a line is cut from its right, so a
-		// name long enough to fill a narrow pane would otherwise push off the one word that says a script
-		// wrote this.
-		name = clip(name, max(width-len(autoBadge)-1, 0)) + " " + l.accent.Render(autoBadge)
-	}
-	when := "  " + l.dim.Render(msg.CreatedAt.Local().Format(l.clock))
-	if msg.Type == ops.MessageTypeAutomation {
-		// The time is cut on its own, to the room the name and the badge leave. Cut together, the mark
-		// that says something was left out would land on the badge's last letter.
-		if room := width - ansi.StringWidth(name); room > 0 {
-			when = clip(when, room)
-		} else {
-			when = ""
-		}
-	}
-	header := name + when
+	header := l.byline(msg) + "  " + l.dim.Render(msg.CreatedAt.Local().Format(l.clock))
 	if msg.EditedAt != nil {
 		header += l.dim.Render("  (edited)")
+	}
+	if msg.Type == ops.MessageTypeAutomation {
+		// The instance sets this for a message an API token sent or has ever edited (M22), and for a
+		// webhook's (M60). The badge is the header's last word, for two reasons.
+		//
+		// A name is the account's to choose, and everything after it is this client's. Drawn straight
+		// after the name, the badge could be typed: "Bob AUTO" on a message written by hand read the
+		// same as Bob's script once color is taken away. At the end, a forged one is followed by a time.
+		//
+		// And a line is cut from its right, so whatever comes before the badge is cut to the room it
+		// leaves, and the mark for something left out lands there and never on the badge itself.
+		badge := "  " + l.accent.Render(autoBadge)
+		header = clip(header, max(width-ansi.StringWidth(badge), 0)) + badge
 	}
 	lines := []string{clip(header, width)}
 

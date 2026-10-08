@@ -112,26 +112,22 @@ func New(opts Options) *Relay {
 	return &Relay{creds: opts.Credentials, http: client, userAgent: "norite-daemon/" + version, log: opts.Log}
 }
 
-func failure(code, msg string) ipc.Response {
-	return ipc.Response{Error: &ipc.RelayError{Code: code, Message: msg}}
-}
-
 // Do performs req. Its answer's ID is left for the caller to set.
 func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	target, err := Target(req.Path)
 	if err != nil {
-		return failure(ipc.RelayRefused, err.Error())
+		return ipc.Failure(ipc.RelayRefused, err.Error())
 	}
 	// The contract carries "no body" as JSON null, which arrives here as the four bytes of it.
 	if bytes.Equal(bytes.TrimSpace(req.Body), []byte("null")) {
 		req.Body = nil
 	}
 	if req.Body != nil && !json.Valid(req.Body) {
-		return failure(ipc.RelayBadRequest, "the request body is not JSON")
+		return ipc.Failure(ipc.RelayBadRequest, "the request body is not JSON")
 	}
 
 	if standing, _ := r.creds.Status(); standing == session.SignedOut {
-		return failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
+		return ipc.Failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
 	}
 	cred, failed := r.current(ctx)
 	if failed != nil {
@@ -149,20 +145,20 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 			return *failed
 		}
 		if renewed.Generation != cred.Generation || renewed.InstanceURL != cred.InstanceURL {
-			return failure(ipc.RelayNotSignedIn, "the daemon's sign-in changed during the request; try it again")
+			return ipc.Failure(ipc.RelayNotSignedIn, "the daemon's sign-in changed during the request; try it again")
 		}
 		status, body, err = r.send(ctx, req, target, renewed)
 	}
 
 	switch {
 	case errors.Is(err, ErrTooLarge):
-		return failure(ipc.RelayTooLarge, fmt.Sprintf("the instance's answer exceeds %d bytes", ipc.MaxResponseBody))
+		return ipc.Failure(ipc.RelayTooLarge, fmt.Sprintf("the instance's answer exceeds %d bytes", ipc.MaxResponseBody))
 	case err != nil:
 		if ctx.Err() != nil {
-			return failure(ipc.RelayUnreachable, "the request was canceled")
+			return ipc.Failure(ipc.RelayUnreachable, "the request was canceled")
 		}
 		r.log.Debug().Str("error", termsafe.Text(err.Error())).Msg("a relayed request could not reach the instance")
-		return failure(ipc.RelayUnreachable, "could not reach the instance: "+termsafe.Text(err.Error()))
+		return ipc.Failure(ipc.RelayUnreachable, "could not reach the instance: "+termsafe.Text(err.Error()))
 	}
 
 	r.log.Debug().Str("method", req.Method).Str("path", termsafe.Text(target.Path)).Int("status", status).
@@ -179,14 +175,14 @@ func (r *Relay) current(ctx context.Context) (session.Credential, *ipc.Response)
 		return cred, nil
 	}
 	if ctx.Err() != nil {
-		f := failure(ipc.RelayUnreachable, "the request was canceled")
+		f := ipc.Failure(ipc.RelayUnreachable, "the request was canceled")
 		return session.Credential{}, &f
 	}
 	if errors.Is(err, session.ErrSignedOut) {
-		f := failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
+		f := ipc.Failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
 		return session.Credential{}, &f
 	}
-	f := failure(ipc.RelayUnreachable, "the daemon has no usable session from its instance yet; "+
+	f := ipc.Failure(ipc.RelayUnreachable, "the daemon has no usable session from its instance yet; "+
 		"it may be unreachable, and the daemon's log says why")
 	return session.Credential{}, &f
 }

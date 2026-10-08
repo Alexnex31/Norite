@@ -184,13 +184,19 @@ func SameInstance(a, b string) bool {
 		strings.TrimRight(ua.Path, "/") == strings.TrimRight(ub.Path, "/")
 }
 
+// validInstance reports whether s is an instance URL this package can compare: it parses and names a host.
+func validInstance(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Host != ""
+}
+
 // Open binds the port, mints this run's secret and writes both where a script can find them. The caller
 // serves with Serve and, when done, calls Close.
 func Open(opts Options) (*Server, error) {
 	if opts.Instance == nil || opts.HTTP == nil {
 		return nil, errors.New("automation: an instance and an HTTP client are required")
 	}
-	if !SameInstance(opts.EnabledFor, opts.EnabledFor) {
+	if !validInstance(opts.EnabledFor) {
 		return nil, errors.New("automation: the instance the port was enabled for is required")
 	}
 	// A copy, so the caller's client is not changed under it, and so that the policy does not depend on
@@ -395,6 +401,10 @@ func (s *Server) closeAfterReading(conn net.Conn, code int, reason string) {
 	_, _ = io.CopyN(io.Discard, conn, lingerBytes)
 }
 
+// closing is why a connection ends when the port does. The port closes when the daemon stops, and also when
+// its user turns it off or on again, so the reason names the port.
+const closing = "the automation port is closing"
+
 // refusal is the one answer to a first frame that does not open the port, whatever was wrong with it.
 const refusal = "the automation port did not accept that secret"
 
@@ -443,14 +453,14 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 		// here, or Serve's deadline lands after this one and ends the read.
 		_ = conn.SetReadDeadline(time.Now().Add(idleWait))
 		if ctx.Err() != nil {
-			s.closeWith(conn, ipc.CloseGoingAway, "the daemon is stopping")
+			s.closeWith(conn, ipc.CloseGoingAway, closing)
 			return
 		}
 		f, err := ipc.ReadFrame(conn, ipc.MaxClientFrame)
 		switch {
 		case err == nil:
 		case ctx.Err() != nil:
-			s.closeWith(conn, ipc.CloseGoingAway, "the daemon is stopping")
+			s.closeWith(conn, ipc.CloseGoingAway, closing)
 			return
 		case errors.Is(err, io.EOF):
 			return
@@ -496,22 +506,14 @@ func (s *Server) write(conn net.Conn, op gatewayproto.Opcode, payload any) bool 
 	return ipc.WriteFrame(conn, f) == nil
 }
 
-func failure(code, msg string) ipc.Response {
-	return ipc.Response{Error: &ipc.RelayError{Code: code, Message: msg}}
-}
-
-var methods = map[string]bool{
-	http.MethodGet: true, http.MethodPost: true, http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
-}
-
 // do performs one request with the script's token.
 func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Response {
-	if !methods[req.Method] {
-		return failure(ipc.RelayBadRequest, "the method must be GET, POST, PUT, PATCH or DELETE")
+	if !ipc.ValidMethod(req.Method) {
+		return ipc.Failure(ipc.RelayBadRequest, "the method must be GET, POST, PUT, PATCH or DELETE")
 	}
 	target, err := relay.ScriptTarget(req.Path)
 	if err != nil {
-		return failure(ipc.RelayRefused, err.Error())
+		return ipc.Failure(ipc.RelayRefused, err.Error())
 	}
 	// "No body" is JSON null on the wire, as on the attach socket.
 	body := req.Body
@@ -522,13 +524,13 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 	instanceURL, err := s.opts.Instance.InstanceURL()
 	switch {
 	case errors.Is(err, ErrSignInPending):
-		return failure(ipc.RelayUnreachable, err.Error())
+		return ipc.Failure(ipc.RelayUnreachable, err.Error())
 	case err != nil:
-		return failure(ipc.RelayNotSignedIn, ErrSignedOut.Error())
+		return ipc.Failure(ipc.RelayNotSignedIn, ErrSignedOut.Error())
 	}
 	// Asked on every request, not once per connection: a sign-in can change under an open one.
 	if !SameInstance(instanceURL, s.enabledFor) {
-		return failure(ipc.RelayRefused, "the automation port was turned on for another instance than the one "+
+		return ipc.Failure(ipc.RelayRefused, "the automation port was turned on for another instance than the one "+
 			"the daemon is signed in to now, and a token is not sent to an instance it was not made on; "+
 			"run `norite automation enable` to use the port with this one")
 	}
@@ -536,10 +538,11 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 	// After every check that costs nothing, so that a request refused here does not spend a budget all
 	// scripts share, and before the one thing that reaches the instance.
 	if !s.bucket.take() {
-		return failure(ipc.RelayTooManyRequests, fmt.Sprintf("the automation port takes %g requests a second "+
+		return ipc.Failure(ipc.RelayTooManyRequests, fmt.Sprintf("the automation port takes %g requests a second "+
 			"across every script; slow down and send it again", s.opts.Rate))
 	}
 
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	// The script's token, and only ever the script's: there is no other credential in reach of this
@@ -547,13 +550,18 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 	status, raw, err := relay.Perform(ctx, s.opts.HTTP, instanceURL, target, req.Method, body, token, s.userAgent)
 	switch {
 	case errors.Is(err, relay.ErrTooLarge):
-		return failure(ipc.RelayTooLarge, "the instance's answer is larger than the daemon will carry")
+		return ipc.Failure(ipc.RelayTooLarge, "the instance's answer is larger than the daemon will carry")
+	case err != nil && parent.Err() != nil:
+		// Ended by the port closing under it, not by the instance. It may have arrived all the same, and a
+		// script told only "did not answer" would send a message twice (M22 /code-review).
+		return ipc.Failure(ipc.RelayUnreachable, "the automation port closed with this request in flight; it may "+
+			"or may not have reached the instance")
 	case err != nil:
 		// The error names the URL, which is the instance's and the path's; no secret is in it. Logged
 		// sanitized, and the script is told only that the instance did not answer.
 		s.opts.Log.Debug().Str("method", req.Method).Str("error", termsafe.Text(err.Error())).
 			Msg("an automation request did not reach the instance")
-		return failure(ipc.RelayUnreachable, "the instance did not answer")
+		return ipc.Failure(ipc.RelayUnreachable, "the instance did not answer")
 	}
 	return ipc.Response{Status: &status, Body: raw}
 }

@@ -99,10 +99,10 @@ func (h *Handler) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	case ipc.PathConfigUnsplit:
 		run = func(ctx context.Context) (any, error) { return h.unsplit(ctx) }
 	default:
-		return failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
+		return ipc.Failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
 	}
 	if req.Method != method {
-		return failure(ipc.RelayBadRequest, "the config toggle is read with GET and changed with POST")
+		return ipc.Failure(ipc.RelayBadRequest, "the config toggle is read with GET and changed with POST")
 	}
 
 	done, err := run(ctx)
@@ -110,26 +110,26 @@ func (h *Handler) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	var parse *config.ParseError
 	switch {
 	case errors.As(err, &no):
-		return failure(ipc.RelayConflict, no.msg)
+		return ipc.Failure(ipc.RelayConflict, no.msg)
 	case errors.Is(err, internalstate.ErrLocked):
-		return failure(ipc.RelayConflict, "another request is changing the config toggle; try again")
+		return ipc.Failure(ipc.RelayConflict, "another request is changing the config toggle; try again")
 	case errors.Is(err, config.ErrLocked):
-		return failure(ipc.RelayConflict, "something else is writing a config file; try again")
+		return ipc.Failure(ipc.RelayConflict, "something else is writing a config file; try again")
 	case errors.Is(err, config.ErrKeepsChanging):
-		return failure(ipc.RelayConflict, "a config file kept being saved while the toggle worked on it; "+
+		return ipc.Failure(ipc.RelayConflict, "a config file kept being saved while the toggle worked on it; "+
 			"try again once it is left alone. Nothing a client reads was moved")
 	case errors.Is(err, atomicfile.ErrReadOnly), errors.Is(err, config.ErrInlineTable),
 		errors.Is(err, config.ErrNotAFile), errors.Is(err, config.ErrTooLarge), errors.As(err, &parse):
 		// Understood, and not done because of a file as it stands: the person can fix that, and the
 		// daemon did not fail. The error names paths, which are the filesystem's text.
-		return failure(ipc.RelayConflict, termsafe.Text(err.Error())+"; the toggle was not changed")
+		return ipc.Failure(ipc.RelayConflict, termsafe.Text(err.Error())+"; the toggle was not changed")
 	case err != nil:
 		h.Log.Error().Str("error", termsafe.Text(err.Error())).Str("path", req.Path).Msg("the config toggle failed")
-		return failure(ipc.RelayFailed, termsafe.Text(err.Error()))
+		return ipc.Failure(ipc.RelayFailed, termsafe.Text(err.Error()))
 	}
 	body, err := json.Marshal(done)
 	if err != nil {
-		return failure(ipc.RelayFailed, "the daemon could not encode its answer")
+		return ipc.Failure(ipc.RelayFailed, "the daemon could not encode its answer")
 	}
 	if toggled, moved := done.(ipc.ConfigToggle); moved {
 		h.Log.Info().Bool("split", toggled.Split).Msg("the config toggle changed")
@@ -139,10 +139,6 @@ func (h *Handler) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	}
 	status := http.StatusOK
 	return ipc.Response{Status: &status, Body: body}
-}
-
-func failure(code, msg string) ipc.Response {
-	return ipc.Response{Error: &ipc.RelayError{Code: code, Message: msg}}
 }
 
 // where answers which directory this daemon keeps configs in and how the toggle stands. A command asks

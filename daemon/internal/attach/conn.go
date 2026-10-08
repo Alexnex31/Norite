@@ -169,8 +169,6 @@ func (c *conn) handshake() error {
 // requestID is what an id may be: the contract's pattern, checked here because the id is echoed back.
 var requestID = regexp.MustCompile(`^[0-9A-Za-z_-]{1,64}$`)
 
-var methods = map[string]bool{"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true}
-
 // read handles everything after IDENTIFY: requests, and the end of the connection.
 func (c *conn) read() {
 	for {
@@ -203,7 +201,7 @@ func (c *conn) handle(req ipc.Request) {
 	refuse := func(code, msg string) {
 		c.respond(ipc.Response{ID: req.ID, Error: &ipc.RelayError{Code: code, Message: msg}})
 	}
-	if !methods[req.Method] {
+	if !ipc.ValidMethod(req.Method) {
 		refuse(ipc.RelayBadRequest, "the method must be GET, POST, PUT, PATCH or DELETE")
 		return
 	}

@@ -1468,8 +1468,10 @@ of this section.
   verb, and the relay refused all of `/auth/*` (M20). It now reaches the three `/auth/tokens` routes and
   nothing else there. The value is shown once.
 
-  **The M20a client draws `AUTO`** after the author of a type-1 message. The author colour `TOKENS.md`
-  gives bots and webhooks is M60's.
+  **The M20a client draws `AUTO`** as the last word of a type-1 message's header, after the time, and
+  `norite message list` ends its line with the same word. Not straight after the author: a display name
+  is the account's to choose, and `Bob AUTO` typed by hand would read as Bob's script. The author colour
+  `TOKENS.md` gives bots and webhooks is M60's.
 
   Done when: a shell script holding a scoped token minted with `norite token create` sends a message
   through the local port, and it is drawn tagged as automated in another account's client; the same token
