@@ -182,6 +182,9 @@ func TestStatusSaysWhatAPersonNeedsNextAndNeverTheSecret(t *testing.T) {
 			[]string{"127.0.0.1:7717", "https://chat.example", "norite automation run", EnvToken}},
 		"on and not open": {ipc.AutomationStatus{Enabled: true, Port: 7717, Instance: "https://chat.example", Problem: "something else is listening on 127.0.0.1 port 7717"},
 			[]string{"not open", "something else is listening"}},
+		"open and refusing": {ipc.AutomationStatus{Enabled: true, Port: 7717, Instance: "https://chat.example", Open: true, Address: "127.0.0.1:7717",
+			Problem: "the daemon is signed in to no instance; run `norite login`"},
+			[]string{"127.0.0.1:7717", "refusing requests", "norite login"}},
 	} {
 		text := norite(t, &fakeDaemon{status: tc.status}, "", false, "status")
 		require.NoError(t, text.err, name)

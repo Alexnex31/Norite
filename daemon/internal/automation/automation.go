@@ -164,8 +164,8 @@ func Clean(stateDir string) {
 	_ = os.Remove(ipc.AutomationFilePath(stateDir))
 }
 
-// sameInstance reports whether two instance URLs name one instance: scheme, host and path prefix.
-func sameInstance(a, b string) bool {
+// SameInstance reports whether two instance URLs name one instance: scheme, host and path prefix.
+func SameInstance(a, b string) bool {
 	ua, errA := url.Parse(a)
 	ub, errB := url.Parse(b)
 	if errA != nil || errB != nil || ua.Host == "" || ub.Host == "" {
@@ -181,7 +181,7 @@ func Open(opts Options) (*Server, error) {
 	if opts.Instance == nil || opts.HTTP == nil {
 		return nil, errors.New("automation: an instance and an HTTP client are required")
 	}
-	if !sameInstance(opts.EnabledFor, opts.EnabledFor) {
+	if !SameInstance(opts.EnabledFor, opts.EnabledFor) {
 		return nil, errors.New("automation: the instance the port was enabled for is required")
 	}
 	// A copy, so the caller's client is not changed under it, and so that the policy does not depend on
@@ -496,7 +496,7 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 		return failure(ipc.RelayNotSignedIn, "the daemon is not signed in to an instance; run `norite login`")
 	}
 	// Asked on every request, not once per connection: a sign-in can change under an open one.
-	if !sameInstance(instanceURL, s.enabledFor) {
+	if !SameInstance(instanceURL, s.enabledFor) {
 		return failure(ipc.RelayRefused, "the automation port was turned on for another instance than the one "+
 			"the daemon is signed in to now, and a token is not sent to an instance it was not made on; "+
 			"run `norite automation enable` to use the port with this one")

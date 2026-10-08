@@ -681,7 +681,7 @@
         },
         "problem": {
           "type": "string",
-          "description": "Why an enabled port is not open, or empty."
+          "description": "Why an enabled port is not open, or why an open one refuses every request (the daemon is signed in to no instance, or to another than the port was turned on for), or empty."
         }
       }
     }

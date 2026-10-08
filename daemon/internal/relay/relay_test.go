@@ -229,6 +229,15 @@ func TestAScriptReachesWhatTheRelayDoesLessAllOfAuth(t *testing.T) {
 		_, err := ScriptTarget(path)
 		assert.Error(t, err, "%q must be refused to a script", path)
 	}
+
+	// Each surface is told about itself: a script is not on the attach socket (M22 manual pass).
+	_, err := ScriptTarget("/auth/login")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the automation port does not carry /auth")
+	assert.NotContains(t, err.Error(), "attach socket")
+	_, err = Target("/auth/login")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attach socket")
 }
 
 // ---------- performing a request ----------

@@ -462,6 +462,36 @@ func TestAMessageIsNamedByItsAuthor(t *testing.T) {
 	assert.Nil(t, back.Items[2].AuthorID)
 }
 
+// TestAMessageWrittenByAutomationSaysSoInBothForms: the instance marks what an API token sent or last
+// edited, and a reader of this command must see it as a reader of the terminal client does. The word comes
+// after everything an account chose, so a display name cannot forge it on a typed message.
+func TestAMessageWrittenByAutomationSaysSoInBothForms(t *testing.T) {
+	scripted := apiMessage("33", "20", "scripted")
+	scripted.Type = 1
+	typed := apiMessage("32", "20", "typed")
+	typed.Author = &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: "alice  AUTO"}
+	f := newFake(t).On("listChannelMessages", ok([]apicontract.Message{scripted, typed}))
+
+	text := runVerb(t, f, "", "message", "list", "20")
+	require.NoError(t, text.err)
+	lines := strings.Split(text.out, "\n")
+	require.GreaterOrEqual(t, len(lines), 4)
+	assert.True(t, strings.HasSuffix(lines[0], "  AUTO"), "%q", lines[0])
+	assert.False(t, strings.HasSuffix(lines[2], "AUTO"), "%q", lines[2])
+
+	js := runVerb(t, f, "", "--json", "message", "list", "20")
+	require.NoError(t, js.err)
+	var back struct {
+		Items []struct {
+			Type int `json:"type"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(js.out), &back))
+	require.Len(t, back.Items, 2)
+	assert.Equal(t, 1, back.Items[0].Type)
+	assert.Equal(t, 0, back.Items[1].Type)
+}
+
 func TestAReportIsFiledAndTriagedAndTheReporterIsNeverShown(t *testing.T) {
 	f := newFake(t).
 		On("fileReport", created(apiReport("70", "open"))).

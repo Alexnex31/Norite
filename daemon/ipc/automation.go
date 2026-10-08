@@ -248,7 +248,8 @@ type AutomationStatus struct {
 	Open bool `json:"open"`
 	// Address is where it listens, or empty when it is not open.
 	Address string `json:"address"`
-	// Problem says why an enabled port is not open, or is empty.
+	// Problem says why an enabled port is not open, or why an open one refuses every request (the daemon
+	// is signed in nowhere, or to another instance than the port's), or is empty.
 	Problem string `json:"problem"`
 }
 

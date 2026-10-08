@@ -204,6 +204,9 @@ func (v statusView) Text(t *output.Text) {
 	switch {
 	case !v.Enabled:
 		t.Line("The automation port is off. `norite automation enable` opens it on port %d.", v.Port)
+	case v.Open && v.Problem != "":
+		t.Line("The automation port is on, at %s, for %s.", output.Clean(v.Address), output.Clean(v.Instance))
+		t.Line("It is refusing requests: %s.", output.Clean(v.Problem))
 	case v.Open:
 		t.Line("The automation port is on, at %s, for %s.", output.Clean(v.Address), output.Clean(v.Instance))
 		t.Line("Start a script with `norite automation run -- <command>`, with %s set to its token.", EnvToken)

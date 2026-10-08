@@ -299,6 +299,11 @@ func target(path string, exceptions bool) (*url.URL, error) {
 	}
 	for _, prefix := range refused {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+			if !exceptions {
+				// A script is not on the attach socket, and is told about the surface it is on.
+				return nil, fmt.Errorf("the automation port does not carry %s: it manages credentials or "+
+					"the instance", prefix)
+			}
 			return nil, fmt.Errorf("the daemon does not relay %s: it manages credentials or the instance, "+
 				"and stays off the attach socket", prefix)
 		}

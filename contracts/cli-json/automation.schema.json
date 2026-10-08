@@ -43,7 +43,7 @@
         },
         "problem": {
           "type": "string",
-          "description": "Why a port that is on is not open, or empty."
+          "description": "Why a port that is on is not open, or why an open one refuses every request (the daemon is signed in to no instance, or to another than the port was turned on for), or empty."
         }
       }
     }

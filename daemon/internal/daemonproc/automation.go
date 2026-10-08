@@ -153,6 +153,15 @@ func (a *automationControl) statusLocked(st statefile.State) ipc.AutomationStatu
 	}
 	if a.srv != nil {
 		out.Open, out.Address = true, a.srv.Address()
+		// An open port that will refuse every request says so here, where a person looks first, and not
+		// only to the script (M22 manual pass). The port asks the same two questions of each request.
+		switch now, ok := a.InstanceURL(); {
+		case !ok:
+			out.Problem = "the daemon is signed in to no instance; run `norite login`"
+		case !automation.SameInstance(now, st.AutomationInstance):
+			out.Problem = "the daemon is signed in to " + termsafe.Text(now) + " now, and the port serves only the " +
+				"instance it was turned on for; run `norite automation enable` to use it with this one"
+		}
 	}
 	return out
 }
@@ -247,7 +256,7 @@ func (a *automationControl) enable(ctx context.Context, port int) (statefile.Sta
 						Msg("the automation port could not be reopened as it was")
 				}
 			}
-			return &automationRefusal{reason + ". The port was not turned on"}
+			return &automationRefusal{reason + ". Nothing was changed"}
 		}
 		out = *st
 		return nil

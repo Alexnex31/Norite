@@ -235,11 +235,20 @@ func TestThePortIsTurnedOnForOneInstance(t *testing.T) {
 	refused := f.send()
 	require.NotNil(t, refused)
 	assert.Equal(t, ipc.RelayRefused, refused.Code)
-	assert.Equal(t, f.instance.URL, f.ok("GET", ipc.PathAutomation).Instance, "status still names the first")
+	st = f.ok("GET", ipc.PathAutomation)
+	assert.Equal(t, f.instance.URL, st.Instance, "status still names the first")
+	assert.True(t, st.Open)
+	assert.Contains(t, st.Problem, other.URL, "an open port that refuses everything must say so")
+	assert.Contains(t, st.Problem, "norite automation enable")
+
+	f.signIn.set(session.SignedOut, "")
+	st = f.ok("GET", ipc.PathAutomation)
+	assert.True(t, st.Open)
+	assert.Contains(t, st.Problem, "norite login")
 
 	// Turning it on again is how it is moved.
 	f.signIn.set(session.Live, f.instance.URL)
-	f.ok("POST", ipc.PathAutomationEnable(freePort(t)))
+	assert.Empty(t, f.ok("POST", ipc.PathAutomationEnable(freePort(t))).Problem)
 	require.Nil(t, f.send())
 }
 
@@ -257,7 +266,7 @@ func TestATakenPortIsRefusedAndNothingChanges(t *testing.T) {
 	require.NotNil(t, resp.Error)
 	assert.Equal(t, ipc.RelayConflict, resp.Error.Code)
 	assert.Contains(t, resp.Error.Message, itoa(taken))
-	assert.Contains(t, resp.Error.Message, "not turned on")
+	assert.Contains(t, resp.Error.Message, "Nothing was changed")
 	assert.Equal(t, ipc.AutomationStatus{Port: ipc.DefaultAutomationPort}, f.ok("GET", ipc.PathAutomation))
 	assert.False(t, f.fileExists())
 
