@@ -191,6 +191,23 @@ func TestACallGivenUpOnEndsTheConnection(t *testing.T) {
 	assert.Contains(t, err.Error(), "open another")
 }
 
+// TestAnAnswerThatIsNotThisRequestsEndsTheConnection: once an answer does not match its request, the next
+// answer would be read by the wrong call. The connection is given up on rather than used again.
+func TestAnAnswerThatIsNotThisRequestsEndsTheConnection(t *testing.T) {
+	file := fakePort(t, func(conn net.Conn, req Request) { respond(conn, req.ID+"0") })
+	c, err := DialAutomation(context.Background(), file, exampleToken)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+
+	_, err = c.Do(context.Background(), "GET", "/users/@me", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "other than this request's response")
+
+	_, err = c.Do(context.Background(), "GET", "/users/@me", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open another")
+}
+
 // TestACancelThatLosesTheRaceWithAnAnswerLeavesTheConnectionUsable: the context is canceled the moment
 // the answer is written, so the cancel and the read race. Whichever wins, a call that returned an answer
 // must leave a connection the next call can use: the cancel moves the connection's deadline to now, and a

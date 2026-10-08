@@ -70,6 +70,13 @@ func (a *automationControl) InstanceURL() (string, bool) {
 // lock, which is what makes any file a killed daemon left stale: it is removed whether or not the port is
 // to open.
 func (a *automationControl) start() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// The attach socket is already served when this runs, so a request may have opened the port first. Its
+	// file is this run's then, and removing it would leave a port no script can find.
+	if a.srv != nil {
+		return
+	}
 	automation.Clean(a.stateDir)
 	st, err := statefile.ReadIn(a.stateDir)
 	if err != nil {
@@ -79,8 +86,6 @@ func (a *automationControl) start() {
 	if !st.AutomationEnabled {
 		return
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if err := a.openLocked(st); err != nil {
 		a.log.Warn().Str("error", termsafe.Text(err.Error())).Int("port", portOf(st)).
 			Msg("the automation port is enabled and could not be opened; scripts cannot reach the daemon")
@@ -228,13 +233,14 @@ func (a *automationControl) enable(ctx context.Context, port int) (statefile.Sta
 		a.mu.Lock()
 		defer a.mu.Unlock()
 
-		before, wasOpen := *st, a.srv != nil
+		before, wasOpen, wasWrong := *st, a.srv != nil, a.problem
 		st.AutomationEnabled, st.AutomationPort, st.AutomationInstance = true, port, instanceURL
 		a.closeLocked()
 		if err := a.openLocked(*st); err != nil {
 			reason := a.problem
 			// What was open is opened again, with a new secret: the old one went with the old listener.
-			a.problem = ""
+			// What was enabled and could not open still cannot, for the reason it had.
+			a.problem = wasWrong
 			if wasOpen {
 				if rerr := a.openLocked(before); rerr != nil {
 					a.log.Warn().Str("error", termsafe.Text(rerr.Error())).

@@ -1371,6 +1371,13 @@ carries the condition that would reopen it.
   that remains needs a second account on the machine, acting while the daemon is dead and a script is
   running. Closing it means the daemon proving it knows the secret before a script sends the token, a
   challenge every script in every language would have to implement.
+
+  **Wider than the file, found by the M22 sweep.** A program started by `norite automation run` holds the
+  address and the secret in its environment for as long as it runs, so it needs no file and no killed
+  daemon: whenever the port is closed under it (the daemon stopped, the port disabled, or enabled again
+  on another number) its next connection goes to whatever holds that port, and its first frame carries
+  the token. `norite automation request` cannot fall back on the file to notice, because a script run
+  under another account through `run` has only the environment. Same second account, same verdict.
 - **Reopens if**: the port is offered on a machine shared by accounts that do not trust each other as a
   supported case, or a script-side library is published, since it could carry the challenge once for
   everybody.

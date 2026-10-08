@@ -278,6 +278,10 @@ func (s *Server) Serve(ctx context.Context) {
 			}
 			continue
 		}
+		// Set here and not by the connection's own goroutine: once a connection is among those Serve wakes
+		// below, its deadline is already this one, so the wake cannot be overwritten by a goroutine that
+		// had not started yet and leave a stopping daemon waiting out the five seconds.
+		_ = conn.SetReadDeadline(time.Now().Add(identifyWait))
 		if !s.admit(conn) {
 			// A stranger like any other: it has presented nothing, so it is told nothing.
 			_ = conn.Close()
@@ -361,7 +365,7 @@ const refusal = "the automation port did not accept that secret"
 
 // serve runs one connection: the two secrets, then requests, one at a time.
 func (s *Server) serve(ctx context.Context, conn net.Conn) {
-	_ = conn.SetReadDeadline(time.Now().Add(identifyWait))
+	// Serve set the deadline for this read before it admitted the connection.
 	first, err := ipc.ReadFrame(conn, ipc.MaxAutomationIdentify)
 	if err != nil {
 		// Nothing is said to something that has not presented the secret: not a browser, not a port

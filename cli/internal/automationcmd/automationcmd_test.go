@@ -490,6 +490,17 @@ func TestEachOutcomeOfARequestHasItsExitCode(t *testing.T) {
 	}
 }
 
+// TestARequestPrintsNumbersAsTheInstanceWroteThem: an integer above 2^53 is not a float64, and printed
+// through one it becomes a neighbor. A script reading the output must get the instance's number.
+func TestARequestPrintsNumbersAsTheInstanceWroteThem(t *testing.T) {
+	p := newFakePort(t, status(200, `{"count":9007199254740993,"ratio":0.1}`))
+	p.inRun(t)
+	r := norite(t, nil, "", false, "request", "GET", "/users/@me")
+	require.NoError(t, r.err)
+	assert.Contains(t, r.out, "9007199254740993")
+	assert.Contains(t, r.out, "0.1")
+}
+
 // TestAWrongSecretSaysToStartTheScriptAgain: the secret changes with every run of the daemon, so a script
 // that outlived one holds a stale pair. The way out is `run`, and the message says so.
 func TestAWrongSecretSaysToStartTheScriptAgain(t *testing.T) {

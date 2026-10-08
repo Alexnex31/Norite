@@ -366,3 +366,43 @@ func TestWhatTheAutomationRequestsRefuse(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// TestStartingLeavesAPortARequestAlreadyOpened: the attach socket is served before start runs, so an enable
+// can arrive first. start then finds this run's own port, and must not remove its file or try to bind it a
+// second time: a port open with no file is one no script can find (M22 review).
+func TestStartingLeavesAPortARequestAlreadyOpened(t *testing.T) {
+	f := newPortFixture(t)
+	f.ok("POST", ipc.PathAutomationEnable(freePort(t)))
+
+	f.control.start()
+	require.True(t, f.fileExists(), "start removed the file of a port this daemon had just opened")
+	st := f.ok("GET", ipc.PathAutomation)
+	assert.True(t, st.Open)
+	assert.Empty(t, st.Problem)
+	require.Nil(t, f.send())
+}
+
+// TestARefusedEnableKeepsWhyTheEnabledPortIsNotOpen: a port that is on and could not be bound says why. An
+// enable that is refused changes nothing, and that includes the reason.
+func TestARefusedEnableKeepsWhyTheEnabledPortIsNotOpen(t *testing.T) {
+	f := newPortFixture(t)
+	port := freePort(t)
+	f.ok("POST", ipc.PathAutomationEnable(port))
+	f.control.stop()
+
+	squatter, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", itoa(port)))
+	require.NoError(t, err)
+	defer func() { _ = squatter.Close() }()
+	other, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = other.Close() }()
+
+	f.control = f.boot()
+	resp := f.ask("POST", ipc.PathAutomationEnable(other.Addr().(*net.TCPAddr).Port))
+	require.NotNil(t, resp.Error)
+	st := f.ok("GET", ipc.PathAutomation)
+	assert.True(t, st.Enabled)
+	assert.False(t, st.Open)
+	assert.Equal(t, port, st.Port)
+	assert.Contains(t, st.Problem, itoa(port), "the reason the enabled port is not open was lost")
+}

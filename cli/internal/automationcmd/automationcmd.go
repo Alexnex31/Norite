@@ -414,8 +414,12 @@ func outcome(w io.Writer, resp ipc.Response) error {
 		}
 		// The instance's body, exactly, with what a terminal would act on escaped. A parser reads the
 		// same values either way.
+		// Numbers are kept as written. Decoded the ordinary way they become float64, and an integer above
+		// 2^53 would be printed as a different one.
 		var v any
-		if err := json.Unmarshal(resp.Body, &v); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(resp.Body))
+		dec.UseNumber()
+		if err := dec.Decode(&v); err != nil {
 			return fmt.Errorf("the instance's answer does not decode: %w", err)
 		}
 		return output.WriteJSON(w, v)

@@ -372,7 +372,7 @@ func (c *AutomationClient) Do(ctx context.Context, method, path string, body jso
 	// A call given up on leaves an answer that may still arrive, for a request nobody is waiting on. The
 	// next call would read it as its own, so there is no next call on this connection.
 	abandon := func(err error) error {
-		c.broken = errors.New("this connection to the automation port was given up on mid-request; open another")
+		c.broken = errors.New("this connection to the automation port was given up on; open another")
 		_ = c.conn.Close()
 		return err
 	}
@@ -394,7 +394,9 @@ func (c *AutomationClient) Do(ctx context.Context, method, path string, body jso
 	}
 	var resp Response
 	if answer.Op != OpResponse || Decode(answer, &resp) != nil || resp.ID != id {
-		return Response{}, errors.New("the automation port answered with something other than this request's response")
+		// Whatever this was, the answers no longer line up with the requests, and the next call would read
+		// one that is not its own.
+		return Response{}, abandon(errors.New("the automation port answered with something other than this request's response"))
 	}
 	return resp, nil
 }
