@@ -1426,10 +1426,53 @@ of this section.
   same-machine toggle on and off preserves both files' customization; and `norite config export` on one
   machine followed by `norite config import` on another carries the portable keys over without disturbing
   the target's own settings.
-- **M22 — Local bot-automation port**: the separate localhost-only TCP listener with a per-session secret
-  (`0600` file or environment variable), authenticated via scoped `api_tokens` (M4), messages sent through it
-  tagged via the `messages.type` "sent via automation" reserved value. Done when: an external script with a
-  valid scoped token can send a message via the local port, and it renders visually tagged as automated.
+- **M22 — Local bot-automation port**: a second listener in the daemon, TCP on `127.0.0.1` only, for
+  scripts that are not first-party clients. Its trust tier is a secret, never the OS account (rule 16,
+  ADR 0017): a script presents the port's per-session secret and a scoped `api_tokens` value (M4), and
+  what it may do is what that token may do. The daemon forwards the script's token and never its own, so
+  the port lends nobody first-party reach.
+
+  **Two secrets answer two questions.** The port secret, minted for each run of the daemon and kept in
+  `automation.json` in the state directory (`0600`), says this process may use this daemon's port. It
+  grants nothing on the instance. The API token says what the script may do there, and the daemon neither
+  stores nor logs it. A script gets the address and the secret from that file, or from its environment
+  when started with `norite automation run -- <command>`; neither is ever printed or passed as a flag.
+
+  **The port speaks the attach socket's framing**, 4-byte-length-prefixed JSON (ADR 0010), with frames of
+  its own: one that carries the secret and the token, then requests and responses naming a method, a
+  path and a body, as the relay's do. The paths are the REST API's, under the relay's own rules and
+  refusals, and `/@daemon/` is refused: the daemon answers none of its own requests to a script.
+  `norite automation request <method> <path>` speaks it for a shell script, taking the token from
+  `NORITE_API_TOKEN`. A browser cannot speak it at all, since an HTTP request's first four bytes read as
+  a frame length far past the bound.
+
+  **The instance writes the tag, from the actor.** Planning found nothing said who does, and that a tag
+  the daemon asked for is one a script avoids by sending the same request to the instance directly, which
+  an API token has been able to do since M15. So a message sent by an API token is `messages.type` 1
+  whichever way it arrived, an edit by a token marks the message, and nothing unmarks one. A client that
+  signs in as its user, first-party or not, is a user actor and is never tagged. What the tag cannot
+  say: an account's owner can script their own signed-in session, and that reads as typed.
+
+  **Bots get no event stream**, here or later. The gateway refuses API tokens (M18) and the daemon's
+  stream is everything the account sees; a script reads over REST.
+
+  **Closed until asked for.** `norite automation enable|disable|status`, requests to the daemon under
+  `/@daemon/`, which keeps the switch and the port number in `state.json` (M21). The port is 7717 unless
+  `enable --port` says otherwise. A port already taken is not walked past: the listener stays closed and
+  the log and `status` say why, because a script would not find a port the daemon moved to.
+
+  **`norite token create|list|revoke`**, because nobody could mint a token from this client: there was no
+  verb, and the relay refused all of `/auth/*` (M20). It now reaches the three `/auth/tokens` routes and
+  nothing else there. The value is shown once.
+
+  **The M20a client draws `AUTO`** after the author of a type-1 message. The author colour `TOKENS.md`
+  gives bots and webhooks is M60's.
+
+  Done when: a shell script holding a scoped token minted with `norite token create` sends a message
+  through the local port, and it is drawn tagged as automated in another account's client; the same token
+  sent straight to the instance is tagged the same; a wrong port secret, a token lacking the scope and a
+  request while the port is disabled are each refused; and a message the same account types in its own
+  client is not tagged.
 - **M23 — Daemon lifecycle polish**: OS-service auto-install across all three platforms, a startup
   `RLIMIT_NOFILE` raise (`syscall.Setrlimit`, to a safe ceiling such as 4096) before any
   IPC/network/subprocess
@@ -1796,8 +1839,8 @@ of this section.
 - **M60 — Incoming webhooks**: the `webhooks` table, `PermManageWebhooks`, the
   `POST /webhooks/{id}/{token}` endpoint with per-message name/avatar override support, automation-tagged
   messages via the existing `messages.type` reserved value routed through the same rendering/sanitization
-  pipeline as any other message, hashed high-entropy tokens with independent per-webhook rate limiting. Adds
-  the `AUTO` badge and the bot/webhook author colour to the M43 renderer (`1a`). Done
+  pipeline as any other message, hashed high-entropy tokens with independent per-webhook rate limiting. The
+  `AUTO` badge is M22's; this adds the bot/webhook author colour beside it (`1a`). Done
   when: a message posted to a valid webhook URL appears in the target channel with its per-message override
   applied, visually tagged as automated, and rendered/sanitized identically to a normal message; an invalid or
   revoked token is rejected; regenerating a webhook's token invalidates the old one without deleting the

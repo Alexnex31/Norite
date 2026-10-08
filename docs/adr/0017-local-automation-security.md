@@ -12,9 +12,16 @@ become a privilege-escalation path.
 **Local bot-automation port**: a separate, localhost-only TCP listener with its own per-session secret
 (a `0600` file or environment variable), authenticated via scoped `api_tokens` (ADR 0011) — kept deliberately
 separate from the daemon-attach Unix socket (ADR 0010), because external scripts in arbitrary languages need
-a plain TCP/HTTP surface and must **not** receive the same trust level as first-party clients. Messages sent
-through it are visually tagged in the UI via the shared `messages.type` "sent via automation" value, the same
-mechanism incoming webhooks use.
+a plain TCP surface and must **not** receive the same trust level as first-party clients. Messages sent by
+an API token are visually tagged in the UI via the shared `messages.type` "sent via automation" value, the
+same mechanism incoming webhooks use.
+
+**Amended at M22.** This paragraph said "a plain TCP/HTTP surface" while ADR 0010 said the port uses the
+attach socket's length-prefixed JSON framing; the framing is what M22 builds, and `norite automation request`
+speaks it for a script that cannot. It also said messages "sent through it" are tagged, which left the tag
+to the daemon: a script could avoid it by presenting the same token to the instance directly. The instance
+writes the tag for any message an API token sends or edits. And the port is closed until the user enables
+it.
 
 **Integrated shell**: spawns the user's actual shell — the same trust boundary as a real terminal, with no
 extra sandboxing layer. It's not a new capability the user didn't already have; it's a convenience surface

@@ -273,8 +273,8 @@ an instance you can host, and the source in front of you. The rest is what the p
 - **Deep Work status** with an `@urgent` bypass and an optional offline email fallback — a way to be
   genuinely unreachable without being unreachable in an emergency.
 - **Regex notification filters**, evaluated server-side, instead of a fixed keyword list.
-- **Local bot automation.** Scripts running on your own machine against your own session, with no
-  application registration and no hosted bot.
+- **Local bot automation.** Scripts running on your own machine as your own account, bounded by a token
+  you scope, with no application registration and no hosted bot.
 - **A sandboxed client-side plugin system**, capability-gated and supported rather than tolerated.
 - **In-channel whispers, message tagging, and bandwidth toggles** for constrained connections.
 

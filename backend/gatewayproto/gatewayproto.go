@@ -94,8 +94,8 @@ type Hello struct {
 
 // Identify authenticates a new session.
 type Identify struct {
-	// Token is an access token. Never an API token: the gateway carries everything an account can see, and
-	// bots reach it through the daemon (M22).
+	// Token is an access token. Never an API token: the gateway carries everything an account can see, which
+	// no scope bounds. A bot has no event stream and reads over REST (settled at M22).
 	Token      string             `json:"token"`
 	Properties IdentifyProperties `json:"properties"`
 	// Intents is reserved. It must be absent or 0 until a milestone defines a bit; refusing a value now is
