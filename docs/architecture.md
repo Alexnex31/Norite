@@ -1677,7 +1677,8 @@ token pasted into a script never crosses the port. Paths are the REST API's, und
 and refusals plus all of `/auth`, and `/@daemon/` is refused, so nothing the daemon answers for a first-
 party client is reachable with a secret. `contracts/daemon-automation.schema.json` is the contract. The
 instance's status and body come back as they are; a 401 is the script's to deal with, where on the attach
-socket it is the session's. Frames, connections (16) and the request rate (five a second across every
+socket it is the session's. A request the port ended by closing is answered as one that may have reached
+the instance. Frames, connections (16) and the request rate (five a second across every
 script) are bounded locally, the last because a script shares its owner's per-IP budget on the instance. A
 browser cannot speak the framing. A script that cannot either uses `norite automation request`.
 
@@ -1688,12 +1689,16 @@ signing in to a second instance would hand the first one's tokens to the second'
 
 The switch, the port number (7717 by default) and that instance are in `state.json`, changed by
 `norite automation enable|disable` through `/@daemon/` requests on the attach socket, which are that
-socket's tier and are not reachable from the port they control. Enabling opens the port before anything
-is recorded, so a port that is taken is refused with nothing changed; the daemon never moves to another.
-A daemon that starts with the port enabled and cannot bind it runs with the port closed, and
-`norite automation status` says why. The port number travels in the request's path, the one thing of the
-user's a local path carries, and only after a request that says nothing has shown the daemon is new
-enough to answer it rather than relay it.
+socket's tier and are not reachable from the port they control. Enabling opens the port before anything is
+recorded, so a port that is taken is refused; the daemon never moves to another. A port on a new number is
+bound beside the one already open, which closes only once the new one is up, so a refusal takes nothing from
+running scripts. On the same number the port must close to be bound again, which is also how its secret is
+replaced. If the record cannot be written, the port is put back as the file says. A daemon that starts with
+the port enabled and cannot bind it runs with the port closed, and `norite automation status` says why, as
+it does for an open port that would refuse every request because the daemon is signed in elsewhere or
+nowhere. A daemon that has not yet read its sign-in is not signed out, and says to try again rather than to
+log in. The port number travels in the request's path, the one thing of the user's a local path carries, and
+only after a request that says nothing has shown the daemon is new enough to answer it rather than relay it.
 
 A script reaches the port through two commands that never touch the attach socket.
 `norite automation run -- <command>` starts a program with `NORITE_AUTOMATION_ADDRESS` and
@@ -1702,8 +1707,10 @@ it, so a signal meant for the script reaches the script. `norite automation requ
 makes one request, with the token from `NORITE_API_TOKEN` and never from a flag, and prints the
 instance's answer. Neither secret is ever printed.
 
-**The instance tags what a token writes.** `messages.type` is 1 for a message an API token sent or last
-edited, whichever way the request arrived, and nothing sets it back. The daemon plays no part, so the tag
+**The instance tags what a token writes.** `messages.type` is 1 for a message an API token sent or has
+ever edited, whichever way the request arrived, and nothing sets it back, a later edit by a person
+included. Both front ends show it as `AUTO`, the last word of the message's header, where no display name
+can put it. The daemon plays no part, so the tag
 cannot be avoided by going around it. A client that signs in as its user is a user actor and is not
 tagged, which is what leaves third-party clients alone. An account's owner scripting their own signed-in
 session is not detectable and is not claimed to be.
