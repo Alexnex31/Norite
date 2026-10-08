@@ -34,7 +34,9 @@ type localSink interface {
 func watchConfig(ctx context.Context, sink localSink, log zerolog.Logger) {
 	dir, err := config.Dir()
 	if err != nil {
-		log.Warn().Err(err).Msg("cannot locate the config file; a change to it will be noticed when a client next starts")
+		// An error here names a path, which is the environment's text, and a log is read in a terminal.
+		log.Warn().Str("error", termsafe.Text(err.Error())).
+			Msg("cannot locate the config file; a change to it will be noticed when a client next starts")
 		return
 	}
 	// All three: config.toml, and the file each client reads while the same-machine toggle is on. Which of
@@ -47,7 +49,8 @@ func watchConfig(ctx context.Context, sink localSink, log zerolog.Logger) {
 		sink.Local(ipc.EventConfigUpdate, json.RawMessage(`{}`))
 	})
 	if err != nil {
-		log.Warn().Err(err).Msg("cannot watch the config file; a change to it will be noticed when a client next starts")
+		log.Warn().Str("error", termsafe.Text(err.Error())).
+			Msg("cannot watch the config file; a change to it will be noticed when a client next starts")
 	}
 }
 
@@ -68,7 +71,8 @@ func newLocal(stateDir string, log zerolog.Logger) *localRequests {
 	dir, err := config.Dir()
 	if err != nil {
 		// Nowhere to put a config is nowhere to split one. The requests are refused, each saying why.
-		log.Warn().Err(err).Msg("cannot locate the config directory; the config toggle is unavailable")
+		log.Warn().Str("error", termsafe.Text(err.Error())).
+			Msg("cannot locate the config directory; the config toggle is unavailable")
 		return l
 	}
 	l.toggle = &toggle.Handler{ConfigDir: dir, StateDir: stateDir, Log: log, Changed: func() {
