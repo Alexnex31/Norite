@@ -15,7 +15,8 @@
 // Three surfaces are refused outright, because each manages credentials rather than using one (B1 in M20's
 // planning, and architecture.md §3):
 //
-//   - /auth/*, which mints and revokes tokens and changes the second factor;
+//   - /auth/*, which starts and ends sign-ins and changes the second factor, all of it but the three API
+//     token routes below;
 //   - /instance/*, the operator's surface;
 //   - /users/@me/sessions, which lists every device the account is signed in on and signs them out.
 //
@@ -23,6 +24,17 @@
 // unmake credentials escalates itself. Nothing in M20 needs them. Lifting a refusal later is additive, where
 // withdrawing a reach scripts rely on is not, and TestEveryContractPathIsDecided makes each new route in
 // the contract a decision rather than a default.
+//
+// # The one exception: API tokens (M22)
+//
+// /auth/tokens and /auth/tokens/{id} are relayed, and nothing else under /auth is. A script on the
+// automation port needs a token, architecture.md has always said one is "minted from any attach client",
+// and without this the only way to get one was a second sign-in made by hand. What it concedes is in
+// docs/security-ledger.md: any program running as the user can now mint a durable credential through the
+// socket. Such a program can already read the refresh token the daemon stores, which reaches more, and
+// the instance still asks for a user actor and a live session.
+//
+// The exception is two exact shapes, matched on the whole path, so nothing beside them comes along.
 //
 // # A 401 is the session's business
 //
@@ -269,6 +281,10 @@ func Target(path string) (*url.URL, error) {
 	if local := strings.TrimSuffix(ipc.LocalPathPrefix, "/"); lower == local || strings.HasPrefix(lower, ipc.LocalPathPrefix) {
 		return nil, errors.New("the path is the daemon's own, and is not relayed to the instance")
 	}
+	// On the path as written, not lowered: a refusal errs wide and an exception must not.
+	if tokenRoute(u.Path) {
+		return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
+	}
 	for _, prefix := range refused {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
 			return nil, fmt.Errorf("the daemon does not relay %s: it manages credentials or the instance, "+
@@ -276,6 +292,26 @@ func Target(path string) (*url.URL, error) {
 		}
 	}
 	return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
+}
+
+// tokenRoute reports whether a path is one of the API token routes, the exception to the /auth
+// refusal: the collection, or one token named by its id. An id is digits, so the second shape cannot be
+// stretched over a sibling route.
+func tokenRoute(path string) bool {
+	const collection = "/auth/tokens"
+	if path == collection {
+		return true
+	}
+	id, ok := strings.CutPrefix(path, collection+"/")
+	if !ok || id == "" || len(id) > 20 {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Build joins a checked target onto an instance URL: its scheme and host, its path prefix, then /api/v1.

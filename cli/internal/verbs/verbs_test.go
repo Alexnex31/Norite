@@ -180,6 +180,16 @@ func verbCases() map[string]verbCase {
 		"invite revoke": {argv: []string{"invite", "revoke", "BCDFGHJKMNPQRSTV"},
 			answers: map[string]answerFunc{"revokeInvite": noContent()},
 			file:    "guild-invite.schema.json", def: "revoked"},
+
+		"token create": {argv: []string{"token", "create", "--name", "status bot", "--scope", "messages.write"},
+			answers: map[string]answerFunc{"mintApiToken": created(apiMinted("95", "status bot"))},
+			file:    "token.schema.json", def: "minted"},
+		"token list": {argv: []string{"token", "list"},
+			answers: map[string]answerFunc{"listApiTokens": ok([]apicontract.ApiToken{apiToken("95", "status bot")})},
+			file:    "token.schema.json", def: "tokenList"},
+		"token revoke": {argv: []string{"token", "revoke", "95", "--yes"},
+			answers: map[string]answerFunc{"revokeApiToken": noContent()},
+			file:    "common.schema.json", def: "done"},
 	}
 }
 

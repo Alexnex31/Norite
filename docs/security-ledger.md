@@ -1202,6 +1202,8 @@ carries the condition that would reopen it.
 - **Reopens if**: a resync makes the client fetch from anybody other than the instance (link previews,
   media), or home's guild bound is lifted.
 
+## M21 — config file
+
 ### A write through a symlinked `config.toml` reaches whatever file the link names
 - **Raised**: M21, `/security-sweep`
 - **Verdict**: not a vulnerability
@@ -1317,3 +1319,24 @@ carries the condition that would reopen it.
   each costing an attached client about 30 µs to re-read a config that did not change.
 - **Reopens if**: an event's name is ever logged or forwarded, or a reload becomes expensive enough for ten
   a second to matter (a theme file read on every reload, M45, is the first candidate).
+
+## M22 — local bot-automation port
+
+### Any program running as the user can mint an API token through the attach socket
+- **Raised**: M22, at planning, on reopening M20's refusal of `/auth/*`
+- **Verdict**: accepted risk
+- **Why**: the relay now reaches `/auth/tokens` and `/auth/tokens/{id}`, so a process that can open the
+  attach socket can mint a durable, scoped credential as the account, list the account's tokens, and
+  revoke them. M20 refused all of `/auth/*` for that reason and because nothing then needed it. Something
+  does now: a script cannot use the automation port without a token, and the only other way to mint one
+  was a second sign-in made by hand. What the socket's tier already concedes is larger. A process running
+  as the user can read the refresh token itself, from the `0600` file or from a keyring that answers any
+  of the user's processes, and that is every scope and a session besides. The instance still requires a
+  user actor and a live sign-in on all three routes, a minted token is visible in `norite token list`, and
+  a password reset revokes every one. The exception is two exact path shapes
+  (`TestOnlyTheTokenRoutesAreRelayedUnderAuth`); the rest of `/auth/*`, `/instance/*` and the session
+  routes stay refused.
+- **Reopens if**: the attach socket's tier ever admits something that is not the account (a plugin given
+  a relay, M88, is the obvious one), a token gains a scope that reaches credential or session management,
+  or the refresh token moves somewhere the user's other processes cannot read it, since the argument
+  above is a comparison with that.

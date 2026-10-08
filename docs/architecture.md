@@ -1715,7 +1715,10 @@ first call after an expiry. The relay builds the URL itself (the instance URL wi
 `/auth/*`, `/instance/*` and `/users/@me/sessions`, which mint and revoke credentials, change the second
 factor, sign devices out and administer the instance: the surface M11 put behind `RequireLiveSession`,
 because a credential that can make credentials escalates itself. Nothing in M20 needs any of them, and
-lifting a refusal later is additive where withdrawing a reach scripts rely on is not. Every path in
+lifting a refusal later is additive where withdrawing a reach scripts rely on is not. **One was lifted at
+M22**: `/auth/tokens` and `/auth/tokens/{id}`, matched as two exact shapes and nothing beside them, so that
+`norite token` can mint the credential a script holds (`docs/security-ledger.md` has what that concedes).
+Every path in
 `openapi.yaml` carries an explicit relay-or-refuse decision in the relay's tests, so a new route is a
 decision rather than a default. Neither request nor response bodies are logged, since they carry message
 content.
