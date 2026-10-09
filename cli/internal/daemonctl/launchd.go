@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+
+	"github.com/Alexnex31/Norite/daemon/logfile"
 )
 
 const plistFileName = launchdLabel + ".plist"
@@ -41,11 +43,9 @@ var plistTemplate = template.Must(template.New("plist").Funcs(template.FuncMap{
 	<key>ProgramArguments</key>
 	<array>
 		<string>{{ .Program | xml }}</string>
-		<!-- Put the daemon's own rotating log where macOS users and Console.app look for logs, rather than
-		     somewhere only Norite knows about. -->
-		<string>-log-file</string>
-		<string>{{ .LogPath | xml }}</string>
-		<!-- And stop it mirroring to stderr. launchd writes stderr to StandardErrorPath, a plain file it
+		<!-- No -log-file: since M23 the daemon writes its rotating log to ~/Library/Logs on macOS whoever
+		     starts it, so this file and "norite logs tail" cannot disagree about where that is. -->
+		<!-- Stop it mirroring to stderr. launchd writes stderr to StandardErrorPath, a plain file it
 		     never rotates or truncates — mirroring every line into it would duplicate the rotated log into
 		     an unbounded one, defeating the size cap on the copy that does rotate. With this off, that file
 		     collects only panics and failures from before logging is up, which is what it is useful for. -->
@@ -111,12 +111,12 @@ func (l *launchdAgent) DefinitionPath() (string, error) {
 // runs it immediately. launchd offers no way to register a login agent without also starting it.
 func (l *launchdAgent) StartsOnInstall() bool { return true }
 
-// LogHint names the daemon's own rotating log, which the plist points at ~/Library/Logs.
+// LogHint names the daemon's own rotating log, which on macOS is in ~/Library/Logs (logfile.MacName).
 //
 // Not the StandardErrorPath file next to it: nothing routine is written there (see the plist), so sending
 // an operator to it would have them tail an empty file while the output they want sits in the sibling.
 func (l *launchdAgent) LogHint() string {
-	return "tail -f ~/Library/Logs/" + ServiceName + ".log"
+	return "tail -f ~/Library/Logs/" + logfile.MacName
 }
 
 // serviceTarget is launchd's addressing scheme: a domain plus the label.
@@ -152,11 +152,10 @@ func (l *launchdAgent) Install(ctx context.Context, daemonBinary string) error {
 		configHome = ""
 	}
 
-	err = plistTemplate.Execute(&plist, struct{ Label, Program, LogPath, StderrPath, ConfigHome string }{
+	err = plistTemplate.Execute(&plist, struct{ Label, Program, StderrPath, ConfigHome string }{
 		ConfigHome: configHome,
 		Label:      launchdLabel,
 		Program:    daemonBinary,
-		LogPath:    filepath.Join(logDir, ServiceName+".log"),
 		StderrPath: filepath.Join(logDir, ServiceName+".err.log"),
 	})
 	if err != nil {

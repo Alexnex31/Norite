@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Alexnex31/Norite/daemon/logfile"
 )
 
 // Regression tests for the M3 code-review findings. Each one failed before its fix; grouped here so the
@@ -96,12 +98,13 @@ func TestLaunchdLogHintNamesTheFileTheDaemonActuallyWrites(t *testing.T) {
 	if !strings.Contains(hint, ServiceName+".log") || strings.Contains(hint, ".out.log") {
 		t.Errorf("LogHint = %q, want the daemon's own rotating log", hint)
 	}
-	// And that file has to be the one the plist actually tells the daemon to write.
-	if !strings.Contains(plist, "<string>-log-file</string>") {
-		t.Errorf("the plist does not point the daemon's log anywhere:\n%s", plist)
+	// And that file is the one the daemon writes by itself on macOS. The plist passed -log-file until
+	// M23, which made the path a thing two programs each decided.
+	if !strings.Contains(hint, logfile.MacName) {
+		t.Errorf("LogHint = %q, which is not the daemon's own default %q", hint, logfile.MacName)
 	}
-	if !strings.Contains(plist, ServiceName+".log</string>") {
-		t.Errorf("the plist and LogHint name different files:\n%s", plist)
+	if strings.Contains(plist, "<string>-log-file</string>") {
+		t.Errorf("the plist decides the log's path a second time:\n%s", plist)
 	}
 }
 

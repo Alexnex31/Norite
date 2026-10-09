@@ -38,7 +38,7 @@ const (
 // world-writable version of that directory would let any local user rewrite what a plugin is allowed to do.
 // Establishing the mode now, while the directory holds nothing sensitive, means no migration later.
 func StateDir() (string, error) {
-	dir, err := stateDirFor(runtime.GOOS)
+	dir, err := StateDirFor(runtime.GOOS)
 	if err != nil {
 		return "", err
 	}
@@ -83,12 +83,15 @@ func tighten(dir string) error {
 	return nil
 }
 
-// stateDirFor resolves the state directory for a named GOOS without creating it.
+// StateDirFor resolves the state directory for a named GOOS without creating or tightening it.
 //
 // The platform is a parameter rather than a direct read of runtime.GOOS so that the resolution rules for
 // all three platforms are testable from any one of them. These paths are the kind of thing that is wrong
 // for years because nobody on the team runs the platform that got it wrong.
-func stateDirFor(goos string) (string, error) {
+//
+// Exported since M23 for a caller that only reads, such as `norite logs tail`, which must leave nothing
+// behind on a machine that never ran a daemon.
+func StateDirFor(goos string) (string, error) {
 	parts, err := stateBase(goos)
 	if err != nil {
 		return "", err

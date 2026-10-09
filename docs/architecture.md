@@ -1632,7 +1632,9 @@ with its version and standing, and `--json` carries the same.
 **Daemon-owned state directory**: `$XDG_STATE_HOME/norite` (`~/.local/state/norite`), `~/Library/Application
 Support/Norite`, or `%LOCALAPPDATA%\Norite`, created `0700` — it will later hold plugin capability grants and
 pinned `.wasm` hashes (§8), so the mode is established now rather than migrated. It holds the lock and, by
-default, the daemon's own rotating log (`natefinch/lumberjack`, per §4a's file-based logging rule); the
+default, the daemon's own rotating log (`natefinch/lumberjack`: 10 MB, three backups, 28 days) with
+`daemon.crash.log` beside it, which a fatal crash is written to as well as stderr (M23), since a panic
+never reaches the logger and under Task Scheduler stderr is nowhere. The
 daemon also copies every line to stderr, which is what journald captures, so `systemctl --user status` and
 the log file both show something useful. **The lock always stays in the state directory** even when the log
 is redirected — it is the per-user rendezvous point, and a lock that moved with the logs would let two
@@ -1650,9 +1652,12 @@ start — breaking the single-instance invariant with no error anywhere.
 - **launchd cannot exempt an exit code** the way `RestartPreventExitStatus=3` does, so an exit-3 daemon is
   respawned while another instance holds the lock. The loop is self-correcting; `ThrottleInterval` keeps it
   cheap.
-- **launchd's `StandardErrorPath` is never rotated**, so on macOS the daemon is launched with `-log-file`
-  (rotating log into `~/Library/Logs`) and `-stderr-log=false`; that leaves the launchd-captured file holding
-  only panics and pre-logging failures rather than an unbounded copy of the rotated log.
+- **launchd's `StandardErrorPath` is never rotated**, so on macOS the daemon is launched with
+  `-stderr-log=false`; that leaves the launchd-captured file holding only panics and pre-logging failures
+  rather than an unbounded copy of the rotated log.
+- **On macOS the log is in `~/Library/Logs`**, whoever starts the daemon (M23). The plist passed that path
+  as `-log-file` before, so a daemon started by hand logged to the state directory instead, and
+  `norite logs tail` could not have known which. `daemon/logfile` is the one place that decides it.
 
 **Dual IPC, different trust tiers**:
 - **Daemon↔attach-client**: a Unix domain socket / Windows named pipe, OS-permission-protected — the

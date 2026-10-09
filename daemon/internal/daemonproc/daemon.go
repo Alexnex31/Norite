@@ -34,6 +34,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/state"
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/logfile"
 )
 
 // Options configures a daemon run.
@@ -42,12 +43,12 @@ type Options struct {
 	// Tests set it; nothing in production does.
 	StateDir string
 
-	// LogFile overrides the rotating log's path. Empty means <StateDir>/daemon.log.
+	// LogFile overrides the rotating log's path. Empty means logfile.Path, the one place `norite logs tail`
+	// looks without being told: the state directory, or ~/Library/Logs on macOS. With StateDir given, empty
+	// means the log inside that directory on every platform, so a test never writes to a real home.
 	//
-	// The launchd backend sets this, so that on macOS the daemon's log lands in ~/Library/Logs where the
-	// platform's users and Console.app look for it, rather than somewhere only Norite knows about. The lock
-	// is not affected — it stays in the state directory, which is what makes it a reliable per-user
-	// rendezvous point regardless of where logs were pointed.
+	// The lock is not affected — it stays in the state directory, which is what makes it a reliable
+	// per-user rendezvous point regardless of where logs were pointed.
 	LogFile string
 
 	// Version is reported in the startup log, so a support question about behavior can be tied to a build.
@@ -104,8 +105,16 @@ func Run(ctx context.Context, opts Options) error {
 	defer func() { _ = lock.release() }()
 
 	logPath := opts.LogFile
-	if logPath == "" {
-		logPath = paths.LogFile(stateDir)
+	switch {
+	case logPath != "":
+	case opts.StateDir != "":
+		logPath = logfile.In(stateDir)
+	default:
+		resolved, err := logfile.Path()
+		if err != nil {
+			return err
+		}
+		logPath = resolved
 	}
 	logFile := newLogWriter(logPath)
 	defer func() { _ = logFile.Close() }()
@@ -116,19 +125,26 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	log := newLogger(sink, opts.LogLevel)
 
-	log.Info().
+	starting := log.Info().
 		Int("pid", os.Getpid()).
 		Str("version", opts.Version).
 		Str("state_dir", stateDir).
-		Str("log_file", logPath).
-		Msg("daemon starting")
+		Str("log_file", logPath)
+	// Reported, never raised: Go's runtime has already raised the soft limit to the hard one, and a
+	// Setrlimit of the daemon's own would be inherited by every child it starts (M23). It is here so that
+	// a later "too many open files" has an obvious first thing to look at.
+	if limit := openFileLimit(); limit > 0 {
+		starting = starting.Uint64("open_file_limit", limit)
+	}
+	starting.Msg("daemon starting")
 
-	// Raised before the first handle is opened, which is the whole point of doing it here rather than
-	// lazily. A failure is logged and survived rather than returned — see raiseFileLimit.
-	if limit, err := raiseFileLimit(); err != nil {
-		log.Warn().Err(err).Msg("could not raise the open-file limit; continuing at the inherited limit")
-	} else if limit > 0 {
-		log.Debug().Uint64("open_file_limit", limit).Msg("open-file limit set")
+	// A fatal crash goes to a file beside the log as well as to stderr, which under Task Scheduler is
+	// nowhere and under launchd is a file nothing bounds. Without it the log shows a second "daemon
+	// starting" and no reason. A crash file that cannot be opened costs the daemon nothing else.
+	if release, err := captureCrashes(logfile.CrashPath(logPath)); err != nil {
+		log.Warn().Err(err).Msg("a crash will not be recorded beside the log")
+	} else {
+		defer release()
 	}
 
 	// The session runs for the daemon's whole life, in its own goroutine, and "ready" does not wait for it.

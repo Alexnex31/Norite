@@ -29,12 +29,12 @@ func TestStateDirFollowsEachPlatformsConvention(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.goos, func(t *testing.T) {
-			got, err := stateDirFor(tc.goos)
+			got, err := StateDirFor(tc.goos)
 			if err != nil {
-				t.Fatalf("stateDirFor(%q): %v", tc.goos, err)
+				t.Fatalf("StateDirFor(%q): %v", tc.goos, err)
 			}
 			if got != tc.want {
-				t.Errorf("stateDirFor(%q) = %q, want %q", tc.goos, got, tc.want)
+				t.Errorf("StateDirFor(%q) = %q, want %q", tc.goos, got, tc.want)
 			}
 		})
 	}
@@ -47,9 +47,9 @@ func TestStateDirHonorsXDGStateHome(t *testing.T) {
 	custom := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", custom)
 
-	got, err := stateDirFor("linux")
+	got, err := StateDirFor("linux")
 	if err != nil {
-		t.Fatalf("stateDirFor: %v", err)
+		t.Fatalf("StateDirFor: %v", err)
 	}
 	if want := filepath.Join(custom, "norite"); got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -65,9 +65,9 @@ func TestStateDirIgnoresARelativeXDGStateHome(t *testing.T) {
 	// not guaranteed to be, so a relative path would put the lock file somewhere that moves.
 	t.Setenv("XDG_STATE_HOME", "relative/path")
 
-	got, err := stateDirFor("linux")
+	got, err := StateDirFor("linux")
 	if err != nil {
-		t.Fatalf("stateDirFor: %v", err)
+		t.Fatalf("StateDirFor: %v", err)
 	}
 	if want := filepath.Join(home, ".local", "state", "norite"); got != want {
 		t.Errorf("a relative XDG_STATE_HOME was honored: got %q, want the default %q", got, want)
@@ -82,9 +82,9 @@ func TestStateDirPrefersLocalAppDataOnWindows(t *testing.T) {
 	local := t.TempDir()
 	t.Setenv("LOCALAPPDATA", local)
 
-	got, err := stateDirFor("windows")
+	got, err := StateDirFor("windows")
 	if err != nil {
-		t.Fatalf("stateDirFor: %v", err)
+		t.Fatalf("StateDirFor: %v", err)
 	}
 	if want := filepath.Join(local, "Norite"); got != want {
 		t.Errorf("got %q, want %q", got, want)

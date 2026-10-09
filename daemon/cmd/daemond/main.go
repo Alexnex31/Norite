@@ -49,7 +49,7 @@ func main() {
 		debug       = flag.Bool("debug", false, "log at debug level")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 		showLicense = flag.Bool("licenses", false, "print the third-party licenses in this binary and exit")
-		logFile     = flag.String("log-file", "", "write the rotating log here instead of the default in the state directory")
+		logFile     = flag.String("log-file", "", "write the rotating log here; `norite logs tail` then needs --file")
 		// On by default: run in a terminal and you expect to see output, and journald captures stderr, which
 		// is what makes `systemctl --user status` useful. The launchd backend turns it off, because there the
 		// service manager writes stderr to a plain file it never rotates — mirroring into it would duplicate
