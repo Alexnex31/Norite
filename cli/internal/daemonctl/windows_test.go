@@ -4,9 +4,12 @@
 package daemonctl
 
 import (
+	"encoding/xml"
 	"errors"
+	"os"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 // queryLine is the exact schtasks query the backend issues; every test that needs the task to look present
@@ -39,34 +42,138 @@ func taskNotListed() Result {
 	return Result{ExitCode: 0, Stdout: `"\Microsoft\Windows\Defrag\ScheduledDefrag","N/A","Ready"` + "\r\n"}
 }
 
-func TestWindowsInstallCreatesALogonTask(t *testing.T) {
+// installed runs Install against a runner that answers whoami with user, and returns the definition
+// schtasks was handed, decoded, with the command lines that were run.
+func installed(t *testing.T, user, binary string) (definition string, raw []byte, lines []string, err error) {
+	t.Helper()
 	r := newFakeRunner()
-	w := &windowsTask{run: r}
+	r.respond("whoami", Result{Stdout: user})
+	var path string
+	r.during = func(name string, args []string) {
+		for i, arg := range args {
+			if name == "schtasks" && arg == "/XML" && i+1 < len(args) {
+				path = args[i+1]
+				// Read while the command "runs": the file is removed once it returns.
+				raw, _ = os.ReadFile(path)
+			}
+		}
+	}
+	err = (&windowsTask{run: r}).Install(t.Context(), binary)
+	if path != "" {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("the definition was left behind at %s: %v", path, statErr)
+		}
+	}
+	if len(raw) >= 2 {
+		units := make([]uint16, 0, len(raw)/2)
+		for i := 2; i+1 < len(raw); i += 2 {
+			units = append(units, uint16(raw[i])|uint16(raw[i+1])<<8)
+		}
+		definition = string(utf16.Decode(units))
+	}
+	return definition, raw, r.lines(), err
+}
 
-	if err := w.Install(t.Context(), `C:\Program Files\Norite\norite-daemon.exe`); err != nil {
+func TestWindowsInstallRegistersADefinitionForThisUsersLogon(t *testing.T) {
+	definition, raw, lines, err := installed(t, "DESKTOP-1\\ada\r\n", `C:\Program Files\Norite\norite-daemon.exe`)
+	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-
-	line := r.lines()[0]
-	for _, want := range []string{
-		"/Create",
-		"/TN " + windowsTaskName,
-		"/SC ONLOGON",
-		// LIMITED, not HIGHEST: the daemon needs no privilege beyond the user's own, and asking for
-		// elevation would prompt at install time and widen the blast radius of any later bug.
-		"/RL LIMITED",
-		// /F replaces an existing task, which is what makes reinstalling idempotent rather than an error.
-		"/F",
-	} {
-		if !strings.Contains(line, want) {
-			t.Errorf("the schtasks invocation is missing %q:\n%s", want, line)
+	if len(lines) != 2 || lines[0] != "whoami" {
+		t.Fatalf("ran %v", lines)
+	}
+	for _, want := range []string{"schtasks /Create", "/TN " + windowsTaskName, "/XML ", "/F"} {
+		if !strings.Contains(lines[1], want) {
+			t.Errorf("the schtasks invocation is missing %q:\n%s", want, lines[1])
+		}
+	}
+	// The flags took Task Scheduler's defaults, which none of them can change.
+	for _, gone := range []string{"/SC", "/TR", "/RL"} {
+		if strings.Contains(lines[1], gone) {
+			t.Errorf("the invocation still passes %s beside a definition:\n%s", gone, lines[1])
 		}
 	}
 
-	// /TR takes a command line that schtasks re-parses, so an unquoted "C:\Program Files\..." becomes the
-	// program "C:\Program" with an argument — a task that fails at every logon.
-	if !strings.Contains(line, `"C:\Program Files\Norite\norite-daemon.exe"`) {
-		t.Errorf("the binary path was not quoted for /TR:\n%s", line)
+	// The bytes are what the first line says they are, or schtasks calls the file malformed.
+	if len(raw) < 2 || raw[0] != 0xFF || raw[1] != 0xFE {
+		t.Fatalf("the definition does not begin with a UTF-16 little-endian byte-order mark: % x", raw[:min(len(raw), 4)])
+	}
+	if !strings.HasPrefix(definition, `<?xml version="1.0" encoding="UTF-16"?>`) {
+		t.Errorf("the definition does not declare the encoding it is written in:\n%s", definition)
+	}
+	var parsed struct {
+		Trigger   string `xml:"Triggers>LogonTrigger>UserId"`
+		Principal struct {
+			User      string `xml:"UserId"`
+			LogonType string `xml:"LogonType"`
+			RunLevel  string `xml:"RunLevel"`
+		} `xml:"Principals>Principal"`
+		Settings struct {
+			Instances   string `xml:"MultipleInstancesPolicy"`
+			NoBattery   string `xml:"DisallowStartIfOnBatteries"`
+			StopBattery string `xml:"StopIfGoingOnBatteries"`
+			Limit       string `xml:"ExecutionTimeLimit"`
+			Restarts    string `xml:"RestartOnFailure>Count"`
+		} `xml:"Settings"`
+		Command string `xml:"Actions>Exec>Command"`
+	}
+	// encoding/xml reads UTF-8, which the decoded string is; the declaration is for schtasks.
+	body := strings.Replace(definition, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
+	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("the definition is not well-formed: %v\n%s", err, definition)
+	}
+	// This user's logon, and run as them: not anybody's, which a standard account may not register.
+	if parsed.Trigger != `DESKTOP-1\ada` || parsed.Principal.User != `DESKTOP-1\ada` {
+		t.Errorf("the task is for %q and runs as %q", parsed.Trigger, parsed.Principal.User)
+	}
+	// LeastPrivilege, not HighestAvailable: the daemon needs no privilege beyond the user's own.
+	if parsed.Principal.RunLevel != "LeastPrivilege" || parsed.Principal.LogonType != "InteractiveToken" {
+		t.Errorf("principal: %+v", parsed.Principal)
+	}
+	if parsed.Settings.NoBattery != "false" || parsed.Settings.StopBattery != "false" {
+		t.Errorf("the daemon stops for a battery: %+v", parsed.Settings)
+	}
+	if parsed.Settings.Limit != "PT0S" {
+		t.Errorf("the daemon is ended after %s", parsed.Settings.Limit)
+	}
+	if parsed.Settings.Instances != "IgnoreNew" || parsed.Settings.Restarts != "3" {
+		t.Errorf("settings: %+v", parsed.Settings)
+	}
+	// A path, not a command line: nothing re-parses it, so the space needs no quotes.
+	if parsed.Command != `C:\Program Files\Norite\norite-daemon.exe` {
+		t.Errorf("the task runs %q", parsed.Command)
+	}
+}
+
+// A path or an account name is text in a document, and a document has characters that end its elements.
+func TestWindowsDefinitionEscapesWhatItIsGiven(t *testing.T) {
+	definition, _, _, err := installed(t, `CORP&CO\a<b>`, `C:\R&D\"x"\norite-daemon.exe`)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	var parsed struct {
+		User    string `xml:"Principals>Principal>UserId"`
+		Command string `xml:"Actions>Exec>Command"`
+	}
+	body := strings.Replace(definition, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
+	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("the definition is not well-formed: %v\n%s", err, definition)
+	}
+	if parsed.User != `CORP&CO\a<b>` || parsed.Command != `C:\R&D\"x"\norite-daemon.exe` {
+		t.Errorf("round trip: %q, %q", parsed.User, parsed.Command)
+	}
+}
+
+func TestWindowsInstallRefusesWhatItCannotName(t *testing.T) {
+	// No account name, or one that is not a name: the task would be nobody's.
+	for _, user := range []string{"", "  \r\n", "a\x00b"} {
+		if _, _, lines, err := installed(t, user, `C:\norite-daemon.exe`); err == nil || len(lines) != 1 {
+			t.Errorf("whoami answered %q: err=%v, ran %v", user, err, lines)
+		}
+	}
+	// A control character in the path is refused before anything is asked.
+	if _, _, lines, err := installed(t, `PC\ada`, "C:\\a\nb.exe"); err == nil || len(lines) != 0 {
+		t.Errorf("a path with a newline: err=%v, ran %v", err, lines)
 	}
 }
 

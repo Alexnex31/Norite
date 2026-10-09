@@ -351,9 +351,17 @@ service on Linux, a launchd agent on macOS, a logon task on Windows — so it st
 log in. It never needs administrator rights and never runs as a system service: it runs as you, because it
 holds your sign-in. On macOS it is already running after `install`, and it says so.
 
-`norite daemon status` tells you where it stands: it exits 0 when running, 1 when installed but stopped and
-2 when not installed. Its log is `daemon.log` in its state directory: `~/.local/state/norite/` on Linux,
-`~/Library/Application Support/Norite/` on macOS, `%LOCALAPPDATA%\Norite\` on Windows.
+`norite daemon status` tells you where it stands, and whether it is signed in: it exits 0 when a daemon is
+running, 1 when installed but stopped and 2 when not installed. `norite logs tail` prints the newest lines
+of its log, and `norite logs tail --follow` keeps printing. The log itself is `daemon.log` in
+`~/.local/state/norite/` on Linux and `%LOCALAPPDATA%\Norite\` on Windows, and
+`~/Library/Logs/norite-daemon.log` on macOS.
+
+**On a Linux machine you only reach over SSH**, a service of your account stops when you disconnect.
+`norite daemon install --linger` keeps it running, and starts it at boot. `install` tells you which case
+you are in.
+
+If you skip this step, `norite login` offers to do it when it finishes.
 
 One daemon serves one OS account. Two people sharing a computer use two OS accounts.
 
@@ -582,7 +590,7 @@ delete the instance directory.
 | `curl …/healthz` from another machine hangs or is refused | The request never reaches Norite. | Check the server is running and listening (`ss -ltn` shows `:8080`); the firewall (shape A: port 8080; shape B: 80 and 443); that you used the right address. In shape B, `--listen-addr 127.0.0.1:8080` makes Norite unreachable *except* through the proxy, by design. |
 | `{"status":"starting"}` | The server is still creating or upgrading its tables. | Wait a few seconds. |
 | The server exits right after starting | Its last log line says why — usually the database is unreachable or the password is wrong. | Fix the `[database]` section of `instance.toml`. |
-| `the daemon is not running` or `unavailable` | No daemon is answering on this machine. | `norite daemon status`, then `norite daemon start`. Its log is `daemon.log` in the state directory. |
+| `the daemon is not running` or `unavailable` | No daemon is answering on this machine. | `norite daemon status`, then `norite daemon start`. `norite logs tail` shows its log. |
 | `the daemon is not signed in; run norite login` | The daemon is running with no sign-in. | `norite login --instance INSTANCE-URL`. |
 | `that email and password did not match an account` | Wrong email or password — or, with a mail relay, an address not confirmed yet. The answer is deliberately the same for all of them. | Check both; look for the confirmation mail. |
 | `this instance takes new accounts by invite` | Registration is `invite`. | Ask the administrator for an instance invite and pass `--invite-code`. |

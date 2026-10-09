@@ -1489,9 +1489,9 @@ of this section.
     The function is removed, and deliberately not repaired: a program that calls `Setrlimit` itself makes
     Go stop restoring the original limit for children, and the voice-worker (M28) would inherit the raise.
     What bounds the daemon's handles is its own caps.
-  - *"Auto-install" was defined nowhere.* It means: the installers register and start the service on all
-    three platforms, and `norite login` on a terminal, finding no daemon and no service, offers to. Never
-    without asking, and no command starts a daemon by itself.
+  - *"Auto-install" was defined nowhere.* It means: the installers register and start the service (on
+    Linux and macOS; on Windows only when asked, see below), and `norite login` on a terminal, finding no
+    daemon and no service, offers to. Never without asking, and no command starts a daemon by itself.
   - *The unit's `After=network-online.target` did nothing.* The user manager has no such target. Removed.
   - *"Survives a reboot" means "is back at the next login"*, as ADR 0010's "running from login" says. On a
     machine used only over SSH the systemd user manager stops at the last logout, and the daemon with it.
@@ -1513,10 +1513,13 @@ of this section.
   stop is a kill, and a kill between a refresh's answer and its write leaves a spent token on disk (M19).
   M24's binary swap needs the same request.
 
-  **Windows**: the daemon is built windowless and attaches to its parent's console when it has one; the task
-  is an XML definition with a logon trigger for this user, no battery condition, no time limit and a restart
-  on failure; `install.ps1` registers it by default. **Nobody has run this on Windows from this branch
-  unless the PR says so**; the command lines are asserted through `Runner`.
+  **Windows**: the task is an XML definition with a logon trigger for this user, no battery condition, no
+  time limit and a restart on failure, where `schtasks /SC ONLOGON` took a laptop's defaults for a short
+  job. The daemon lets go of a console window Windows opened for it alone, and keeps one it shares with a
+  shell, so it still prints in a tab; a windowless build would have lost that. **None of it has been run
+  on Windows from this branch unless the PR says so**: the definition and the command lines are asserted
+  through `Runner`, and `install.ps1` therefore still registers the task only with `-AutoStart`. Making
+  that the default is one line, owed once somebody has watched it work.
 
   **`norite daemon status` also asks the socket**: version, standing, and "running, started by hand" where
   the service manager knows nothing. A daemon that answers is exit 0 however it was started. `--json`.

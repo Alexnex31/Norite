@@ -1606,8 +1606,10 @@ automation port refuses every `/@daemon/` path.
 **Service installation** (settled at Milestone M3): `norite daemon install | uninstall | start | stop |
 restart | status`, implemented in `cli/internal/daemonctl` behind one `Manager` interface with a backend per
 platform. Always a **user-scoped** service — a systemd *user* unit (`~/.config/systemd/user/`), a launchd
-*agent* (`~/Library/LaunchAgents/`), or a logon task at the user's own integrity level (`schtasks /SC
-ONLOGON /RL LIMITED`) — never a system-wide one, so installing needs no elevation and the daemon runs as the
+*agent* (`~/Library/LaunchAgents/`), or a logon task at the user's own integrity level (since M23 an XML
+definition registered with `schtasks /Create /XML`: this user's logon, `LeastPrivilege`, no battery
+condition, no time limit) — never a system-wide one, so installing needs no elevation and the daemon runs as
+the
 account whose tokens and keystore it holds. Each backend shells out to that platform's own tool
 (`systemctl --user`, `launchctl`, `schtasks`) through an injectable `Runner`, which is what lets all three
 command lines be asserted from one CI machine; the failed command appears verbatim in any error, so an
