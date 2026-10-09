@@ -10,9 +10,14 @@ import (
 	"io"
 
 	"github.com/urfave/cli/v3"
+
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
 )
 
-const daemonBinaryFlag = "daemon-binary"
+const (
+	daemonBinaryFlag = "daemon-binary"
+	lingerFlag       = "linger"
+)
 
 // managerFor builds the Manager each action operates through.
 //
@@ -55,6 +60,9 @@ func installCommand() *cli.Command {
 		Description: "Writes a systemd user unit, a launchd agent, or a logon task depending on the\n" +
 			"platform, so the daemon starts automatically at login. It does not start it now —\n" +
 			"run `norite daemon start` for that.\n\n" +
+			"On Linux a service of your account stops when you log out of the machine for the last\n" +
+			"time. On a machine you reach only over SSH, that is whenever you disconnect, and\n" +
+			"--linger keeps it running.\n\n" +
 			"Safe to run again: an existing definition is replaced.",
 		Flags: []cli.Flag{
 			// Deliberately no Sources: cli.EnvVars(...) here. LocateDaemon already consults
@@ -67,11 +75,22 @@ func installCommand() *cli.Command {
 				Usage: "`PATH` of the norite-daemon executable to register (default: " +
 					DaemonBinaryEnvVar + ", then next to this binary, then PATH)",
 			},
+			&cli.BoolFlag{
+				Name: lingerFlag,
+				Usage: "Linux: keep your account's services running after you log out, so the daemon " +
+					"starts at boot and survives an SSH session ending",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			mgr, err := managerFor()
 			if err != nil {
 				return err
+			}
+			lingerer, canLinger := mgr.(Lingerer)
+			// Refused before anything is written: a flag that does nothing here is not one to accept.
+			if cmd.Bool(lingerFlag) && !canLinger {
+				return clierr.Usage("--linger is for Linux, where a service stops at logout; on this platform " +
+					"the daemon starts at login and there is nothing to keep it running without one")
 			}
 
 			binary, err := LocateDaemon(cmd.String(daemonBinaryFlag))
@@ -99,9 +118,45 @@ func installCommand() *cli.Command {
 				fprintf(out, "\nIt will start automatically at login. To start it now:\n")
 				fprintf(out, "  norite daemon start\n")
 			}
+			if canLinger {
+				return reportLinger(ctx, out, lingerer, cmd.Bool(lingerFlag))
+			}
 			return nil
 		},
 	}
+}
+
+// reportLinger says how the service stands once its user logs out, and asks for lingering when told to.
+//
+// Written after the last step that can fail, from what happened: an account that already lingers is told
+// so, one that was asked for and refused is told the command that needs a privilege this one has not got.
+func reportLinger(ctx context.Context, out io.Writer, l Lingerer, want bool) error {
+	lingering, err := l.Lingering(ctx)
+	if err != nil {
+		// A machine without logind, most likely. Nothing is known, so nothing is claimed, unless
+		// lingering was asked for, in which case not being able to tell is the answer.
+		if want {
+			return fmt.Errorf("the service is installed, and whether your account lingers could not be read: %w", err)
+		}
+		return nil
+	}
+	switch {
+	case lingering:
+		fprintf(out, "\nYour account lingers, so the daemon also starts at boot and keeps running after you log out.\n")
+		return nil
+	case !want:
+		fprintf(out, "\nIt stops when you log out of this machine for the last time, like every service of your\n")
+		fprintf(out, "account. Over SSH alone, that is whenever you disconnect. To keep it running:\n")
+		fprintf(out, "  norite daemon install --linger\n")
+		return nil
+	}
+	if err := l.EnableLinger(ctx); err != nil {
+		return fmt.Errorf("the service is installed, and lingering could not be turned on: %w. "+
+			"It usually needs an administrator: %s", err, LingerHint)
+	}
+	fprintf(out, "\nYour account now lingers: the daemon starts at boot and keeps running after you log out.\n")
+	fprintf(out, "To undo that: loginctl disable-linger\n")
+	return nil
 }
 
 func uninstallCommand(version string) *cli.Command {

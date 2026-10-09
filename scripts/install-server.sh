@@ -166,7 +166,6 @@ install_service() {
     cat >"$unit_dir/$unit.service" <<EOF
 [Unit]
 Description=Norite server
-After=network-online.target
 
 [Service]
 ExecStart=$bin_dir/norite-server -config $config
