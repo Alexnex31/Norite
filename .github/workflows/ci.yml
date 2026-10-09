@@ -12,7 +12,13 @@ env:
   # Must be >= the highest `go` directive in the workspace, which is what actually pins this. The floor has
   # been raised twice by a dependency rather than by choice: testcontainers-go took it to 1.25.0, and
   # golang.org/x/crypto v0.56.0 — the first release fixing GO-2026-6354/6355 — took it to 1.26.0.
-  GO_VERSION: "1.26"
+  #
+  # An exact patch release, not "1.26". A minor is resolved against the list of versions GitHub's runners
+  # know, which trails a Go release: 1.26.9 fixed eleven standard-library advisories this code reaches,
+  # and "1.26" went on choosing 1.26.8, so the `security` job failed on a toolchain nothing here named.
+  # An exact version that list does not hold yet is fetched from go.dev. When govulncheck next reports an
+  # advisory "Fixed in" a newer patch, this is the line to move, with release.yml's.
+  GO_VERSION: "1.26.9"
   # Keep in sync with `sqlc_version` in the justfile.
   SQLC_VERSION: "v1.30.0"
   # Keep in sync with `oapi_codegen_version` in the justfile. Pinned for the same reason as the other two:

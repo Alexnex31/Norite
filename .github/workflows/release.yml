@@ -25,7 +25,7 @@ concurrency:
 
 env:
   # Keep in sync with GO_VERSION in ci.yml.
-  GO_VERSION: "1.26"
+  GO_VERSION: "1.26.9"
   # Keep in sync with GORELEASER_VERSION in ci.yml and `goreleaser_version` in the justfile, which
   # `just release-dry-run` uses. Pinned for the reason every tool here is: `latest` would make an upstream
   # release the first thing a tag tests, on the one run that publishes.
