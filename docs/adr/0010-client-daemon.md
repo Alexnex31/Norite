@@ -23,7 +23,9 @@ for external bot-automation scripts (must not receive first-party trust). Both u
 prefix JSON framing, also reused unmodified for daemon↔voice-worker IPC. The shared HELLO/IDENTIFY handshake
 carries a semver field (MAJOR must match exactly; a defined MINOR-version-back window is tolerated).
 
-The daemon auto-installs as a real OS-level service (systemd/launchd/Windows task), running from login. A
+The daemon auto-installs as a real OS-level service (systemd/launchd/Windows task), running from login.
+*(Defined at M23: the installers register and start it, and `norite login` offers to. Nothing installs or
+starts a daemon without asking. See `docs/architecture.md` §3, "Lifecycle".)* A
 single shared, hand-editable TOML config file (`pelletier/go-toml` v2, document-editing mode to preserve
 comments) holds theme/keybindings/notification-filter data; a second, daemon-owned state file holds anything
 daemon-written-only (plugin capability grants + pinned hashes, the voice-channel breadcrumb). Every writer
@@ -50,6 +52,9 @@ replacing the byte range of the value being changed, over v2's `unstable.Parser`
 - The daemon proactively raises `RLIMIT_NOFILE` at startup — it's effectively a local server holding many
   simultaneous handles (gateway WS, N attach sockets, bot-automation TCP, voice-worker pipes, SQLite/log
   files) and default OS limits (256 on macOS) are easy to exceed under normal multi-client, active-voice use.
+  *(Corrected at M23: Go's runtime raises the soft limit to the hard one at start, so the raise M3 built
+  did nothing and is removed. The daemon's own connection caps bound its handles. See
+  `docs/architecture.md` §3, "File descriptors".)*
 
 ## Alternatives considered
 - **Each client holds its own gateway connection independently**: rejected — duplicated logic, presence

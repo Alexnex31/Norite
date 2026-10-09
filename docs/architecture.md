@@ -1582,11 +1582,25 @@ in-memory scrollback state, the WASM plugin host (§8), and the local bot-automa
 deliberately **not** in the daemon (§6). The daemon is also the sole holder of auth tokens (§2) and, once E2E
 exists, the E2E keystore (§7) — nothing credential-bearing lives in an attach client.
 
-**Lifecycle**: auto-installed as a real OS-level service (systemd user unit / launchd agent / Windows
-startup task), running from login. On startup, before opening any handle, the daemon raises `RLIMIT_NOFILE`
-(`syscall.Setrlimit`, e.g. to 4096) — it simultaneously holds the gateway WS, N attach-client sockets, the
-bot-automation TCP listener, voice-worker pipes, and SQLite/log files, and default OS limits (256 on macOS)
-are easy to exceed under normal multi-client, active-voice use.
+**Lifecycle**: a real OS-level service (systemd user unit / launchd agent / Windows logon task), running
+from login. The installers register and start it, and `norite login` on a terminal offers to when it finds
+no daemon and no service; nothing installs or starts one without asking (M23). "From login" is exact: on a
+machine used only over SSH the systemd user manager stops at the last logout unless the account lingers,
+which `norite daemon install` reports and `--linger` asks for.
+
+**File descriptors**: the daemon does not raise `RLIMIT_NOFILE`, because Go's runtime already raises the
+soft limit to the hard one at start. This section said the daemon raised it to 4096 against a default of
+256 on macOS, and M3 built that; M23 measured it doing nothing and removed it. Calling `Setrlimit` would
+also make Go stop restoring the original limit for child processes, so the voice-worker would inherit the
+raise. What bounds the daemon's handles is its own caps: 64 attach clients, the automation port's served
+and pending connections, one gateway connection. A test runs the real binary under a soft limit of 256
+with every cap filled.
+
+**Stopping**: a signal, or `POST /@daemon/stop` on the attach socket (M23), which stops the daemon exactly
+as SIGTERM does. `norite daemon stop` and `restart` ask the socket first and the service manager second.
+The request exists because on Windows the service manager's stop is a kill, and a kill between a
+refresh's answer and its write-back leaves a spent token on disk. It is first-party tier only: the
+automation port refuses every `/@daemon/` path.
 
 **Service installation** (settled at Milestone M3): `norite daemon install | uninstall | start | stop |
 restart | status`, implemented in `cli/internal/daemonctl` behind one `Manager` interface with a backend per
@@ -1612,7 +1626,8 @@ the systemd unit also never retries (`RestartPreventExitStatus=3 4`), since no r
 signal-initiated stop exits **0**, not 128+signum: every service manager reads a non-zero exit as a crash
 and answers with a restart, which would make an ordinary stop loop. `norite daemon status` reports through
 its exit code — 0 running, 1 installed-but-stopped, 2 not installed — so a script can branch without parsing
-prose, and until the `--json` machinery lands (M48) that code is the machine-readable surface.
+prose. Since M23 it also asks the attach socket, so a daemon started by hand is 0 and reported as such,
+with its version and standing, and `--json` carries the same.
 
 **Daemon-owned state directory**: `$XDG_STATE_HOME/norite` (`~/.local/state/norite`), `~/Library/Application
 Support/Norite`, or `%LOCALAPPDATA%\Norite`, created `0700` — it will later hold plugin capability grants and
@@ -2120,8 +2135,11 @@ for it again costs nothing.
 supported, filename/link fallback otherwise — the hook point for the "disable image loading" bandwidth
 toggle (which does not suppress custom-emoji rendering).
 
-**Logging**: file-based, never stderr (Bubble Tea owns the alternate screen buffer), `norite logs tail`,
-`natefinch/lumberjack` rotation — reused by the daemon, both front ends of this binary, and the GUI alike.
+**Logging**: the daemon's log is a file with `natefinch/lumberjack` rotation, and `norite logs tail` reads
+it (M23): with no daemon running, into the newest backup, bounded and sanitized line by line since the file
+is one a person can edit, and without holding it open between reads. The command tree and the terminal
+client write no log of their own, and no milestone gives them one; if one does, it is a file, never stderr
+(Bubble Tea owns the alternate screen buffer).
 
 **Voice controls**: join/leave/mute/deafen on a chord, an active-speaker indicator, and two separate
 actions (keybind each) for local-mute and report (§6). A call is *drawn* here, not merely announced: `4b`
