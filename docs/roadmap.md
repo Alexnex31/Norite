@@ -1504,7 +1504,8 @@ of this section.
   rename an open file. The log is a file a person can edit: every line is bounded and sanitized (rule 19).
   One exported function says where the log is, for the daemon and the CLI alike; on macOS that is
   `~/Library/Logs` however the daemon was started. A fatal crash is written to `daemon.crash.log` beside it
-  (`debug.SetCrashOutput`), and `logs tail` says when one is newer than the last start.
+  (`debug.SetCrashOutput`). The file is one run's: the next start sets it aside as `daemon.crash.1.log` and
+  says in the log that the previous run crashed, which is where `logs tail` shows it.
 
   **A stop the daemon performs**: `POST /@daemon/stop` on the attach socket, first-party tier only (rule 16;
   the automation port refuses `/@daemon/`). The daemon stops as it does on SIGTERM and exits 0. `norite

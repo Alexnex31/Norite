@@ -35,6 +35,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/state"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/logfile"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // Options configures a daemon run.
@@ -144,10 +145,16 @@ func Run(ctx context.Context, opts Options) error {
 	starting.Msg("daemon starting")
 
 	// A fatal crash goes to a file beside the log as well as to stderr, which under Task Scheduler is
-	// nowhere and under launchd is a file nothing bounds. Without it the log shows a second "daemon
-	// starting" and no reason. A crash file that cannot be opened costs the daemon nothing else.
-	if release, err := captureCrashes(logfile.CrashPath(logPath)); err != nil {
-		log.Warn().Err(err).Msg("a crash will not be recorded beside the log")
+	// nowhere and under launchd is a file nothing bounds. A crash never reaches the logger, so without
+	// this the log shows a second "daemon starting" and no reason; with it, the start after a crash says
+	// so here. A crash file that cannot be opened costs the daemon nothing else.
+	previous, release, err := captureCrashes(logfile.CrashPath(logPath))
+	if previous != "" {
+		// The path is the environment's text, and a log is read in a terminal.
+		log.Warn().Str("traceback", termsafe.Text(previous)).Msg("the daemon's previous run crashed")
+	}
+	if err != nil {
+		log.Warn().Str("error", termsafe.Text(err.Error())).Msg("a crash will not be recorded beside the log")
 	} else {
 		defer release()
 	}

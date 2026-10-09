@@ -5,6 +5,7 @@ package daemonproc
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,37 +87,37 @@ func TestTheLogRotatesAndKeepsOnlyItsBackups(t *testing.T) {
 // crashHelperEnv names the crash file for the child below, and is what makes it the child.
 const crashHelperEnv = "NORITE_TEST_CRASH_FILE"
 
-// A crash is a process dying, so it is tested in one: this test runs itself again with the variable set,
-// and that copy directs crashes to the file and panics on a goroutine nothing recovers.
+// crashOnce runs this test binary again as a process that directs crashes to path and panics on a
+// goroutine nothing recovers. A crash is a process dying, so it is tested in one.
+func crashOnce(t *testing.T, path, saying string) {
+	t.Helper()
+	child := exec.Command(os.Args[0], "-test.run=^TestAFatalCrashIsWrittenBesideTheLog$") //nolint:gosec // the test binary itself
+	child.Env = append(os.Environ(), crashHelperEnv+"="+path, crashHelperEnv+"_SAYING="+saying)
+	if err := child.Run(); err == nil {
+		t.Fatal("the child did not crash")
+	}
+}
+
 func TestAFatalCrashIsWrittenBesideTheLog(t *testing.T) {
 	if path := os.Getenv(crashHelperEnv); path != "" {
-		if _, err := captureCrashes(path); err != nil {
+		if _, _, err := captureCrashes(path); err != nil {
 			t.Fatalf("captureCrashes: %v", err)
 		}
-		go panic("the crash this test is about")
+		go panic(os.Getenv(crashHelperEnv + "_SAYING"))
 		select {}
 	}
 
 	logPath := filepath.Join(t.TempDir(), "daemon.log")
 	crashPath := logfile.CrashPath(logPath)
 
-	for run := 1; run <= 2; run++ {
-		child := exec.Command(os.Args[0], "-test.run=^TestAFatalCrashIsWrittenBesideTheLog$") //nolint:gosec // the test binary itself
-		child.Env = append(os.Environ(), crashHelperEnv+"="+crashPath)
-		if err := child.Run(); err == nil {
-			t.Fatalf("run %d: the child did not crash", run)
-		}
-
-		body, err := os.ReadFile(crashPath)
-		if err != nil {
-			t.Fatalf("run %d: no crash file: %v", run, err)
-		}
-		// Appended, so a daemon crashing at every start leaves each crash and not only the last.
-		if got := strings.Count(string(body), "panic: the crash this test is about"); got != run {
-			t.Fatalf("run %d: the crash file holds %d crashes, want %d:\n%s", run, got, run, body)
-		}
+	crashOnce(t, crashPath, "the first crash")
+	body, err := os.ReadFile(crashPath)
+	if err != nil {
+		t.Fatalf("no crash file: %v", err)
 	}
-
+	if !strings.Contains(string(body), "panic: the first crash") {
+		t.Fatalf("the crash file does not hold the crash:\n%s", body)
+	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(crashPath)
 		if err != nil {
@@ -126,52 +127,55 @@ func TestAFatalCrashIsWrittenBesideTheLog(t *testing.T) {
 			t.Errorf("the crash file is %#o, want %#o", info.Mode().Perm(), crashFileMode)
 		}
 	}
+
+	// The next run finds it, sets it aside, and starts a file of its own: each file is one run's.
+	crashOnce(t, crashPath, "the second crash")
+	body, err = os.ReadFile(crashPath)
+	if err != nil {
+		t.Fatalf("no crash file after the second run: %v", err)
+	}
+	if strings.Contains(string(body), "the first crash") || !strings.Contains(string(body), "panic: the second crash") {
+		t.Errorf("the crash file is not the second run's alone:\n%s", body)
+	}
+	kept, err := os.ReadFile(previousCrashPath(crashPath))
+	if err != nil {
+		t.Fatalf("the first crash was not kept: %v", err)
+	}
+	if !strings.Contains(string(kept), "panic: the first crash") {
+		t.Errorf("the file set aside is not the first crash:\n%s", kept)
+	}
+
+	// And the one after that keeps the latest two, not three.
+	crashOnce(t, crashPath, "the third crash")
+	kept, err = os.ReadFile(previousCrashPath(crashPath))
+	if err != nil {
+		t.Fatalf("the second crash was not kept: %v", err)
+	}
+	if strings.Contains(string(kept), "the first crash") || !strings.Contains(string(kept), "panic: the second crash") {
+		t.Errorf("the file set aside is not the second crash alone:\n%s", kept)
+	}
 }
 
-func TestACrashFilePastItsBoundIsEmptiedAtStart(t *testing.T) {
+// A run that ended without crashing leaves an empty file, and an empty file is not a crash.
+func TestAnEmptyCrashFileIsNotAPreviousCrash(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.crash.log")
-	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), crashFileMax+1), crashFileMode); err != nil {
-		t.Fatalf("seeding the crash file: %v", err)
+	for range 2 {
+		previous, release, err := captureCrashes(path)
+		if err != nil {
+			t.Fatalf("captureCrashes: %v", err)
+		}
+		release()
+		if previous != "" {
+			t.Fatalf("a run that did not crash was reported as one: %q", previous)
+		}
 	}
-	release, err := captureCrashes(path)
-	if err != nil {
-		t.Fatalf("captureCrashes: %v", err)
-	}
-	release()
-
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("the crash file: %v", err)
-	}
-	if info.Size() != 0 {
-		t.Errorf("a crash file past its bound is still %d bytes", info.Size())
+	if _, err := os.Stat(previousCrashPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("something was set aside with no crash to keep: %v", err)
 	}
 }
 
-// A crash file at its bound or under it is kept: emptying it at every start would lose the crash that
-// made somebody restart.
-func TestACrashFileWithinItsBoundIsKept(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "daemon.crash.log")
-	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), crashFileMax), crashFileMode); err != nil {
-		t.Fatalf("seeding the crash file: %v", err)
-	}
-	release, err := captureCrashes(path)
-	if err != nil {
-		t.Fatalf("captureCrashes: %v", err)
-	}
-	release()
-
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("the crash file: %v", err)
-	}
-	if info.Size() != crashFileMax {
-		t.Errorf("a crash file within its bound was changed to %d bytes", info.Size())
-	}
-}
-
-// Whatever is at the path is appended to as this user, so a link there is refused: it would send a
-// traceback to a file somebody else chose.
+// Whatever is at the path is written to as this user, so a link there is refused: it would send a
+// traceback to a file somebody else chose. And the file it points at is not moved or emptied.
 func TestACrashFileThatIsALinkIsRefused(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating a symbolic link needs a privilege on Windows")
@@ -186,9 +190,56 @@ func TestACrashFileThatIsALinkIsRefused(t *testing.T) {
 		t.Fatalf("linking: %v", err)
 	}
 
-	if release, err := captureCrashes(path); err == nil {
+	if _, release, err := captureCrashes(path); err == nil {
 		release()
 		t.Fatal("a crash file that is a link was accepted")
+	}
+	if body, err := os.ReadFile(target); err != nil || string(body) != "kept" {
+		t.Errorf("the link's target was touched: %q, %v", body, err)
+	}
+	if _, err := os.Lstat(previousCrashPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the link was set aside as if it were a crash: %v", err)
+	}
+}
+
+// The start after a crash says so in the log, which is where `norite logs tail` looks: a crash never
+// reaches the logger, so before this the log showed two starts and no reason between them.
+func TestTheStartAfterACrashSaysSoInTheLog(t *testing.T) {
+	stateDir := t.TempDir()
+	logPath := logfile.In(stateDir)
+	crashPath := logfile.CrashPath(logPath)
+	if err := os.WriteFile(crashPath, []byte("panic: left by the run before\n"), crashFileMode); err != nil {
+		t.Fatalf("seeding a crash: %v", err)
+	}
+
+	stop, _ := startDaemon(t, Options{StateDir: stateDir, Version: "test", SkipSession: true})
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading the log: %v", err)
+	}
+	if !strings.Contains(string(body), "previous run crashed") ||
+		!strings.Contains(string(body), filepath.Base(previousCrashPath(crashPath))) {
+		t.Errorf("the log does not say the previous run crashed, or where the traceback is:\n%s", body)
+	}
+
+	// A run that ended cleanly is followed by a start that says nothing of the kind.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	stop, _ = startDaemon(t, Options{StateDir: stateDir, Version: "test", SkipSession: true})
+	if err := stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	body, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading the log: %v", err)
+	}
+	if strings.Contains(string(body), "previous run crashed") {
+		t.Errorf("a clean stop was followed by a start reporting a crash:\n%s", body)
 	}
 }
 
