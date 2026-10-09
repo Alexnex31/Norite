@@ -1506,3 +1506,55 @@ carries the condition that would reopen it.
   as it always was.
 - **Reopens if**: anything is ever done to that process other than waiting for it, or the id comes from
   anywhere but the daemon's own answer on the attach socket.
+
+### A crash file holds whatever the runtime prints when the daemon dies
+- **Raised**: M23, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: `daemon.crash.log` and `daemon.crash.1.log` receive the runtime's own account of a fatal
+  error: the panic's value, a stack for each goroutine it prints, and for a signal the registers. A stack
+  shows arguments as raw words, never the text of a string. A panic's value is the one place content
+  could appear, and nothing in the daemon panics with a value of its own: there is no `panic(` outside
+  its tests, so the value is the runtime's ("index out of range", "nil pointer dereference"). M19's
+  entry "A panic in the gateway connection is logged with its value" judged the same question for the
+  log. Both files are `0600`, and no command prints them.
+- **Reopens if**: the daemon or a dependency it calls with a frame, a token or a message panics with a
+  value built from one; or a command comes to print or upload a crash file, `norite logs tail` included.
+
+### `--linger` keeps every service of the account running, not only the daemon
+- **Raised**: M23, `/security-sweep` of the finished branch
+- **Verdict**: accepted risk
+- **Why**: lingering is the account's, not a service's. `norite daemon install --linger` asks logind to
+  keep the whole user manager up after logout and to start it at boot, so everything else the account
+  has enabled as a user service runs unattended too, and the daemon holds a live sign-in on a machine
+  nobody is logged in to. That is the point of the flag on a machine reached over SSH, it is never the
+  default, the flag's own help and the line it prints say "your account's services", and the line says
+  how to undo it. Whether the account may is the machine's policy: where polkit refuses, the command
+  names the one an administrator runs and does nothing itself.
+- **Reopens if**: lingering is turned on without the flag, by an installer or by the offer `norite login`
+  makes; or the daemon gains a surface that listens beyond loopback, where "running while nobody is
+  logged in" would mean something else.
+
+### The guides ask for `norite logs tail` output in a public issue
+- **Raised**: M23, `/security-sweep` of the finished branch, on reading M19's entry about the log
+- **Verdict**: accepted risk, with the guide changed
+- **Why**: M19's entry "The daemon logs the account's username and display name at every READY" reopens
+  if the log leaves the machine on the user's behalf. It does not: nothing uploads it. But the Windows
+  guide asks its reader to paste the log into an issue, did so before this milestone by naming the file,
+  and now names a command that makes it one line. The log holds no password, token, port secret or
+  message, which the guide says. It does hold the instance's address, the username and the path of the
+  state directory, which names the OS account, and the guide now says that too, beside the request.
+- **Reopens if**: a command gathers or sends the log for the user (a support bundle, a crash reporter),
+  at which point what it holds is no longer theirs to trim; or the log gains anything a member of a
+  shared guild could not already see.
+
+### `norite logs tail --file` reads any file its user can
+- **Raised**: M23, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: the command runs as the person who typed it and reads with their own permissions, like `cat`.
+  It crosses no boundary: nothing is read on the daemon's behalf or through it. What it adds over `cat`
+  is in the safe direction, since every byte is bounded and cleaned before it reaches the terminal, and a
+  pipe or a device at the path is refused. It lists the directory the file is in to find rotated copies,
+  which for a path somebody chose is a listing of a directory they chose.
+- **Reopens if**: the path ever comes from somewhere other than the command line or `daemon/logfile`,
+  such as `state.json` or the daemon's answer, or the command comes to run with more than its user's
+  permissions.

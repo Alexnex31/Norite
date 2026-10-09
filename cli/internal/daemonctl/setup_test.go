@@ -60,6 +60,10 @@ func TestSetupInstallsAndStartsAsThePlatformNeeds(t *testing.T) {
 	if len(mgr.installed) != 1 || mgr.starts != 1 || !strings.Contains(out.String(), "Installed and started") {
 		t.Errorf("installed=%v starts=%d output=%q", mgr.installed, mgr.starts, out.String())
 	}
+	// Which program the yes registered is shown: it was found by looking, and it runs at every login.
+	if !strings.Contains(out.String(), "executable: "+mgr.installed[0]) || !strings.Contains(out.String(), "definition: ") {
+		t.Errorf("the output does not name what was registered: %q", out.String())
+	}
 
 	// launchd starts the agent by loading it, and a second start is not sent.
 	mgr = &stubManager{startsOnInstall: true}

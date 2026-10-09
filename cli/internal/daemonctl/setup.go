@@ -52,6 +52,13 @@ func (s Setup) InstallAndStart(ctx context.Context, out io.Writer) error {
 		}
 	}
 	fprintf(out, "Installed and started %s. It starts by itself when you log in.\n", ServiceName)
+	// Which program was registered, as `norite daemon install` says: it was found by looking, in the
+	// environment, beside this binary and on PATH, and it now runs at every login holding the sign-in.
+	// Somebody who said yes to a question should be shown what the yes registered.
+	fprintf(out, "  executable: %s\n", binary)
+	if path, err := mgr.DefinitionPath(); err == nil && path != "" {
+		fprintf(out, "  definition: %s\n", path)
+	}
 	if lingerer, ok := mgr.(Lingerer); ok {
 		// What happens at logout, which on a machine reached over SSH is the next thing to happen.
 		return reportLinger(ctx, out, lingerer, false)
