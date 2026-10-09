@@ -48,7 +48,7 @@ func GroupCommand(version string) *cli.Command {
 			startCommand(),
 			stopCommand(version),
 			restartCommand(version),
-			statusCommand(),
+			statusCommand(version),
 		},
 	}
 }
@@ -258,47 +258,6 @@ func restartCommand(version string) *cli.Command {
 			}
 			fprintf(cmd.Root().Writer, "Restarted %s.\n", ServiceName)
 			return nil
-		},
-	}
-}
-
-func statusCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "status",
-		Usage: "report whether the daemon is installed and running",
-		Description: "Exits 0 when the daemon is running, 1 when it is installed but stopped, and 2 when it\n" +
-			"is not installed — so a script can branch on the exit code without parsing this output.",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			mgr, err := managerFor()
-			if err != nil {
-				return err
-			}
-			state, err := mgr.Status(ctx)
-			if err != nil {
-				return err
-			}
-
-			out := cmd.Root().Writer
-			switch {
-			case !state.Installed:
-				fprintf(out, "%s is not installed.\n", ServiceName)
-				fprintf(out, "Run `norite daemon install` to register it with this machine's service manager.\n")
-				// A distinct exit code per state, so `norite daemon status` is usable as a condition. Exit
-				// codes are the machine-readable surface here; --json arrives with the CLI's JSON output
-				// machinery at M48 (docs/architecture.md §4), and inventing a one-off shape for it now would
-				// mean shipping a contract that the real one has to break.
-				return cli.Exit("", 2)
-			case !state.Running:
-				fprintf(out, "%s is installed but not running (%s).\n", ServiceName, state.Detail)
-				fprintf(out, "Run `norite daemon start` to start it.\n")
-				return cli.Exit("", 1)
-			default:
-				fprintf(out, "%s is running (%s).\n", ServiceName, state.Detail)
-				if hint := mgr.LogHint(); hint != "" {
-					fprintf(out, "Logs: %s\n", hint)
-				}
-				return nil
-			}
 		},
 	}
 }

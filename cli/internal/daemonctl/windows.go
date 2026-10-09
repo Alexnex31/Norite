@@ -24,10 +24,6 @@ func (w *windowsTask) DefinitionPath() (string, error) { return "", nil }
 // StartsOnInstall is false: a logon task is registered and waits for its trigger.
 func (w *windowsTask) StartsOnInstall() bool { return false }
 
-func (w *windowsTask) LogHint() string {
-	return `Task Scheduler (taskschd.msc), Task Scheduler Library > "` + windowsTaskName + `"`
-}
-
 func (w *windowsTask) Install(ctx context.Context, daemonBinary string) error {
 	// /RL LIMITED runs at the user's normal integrity level rather than elevated. The daemon needs no
 	// privilege beyond the user's own, and asking for elevation would both prompt at install time and make

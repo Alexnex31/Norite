@@ -90,10 +90,6 @@ func (s *systemdUser) DefinitionPath() (string, error) {
 // StartsOnInstall is false: Install uses `enable`, not `enable --now`, on purpose.
 func (s *systemdUser) StartsOnInstall() bool { return false }
 
-func (s *systemdUser) LogHint() string {
-	return "journalctl --user -u " + unitFileName + " -f"
-}
-
 func (s *systemdUser) Install(ctx context.Context, daemonBinary string) error {
 	// A unit file is parsed line by line, so a newline in the path ends ExecStart= and turns everything
 	// after it into further directives — including ones that run commands. LocateDaemon already rejects

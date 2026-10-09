@@ -38,7 +38,6 @@ func (s *stubManager) Stop(context.Context) error            { s.stops++; return
 func (s *stubManager) Status(context.Context) (State, error) { return s.state, s.statusErr }
 func (s *stubManager) StartsOnInstall() bool                 { return s.startsOnInstall }
 func (s *stubManager) DefinitionPath() (string, error)       { return "/tmp/norite-daemon.service", nil }
-func (s *stubManager) LogHint() string                       { return "journalctl --user -u norite-daemon -f" }
 
 // testRoot builds a root command that handles exit codes the way cliapp.New does.
 //
@@ -52,6 +51,7 @@ func testRoot(out *bytes.Buffer) *cli.Command {
 		Writer:         out,
 		ErrWriter:      out,
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
+		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
 		Commands:       []*cli.Command{GroupCommand("test")},
 	}
 }
@@ -68,10 +68,25 @@ func runCommand(t *testing.T, mgr Manager, argv ...string) (stdout string, err e
 	if !stopStubbed {
 		answerStop(t, stopNotAsked)
 	}
+	if !statusStubbed {
+		answerStatus(t, socketAnswer{})
+	}
 
 	var out bytes.Buffer
 	err = testRoot(&out).Run(t.Context(), append([]string{"norite"}, argv...))
 	return out.String(), err
+}
+
+// statusStubbed is whether a test has said what the socket answers when asked who is there.
+var statusStubbed bool
+
+// answerStatus makes the socket answer every status question with answer for the rest of the test.
+func answerStatus(t *testing.T, answer socketAnswer) {
+	t.Helper()
+	previous, was := socketStatus, statusStubbed
+	socketStatus = func(context.Context, string) socketAnswer { return answer }
+	statusStubbed = true
+	t.Cleanup(func() { socketStatus, statusStubbed = previous, was })
 }
 
 // stopStubbed is whether a test has said what the socket answers a stop request.
@@ -87,49 +102,6 @@ func answerStop(t *testing.T, outcome stopOutcome) *int {
 	stopStubbed = true
 	t.Cleanup(func() { socketStop, stopStubbed = previous, was })
 	return asked
-}
-
-func TestStatusExitCodesDistinguishEveryState(t *testing.T) {
-	cases := []struct {
-		name     string
-		state    State
-		wantCode int
-		wantText string
-	}{
-		// The exit code is the machine-readable surface until the CLI's --json machinery arrives at M48, so
-		// a script can branch on it without parsing prose that is free to change.
-		{"running", State{Installed: true, Running: true, Detail: "active"}, 0, "is running"},
-		{"stopped", State{Installed: true, Detail: "inactive"}, 1, "not running"},
-		{"absent", State{}, 2, "is not installed"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			mgr := &stubManager{state: tc.state}
-
-			previous := managerFor
-			managerFor = func() (Manager, error) { return mgr, nil }
-			t.Cleanup(func() { managerFor = previous })
-
-			var out bytes.Buffer
-			err := testRoot(&out).Run(t.Context(), []string{"norite", "daemon", "status"})
-
-			var exit cli.ExitCoder
-			switch {
-			case tc.wantCode == 0:
-				if err != nil {
-					t.Fatalf("status returned %v, want success", err)
-				}
-			case !errors.As(err, &exit):
-				t.Fatalf("status returned %v (%T), want a cli.ExitCoder with code %d", err, err, tc.wantCode)
-			case exit.ExitCode() != tc.wantCode:
-				t.Fatalf("exit code = %d, want %d", exit.ExitCode(), tc.wantCode)
-			}
-
-			if !strings.Contains(out.String(), tc.wantText) {
-				t.Errorf("output does not contain %q:\n%s", tc.wantText, out.String())
-			}
-		})
-	}
 }
 
 func TestStatusTellsTheUserWhatToDoNext(t *testing.T) {

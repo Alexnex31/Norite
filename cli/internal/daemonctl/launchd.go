@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
-
-	"github.com/Alexnex31/Norite/daemon/logfile"
 )
 
 const plistFileName = launchdLabel + ".plist"
@@ -110,14 +108,6 @@ func (l *launchdAgent) DefinitionPath() (string, error) {
 // StartsOnInstall is true: `launchctl bootstrap` loads the agent, and loading one with RunAtLoad set
 // runs it immediately. launchd offers no way to register a login agent without also starting it.
 func (l *launchdAgent) StartsOnInstall() bool { return true }
-
-// LogHint names the daemon's own rotating log, which on macOS is in ~/Library/Logs (logfile.MacName).
-//
-// Not the StandardErrorPath file next to it: nothing routine is written there (see the plist), so sending
-// an operator to it would have them tail an empty file while the output they want sits in the sibling.
-func (l *launchdAgent) LogHint() string {
-	return "tail -f ~/Library/Logs/" + logfile.MacName
-}
 
 // serviceTarget is launchd's addressing scheme: a domain plus the label.
 func (l *launchdAgent) serviceTarget() string {

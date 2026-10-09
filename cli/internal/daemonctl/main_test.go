@@ -18,6 +18,9 @@ import (
 // an empty state directory.
 var realSocketStop func(context.Context, string) stopOutcome
 
+// realSocketStatus is the same for the status question.
+var realSocketStatus func(context.Context, string) socketAnswer
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "norite-daemonctl-test-")
 	if err != nil {
@@ -30,6 +33,10 @@ func TestMain(m *testing.M) {
 	realSocketStop = socketStop
 	socketStop = func(context.Context, string) stopOutcome {
 		panic("a daemonctl test reached the real attach socket; say what it answers with answerStop")
+	}
+	realSocketStatus = socketStatus
+	socketStatus = func(context.Context, string) socketAnswer {
+		panic("a daemonctl test reached the real attach socket; say what it answers with answerStatus")
 	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
