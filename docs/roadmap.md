@@ -1542,6 +1542,12 @@ of this section.
   guard additionally defers applying a downloaded update while the daemon is tracking an active voice
   session, applying it only once the call ends (`architecture.md` §6).
 
+  **Inherited from M23.** The updater stops the daemon through `POST /@daemon/stop` and never through the
+  service manager, whose stop is a kill on Windows; the old binary asks, since it is the running daemon's
+  version and the new one may not be able to attach. And the Windows service M23 rebuilt (the XML task,
+  the console it lets go of) has not been run on Windows: this milestone cannot be done there until it
+  has, and `install.ps1` registers the task by default once somebody has watched it work.
+
   **Versions are compared by SemVer precedence, noted 2026-09-30 with ADR 0033**, which makes the three
   guards above consistent rather than changing any of them.
   - **Downgrade.** "Downgrade" means lower precedence under SemVer §11: a pre-release sorts below its
