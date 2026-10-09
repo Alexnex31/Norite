@@ -5,6 +5,7 @@ package daemonctl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -25,7 +26,10 @@ var managerFor = func() (Manager, error) { return New(nil) }
 // Install and start are separate verbs rather than one "make it go" command. Provisioning a machine image
 // wants install without start; a user recovering from a crash wants start without touching the definition;
 // and a single fused command would have to guess which of those it was being asked for.
-func GroupCommand() *cli.Command {
+//
+// version is this CLI's, for attaching to the daemon: stop, restart and uninstall ask the daemon to stop
+// itself before they ask the service manager (M23).
+func GroupCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "daemon",
 		Usage: "manage the background daemon this machine's clients attach to",
@@ -35,10 +39,10 @@ func GroupCommand() *cli.Command {
 			"The CLI and GUI attach to it; they do not replace it.",
 		Commands: []*cli.Command{
 			installCommand(),
-			uninstallCommand(),
+			uninstallCommand(version),
 			startCommand(),
-			stopCommand(),
-			restartCommand(),
+			stopCommand(version),
+			restartCommand(version),
 			statusCommand(),
 		},
 	}
@@ -100,7 +104,7 @@ func installCommand() *cli.Command {
 	}
 }
 
-func uninstallCommand() *cli.Command {
+func uninstallCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "uninstall",
 		Usage: "stop the daemon and remove it from the service manager",
@@ -111,6 +115,9 @@ func uninstallCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			// Uninstalling stops the daemon, and the service manager's stop is a kill on Windows. Asked
+			// first, the daemon has usually finished before the definition goes.
+			socketStop(ctx, version)
 			if err := mgr.Uninstall(ctx); err != nil {
 				return err
 			}
@@ -128,17 +135,45 @@ func startCommand() *cli.Command {
 	}
 }
 
-func stopCommand() *cli.Command {
+func stopCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "stop",
 		Usage: "stop the daemon now",
-		Description: "The daemon stays installed and will start again at your next login. To prevent that,\n" +
-			"use `norite daemon uninstall`.",
-		Action: simpleAction("Stopped", func(m Manager) func(context.Context) error { return m.Stop }),
+		Description: "Asks the daemon to stop, which lets it finish what it has begun, and then tells the\n" +
+			"service manager. A daemon started by hand is stopped too.\n\n" +
+			"An installed daemon will start again at your next login. To prevent that, use\n" +
+			"`norite daemon uninstall`.",
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			mgr, err := managerFor()
+			if err != nil {
+				return err
+			}
+			out := cmd.Root().Writer
+			asked := socketStop(ctx, version)
+			// Always, when there is a service: it is what makes the service manager's own record say
+			// stopped, and what stops a daemon the request did not reach. Stopping a stopped one succeeds.
+			err = mgr.Stop(ctx)
+			switch {
+			case err == nil:
+				fprintf(out, "Stopped %s.\n", ServiceName)
+				return nil
+			case !errors.Is(err, ErrNotInstalled) || asked == stopNotAsked:
+				// Unwrapped, as every Manager error is: it already says what to run, or quotes the command
+				// that failed.
+				return err
+			case asked == stopGone:
+				fprintf(out, "Stopped %s. It is not installed as a service, so nothing starts it at your next login.\n",
+					ServiceName)
+				return nil
+			default:
+				return fmt.Errorf("%s agreed to stop and has not exited after %s; it is not installed as a "+
+					"service, so there is nothing else here to stop it with", ServiceName, stopWait)
+			}
+		},
 	}
 }
 
-func restartCommand() *cli.Command {
+func restartCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "restart",
 		Usage: "stop the daemon and start it again",
@@ -147,6 +182,17 @@ func restartCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			// Asked before anything is stopped: with no service there is nothing to start the daemon
+			// again, and a restart that stops one started by hand and then fails has made things worse.
+			state, err := mgr.Status(ctx)
+			if err != nil {
+				return err
+			}
+			if !state.Installed {
+				return fmt.Errorf("%w. A daemon started by hand is stopped with `norite daemon stop` and "+
+					"started again the way it was started", ErrNotInstalled)
+			}
+			socketStop(ctx, version)
 			// Stop failures are surfaced rather than swallowed: if the daemon could not be stopped, starting
 			// it again either does nothing or produces a second one, and both are worse than saying so.
 			if err := mgr.Stop(ctx); err != nil {

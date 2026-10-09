@@ -133,7 +133,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			login.RegisterCommand(),
 			login.Command(),
 			login.LogoutCommand(),
-			daemonctl.GroupCommand(),
+			daemonctl.GroupCommand(Version),
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
 			aboutCommand(verbs.Daemon(Version)),

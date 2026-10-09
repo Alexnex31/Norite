@@ -103,6 +103,25 @@ const (
 	PathConfigUnsplit = LocalPathPrefix + "config/unsplit"
 )
 
+// PathStop is POST with no body, and answers a Stopping: the daemon stops as it does on SIGTERM, finishing
+// what it has begun, and exits 0, which no service manager restarts (M23).
+//
+// It exists because a service manager's stop is not always a signal. On Windows it is a kill, and a kill
+// between an instance answering a token refresh and the daemon storing the answer leaves a spent token on
+// disk, which the next start presents and reuse detection answers by ending the sign-in.
+//
+// Trust tier (rule 16): the attach socket's and no other. Whoever can open the socket runs as the
+// daemon's own account and can already signal it. The port for scripts serves nothing under
+// LocalPathPrefix, so a script holding the port secret cannot stop the daemon.
+const PathStop = LocalPathPrefix + "stop"
+
+// Stopping is the answer to PathStop.
+type Stopping struct {
+	// PID is the daemon's process, so the asker can wait for it to be gone. The attach socket closes
+	// before the daemon has finished, and a start that does not wait finds the lock still held.
+	PID int `json:"pid"`
+}
+
 // ConfigToggle is what a split or an unsplit did.
 type ConfigToggle struct {
 	// Split is the toggle as it now stands.

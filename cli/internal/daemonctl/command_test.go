@@ -52,7 +52,7 @@ func testRoot(out *bytes.Buffer) *cli.Command {
 		Writer:         out,
 		ErrWriter:      out,
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
-		Commands:       []*cli.Command{GroupCommand()},
+		Commands:       []*cli.Command{GroupCommand("test")},
 	}
 }
 
@@ -63,10 +63,30 @@ func runCommand(t *testing.T, mgr Manager, argv ...string) (stdout string, err e
 	previous := managerFor
 	managerFor = func() (Manager, error) { return mgr, nil }
 	t.Cleanup(func() { managerFor = previous })
+	// No socket unless the test set one with answerStop: the real one would be the daemon of whoever runs
+	// the suite, and these commands stop it.
+	if !stopStubbed {
+		answerStop(t, stopNotAsked)
+	}
 
 	var out bytes.Buffer
 	err = testRoot(&out).Run(t.Context(), append([]string{"norite"}, argv...))
 	return out.String(), err
+}
+
+// stopStubbed is whether a test has said what the socket answers a stop request.
+var stopStubbed bool
+
+// answerStop makes the socket answer every stop request with outcome for the rest of the test, and
+// returns how many times it was asked.
+func answerStop(t *testing.T, outcome stopOutcome) *int {
+	t.Helper()
+	asked := new(int)
+	previous, was := socketStop, stopStubbed
+	socketStop = func(context.Context, string) stopOutcome { *asked++; return outcome }
+	stopStubbed = true
+	t.Cleanup(func() { socketStop, stopStubbed = previous, was })
+	return asked
 }
 
 func TestStatusExitCodesDistinguishEveryState(t *testing.T) {
@@ -207,11 +227,16 @@ func TestStartSurfacesNotInstalledUnchanged(t *testing.T) {
 }
 
 func TestRestartDoesNotStartAfterAFailedStop(t *testing.T) {
-	mgr := &stubManager{stopErr: errors.New("systemctl --user stop failed")}
+	mgr := &stubManager{state: State{Installed: true, Running: true},
+		stopErr: errors.New("systemctl --user stop failed")}
 
 	_, err := runCommand(t, mgr, "daemon", "restart")
 	if err == nil {
 		t.Fatal("restart succeeded despite the stop failing")
+	}
+	// Reached, and failed: a restart refused before it tried would also start nothing.
+	if mgr.stops != 1 {
+		t.Fatalf("the stop was tried %d times, want once", mgr.stops)
 	}
 	// Starting anyway would either do nothing or produce a second daemon, and the second is exactly what
 	// the single-instance lock exists to prevent — better to stop and say so.
@@ -221,7 +246,7 @@ func TestRestartDoesNotStartAfterAFailedStop(t *testing.T) {
 }
 
 func TestRestartStopsThenStarts(t *testing.T) {
-	mgr := &stubManager{}
+	mgr := &stubManager{state: State{Installed: true, Running: true}}
 
 	if _, err := runCommand(t, mgr, "daemon", "restart"); err != nil {
 		t.Fatalf("restart: %v", err)
@@ -247,7 +272,7 @@ func TestUninstallRemovesTheService(t *testing.T) {
 }
 
 func TestEveryDaemonSubcommandIsDocumented(t *testing.T) {
-	group := GroupCommand()
+	group := GroupCommand("test")
 
 	want := []string{"install", "uninstall", "start", "stop", "restart", "status"}
 	got := map[string]*cli.Command{}

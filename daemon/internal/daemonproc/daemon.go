@@ -85,6 +85,11 @@ type Options struct {
 // must not look like a failure to a service manager that would count a non-zero exit as a crash and restart
 // it. ErrAlreadyRunning is returned, unwrapped, when another daemon holds this user's lock.
 func Run(ctx context.Context, opts Options) error {
+	// The run ends when the caller's context does, which is a signal, or when an attached client asks
+	// (ipc.PathStop). Both are this one cancellation, so nothing below can tell them apart or needs to.
+	ctx, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+
 	stateDir := opts.StateDir
 	if stateDir == "" {
 		resolved, err := paths.StateDir()
@@ -180,7 +185,7 @@ func Run(ctx context.Context, opts Options) error {
 		st := state.New(part("state"), state.DefaultLimits)
 		// The requests the daemon answers itself. They are about this machine, so they are served whichever
 		// branch below is taken: signed in or not, credential store or none.
-		local = newLocal(stateDir, part("config"))
+		local = newLocal(stateDir, stopRun, log, part("config"))
 
 		store, err := credentials.OpenIn(stateDir)
 		if err != nil {

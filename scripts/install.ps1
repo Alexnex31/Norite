@@ -96,10 +96,13 @@ function Install-Norite {
     $norite = Join-Path $BinDir 'norite.exe'
     $daemon = Join-Path $BinDir 'norite-daemon.exe'
 
-    # Stop-Daemon ends a daemon running from $BinDir. Windows will not replace or delete a program that is
-    # running, and has no polite signal for a windowless one, so it is ended outright; the daemon keeps
-    # nothing in memory that a restart does not rebuild.
+    # Stop-Daemon stops a daemon running from $BinDir. Windows will not replace or delete a program that is
+    # running. The daemon is asked first, by the norite already installed, which is the running daemon's own
+    # version and so can attach to it: a daemon that stops itself finishes storing a renewed sign-in, and one
+    # ended while doing that is signed out at its next start. Whatever is still running after that, an older
+    # daemon that does not know the request or one that is stuck, is ended outright.
     function Stop-Daemon {
+        if (Test-Path $norite) { & $norite daemon stop 2>$null | Out-Null }
         Get-Process -Name 'norite-daemon' -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -eq $daemon } |
             Stop-Process -Force -ErrorAction SilentlyContinue

@@ -519,6 +519,7 @@ func TestWhatTheDaemonAnswersItselfIsNotReachableWithASecret(t *testing.T) {
 
 	for i, path := range []string{
 		ipc.PathConfig, ipc.PathConfigSplit, ipc.PathConfigUnsplit, "/@daemon/automation", "/@DAEMON/config",
+		ipc.PathStop,
 		"/auth/tokens", "/auth/tokens/1", "/auth/login", "/auth/logout/all", "/AUTH/tokens",
 		"/instance/bootstrap", "/users/@me/sessions", "/users/@me/sessions/1",
 		"//evil.example/x", "/../etc/passwd", "/guilds/1/../../auth/tokens", "/guilds//1", "https://evil.example/x",
