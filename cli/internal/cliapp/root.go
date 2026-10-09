@@ -25,6 +25,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
+	"github.com/Alexnex31/Norite/cli/internal/logscmd"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/cli/internal/tui"
@@ -139,6 +140,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			aboutCommand(verbs.Daemon(Version)),
 			configcmd.Command(configcmd.Connector(verbs.Daemon(Version))),
 			automationcmd.Command(automationcmd.Connector(verbs.Daemon(Version))),
+			logscmd.Command(),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

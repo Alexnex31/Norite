@@ -27,6 +27,7 @@ verb's output a definition in it that the CLI's tests validate against.
 | `token.schema.json` | `norite token create \| list \| revoke` |
 | `automation.schema.json` | `norite automation enable \| disable \| status` |
 | `about.schema.json` | `norite about` |
+| `logs.schema.json` | `norite logs tail`, one object per line of output |
 | `config.schema.json` | `norite config path \| get \| set \| unset \| export \| import \| split \| unsplit` |
 
 **These shapes belong to the CLI, not to the instance.** Several of them are built from a REST response
