@@ -13,6 +13,7 @@
         "answering",
         "installed",
         "service",
+        "service_running",
         "version",
         "standing",
         "instance",
@@ -36,6 +37,10 @@
         "service": {
           "type": "string",
           "description": "The service manager's own word for the service's state, such as active or inactive, or empty when none is installed."
+        },
+        "service_running": {
+          "type": "boolean",
+          "description": "The service manager says it is running the daemon. Running without it is a daemon somebody started by hand, whether or not a service is installed beside it."
         },
         "version": {
           "type": "string",

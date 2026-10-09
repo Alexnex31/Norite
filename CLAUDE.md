@@ -1151,6 +1151,14 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   lines already there, a state word no case exercised. The fourth was a second layer of cleaning that
   `%q` already made safe, kept and said to be unprovable.
 
+  **`/code-review` found ten things, and the worst undid the milestone's own reason.** To hide the
+  Windows console window the daemon let go of its console, and a program with no console is not told
+  about a logoff: it is killed, mid-refresh or not, on the commonest stop there is. Removed. The others
+  were a status that called a path no socket can have "running", a refusal that claimed twenty seconds of
+  waiting it had not done, a log tail that filled a short count from the wrong file, and an installer
+  that a quiet failure would have ended. **A fix for one platform's cosmetics is a change to how that
+  platform stops the program**; ask what the thing being removed was also carrying.
+
   **The Windows half was written without a Windows machine**, and every place that describes it says so:
   the entry, the guide, the commit, the code's own comments. `install.ps1` still registers the task only
   when asked, because flipping a default on a path nobody has watched work is how a guide ends up wrong.
@@ -2525,6 +2533,15 @@ And on the daemon's lifecycle and its log, from M23:
 - **`norite daemon status`: 0 means a daemon is running, however it was started.** It asks the service
   manager and the socket. A daemon started by hand is running and not installed, and anything that offers
   to install must treat it as running.
+- **On Windows the daemon keeps its console.** A console program is told about a logoff, a shutdown and
+  its window closing through the console, and Go turns each into the SIGTERM the daemon stops on. Letting
+  go of the console to hide the window was built and removed: without one the daemon is killed where it
+  stands at every logoff. Whatever hides that window must leave the daemon told.
+- **A daemon is running when something answered, never when a connection could not be made.** A dial
+  that fails for any reason but "nothing is listening" says so as a problem and reports no daemon.
+- **Every "it has not stopped" has waited.** `askToStop` waits for the process the daemon named, or for
+  its socket to go quiet when it named none, before it says so.
+- **What "yes" is lives in `prompt.Yes`**, for `prompt.Confirm` and for a question that is not one.
 - **Nothing installs or starts a daemon unasked.** `norite login` offers when somebody is there to
   answer, and the default for installing is no. A failed offer never fails the login.
 - **A service of the account stops at its last logout on Linux.** `install` reports lingering and

@@ -1515,11 +1515,16 @@ of this section.
 
   **Windows**: the task is an XML definition with a logon trigger for this user, no battery condition, no
   time limit and a restart on failure, where `schtasks /SC ONLOGON` took a laptop's defaults for a short
-  job. The daemon lets go of a console window Windows opened for it alone, and keeps one it shares with a
-  shell, so it still prints in a tab; a windowless build would have lost that. **None of it has been run
-  on Windows from this branch unless the PR says so**: the definition and the command lines are asserted
-  through `Runner`, and `install.ps1` therefore still registers the task only with `-AutoStart`. Making
-  that the default is one line, owed once somebody has watched it work.
+  job. **It has not been run on Windows from this branch unless the PR says so**: the definition and the
+  command lines are asserted through `Runner`, and `install.ps1` therefore still registers the task only
+  with `-AutoStart`. Making that the default is one line, owed once somebody has watched it work.
+
+  **The console window is left as it was**, open while the task runs. Two ways of removing it were written
+  and neither kept. A windowless build stops the daemon printing in a tab. Letting go of the console
+  (`FreeConsole`) was built and then taken out by `/code-review`: Windows tells a program that the user is
+  logging off through its console, so a daemon without one is killed at every logoff and shutdown where
+  it now gets to stop, which is the spent-token kill the stop request exists to prevent, on the commonest
+  path there is. Hiding the window and keeping the console is the candidate, and needs a Windows machine.
 
   **`norite daemon status` also asks the socket**: version, standing, and "running, started by hand" where
   the service manager knows nothing. A daemon that answers is exit 0 however it was started. `--json`.
@@ -1544,9 +1549,11 @@ of this section.
 
   **Inherited from M23.** The updater stops the daemon through `POST /@daemon/stop` and never through the
   service manager, whose stop is a kill on Windows; the old binary asks, since it is the running daemon's
-  version and the new one may not be able to attach. And the Windows service M23 rebuilt (the XML task,
-  the console it lets go of) has not been run on Windows: this milestone cannot be done there until it
-  has, and `install.ps1` registers the task by default once somebody has watched it work.
+  version and the new one may not be able to attach. And the Windows task M23 rebuilt as an XML
+  definition has not been run on Windows: this milestone cannot be done there until it has, and
+  `install.ps1` registers the task by default once somebody has watched it work. The task's console
+  window is still shown; M23's entry says which two ways of removing it are wrong and which is left to
+  try, and whatever is chosen must leave the daemon told about a logoff.
 
   **Versions are compared by SemVer precedence, noted 2026-09-30 with ADR 0033**, which makes the three
   guards above consistent rather than changing any of them.

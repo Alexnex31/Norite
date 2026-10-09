@@ -135,12 +135,16 @@ func Tail(path string, o Options) ([]Entry, *Follower, error) {
 	defer func() { _ = file.Close() }()
 
 	follower := &Follower{path: path, keep: o.Keep, id: info, offset: info.Size()}
-	entries, err := readNewest(file, info.Size(), o.Lines, o.Keep, &follower.split, !o.Follow)
+	entries, whole, err := readNewest(file, info.Size(), o.Lines, o.Keep, &follower.split, !o.Follow)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if missing := o.Lines - len(entries); missing > 0 {
+	// Only when the live file was read from its first byte and still came up short. Short for any other
+	// reason, a last line left to the Follower or a read that stopped at its bound, the lines missing are
+	// in this file, and filling the count from the copy before it would put one old line in front of a gap
+	// nothing marks (M23 /code-review).
+	if missing := o.Lines - len(entries); missing > 0 && whole {
 		if older := newestBackup(path); older != "" {
 			// A copy that has gone, or cannot be read, costs the lines it held and nothing else.
 			if earlier, err := tailOf(older, missing, o.Keep); err == nil {
@@ -159,43 +163,44 @@ func tailOf(path string, n int, keep func(Entry) bool) ([]Entry, error) {
 	}
 	defer func() { _ = file.Close() }()
 	var split splitter
-	return readNewest(file, info.Size(), n, keep, &split, true)
+	entries, _, err := readNewest(file, info.Size(), n, keep, &split, true)
+	return entries, err
 }
 
-// readNewest returns the newest n kept entries among the first size bytes of file. What it leaves in split
-// is a last line with no newline yet, unless flush says to return that as an entry too.
-func readNewest(file *os.File, size int64, n int, keep func(Entry) bool, split *splitter, flush bool) ([]Entry, error) {
+// readNewest returns the newest n kept entries among the first size bytes of file, and whether it read the
+// file from its first byte. What it leaves in split is a last line with no newline yet, unless flush says
+// to return that as an entry too.
+func readNewest(file *os.File, size int64, n int, keep func(Entry) bool, split *splitter, flush bool) (entries []Entry, whole bool, err error) {
 	if n == 0 {
 		// Nothing is wanted of what is already there. The start of an unfinished last line is still
 		// found, so that a Follower prints the whole of it and not its end.
 		start, cut, err := lineStart(file, size, 1)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		split.skip = cut
 		if size > 0 {
 			var last [1]byte
 			if _, err := file.ReadAt(last[:], size-1); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if last[0] == '\n' {
-				return nil, nil
+				return nil, false, nil
 			}
 		}
 		_, err = feed(file, start, size, split, func([]byte, bool) {})
-		return nil, err
+		return nil, false, err
 	}
 
 	var (
 		start int64
 		cut   bool
-		err   error
 	)
 	if keep == nil {
 		// Exactly the lines wanted, found by counting newlines from the end.
 		start, cut, err = lineStart(file, size, n)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	} else if size > maxScan {
 		// Which lines pass is not known without reading them, so everything within the bound is read.
@@ -204,7 +209,6 @@ func readNewest(file *os.File, size int64, n int, keep func(Entry) bool, split *
 	// A start that is not known to be a line's is in the middle of one, whose end is not an entry.
 	split.skip = cut
 
-	var entries []Entry
 	collect := func(line []byte, truncated bool) {
 		entry := parse(line, truncated)
 		if keep != nil && !keep(entry) {
@@ -217,7 +221,7 @@ func readNewest(file *os.File, size int64, n int, keep func(Entry) bool, split *
 		}
 	}
 	if _, err := feed(file, start, size, split, collect); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if flush {
 		split.flush(collect)
@@ -225,7 +229,7 @@ func readNewest(file *os.File, size int64, n int, keep func(Entry) bool, split *
 	if len(entries) > n {
 		entries = entries[len(entries)-n:]
 	}
-	return entries, nil
+	return entries, start == 0, nil
 }
 
 // lineStart finds where the last n lines of the first size bytes begin. cut is true when the search

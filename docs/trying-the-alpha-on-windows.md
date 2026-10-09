@@ -227,9 +227,9 @@ Scheduler task named "Norite Daemon", running as you and needing no administrato
 `.\norite.exe daemon stop` stops it, however it was started.
 
 This path was rebuilt for this release and **has not yet been run on Windows**: the task is registered
-from a definition that starts it at your logon, on battery as on mains, with no time limit, and the daemon
-lets go of the console window Windows opens for it, which should show for a moment at logon and then
-close. If the window stays, or the task does not start, a tab is the reliable way, and the output of
+from a definition that starts it at your logon, on battery as on mains, with no time limit. Because the
+daemon is a console program, Windows shows its console window while the task runs; closing that window
+stops the daemon. If the task does not start, a tab is the reliable way, and the output of
 `.\norite.exe daemon status` and `.\norite.exe logs tail` is worth an issue.
 
 ## Step 4 — sign in

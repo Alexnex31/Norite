@@ -6,8 +6,8 @@ package login
 import (
 	"context"
 	"io"
-	"strings"
 
+	"github.com/Alexnex31/Norite/cli/internal/prompt"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
@@ -99,11 +99,5 @@ func (r *Runner) yes(question string, byDefault bool) bool {
 	if err != nil {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "":
-		return byDefault
-	case "y", "yes":
-		return true
-	}
-	return false
+	return prompt.Yes(line, byDefault)
 }

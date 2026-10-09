@@ -102,7 +102,10 @@ function Install-Norite {
     # ended while doing that is signed out at its next start. Whatever is still running after that, an older
     # daemon that does not know the request or one that is stuck, is ended outright.
     function Stop-Daemon {
-        if (Test-Path $norite) { & $norite daemon stop 2>$null | Out-Null }
+        # In a try: with no daemon and no task, `daemon stop` says so on stderr and exits non-zero, and under
+        # $ErrorActionPreference = 'Stop' Windows PowerShell 5.1 turns a redirected stderr line from a program
+        # into a terminating error, which would end the install before a file was copied.
+        if (Test-Path $norite) { try { & $norite daemon stop 2>$null | Out-Null } catch { } }
         Get-Process -Name 'norite-daemon' -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -eq $daemon } |
             Stop-Process -Force -ErrorAction SilentlyContinue

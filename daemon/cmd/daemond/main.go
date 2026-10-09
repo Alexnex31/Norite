@@ -85,12 +85,8 @@ func main() {
 		level = zerolog.DebugLevel
 	}
 
-	// On Windows, a console opened for this process alone is let go of, and with it goes anywhere for a
-	// copy of the log to be read: the file is the log.
-	ownConsole := leaveOwnConsole()
-
 	var stderr io.Writer
-	if *stderrLog && !ownConsole {
+	if *stderrLog {
 		stderr = os.Stderr
 	}
 

@@ -534,3 +534,28 @@ func TestFollowingALargeAppendComesInBoundedPieces(t *testing.T) {
 		t.Errorf("%d MB came back in %d calls; one call is not bounded", body.Len()>>20, calls)
 	}
 }
+
+// The rotated copy fills the count only when the live file was read from its first byte and still came up
+// short. Short because the last line was left to the Follower, the lines missing are in the live file, and
+// one old line from the copy would sit in front of a gap nothing marks.
+func TestTheRotatedCopyIsNotReadWhenTheLiveFileHoldsEnough(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daemon.log")
+	writeLog(t, filepath.Join(dir, "daemon-2026-10-09T10-00-00.000.log"), line("info", "from the copy before"))
+	writeLog(t, path, numbered(1, 100)+`{"level":"info","message":"unfin`)
+
+	got, _, err := Tail(path, Options{Lines: 5, Follow: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Four, not five: the fifth is the line still being written. And none of them from the copy.
+	wantMessages(t, got, "line 97", "line 98", "line 99", "line 100")
+
+	// With the whole live file read and still short, the copy is where the rest are.
+	writeLog(t, path, numbered(1, 2)+`{"level":"info","message":"unfin`)
+	got, _, err = Tail(path, Options{Lines: 5, Follow: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMessages(t, got, "from the copy before", "line 1", "line 2")
+}

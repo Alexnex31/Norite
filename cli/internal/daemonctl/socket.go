@@ -23,8 +23,8 @@ const (
 	stopNotAsked stopOutcome = iota
 	// stopGone: the daemon agreed, and its process has exited.
 	stopGone
-	// stopPending: the daemon agreed, or closed the connection as a stopping daemon does, and its process
-	// could not be seen to exit: it named none, or it is still there after stopWait.
+	// stopPending: the daemon agreed, or closed the connection as a stopping daemon does, and after
+	// stopWait it is still there: its process, or when it named none, its socket.
 	stopPending
 )
 
@@ -57,19 +57,35 @@ var socketStop = func(ctx context.Context, version string) stopOutcome {
 		return stopNotAsked
 	}
 	defer func() { _ = client.Close() }()
-	return askToStop(askCtx, client, func(pid int) bool { return waitForExit(ctx, pid, stopWait) })
+	return askToStop(askCtx, client, func(pid int) bool {
+		if pid > 1 {
+			return waitForExit(ctx, pid, stopWait)
+		}
+		return waitForSilence(ctx, stopWait)
+	})
 }
 
-// askToStop sends the request on c and reports what came of it. gone waits for a process to exit and
-// reports whether it did.
+// askToStop sends the request on c and reports what came of it. gone waits for the daemon to be gone and
+// reports whether it is: for the process when it is given one, and when it is given 0, for whatever else
+// shows a daemon nobody named has stopped.
+//
+// Every stopPending it returns has waited. It returned one at once for a connection that closed under the
+// request, and the command then said the daemon "has not exited after 20s" about a daemon that exited a
+// moment later, having waited for nothing (M23 /code-review).
 func askToStop(ctx context.Context, c stopCaller, gone func(pid int) bool) stopOutcome {
+	unnamed := func() stopOutcome {
+		if gone(0) {
+			return stopGone
+		}
+		return stopPending
+	}
 	res, err := c.Do(ctx, http.MethodPost, ipc.PathStop, nil)
 	if err != nil {
 		var closed *ipc.CloseError
 		// A daemon that began stopping before the answer left closes the connection instead, saying so
 		// or not. The request was read, so it is stopping; which process to wait for is not known.
 		if errors.Is(err, ipc.ErrClosed) || (errors.As(err, &closed) && closed.Code == ipc.CloseGoingAway) {
-			return stopPending
+			return unnamed()
 		}
 		// Declined, or not understood: a daemon older than the request relays the path and reports
 		// whatever came of that.
@@ -82,7 +98,7 @@ func askToStop(ctx context.Context, c stopCaller, gone func(pid int) bool) stopO
 	var out ipc.Stopping
 	// The daemon agreed. A process id that cannot be waited on is still an agreement.
 	if err := json.Unmarshal(res.Body, &out); err != nil || out.PID <= 1 {
-		return stopPending
+		return unnamed()
 	}
 	if gone(out.PID) {
 		return stopGone
@@ -97,4 +113,28 @@ func waitForExit(ctx context.Context, pid int, limit time.Duration) bool {
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	return processExited(ctx, pid)
+}
+
+// waitForSilence reports whether the daemon's socket stops answering within limit: what there is to watch
+// when a stopping daemon did not say which process it is. The socket closes a little before the process
+// ends, which is close enough to say it stopped and not close enough to start another, so a restart still
+// goes through the service manager, which waits for the process itself.
+func waitForSilence(ctx context.Context, limit time.Duration) bool {
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		conn, err := ipc.Dial(ctx)
+		if err == nil {
+			_ = conn.Close()
+		} else if errors.Is(err, ipc.ErrNotRunning) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
+	}
 }

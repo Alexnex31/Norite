@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Alexandre Duffez
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//go:build unix
+// Linux only, and not merely Unix: the state directory comes from XDG_STATE_HOME and the log is beside
+// it, which is this platform's layout. On macOS the daemon reads neither from there.
+//go:build linux
 
 package main
 

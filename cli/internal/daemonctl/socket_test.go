@@ -42,47 +42,55 @@ func stoppingBody(t *testing.T, pid int) json.RawMessage {
 }
 
 func TestAskingTheDaemonToStop(t *testing.T) {
+	const noWait = -1
 	cases := []struct {
 		name string
 		res  ipc.Result
 		err  error
-		// exits is what waiting for the process finds; waited is whether it should have been waited for.
-		exits  bool
-		waited bool
-		want   stopOutcome
+		// gone is what waiting finds. waitedFor is what must have been waited for: a process id, 0 for a
+		// daemon that named none, or noWait.
+		gone      bool
+		waitedFor int
+		want      stopOutcome
 	}{
 		{name: "agreed and exited", res: ipc.Result{Status: 200, Body: stoppingBody(t, 4242)},
-			exits: true, waited: true, want: stopGone},
+			gone: true, waitedFor: 4242, want: stopGone},
 		{name: "agreed and still there", res: ipc.Result{Status: 200, Body: stoppingBody(t, 4242)},
-			waited: true, want: stopPending},
+			waitedFor: 4242, want: stopPending},
 		// The connection closing under the request is a daemon that began to stop before its answer left.
-		{name: "closed as a stopping daemon does",
-			err: &ipc.CloseError{Code: ipc.CloseGoingAway, Reason: "the daemon is stopping"}, want: stopPending},
-		{name: "closed without a word", err: ipc.ErrClosed, want: stopPending},
+		// Which process is not known, so its socket is what is watched, and it is watched: a pending that
+		// had waited for nothing was reported as twenty seconds of waiting.
+		{name: "closed as a stopping daemon does, and gone",
+			err:  &ipc.CloseError{Code: ipc.CloseGoingAway, Reason: "the daemon is stopping"},
+			gone: true, waitedFor: 0, want: stopGone},
+		{name: "closed as a stopping daemon does, and still answering",
+			err:       &ipc.CloseError{Code: ipc.CloseGoingAway, Reason: "the daemon is stopping"},
+			waitedFor: 0, want: stopPending},
+		{name: "closed without a word, and gone", err: ipc.ErrClosed, gone: true, waitedFor: 0, want: stopGone},
 		// A daemon from before the request relays the path: signed out it declines, signed in it reports
 		// whatever its instance made of it. Neither is an agreement, and the service manager is still owed.
 		{name: "an older daemon, signed out",
-			err: &ipc.RelayError{Code: ipc.RelayNotSignedIn, Message: "nobody is signed in"}, want: stopNotAsked},
+			err: &ipc.RelayError{Code: ipc.RelayNotSignedIn, Message: "nobody is signed in"}, waitedFor: noWait, want: stopNotAsked},
 		{name: "an older daemon, signed in", res: ipc.Result{Status: 404, Body: json.RawMessage(`{}`)},
-			want: stopNotAsked},
-		{name: "refused", err: &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "no"}, want: stopNotAsked},
+			waitedFor: noWait, want: stopNotAsked},
+		{name: "refused", err: &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "no"}, waitedFor: noWait, want: stopNotAsked},
 		{name: "closed for another reason",
-			err: &ipc.CloseError{Code: ipc.CloseTooSlow, Reason: "slow"}, want: stopNotAsked},
-		// Agreed, with nothing usable to wait on. Never waited for: 0 is the caller's whole process group
-		// to a signal, 1 is init, and a negative id is a group.
-		{name: "agreed, pid 0", res: ipc.Result{Status: 200, Body: stoppingBody(t, 0)}, want: stopPending},
-		{name: "agreed, pid 1", res: ipc.Result{Status: 200, Body: stoppingBody(t, 1)}, want: stopPending},
-		{name: "agreed, a negative pid", res: ipc.Result{Status: 200, Body: stoppingBody(t, -7)}, want: stopPending},
+			err: &ipc.CloseError{Code: ipc.CloseTooSlow, Reason: "slow"}, waitedFor: noWait, want: stopNotAsked},
+		// Agreed, with no process that can be waited on: 0 is the caller's whole process group to a
+		// signal, 1 is init, and a negative id is a group. The id is never used; the socket is watched.
+		{name: "agreed, pid 0", res: ipc.Result{Status: 200, Body: stoppingBody(t, 0)}, gone: true, waitedFor: 0, want: stopGone},
+		{name: "agreed, pid 1", res: ipc.Result{Status: 200, Body: stoppingBody(t, 1)}, waitedFor: 0, want: stopPending},
+		{name: "agreed, a negative pid", res: ipc.Result{Status: 200, Body: stoppingBody(t, -7)}, gone: true, waitedFor: 0, want: stopGone},
 		{name: "agreed, a body that is not one", res: ipc.Result{Status: 200, Body: json.RawMessage(`[]`)},
-			want: stopPending},
+			waitedFor: 0, want: stopPending},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &stopDaemon{res: tc.res, err: tc.err}
-			var waitedFor []int
+			waited := []int{}
 			got := askToStop(t.Context(), d, func(pid int) bool {
-				waitedFor = append(waitedFor, pid)
-				return tc.exits
+				waited = append(waited, pid)
+				return tc.gone
 			})
 			if got != tc.want {
 				t.Errorf("outcome %d, want %d", got, tc.want)
@@ -90,10 +98,28 @@ func TestAskingTheDaemonToStop(t *testing.T) {
 			if len(d.asked) != 1 || d.asked[0] != "POST "+ipc.PathStop {
 				t.Errorf("asked %v, want one POST %s", d.asked, ipc.PathStop)
 			}
-			if (len(waitedFor) > 0) != tc.waited {
-				t.Errorf("waited for %v, want waited=%v", waitedFor, tc.waited)
+			switch {
+			case tc.waitedFor == noWait && len(waited) != 0:
+				t.Errorf("waited for %v, want no wait", waited)
+			case tc.waitedFor != noWait && (len(waited) != 1 || waited[0] != tc.waitedFor):
+				t.Errorf("waited for %v, want one wait for %d", waited, tc.waitedFor)
 			}
 		})
+	}
+}
+
+// With no daemon listening the socket is silent at once. TestMain points the state directory somewhere
+// empty, so this is the real dial.
+func TestWaitingForSilenceReturnsWhenNothingListens(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	start := time.Now()
+	if !waitForSilence(t.Context(), 10*time.Second) {
+		t.Fatal("a socket nobody listens on was not reported silent")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("it took %s to notice", took)
 	}
 }
 

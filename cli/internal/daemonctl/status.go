@@ -41,13 +41,21 @@ const statusAskTimeout = 5 * time.Second
 var socketStatus = func(ctx context.Context, version string) socketAnswer {
 	ctx, cancel := context.WithTimeout(ctx, statusAskTimeout)
 	defer cancel()
-	client, err := ipc.Connect(ctx, ipc.Options{Client: "norite", Version: version})
+	// In two steps, because they fail for different reasons. A connection that could not be made is not a
+	// daemon: the socket's path is too long for one to listen on, or the state directory cannot be had.
+	// Only a connection that was made and then went wrong is a daemon this command could not talk to.
+	conn, err := ipc.Dial(ctx)
+	if err != nil {
+		if errors.Is(err, ipc.ErrNotRunning) {
+			return socketAnswer{}
+		}
+		return socketAnswer{Problem: "no daemon could be looked for: " + output.Clean(err.Error())}
+	}
+	client, err := ipc.Attach(ctx, conn, ipc.Options{Client: "norite", Version: version})
 	if err != nil {
 		var mismatch *ipc.VersionError
 		var closed *ipc.CloseError
 		switch {
-		case errors.Is(err, ipc.ErrNotRunning):
-			return socketAnswer{}
 		case errors.As(err, &mismatch):
 			// The versions are the daemon's and this binary's own, and the daemon's is still foreign text.
 			return socketAnswer{Running: true, Version: output.Clean(mismatch.Daemon), Problem: output.Clean(mismatch.Error())}
@@ -77,6 +85,9 @@ type statusView struct {
 	Installed bool `json:"installed"`
 	// Service is the service manager's own word for the service's state, or empty when none is installed.
 	Service string `json:"service"`
+	// ServiceRunning is the service manager saying it is running the daemon. Running without it is a
+	// daemon somebody started by hand, whether or not a service is installed beside it.
+	ServiceRunning bool `json:"service_running"`
 	// Version is the running daemon's, or empty when none answered.
 	Version string `json:"version"`
 	// Standing is signed_in, starting or signed_out, or empty when none answered.
@@ -103,12 +114,13 @@ func (v statusView) exitCode() int {
 
 func viewOfStatus(state State, socket socketAnswer) statusView {
 	v := statusView{
-		Running:   socket.Running || (state.Installed && state.Running),
-		Answering: socket.Attached,
-		Installed: state.Installed,
-		Version:   socket.Version,
-		Standing:  socket.Standing,
-		Problem:   socket.Problem,
+		Running:        socket.Running || (state.Installed && state.Running),
+		Answering:      socket.Attached,
+		Installed:      state.Installed,
+		ServiceRunning: state.Installed && state.Running,
+		Version:        socket.Version,
+		Standing:       socket.Standing,
+		Problem:        socket.Problem,
 	}
 	if state.Installed {
 		v.Service = state.Detail
@@ -117,7 +129,7 @@ func viewOfStatus(state State, socket socketAnswer) statusView {
 		v.Instance, v.Username = socket.Account.InstanceURL, socket.Account.Username
 	}
 	// The service manager says it started one, and nothing is at the socket this command looked at.
-	if !socket.Running && state.Installed && state.Running {
+	if !socket.Running && socket.Problem == "" && state.Installed && state.Running {
 		v.Problem = "the service manager reports it running, and nothing answers on its socket: it is still " +
 			"starting, or it was started with another state directory than this shell's (XDG_STATE_HOME)"
 	}
@@ -128,8 +140,13 @@ func viewOfStatus(state State, socket socketAnswer) statusView {
 // are all somebody else's text.
 func (v statusView) Text(t *output.Text) {
 	switch {
-	case v.Running && v.Installed:
+	case v.Running && v.ServiceRunning:
 		t.Line("%s is running (%s).", ServiceName, output.Clean(v.Service))
+	case v.Running && v.Installed:
+		// Not "running (inactive)": the word is the service's, and the service is not what is running.
+		t.Line("%s is running, started by hand. The installed service is not running (%s), and",
+			ServiceName, output.Clean(v.Service))
+		t.Line("`norite daemon start` cannot start it while this one runs: `norite daemon restart` replaces it.")
 	case v.Running:
 		t.Line("%s is running, started by hand: it is not installed as a service, so nothing starts it at login.", ServiceName)
 		t.Line("Run `norite daemon install` to register it.")
