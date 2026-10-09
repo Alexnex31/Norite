@@ -1555,6 +1555,14 @@ type Querier interface {
 	// `messages.id` is qualified because sqlc cannot resolve a bare `id` once the CTE meets `users`; Postgres
 	// could.
 	//
+	// # The type only ever rises (M22)
+	//
+	// An edit by an API token marks the message as sent via automation: the token is its author's, so it may
+	// rewrite what a person typed, and the text would otherwise stand under a message drawn as theirs. The
+	// caller passes the type its actor writes (messages.typeFor) and GREATEST keeps the higher, so a person
+	// editing afterwards passes 0 and unmarks nothing, and a reserved system value above 1 is never lowered.
+	// It is in the statement so that no caller can assign over it.
+	//
 	UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (UpdateMessageContentRow, error)
 	// Same COALESCE shape as UpdateGuild, and the same guild scoping as GetRole.
 	//

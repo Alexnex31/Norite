@@ -31,6 +31,7 @@
         "author_id",
         "author",
         "content",
+        "type",
         "reply_to_id",
         "created_at",
         "edited_at",
@@ -70,6 +71,11 @@
         "content": {
           "type": "string",
           "description": "Exactly as sent. Rendering it is the client's business (rule 9); here it is escaped only where a terminal would act on it."
+        },
+        "type": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The instance's kind for the message: 0 for one a signed-in person sent, 1 for one an API token sent or has ever edited (M22); the mark stays when a person edits it afterwards. Decided by the instance from how the request authenticated, never by a client. Other values are reserved for kinds added later."
         },
         "reply_to_id": {
           "type": [

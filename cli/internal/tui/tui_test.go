@@ -452,6 +452,58 @@ func TestAPaneHoldsAtMostFiveHundred(t *testing.T) {
 	assert.Equal(t, "1599", p.msgs[len(p.msgs)-1].Id)
 }
 
+// TestAMessageWrittenByAutomationIsDrawnTagged is the second half of M22's done-when: what a token wrote
+// says so in its header, and what a person typed does not.
+func TestAMessageWrittenByAutomationIsDrawnTagged(t *testing.T) {
+	typed := message("1", "20", "2", "Bob", "by hand")
+	scripted := message("2", "20", "2", "Bob", "by a script")
+	scripted.Type = 1
+
+	header := func(m apicontract.Message, width int) string {
+		return ansi.Strip(defaultLook.messageLines(m, width)[0])
+	}
+	assert.NotContains(t, header(typed, 80), "AUTO")
+	assert.Regexp(t, `^Bob  .*  AUTO$`, header(scripted, 80))
+	assert.Contains(t, ansi.Strip(strings.Join(defaultLook.messageLines(scripted, 80), "\n")), "by a script")
+
+	// The badge is the header's last word, edited or not: a token's edit is what tags most messages.
+	edited := scripted
+	when := scripted.CreatedAt
+	edited.EditedAt = &when
+	assert.Regexp(t, `^Bob  .*  \(edited\)  AUTO$`, header(edited, 80))
+
+	// A name as long as an instance allows, in characters two cells wide, in the narrowest pane there is.
+	// What comes before the badge is what is cut, and the badge is whole.
+	long := edited
+	long.Author = &apicontract.PublicUser{Id: "2", Username: "bob", DisplayName: strings.Repeat("名", 64)}
+	for _, m := range []apicontract.Message{scripted, edited, long} {
+		for _, width := range []int{40, 20, 12} {
+			got := header(m, width)
+			assert.True(t, strings.HasSuffix(got, "  AUTO"), "at %d columns the tag was cut: %q", width, got)
+			assert.LessOrEqual(t, ansi.StringWidth(got), width)
+		}
+	}
+	// And a person whose name is long is drawn as before, with no room taken for a tag.
+	typed.Author = &apicontract.PublicUser{Id: "2", Username: "bob", DisplayName: strings.Repeat("名", 64)}
+	assert.NotContains(t, header(typed, 40), "AUTO")
+}
+
+// TestANameCannotForgeTheBadge: a display name is the account's to choose. Whatever it says, a message
+// typed by hand does not end its header the way a scripted one does, with or without color.
+func TestANameCannotForgeTheBadge(t *testing.T) {
+	header := func(m apicontract.Message) string { return ansi.Strip(defaultLook.messageLines(m, 80)[0]) }
+	scripted := message("2", "20", "2", "Bob", "by a script")
+	scripted.Type = 1
+	real := header(scripted)
+
+	for _, name := range []string{"Bob AUTO", "Bob  AUTO", real} {
+		forged := message("1", "20", "2", name, "by hand")
+		got := header(forged)
+		assert.NotEqual(t, real, got, "a name of %q reads as a scripted message", name)
+		assert.False(t, strings.HasSuffix(got, "AUTO"), "%q", got)
+	}
+}
+
 func TestWhatThePaneCannotNameItSaysSo(t *testing.T) {
 	deleted := message("1", "20", "2", "Bob", "hi")
 	deleted.Author = nil

@@ -59,6 +59,7 @@ func Commands(connect Connector) []*cli.Command {
 		reportCommand(connect),
 		tagCommand(connect),
 		inviteCommand(connect),
+		tokenCommand(connect),
 	}
 }
 

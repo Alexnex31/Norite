@@ -145,3 +145,18 @@ func apiPreview(code, guildName string) apicontract.GuildInvitePreview {
 	p.Channel.Id, p.Channel.Name = "20", ptr("general")
 	return p
 }
+
+// tokenValue is shaped like a real one and announces that it is not: 43 characters after the prefix.
+const tokenValue = "nat_" + "EXAMPLEexampleEXAMPLEexampleEXAMPLEexample0"
+
+func apiToken(id, name string) apicontract.ApiToken {
+	return apicontract.ApiToken{
+		Id: id, Name: name, Scopes: []apicontract.Scope{apicontract.MessagesWrite}, CreatedAt: at,
+	}
+}
+
+func apiMinted(id, name string) apicontract.MintedApiToken {
+	return apicontract.MintedApiToken{
+		Id: id, Name: name, Scopes: []apicontract.Scope{apicontract.MessagesWrite}, CreatedAt: at, Value: tokenValue,
+	}
+}

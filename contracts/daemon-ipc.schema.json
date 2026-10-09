@@ -338,7 +338,7 @@
               "minLength": 1,
               "maxLength": 2048,
               "pattern": "^/",
-              "description": "Under /api/v1, which the daemon prefixes, with any query string. The daemon builds the URL from its own instance URL and refuses a path that could leave it, and anything under /auth or /instance. A path under /@daemon/ is not relayed: the daemon answers it itself, signed in or not, with status 200 and a body or with an error (M21). Those are GET /@daemon/config, answering a ConfigLocation, and POST /@daemon/config/split and POST /@daemon/config/unsplit, both without a body, both answering a ConfigToggle."
+              "description": "Under /api/v1, which the daemon prefixes, with any query string. The daemon builds the URL from its own instance URL and refuses a path that could leave it, anything under /instance, the session routes under /users/@me/sessions, and anything under /auth except the API token routes, /auth/tokens and /auth/tokens/{id}, which it relays from M22 so that a first-party client can mint, list and revoke the tokens scripts use. A path under /@daemon/ is not relayed: the daemon answers it itself, signed in or not, with status 200 and a body or with an error (M21). Those are GET /@daemon/config, answering a ConfigLocation, and POST /@daemon/config/split and POST /@daemon/config/unsplit, both without a body, both answering a ConfigToggle. And, from M22, the three about the port for scripts, each answering an AutomationStatus: GET /@daemon/automation, POST /@daemon/automation/enable/{port} and POST /@daemon/automation/disable. The port number is the one thing of the user's such a path carries, since a request to the daemon takes no body."
             },
             "body": {
               "description": "The JSON to send, or null for none."
@@ -640,6 +640,48 @@
             "type": "string"
           },
           "description": "The files an unsplit set aside rather than deleted."
+        }
+      }
+    },
+    "AutomationStatus": {
+      "type": "object",
+      "description": "The body of a 200 answer to the three requests about the port for scripts (M22, daemon-automation.schema.json): how it stands. Enabling opens it for the instance the daemon is signed in to and records the port and that instance in the daemon's state file; a port that cannot be bound is a conflict and changes nothing. These requests are the attach socket's tier, and none is reachable from the port they control.",
+      "required": [
+        "enabled",
+        "port",
+        "instance",
+        "open",
+        "address",
+        "problem"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the user has turned the port on. It is off until they do."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "The port on 127.0.0.1 it is on, or would be on: 7717 unless another was chosen."
+        },
+        "instance": {
+          "type": "string",
+          "description": "The instance it was turned on for, the only one it serves, or empty when it is off. Sanitized."
+        },
+        "open": {
+          "type": "boolean",
+          "description": "Whether the daemon is listening. Enabled and not open is a port that could not be bound when the daemon started."
+        },
+        "address": {
+          "type": "string",
+          "pattern": "^(127\\.0\\.0\\.1:[0-9]{1,5})?$",
+          "description": "Where it listens, or empty when it is not open."
+        },
+        "problem": {
+          "type": "string",
+          "description": "Why an enabled port is not open, or why an open one refuses every request (the daemon is signed in to no instance, or to another than the port was turned on for), or empty."
         }
       }
     }

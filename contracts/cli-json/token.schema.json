@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/token.schema.json",
+  "title": "norite token --json",
+  "description": "The machine-readable output of `norite token create`, `list` and `revoke` (M22): API tokens, the credential a script or bot holds.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.\n\n`create` is the only output in this directory that carries a secret. It is the one moment the value exists outside the instance's hash of it.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/minted",
+      "title": "create"
+    },
+    {
+      "$ref": "#/$defs/tokenList",
+      "title": "list"
+    },
+    {
+      "$ref": "common.schema.json#/$defs/done",
+      "title": "revoke: action token.revoke, target token_id"
+    }
+  ],
+  "$defs": {
+    "token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "scopes",
+        "last_used_at",
+        "created_at"
+      ],
+      "description": "One live token, without its value, which nothing can show after creation.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "The label chosen at creation, exactly as the instance returned it."
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The scopes the token is limited to. Never null. A string rather than an enum: a newer instance may know a scope this file does not."
+        },
+        "last_used_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "Null until first use. The instance records it at most once every few minutes."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "tokenList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/token"
+      },
+      "description": "Every token of the account that has not been revoked."
+    },
+    "minted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "scopes",
+        "last_used_at",
+        "created_at",
+        "value",
+        "written_to"
+      ],
+      "description": "A token just created, with its value or the file the value went to.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "A Snowflake ID, as a decimal string."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "The label chosen at creation, exactly as the instance returned it."
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The scopes the token is limited to. Never null. A string rather than an enum: a newer instance may know a scope this file does not."
+        },
+        "last_used_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "Null until first use. The instance records it at most once every few minutes."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^nat_",
+          "description": "The credential itself, shown this once. Null when --out wrote it to a file instead."
+        },
+        "written_to": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The file --out wrote the value to, or null when the value is in `value`. Exactly one of the two is null."
+        }
+      }
+    }
+  }
+}

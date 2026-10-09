@@ -40,8 +40,8 @@ func TestTargetRefusesWhatCouldLeaveTheInstance(t *testing.T) {
 		`/guilds\1`,
 		"/guilds/1#frag",
 		"/" + strings.Repeat("a", 2048),
-		"/auth/tokens",
-		"/AUTH/tokens",
+		"/auth/login",
+		"/AUTH/login",
 		"/auth",
 		"/instance/invites",
 		"/users/@me/sessions",
@@ -132,9 +132,10 @@ func TestEveryContractPathIsDecided(t *testing.T) {
 		"/auth/oauth/{provider}/callback": refused, "/auth/oauth/exchange": refused,
 		"/auth/oauth/complete": refused, "/auth/device/code": refused, "/auth/device/token": refused,
 		"/auth/2fa/verify": refused, "/auth/2fa/totp": refused, "/auth/2fa/totp/confirm": refused,
-		"/auth/2fa/recovery-codes": refused, "/auth/logout/all": refused, "/auth/tokens": refused,
-		"/auth/tokens/{tokenId}": refused,
-		"/instance/bootstrap":    refused, "/instance/invites": refused, "/instance/invites/revoke": refused,
+		"/auth/2fa/recovery-codes": refused, "/auth/logout/all": refused,
+		// M22. The one exception under /auth: see the package comment, and the test below this one.
+		"/auth/tokens": relayed, "/auth/tokens/{tokenId}": relayed,
+		"/instance/bootstrap": refused, "/instance/invites": refused, "/instance/invites/revoke": refused,
 		"/users/@me/sessions": refused, "/users/@me/sessions/{sessionID}": refused,
 
 		"/users/@me": relayed, "/users/@me/guilds": relayed,
@@ -187,6 +188,56 @@ func TestEveryContractPathIsDecided(t *testing.T) {
 			t.Errorf("a decision for %s, which the contract no longer has", path)
 		}
 	}
+}
+
+// TestOnlyTheTokenRoutesAreRelayedUnderAuth holds M22's exception to its two shapes.
+//
+// The relay refuses /auth because those routes make and unmake credentials. Minting an API token had to
+// become reachable, and an exception written as a prefix would bring whatever is later mounted beside it.
+// So it is the collection and one id of digits, on the path as written.
+func TestOnlyTheTokenRoutesAreRelayedUnderAuth(t *testing.T) {
+	for _, path := range []string{"/auth/tokens", "/auth/tokens/1234567890", "/auth/tokens?limit=5"} {
+		_, err := Target(path)
+		assert.NoError(t, err, "%q is one of the token routes", path)
+	}
+	for _, path := range []string{
+		"/auth/tokens/",                      // an empty segment
+		"/auth/tokens/abc",                   // not an id
+		"/auth/tokens/1/rotate",              // nothing below a token
+		"/auth/tokens/123456789012345678901", // longer than an id is
+		"/AUTH/tokens",                       // the exception does not fold case, though the refusal does
+		"/auth/Tokens/1",
+		"/auth/tokensx",
+		"/auth/login", "/auth/logout", "/auth/logout/all", "/auth/refresh", "/auth/2fa/totp",
+	} {
+		_, err := Target(path)
+		assert.Error(t, err, "%q must stay refused", path)
+	}
+}
+
+// TestAScriptReachesWhatTheRelayDoesLessAllOfAuth: the automation port's paths (M22). The token routes the
+// relay opened for `norite token` are not opened to a script, which uses a credential and manages none.
+func TestAScriptReachesWhatTheRelayDoesLessAllOfAuth(t *testing.T) {
+	for _, path := range []string{"/users/@me", "/channels/2/messages?before=9", "/guilds/1/members", "/authors/1"} {
+		_, err := ScriptTarget(path)
+		assert.NoError(t, err, path)
+	}
+	for _, path := range []string{
+		"/auth/tokens", "/auth/tokens/1", "/AUTH/tokens", "/auth", "/auth/login",
+		"/instance/invites", "/users/@me/sessions", "/@daemon/config", "//host/x", "/guilds/../auth/tokens",
+	} {
+		_, err := ScriptTarget(path)
+		assert.Error(t, err, "%q must be refused to a script", path)
+	}
+
+	// Each surface is told about itself: a script is not on the attach socket (M22 manual pass).
+	_, err := ScriptTarget("/auth/login")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the automation port does not carry /auth")
+	assert.NotContains(t, err.Error(), "attach socket")
+	_, err = Target("/auth/login")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attach socket")
 }
 
 // ---------- performing a request ----------
@@ -346,7 +397,7 @@ func TestARefusedPathReachesNothing(t *testing.T) {
 	srv, requests := instance(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	r := newRelay(live(srv.URL, "eyJ.access.1", 1), srv)
 
-	resp := do(r, "POST", "/auth/tokens", `{"name":"x","scopes":["guilds.write"]}`)
+	resp := do(r, "POST", "/auth/logout/all", `{}`)
 	require.NotNil(t, resp.Error)
 	assert.Equal(t, ipc.RelayRefused, resp.Error.Code)
 	assert.Empty(t, requests())

@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
@@ -264,11 +265,24 @@ func (l *look) messageLines(msg apicontract.Message, width int) []string {
 	if msg.EditedAt != nil {
 		header += l.dim.Render("  (edited)")
 	}
+	if msg.Type == ops.MessageTypeAutomation {
+		// The instance sets this for a message an API token sent or has ever edited (M22), and for a
+		// webhook's (M60). The badge is the header's last word, for two reasons.
+		//
+		// A name is the account's to choose, and everything after it is this client's. Drawn straight
+		// after the name, the badge could be typed: "Bob AUTO" on a message written by hand read the
+		// same as Bob's script once color is taken away. At the end, a forged one is followed by a time.
+		//
+		// And a line is cut from its right, so whatever comes before the badge is cut to the room it
+		// leaves, and the mark for something left out lands there and never on the badge itself.
+		badge := "  " + l.accent.Render(autoBadge)
+		header = clip(header, max(width-ansi.StringWidth(badge), 0)) + badge
+	}
 	lines := []string{clip(header, width)}
 
-	// Type 0 is a message a person typed and 1 one sent through automation (M22); anything else is a kind
-	// this client does not draw, and says so rather than guessing.
-	if msg.Type != 0 && msg.Type != 1 {
+	// Type 0 is a message a person typed and 1 one a token or a webhook wrote; anything else is a kind this
+	// client does not draw, and says so rather than guessing.
+	if msg.Type != 0 && msg.Type != ops.MessageTypeAutomation {
 		return append(lines, "  "+l.dim.Render("(a kind of message this client cannot show)"))
 	}
 	// Plain text: rule 9 is met by interpreting no markup, and rule 19 by termsafe, which keeps line breaks
@@ -282,6 +296,11 @@ func (l *look) messageLines(msg apicontract.Message, width int) []string {
 	}
 	return lines
 }
+
+// autoBadge is the word drawn beside the author of a message written by automation
+// (docs/design/tui/SCREENS.md, 1a). The author color TOKENS.md gives bots and webhooks arrives with
+// webhooks, at M60.
+const autoBadge = "AUTO"
 
 // byline names who wrote a message: the display name, a deleted account, or nobody for a system message.
 func (l *look) byline(msg apicontract.Message) string {

@@ -1202,6 +1202,8 @@ carries the condition that would reopen it.
 - **Reopens if**: a resync makes the client fetch from anybody other than the instance (link previews,
   media), or home's guild bound is lifted.
 
+## M21 — config file
+
 ### A write through a symlinked `config.toml` reaches whatever file the link names
 - **Raised**: M21, `/security-sweep`
 - **Verdict**: not a vulnerability
@@ -1292,6 +1294,13 @@ carries the condition that would reopen it.
   (`TestTheDaemonsOwnPathsAreNeitherRelayedNorInTheContract`).
 - **Reopens if**: a local request carries a body, or a path segment holding something of the user's. An
   older daemon would then deliver that to a stranger's server, and the request needs a frame of its own.
+- **Reopened at M22, and answered without a new frame**: `POST /@daemon/automation/enable/{port}` carries
+  a port number the user chose. `norite automation enable` sends `GET /@daemon/automation` first, which
+  says nothing, and sends the number only to a daemon that answered it. A daemon from before the prefix
+  relays that first request and is reported as older; a daemon from M21 answers that it knows no such
+  path and relays nothing. Neither is sent the number
+  (`TestEnableAsksHowThePortStandsBeforeItSendsAPortNumber`). The condition above stands for anything
+  more than that.
 
 ### Which file wins a shared key at unsplit is decided by modification times anything can set
 - **Raised**: M21, while building the toggle; narrowed by `/code-review`
@@ -1317,3 +1326,121 @@ carries the condition that would reopen it.
   each costing an attached client about 30 µs to re-read a config that did not change.
 - **Reopens if**: an event's name is ever logged or forwarded, or a reload becomes expensive enough for ten
   a second to matter (a theme file read on every reload, M45, is the first candidate).
+
+## M22 — local bot-automation port
+
+### Any program running as the user can mint an API token through the attach socket
+- **Raised**: M22, at planning, on reopening M20's refusal of `/auth/*`
+- **Verdict**: accepted risk
+- **Why**: the relay now reaches `/auth/tokens` and `/auth/tokens/{id}`, so a process that can open the
+  attach socket can mint a durable, scoped credential as the account, list the account's tokens, and
+  revoke them. M20 refused all of `/auth/*` for that reason and because nothing then needed it. Something
+  does now: a script cannot use the automation port without a token, and the only other way to mint one
+  was a second sign-in made by hand. What the socket's tier already concedes is larger. A process running
+  as the user can read the refresh token itself, from the `0600` file or from a keyring that answers any
+  of the user's processes, and that is every scope and a session besides. The instance still requires a
+  user actor and a live sign-in on all three routes, a minted token is visible in `norite token list`, and
+  a password reset revokes every one. The exception is two exact path shapes
+  (`TestOnlyTheTokenRoutesAreRelayedUnderAuth`); the rest of `/auth/*`, `/instance/*` and the session
+  routes stay refused.
+- **Reopens if**: the attach socket's tier ever admits something that is not the account (a plugin given
+  a relay, M88, is the obvious one), a token gains a scope that reaches credential or session management,
+  or the refresh token moves somewhere the user's other processes cannot read it, since the argument
+  above is a comparison with that.
+
+### A script's token for another account on the same instance is forwarded
+- **Raised**: M22, at planning
+- **Verdict**: accepted risk
+- **Why**: the port forwards whatever API token a script presents to the instance the port was enabled
+  for. It does not check that the token belongs to the account the daemon is signed in as, and cannot:
+  listing tokens is refused to a token by design (ADR 0022), so no route says whose one is. What the
+  script gains is nothing it lacked. It holds that token already and could present it to the instance
+  directly; the port adds an address and a local rate limit. The instance still decides everything the
+  token may do.
+- **Reopens if**: the port gives a script anything that comes from the daemon's own sign-in rather than
+  from the script's token (events, state, a cache), since that would then reach somebody else's account.
+
+### Between a killed daemon and the next start, its automation file names a port anything may bind
+- **Raised**: M22, `/code-review` of the listener
+- **Verdict**: accepted risk, narrowed
+- **Why**: `automation.json` is removed when the port closes, and a daemon that is killed removes
+  nothing. Until the next daemon starts, the file names a port and a secret, and another account on the
+  machine can bind that port and be sent the secret and a script's token by a script that reads the
+  file. Narrowed by removing whatever is found before binding and when the daemon starts with the port
+  disabled (`automation.Clean`), and by never leaving the file when the port cannot be bound. The window
+  that remains needs a second account on the machine, acting while the daemon is dead and a script is
+  running. Closing it means the daemon proving it knows the secret before a script sends the token, a
+  challenge every script in every language would have to implement.
+
+  **Wider than the file, found by the M22 sweep.** A program started by `norite automation run` holds the
+  address and the secret in its environment for as long as it runs, so it needs no file and no killed
+  daemon: whenever the port is closed under it (the daemon stopped, the port disabled, or enabled again
+  on another number) its next connection goes to whatever holds that port, and its first frame carries
+  the token. `norite automation request` cannot fall back on the file to notice, because a script run
+  under another account through `run` has only the environment. Same second account, same verdict.
+- **Reopens if**: the port is offered on a machine shared by accounts that do not trust each other as a
+  supported case, or a script-side library is published, since it could carry the challenge once for
+  everybody.
+
+### Another account on the machine can keep scripts waiting on the automation port
+- **Raised**: M22, `/code-review` of the listener
+- **Verdict**: accepted risk, narrowed
+- **Why**: a loopback port accepts connections from every account. Connections that have not presented
+  the secret are counted apart from scripts (32 against 16), are told nothing, and are dropped after
+  five seconds, so they take no script's place. An account that keeps 32 of them open is still refusing
+  every new script its turn to present the secret. It learns nothing and reaches nothing; it denies a
+  service on a machine it already runs code on.
+- **Reopens if**: the count of waiting connections is ever shared with the scripts being served again, or
+  a connection that has presented nothing is sent a frame.
+
+
+### The port secret alone lets its holder take the port's places and spend its rate
+- **Raised**: M22, `/security-sweep` of the finished branch
+- **Verdict**: accepted risk
+- **Why**: a connection needs the port secret and any value shaped like an API token to be counted as a
+  script. `norite automation run` puts the secret in its program's environment, where every process that
+  program starts inherits it, so a holder that has no valid token can still take the sixteen places and
+  the shared five requests a second, and its requests reach the instance as 401s from the user's
+  address. It reaches nothing on the instance and nothing of the daemon's: the secret opens no request
+  of the daemon's own and carries no credential. Requests the daemon refuses itself (a path it does not
+  carry, a daemon signed in elsewhere) are deliberately not charged to the rate, so such a holder can
+  also keep sixteen goroutines parsing frames. Whoever holds the secret was started by the user or by
+  something the user started; turning the port on again replaces it.
+- **Reopens if**: the secret is ever given to something the user did not start (a plugin, M88, is the
+  obvious one), a refused request comes to cost more than parsing a frame, or the port's rate is raised
+  to where 401s from it could spend the instance's own per-address budget.
+
+### An API token can mark its owner's typed messages as automated, for good
+- **Raised**: M22, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: an edit by a token raises `messages.type` to 1 and nothing lowers it
+  (`UpdateMessageContent`'s `GREATEST`), and an edit that changes nothing is still an edit. So a token
+  holding `messages.write` can put `AUTO` on everything its owner ever typed. That is less than the same
+  scope already allows, which is rewriting those messages, and the mark is true: a token did edit them.
+  The direction that matters is closed, since nothing a token or a person does removes the mark.
+- **Reopens if**: the type comes to decide anything beyond a label, such as automated messages being
+  hidden, filtered, excluded from notifications or rate-limited apart (M60 and M64 are where that could
+  arrive), because a token could then make its owner's own messages subject to it.
+
+### Turning the port on just after signing in elsewhere records the instance the daemon has not left yet
+- **Raised**: M22, `/code-review` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: `enable` records the instance `session.Status` names, and after `norite login` to another
+  instance the daemon names the old one until it notices the store changed: a moment, or until the next
+  renewal if its watch of the store failed. The port is then recorded for the old instance. It fails
+  closed. Each request compares the instance the daemon is signed in to with the one recorded, so once
+  the daemon moves every request is refused before a token is sent, and `norite automation status` says
+  why and what to run. No token reaches an instance the port was not recorded for.
+- **Reopens if**: a request is ever sent to the recorded instance rather than to the one the daemon is
+  signed in to, or the per-request comparison is replaced by one made when the connection opens.
+
+### The daemon's debug log names the URL of an automation request that did not reach the instance
+- **Raised**: M22, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: when a script's request fails to reach the instance, the port logs Go's error at debug level,
+  which names the method and the URL, query string included. Rule 8 is about secrets, and the API puts
+  none in a URL: a token travels in a header, and an invite code, a password and a second factor travel
+  in bodies (ADR 0029). The token itself, the port secret and every body are logged at no level, which
+  the manual pass checked against both daemons' logs. The text is sanitized before it is logged.
+- **Reopens if**: any route a script can reach takes a credential or a code in its path or query, or
+  this line is raised above debug.

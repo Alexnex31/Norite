@@ -890,7 +890,7 @@
         },
         "type": {
           "type": "integer",
-          "description": "0 default, 1 sent via automation (webhooks, bot automation). Higher values reserved."
+          "description": "0 default; 1 sent via automation, which the instance sets for a message an API token sent or has ever edited, however the request arrived, and for a webhook's. The mark stays: a person editing the message afterwards does not remove it. No request sets it. Higher values reserved.\n"
         },
         "reply_to_id": {
           "oneOf": [

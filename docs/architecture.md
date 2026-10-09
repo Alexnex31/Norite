@@ -125,8 +125,9 @@ Locked-in decisions:
 │   ├── internal/backoff/         # the one retry policy the session and the connection share
 │   ├── internal/attach/          # the attach socket's server: peer check, bounded fan-out, resync (M20)
 │   ├── internal/relay/           # attach clients' REST calls, made with the daemon's token (M20)
+│   ├── internal/automation/      # the local port for scripts: secret, token forwarding, bounds (M22)
 │   ├── ipc/                      # the attach socket's protocol and client half, outside internal/ for the
-│   │                             #   CLI and GUI (M20); the bot-automation TCP listener joins at M22
+│   │                             #   CLI and GUI (M20), and the automation port's frames (M22)
 │   ├── config/                   # the client config: its keys, loader, byte-range edits over go-toml
 │   │                             #   v2 under a flock, export/import and the two clients' merge (M21);
 │   │                             #   outside internal/ for the CLI, the TUI and the GUI
@@ -149,6 +150,7 @@ Locked-in decisions:
 │   ├── openapi.yaml               # REST contract — single source of truth
 │   ├── gateway-events.schema.json # WS dispatch payload contract
 │   ├── daemon-ipc.schema.json     # the daemon's attach socket, sharing the gateway's frames (M20)
+│   ├── daemon-automation.schema.json  # the daemon's port for scripts: its frames and its file (M22)
 │   └── cli-json/                  # CLI --json output schemas, versioned
 ├── docker/docker-compose.yml      # postgres, valkey, backend (air hot-reload) — local dev + self-hosted
 ├── deploy/helm/                   # flagship Kubernetes Helm chart (§12)
@@ -477,7 +479,7 @@ CREATE TABLE messages (                        -- M15
   -- account, because the content is what survives.
   author_id bigint NULL REFERENCES users(id),
   content text NOT NULL,
-  type smallint NOT NULL DEFAULT 0,   -- 0 DEFAULT, 1 SENT_VIA_AUTOMATION (webhooks + bot automation), reserved system values
+  type smallint NOT NULL DEFAULT 0,   -- 0 DEFAULT, 1 SENT_VIA_AUTOMATION (written by the instance for an API-token actor, M22, and a webhook, M60), reserved system values
   reply_to_id bigint NULL REFERENCES messages(id) ON DELETE SET NULL,
   -- M15, though nothing reads it until E2E at M97. It is what the M65 column below keys its exclusion
   -- off, and rule 13 is cheaper to design in than to retrofit onto a populated table.
@@ -1315,7 +1317,7 @@ Attachments served from a separate origin/subdomain with no ambient credentials 
 values, SHA-256-hashed at rest, **scoped per `device_id`** — rotation on one device's daemon never
 invalidates another device's session (a user may run daemons on more than one machine under the same
 account); reuse-detection revokes only the affected device's chain. Scoped `api_tokens` support named scopes
-for bots/automation, minted from any attach client once logged in.
+for bots/automation, minted from any attach client once logged in (`norite token`, M22).
 
 **Settled at Milestone M4** (ADR 0022):
 
@@ -1653,9 +1655,68 @@ start — breaking the single-instance invariant with no error anywhere.
   else attached. The dropped client resyncs on reattach. The daemon closes every client the same way when
   its own session starts afresh or its sign-in ends (M20), because the state those frames were building has
   just been cleared (M19), and a view built from them would show the gap as history.
-- **Local bot-automation port**: a separate, localhost-only TCP listener with its own per-session secret
-  (`0600` file or env var), authenticated via scoped `api_tokens` — deliberately lower-trust than the attach
-  socket, since external scripts must not receive first-party trust.
+- **Local bot-automation port** (M22): a separate TCP listener on `127.0.0.1`, closed until the user
+  enables it, with its own per-session secret and authenticated by scoped `api_tokens` — the
+  secret-protected tier, deliberately lower-trust than the attach socket, since external scripts must not
+  receive first-party trust. See "The automation port" below.
+
+**The automation port** (M22). Two secrets answer two questions, and neither stands in for the other. The
+**port secret** says this process may use this daemon's port: 256 random bits minted for each run of the
+daemon, written with the listener's address to `automation.json` in the state directory (`0600`), and
+removed on a clean stop. It keeps other OS accounts out and grants nothing on the instance. The **API
+token** says what the script may do there. The daemon forwards it as the request's credential and never
+stores or logs it, and **the daemon's own access token is never used on this path**: the forwarder is built
+with the instance's URL and no credential source, so it cannot lend first-party reach by mistake.
+
+It speaks the attach socket's framing. A script's first frame carries the secret and the token, under an op
+of the port's own (200, answered by 201), and the daemon says nothing before it: a connection that does not
+present the secret is closed without a word, so a stranger on the port learns nothing, and a wrong secret
+gets one answer whatever was wrong with it. After that come the attach socket's request and response frames,
+one request at a time on a connection. Only a value shaped like an API token is forwarded, so an access
+token pasted into a script never crosses the port. Paths are the REST API's, under the relay's path rules
+and refusals plus all of `/auth`, and `/@daemon/` is refused, so nothing the daemon answers for a first-
+party client is reachable with a secret. `contracts/daemon-automation.schema.json` is the contract. The
+instance's status and body come back as they are; a 401 is the script's to deal with, where on the attach
+socket it is the session's. A request the port ended by closing is answered as one that may have reached
+the instance. Frames, connections (16) and the request rate (five a second across every
+script) are bounded locally, the last because a script shares its owner's per-IP budget on the instance. A
+browser cannot speak the framing. A script that cannot either uses `norite automation request`.
+
+**The port serves one instance.** A token is a credential for the instance that minted it, and the daemon
+cannot tell which that was. So enabling the port records the instance the daemon is signed in to, and a
+request made while it is signed in to any other is refused before the token goes anywhere. Without that,
+signing in to a second instance would hand the first one's tokens to the second's operator.
+
+The switch, the port number (7717 by default) and that instance are in `state.json`, changed by
+`norite automation enable|disable` through `/@daemon/` requests on the attach socket, which are that
+socket's tier and are not reachable from the port they control. Enabling opens the port before anything is
+recorded, so a port that is taken is refused; the daemon never moves to another. A port on a new number is
+bound beside the one already open, which closes only once the new one is up, so a refusal takes nothing from
+running scripts. On the same number the port must close to be bound again, which is also how its secret is
+replaced. If the record cannot be written, the port is put back as the file says. A daemon that starts with
+the port enabled and cannot bind it runs with the port closed, and `norite automation status` says why, as
+it does for an open port that would refuse every request because the daemon is signed in elsewhere or
+nowhere. A daemon that has not yet read its sign-in is not signed out, and says to try again rather than to
+log in. The port number travels in the request's path, the one thing of the user's a local path carries, and
+only after a request that says nothing has shown the daemon is new enough to answer it rather than relay it.
+
+A script reaches the port through two commands that never touch the attach socket.
+`norite automation run -- <command>` starts a program with `NORITE_AUTOMATION_ADDRESS` and
+`NORITE_AUTOMATION_SECRET` in its environment and takes no further part: on Unix the program replaces
+it, so a signal meant for the script reaches the script. `norite automation request <method> <path>`
+makes one request, with the token from `NORITE_API_TOKEN` and never from a flag, and prints the
+instance's answer. Neither secret is ever printed.
+
+**The instance tags what a token writes.** `messages.type` is 1 for a message an API token sent or has
+ever edited, whichever way the request arrived, and nothing sets it back, a later edit by a person
+included. Both front ends show it as `AUTO`, the last word of the message's header, where no display name
+can put it. The daemon plays no part, so the tag
+cannot be avoided by going around it. A client that signs in as its user is a user actor and is not
+tagged, which is what leaves third-party clients alone. An account's owner scripting their own signed-in
+session is not detectable and is not claimed to be.
+
+**Bots have no event stream.** The gateway refuses API tokens, and the daemon's stream carries everything
+the account sees, which no scope bounds. A script reads over REST.
 
 **Where the attach socket lives** (M20). On Unix it is `<state-dir>/daemon.sock`, inside the `0700` state
 directory that already holds the single-instance lock, so the directory's mode is the boundary. A socket
@@ -1683,7 +1744,10 @@ first call after an expiry. The relay builds the URL itself (the instance URL wi
 `/auth/*`, `/instance/*` and `/users/@me/sessions`, which mint and revoke credentials, change the second
 factor, sign devices out and administer the instance: the surface M11 put behind `RequireLiveSession`,
 because a credential that can make credentials escalates itself. Nothing in M20 needs any of them, and
-lifting a refusal later is additive where withdrawing a reach scripts rely on is not. Every path in
+lifting a refusal later is additive where withdrawing a reach scripts rely on is not. **One was lifted at
+M22**: `/auth/tokens` and `/auth/tokens/{id}`, matched as two exact shapes and nothing beside them, so that
+`norite token` can mint the credential a script holds (`docs/security-ledger.md` has what that concedes).
+Every path in
 `openapi.yaml` carries an explicit relay-or-refuse decision in the relay's tests, so a new route is a
 decision rather than a default. Neither request nor response bodies are logged, since they carry message
 content.

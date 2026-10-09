@@ -1,0 +1,395 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.example/contracts/daemon-automation.schema.json",
+  "title": "Norite daemon automation port",
+  "description": "Source of truth for every frame on the daemon's automation port (docs/architecture.md §3, ADR 0017, M22): TCP on 127.0.0.1, each frame JSON behind a 4-byte big-endian length, the attach socket's framing. daemon/ipc is its Go form, and the tests validate every frame both ends send against this document.\n\nTrust tier (rule 16): secret-protected, for scripts that are not first-party clients, and lower than the attach socket's. A script presents two secrets in its first frame. The port secret, minted for each run of the daemon and kept with the address in automation.json in the daemon's state directory, says the process may use this port and grants nothing on the instance. The API token says what the script may do there; the daemon forwards it as the request's credential, never stores or logs it, and never uses its own. The daemon sends nothing before the first frame, and nothing but a close after a wrong one.\n\nThe port is closed until the user enables it. It carries requests and their answers only: no events, and no request the daemon answers itself.",
+  "$ref": "#/$defs/Frame",
+  "$defs": {
+    "Frame": {
+      "description": "Any frame, in either direction.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DaemonFrame"
+        },
+        {
+          "$ref": "#/$defs/ScriptFrame"
+        }
+      ]
+    },
+    "DaemonFrame": {
+      "description": "What the daemon sends: Ready once, then one Response per Request, and Close last if it is the one closing.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Ready"
+        },
+        {
+          "$ref": "#/$defs/Response"
+        },
+        {
+          "$ref": "#/$defs/Close"
+        }
+      ]
+    },
+    "ScriptFrame": {
+      "description": "What a script sends: Identify first and once, then requests, one at a time. Anything else closes the connection.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Identify"
+        },
+        {
+          "$ref": "#/$defs/Request"
+        }
+      ]
+    },
+    "Identify": {
+      "type": "object",
+      "description": "op 200: a script's first frame, at most 4 KiB, sent within five seconds of connecting.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 200
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "secret",
+            "token"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "secret": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The port secret, from automation.json."
+            },
+            "token": {
+              "type": "string",
+              "pattern": "^nat_[A-Za-z0-9_-]+$",
+              "maxLength": 256,
+              "description": "An API token, from `norite token create`. Never an access token: the daemon refuses anything of another shape rather than forward it."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Ready": {
+      "type": "object",
+      "description": "op 201: both secrets had the right shape and the port secret was right. Says nothing about whether the instance accepts the token, which the first request finds out.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 201
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "version"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string",
+              "description": "The daemon's release version, or dev."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Request": {
+      "type": "object",
+      "description": "op 100: perform a REST call with the script's token. One at a time on a connection; at most 1 MiB.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 100
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "id",
+            "method",
+            "path",
+            "body"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-9A-Za-z_-]{1,64}$",
+              "description": "Chosen by the script, echoed by the response. A request whose id does not match is not performed, and the connection is closed."
+            },
+            "method": {
+              "enum": [
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE"
+              ]
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "^/",
+              "description": "Under /api/v1, which the daemon prefixes, with any query string: the REST API's own paths (openapi.yaml). The daemon builds the URL from the instance it is signed in to and refuses a path that could leave it, anything under /auth, /instance or /users/@me/sessions, and anything under /@daemon/."
+            },
+            "body": {
+              "description": "The JSON to send, or null for none."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Response": {
+      "type": "object",
+      "description": "op 101: the answer to one request, by its id.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 101
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "id",
+            "status",
+            "body",
+            "error"
+          ],
+          "additionalProperties": false,
+          "description": "Exactly one of status and error is non-null.",
+          "oneOf": [
+            {
+              "properties": {
+                "status": {
+                  "type": "integer",
+                  "minimum": 100,
+                  "maximum": 599
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "type": "null"
+                },
+                "body": {
+                  "type": "null"
+                },
+                "error": {
+                  "$ref": "#/$defs/Error"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "description": "The instance's HTTP status, whatever it was. A 401 or 403 is the token's: the daemon renews nothing here."
+            },
+            "body": {
+              "description": "The instance's JSON body, or null when it sent none or sent something that is not JSON."
+            },
+            "error": {
+              "description": "Why the daemon did not ask the instance, or null."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "oneOf": [
+            {
+              "const": "not_signed_in",
+              "description": "The daemon is signed in to no instance, so there is nowhere to send the request."
+            },
+            {
+              "const": "unreachable",
+              "description": "The instance did not answer, or not in time, or the port closed with the request in flight: in each case the request may or may not have reached the instance. Also a daemon that has not finished reading its sign-in, which is not being signed out; nothing was sent."
+            },
+            {
+              "const": "refused",
+              "description": "A path the port does not carry, or a daemon signed in to another instance than the one the port was enabled for: a token is not sent to an instance it was not made on."
+            },
+            {
+              "const": "bad_request",
+              "description": "A method the port does not carry."
+            },
+            {
+              "const": "too_many_requests",
+              "description": "The port's own rate, shared by every script, was exceeded. Nothing was sent to the instance."
+            },
+            {
+              "const": "too_large",
+              "description": "The instance's answer was larger than 8 MiB."
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "The daemon's own wording, never the instance's."
+        }
+      }
+    },
+    "Close": {
+      "type": "object",
+      "description": "op 102: the daemon's last frame on a connection it is closing. A connection that never presented the port secret is closed without one.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 102
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "code",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/CloseCode"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "CloseCode": {
+      "description": "Why the daemon closed a connection. The attach socket's and the gateway's number wherever the meaning is the same.",
+      "oneOf": [
+        {
+          "const": 1001,
+          "description": "The port is closing: the daemon is stopping, or the port was turned off, or turned on again."
+        },
+        {
+          "const": 4001,
+          "description": "An op a script may not send."
+        },
+        {
+          "const": 4002,
+          "description": "A frame that is not valid, or too large."
+        },
+        {
+          "const": 4004,
+          "description": "The port secret is wrong, or the token is not shaped like an API token."
+        },
+        {
+          "const": 4005,
+          "description": "A second Identify."
+        },
+        {
+          "const": 4009,
+          "description": "Nothing was asked for five minutes."
+        },
+        {
+          "const": 4101,
+          "description": "Too many scripts: the port already serves 16. Sent only to a connection that presented the port secret; one that has not is closed without a frame, as is the thirty-third connection waiting to present it."
+        }
+      ]
+    },
+    "File": {
+      "type": "object",
+      "description": "automation.json, in the daemon's state directory, mode 0600: what a script needs to reach the port. Present only while the port is open. `norite automation run` reads it for a script and puts both values in its environment.",
+      "required": [
+        "address",
+        "secret"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "type": "string",
+          "pattern": "^127\\.0\\.0\\.1:[0-9]{1,5}$",
+          "description": "Always the 127.0.0.1 literal and a port, 7717 unless the user chose another."
+        },
+        "secret": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "The port secret for this run of the daemon. It changes every time the daemon starts or the port is enabled."
+        }
+      }
+    }
+  }
+}

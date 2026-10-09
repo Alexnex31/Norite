@@ -15,7 +15,8 @@
 // Three surfaces are refused outright, because each manages credentials rather than using one (B1 in M20's
 // planning, and architecture.md §3):
 //
-//   - /auth/*, which mints and revokes tokens and changes the second factor;
+//   - /auth/*, which starts and ends sign-ins and changes the second factor, all of it but the three API
+//     token routes below;
 //   - /instance/*, the operator's surface;
 //   - /users/@me/sessions, which lists every device the account is signed in on and signs them out.
 //
@@ -23,6 +24,17 @@
 // unmake credentials escalates itself. Nothing in M20 needs them. Lifting a refusal later is additive, where
 // withdrawing a reach scripts rely on is not, and TestEveryContractPathIsDecided makes each new route in
 // the contract a decision rather than a default.
+//
+// # The one exception: API tokens (M22)
+//
+// /auth/tokens and /auth/tokens/{id} are relayed, and nothing else under /auth is. A script on the
+// automation port needs a token, architecture.md has always said one is "minted from any attach client",
+// and without this the only way to get one was a second sign-in made by hand. What it concedes is in
+// docs/security-ledger.md: any program running as the user can now mint a durable credential through the
+// socket. Such a program can already read the refresh token the daemon stores, which reaches more, and
+// the instance still asks for a user actor and a live session.
+//
+// The exception is two exact shapes, matched on the whole path, so nothing beside them comes along.
 //
 // # A 401 is the session's business
 //
@@ -100,26 +112,22 @@ func New(opts Options) *Relay {
 	return &Relay{creds: opts.Credentials, http: client, userAgent: "norite-daemon/" + version, log: opts.Log}
 }
 
-func failure(code, msg string) ipc.Response {
-	return ipc.Response{Error: &ipc.RelayError{Code: code, Message: msg}}
-}
-
 // Do performs req. Its answer's ID is left for the caller to set.
 func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	target, err := Target(req.Path)
 	if err != nil {
-		return failure(ipc.RelayRefused, err.Error())
+		return ipc.Failure(ipc.RelayRefused, err.Error())
 	}
 	// The contract carries "no body" as JSON null, which arrives here as the four bytes of it.
 	if bytes.Equal(bytes.TrimSpace(req.Body), []byte("null")) {
 		req.Body = nil
 	}
 	if req.Body != nil && !json.Valid(req.Body) {
-		return failure(ipc.RelayBadRequest, "the request body is not JSON")
+		return ipc.Failure(ipc.RelayBadRequest, "the request body is not JSON")
 	}
 
 	if standing, _ := r.creds.Status(); standing == session.SignedOut {
-		return failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
+		return ipc.Failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
 	}
 	cred, failed := r.current(ctx)
 	if failed != nil {
@@ -137,20 +145,20 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 			return *failed
 		}
 		if renewed.Generation != cred.Generation || renewed.InstanceURL != cred.InstanceURL {
-			return failure(ipc.RelayNotSignedIn, "the daemon's sign-in changed during the request; try it again")
+			return ipc.Failure(ipc.RelayNotSignedIn, "the daemon's sign-in changed during the request; try it again")
 		}
 		status, body, err = r.send(ctx, req, target, renewed)
 	}
 
 	switch {
-	case errors.Is(err, errTooLarge):
-		return failure(ipc.RelayTooLarge, fmt.Sprintf("the instance's answer exceeds %d bytes", ipc.MaxResponseBody))
+	case errors.Is(err, ErrTooLarge):
+		return ipc.Failure(ipc.RelayTooLarge, fmt.Sprintf("the instance's answer exceeds %d bytes", ipc.MaxResponseBody))
 	case err != nil:
 		if ctx.Err() != nil {
-			return failure(ipc.RelayUnreachable, "the request was canceled")
+			return ipc.Failure(ipc.RelayUnreachable, "the request was canceled")
 		}
 		r.log.Debug().Str("error", termsafe.Text(err.Error())).Msg("a relayed request could not reach the instance")
-		return failure(ipc.RelayUnreachable, "could not reach the instance: "+termsafe.Text(err.Error()))
+		return ipc.Failure(ipc.RelayUnreachable, "could not reach the instance: "+termsafe.Text(err.Error()))
 	}
 
 	r.log.Debug().Str("method", req.Method).Str("path", termsafe.Text(target.Path)).Int("status", status).
@@ -167,44 +175,56 @@ func (r *Relay) current(ctx context.Context) (session.Credential, *ipc.Response)
 		return cred, nil
 	}
 	if ctx.Err() != nil {
-		f := failure(ipc.RelayUnreachable, "the request was canceled")
+		f := ipc.Failure(ipc.RelayUnreachable, "the request was canceled")
 		return session.Credential{}, &f
 	}
 	if errors.Is(err, session.ErrSignedOut) {
-		f := failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
+		f := ipc.Failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
 		return session.Credential{}, &f
 	}
-	f := failure(ipc.RelayUnreachable, "the daemon has no usable session from its instance yet; "+
+	f := ipc.Failure(ipc.RelayUnreachable, "the daemon has no usable session from its instance yet; "+
 		"it may be unreachable, and the daemon's log says why")
 	return session.Credential{}, &f
 }
 
-var errTooLarge = errors.New("response too large")
+// ErrTooLarge is an answer from the instance larger than the daemon will carry.
+var ErrTooLarge = errors.New("response too large")
 
 // send makes one attempt. A body that is not JSON comes back as nil: a proxy in front of an instance answers
 // a failure with HTML, and the status is what the client needs from it.
 func (r *Relay) send(ctx context.Context, req ipc.Request, target *url.URL, cred session.Credential) (int, json.RawMessage, error) {
-	u, err := Build(cred.InstanceURL, target)
+	return Perform(ctx, r.http, cred.InstanceURL, target, req.Method, req.Body, cred.AccessToken, r.userAgent)
+}
+
+// Perform makes one call to an instance with a bearer credential and returns its status and its body, or
+// nil for a body that is empty or is not JSON. It is the whole of how the daemon asks an instance something
+// on a client's behalf, for the relay and for the automation port alike (M22): the two differ in whose
+// credential they hold and which paths they allow, and a bound or a header changed here changes for both.
+//
+// target has been checked by Target or ScriptTarget. An answer over ipc.MaxResponseBody is ErrTooLarge.
+func Perform(ctx context.Context, client *http.Client, instanceURL string, target *url.URL, method string,
+	body json.RawMessage, bearer, userAgent string) (int, json.RawMessage, error) {
+	u, err := Build(instanceURL, target)
 	if err != nil {
 		return 0, nil, err
 	}
 
 	var reader io.Reader
-	if req.Body != nil {
-		reader = bytes.NewReader(req.Body)
+	if body != nil {
+		reader = bytes.NewReader(body)
 	}
-	hreq, err := http.NewRequestWithContext(ctx, req.Method, u.String(), reader)
+	hreq, err := http.NewRequestWithContext(ctx, method, u.String(), reader)
 	if err != nil {
 		return 0, nil, err
 	}
-	hreq.Header.Set("Authorization", "Bearer "+cred.AccessToken)
+	hreq.Header.Set("Authorization", "Bearer "+bearer)
 	hreq.Header.Set("Accept", "application/json")
-	hreq.Header.Set("User-Agent", r.userAgent)
-	if req.Body != nil {
+	hreq.Header.Set("User-Agent", userAgent)
+	if body != nil {
 		hreq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := r.http.Do(hreq)
+	resp, err := client.Do(hreq)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -215,7 +235,7 @@ func (r *Relay) send(ctx context.Context, req ipc.Request, target *url.URL, cred
 		return 0, nil, err
 	}
 	if len(raw) > ipc.MaxResponseBody {
-		return 0, nil, errTooLarge
+		return 0, nil, ErrTooLarge
 	}
 	if len(bytes.TrimSpace(raw)) == 0 || !json.Valid(raw) {
 		return resp.StatusCode, nil, nil
@@ -228,7 +248,19 @@ var refused = []string{"/auth", "/instance", "/users/@me/sessions"}
 
 // Target checks a client's path and returns it parsed: a path under /api/v1 and its query, nothing that
 // could name another host or climb out, and nothing on a refused surface.
-func Target(path string) (*url.URL, error) {
+func Target(path string) (*url.URL, error) { return target(path, true) }
+
+// ScriptTarget is Target for a request arriving on the automation port (M22): the same rules with none of
+// the relay's exceptions, so every refused surface is refused whole.
+//
+// A script presents an API token, which the instance would refuse on the token routes anyway (they need a
+// user actor); refusing here means the port never carries a request to a surface that manages credentials,
+// whatever a later instance decides to allow on it. The exceptions are a parameter rather than something
+// this function takes back out: an exception added to the relay for another surface must not reach the
+// lower tier because nobody thought to subtract it (M22 /code-review).
+func ScriptTarget(path string) (*url.URL, error) { return target(path, false) }
+
+func target(path string, exceptions bool) (*url.URL, error) {
 	switch {
 	case path == "" || path[0] != '/':
 		return nil, errors.New("the path must start with /")
@@ -269,13 +301,42 @@ func Target(path string) (*url.URL, error) {
 	if local := strings.TrimSuffix(ipc.LocalPathPrefix, "/"); lower == local || strings.HasPrefix(lower, ipc.LocalPathPrefix) {
 		return nil, errors.New("the path is the daemon's own, and is not relayed to the instance")
 	}
+	// On the path as written, not lowered: a refusal errs wide and an exception must not.
+	if exceptions && tokenRoute(u.Path) {
+		return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
+	}
 	for _, prefix := range refused {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+			if !exceptions {
+				// A script is not on the attach socket, and is told about the surface it is on.
+				return nil, fmt.Errorf("the automation port does not carry %s: it manages credentials or "+
+					"the instance", prefix)
+			}
 			return nil, fmt.Errorf("the daemon does not relay %s: it manages credentials or the instance, "+
 				"and stays off the attach socket", prefix)
 		}
 	}
 	return &url.URL{Path: u.Path, RawQuery: u.RawQuery}, nil
+}
+
+// tokenRoute reports whether a path is one of the API token routes, the exception to the /auth
+// refusal: the collection, or one token named by its id. An id is digits, so the second shape cannot be
+// stretched over a sibling route.
+func tokenRoute(path string) bool {
+	const collection = "/auth/tokens"
+	if path == collection {
+		return true
+	}
+	id, ok := strings.CutPrefix(path, collection+"/")
+	if !ok || id == "" || len(id) > 20 {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Build joins a checked target onto an instance URL: its scheme and host, its path prefix, then /api/v1.

@@ -161,8 +161,8 @@ group, no checklist row for a keystore that does not exist. Drawing an indicator
 the build cannot make is precisely the failure decision 3 above exists to prevent; a missing indicator is
 the better failure, because it is visibly missing.
 
-The same rule covers the smaller cases: `1a`'s `◎` discover entry until `M66`, its `AUTO` webhook badge
-until `M60`, `1d`'s plugin-command tally until `M89`, and the `peers` pane's contents until `M94` — the
+The same rule covers the smaller cases: `1a`'s `◎` discover entry until `M66`, its bot and webhook author colour
+until `M60` (the `AUTO` badge itself is drawn from `M22`), `1d`'s plugin-command tally until `M89`, and the `peers` pane's contents until `M94` — the
 pane type can be cycled to from `M46` and shows an empty state until then.
 
 ## Interactions & behavior

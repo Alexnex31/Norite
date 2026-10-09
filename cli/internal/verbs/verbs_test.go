@@ -180,6 +180,16 @@ func verbCases() map[string]verbCase {
 		"invite revoke": {argv: []string{"invite", "revoke", "BCDFGHJKMNPQRSTV"},
 			answers: map[string]answerFunc{"revokeInvite": noContent()},
 			file:    "guild-invite.schema.json", def: "revoked"},
+
+		"token create": {argv: []string{"token", "create", "--name", "status bot", "--scope", "messages.write"},
+			answers: map[string]answerFunc{"mintApiToken": created(apiMinted("95", "status bot"))},
+			file:    "token.schema.json", def: "minted"},
+		"token list": {argv: []string{"token", "list"},
+			answers: map[string]answerFunc{"listApiTokens": ok([]apicontract.ApiToken{apiToken("95", "status bot")})},
+			file:    "token.schema.json", def: "tokenList"},
+		"token revoke": {argv: []string{"token", "revoke", "95", "--yes"},
+			answers: map[string]answerFunc{"revokeApiToken": noContent()},
+			file:    "common.schema.json", def: "done"},
 	}
 }
 
@@ -450,6 +460,36 @@ func TestAMessageIsNamedByItsAuthor(t *testing.T) {
 	assert.Nil(t, back.Items[1].Author)
 	assert.NotNil(t, back.Items[1].AuthorID, "a deleted account keeps its id")
 	assert.Nil(t, back.Items[2].AuthorID)
+}
+
+// TestAMessageWrittenByAutomationSaysSoInBothForms: the instance marks what an API token sent or last
+// edited, and a reader of this command must see it as a reader of the terminal client does. The word comes
+// after everything an account chose, so a display name cannot forge it on a typed message.
+func TestAMessageWrittenByAutomationSaysSoInBothForms(t *testing.T) {
+	scripted := apiMessage("33", "20", "scripted")
+	scripted.Type = 1
+	typed := apiMessage("32", "20", "typed")
+	typed.Author = &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: "alice  AUTO"}
+	f := newFake(t).On("listChannelMessages", ok([]apicontract.Message{scripted, typed}))
+
+	text := runVerb(t, f, "", "message", "list", "20")
+	require.NoError(t, text.err)
+	lines := strings.Split(text.out, "\n")
+	require.GreaterOrEqual(t, len(lines), 4)
+	assert.True(t, strings.HasSuffix(lines[0], "  AUTO"), "%q", lines[0])
+	assert.False(t, strings.HasSuffix(lines[2], "AUTO"), "%q", lines[2])
+
+	js := runVerb(t, f, "", "--json", "message", "list", "20")
+	require.NoError(t, js.err)
+	var back struct {
+		Items []struct {
+			Type int `json:"type"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(js.out), &back))
+	require.Len(t, back.Items, 2)
+	assert.Equal(t, 1, back.Items[0].Type)
+	assert.Equal(t, 0, back.Items[1].Type)
 }
 
 func TestAReportIsFiledAndTriagedAndTheReporterIsNeverShown(t *testing.T) {

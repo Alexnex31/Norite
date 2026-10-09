@@ -78,7 +78,10 @@ func TestAFieldThisBuildDoesNotKnowSurvivesAWrite(t *testing.T) {
 	require.NoError(t, Update(context.Background(), dir, split(true), nil))
 	data, err := os.ReadFile(statefile.PathIn(dir))
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"version":1,"config_split":true,"voice_breadcrumb":{"channel_id":"42"}}`, string(data))
+	// Every field this build knows is written, at its value: a field left out when false would leave a
+	// true one, written earlier, standing in the file.
+	assert.JSONEq(t, `{"version":1,"config_split":true,"automation_enabled":false,"automation_port":0,
+		"automation_instance":"","voice_breadcrumb":{"channel_id":"42"}}`, string(data))
 }
 
 // A file from a newer format is refused, by reader and writer alike, rather than read as far as it is

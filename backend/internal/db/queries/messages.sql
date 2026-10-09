@@ -73,9 +73,17 @@ SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL FOR UPDATE;
 -- `messages.id` is qualified because sqlc cannot resolve a bare `id` once the CTE meets `users`; Postgres
 -- could.
 --
+-- # The type only ever rises (M22)
+--
+-- An edit by an API token marks the message as sent via automation: the token is its author's, so it may
+-- rewrite what a person typed, and the text would otherwise stand under a message drawn as theirs. The
+-- caller passes the type its actor writes (messages.typeFor) and GREATEST keeps the higher, so a person
+-- editing afterwards passes 0 and unmarks nothing, and a reserved system value above 1 is never lowered.
+-- It is in the statement so that no caller can assign over it.
+--
 -- name: UpdateMessageContent :one
 WITH m AS (
-  UPDATE messages SET content = $2, edited_at = now()
+  UPDATE messages SET content = $2, edited_at = now(), type = GREATEST(type, sqlc.arg(type)::smallint)
   WHERE messages.id = $1 AND messages.deleted_at IS NULL
   RETURNING *
 )

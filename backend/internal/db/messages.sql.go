@@ -556,7 +556,7 @@ func (q *Queries) SoftDeleteMessage(ctx context.Context, id int64) error {
 
 const updateMessageContent = `-- name: UpdateMessageContent :one
 WITH m AS (
-  UPDATE messages SET content = $2, edited_at = now()
+  UPDATE messages SET content = $2, edited_at = now(), type = GREATEST(type, $3::smallint)
   WHERE messages.id = $1 AND messages.deleted_at IS NULL
   RETURNING id, channel_id, author_id, content, type, reply_to_id, is_e2e, edited_at, deleted_at, created_at
 )
@@ -567,6 +567,7 @@ FROM m LEFT JOIN users u ON u.id = m.author_id AND u.deleted_at IS NULL
 type UpdateMessageContentParams struct {
 	ID      int64
 	Content string
+	Type    int16
 }
 
 type UpdateMessageContentRow struct {
@@ -586,8 +587,16 @@ type UpdateMessageContentRow struct {
 
 // `messages.id` is qualified because sqlc cannot resolve a bare `id` once the CTE meets `users`; Postgres
 // could.
+//
+// # The type only ever rises (M22)
+//
+// An edit by an API token marks the message as sent via automation: the token is its author's, so it may
+// rewrite what a person typed, and the text would otherwise stand under a message drawn as theirs. The
+// caller passes the type its actor writes (messages.typeFor) and GREATEST keeps the higher, so a person
+// editing afterwards passes 0 and unmarks nothing, and a reserved system value above 1 is never lowered.
+// It is in the statement so that no caller can assign over it.
 func (q *Queries) UpdateMessageContent(ctx context.Context, arg UpdateMessageContentParams) (UpdateMessageContentRow, error) {
-	row := q.db.QueryRow(ctx, updateMessageContent, arg.ID, arg.Content)
+	row := q.db.QueryRow(ctx, updateMessageContent, arg.ID, arg.Content, arg.Type)
 	var i UpdateMessageContentRow
 	err := row.Scan(
 		&i.ID,

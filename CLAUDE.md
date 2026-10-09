@@ -386,7 +386,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D under way, M21 done**. Full
+**Phase D under way, M22 done**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -1076,6 +1076,48 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   rather than to distrust. It is also where two consequences of the design were seen plainly: an unsplit
   starts from the newer file, so the older file's comments are only in the copy set aside; and a table
   whose last entry is removed keeps its header.
+
+- **M22 — Local bot-automation port**: done. `daemon/internal/automation` (the listener: two secrets,
+  token forwarding, bounds), `daemon/ipc`'s automation half (the frames, the file, the client), the
+  port's control in `daemon/internal/daemonproc`, `relay.Perform` shared by both tiers;
+  `norite token create|list|revoke` and `cli/internal/automationcmd` (`norite automation
+  enable|disable|status|run|request`); the instance writing `messages.type` 1 for what an API token
+  sends or edits; `AUTO` in the terminal client and in `norite message list`;
+  `contracts/daemon-automation.schema.json` and two schemas in `contracts/cli-json/`. Decisions are in the
+  roadmap entry, in `architecture.md` §3, in ADR 0017 as amended, and in `docs/security-ledger.md`.
+
+  **Planning found the done-when could not be met as written** — ten milestones running. The entry had
+  the daemon tag what goes through its port, which a script avoids by sending the same token straight to
+  the instance; the instance tags by how the request authenticated instead. Nobody could get a token:
+  the relay refused all of `/auth`, so minting one meant a second sign-in by hand. Two ADRs disagreed
+  about what the port speaks. And `gatewayproto` promised bots an event stream here that no entry built
+  and the gateway refuses.
+
+  **A token is a credential for the instance that minted it, and the daemon cannot tell which that
+  was.** The first build forwarded a script's token to whichever instance the daemon was signed in to, so
+  signing in to a second instance handed the first one's tokens to the second's operator, one request at
+  a time. Found by `/code-review`. The port is turned on for one instance, recorded with the switch, and
+  asked on every request.
+
+  **"Nothing was changed" has to be true.** A refused `enable` closed the working port before trying the
+  new one, then said nothing had changed, with every running script holding a secret that opened nothing.
+  A port on another number is bound beside the old one now. On the same number it must close first, and
+  the refusal says the secret is new. A message that describes the outcome is part of the outcome; write
+  it after the last step that can fail, from what happened.
+
+  **A badge made of text goes where no name can put it.** `AUTO` was drawn straight after the author,
+  and a display name of `Bob AUTO` on a typed message read the same once color was gone. It is the
+  header's last word in both front ends: a name is the account's, everything after it is the client's.
+
+  **Three review rounds found ten things each, and did not converge on their own.** The third still
+  found a badge a name could forge, and a sentence written while fixing the second that told scripts a
+  request was worth sending again when the instance might already have acted on it. Run the review again
+  after fixing what it found; a round's fixes are code nobody has reviewed.
+
+  **The manual pass found the verbs did not show the tag at all.** The terminal client drew it and
+  `norite message list` printed nothing, in text or `--json`: rule 15, missed because the tag arrived as
+  a client feature and the verbs' view was a list of fields nobody reread. When the instance starts
+  saying something new about an object, every view of that object is in scope, not the one being built.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -2248,8 +2290,10 @@ And on the attach socket and the relayed verbs, from M20:
 - **Frames are encoded with `ipc.Marshal`**, which does not HTML-escape: `json.Marshal` rewrites `<` `>` `&`
   as six-byte escapes inside a relayed body too, which let a hostile instance's answer outgrow the bounds.
 - **The relay's reach is a decision per route.** It refuses `/auth/*`, `/instance/*` and
-  `/users/@me/sessions`, and `TestEveryContractPathIsDecided` fails on any path in `openapi.yaml` without an
-  explicit relay-or-refuse entry. A new route gets one in the same commit.
+  `/users/@me/sessions`, with one exception since M22: `/auth/tokens` and `/auth/tokens/{id}`, two exact
+  shapes, so a first-party client can mint the tokens scripts use (ledger). `TestEveryContractPathIsDecided`
+  fails on any path in `openapi.yaml` without an explicit relay-or-refuse entry. A new route gets one in the
+  same commit.
 - **The fan-out never waits on a client.** Queuing is non-blocking and bounded in frames and bytes; a full
   queue drops the client with 4012. The fan-out runs on the gateway connection's read loop, so a blocking
   write there stops the daemon reading the gateway. The payload is encoded once and shared.
@@ -2259,7 +2303,8 @@ And on the attach socket and the relayed verbs, from M20:
   result is a view of the verb's own, filled field by field from `backend/apicontract`'s types, rendered
   by `output.Render` as text or JSON from one value — the shape M48 extends. Its schema goes in
   `contracts/cli-json/` in the same commit (rule 15), and a verb returning no object prints `done`.
-- **Every relayed outcome's exit code is decided in `daemonclient.Call`**, never in a verb: 4xx is 4,
+- **Every relayed outcome's exit code is decided in `daemonclient.Call`**, never in a verb (since M22 its
+  non-2xx half is `daemonclient.Refusal`, which `norite automation request` shares): 4xx is 4,
   except 401 and 429, which are 3 like a stopped daemon, a signed-out one or an unreachable instance; 5xx
   is 1; a 2xx without the body it owed is an error, never an empty object reported as success. Every call
   and every attach is bounded, so a hung daemon is exit 3, not a hang. Usage errors are `clierr.Usage`,
@@ -2350,7 +2395,9 @@ And on the client config and the daemon's own requests, from M21:
 - **A request the daemon answers itself lives under `/@daemon/`** on the relay's own request frame, so no
   frame changes. It is answered signed in or not, with 200 and a body or with `conflict` or `failed`, never
   a status. It takes no body and carries nothing of the user's in its path, because a daemon older than the
-  prefix relays the path to its instance (ledger). `relay.Target` refuses the prefix, and a test holds
+  prefix relays the path to its instance (ledger). One exception since M22: the port number in
+  `/@daemon/automation/enable/{port}`, sent only after a request that says nothing has shown the daemon
+  knows these requests. `relay.Target` refuses the prefix, and a test holds
   `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
   which nothing outside the daemon module can import. A write puts back the fields it did not understand.
@@ -2368,6 +2415,45 @@ And on the client config and the daemon's own requests, from M21:
   limit on a merge failed in CI at 3.04, under the race detector, with nothing wrong.
 - **Testing the editor**: compare whole files, not the presence of a comment. For a race with an editor
   or another command, stand inside the handler (`Handler.saved`, `Handler.rename`) rather than race it.
+
+And on the automation port and what a token writes, from M22:
+
+- **Two tiers, two packages, one send path.** The attach socket is the account's own programs; the port
+  is anything holding its secret, and is lower (rule 16, ADR 0017). `daemon/internal/automation` imports
+  no credential source, and a test holds it to that. Both tiers ask the instance through `relay.Perform`,
+  so a bound or a header changes for both.
+- **Nothing is said before the port secret.** No frame, no reason: a connection that has not presented it
+  is closed, or timed out after five seconds. A wrong secret gets one code and one sentence. Connections
+  waiting to present it are counted apart from scripts being served.
+- **Only a value shaped like an API token is forwarded** (`ipc.LooksLikeAPIToken`), and only to the
+  instance the port was turned on for, compared on every request with `automation.SameInstance`.
+- **A script's paths are `relay.ScriptTarget`'s**: the relay's rules with none of its exceptions. An
+  exception added to the relay does not reach the port unless somebody adds it there.
+- **The rate is charged last**, after every check that costs nothing, so a refused request spends none of
+  a budget all scripts share.
+- **A connection closed with bytes unread is reset.** Where a script is owed the reason, send the Close
+  frame, half-close, and read what it is still writing, within bounds (`closeAfterReading`).
+- **A request the port ended says it may have arrived.** So does a timeout. Never tell a script a write
+  is safe to send again unless nothing was sent.
+- **The port's file is removed before its connections are waited for**, never left by a clean stop, and
+  cleaned at start. `Open` leaves a file it did not write alone: it may be a port still serving.
+- **The port's control answers from one moment.** `status`, `enable` and `disable` each report under the
+  control's lock; an open port is reported as it was opened, and an enabled one that is not open always
+  says why. Lock order: the state file's lock, then the control's mutex. `status` takes only the mutex.
+- **Not having read the sign-in yet is not being signed out** (`automation.ErrSignInPending`). Anything
+  new that asks the session where it is signed in tells the two apart, or it sends somebody to
+  `norite login` over a good sign-in.
+- **A secret is never printed and never a flag.** The port secret goes into one program's environment
+  (`run`) and nowhere else; the API token is read from `NORITE_API_TOKEN`. A token's value is printed
+  once, by `token create`, or written to a new `0600` file by `--out`, claimed before the token is minted.
+- **`messages.type` is the instance's.** `typeFor(actor)` on send, `GREATEST` on edit, no request field.
+  It only rises. Anything new that writes a message passes its actor's type the same way, and anything
+  that shows a message shows the tag: `ops.MessageTypeAutomation` in the client, the last word of the
+  header in both front ends.
+- **Testing the port**: `raw` in `automation_test.go` speaks frames and holds each to the contract;
+  `r.silence` asserts nothing was said. `portFixture` in `daemonproc` boots a control on a temp state
+  directory; `updateState` is the seam for a state write that fails. A manual pass uses a second server
+  process on the same database as "another instance".
 
 ## Project-specific skills
 

@@ -31,6 +31,30 @@ const (
 	maxPageSize     = 100
 )
 
+// The values of messages.type. The column is a smallint and the vocabulary grows by milestone (000020).
+const (
+	// TypeDefault is a message a signed-in person sent from a client.
+	TypeDefault int16 = 0
+	// TypeAutomation is a message an API token sent or has ever edited (M22): the mark is not removed by a
+	// person editing afterwards (UpdateMessageContent). Webhooks join it at M60.
+	TypeAutomation int16 = 1
+)
+
+// typeFor is the type a message written by this actor carries.
+//
+// The instance decides it from how the request authenticated, and no request can ask for or decline it.
+// The alternative M22's entry first implied, a mark the daemon's automation port adds, is one a script
+// avoids by presenting the same token to the instance directly. A client that signs in as its user is a
+// user actor whoever wrote the client, and is not marked.
+//
+// What it cannot say: an account's owner can script their own signed-in session, and that is a user actor.
+func typeFor(actor auth.Actor) int16 {
+	if actor.Kind == auth.ActorAPIToken {
+		return TypeAutomation
+	}
+	return TypeDefault
+}
+
 // Message is one message as the API returns it.
 //
 // Ids marshal as quoted strings (ADR 0003) — a snowflake is 63 bits and a browser's number is a float64,

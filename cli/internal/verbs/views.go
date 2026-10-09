@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
@@ -400,8 +401,11 @@ type messageView struct {
 	AuthorID  *string `json:"author_id"`
 	// Author is null for a message with no author, and for one whose author's account was deleted, which
 	// keeps its author_id: the API's distinction, kept.
-	Author    *userView  `json:"author"`
-	Content   string     `json:"content"`
+	Author  *userView `json:"author"`
+	Content string    `json:"content"`
+	// Type is the instance's: 0 for a message a signed-in person sent, 1 for one an API token sent or has ever
+	// edited (M22). The instance decides it, so it says the same whichever client reads it.
+	Type      int        `json:"type"`
 	ReplyToID *string    `json:"reply_to_id"`
 	CreatedAt time.Time  `json:"created_at"`
 	EditedAt  *time.Time `json:"edited_at"`
@@ -412,7 +416,7 @@ type messageView struct {
 
 func messageFrom(m apicontract.Message) messageView {
 	v := messageView{
-		ID: m.Id, ChannelID: m.ChannelId, AuthorID: m.AuthorId, Content: m.Content, ReplyToID: m.ReplyToId,
+		ID: m.Id, ChannelID: m.ChannelId, AuthorID: m.AuthorId, Content: m.Content, Type: m.Type, ReplyToID: m.ReplyToId,
 		CreatedAt: m.CreatedAt, EditedAt: m.EditedAt,
 	}
 	v.Author = userFrom(m.Author)
@@ -430,7 +434,13 @@ func (m messageView) Text(t *output.Text) {
 	if m.EditedAt != nil {
 		edited = " (edited)"
 	}
-	t.Line("%s  %s  %s%s", c(m.ID), stamp(m.CreatedAt), m.byline(), edited)
+	// After everything an account chose, so no name can put the word there or push it off: the terminal
+	// client's AUTO badge, for a reader of this command's text.
+	auto := ""
+	if m.Type == ops.MessageTypeAutomation {
+		auto = "  AUTO"
+	}
+	t.Line("%s  %s  %s%s%s", c(m.ID), stamp(m.CreatedAt), m.byline(), edited, auto)
 	indented(t, m.Content)
 	for _, tag := range m.Tags {
 		t.Line("    # %s", c(tag.Name))
