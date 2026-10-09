@@ -1523,9 +1523,10 @@ of this section.
 
   Done when: on Linux, the daemon is running after a real reboot and login with nothing typed; a log driven
   past its size limit leaves the configured number of backups and no more, and a `logs tail --follow` held
-  across the rotation keeps printing; the real binary, started under a soft limit of 256 with every
-  connection cap filled (attach clients, the automation port's served and pending connections), keeps
-  answering, and the test fails if a cap is removed; a daemon stopped through the socket exits 0 and is not
+  across the rotation keeps printing; the real binary, started with the hard descriptor limit at 256 (a
+  soft limit alone constrains nothing, since the runtime raises it), with every connection cap filled and
+  pushed past (attach clients, the automation port's served and pending connections), keeps answering, and
+  the test fails if a cap is removed; a daemon stopped through the socket exits 0 and is not
   restarted; and `norite logs tail` on a log holding escape sequences and an over-long line prints neither.
   macOS and Windows are covered by command-line tests, and by a manual pass only where the PR says one ran.
 - **M24 — Client auto-update mechanism**: version-check endpoint polling; Sigstore/cosign signature

@@ -1593,8 +1593,9 @@ soft limit to the hard one at start. This section said the daemon raised it to 4
 256 on macOS, and M3 built that; M23 measured it doing nothing and removed it. Calling `Setrlimit` would
 also make Go stop restoring the original limit for child processes, so the voice-worker would inherit the
 raise. What bounds the daemon's handles is its own caps: 64 attach clients, the automation port's served
-and pending connections, one gateway connection. A test runs the real binary under a soft limit of 256
-with every cap filled.
+and pending connections, one gateway connection. A test runs the real binary with the hard limit at 256,
+which no program can raise, fills every cap and pushes several hundred connections past each; it fails
+when a cap is removed.
 
 **Stopping**: a signal, or `POST /@daemon/stop` on the attach socket (M23), which stops the daemon exactly
 as SIGTERM does. `norite daemon stop` and `restart` ask the socket first and the service manager second.
