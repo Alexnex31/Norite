@@ -20,7 +20,9 @@ import (
 //
 // Mounted at the top level rather than under a group: it is the first thing anyone runs, and
 // `norite auth login` would be a group with one member for the sake of symmetry nobody is asking for.
-func Command() *cli.Command {
+//
+// daemon is the daemon's service, for the offer a finished sign-in ends with; nil prints the command.
+func Command(daemon Daemon) *cli.Command {
 	return &cli.Command{
 		Name:  "login",
 		Usage: "Sign in to a Norite instance and store the credential for the daemon",
@@ -118,6 +120,7 @@ func Command() *cli.Command {
 				ReadSecret:  readSecret,
 				Interactive: interactive,
 				Hostname:    os.Hostname,
+				Daemon:      daemon,
 			}
 
 			if err := runner.Run(ctx); err != nil {
