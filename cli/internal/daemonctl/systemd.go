@@ -32,11 +32,9 @@ type systemdUser struct{ run Runner }
 var unitTemplate = template.Must(template.New("unit").Parse(`[Unit]
 Description=Norite background daemon
 Documentation=https://github.com/Alexnex31/Norite
-# The daemon holds a persistent WebSocket to the instance. Ordering after the network is a hint, not a
-# guarantee, so the daemon still has to tolerate starting with no route — but it avoids a pointless failed
-# connection on every single boot.
-After=network-online.target
-Wants=network-online.target
+# No ordering after the network. network-online.target is the system manager's; in a user manager it does
+# not exist, so the After= and Wants= this unit carried until M23 did nothing. The daemon starts with or
+# without a route and its own backoff reconnects.
 
 [Service]
 Type=simple
@@ -91,10 +89,6 @@ func (s *systemdUser) DefinitionPath() (string, error) {
 
 // StartsOnInstall is false: Install uses `enable`, not `enable --now`, on purpose.
 func (s *systemdUser) StartsOnInstall() bool { return false }
-
-func (s *systemdUser) LogHint() string {
-	return "journalctl --user -u " + unitFileName + " -f"
-}
 
 func (s *systemdUser) Install(ctx context.Context, daemonBinary string) error {
 	// A unit file is parsed line by line, so a newline in the path ends ExecStart= and turns everything
@@ -260,4 +254,33 @@ func systemdEnvEscape(path string) string {
 	}
 	replaced := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(path)
 	return `"` + replaced + `"`
+}
+
+// Lingerer is a backend on which the account's services stop at its last logout unless the account
+// lingers. Only systemd is one: launchd and Task Scheduler start the daemon at login and have no setting
+// that would keep it running without one.
+type Lingerer interface {
+	// Lingering reports whether the account lingers.
+	Lingering(ctx context.Context) (bool, error)
+	// EnableLinger asks for it. Whether the account may is the machine's policy, and a refusal is an
+	// ordinary error.
+	EnableLinger(ctx context.Context) error
+}
+
+// LingerHint is what somebody runs when EnableLinger was refused. A literal shell variable, expanded by
+// their shell and not by this program.
+const LingerHint = `sudo loginctl enable-linger "$USER"`
+
+// Lingering asks logind by numeric id, which names the account without any text of the account's.
+func (s *systemdUser) Lingering(ctx context.Context) (bool, error) {
+	res, err := mustSucceed(ctx, s.run, "loginctl", "show-user", strconv.Itoa(os.Getuid()), "--property=Linger", "--value")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(res.Stdout) == "yes", nil
+}
+
+func (s *systemdUser) EnableLinger(ctx context.Context) error {
+	_, err := mustSucceed(ctx, s.run, "loginctl", "enable-linger", strconv.Itoa(os.Getuid()))
+	return err
 }

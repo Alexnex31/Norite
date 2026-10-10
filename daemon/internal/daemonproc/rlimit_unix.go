@@ -5,52 +5,22 @@
 
 package daemonproc
 
-import (
-	"fmt"
+import "golang.org/x/sys/unix"
 
-	"golang.org/x/sys/unix"
-)
-
-// wantedFileLimit is the soft RLIMIT_NOFILE the daemon asks for at startup.
+// openFileLimit reports the soft RLIMIT_NOFILE the daemon runs under, or 0 when it cannot be read.
 //
-// The daemon is effectively a local server: it simultaneously holds the gateway WebSocket, one socket per
-// attached CLI/GUI client, the bot-automation TCP listener, the voice-worker pipes, and SQLite plus log
-// files (docs/architecture.md §3). macOS still defaults the soft limit to 256, which normal multi-client,
-// active-voice use passes without anything being wrong. 4096 is the figure the architecture names.
-const wantedFileLimit uint64 = 4096
-
-// raiseFileLimit raises the soft RLIMIT_NOFILE toward wantedFileLimit, up to whatever the hard limit allows.
+// M3 raised the limit here, toward 4096, against a default of 256 on macOS. It never raised anything: Go's
+// runtime raises the soft limit to the hard one before main runs, so the function returned early on every
+// platform (measured at M23: a program started under `ulimit -Sn 256` saw 524287). It is not repaired into
+// doing something, because the runtime restores the original limit for child processes only while the
+// program has not called Setrlimit itself, and the voice-worker should not inherit a raise.
 //
-// Done before any handle is opened, so the process never hits the low default in the middle of accepting a
-// client. Raising the *soft* limit is unprivileged as long as it stays under the hard limit, so this needs
-// no elevation and no capability.
-//
-// Returns the resulting soft limit. A hard limit below what we asked for is not an error: the daemon runs
-// fine at a lower ceiling until it genuinely runs out, and refusing to start over a file-descriptor budget
-// would be a self-inflicted outage. The caller logs the outcome so a later "too many open files" has an
-// obvious first thing to look at.
-func raiseFileLimit() (uint64, error) {
+// What bounds the daemon's handles is its own caps: ipc.MaxClients, the automation port's served and
+// pending connections, one gateway connection.
+func openFileLimit() uint64 {
 	var lim unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &lim); err != nil {
-		return 0, fmt.Errorf("reading RLIMIT_NOFILE: %w", err)
+		return 0
 	}
-
-	if lim.Cur >= wantedFileLimit {
-		return lim.Cur, nil
-	}
-
-	target := wantedFileLimit
-	if lim.Max < target {
-		target = lim.Max
-	}
-	if target == lim.Cur {
-		return lim.Cur, nil
-	}
-
-	raised := lim
-	raised.Cur = target
-	if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &raised); err != nil {
-		return lim.Cur, fmt.Errorf("raising RLIMIT_NOFILE to %d: %w", target, err)
-	}
-	return target, nil
+	return lim.Cur
 }

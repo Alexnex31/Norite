@@ -63,6 +63,19 @@ func WriteJSON(w io.Writer, v any) error {
 	return err
 }
 
+// WriteJSONLine writes v as one line of JSON, escaped as WriteJSON escapes, for a command whose output is
+// a stream of objects rather than one: each line is a whole value, so a reader takes them as they come.
+func WriteJSONLine(w io.Writer, v any) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return fmt.Errorf("encoding output: %w", err)
+	}
+	_, err := w.Write(Inert(buf.Bytes()))
+	return err
+}
+
 // Inert rewrites every rune termsafe removes, in already-encoded JSON, as a \u escape.
 //
 // Only runes from DEL up are candidates. Below it, a control character in valid JSON is structural

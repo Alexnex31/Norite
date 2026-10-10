@@ -54,9 +54,24 @@ func (c Confirm) Ask() error {
 		return err
 	}
 	line, _ := bufio.NewReader(c.In).ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
+	if Yes(line, false) {
 		return nil
 	}
 	return clierr.Usage("not confirmed; nothing was changed")
+}
+
+// Yes reports whether a typed answer is a yes: y or yes, in any case, with space around it ignored. An
+// empty answer is byDefault, and anything else is no.
+//
+// It is the one definition of an answer, for Confirm and for a question that is not a Confirm: the offer
+// `norite login` ends with declines without an error and may default to yes, which Confirm does neither
+// of, and it must still mean the same thing by "yes" (M23 /code-review).
+func Yes(answer string, byDefault bool) bool {
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "":
+		return byDefault
+	case "y", "yes":
+		return true
+	}
+	return false
 }

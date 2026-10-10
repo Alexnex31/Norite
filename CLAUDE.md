@@ -386,7 +386,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D under way, M22 done**. Full
+**Phase D under way, M23 done**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -1119,6 +1119,58 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   a client feature and the verbs' view was a list of fields nobody reread. When the instance starts
   saying something new about an object, every view of that object is in scope, not the one being built.
 
+- **M23 — Daemon lifecycle polish**: done. `daemon/logfile` (where the log is, and its reader),
+  `norite logs tail`, `POST /@daemon/stop` and the stop, restart and uninstall that ask it first, the
+  crash file, `norite daemon status` over the socket with `--json`, `install --linger`, the offer
+  `norite login` ends with, the Windows task as an XML definition, and two schemas in
+  `contracts/cli-json/`. Decisions are in the roadmap entry, in `architecture.md` §3 and §4, in ADR 0010
+  as annotated, and in `docs/security-ledger.md`.
+
+  **Planning found the entry's first clause had been dead code since M3** — eleven milestones running.
+  The `RLIMIT_NOFILE` raise never raised anything: Go's runtime raises the soft limit to the hard one
+  before `main`. Measured, by starting a program under `ulimit -Sn 256` and reading 524287. It is removed
+  and not repaired, since a program that calls `Setrlimit` makes Go stop restoring the limit for its
+  children. The done-when's test could not have failed either; the one that replaces it lowers the *hard*
+  limit and fills every connection cap, and fails when a cap goes.
+
+  **A done-when clause that cannot fail is not a clause.** Ask of each one what would have to be broken
+  for it to go red, and break that.
+
+  **A stop is not a signal everywhere.** On Windows the service manager's stop is a kill, and a kill
+  between a refresh's answer and its write-back leaves a spent token on disk. Found by reading what
+  `schtasks /End` does against M19's rule that an answered refresh is always stored. The daemon stops
+  itself on request now, and the commands ask it before they ask the service manager.
+
+  **The command tests would have stopped the daemon of whoever ran them.** Once `norite daemon stop`
+  asked the socket, a test that replaced only the service manager reached the real one. `TestMain` makes
+  the real socket a panic. When a command gains a second way to act, every test that stubbed the first is
+  now running the second for real.
+
+  **Mutations that survive are findings about the tests.** Four did across the milestone, and three were
+  gaps: a field value drawn unquoted that nothing covered, a reader going away tested only among the
+  lines already there, a state word no case exercised. The fourth was a second layer of cleaning that
+  `%q` already made safe, kept and said to be unprovable.
+
+  **`/code-review` found ten things, and the worst undid the milestone's own reason.** To hide the
+  Windows console window the daemon let go of its console, and a program with no console is not told
+  about a logoff: it is killed, mid-refresh or not, on the commonest stop there is. Removed. The others
+  were a status that called a path no socket can have "running", a refusal that claimed twenty seconds of
+  waiting it had not done, a log tail that filled a short count from the wrong file, and an installer
+  that a quiet failure would have ended. **A fix for one platform's cosmetics is a change to how that
+  platform stops the program**; ask what the thing being removed was also carrying.
+
+  **The Windows half was written without a Windows machine**, and every place that describes it says so:
+  the entry, the guide, the commit, the code's own comments. `install.ps1` still registers the task only
+  when asked, because flipping a default on a path nobody has watched work is how a guide ends up wrong.
+
+  **The manual pass ended the author's desktop session.** To test "comes back after a reboot" a
+  privileged container was started with systemd as its init. A privileged container sees the host's
+  `/dev/tty1`; its systemd put a login prompt there, the real session was hung up one second later, and
+  logind killed every process in it. The pass was then run in an unprivileged QEMU guest, where it passed:
+  a real reboot, a login, and with lingering the daemon up four seconds after boot and 36 seconds before
+  anybody logged in. **A stand-in for a machine is not safe because it is small**; ask what it shares
+  with the machine it runs on.
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -1259,8 +1311,9 @@ And on the daemon side, from M3:
   service manager treat an ordinary stop as a crash and restart it), 3 for "already running", and since M20
   4 for a configuration no restart fixes (an attach socket it cannot open) — both of which the systemd unit
   is told never to retry (`RestartPreventExitStatus=3 4`; launchd has no per-code equivalent and is
-  throttled instead). `norite daemon status`: 0 running, 1 stopped, 2 not installed. Changing any of
-  these means changing the unit/plist template in the same commit.
+  throttled instead). `norite daemon status`: 0 running, 1 stopped, 2 not installed; since M23 "running"
+  is a daemon answering or a service the manager calls running, so one started by hand is 0. Changing
+  any of these means changing the unit/plist template in the same commit.
 - **Report platform differences, don't paper over them.** launchd starts the agent as part of installing it
   and cannot do otherwise, so `Manager.StartsOnInstall()` exists and `install` prints what actually
   happened — rather than the alternative of starting and immediately stopping the daemon to fake parity
@@ -2454,6 +2507,55 @@ And on the automation port and what a token writes, from M22:
   `r.silence` asserts nothing was said. `portFixture` in `daemonproc` boots a control on a temp state
   directory; `updateState` is the seam for a state write that fails. A manual pass uses a second server
   process on the same database as "another instance".
+
+And on the daemon's lifecycle and its log, from M23:
+
+- **Where the log is comes from `daemon/logfile`**, for the daemon and for every reader. Never from a
+  service definition: the launchd plist passed the path once, and a daemon started by hand logged
+  somewhere else. On macOS it is `~/Library/Logs`; elsewhere the state directory.
+- **The log is a file anybody can write to.** The reader bounds a line, a read and a batch, opens without
+  waiting and checks the handle is a regular file, and counts only names lumberjack writes as rotated
+  copies. Whatever prints an entry cleans every piece of it; `--json` is one object per line through
+  `output.WriteJSONLine`.
+- **Nothing holds the log between reads.** Rotation is a rename, and Windows refuses to rename an open
+  file. A follower knows its file by the identity of the handle it read, never by the path.
+- **The daemon does not call `Setrlimit`.** The runtime has already raised the soft limit, and a call of
+  the daemon's own would be inherited by the voice-worker. What bounds its handles is its caps
+  (`ipc.MaxClients`, `ipc.MaxAutomationConns`, the port's `maxPending`), and
+  `TestTheDaemonHoldsEveryCapUnderTheLowestDescriptorLimit` holds them to 256 descriptors. A new
+  listener or a raised cap is a reason to run it.
+- **A crash file is one run's.** Anything in `daemon.crash.log` at start means the run before crashed: it
+  is set aside as `.1.log` and the log says so. Nothing compares dates.
+- **A stop is asked of the daemon first** (`ipc.PathStop`), then of the service manager, by `stop`,
+  `restart` and `uninstall`, and by `install.ps1` using the `norite` already installed, which is the
+  running daemon's version. The answer is queued before the stop begins. Anything new that stops or
+  replaces the daemon, M24's updater first, goes through `socketStop`.
+- **`norite daemon status`: 0 means a daemon is running, however it was started.** It asks the service
+  manager and the socket. A daemon started by hand is running and not installed, and anything that offers
+  to install must treat it as running.
+- **On Windows the daemon keeps its console.** A console program is told about a logoff, a shutdown and
+  its window closing through the console, and Go turns each into the SIGTERM the daemon stops on. Letting
+  go of the console to hide the window was built and removed: without one the daemon is killed where it
+  stands at every logoff. Whatever hides that window must leave the daemon told.
+- **A daemon is running when something answered, never when a connection could not be made.** A dial
+  that fails for any reason but "nothing is listening" says so as a problem and reports no daemon.
+- **Every "it has not stopped" has waited.** `askToStop` waits for the process the daemon named, or for
+  its socket to go quiet when it named none, before it says so.
+- **What "yes" is lives in `prompt.Yes`**, for `prompt.Confirm` and for a question that is not one.
+- **Nothing installs or starts a daemon unasked.** `norite login` offers when somebody is there to
+  answer, and the default for installing is no. A failed offer never fails the login.
+- **A service of the account stops at its last logout on Linux.** `install` reports lingering and
+  `--linger` asks for it, by numeric id. Never the default.
+- **`network-online.target` does not exist in a user manager.** Nothing in a user unit orders itself
+  after a system target.
+- **A test of these commands replaces the socket as well as the service manager**: `answerStop`,
+  `answerStatus`, and a `TestMain` that makes the real ones a panic. `logscmd`'s does the same for the
+  log's path.
+- **A manual pass that needs an init system, a reboot or a login session runs in a real VM, unprivileged,
+  or on a machine the author names, and only after asking.** Never in a privileged container, a container
+  whose command is an init system, or anything else that can reach the host's ttys, devices, cgroups or
+  logind: one ended the author's whole desktop session at M23. Where no VM is to be had, the clause is
+  reported as not walked.
 
 ## Project-specific skills
 

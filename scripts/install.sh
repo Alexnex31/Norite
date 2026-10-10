@@ -170,6 +170,13 @@ setup_daemon() {
     # there is nothing to stop or it is already running, so this is right for a first install and an upgrade.
     if "$norite" daemon install >"$tmp/daemon.log" 2>&1 && "$norite" daemon restart >>"$tmp/daemon.log" 2>&1; then
         say "The daemon is running, and starts by itself when you log in."
+        # On Linux a service of the account stops at its last logout, which over SSH is this session
+        # ending. Said only then, since a desktop does not want a daemon that outlives its login.
+        if [ -n "${SSH_CONNECTION:-}" ] && command -v loginctl >/dev/null 2>&1 &&
+            [ "$(loginctl show-user "$(id -u)" --property=Linger --value 2>/dev/null)" = no ]; then
+            say "You are connected over SSH, and it stops when you disconnect. To keep it running:"
+            say "  $norite daemon install --linger"
+        fi
         return 0
     fi
     sed 's/^/  /' "$tmp/daemon.log" >&2

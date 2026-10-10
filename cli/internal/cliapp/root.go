@@ -25,6 +25,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/instanceadmin"
 	"github.com/Alexnex31/Norite/cli/internal/instanceinit"
 	"github.com/Alexnex31/Norite/cli/internal/login"
+	"github.com/Alexnex31/Norite/cli/internal/logscmd"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/cli/internal/tui"
@@ -131,14 +132,15 @@ func New(out, errOut io.Writer) *cli.Command {
 
 		Commands: append([]*cli.Command{
 			login.RegisterCommand(),
-			login.Command(),
+			login.Command(loginDaemon{setup: daemonctl.Setup{Version: Version}}),
 			login.LogoutCommand(),
-			daemonctl.GroupCommand(),
+			daemonctl.GroupCommand(Version),
 			instanceinit.GroupCommand(instanceadmin.Command(), instanceadmin.InviteCommand()),
 			licensesCommand(),
 			aboutCommand(verbs.Daemon(Version)),
 			configcmd.Command(configcmd.Connector(verbs.Daemon(Version))),
 			automationcmd.Command(automationcmd.Connector(verbs.Daemon(Version))),
+			logscmd.Command(),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

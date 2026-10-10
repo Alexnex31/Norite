@@ -32,6 +32,10 @@ type fakeRunner struct {
 
 	// err, when non-nil, is returned instead of running anything.
 	err error
+
+	// during, when non-nil, is called for each invocation while it "runs": for a command given a file
+	// that its caller removes afterwards.
+	during func(name string, args []string)
 }
 
 func newFakeRunner() *fakeRunner { return &fakeRunner{responses: map[string]Result{}} }
@@ -41,6 +45,9 @@ func (f *fakeRunner) Run(_ context.Context, name string, args ...string) (Result
 	defer f.mu.Unlock()
 
 	f.calls = append(f.calls, call{Name: name, Args: args})
+	if f.during != nil {
+		f.during(name, args)
+	}
 	if f.err != nil {
 		return Result{}, f.err
 	}

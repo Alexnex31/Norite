@@ -20,19 +20,21 @@ const (
 
 // newLogWriter returns the daemon's rotating log sink.
 //
-// File-based rather than stderr, matching docs/architecture.md §4's "reused by daemon, CLI, and GUI alike"
-// rule and giving the later `norite logs tail` a single place to read. It is *additional* to whatever the
-// service manager captures, not a replacement: journald and launchd both still collect the process's
-// stderr, and keeping our own copy is what makes the log readable identically on all three platforms
-// instead of through three different tools.
-func newLogWriter(path string) io.WriteCloser {
+// A file rather than stderr, so `norite logs tail` has one place to read on every platform instead of
+// three tools. It is *additional* to whatever the service manager captures, not a replacement: journald
+// still collects the process's stderr.
+func newLogWriter(path string) io.WriteCloser { return newLogWriterSized(path, logMaxSizeMB) }
+
+// newLogWriterSized is newLogWriter rotating at a size the caller gives, so a test can drive a real
+// rotation without writing the tens of megabytes the daemon's own budget would take.
+func newLogWriterSized(path string, maxSizeMB int) io.WriteCloser {
 	return &lumberjack.Logger{
 		Filename:   path,
-		MaxSize:    logMaxSizeMB,
+		MaxSize:    maxSizeMB,
 		MaxBackups: logMaxFiles,
 		MaxAge:     logMaxAgeDay,
-		// Compress is off: three files of at most 10MB is not worth spending CPU on, and an uncompressed
-		// log is one `tail` away from being readable when someone is debugging a daemon that will not start.
+		// Compress is off: three files of at most 10MB is not worth spending CPU on, and `norite logs tail`
+		// reads into the newest backup.
 		Compress: false,
 	}
 }

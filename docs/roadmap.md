@@ -1478,13 +1478,65 @@ of this section.
   sent straight to the instance is tagged the same; a wrong port secret, a token lacking the scope and a
   request while the port is disabled are each refused; and a message the same account types in its own
   client is not tagged.
-- **M23 — Daemon lifecycle polish**: OS-service auto-install across all three platforms, a startup
-  `RLIMIT_NOFILE` raise (`syscall.Setrlimit`, to a safe ceiling such as 4096) before any
-  IPC/network/subprocess
-  handle is opened, log-file-not-stderr logging with `natefinch/lumberjack` rotation, `norite logs tail`. Done
-  when: the daemon survives a full reboot and comes back up automatically; its log file rotates instead of
-  growing unbounded; and a test forcing many simultaneous attach-client/voice-worker/log handles open does not
-  hit the OS's default file-descriptor ceiling.
+- **M23 — Daemon lifecycle polish**: the service, the log and the stop, finished. M3 built the service
+  definitions, the rotating log and a limit raise; what was missing was a way to read the log, a stop the
+  daemon performs itself, a service that works on Windows, and proof of any of it.
+
+  **Planning corrected four claims** (2026-10-09), by reading M3's code against this entry.
+  - *The `RLIMIT_NOFILE` raise never raised anything.* Go's runtime has raised the soft limit to the hard
+    one at start since 1.19, so M3's `raiseFileLimit` returned early on every platform. Measured: a program
+    started under `ulimit -Sn 256` saw 524287. The "256 on macOS" hazard does not exist for this binary.
+    The function is removed, and deliberately not repaired: a program that calls `Setrlimit` itself makes
+    Go stop restoring the original limit for children, and the voice-worker (M28) would inherit the raise.
+    What bounds the daemon's handles is its own caps.
+  - *"Auto-install" was defined nowhere.* It means: the installers register and start the service (on
+    Linux and macOS; on Windows only when asked, see below), and `norite login` on a terminal, finding no
+    daemon and no service, offers to. Never without asking, and no command starts a daemon by itself.
+  - *The unit's `After=network-online.target` did nothing.* The user manager has no such target. Removed.
+  - *"Survives a reboot" means "is back at the next login"*, as ADR 0010's "running from login" says. On a
+    machine used only over SSH the systemd user manager stops at the last logout, and the daemon with it.
+    `norite daemon install` says whether the account lingers; `--linger` asks `loginctl` for it. Not the
+    default.
+
+  **`norite logs tail`**: the last lines of the daemon's log (`-n`, default 50), `--follow`, `--level`,
+  text or `--json`. It works with no daemon running, which is when the log is wanted, reads into the newest
+  backup, and never holds the file open between reads, because rotation is a rename and Windows refuses to
+  rename an open file. The log is a file a person can edit: every line is bounded and sanitized (rule 19).
+  One exported function says where the log is, for the daemon and the CLI alike; on macOS that is
+  `~/Library/Logs` however the daemon was started. A fatal crash is written to `daemon.crash.log` beside it
+  (`debug.SetCrashOutput`). The file is one run's: the next start sets it aside as `daemon.crash.1.log` and
+  says in the log that the previous run crashed, which is where `logs tail` shows it.
+
+  **A stop the daemon performs**: `POST /@daemon/stop` on the attach socket, first-party tier only (rule 16;
+  the automation port refuses `/@daemon/`). The daemon stops as it does on SIGTERM and exits 0. `norite
+  daemon stop` and `restart` ask the socket first and the service manager second. On Windows the only other
+  stop is a kill, and a kill between a refresh's answer and its write leaves a spent token on disk (M19).
+  M24's binary swap needs the same request.
+
+  **Windows**: the task is an XML definition with a logon trigger for this user, no battery condition, no
+  time limit and a restart on failure, where `schtasks /SC ONLOGON` took a laptop's defaults for a short
+  job. **It has not been run on Windows from this branch unless the PR says so**: the definition and the
+  command lines are asserted through `Runner`, and `install.ps1` therefore still registers the task only
+  with `-AutoStart`. Making that the default is one line, owed once somebody has watched it work.
+
+  **The console window is left as it was**, open while the task runs. Two ways of removing it were written
+  and neither kept. A windowless build stops the daemon printing in a tab. Letting go of the console
+  (`FreeConsole`) was built and then taken out by `/code-review`: Windows tells a program that the user is
+  logging off through its console, so a daemon without one is killed at every logoff and shutdown where
+  it now gets to stop, which is the spent-token kill the stop request exists to prevent, on the commonest
+  path there is. Hiding the window and keeping the console is the candidate, and needs a Windows machine.
+
+  **`norite daemon status` also asks the socket**: version, standing, and "running, started by hand" where
+  the service manager knows nothing. A daemon that answers is exit 0 however it was started. `--json`.
+
+  Done when: on Linux, the daemon is running after a real reboot and login with nothing typed; a log driven
+  past its size limit leaves the configured number of backups and no more, and a `logs tail --follow` held
+  across the rotation keeps printing; the real binary, started with the hard descriptor limit at 256 (a
+  soft limit alone constrains nothing, since the runtime raises it), with every connection cap filled and
+  pushed past (attach clients, the automation port's served and pending connections), keeps answering, and
+  the test fails if a cap is removed; a daemon stopped through the socket exits 0 and is not
+  restarted; and `norite logs tail` on a log holding escape sequences and an over-long line prints neither.
+  macOS and Windows are covered by command-line tests, and by a manual pass only where the PR says one ran.
 - **M24 — Client auto-update mechanism**: version-check endpoint polling; Sigstore/cosign signature
   verification, using self-contained offline-verifiable bundles, before any binary swap; anti-downgrade
   protection; fail-closed behavior on verify failure; auto-rollback on repeated crash-loop after an update;
@@ -1494,6 +1546,14 @@ of this section.
   "bad" release triggers automatic rollback to the previous binary. Once Phase E exists, this milestone's
   guard additionally defers applying a downloaded update while the daemon is tracking an active voice
   session, applying it only once the call ends (`architecture.md` §6).
+
+  **Inherited from M23.** The updater stops the daemon through `POST /@daemon/stop` and never through the
+  service manager, whose stop is a kill on Windows; the old binary asks, since it is the running daemon's
+  version and the new one may not be able to attach. And the Windows task M23 rebuilt as an XML
+  definition has not been run on Windows: this milestone cannot be done there until it has, and
+  `install.ps1` registers the task by default once somebody has watched it work. The task's console
+  window is still shown; M23's entry says which two ways of removing it are wrong and which is left to
+  try, and whatever is chosen must leave the daemon told about a logoff.
 
   **Versions are compared by SemVer precedence, noted 2026-09-30 with ADR 0033**, which makes the three
   guards above consistent rather than changing any of them.

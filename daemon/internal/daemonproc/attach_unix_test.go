@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/Alexnex31/Norite/daemon/credentials"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
@@ -128,5 +130,64 @@ func TestADaemonThatCannotListenIsMisconfigured(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not a socket") {
 		t.Errorf("the reason is lost: %v", err)
+	}
+}
+
+// A daemon asked to stop through its socket stops as it does on a signal: the asker reads its answer, Run
+// returns nil, which is exit 0 and what no service manager restarts, and nothing is left listening.
+func TestTheDaemonStopsWhenAnAttachedClientAsks(t *testing.T) {
+	dir, err := os.MkdirTemp("", "nd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	done := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() {
+		// A context nothing cancels: the only thing that can end this run is the request.
+		done <- Run(context.Background(), Options{
+			StateDir: dir, Version: "dev", LogLevel: zerolog.Disabled, Ready: func() { close(ready) },
+		})
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("the daemon exited before becoming ready: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the daemon did not become ready")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	conn, err := ipc.DialAt(ctx, ipc.SocketPath(dir))
+	if err != nil {
+		t.Fatalf("dialing the daemon: %v", err)
+	}
+	client, err := ipc.Attach(ctx, conn, ipc.Options{Client: "norite-test", Version: "dev"})
+	if err != nil {
+		t.Fatalf("attaching: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	res, err := client.Do(ctx, "POST", ipc.PathStop, nil)
+	if err != nil {
+		t.Fatalf("asking the daemon to stop: %v", err)
+	}
+	var out ipc.Stopping
+	if res.Status != http.StatusOK || json.Unmarshal(res.Body, &out) != nil || out.PID != os.Getpid() {
+		t.Fatalf("the stop request answered %d %s", res.Status, res.Body)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a requested stop returned %v, want nil: anything else is a crash to a service manager", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the daemon did not stop")
+	}
+	if _, err := ipc.DialAt(t.Context(), ipc.SocketPath(dir)); !errors.Is(err, ipc.ErrNotRunning) {
+		t.Errorf("dialing a stopped daemon: %v, want ErrNotRunning", err)
 	}
 }

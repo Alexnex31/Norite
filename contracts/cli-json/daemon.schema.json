@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/daemon.schema.json",
+  "title": "norite daemon --json",
+  "description": "The machine-readable output of `norite daemon status` (M23): what the service manager says about the daemon, and what the daemon says about itself on its attach socket.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what this command prints ships with a change to this file in the same commit. Every field is always present, and a string with nothing to say is empty.\n\nThe exit code carries the same answer as it has since M3: 0 when `running`, 1 when `installed` and not running, 2 when neither. The other `norite daemon` verbs print a sentence and have no JSON form.",
+  "$ref": "#/$defs/status",
+  "$defs": {
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "running",
+        "answering",
+        "installed",
+        "service",
+        "service_running",
+        "version",
+        "standing",
+        "instance",
+        "username",
+        "problem"
+      ],
+      "description": "How the daemon stands.",
+      "properties": {
+        "running": {
+          "type": "boolean",
+          "description": "A daemon is running for this account, however it was started: one answered on the socket, or the service manager says it started one."
+        },
+        "answering": {
+          "type": "boolean",
+          "description": "The daemon completed the attach handshake with this command. Running and not answering is a daemon of another version, one that is hung, or one using another state directory; `problem` says which."
+        },
+        "installed": {
+          "type": "boolean",
+          "description": "A service definition is registered, which is what starts the daemon at login. Running and not installed is a daemon somebody started by hand."
+        },
+        "service": {
+          "type": "string",
+          "description": "The service manager's own word for the service's state, such as active or inactive, or empty when none is installed."
+        },
+        "service_running": {
+          "type": "boolean",
+          "description": "The service manager says it is running the daemon. Running without it is a daemon somebody started by hand, whether or not a service is installed beside it."
+        },
+        "version": {
+          "type": "string",
+          "description": "The running daemon's version, or empty when none could be asked."
+        },
+        "standing": {
+          "type": "string",
+          "enum": [
+            "signed_in",
+            "starting",
+            "signed_out",
+            ""
+          ],
+          "description": "Whether the daemon is signed in. `starting` is a sign-in being established, not the absence of one. Empty when the daemon did not answer."
+        },
+        "instance": {
+          "type": "string",
+          "description": "The instance it is signed in to, or empty."
+        },
+        "username": {
+          "type": "string",
+          "description": "The account it is signed in as, or empty."
+        },
+        "problem": {
+          "type": "string",
+          "description": "What is wrong when something is, in words for a person, or empty."
+        }
+      }
+    }
+  }
+}

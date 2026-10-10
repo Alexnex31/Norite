@@ -6,7 +6,11 @@ package daemonctl
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"text/template"
+	"unicode/utf16"
 )
 
 // windowsTask drives a Task Scheduler task that runs at logon.
@@ -24,24 +28,130 @@ func (w *windowsTask) DefinitionPath() (string, error) { return "", nil }
 // StartsOnInstall is false: a logon task is registered and waits for its trigger.
 func (w *windowsTask) StartsOnInstall() bool { return false }
 
-func (w *windowsTask) LogHint() string {
-	return `Task Scheduler (taskschd.msc), Task Scheduler Library > "` + windowsTaskName + `"`
+// taskTemplate is the task's definition, in Task Scheduler's own XML.
+//
+// Until M23 the task was made with `schtasks /Create /SC ONLOGON`, which takes Task Scheduler's defaults,
+// and they are a laptop's defaults for a job that runs for a minute: not started on battery and stopped
+// when the machine goes onto it, ended after three days, never restarted. None of them can be changed
+// from that command's flags. A definition says each one:
+//
+//   - The trigger is this user's logon, not anybody's. The task is theirs and runs as them.
+//   - LeastPrivilege is what /RL LIMITED was: the user's own integrity level, never elevated.
+//   - IgnoreNew: a second start while one runs does nothing, which is what makes start idempotent.
+//   - PT0S is no time limit.
+//   - Three restarts a minute apart after a failure. An exit of 0, which a requested stop is, is not one.
+//
+// The element order is the one Task Scheduler exports. Written from its documented schema and not yet
+// registered on a Windows machine from this code; docs/roadmap.md's M23 entry says so.
+var taskTemplate = template.Must(template.New("task").Funcs(template.FuncMap{
+	"xml": xmlEscape,
+}).Parse(`<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Norite background daemon</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{{ .User | xml }}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{{ .User | xml }}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{{ .Program | xml }}</Command>
+    </Exec>
+  </Actions>
+</Task>
+`))
+
+// taskXML renders the definition for one user and one executable.
+func taskXML(user, program string) (string, error) {
+	var b strings.Builder
+	if err := taskTemplate.Execute(&b, struct{ User, Program string }{user, program}); err != nil {
+		return "", fmt.Errorf("rendering the task definition: %w", err)
+	}
+	return b.String(), nil
+}
+
+// utf16File encodes text as UTF-16 little-endian with a byte-order mark, which is what the definition's
+// own first line declares. schtasks refuses a file whose bytes and declaration disagree.
+func utf16File(text string) []byte {
+	units := utf16.Encode([]rune(text))
+	out := make([]byte, 2, 2+2*len(units))
+	out[0], out[1] = 0xFF, 0xFE
+	for _, u := range units {
+		out = append(out, byte(u), byte(u>>8))
+	}
+	return out
 }
 
 func (w *windowsTask) Install(ctx context.Context, daemonBinary string) error {
-	// /RL LIMITED runs at the user's normal integrity level rather than elevated. The daemon needs no
-	// privilege beyond the user's own, and asking for elevation would both prompt at install time and make
-	// every later escalation bug more expensive.
-	//
+	if strings.ContainsFunc(daemonBinary, isControl) {
+		return fmt.Errorf("refusing to register a task: the executable path contains a control character (%s)",
+			strconv.Quote(daemonBinary))
+	}
+	// Who the task is for, in the form Task Scheduler names accounts: DOMAIN\user. Asked of Windows
+	// rather than assembled from the environment, which a shell can set to anything.
+	res, err := mustSucceed(ctx, w.run, "whoami")
+	if err != nil {
+		return err
+	}
+	user := strings.TrimSpace(res.Stdout)
+	if user == "" || strings.ContainsFunc(user, isControl) {
+		return fmt.Errorf("`whoami` did not name this account (%s), so the task cannot be made its own",
+			strconv.Quote(user))
+	}
+
+	definition, err := taskXML(user, daemonBinary)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp("", "norite-task-*.xml")
+	if err != nil {
+		return fmt.Errorf("writing the task definition: %w", err)
+	}
+	path := file.Name()
+	defer func() { _ = os.Remove(path) }()
+	_, err = file.Write(utf16File(definition))
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("writing the task definition: %w", err)
+	}
+
 	// /F replaces an existing task, which is what makes reinstalling idempotent rather than an error.
-	_, err := mustSucceed(ctx, w.run, "schtasks",
-		"/Create",
-		"/TN", windowsTaskName,
-		"/TR", quoteTaskCommand(daemonBinary),
-		"/SC", "ONLOGON",
-		"/RL", "LIMITED",
-		"/F",
-	)
+	_, err = mustSucceed(ctx, w.run, "schtasks", "/Create", "/TN", windowsTaskName, "/XML", path, "/F")
 	return err
 }
 
@@ -203,14 +313,6 @@ func (w *windowsTask) absentNotFailing(ctx context.Context) (bool, error) {
 	}
 	return !exists, nil
 }
-
-// quoteTaskCommand wraps the binary path for schtasks' /TR argument.
-//
-// /TR takes a command line, not a program path, and re-parses it: an unquoted `C:\Program Files\...` would
-// become the program `C:\Program` with an argument. Quoting unconditionally rather than only when a space
-// is present keeps the two paths through this code identical, so the one exercised in testing is the one
-// that ships.
-func quoteTaskCommand(path string) string { return `"` + path + `"` }
 
 func errFromResult(what string, res Result) error {
 	return fmt.Errorf("`%s` failed (exit %d): %s", what, res.ExitCode, firstNonEmpty(res.Stderr, res.Stdout, "no output"))

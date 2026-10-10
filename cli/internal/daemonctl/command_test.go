@@ -21,6 +21,8 @@ type stubManager struct {
 	startErr        error
 	stopErr         error
 	startsOnInstall bool
+	// definition is what DefinitionPath answers, when a test cares.
+	definition string
 
 	installed  []string
 	uninstalls int
@@ -37,8 +39,12 @@ func (s *stubManager) Start(context.Context) error           { s.starts++; retur
 func (s *stubManager) Stop(context.Context) error            { s.stops++; return s.stopErr }
 func (s *stubManager) Status(context.Context) (State, error) { return s.state, s.statusErr }
 func (s *stubManager) StartsOnInstall() bool                 { return s.startsOnInstall }
-func (s *stubManager) DefinitionPath() (string, error)       { return "/tmp/norite-daemon.service", nil }
-func (s *stubManager) LogHint() string                       { return "journalctl --user -u norite-daemon -f" }
+func (s *stubManager) DefinitionPath() (string, error) {
+	if s.definition != "" {
+		return s.definition, nil
+	}
+	return "/tmp/norite-daemon.service", nil
+}
 
 // testRoot builds a root command that handles exit codes the way cliapp.New does.
 //
@@ -52,7 +58,8 @@ func testRoot(out *bytes.Buffer) *cli.Command {
 		Writer:         out,
 		ErrWriter:      out,
 		ExitErrHandler: func(context.Context, *cli.Command, error) {},
-		Commands:       []*cli.Command{GroupCommand()},
+		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
+		Commands:       []*cli.Command{GroupCommand("test")},
 	}
 }
 
@@ -63,53 +70,45 @@ func runCommand(t *testing.T, mgr Manager, argv ...string) (stdout string, err e
 	previous := managerFor
 	managerFor = func() (Manager, error) { return mgr, nil }
 	t.Cleanup(func() { managerFor = previous })
+	// No socket unless the test set one with answerStop: the real one would be the daemon of whoever runs
+	// the suite, and these commands stop it.
+	if !stopStubbed {
+		answerStop(t, stopNotAsked)
+	}
+	if !statusStubbed {
+		answerStatus(t, socketAnswer{})
+	}
 
 	var out bytes.Buffer
 	err = testRoot(&out).Run(t.Context(), append([]string{"norite"}, argv...))
 	return out.String(), err
 }
 
-func TestStatusExitCodesDistinguishEveryState(t *testing.T) {
-	cases := []struct {
-		name     string
-		state    State
-		wantCode int
-		wantText string
-	}{
-		// The exit code is the machine-readable surface until the CLI's --json machinery arrives at M48, so
-		// a script can branch on it without parsing prose that is free to change.
-		{"running", State{Installed: true, Running: true, Detail: "active"}, 0, "is running"},
-		{"stopped", State{Installed: true, Detail: "inactive"}, 1, "not running"},
-		{"absent", State{}, 2, "is not installed"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			mgr := &stubManager{state: tc.state}
+// statusStubbed is whether a test has said what the socket answers when asked who is there.
+var statusStubbed bool
 
-			previous := managerFor
-			managerFor = func() (Manager, error) { return mgr, nil }
-			t.Cleanup(func() { managerFor = previous })
+// answerStatus makes the socket answer every status question with answer for the rest of the test.
+func answerStatus(t *testing.T, answer socketAnswer) {
+	t.Helper()
+	previous, was := socketStatus, statusStubbed
+	socketStatus = func(context.Context, string) socketAnswer { return answer }
+	statusStubbed = true
+	t.Cleanup(func() { socketStatus, statusStubbed = previous, was })
+}
 
-			var out bytes.Buffer
-			err := testRoot(&out).Run(t.Context(), []string{"norite", "daemon", "status"})
+// stopStubbed is whether a test has said what the socket answers a stop request.
+var stopStubbed bool
 
-			var exit cli.ExitCoder
-			switch {
-			case tc.wantCode == 0:
-				if err != nil {
-					t.Fatalf("status returned %v, want success", err)
-				}
-			case !errors.As(err, &exit):
-				t.Fatalf("status returned %v (%T), want a cli.ExitCoder with code %d", err, err, tc.wantCode)
-			case exit.ExitCode() != tc.wantCode:
-				t.Fatalf("exit code = %d, want %d", exit.ExitCode(), tc.wantCode)
-			}
-
-			if !strings.Contains(out.String(), tc.wantText) {
-				t.Errorf("output does not contain %q:\n%s", tc.wantText, out.String())
-			}
-		})
-	}
+// answerStop makes the socket answer every stop request with outcome for the rest of the test, and
+// returns how many times it was asked.
+func answerStop(t *testing.T, outcome stopOutcome) *int {
+	t.Helper()
+	asked := new(int)
+	previous, was := socketStop, stopStubbed
+	socketStop = func(context.Context, string) stopOutcome { *asked++; return outcome }
+	stopStubbed = true
+	t.Cleanup(func() { socketStop, stopStubbed = previous, was })
+	return asked
 }
 
 func TestStatusTellsTheUserWhatToDoNext(t *testing.T) {
@@ -207,11 +206,16 @@ func TestStartSurfacesNotInstalledUnchanged(t *testing.T) {
 }
 
 func TestRestartDoesNotStartAfterAFailedStop(t *testing.T) {
-	mgr := &stubManager{stopErr: errors.New("systemctl --user stop failed")}
+	mgr := &stubManager{state: State{Installed: true, Running: true},
+		stopErr: errors.New("systemctl --user stop failed")}
 
 	_, err := runCommand(t, mgr, "daemon", "restart")
 	if err == nil {
 		t.Fatal("restart succeeded despite the stop failing")
+	}
+	// Reached, and failed: a restart refused before it tried would also start nothing.
+	if mgr.stops != 1 {
+		t.Fatalf("the stop was tried %d times, want once", mgr.stops)
 	}
 	// Starting anyway would either do nothing or produce a second daemon, and the second is exactly what
 	// the single-instance lock exists to prevent — better to stop and say so.
@@ -221,7 +225,7 @@ func TestRestartDoesNotStartAfterAFailedStop(t *testing.T) {
 }
 
 func TestRestartStopsThenStarts(t *testing.T) {
-	mgr := &stubManager{}
+	mgr := &stubManager{state: State{Installed: true, Running: true}}
 
 	if _, err := runCommand(t, mgr, "daemon", "restart"); err != nil {
 		t.Fatalf("restart: %v", err)
@@ -247,7 +251,7 @@ func TestUninstallRemovesTheService(t *testing.T) {
 }
 
 func TestEveryDaemonSubcommandIsDocumented(t *testing.T) {
-	group := GroupCommand()
+	group := GroupCommand("test")
 
 	want := []string{"install", "uninstall", "start", "stop", "restart", "status"}
 	got := map[string]*cli.Command{}

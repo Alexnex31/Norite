@@ -76,3 +76,20 @@ func TestAsksSaysWhetherAQuestionWillBePut(t *testing.T) {
 		}
 	}
 }
+
+func TestYesIsOneDefinitionOfAnAnswer(t *testing.T) {
+	for answer, want := range map[string]bool{"y": true, "Y": true, "yes": true, " YES \n": true,
+		"n": false, "no": false, "yep": false, "maybe": false, "ja": false} {
+		for _, byDefault := range []bool{true, false} {
+			if got := Yes(answer, byDefault); got != want {
+				t.Errorf("Yes(%q, %v) = %v, want %v", answer, byDefault, got, want)
+			}
+		}
+	}
+	// Only an empty answer takes the default.
+	for _, empty := range []string{"", "  ", "\n"} {
+		if !Yes(empty, true) || Yes(empty, false) {
+			t.Errorf("an empty answer %q did not take the default", empty)
+		}
+	}
+}

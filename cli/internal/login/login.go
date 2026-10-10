@@ -103,6 +103,10 @@ type Runner struct {
 	// Hostname names this machine, for the default device name.
 	Hostname func() (string, error)
 
+	// Daemon is the daemon's service, which a finished sign-in reports on and offers to install. Nil
+	// prints the command to run instead.
+	Daemon Daemon
+
 	// newClient builds the API client. Indirected for tests; production leaves it nil.
 	newClient func(baseURL string) *client
 	// openBrowser launches the sign-in URL. Indirected for tests; production leaves it nil.
@@ -381,7 +385,7 @@ func (r *Runner) finish(ctx context.Context, s session, pair tokenPair, fallback
 		r.printf("Signed in on %s.\n", s.instanceURL)
 	}
 	r.printf("This device is %q; its credential is stored in %s.\n", s.deviceName, r.Store.SecretLocation())
-	r.printf("Start the background daemon with `norite daemon start` if it is not running already.\n")
+	r.daemonAfterSignIn(ctx)
 	return nil
 }
 

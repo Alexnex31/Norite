@@ -64,7 +64,7 @@ What to know about it:
   and with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) installed that file's
   signature is verified too. Without it the script says the signature was not checked.
 - **The daemon is started hidden, for now.** It does not come back after Windows restarts unless you pass
-  `-AutoStart`, which registers it at logon and is the least-tried path of all (see step 3).
+  `-AutoStart`, which registers it at logon; that path has not yet been run on Windows (see step 3).
 - **Options need the longer form**, since `irm | iex` cannot carry any:
 
   ```powershell
@@ -223,9 +223,15 @@ it stops the daemon. Everything else happens in the first tab.
 
 **To have it start by itself whenever you log in**, `.\norite.exe daemon install` registers it as a Task
 Scheduler task named "Norite Daemon", running as you and needing no administrator rights;
-`.\norite.exe daemon start` starts it now, and `.\norite.exe daemon status` reports on it. This path has
-been tried least of all. Because the daemon is a console program, Windows may show its console window at
-each logon, and closing that window stops it — which is why a tab is the better choice for a first try.
+`.\norite.exe daemon start` starts it now, and `.\norite.exe daemon status` reports on it.
+`.\norite.exe daemon stop` stops it, however it was started.
+
+This path was rebuilt for this release and **has not yet been run on Windows**: the task is registered
+from a definition that starts it at your logon, on battery as on mains, with no time limit. Because the
+daemon is a console program, Windows shows its console window while the task runs; closing that window
+stops the daemon. If the task does not start, a tab is the reliable way, and the output of
+`.\norite.exe daemon status` and `.\norite.exe logs tail` is worth an issue (see the last row of the
+table at the end for what that output names).
 
 ## Step 4 — sign in
 
@@ -303,7 +309,7 @@ Everything also works as commands, which is handy for checking from a script:
 
 | What | Where |
 | --- | --- |
-| The daemon's state, including its log, `daemon.log` | `%LOCALAPPDATA%\Norite\` — paste it into Explorer's address bar |
+| The daemon's state, including its log, `daemon.log` | `%LOCALAPPDATA%\Norite\` — paste it into Explorer's address bar. `.\norite.exe logs tail` prints the log's newest lines |
 | Your sign-in | Credential Manager → Windows Credentials → Generic Credentials, an entry named `norite:` followed by the instance URL |
 | The scheduled task, if you installed one | Task Scheduler (`taskschd.msc`) → Task Scheduler Library → "Norite Daemon" |
 
@@ -334,4 +340,4 @@ Your account stays on the instance: deleting an account is not built yet (`M76a`
 | `that email and password did not match an account` | Check both. With a mail relay on the instance, the address may not be confirmed yet; the answer is the same on purpose. |
 | The client's box says `not found` for a code | Mistyped, expired, revoked or used up — these look identical on purpose. Ask for a new one, and check it is a *guild* invite, not an instance invite. |
 | The screen looks garbled | Use Windows Terminal rather than the old console window, and make the window larger. |
-| Anything else | The command's output and `%LOCALAPPDATA%\Norite\daemon.log`, in a [GitHub issue](https://github.com/Alexnex31/Norite/issues). Neither contains your password or tokens. |
+| Anything else | The command's output and what `.\norite.exe logs tail` prints, in a [GitHub issue](https://github.com/Alexnex31/Norite/issues). Neither contains your password or tokens. The log does name your instance's address, your username and your Windows account's folder: an issue is public, so remove what you would rather not post. |

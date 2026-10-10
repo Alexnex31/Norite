@@ -96,9 +96,6 @@ type Manager interface {
 	// DefinitionPath is where the service definition lives, for display. Empty when the platform keeps it
 	// somewhere that is not a file the user can look at (Windows).
 	DefinitionPath() (string, error)
-	// LogHint is the platform-native command for reading the service's own log capture, shown after a
-	// successful install. Norite's own rotated log file is reported separately.
-	LogHint() string
 }
 
 // New returns the Manager for the running platform.

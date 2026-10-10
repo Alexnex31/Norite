@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/logs.schema.json",
+  "title": "norite logs --json",
+  "description": "The machine-readable output of `norite logs tail` (M23): the daemon's log, one `entry` per line of output. It is a stream of objects and not one array, so that `--follow` can be read as it arrives; each line is a whole JSON value.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what this command prints ships with a change to this file in the same commit. Every field is always present.\n\nThe log is a file on the user's machine, and nothing in it is trusted to be what the daemon wrote. A line that is not a JSON object is carried whole in `message` with `unparsed` set. What a terminal would act on is escaped as \\uXXXX, as in every other command's JSON.",
+  "$ref": "#/$defs/entry",
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "time",
+        "level",
+        "subsystem",
+        "message",
+        "fields",
+        "unparsed",
+        "truncated"
+      ],
+      "description": "One line of the log.",
+      "properties": {
+        "time": {
+          "type": "string",
+          "description": "When the line was written, RFC 3339 with the offset the daemon wrote, or empty when the line has no time that parses."
+        },
+        "level": {
+          "type": "string",
+          "description": "The line's level as written: trace, debug, info, warn, error, fatal or panic from the daemon. Empty when the line names none. Not an enum, since the file may hold anything."
+        },
+        "subsystem": {
+          "type": "string",
+          "description": "The part of the daemon that wrote the line, or empty for the daemon itself."
+        },
+        "message": {
+          "type": "string",
+          "description": "The line's message. For an unparsed line, the line itself."
+        },
+        "fields": {
+          "type": "object",
+          "description": "Every other field of the line, each value as the line held it. Empty for an unparsed line. A field named time, level, subsystem or message appears here when the line gave it a value that is not a string, or a time that does not parse."
+        },
+        "unparsed": {
+          "type": "boolean",
+          "description": "The line is not a JSON object: a traceback, or something that is not the daemon's."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "The line was longer than 16384 bytes. `message` holds its beginning, and `unparsed` is set, since a cut line is no longer JSON."
+        }
+      }
+    }
+  }
+}

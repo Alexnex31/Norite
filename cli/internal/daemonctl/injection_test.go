@@ -95,20 +95,18 @@ func TestOtherBackendsAreNotLineOriented(t *testing.T) {
 		}
 	})
 
-	t.Run("schtasks receives one argv element", func(t *testing.T) {
-		r := newFakeRunner()
-		w := &windowsTask{run: r}
-
-		// Task Scheduler takes /TR as a single argument through exec, with no shell and no line-oriented
-		// config file, so there is no directive to inject into.
-		if err := w.Install(t.Context(), `C:\norite\norite-daemon.exe`); err != nil {
+	t.Run("the task definition is a document, and the path is text in it", func(t *testing.T) {
+		// Since M23 the task is registered from an XML definition, so the path lands inside an element as
+		// the plist's does. Markup in it must arrive escaped, and never as a setting of its own.
+		definition, _, _, err := installed(t, `PC\ada`, `C:\norite\x</Command></Exec><Exec><Command>calc.exe`)
+		if err != nil {
 			t.Fatalf("Install: %v", err)
 		}
-		if len(r.calls) != 1 {
-			t.Fatalf("expected exactly one schtasks call, got %d", len(r.calls))
+		if strings.Count(definition, "<Exec>") != 1 || strings.Contains(definition, "<Command>calc.exe") {
+			t.Errorf("the definition gained an action:\n%s", definition)
 		}
-		if got := r.calls[0].Name; got != "schtasks" {
-			t.Errorf("ran %q, not schtasks", got)
+		if !strings.Contains(definition, "&lt;/Command&gt;") {
+			t.Errorf("the injected markup was not escaped:\n%s", definition)
 		}
 	})
 }

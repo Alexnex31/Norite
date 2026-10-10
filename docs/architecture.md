@@ -1582,17 +1582,34 @@ in-memory scrollback state, the WASM plugin host (§8), and the local bot-automa
 deliberately **not** in the daemon (§6). The daemon is also the sole holder of auth tokens (§2) and, once E2E
 exists, the E2E keystore (§7) — nothing credential-bearing lives in an attach client.
 
-**Lifecycle**: auto-installed as a real OS-level service (systemd user unit / launchd agent / Windows
-startup task), running from login. On startup, before opening any handle, the daemon raises `RLIMIT_NOFILE`
-(`syscall.Setrlimit`, e.g. to 4096) — it simultaneously holds the gateway WS, N attach-client sockets, the
-bot-automation TCP listener, voice-worker pipes, and SQLite/log files, and default OS limits (256 on macOS)
-are easy to exceed under normal multi-client, active-voice use.
+**Lifecycle**: a real OS-level service (systemd user unit / launchd agent / Windows logon task), running
+from login. The installers register and start it, and `norite login` on a terminal offers to when it finds
+no daemon and no service; nothing installs or starts one without asking (M23). "From login" is exact: on a
+machine used only over SSH the systemd user manager stops at the last logout unless the account lingers,
+which `norite daemon install` reports and `--linger` asks for.
+
+**File descriptors**: the daemon does not raise `RLIMIT_NOFILE`, because Go's runtime already raises the
+soft limit to the hard one at start. This section said the daemon raised it to 4096 against a default of
+256 on macOS, and M3 built that; M23 measured it doing nothing and removed it. Calling `Setrlimit` would
+also make Go stop restoring the original limit for child processes, so the voice-worker would inherit the
+raise. What bounds the daemon's handles is its own caps: 64 attach clients, the automation port's served
+and pending connections, one gateway connection. A test runs the real binary with the hard limit at 256,
+which no program can raise, fills every cap and pushes several hundred connections past each; it fails
+when a cap is removed.
+
+**Stopping**: a signal, or `POST /@daemon/stop` on the attach socket (M23), which stops the daemon exactly
+as SIGTERM does. `norite daemon stop` and `restart` ask the socket first and the service manager second.
+The request exists because on Windows the service manager's stop is a kill, and a kill between a
+refresh's answer and its write-back leaves a spent token on disk. It is first-party tier only: the
+automation port refuses every `/@daemon/` path.
 
 **Service installation** (settled at Milestone M3): `norite daemon install | uninstall | start | stop |
 restart | status`, implemented in `cli/internal/daemonctl` behind one `Manager` interface with a backend per
 platform. Always a **user-scoped** service — a systemd *user* unit (`~/.config/systemd/user/`), a launchd
-*agent* (`~/Library/LaunchAgents/`), or a logon task at the user's own integrity level (`schtasks /SC
-ONLOGON /RL LIMITED`) — never a system-wide one, so installing needs no elevation and the daemon runs as the
+*agent* (`~/Library/LaunchAgents/`), or a logon task at the user's own integrity level (since M23 an XML
+definition registered with `schtasks /Create /XML`: this user's logon, `LeastPrivilege`, no battery
+condition, no time limit) — never a system-wide one, so installing needs no elevation and the daemon runs as
+the
 account whose tokens and keystore it holds. Each backend shells out to that platform's own tool
 (`systemctl --user`, `launchctl`, `schtasks`) through an injectable `Runner`, which is what lets all three
 command lines be asserted from one CI machine; the failed command appears verbatim in any error, so an
@@ -1612,12 +1629,16 @@ the systemd unit also never retries (`RestartPreventExitStatus=3 4`), since no r
 signal-initiated stop exits **0**, not 128+signum: every service manager reads a non-zero exit as a crash
 and answers with a restart, which would make an ordinary stop loop. `norite daemon status` reports through
 its exit code — 0 running, 1 installed-but-stopped, 2 not installed — so a script can branch without parsing
-prose, and until the `--json` machinery lands (M48) that code is the machine-readable surface.
+prose. Since M23 it also asks the attach socket, so a daemon started by hand is 0 and reported as such,
+with its version and standing, and `--json` carries the same.
 
 **Daemon-owned state directory**: `$XDG_STATE_HOME/norite` (`~/.local/state/norite`), `~/Library/Application
 Support/Norite`, or `%LOCALAPPDATA%\Norite`, created `0700` — it will later hold plugin capability grants and
 pinned `.wasm` hashes (§8), so the mode is established now rather than migrated. It holds the lock and, by
-default, the daemon's own rotating log (`natefinch/lumberjack`, per §4a's file-based logging rule); the
+default, the daemon's own rotating log (`natefinch/lumberjack`: 10 MB, three backups, 28 days) with
+`daemon.crash.log` beside it, which a fatal crash is written to as well as stderr (M23), since a panic
+never reaches the logger and under Task Scheduler stderr is nowhere. That file is one run's: the next start
+sets it aside as `daemon.crash.1.log` and logs that the previous run crashed. The
 daemon also copies every line to stderr, which is what journald captures, so `systemctl --user status` and
 the log file both show something useful. **The lock always stays in the state directory** even when the log
 is redirected — it is the per-user rendezvous point, and a lock that moved with the logs would let two
@@ -1635,9 +1656,12 @@ start — breaking the single-instance invariant with no error anywhere.
 - **launchd cannot exempt an exit code** the way `RestartPreventExitStatus=3` does, so an exit-3 daemon is
   respawned while another instance holds the lock. The loop is self-correcting; `ThrottleInterval` keeps it
   cheap.
-- **launchd's `StandardErrorPath` is never rotated**, so on macOS the daemon is launched with `-log-file`
-  (rotating log into `~/Library/Logs`) and `-stderr-log=false`; that leaves the launchd-captured file holding
-  only panics and pre-logging failures rather than an unbounded copy of the rotated log.
+- **launchd's `StandardErrorPath` is never rotated**, so on macOS the daemon is launched with
+  `-stderr-log=false`; that leaves the launchd-captured file holding only panics and pre-logging failures
+  rather than an unbounded copy of the rotated log.
+- **On macOS the log is in `~/Library/Logs`**, whoever starts the daemon (M23). The plist passed that path
+  as `-log-file` before, so a daemon started by hand logged to the state directory instead, and
+  `norite logs tail` could not have known which. `daemon/logfile` is the one place that decides it.
 
 **Dual IPC, different trust tiers**:
 - **Daemon↔attach-client**: a Unix domain socket / Windows named pipe, OS-permission-protected — the
@@ -2120,8 +2144,11 @@ for it again costs nothing.
 supported, filename/link fallback otherwise — the hook point for the "disable image loading" bandwidth
 toggle (which does not suppress custom-emoji rendering).
 
-**Logging**: file-based, never stderr (Bubble Tea owns the alternate screen buffer), `norite logs tail`,
-`natefinch/lumberjack` rotation — reused by the daemon, both front ends of this binary, and the GUI alike.
+**Logging**: the daemon's log is a file with `natefinch/lumberjack` rotation, and `norite logs tail` reads
+it (M23): with no daemon running, into the newest backup, bounded and sanitized line by line since the file
+is one a person can edit, and without holding it open between reads. The command tree and the terminal
+client write no log of their own, and no milestone gives them one; if one does, it is a file, never stderr
+(Bubble Tea owns the alternate screen buffer).
 
 **Voice controls**: join/leave/mute/deafen on a chord, an active-speaker indicator, and two separate
 actions (keybind each) for local-mute and report (§6). A call is *drawn* here, not merely announced: `4b`

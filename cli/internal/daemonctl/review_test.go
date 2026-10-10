@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Alexnex31/Norite/daemon/logfile"
 )
 
 // Regression tests for the M3 code-review findings. Each one failed before its fix; grouped here so the
@@ -78,30 +80,26 @@ func TestLaunchdStopSurfacesARealFailure(t *testing.T) {
 	}
 }
 
-// LogHint pointed at norite-daemon.out.log, but the daemon writes everything to stderr and nothing to
-// stdout — so `norite daemon status` sent operators to tail a file that is always empty.
-func TestLaunchdLogHintNamesTheFileTheDaemonActuallyWrites(t *testing.T) {
+// The plist passed -log-file until M23, which made the log's path a thing two programs each decided: the
+// service logged to ~/Library/Logs and a daemon started by hand to the state directory. The daemon decides
+// it now (daemon/logfile), and the plist says nothing.
+func TestThePlistDoesNotDecideWhereTheLogIs(t *testing.T) {
 	l, _, plistPath := newLaunchd(t)
 	if err := l.Install(t.Context(), "/opt/norite/norite-daemon"); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-
 	body, err := os.ReadFile(plistPath)
 	if err != nil {
 		t.Fatalf("reading the plist: %v", err)
 	}
-	plist := string(body)
-
-	hint := l.LogHint()
-	if !strings.Contains(hint, ServiceName+".log") || strings.Contains(hint, ".out.log") {
-		t.Errorf("LogHint = %q, want the daemon's own rotating log", hint)
+	// As an argument: the plist's own comment names the flag to say why it is gone.
+	if strings.Contains(string(body), "<string>-log-file</string>") {
+		t.Errorf("the plist decides the log's path a second time:\n%s", body)
 	}
-	// And that file has to be the one the plist actually tells the daemon to write.
-	if !strings.Contains(plist, "<string>-log-file</string>") {
-		t.Errorf("the plist does not point the daemon's log anywhere:\n%s", plist)
-	}
-	if !strings.Contains(plist, ServiceName+".log</string>") {
-		t.Errorf("the plist and LogHint name different files:\n%s", plist)
+	// What launchd captures is beside the daemon's own log, under a name that is not it.
+	if !strings.Contains(string(body), filepath.Join("Library", "Logs", ServiceName+".err.log")) ||
+		ServiceName+".log" != logfile.MacName {
+		t.Errorf("the captured stderr is not beside %s:\n%s", logfile.MacName, body)
 	}
 }
 

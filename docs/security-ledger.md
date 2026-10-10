@@ -1444,3 +1444,117 @@ carries the condition that would reopen it.
   the manual pass checked against both daemons' logs. The text is sanitized before it is logged.
 - **Reopens if**: any route a script can reach takes a credential or a code in its path or query, or
   this line is raised above debug.
+
+## M23 — daemon lifecycle polish
+
+### Any program running as the user can stop the daemon through the attach socket
+- **Raised**: M23, while building `POST /@daemon/stop`
+- **Verdict**: accepted risk
+- **Why**: the request is served to every attach client, and the attach socket's tier is first-party and
+  OS-permission-protected (rule 16): whatever can open it runs as the daemon's own account and can send
+  the daemon a signal, which does the same thing. The request adds no authority. It takes no body, and
+  the daemon finishes what it has begun, a renewed sign-in included, before it exits. The port for
+  scripts serves nothing under `/@daemon/`
+  (`TestWhatTheDaemonAnswersItselfIsNotReachableWithASecret` names this path).
+- **Reopens if**: the daemon answers this request on any surface whose tier is a secret and not the
+  account; or stopping gains an effect a signal does not have, such as discarding state or skipping the
+  write-back of a renewal.
+
+### A daemon older than the stop request sends its path to its instance
+- **Raised**: M23, on reading M21's entry of the same shape
+- **Verdict**: accepted risk
+- **Why**: M21's entry, "A daemon older than the toggle sends the request's path to its instance", covers
+  it and its condition has not arrived: `POST /@daemon/stop` has no body and its path holds nothing of
+  the user's. What an instance learns from an older daemon is that this account's client asked its daemon
+  to stop. The client reads any answer that is not the daemon's own 200 as "not asked" and uses the
+  service manager.
+- **Reopens if**: the stop request gains a body or a path segment, a reason or a deadline being the
+  likely ones.
+
+### The crash file and the log are opened by path, in a directory the user chose
+- **Raised**: M23, own review of the finished branch
+- **Verdict**: accepted risk
+- **Why**: `captureCrashes` checks with `Lstat` that the path holds a regular file and then opens it,
+  and between the two another local account could put a link there, sending a traceback to a file of the
+  daemon's user. That needs write access to the log's directory. By default it is the state directory,
+  `0700`, or `~/Library/Logs`, which is the user's. It is reachable only when `-log-file` names a
+  directory others can write to, where lumberjack's own rename and create have the same exposure and
+  have had since M3.
+- **Reopens if**: a default log location is ever a directory another account can write to, or the daemon
+  comes to run as an account other than the one that chose the path.
+
+### `norite logs tail` prints whatever the daemon logged
+- **Raised**: M23, own review of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: the command makes the log one keystroke away, and somebody will paste its output into an
+  issue; the Windows guide now asks them to. Rule 8 is the daemon's to keep and it does: no token, port
+  secret, frame or message content is logged at any level (M19, M22's manual pass against two daemons'
+  logs). What the log does hold is the instance's URL, the account's state directory, and at debug level
+  the URL of an automation request that failed, which M22's entry already judged. The file and both crash
+  files are `0600`.
+- **Reopens if**: anything is logged that authenticates, or the conditions of M22's entry "The daemon's
+  debug log names the URL of an automation request" arrive, since this command is now how that line is
+  read.
+
+### The process a stop waits for is whichever one the daemon names
+- **Raised**: M23, own review of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: `socketStop` waits for the process id in the daemon's answer to exit. It signals nothing: on
+  Unix it sends signal 0, which delivers nothing, and on Windows it opens a handle with the right to wait
+  and no other. Ids of 1 and below are never waited on. The answer comes over a socket only the user's
+  account opens. A wrong id costs the full wait, twenty seconds, after which the service manager is asked
+  as it always was.
+- **Reopens if**: anything is ever done to that process other than waiting for it, or the id comes from
+  anywhere but the daemon's own answer on the attach socket.
+
+### A crash file holds whatever the runtime prints when the daemon dies
+- **Raised**: M23, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: `daemon.crash.log` and `daemon.crash.1.log` receive the runtime's own account of a fatal
+  error: the panic's value, a stack for each goroutine it prints, and for a signal the registers. A stack
+  shows arguments as raw words, never the text of a string. A panic's value is the one place content
+  could appear, and nothing in the daemon panics with a value of its own: there is no `panic(` outside
+  its tests, so the value is the runtime's ("index out of range", "nil pointer dereference"). M19's
+  entry "A panic in the gateway connection is logged with its value" judged the same question for the
+  log. Both files are `0600`, and no command prints them.
+- **Reopens if**: the daemon or a dependency it calls with a frame, a token or a message panics with a
+  value built from one; or a command comes to print or upload a crash file, `norite logs tail` included.
+
+### `--linger` keeps every service of the account running, not only the daemon
+- **Raised**: M23, `/security-sweep` of the finished branch
+- **Verdict**: accepted risk
+- **Why**: lingering is the account's, not a service's. `norite daemon install --linger` asks logind to
+  keep the whole user manager up after logout and to start it at boot, so everything else the account
+  has enabled as a user service runs unattended too, and the daemon holds a live sign-in on a machine
+  nobody is logged in to. That is the point of the flag on a machine reached over SSH, it is never the
+  default, the flag's own help and the line it prints say "your account's services", and the line says
+  how to undo it. Whether the account may is the machine's policy: where polkit refuses, the command
+  names the one an administrator runs and does nothing itself.
+- **Reopens if**: lingering is turned on without the flag, by an installer or by the offer `norite login`
+  makes; or the daemon gains a surface that listens beyond loopback, where "running while nobody is
+  logged in" would mean something else.
+
+### The guides ask for `norite logs tail` output in a public issue
+- **Raised**: M23, `/security-sweep` of the finished branch, on reading M19's entry about the log
+- **Verdict**: accepted risk, with the guide changed
+- **Why**: M19's entry "The daemon logs the account's username and display name at every READY" reopens
+  if the log leaves the machine on the user's behalf. It does not: nothing uploads it. But the Windows
+  guide asks its reader to paste the log into an issue, did so before this milestone by naming the file,
+  and now names a command that makes it one line. The log holds no password, token, port secret or
+  message, which the guide says. It does hold the instance's address, the username and the path of the
+  state directory, which names the OS account, and the guide now says that too, beside the request.
+- **Reopens if**: a command gathers or sends the log for the user (a support bundle, a crash reporter),
+  at which point what it holds is no longer theirs to trim; or the log gains anything a member of a
+  shared guild could not already see.
+
+### `norite logs tail --file` reads any file its user can
+- **Raised**: M23, `/security-sweep` of the finished branch
+- **Verdict**: not a vulnerability
+- **Why**: the command runs as the person who typed it and reads with their own permissions, like `cat`.
+  It crosses no boundary: nothing is read on the daemon's behalf or through it. What it adds over `cat`
+  is in the safe direction, since every byte is bounded and cleaned before it reaches the terminal, and a
+  pipe or a device at the path is refused. It lists the directory the file is in to find rotated copies,
+  which for a path somebody chose is a listing of a directory they chose.
+- **Reopens if**: the path ever comes from somewhere other than the command line or `daemon/logfile`,
+  such as `state.json` or the daemon's answer, or the command comes to run with more than its user's
+  permissions.

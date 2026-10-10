@@ -5,13 +5,21 @@ package daemonctl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/urfave/cli/v3"
+
+	"github.com/Alexnex31/Norite/cli/internal/output"
+
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
 )
 
-const daemonBinaryFlag = "daemon-binary"
+const (
+	daemonBinaryFlag = "daemon-binary"
+	lingerFlag       = "linger"
+)
 
 // managerFor builds the Manager each action operates through.
 //
@@ -25,7 +33,10 @@ var managerFor = func() (Manager, error) { return New(nil) }
 // Install and start are separate verbs rather than one "make it go" command. Provisioning a machine image
 // wants install without start; a user recovering from a crash wants start without touching the definition;
 // and a single fused command would have to guess which of those it was being asked for.
-func GroupCommand() *cli.Command {
+//
+// version is this CLI's, for attaching to the daemon: stop, restart and uninstall ask the daemon to stop
+// itself before they ask the service manager (M23).
+func GroupCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "daemon",
 		Usage: "manage the background daemon this machine's clients attach to",
@@ -35,11 +46,11 @@ func GroupCommand() *cli.Command {
 			"The CLI and GUI attach to it; they do not replace it.",
 		Commands: []*cli.Command{
 			installCommand(),
-			uninstallCommand(),
+			uninstallCommand(version),
 			startCommand(),
-			stopCommand(),
-			restartCommand(),
-			statusCommand(),
+			stopCommand(version),
+			restartCommand(version),
+			statusCommand(version),
 		},
 	}
 }
@@ -51,6 +62,9 @@ func installCommand() *cli.Command {
 		Description: "Writes a systemd user unit, a launchd agent, or a logon task depending on the\n" +
 			"platform, so the daemon starts automatically at login. It does not start it now —\n" +
 			"run `norite daemon start` for that.\n\n" +
+			"On Linux a service of your account stops when you log out of the machine for the last\n" +
+			"time. On a machine you reach only over SSH, that is whenever you disconnect, and\n" +
+			"--linger keeps it running.\n\n" +
 			"Safe to run again: an existing definition is replaced.",
 		Flags: []cli.Flag{
 			// Deliberately no Sources: cli.EnvVars(...) here. LocateDaemon already consults
@@ -63,11 +77,22 @@ func installCommand() *cli.Command {
 				Usage: "`PATH` of the norite-daemon executable to register (default: " +
 					DaemonBinaryEnvVar + ", then next to this binary, then PATH)",
 			},
+			&cli.BoolFlag{
+				Name: lingerFlag,
+				Usage: "Linux: keep your account's services running after you log out, so the daemon " +
+					"starts at boot and survives an SSH session ending",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			mgr, err := managerFor()
 			if err != nil {
 				return err
+			}
+			lingerer, canLinger := mgr.(Lingerer)
+			// Refused before anything is written: a flag that does nothing here is not one to accept.
+			if cmd.Bool(lingerFlag) && !canLinger {
+				return clierr.Usage("--linger is for Linux, where a service stops at logout; on this platform " +
+					"the daemon starts at login and there is nothing to keep it running without one")
 			}
 
 			binary, err := LocateDaemon(cmd.String(daemonBinaryFlag))
@@ -81,9 +106,10 @@ func installCommand() *cli.Command {
 
 			out := cmd.Root().Writer
 			fprintf(out, "Installed %s.\n", ServiceName)
-			fprintf(out, "  executable: %s\n", binary)
+			// Both are the environment's text, and a path may hold anything (rule 19).
+			fprintf(out, "  executable: %s\n", output.Clean(binary))
 			if path, err := mgr.DefinitionPath(); err == nil && path != "" {
-				fprintf(out, "  definition: %s\n", path)
+				fprintf(out, "  definition: %s\n", output.Clean(path))
 			}
 			// What follows differs by platform because the platforms differ: launchd starts the agent as
 			// part of loading it, and no amount of wishing makes install-without-start available there.
@@ -95,12 +121,48 @@ func installCommand() *cli.Command {
 				fprintf(out, "\nIt will start automatically at login. To start it now:\n")
 				fprintf(out, "  norite daemon start\n")
 			}
+			if canLinger {
+				return reportLinger(ctx, out, lingerer, cmd.Bool(lingerFlag))
+			}
 			return nil
 		},
 	}
 }
 
-func uninstallCommand() *cli.Command {
+// reportLinger says how the service stands once its user logs out, and asks for lingering when told to.
+//
+// Written after the last step that can fail, from what happened: an account that already lingers is told
+// so, one that was asked for and refused is told the command that needs a privilege this one has not got.
+func reportLinger(ctx context.Context, out io.Writer, l Lingerer, want bool) error {
+	lingering, err := l.Lingering(ctx)
+	if err != nil {
+		// A machine without logind, most likely. Nothing is known, so nothing is claimed, unless
+		// lingering was asked for, in which case not being able to tell is the answer.
+		if want {
+			return fmt.Errorf("the service is installed, and whether your account lingers could not be read: %w", err)
+		}
+		return nil
+	}
+	switch {
+	case lingering:
+		fprintf(out, "\nYour account lingers, so the daemon also starts at boot and keeps running after you log out.\n")
+		return nil
+	case !want:
+		fprintf(out, "\nIt stops when you log out of this machine for the last time, like every service of your\n")
+		fprintf(out, "account. Over SSH alone, that is whenever you disconnect. To keep it running:\n")
+		fprintf(out, "  norite daemon install --linger\n")
+		return nil
+	}
+	if err := l.EnableLinger(ctx); err != nil {
+		return fmt.Errorf("the service is installed, and lingering could not be turned on: %w. "+
+			"It usually needs an administrator: %s", err, LingerHint)
+	}
+	fprintf(out, "\nYour account now lingers: the daemon starts at boot and keeps running after you log out.\n")
+	fprintf(out, "To undo that: loginctl disable-linger\n")
+	return nil
+}
+
+func uninstallCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "uninstall",
 		Usage: "stop the daemon and remove it from the service manager",
@@ -111,6 +173,9 @@ func uninstallCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			// Uninstalling stops the daemon, and the service manager's stop is a kill on Windows. Asked
+			// first, the daemon has usually finished before the definition goes.
+			socketStop(ctx, version)
 			if err := mgr.Uninstall(ctx); err != nil {
 				return err
 			}
@@ -128,17 +193,45 @@ func startCommand() *cli.Command {
 	}
 }
 
-func stopCommand() *cli.Command {
+func stopCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "stop",
 		Usage: "stop the daemon now",
-		Description: "The daemon stays installed and will start again at your next login. To prevent that,\n" +
-			"use `norite daemon uninstall`.",
-		Action: simpleAction("Stopped", func(m Manager) func(context.Context) error { return m.Stop }),
+		Description: "Asks the daemon to stop, which lets it finish what it has begun, and then tells the\n" +
+			"service manager. A daemon started by hand is stopped too.\n\n" +
+			"An installed daemon will start again at your next login. To prevent that, use\n" +
+			"`norite daemon uninstall`.",
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			mgr, err := managerFor()
+			if err != nil {
+				return err
+			}
+			out := cmd.Root().Writer
+			asked := socketStop(ctx, version)
+			// Always, when there is a service: it is what makes the service manager's own record say
+			// stopped, and what stops a daemon the request did not reach. Stopping a stopped one succeeds.
+			err = mgr.Stop(ctx)
+			switch {
+			case err == nil:
+				fprintf(out, "Stopped %s.\n", ServiceName)
+				return nil
+			case !errors.Is(err, ErrNotInstalled) || asked == stopNotAsked:
+				// Unwrapped, as every Manager error is: it already says what to run, or quotes the command
+				// that failed.
+				return err
+			case asked == stopGone:
+				fprintf(out, "Stopped %s. It is not installed as a service, so nothing starts it at your next login.\n",
+					ServiceName)
+				return nil
+			default:
+				return fmt.Errorf("%s agreed to stop and has not exited after %s; it is not installed as a "+
+					"service, so there is nothing else here to stop it with", ServiceName, stopWait)
+			}
+		},
 	}
 }
 
-func restartCommand() *cli.Command {
+func restartCommand(version string) *cli.Command {
 	return &cli.Command{
 		Name:  "restart",
 		Usage: "stop the daemon and start it again",
@@ -147,6 +240,17 @@ func restartCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			// Asked before anything is stopped: with no service there is nothing to start the daemon
+			// again, and a restart that stops one started by hand and then fails has made things worse.
+			state, err := mgr.Status(ctx)
+			if err != nil {
+				return err
+			}
+			if !state.Installed {
+				return fmt.Errorf("%w. A daemon started by hand is stopped with `norite daemon stop` and "+
+					"started again the way it was started", ErrNotInstalled)
+			}
+			socketStop(ctx, version)
 			// Stop failures are surfaced rather than swallowed: if the daemon could not be stopped, starting
 			// it again either does nothing or produces a second one, and both are worse than saying so.
 			if err := mgr.Stop(ctx); err != nil {
@@ -157,47 +261,6 @@ func restartCommand() *cli.Command {
 			}
 			fprintf(cmd.Root().Writer, "Restarted %s.\n", ServiceName)
 			return nil
-		},
-	}
-}
-
-func statusCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "status",
-		Usage: "report whether the daemon is installed and running",
-		Description: "Exits 0 when the daemon is running, 1 when it is installed but stopped, and 2 when it\n" +
-			"is not installed — so a script can branch on the exit code without parsing this output.",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			mgr, err := managerFor()
-			if err != nil {
-				return err
-			}
-			state, err := mgr.Status(ctx)
-			if err != nil {
-				return err
-			}
-
-			out := cmd.Root().Writer
-			switch {
-			case !state.Installed:
-				fprintf(out, "%s is not installed.\n", ServiceName)
-				fprintf(out, "Run `norite daemon install` to register it with this machine's service manager.\n")
-				// A distinct exit code per state, so `norite daemon status` is usable as a condition. Exit
-				// codes are the machine-readable surface here; --json arrives with the CLI's JSON output
-				// machinery at M48 (docs/architecture.md §4), and inventing a one-off shape for it now would
-				// mean shipping a contract that the real one has to break.
-				return cli.Exit("", 2)
-			case !state.Running:
-				fprintf(out, "%s is installed but not running (%s).\n", ServiceName, state.Detail)
-				fprintf(out, "Run `norite daemon start` to start it.\n")
-				return cli.Exit("", 1)
-			default:
-				fprintf(out, "%s is running (%s).\n", ServiceName, state.Detail)
-				if hint := mgr.LogHint(); hint != "" {
-					fprintf(out, "Logs: %s\n", hint)
-				}
-				return nil
-			}
 		},
 	}
 }

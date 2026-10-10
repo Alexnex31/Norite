@@ -306,17 +306,6 @@ func TestRunCreatesTheStateDirectoryItWasGiven(t *testing.T) {
 	}
 }
 
-func TestRaiseFileLimitDoesNotFail(t *testing.T) {
-	// Asserting a specific number would be asserting the machine's hard limit, which CI containers set
-	// wherever they like. What matters is that the call is safe to make unprivileged and never returns an
-	// error that would show up as a warning on every single start.
-	limit, err := raiseFileLimit()
-	if err != nil {
-		t.Fatalf("raiseFileLimit: %v", err)
-	}
-	t.Logf("resulting soft RLIMIT_NOFILE: %d", limit)
-}
-
 func indexOf(haystack, needle string) int { return strings.Index(haystack, needle) }
 
 // syncBuffer is a bytes.Buffer safe to write from the daemon goroutine and read from the test's.
