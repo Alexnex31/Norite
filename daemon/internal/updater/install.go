@@ -53,6 +53,11 @@ type Record struct {
 	Available string `json:"available,omitempty"`
 	// LastError is why the last check or installation failed, or "".
 	LastError string `json:"last_error,omitempty"`
+	// Mode and Channel are what the account chose (ipc.UpdateAuto and the rest), or "" for the default.
+	// They are here and not in config.toml because they are this machine's and the daemon's own, as the
+	// port for scripts' switch is: the daemon interprets nobody's config file (M21).
+	Mode    string `json:"mode,omitempty"`
+	Channel string `json:"channel,omitempty"`
 }
 
 // Outcome is what a start found in the record.

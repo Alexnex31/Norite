@@ -24,14 +24,20 @@ import (
 // matchesStopping holds an answer to daemon-ipc.schema.json's Stopping.
 func matchesStopping(t *testing.T, body []byte) {
 	t.Helper()
+	matchesDefinition(t, "Stopping", body)
+}
+
+// matchesDefinition holds a body to one of daemon-ipc.schema.json's definitions.
+func matchesDefinition(t *testing.T, name string, body []byte) {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "daemon-ipc.schema.json"))
 	require.NoError(t, err)
 	var doc struct {
 		Defs map[string]json.RawMessage `json:"$defs"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &doc))
-	require.Contains(t, doc.Defs, "Stopping")
-	def, err := jsonschema.UnmarshalJSON(bytes.NewReader(doc.Defs["Stopping"]))
+	require.Contains(t, doc.Defs, name)
+	def, err := jsonschema.UnmarshalJSON(bytes.NewReader(doc.Defs[name]))
 	require.NoError(t, err)
 	c := jsonschema.NewCompiler()
 	require.NoError(t, c.AddResource("stopping.json", def))

@@ -411,6 +411,7 @@ type harness struct {
 	creds  *fakeCreds
 	sink   *recordingSink
 	logs   *syncBuffer
+	client *Client
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -432,6 +433,7 @@ func start(t *testing.T, tweak ...func(*Options)) *harness {
 	ctx, cancel := context.WithCancel(t.Context())
 	h.cancel, h.done = cancel, make(chan struct{})
 	client := New(opts)
+	h.client = client
 	go func() { defer close(h.done); client.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
@@ -649,6 +651,16 @@ func TestAVersionMismatchIsNotRetriedSoon(t *testing.T) {
 		assert.Equal(t, websocket.StatusNormalClosure, c.closedWith(), "and no IDENTIFY was sent")
 		h.g.noConnectionWithin(200 * time.Millisecond)
 		assert.Contains(t, h.logs.String(), "upgrade the client")
+		// The version of the instance that refused it is the one the updater needs (M24).
+		assert.Equal(t, "0.2.0", h.client.ServerVersion())
+	})
+	t.Run("a version too long to be one is not kept", func(t *testing.T) {
+		h := start(t, func(o *Options) { o.Version = "0.1.0" })
+		assert.Empty(t, h.client.ServerVersion(), "before any HELLO")
+		c := h.g.next()
+		c.hello(time.Now(), strings.Repeat("9", 65), time.Minute)
+		c.closedWith()
+		assert.Empty(t, h.client.ServerVersion())
 	})
 	t.Run("the server refuses the daemon", func(t *testing.T) {
 		h := start(t)

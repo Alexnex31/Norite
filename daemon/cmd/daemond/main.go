@@ -42,6 +42,11 @@ const (
 	exitFailure       = 1
 	exitAlreadyUp     = 3
 	exitMisconfigured = 4
+	// exitRestart asks whatever runs the daemon to run it again: the program on disk has changed (M24).
+	// On Unix the process replaces itself and this is only what is left when that fails. On Windows there
+	// is no replacing a process, and this is how every update ends: the task restarts a daemon that
+	// exits non-zero. It must stay out of the systemd unit's RestartPreventExitStatus.
+	exitRestart = 5
 )
 
 func main() {
@@ -90,8 +95,12 @@ func main() {
 		stderr = os.Stderr
 	}
 
+	// Asked before the run, which may rename another program over this one's name (M24).
+	self, selfErr := os.Executable()
+
 	err := daemonproc.Run(ctx, daemonproc.Options{
 		Version:  Version,
+		Updates:  true,
 		LogLevel: level,
 		LogFile:  *logFile,
 		Stderr:   stderr,
@@ -100,6 +109,17 @@ func main() {
 	switch {
 	case err == nil:
 		return
+	case errors.Is(err, daemonproc.ErrRestart):
+		// The run returned and released its lock; the program at this one's path is now another version.
+		stop()
+		if selfErr != nil {
+			fmt.Fprintf(os.Stderr, "norite-daemon: cannot find this program to start it again: %v\n", selfErr)
+			os.Exit(exitRestart)
+		}
+		if err := startAgain(self); err != nil {
+			fmt.Fprintf(os.Stderr, "norite-daemon: cannot start the installed version: %v\n", err)
+		}
+		os.Exit(exitRestart)
 	case errors.Is(err, daemonproc.ErrAlreadyRunning):
 		// Not a failure worth alarming anyone over — say so plainly and exit with a code the caller can
 		// tell apart from a real problem. `norite daemon status` is the way to see the running one.

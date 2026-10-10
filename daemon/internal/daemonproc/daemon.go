@@ -18,11 +18,14 @@ package daemonproc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 
@@ -33,6 +36,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/relay"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/state"
+	"github.com/Alexnex31/Norite/daemon/internal/updater"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/logfile"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -51,6 +55,11 @@ type Options struct {
 	// The lock is not affected — it stays in the state directory, which is what makes it a reliable
 	// per-user rendezvous point regardless of where logs were pointed.
 	LogFile string
+
+	// Updates turns on the updater's schedule: reading the release listing, and installing what it
+	// verifies (M24). cmd/daemond sets it. A test leaves it off, so no test asks the network anything;
+	// the requests about updating are answered either way.
+	Updates bool
 
 	// Version is reported in the startup log, so a support question about behavior can be tied to a build.
 	Version string
@@ -159,6 +168,32 @@ func Run(ctx context.Context, opts Options) error {
 		defer release()
 	}
 
+	// Before anything else runs, and with the lock held: a version installed by the updater that did not
+	// stay up is undone here, and this process then makes way for the one put back (M24). The gateway
+	// client does not exist yet, so the instance's version is asked through a pointer filled in below.
+	var gateway atomic.Pointer[gatewayclient.Client]
+	var local *localRequests
+	update := updater.New(updater.Options{
+		Version: opts.Version, StateDir: stateDir, Executable: executable(), Log: log.With().Str("subsystem", "update").Logger(),
+		Instance: func() string {
+			if gw := gateway.Load(); gw != nil {
+				return gw.ServerVersion()
+			}
+			return ""
+		},
+		Restart: stopRun,
+		Changed: func() {
+			if local != nil {
+				if box := local.sink.Load(); box != nil {
+					box.Local(ipc.EventUpdate, json.RawMessage("{}"))
+				}
+			}
+		},
+	})
+	if update.AtStart(previous != "") {
+		return ErrRestart
+	}
+
 	// The session runs for the daemon's whole life, in its own goroutine, and "ready" does not wait for it.
 	// M7 signed in before reporting ready so an attach client would find the session established; that
 	// stopped being possible to promise at M19, when signing in became something that can take indefinitely
@@ -166,7 +201,6 @@ func Run(ctx context.Context, opts Options) error {
 	// logout). A client has to handle "not signed in" whenever it attaches, so it may as well at startup.
 	var components sync.WaitGroup
 	// What the daemon answers itself, when it serves the attach socket at all.
-	var local *localRequests
 	if opts.SkipSession {
 		log.Debug().Msg("session establishment skipped")
 	} else {
@@ -193,6 +227,7 @@ func Run(ctx context.Context, opts Options) error {
 		// The requests the daemon answers itself. They are about this machine, so they are served whichever
 		// branch below is taken: signed in or not, credential store or none.
 		local = newLocal(stateDir, stopRun, log, part("config"))
+		local.update = update
 
 		store, err := credentials.OpenIn(stateDir)
 		if err != nil {
@@ -240,6 +275,7 @@ func Run(ctx context.Context, opts Options) error {
 				Credentials: src, Sink: server, Version: opts.Version,
 				Log: part("gateway"),
 			})
+			gateway.Store(gw)
 			components.Go(func() { gw.Run(ctx) })
 			components.Go(func() { server.Serve(ctx, listener) })
 			components.Go(func() { watchConfig(ctx, server, part("config")) })
@@ -256,6 +292,10 @@ func Run(ctx context.Context, opts Options) error {
 		})
 	}
 
+	if opts.Updates {
+		components.Go(func() { update.Run(ctx) })
+	}
+
 	log.Info().Msg("daemon ready")
 	if opts.Ready != nil {
 		opts.Ready()
@@ -268,8 +308,32 @@ func Run(ctx context.Context, opts Options) error {
 	// finish before a second daemon can take the lock and read it.
 	log.Info().Msg("daemon stopping")
 	components.Wait()
+	// Everything that writes has stopped and the lock is still held: the one moment the programs on disk
+	// can be replaced. A run that ended to install a release ends by asking to be replaced.
+	if update.Finish() {
+		log.Info().Msg("daemon stopped, to start again as the version now installed")
+		return ErrRestart
+	}
 	log.Info().Msg("daemon stopped")
 	return nil
+}
+
+// ErrRestart is a run that ended so that the program now on disk can take its place: a release was
+// installed, or one that did not stay up was undone (M24). cmd/daemond replaces the process on Unix, and
+// on Windows exits with a code its task restarts on.
+var ErrRestart = errors.New("the daemon must start again as the version now installed")
+
+// executable is this daemon's own path with links resolved, or "" when it cannot be found. Asked at the
+// start of a run, before anything is renamed over it.
+func executable() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return path
 }
 
 // ErrMisconfigured is a daemon that cannot run as configured, where starting it again changes nothing: the

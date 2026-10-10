@@ -1,0 +1,417 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package updater
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/Alexnex31/Norite/daemon/installreceipt"
+	"github.com/Alexnex31/Norite/daemon/ipc"
+)
+
+// world is one installation: a state directory with a receipt, a bin directory holding 0.1.0's pair, and a
+// release host offering 0.1.1, whose daemon is a script that reports that version.
+type world struct {
+	t         *testing.T
+	state     string
+	bin       string
+	host      *host
+	listing   atomic.Value // string: the listing's body
+	listed    atomic.Int32
+	restarts  atomic.Int32
+	changes   atomic.Int32
+	busy      atomic.Bool
+	instance  atomic.Value // string
+	verifyErr atomic.Value // error
+}
+
+const newDaemonScript = "#!/bin/sh\necho 0.1.1\n"
+
+func newWorld(t *testing.T) *world {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in daemon is a shell script")
+	}
+	root := t.TempDir()
+	w := &world{t: t, state: filepath.Join(root, "state"), bin: filepath.Join(root, "bin")}
+	for _, dir := range []string{w.state, w.bin} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{cliName, daemonName} {
+		if err := os.WriteFile(filepath.Join(w.bin, name), []byte("0.1.0 "+name), 0o755); err != nil { //nolint:gosec // a stand-in program
+			t.Fatal(err)
+		}
+	}
+	if err := installreceipt.Write(w.state, installreceipt.Receipt{BinDir: w.bin, By: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	archive := fmt.Sprintf("norite_0.1.1_linux_%s.tar.gz", runtime.GOARCH)
+	w.host = newHost(t, "v0.1.1", archive, tarGz(t, entry{name: "norite", body: "0.1.1 norite"},
+		entry{name: "norite-daemon", body: newDaemonScript}))
+	w.listing.Store(`[{"tag_name":"v0.1.1"},{"tag_name":"v0.1.0"}]`)
+	w.instance.Store("")
+	inner := w.host.server.Config.Handler
+	w.host.server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/releases" {
+			w.listed.Add(1)
+			_, _ = fmt.Fprint(rw, w.listing.Load().(string))
+			return
+		}
+		inner.ServeHTTP(rw, r)
+	})
+	return w
+}
+
+// updater builds the Updater for a daemon of the given version running from the bin directory.
+func (w *world) updater(version string, change ...func(*Options)) *Updater {
+	src := sourceAt(w.host.server)
+	o := Options{Version: version, StateDir: w.state, Executable: filepath.Join(w.bin, daemonName),
+		Source: &src, GOOS: "linux", Log: zerolog.Nop(),
+		Instance: func() string { return w.instance.Load().(string) },
+		Busy:     w.busy.Load,
+		Restart:  func() { w.restarts.Add(1) },
+		Changed:  func() { w.changes.Add(1) },
+		Verify: func(_, _ []byte, _ string) error {
+			if err, _ := w.verifyErr.Load().(error); err != nil {
+				return err
+			}
+			return nil
+		}}
+	for _, c := range change {
+		c(&o)
+	}
+	return New(o)
+}
+
+func (w *world) daemonOnDisk() string {
+	w.t.Helper()
+	got, err := os.ReadFile(filepath.Join(w.bin, daemonName))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return string(got)
+}
+
+func TestWhichDaemonsInstallReleases(t *testing.T) {
+	w := newWorld(t)
+	if u := w.updater("0.1.0"); !u.installs || u.Status().Mode != ipc.UpdateAuto {
+		t.Errorf("an installer's install: installs=%v (%s), mode %s", u.installs, u.reason, u.Status().Mode)
+	}
+	cases := map[string]*Updater{
+		"development build": w.updater("dev"),
+		"not the one":       w.updater("0.1.0", func(o *Options) { o.Executable = "/usr/bin/norite-daemon" }),
+		"macOS":             w.updater("0.1.0", func(o *Options) { o.GOOS = "darwin" }),
+	}
+	if err := installreceipt.Remove(w.state); err != nil {
+		t.Fatal(err)
+	}
+	cases["not made by"] = w.updater("0.1.0")
+	for says, u := range cases {
+		s := u.Status()
+		if s.Installs || !strings.Contains(s.Reason, says) {
+			t.Errorf("%s: installs=%v, reason %q", says, s.Installs, s.Reason)
+		}
+		// Told nothing would change, it is not changed: the default is to say so and wait.
+		if s.Mode != ipc.UpdateNotify {
+			t.Errorf("%s: mode %s", says, s.Mode)
+		}
+		if _, err := u.SetMode(ipc.UpdateAuto); err == nil {
+			t.Errorf("%s: auto was accepted by a daemon that installs nothing", says)
+		}
+		if _, err := u.Apply(t.Context()); err == nil {
+			t.Errorf("%s: apply was accepted", says)
+		}
+		if u.AtStart(true) {
+			t.Errorf("%s: asked to restart at start", says)
+		}
+	}
+	if w.restarts.Load() != 0 || w.daemonOnDisk() != "0.1.0 norite-daemon" {
+		t.Errorf("something was installed or restarted")
+	}
+}
+
+func TestAnAutomaticUpdateInstallsWhenTheRunEnds(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	if waiting := u.scheduled(t.Context()); waiting {
+		t.Fatal("nothing defers it, and it waits")
+	}
+	if w.restarts.Load() != 1 {
+		t.Fatalf("the run was asked to end %d times", w.restarts.Load())
+	}
+	// Nothing is on disk until the run has ended.
+	if w.daemonOnDisk() != "0.1.0 norite-daemon" {
+		t.Fatal("the program was replaced while the daemon was still running")
+	}
+	if !u.Finish() {
+		t.Fatal("Finish did not ask for the new version to be started")
+	}
+	if w.daemonOnDisk() != newDaemonScript {
+		t.Errorf("the daemon on disk is %q", w.daemonOnDisk())
+	}
+
+	// The new version starts, is on trial, and says so.
+	next := w.updater("0.1.1")
+	if next.AtStart(false) {
+		t.Fatal("the new version was undone at its first start")
+	}
+	if s := next.Status(); s.Trial != "0.1.1" || s.Available != "" {
+		t.Errorf("status %+v", s)
+	}
+}
+
+func TestNotifyChecksAndDownloadsNothing(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	u.scheduled(t.Context())
+	if s := u.Status(); s.Available != "0.1.1" || s.LastCheck == "" {
+		t.Errorf("status %+v", s)
+	}
+	if n := w.host.asked["checksums.txt"].Load(); n != 0 || w.restarts.Load() != 0 {
+		t.Errorf("notify downloaded (%d) or restarted (%d)", n, w.restarts.Load())
+	}
+	if u.Finish() {
+		t.Errorf("a run that ended for no update asked to be replaced")
+	}
+
+	// Asked, it installs.
+	if _, err := u.Apply(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for w.restarts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.restarts.Load() != 1 || !u.Finish() || w.daemonOnDisk() != newDaemonScript {
+		t.Errorf("apply: restarts=%d, on disk %q", w.restarts.Load(), w.daemonOnDisk())
+	}
+}
+
+func TestAnUnverifiedReleaseIsRefusedAndTheVersionKeepsRunning(t *testing.T) {
+	w := newWorld(t)
+	w.verifyErr.Store(fmt.Errorf("%w: test", ErrNotVerified))
+	u := w.updater("0.1.0")
+	if waiting := u.scheduled(t.Context()); waiting {
+		t.Error("a refused release is waiting to be installed")
+	}
+	_, err := u.Apply(t.Context())
+	var refused *ErrRefused
+	if !errors.As(err, &refused) || !strings.Contains(refused.Msg, "keeps running") {
+		t.Errorf("apply: %v", err)
+	}
+	if w.restarts.Load() != 0 || u.Finish() || w.daemonOnDisk() != "0.1.0 norite-daemon" {
+		t.Errorf("an unverified release changed something")
+	}
+	if s := u.Status(); !strings.Contains(s.LastError, "did not verify") {
+		t.Errorf("last error %q", s.LastError)
+	}
+}
+
+func TestADowngradeIsNeverChosen(t *testing.T) {
+	w := newWorld(t)
+	// The host offers only what is older than what runs, validly listed.
+	u := w.updater("0.1.2")
+	u.scheduled(t.Context())
+	if _, err := u.Apply(t.Context()); err == nil {
+		t.Error("apply moved to an older version")
+	}
+	if s := u.Status(); s.Available != "" || w.restarts.Load() != 0 || w.host.asked["checksums.txt"].Load() != 0 {
+		t.Errorf("status %+v, restarts %d", s, w.restarts.Load())
+	}
+}
+
+func TestTheInstanceBoundsTheChoice(t *testing.T) {
+	w := newWorld(t)
+	w.instance.Store("0.2.0")
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	if s := u.Status(); s.Available != "" || w.restarts.Load() != 0 {
+		t.Errorf("moved within 0.1 while signed in to a 0.2 instance: %+v", s)
+	}
+}
+
+func TestAnUpdateWaitsWhileBusy(t *testing.T) {
+	w := newWorld(t)
+	w.busy.Store(true)
+	u := w.updater("0.1.0")
+	if !u.scheduled(t.Context()) || w.restarts.Load() != 0 {
+		t.Fatalf("a busy daemon was restarted (%d)", w.restarts.Load())
+	}
+	if _, err := u.Apply(t.Context()); err == nil || !strings.Contains(err.Error(), "ready") {
+		t.Errorf("apply while busy: %v", err)
+	}
+	asked := w.listed.Load()
+	w.busy.Store(false)
+	if u.scheduled(t.Context()) || w.restarts.Load() != 1 {
+		t.Errorf("not installed once free: restarts %d", w.restarts.Load())
+	}
+	// What was staged is installed; the listing was not asked again for it.
+	if w.listed.Load() != asked {
+		t.Errorf("the listing was read again for a release already staged")
+	}
+}
+
+func TestAFailedInstallationStillStartsTheDaemonAgain(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	// The installed command vanishes before the run ends, so the pair cannot be kept and nothing is swapped.
+	if err := os.Remove(filepath.Join(w.bin, cliName)); err != nil {
+		t.Fatal(err)
+	}
+	if !u.Finish() {
+		t.Error("a run that ended to install, and could not, did not ask to be started again")
+	}
+	if w.daemonOnDisk() != "0.1.0 norite-daemon" {
+		t.Errorf("on disk: %q", w.daemonOnDisk())
+	}
+}
+
+func TestOffAsksNobodyAnything(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, 10*time.Millisecond)
+	lower(t, &checkJitter, 0)
+	lower(t, &checkEvery, 20*time.Millisecond)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateOff); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	time.Sleep(200 * time.Millisecond)
+	if n := w.listed.Load(); n != 0 {
+		t.Errorf("with updates off the listing was read %d times", n)
+	}
+	// Asked outright, it still answers.
+	if s, err := u.Check(t.Context()); err != nil || s.Available != "0.1.1" {
+		t.Errorf("a check asked for: %+v, %v", s, err)
+	}
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if w.listed.Load() < 3 {
+		t.Errorf("with updates on the schedule read the listing %d times", w.listed.Load())
+	}
+}
+
+func TestTheFirstCheckWaitsOutARecentOne(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	if wait := u.untilFirstCheck(); wait > firstCheck+checkJitter {
+		t.Errorf("never checked, and waits %s", wait)
+	}
+	if _, err := u.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// A daemon restarted in a loop does not ask the host at every start.
+	if wait := w.updater("0.1.0").untilFirstCheck(); wait < 23*time.Hour {
+		t.Errorf("checked a moment ago, and waits only %s", wait)
+	}
+}
+
+func TestAListingThatCannotBeReadIsSaidAndNothingElse(t *testing.T) {
+	w := newWorld(t)
+	w.listing.Store("<html>rate limited \x1b[2J</html>")
+	u := w.updater("0.1.0")
+	_, err := u.Check(t.Context())
+	var refused *ErrRefused
+	if !errors.As(err, &refused) || strings.ContainsRune(refused.Msg, 0x1b) {
+		t.Errorf("check: %v", err)
+	}
+	if s := u.Status(); s.LastError == "" || strings.ContainsRune(s.LastError, 0x1b) || s.Available != "" {
+		t.Errorf("status %+v", s)
+	}
+	if w.changes.Load() == 0 {
+		t.Errorf("nobody was told the status changed")
+	}
+}
+
+func TestModeAndChannelTakeOnlyTheirWords(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	for _, word := range []string{"", "AUTO", "on", "always", "../off"} {
+		if _, err := u.SetMode(word); err == nil {
+			t.Errorf("mode %q accepted", word)
+		}
+		if _, err := u.SetChannel(word); err == nil {
+			t.Errorf("channel %q accepted", word)
+		}
+	}
+	w.listing.Store(`[{"tag_name":"v0.1.2-rc.1"}]`)
+	if s, _ := u.Check(t.Context()); s.Available != "" {
+		t.Errorf("a stable install was offered %s", s.Available)
+	}
+	if _, err := u.SetChannel(ipc.ChannelPrerelease); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := u.Check(t.Context()); s.Available != "0.1.2-rc.1" || s.Channel != ipc.ChannelPrerelease {
+		t.Errorf("opted in: %+v", s)
+	}
+	// Going back forgets what the other channel offered.
+	if s, _ := u.SetChannel(ipc.ChannelStable); s.Available != "" {
+		t.Errorf("back on stable, still offered %s", s.Available)
+	}
+}
+
+func TestARolledBackVersionIsSaidAndNotOfferedAgain(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	u.Finish()
+
+	// A 0.1.1 that is not the installed daemon, a build somebody is running from a checkout, is not the one
+	// on trial: however it starts, it counts for nothing and writes over nothing.
+	elsewhere := func(o *Options) { o.Executable = "/home/somebody/src/bin/norite-daemon" }
+	for i := 0; i < 4; i++ {
+		if w.updater("0.1.1", elsewhere).AtStart(true) {
+			t.Fatal("a daemon that is not the installed one undid the installed one")
+		}
+	}
+	if w.daemonOnDisk() != newDaemonScript {
+		t.Fatalf("on disk: %q", w.daemonOnDisk())
+	}
+
+	// 0.1.1 starts three times and never stays up. The third start undoes it.
+	for i, want := range []bool{false, false, true} {
+		if got := w.updater("0.1.1").AtStart(false); got != want {
+			t.Fatalf("start %d of the new version: restart=%v", i+1, got)
+		}
+	}
+	if w.daemonOnDisk() != "0.1.0 norite-daemon" {
+		t.Fatalf("on disk after the rollback: %q", w.daemonOnDisk())
+	}
+	back := w.updater("0.1.0")
+	if back.AtStart(false) {
+		t.Fatal("the restored version was asked to restart")
+	}
+	restarts := w.restarts.Load()
+	back.scheduled(t.Context())
+	if s := back.Status(); s.RolledBack != "0.1.1" || s.Available != "" || w.restarts.Load() != restarts {
+		t.Errorf("after a rollback: %+v", s)
+	}
+}

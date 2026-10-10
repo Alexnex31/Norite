@@ -55,6 +55,10 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 		return outcome{ending: ending}
 	}
 
+	// Bounded before it is kept: a version is a few bytes, and this is a stranger's text.
+	if reported := hello.Version; len(reported) <= 64 {
+		c.serverVersion.Store(&reported)
+	}
 	compat := gatewayproto.Check(hello.Version, c.version)
 	if !compat.Compatible {
 		c.log.Error().Str("server_version", termsafe.Text(hello.Version)).Str("client_version", c.version).

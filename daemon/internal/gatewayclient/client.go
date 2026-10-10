@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -111,6 +112,10 @@ const (
 
 // Client is the daemon's gateway connection.
 type Client struct {
+	// serverVersion is the version the instance last reported in HELLO, as it wrote it. Read by the
+	// updater from another goroutine (M24).
+	serverVersion atomic.Pointer[string]
+
 	creds   Credentials
 	sink    Sink
 	version string
@@ -349,3 +354,14 @@ func closeEnding(code websocket.StatusCode) ending {
 
 // errHeartbeatMissed is how the heartbeat ends a connection the server has stopped answering.
 var errHeartbeatMissed = errors.New("the gateway stopped acknowledging heartbeats")
+
+// ServerVersion is the version the instance reported in its last HELLO, or "" before any. It is kept
+// whether or not the handshake then went on: an instance that refuses this daemon for its version is the
+// one whose version the updater most needs (M24). The text is the instance's, to be parsed and never
+// printed as it is.
+func (c *Client) ServerVersion() string {
+	if v := c.serverVersion.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
