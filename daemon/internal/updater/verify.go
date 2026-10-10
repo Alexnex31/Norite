@@ -37,10 +37,6 @@ const (
 //go:embed trusted_root.json
 var embeddedRoot []byte
 
-// trustedRootJSON is the root verification uses. A release build has exactly one value for it. A build
-// with the norite_testroot tag, which nothing released carries, replaces it (testroot.go).
-var trustedRootJSON = func() []byte { return embeddedRoot }
-
 // ErrNotVerified is a release whose signature did not verify. Whatever it wraps, nothing of that release
 // is used.
 var ErrNotVerified = errors.New("the release's signature did not verify")
@@ -48,26 +44,40 @@ var ErrNotVerified = errors.New("the release's signature did not verify")
 // Verifier checks that a checksums.txt is the one this repository's release workflow signed for a tag.
 type Verifier struct {
 	verifier *verify.Verifier
+	// logged is whether a certificate must prove it was written to a certificate log. See newVerifierOn.
+	logged bool
 }
 
 // NewVerifier builds a Verifier on the trusted root.
 func NewVerifier() (*Verifier, error) {
-	trusted, err := root.NewTrustedRootFromJSON(trustedRootJSON())
+	trusted, err := root.NewTrustedRootFromJSON(embeddedRoot)
 	if err != nil {
 		return nil, fmt.Errorf("reading the trusted root: %w", err)
 	}
+	return newVerifierOn(trusted, true)
+}
+
+// newVerifierOn builds a Verifier that trusts what material says to trust. NewVerifier passes the embedded
+// root and nothing else in a release build does; the tests pass an authority they made, to sign things the
+// real one never would.
+//
+// logged is whether the certificate must carry proof that it was written to a certificate log when it
+// was issued. It is true for every Verifier that is not a test's: the authority a test makes issues
+// certificates with no such proof, which is exactly what a real one must be refused for.
+func newVerifierOn(trusted root.TrustedMaterial, logged bool) (*Verifier, error) {
 	// All three, as cosign's own verify-blob asks by default: the certificate was logged when it was
 	// issued, the signature was logged when it was made, and something other than this machine's clock
 	// says when that was. The last is what lets a ten-minute certificate be checked years later, and what
 	// keeps a wrong clock here from deciding anything.
-	v, err := verify.NewVerifier(trusted,
-		verify.WithSignedCertificateTimestamps(1),
-		verify.WithTransparencyLog(1),
-		verify.WithObserverTimestamps(1))
+	options := []verify.VerifierOption{verify.WithTransparencyLog(1), verify.WithObserverTimestamps(1)}
+	if logged {
+		options = append(options, verify.WithSignedCertificateTimestamps(1))
+	}
+	v, err := verify.NewVerifier(trusted, options...)
 	if err != nil {
 		return nil, fmt.Errorf("building the verifier: %w", err)
 	}
-	return &Verifier{verifier: v}, nil
+	return &Verifier{verifier: v, logged: logged}, nil
 }
 
 // Verify reports whether bundleJSON is the release workflow's signature over checksums, made for tag.
@@ -88,12 +98,17 @@ func (v *Verifier) Verify(checksums, bundleJSON []byte, tag string) error {
 	if err := b.UnmarshalJSON(bundleJSON); err != nil {
 		return fmt.Errorf("%w: the bundle cannot be read: %w", ErrNotVerified, err)
 	}
+	return v.verifyEntity(checksums, &b, tag)
+}
+
+// verifyEntity is Verify once the bundle has been read.
+func (v *Verifier) verifyEntity(checksums []byte, signed verify.SignedEntity, tag string) error {
 	identity, err := verify.NewShortCertificateIdentity(oidcIssuer, "", releaseWorkflow+tag, "")
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrNotVerified, err)
 	}
 	policy := verify.NewPolicy(verify.WithArtifact(bytes.NewReader(checksums)), verify.WithCertificateIdentity(identity))
-	if _, err := v.verifier.Verify(&b, policy); err != nil {
+	if _, err := v.verifier.Verify(signed, policy); err != nil {
 		return fmt.Errorf("%w: %w", ErrNotVerified, err)
 	}
 	return nil

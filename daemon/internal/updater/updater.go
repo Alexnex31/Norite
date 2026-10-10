@@ -36,6 +36,15 @@ var (
 	applyTimeout = 100 * time.Second
 )
 
+// The three things the norite_testrelease build replaces (testrelease.go). In every other build they are
+// nil and nothing assigns them: where releases come from, what makes one believed, and a hook run once the
+// daemon has started.
+var (
+	sourceOverride func(version string) *Source
+	verifyOverride func(checksums, bundle []byte, tag string) error
+	startedHook    func(running string)
+)
+
 // ErrRefused is a request understood and not carried out, with nothing changed. Its text is for a person.
 type ErrRefused struct{ Msg string }
 
@@ -96,6 +105,12 @@ func New(o Options) *Updater {
 	if o.Source == nil {
 		src := DefaultSource(o.Version)
 		o.Source = &src
+		if sourceOverride != nil {
+			o.Source = sourceOverride(o.Version)
+		}
+	}
+	if o.Verify == nil {
+		o.Verify = verifyOverride
 	}
 	if o.Changed == nil {
 		o.Changed = func() {}
@@ -139,6 +154,9 @@ func (u *Updater) AtStart(crashed bool) bool {
 		u.opts.Log.Error().Str("error", termsafe.Text(err.Error())).
 			Msg("an update that did not stay up could not be undone; this version keeps running")
 		return false
+	}
+	if startedHook != nil && outcome != RolledBack {
+		defer startedHook(u.current.String())
 	}
 	switch outcome {
 	case RolledBack:

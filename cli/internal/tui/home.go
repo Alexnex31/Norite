@@ -5,7 +5,6 @@ package tui
 
 import (
 	"context"
-	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"slices"
 	"strings"
 
@@ -14,6 +13,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
