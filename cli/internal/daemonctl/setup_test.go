@@ -102,3 +102,28 @@ func TestSetupStartIsTheServiceManagers(t *testing.T) {
 		t.Errorf("err=%v starts=%d", err, mgr.starts)
 	}
 }
+
+// A path is the environment's text: XDG_CONFIG_HOME decides where a definition is, and it may hold anything.
+// Neither command prints one raw (rule 19, M23 /security-audit).
+func TestThePathsAnInstallPrintsAreCleaned(t *testing.T) {
+	t.Setenv(DaemonBinaryEnvVar, writeExecutable(t, t.TempDir(), daemonBinaryName))
+	hostile := "/tmp/\x1b[2Jcfg/norite-daemon.service"
+
+	mgr := &stubManager{definition: hostile}
+	withManager(t, mgr, nil)
+	var out bytes.Buffer
+	if err := (Setup{}).InstallAndStart(t.Context(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsRune(out.String(), 0x1b) || !strings.Contains(out.String(), "definition: ") {
+		t.Errorf("the login offer printed a path as it came: %q", out.String())
+	}
+
+	stdout, err := runCommand(t, &stubManager{definition: hostile}, "daemon", "install")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsRune(stdout, 0x1b) || !strings.Contains(stdout, "definition: ") {
+		t.Errorf("install printed a path as it came: %q", stdout)
+	}
+}

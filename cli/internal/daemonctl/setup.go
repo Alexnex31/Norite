@@ -6,6 +6,8 @@ package daemonctl
 import (
 	"context"
 	"io"
+
+	"github.com/Alexnex31/Norite/cli/internal/output"
 )
 
 // Setup brings the daemon up on behalf of a command that is not one of this group's: `norite login`, which
@@ -55,9 +57,10 @@ func (s Setup) InstallAndStart(ctx context.Context, out io.Writer) error {
 	// Which program was registered, as `norite daemon install` says: it was found by looking, in the
 	// environment, beside this binary and on PATH, and it now runs at every login holding the sign-in.
 	// Somebody who said yes to a question should be shown what the yes registered.
-	fprintf(out, "  executable: %s\n", binary)
+	// Both are the environment's text, and a path may hold anything (rule 19).
+	fprintf(out, "  executable: %s\n", output.Clean(binary))
 	if path, err := mgr.DefinitionPath(); err == nil && path != "" {
-		fprintf(out, "  definition: %s\n", path)
+		fprintf(out, "  definition: %s\n", output.Clean(path))
 	}
 	if lingerer, ok := mgr.(Lingerer); ok {
 		// What happens at logout, which on a machine reached over SSH is the next thing to happen.

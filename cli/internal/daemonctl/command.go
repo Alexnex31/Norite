@@ -11,6 +11,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/Alexnex31/Norite/cli/internal/output"
+
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 )
 
@@ -104,9 +106,10 @@ func installCommand() *cli.Command {
 
 			out := cmd.Root().Writer
 			fprintf(out, "Installed %s.\n", ServiceName)
-			fprintf(out, "  executable: %s\n", binary)
+			// Both are the environment's text, and a path may hold anything (rule 19).
+			fprintf(out, "  executable: %s\n", output.Clean(binary))
 			if path, err := mgr.DefinitionPath(); err == nil && path != "" {
-				fprintf(out, "  definition: %s\n", path)
+				fprintf(out, "  definition: %s\n", output.Clean(path))
 			}
 			// What follows differs by platform because the platforms differ: launchd starts the agent as
 			// part of loading it, and no amount of wishing makes install-without-start available there.

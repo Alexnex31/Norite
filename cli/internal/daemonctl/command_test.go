@@ -21,6 +21,8 @@ type stubManager struct {
 	startErr        error
 	stopErr         error
 	startsOnInstall bool
+	// definition is what DefinitionPath answers, when a test cares.
+	definition string
 
 	installed  []string
 	uninstalls int
@@ -37,7 +39,12 @@ func (s *stubManager) Start(context.Context) error           { s.starts++; retur
 func (s *stubManager) Stop(context.Context) error            { s.stops++; return s.stopErr }
 func (s *stubManager) Status(context.Context) (State, error) { return s.state, s.statusErr }
 func (s *stubManager) StartsOnInstall() bool                 { return s.startsOnInstall }
-func (s *stubManager) DefinitionPath() (string, error)       { return "/tmp/norite-daemon.service", nil }
+func (s *stubManager) DefinitionPath() (string, error) {
+	if s.definition != "" {
+		return s.definition, nil
+	}
+	return "/tmp/norite-daemon.service", nil
+}
 
 // testRoot builds a root command that handles exit codes the way cliapp.New does.
 //
