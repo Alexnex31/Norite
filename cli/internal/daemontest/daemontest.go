@@ -267,7 +267,8 @@ type Daemon struct {
 	routes []*route
 
 	mu      sync.Mutex
-	answers map[string]Answer // by operationId
+	answers map[string]Answer          // by operationId
+	local   map[string]json.RawMessage // by path, the daemon's own requests
 	calls   []Request
 	clients []*Client
 }
@@ -421,8 +422,35 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// OnLocal scripts the 200 answer to one of the daemon's own requests (ipc.LocalPathPrefix), by its path.
+// These are not in openapi.yaml, which a test holds to never using the prefix, so they are answered as
+// scripted and not checked against it. One nobody scripted is refused, as a daemon that does not know the
+// request refuses it: a client has to live with that, since the daemon it attaches to may be older.
+func (d *Daemon) OnLocal(path string, body any) *Daemon {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		d.t.Fatalf("OnLocal(%s): %v", path, err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.local == nil {
+		d.local = map[string]json.RawMessage{}
+	}
+	d.local[path] = raw
+	return d
+}
+
 func (d *Daemon) Do(_ context.Context, method, rawPath string, body any) (ipc.Result, error) {
 	t := d.t
+	if strings.HasPrefix(rawPath, ipc.LocalPathPrefix) {
+		d.mu.Lock()
+		raw, ok := d.local[rawPath]
+		d.mu.Unlock()
+		if !ok {
+			return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "the daemon answers no request of its own at that path"}
+		}
+		return ipc.Result{Status: 200, Body: raw}, nil
+	}
 	path, rawQuery, _ := strings.Cut(rawPath, "?")
 	r := matchRoute(d.routes, path)
 	if r == nil {

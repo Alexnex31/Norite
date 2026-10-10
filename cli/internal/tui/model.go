@@ -176,7 +176,8 @@ func (m *Model) onAttached(msg attachedMsg) tea.Cmd {
 	m.sess, m.retry = msg.sess, 0
 	// The daemon reports a changed config only to clients attached when it changes, so whatever was saved
 	// while this one was not is read now.
-	cmds := []tea.Cmd{listen(m.gen, m.sess), m.reloadConfig()}
+	// And what it knows about a newer release, which it otherwise says only when that changes (M24).
+	cmds := []tea.Cmd{listen(m.gen, m.sess), m.reloadConfig(), loadUpdate(m.gen, m.sess)}
 
 	ready := m.sess.Ready()
 	switch ready.Standing {
@@ -253,6 +254,11 @@ func (m *Model) onEvent(ev ipc.Event) tea.Cmd {
 	case ipc.EventConfigUpdate:
 		// The daemon's own event, carrying nothing: the file is this user's, and the client reads it.
 		return m.reloadConfig()
+	case ipc.EventUpdate:
+		// Also the daemon's own and also empty: the client asks.
+		if m.sess != nil {
+			return loadUpdate(m.gen, m.sess)
+		}
 	case "MESSAGE_CREATE", "MESSAGE_UPDATE":
 		var msg apicontract.Message
 		if json.Unmarshal(ev.Data, &msg) == nil && m.pane != nil && m.pane.channelID == msg.ChannelId {
@@ -361,6 +367,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.onEvent(msg.ev)
 		return m, tea.Batch(cmd, listen(m.gen, m.sess))
 
+	case updateMsg:
+		// An answer for an attachment that has gone is dropped, as every answer is.
+		if msg.gen == m.gen {
+			m.home.update = msg.notice
+		}
+		return m, nil
 	case homeMsg:
 		if msg.gen != m.gen {
 			return m, nil

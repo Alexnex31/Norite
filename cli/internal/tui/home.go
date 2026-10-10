@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"slices"
 	"strings"
 
@@ -74,6 +75,72 @@ type homeModel struct {
 	pending string      // a guild just joined, to select once home reloads
 
 	look *look // how it is drawn; the client's, replaced when the config is read again
+
+	// update is what the daemon last said about a newer release, or nil when it has said nothing (M24).
+	// It is about this machine and not the account, so a sign-out leaves it.
+	update *updateNotice
+}
+
+// updateNotice is the one sentence 7a's health block carries about updating, which home draws until the
+// status bar exists (M42).
+type updateNotice struct {
+	text string
+	// tone is which of the three states it is: a release ready, one installed, one undone.
+	tone int
+}
+
+const (
+	toneReady = iota
+	toneInstalled
+	toneUndone
+)
+
+// maxNoticeVersion bounds a version drawn from the daemon's answer: a version is a few characters, and
+// what is drawn on every frame is not left to the length of somebody else's string.
+const maxNoticeVersion = 32
+
+// noticeOf turns the daemon's status into the sentence, or nil when there is nothing to say. Undone comes
+// first, since it is the one a person did not expect; then a version on trial; then one that is out.
+func noticeOf(st ipc.UpdateStatus) *updateNotice {
+	ver := func(s string) string {
+		s = termsafe.Text(s)
+		if r := []rune(s); len(r) > maxNoticeVersion {
+			s = string(r[:maxNoticeVersion]) + "…"
+		}
+		return s
+	}
+	switch {
+	case st.RolledBack != "":
+		return &updateNotice{text: "↓ " + ver(st.RolledBack) + " undone", tone: toneUndone}
+	case st.Trial != "":
+		return &updateNotice{text: "↑ " + ver(st.Trial) + " installed · restart norite", tone: toneInstalled}
+	case st.Available != "" && st.Installs:
+		return &updateNotice{text: "↑ " + ver(st.Available) + " ready", tone: toneReady}
+	case st.Available != "":
+		return &updateNotice{text: "↑ " + ver(st.Available) + " is out", tone: toneReady}
+	}
+	return nil
+}
+
+// loadUpdate asks the daemon where updating stands. A daemon from before the request, or one that does
+// not answer, is nothing to say: the notice is a convenience and never an error on screen.
+func loadUpdate(gen int, s Session) tea.Cmd {
+	return func() tea.Msg {
+		st, err := call(s, func(ctx context.Context, s Session) (ipc.UpdateStatus, error) {
+			var st ipc.UpdateStatus
+			return st, daemonclient.LocalRead(ctx, s, ipc.PathUpdate, &st)
+		})
+		if err != nil {
+			return updateMsg{gen: gen}
+		}
+		return updateMsg{gen: gen, notice: noticeOf(st)}
+	}
+}
+
+// updateMsg is the answer, naming the attachment that asked.
+type updateMsg struct {
+	gen    int
+	notice *updateNotice
 }
 
 func newHome() homeModel {
@@ -417,7 +484,18 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 		// Read from a file a person can edit, and sanitized there; sanitized again, since it is drawn.
 		who = "signed in as @" + termsafe.Text(account.Username)
 	}
-	top = append(top, clip(h.look.bold.Render("Norite")+h.look.dim.Render(" · "+who), width), "")
+	title := h.look.bold.Render("Norite") + h.look.dim.Render(" · "+who)
+	if n := h.update; n != nil {
+		style := h.look.accent
+		switch n.tone {
+		case toneInstalled:
+			style = h.look.warn
+		case toneUndone:
+			style = h.look.danger
+		}
+		title += h.look.dim.Render(" · ") + style.Render(n.text)
+	}
+	top = append(top, clip(title, width), "")
 
 	// The redeem box, drawn below the list but sized first, since the list takes whatever it leaves.
 	box := []string{h.look.label.Render("REDEEM AN INVITE"), "  " + h.code.View()}
