@@ -18,7 +18,8 @@
         "standing",
         "instance",
         "username",
-        "problem"
+        "problem",
+        "update"
       ],
       "description": "How the daemon stands.",
       "properties": {
@@ -67,6 +68,10 @@
         "problem": {
           "type": "string",
           "description": "What is wrong when something is, in words for a person, or empty."
+        },
+        "update": {
+          "type": "string",
+          "description": "A newer version the daemon knows is out (M24), or empty: none is, no check has been made, or no daemon answered. `norite update status` says the rest."
         }
       }
     }

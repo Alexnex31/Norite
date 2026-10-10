@@ -32,6 +32,8 @@ var (
 	retryStaged = 5 * time.Minute
 	// confirmAfter is how long a new version must stay up before it is kept.
 	confirmAfter = 10 * time.Minute
+	// applyTimeout bounds an installation somebody asked for and is waiting on.
+	applyTimeout = 100 * time.Second
 )
 
 // ErrRefused is a request understood and not carried out, with nothing changed. Its text is for a person.
@@ -380,6 +382,10 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 	if !u.installs {
 		return u.Status(), &ErrRefused{u.reason}
 	}
+	// Somebody is waiting for this answer, and a client gives a request two minutes. A download that
+	// takes longer is given up on here and said, where the schedule's own has a quarter of an hour.
+	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
+	defer cancel()
 	u.mu.Lock()
 	staged := u.staged
 	u.mu.Unlock()

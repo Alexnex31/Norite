@@ -28,6 +28,7 @@ verb's output a definition in it that the CLI's tests validate against.
 | `automation.schema.json` | `norite automation enable \| disable \| status` |
 | `about.schema.json` | `norite about` |
 | `daemon.schema.json` | `norite daemon status` |
+| `update.schema.json` | `norite update status \| check \| apply \| mode \| channel` |
 | `logs.schema.json` | `norite logs tail`, one object per line of output |
 | `config.schema.json` | `norite config path \| get \| set \| unset \| export \| import \| split \| unsplit` |
 

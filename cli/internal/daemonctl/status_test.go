@@ -59,6 +59,14 @@ func TestStatusAsksTheDaemonAsWellAsTheServiceManager(t *testing.T) {
 			absent: []string{"is not installed."},
 		},
 		{
+			// M24: a newer version the daemon knows of is one line, and a field.
+			name: "a newer version is out", state: State{Installed: true, Running: true, Detail: "active"},
+			socket: func() socketAnswer { s := signedIn; s.Update = "0.1.1"; return s }(), code: 0,
+			view: statusView{Running: true, Answering: true, Installed: true, Service: "active", ServiceRunning: true, Version: "0.1.0",
+				Standing: "signed_in", Instance: "https://chat.example.com", Username: "ada", Update: "0.1.1"},
+			text: []string{"update:   0.1.1 is out", "norite update status"},
+		},
+		{
 			name: "installed and stopped", state: State{Installed: true, Detail: "inactive"}, code: 1,
 			view:   statusView{Installed: true, Service: "inactive"},
 			text:   []string{"installed but not running (inactive)", "norite daemon start"},
@@ -167,7 +175,8 @@ func TestStatusPrintsNothingThatActsOnTheTerminal(t *testing.T) {
 	state := State{Installed: true, Running: true, Detail: "active" + hostile}
 	for _, argv := range [][]string{{"daemon", "status"}, {"--json", "daemon", "status"}} {
 		answerStatus(t, socketAnswer{Running: true, Attached: true, Version: "1" + hostile, Standing: ipc.StandingSignedIn,
-			Account: &ipc.Account{InstanceURL: "https://x" + hostile, Username: "ada" + hostile}, Problem: "p" + hostile})
+			Account: &ipc.Account{InstanceURL: "https://x" + hostile, Username: "ada" + hostile}, Problem: "p" + hostile,
+			Update: "0.1.1" + hostile})
 		out, err := runCommand(t, &stubManager{state: state}, argv...)
 		if err != nil {
 			t.Fatalf("%v: %v", argv, err)

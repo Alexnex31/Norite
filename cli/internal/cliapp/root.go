@@ -29,6 +29,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/cli/internal/tui"
+	"github.com/Alexnex31/Norite/cli/internal/updatecmd"
 	"github.com/Alexnex31/Norite/cli/internal/verbs"
 )
 
@@ -141,6 +142,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			configcmd.Command(configcmd.Connector(verbs.Daemon(Version))),
 			automationcmd.Command(automationcmd.Connector(verbs.Daemon(Version))),
 			logscmd.Command(),
+			updatecmd.Command(updatecmd.Connector(verbs.Daemon(Version))),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

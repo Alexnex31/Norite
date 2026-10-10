@@ -5,8 +5,10 @@ package daemonctl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -26,6 +28,8 @@ type socketAnswer struct {
 	Account  *ipc.Account
 	// Problem is why a daemon that is there could not be attached to, in words for a person.
 	Problem string
+	// Update is a newer version the daemon says is out, or "" (M24).
+	Update string
 }
 
 // statusAskTimeout bounds the handshake. A daemon answers in milliseconds when it answers.
@@ -69,8 +73,17 @@ var socketStatus = func(ctx context.Context, version string) socketAnswer {
 	}
 	defer func() { _ = client.Close() }()
 	ready := client.Ready()
-	return socketAnswer{Running: true, Attached: true, Version: client.Hello().Version,
+	answer := socketAnswer{Running: true, Attached: true, Version: client.Hello().Version,
 		Standing: ready.Standing, Account: ready.Account}
+	// One more question, whose answer is a convenience: a daemon from before M24 relays the path or
+	// refuses it, and either way there is simply nothing to add.
+	if res, err := client.Do(ctx, http.MethodGet, ipc.PathUpdate, nil); err == nil && res.Status == http.StatusOK {
+		var update ipc.UpdateStatus
+		if json.Unmarshal(res.Body, &update) == nil {
+			answer.Update = update.Available
+		}
+	}
+	return answer
 }
 
 // statusView is `norite daemon status` (contracts/cli-json/daemon.schema.json). Every field is always
@@ -97,6 +110,8 @@ type statusView struct {
 	Username string `json:"username"`
 	// Problem is what is wrong when something is, in words for a person, or empty.
 	Problem string `json:"problem"`
+	// Update is a newer version the daemon knows is out, or empty.
+	Update string `json:"update"`
 }
 
 // exitCode is the command's exit: 0 running, 1 installed and not running, 2 neither. The three M3 gave it,
@@ -121,6 +136,7 @@ func viewOfStatus(state State, socket socketAnswer) statusView {
 		Version:        socket.Version,
 		Standing:       socket.Standing,
 		Problem:        socket.Problem,
+		Update:         socket.Update,
 	}
 	if state.Installed {
 		v.Service = state.Detail
@@ -170,6 +186,9 @@ func (v statusView) Text(t *output.Text) {
 	}
 	if v.Problem != "" {
 		t.Line("  problem:  %s", output.Clean(v.Problem))
+	}
+	if v.Update != "" {
+		t.Line("  update:   %s is out; `norite update status` says more", output.Clean(v.Update))
 	}
 	if v.Running || v.Installed {
 		t.Line("Its log: norite logs tail")

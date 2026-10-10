@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 
 	"github.com/Alexnex31/Norite/daemon/atomicfile"
+	"github.com/Alexnex31/Norite/daemon/internal/paths"
 )
 
 // FileName is the receipt's name in the state directory.
@@ -90,4 +91,22 @@ func Remove(stateDir string) error {
 		return nil
 	}
 	return err
+}
+
+// Record writes a receipt in the current user's state directory, and Forget removes it: what the CLI does
+// for an installer and for an uninstall.
+func Record(r Receipt) error {
+	dir, err := paths.StateDir()
+	if err != nil {
+		return err
+	}
+	return Write(dir, r)
+}
+
+func Forget() error {
+	dir, err := paths.StateDir()
+	if err != nil {
+		return err
+	}
+	return Remove(dir)
 }
