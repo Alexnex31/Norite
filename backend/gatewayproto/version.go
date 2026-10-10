@@ -144,3 +144,69 @@ func older(server, client Version) string {
 	}
 	return "client"
 }
+
+// Compare orders two versions by SemVer §11 precedence: negative when v sorts before w, zero when they
+// are the same release, positive when after.
+//
+// A pre-release sorts below the release it precedes. Two pre-releases of one release are compared
+// identifier by identifier: numeric ones as numbers, the others as ASCII text, a numeric one below a
+// textual one, and the shorter list below the longer when one is the other's beginning. Build metadata
+// was discarded by ParseVersion and takes no part.
+//
+// The handshake never needs this, since Check asks whether two versions talk and not which is newer. M24's
+// updater does: "downgrade" means lower precedence, and nothing else.
+func (v Version) Compare(w Version) int {
+	for _, pair := range [3][2]uint64{{v.Major, w.Major}, {v.Minor, w.Minor}, {v.Patch, w.Patch}} {
+		if pair[0] != pair[1] {
+			if pair[0] < pair[1] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case v.Pre == w.Pre:
+		return 0
+	case v.Pre == "":
+		return 1
+	case w.Pre == "":
+		return -1
+	}
+	a, b := strings.Split(v.Pre, "."), strings.Split(w.Pre, ".")
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if c := comparePreIdentifier(a[i], b[i]); c != 0 {
+			return c
+		}
+	}
+	return len(a) - len(b)
+}
+
+// comparePreIdentifier orders two pre-release identifiers.
+func comparePreIdentifier(a, b string) int {
+	na, aIsNumber := preNumber(a)
+	nb, bIsNumber := preNumber(b)
+	switch {
+	case aIsNumber && bIsNumber:
+		// Digits only and no leading zero, so the longer number is the larger, and equal lengths compare
+		// as text. No identifier is too long for this, where a uint64 would overflow.
+		if len(na) != len(nb) {
+			return len(na) - len(nb)
+		}
+		return strings.Compare(na, nb)
+	case aIsNumber:
+		return -1
+	case bIsNumber:
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
+// preNumber reports whether a pre-release identifier is numeric, and returns it.
+func preNumber(s string) (string, bool) {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	return s, s != ""
+}
