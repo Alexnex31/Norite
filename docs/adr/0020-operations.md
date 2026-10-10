@@ -8,6 +8,16 @@ alone. The Sigstore-versus-license-file distinction below stands unchanged — t
 file survives as an inert seam, and publishing its signatures to a public transparency log would still be
 wrong for the reason given.
 
+**Amended at M24 (2026-10-10)** in three places, none reversing the decision.
+- **The "version-check endpoint" is GitHub's release listing**, read once a day. No endpoint of the
+  project's own exists and an instance cannot be one. "Never a live call to Sigstore's infrastructure"
+  stands and is met; the check itself is a call to a third party, which this record had not considered.
+  It carries the daemon's version and nothing else, and `update = "off"` stops it.
+- **Verification is `sigstore-go` against a trusted root embedded in the binary.** A root embedded is a
+  root that ages: an install that outlives a Sigstore key rotation without updating fails closed and is
+  told to reinstall.
+- **Only an install the installer scripts made updates itself.** Any other checks and says so.
+
 ## Context
 A daemon-based client architecture that self-updates, plus a self-hosting story that needs to stay
 one-command-simple, both need real operational decisions: how updates are verified and rolled back, how

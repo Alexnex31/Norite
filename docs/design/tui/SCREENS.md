@@ -416,3 +416,10 @@ No chord here is new except `C-c g`. `ESC` closes, per the shared conventions.
 The reference strip, shown in isolation above a stub message pane. Two rows, always the bottom two rows
 of the terminal, present on **every** screen above with screen-specific content. Full recipe in
 `TOKENS.md → Status bar`. Per-screen row-2 chord sets are listed in `KEYMAP.md`.
+
+**Update notice (M24).** The health block carries one more state, after the daemon's health dot and only
+when there is something to say: `↑ 0.1.1 ready` in `accent` when a verified update waits to be applied,
+`↑ 0.1.1 installed · restart norite` in `warn` when the daemon is already running it and this client is
+the older program, `↓ 0.1.1 undone` in `danger` when an update was rolled back. The version is the
+daemon's own text, never the listing's. Until M42 draws this bar, the terminal client shows the same
+sentence as one line on home.
