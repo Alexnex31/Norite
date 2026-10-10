@@ -224,6 +224,11 @@ it stops the daemon. Everything else happens in the first tab.
 **To have it start by itself whenever you log in**, `.\norite.exe daemon install` registers it as a Task
 Scheduler task named "Norite Daemon", running as you and needing no administrator rights;
 `.\norite.exe daemon start` starts it now, and `.\norite.exe daemon status` reports on it.
+
+Norite keeps itself up to date: once a day the daemon checks for a new release, verifies its signature and
+installs it, then starts the new version in its place. `.\norite.exe update status` says where that
+stands, `.\norite.exe update mode notify` makes it ask first, and `.\norite.exe update mode off` stops
+the check.
 `.\norite.exe daemon stop` stops it, however it was started.
 
 This path was rebuilt for this release and **has not yet been run on Windows**: the task is registered

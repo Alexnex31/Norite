@@ -357,6 +357,22 @@ of its log, and `norite logs tail --follow` keeps printing. The log itself is `d
 `~/.local/state/norite/` on Linux and `%LOCALAPPDATA%\Norite\` on Windows, and
 `~/Library/Logs/norite-daemon.log` on macOS.
 
+**Updates.** If you installed with the installer, Norite keeps itself up to date on Linux and Windows.
+Once a day the daemon asks GitHub for this project's list of releases, sending nothing but its own
+version. A newer release is downloaded, its signature is verified on your machine as the one this
+project's release workflow made, and it is installed; the daemon restarts as it. A release that fails the
+check is refused and the version you have keeps running. One that does not stay up after it is installed
+is undone by itself.
+
+- `norite update status` says which version runs and what is known about a newer one.
+- `norite update mode notify` makes it tell you and wait for `norite update apply`.
+- `norite update mode off` stops the daily check.
+- `norite update channel prerelease` also offers alphas, betas and release candidates.
+
+It only ever moves to a version your instance talks to, so it does not jump ahead of the server you are
+signed in to. On macOS, and for any install the installer did not make, it tells you a release is out and
+does not install it: run the installer again.
+
 **On a Linux machine you only reach over SSH**, a service of your account stops when you disconnect.
 `norite daemon install --linger` keeps it running, and starts it at boot. `install` tells you which case
 you are in.

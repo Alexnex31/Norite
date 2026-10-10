@@ -1546,12 +1546,12 @@ of this section.
   version-check endpoint of the project's own, and an instance cannot be one, since it knows its own
   version and not what has been released. The listing is a hint and nothing more: it is bounded, its tags
   are parsed strictly, and nothing it says is believed until a signature says it too. The request carries
-  a `norite-daemon/<version>` user agent and nothing else, and `update = "off"` stops it.
+  a `norite-daemon/<version>` user agent and nothing else, and `norite update mode off` stops it.
 
   **Choosing one.** A candidate must pass all four:
   - **Channel.** A stable install is never offered a pre-release. Receiving them is an explicit opt-in
-    (`update_channel = "prerelease"`), and an opted-in install takes the highest precedence, stable
-    releases included.
+    (`norite update channel prerelease`), and an opted-in install takes the highest precedence the
+    instance rule allows, stable releases included.
   - **Order.** Higher precedence than what runs, under SemVer §11: a pre-release sorts below its release,
     build metadata is ignored. The comparison lives in `gatewayproto`, beside the parser.
   - **The instance.** `gatewayproto.Check(instance, candidate)` must pass, the handshake's own function
@@ -1574,7 +1574,9 @@ of this section.
   version, which stops a binary that cannot start. The daemon then ends its run as a stop request does
   (M23), so an answered token renewal is stored; with its lock still held it sets the current pair aside,
   renames the new pair in, and writes an update record. On Unix the process replaces itself with the new
-  binary, keeping its PID. On Windows it exits with a code the task restarts on. A swap interrupted
+  binary, keeping its PID. On Windows, where a process cannot do that, it starts the installed version as
+  a process of its own, with a hidden console, and exits 0: the installer there starts the daemon by hand
+  unless asked to register a task, so nothing else would start it. A swap interrupted
   half-way is finished or undone from the record at the next start. Once Phase E exists, applying is
   deferred while a voice session is active (`architecture.md` §6); the seam is built here.
 
@@ -1586,8 +1588,11 @@ of this section.
 
   **Which installs.** Only one the installer scripts made, which leave a receipt naming where the two
   programs are. Any other install, a package manager's or a checkout's, checks and says so and never
-  writes a binary. A `dev` build does neither. `update = "auto"` is the default for a receipted install,
-  said by the installer with how to change it; `"notify"` checks and waits for `norite update apply`.
+  writes a binary. A `dev` build does neither. `auto` is the default for a receipted install, said by the
+  installer with how to change it; `notify` checks and waits for `norite update apply`; `off` asks
+  nobody. The mode and the channel are set with `norite update mode|channel` and kept in the updater's
+  own record in the state directory, not in `config.toml`: they are this machine's and the daemon's own,
+  as the port for scripts' switch is, and the daemon interprets nobody's config file (M21).
 
   **Platforms.** Linux is walked in a VM. Windows is walked by the author on a real machine, with M23's
   task, which that milestone never ran: applying is enabled there only if that pass succeeds, and
@@ -1602,9 +1607,11 @@ of this section.
   Done when: against a real signed pre-release cut from this branch, a daemon one version lower installs
   it and is running it, with no network call beyond the listing and the downloads; an unsigned release
   and a downgrade are each refused and the current version keeps running; and a release that crashes at
-  start is rolled back to the previous pair and not offered again. The last two run on a test trust root
-  that only a build tag can reach, since a crashing release signed by the real workflow would be a public
-  one, and a test holds a release build to not containing it.
+  start is rolled back to the previous pair and not offered again. The last three are walked by a test
+  with real daemon binaries on a signer of the test's own, which only a build tag reaches
+  (`norite_testrelease`), since a crashing release signed by the real workflow would be a public one; a
+  test holds a build without the tag to containing none of it. The real verifier is tested against the
+  published alpha's bundle and against an authority made in the test.
 
   **Corrected at planning.**
   - "Version-check endpoint polling" named an endpoint nobody serves. It is GitHub's listing, a daily
