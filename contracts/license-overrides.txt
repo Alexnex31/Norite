@@ -1,0 +1,15 @@
+# Dependency licenses read by hand, because go-licenses cannot classify them.
+#
+# Each of these modules ships a LICENSE file holding only the Apache-2.0 notice ("Licensed under the Apache
+# License, Version 2.0 ...") and not the license's text, which is what the classifier matches on, so it
+# reports them Unknown and `check` fails. They arrived at M24 through sigstore-go. Each file was read, and
+# its SHA-256 is recorded: scripts/license-overrides.sh refuses a module whose LICENSE no longer has that
+# hash, so a version that changes its terms is read again rather than waved through.
+#
+# This is the only way a dependency gets past the classifier, and it is for that one case. A module with
+# no license file, or one whose terms are not on ADR 0032's list, does not belong here.
+#
+# module,license-url,license,sha256 of its LICENSE
+github.com/cyberphone/json-canonicalization,https://github.com/cyberphone/json-canonicalization/blob/19d51d7fe467/LICENSE,Apache-2.0,6821faaddedf2d78c95bb6d98b127e9e616097afd2f6bcc34389f000d13ab12d
+github.com/in-toto/attestation,https://github.com/in-toto/attestation/blob/v1.2.0/LICENSE,Apache-2.0,b3a6ac899861c2c28a1abd5c7ea8733fefaed6938d730e099c42671386032aeb
+github.com/in-toto/in-toto-golang,https://github.com/in-toto/in-toto-golang/blob/v0.11.0/LICENSE,Apache-2.0,b5c26c8a2ad6dd7cac6646e470a32ee42d23c36124caac4e66c989b6545b2a44

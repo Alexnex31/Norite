@@ -39,6 +39,12 @@ ids=$(cd "$repo/$module_dir" \
         | awk -F, 'NF>=3 {print $1, $NF}') \
   || { echo "gen-notices: $module_dir: go-licenses report failed; refusing to write a partial file" >&2; exit 1; }
 
+# A module go-licenses cannot classify is reported Unknown, which is no identifier. Those read by hand
+# (contracts/license-overrides.txt) are named from that list, first, so the longest-prefix join below finds
+# the module's own row before any of its packages'.
+by_hand=$("$repo/scripts/license-overrides.sh" ids)
+ids=$(printf '%s\n' "$ids" | awk '$2 != "Unknown"')
+
 # The module cache escapes an uppercase letter as '!' + its lowercase form.
 escape() { printf '%s' "$1" | sed 's/\([A-Z]\)/!\L\1/g'; }
 
@@ -74,7 +80,7 @@ while read -r mod ver; do
     # obligation is discharged by the full LICENSE text below it, which carries every license in the file.
     id=$(awk -v m="$mod" 'index($1, m) == 1 && length($1) >= length(m) {
              if (length($1) > best) { best = length($1); v = $2 }
-         } END { print (v == "" ? "UNKNOWN" : v) }' <<<"$ids")
+         } END { print (v == "" ? "UNKNOWN" : v) }' <<<"$ids"$'\n'"$by_hand")
     if [ "$id" = "UNKNOWN" ]; then
         echo "gen-notices: no license identifier for $mod — refusing to write a partial file" >&2
         exit 1
