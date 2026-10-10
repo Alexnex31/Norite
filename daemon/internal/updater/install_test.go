@@ -1,0 +1,287 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package updater
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"testing"
+)
+
+// installed is an Installer over a bin directory holding version 0.1.0's pair, and a release 0.1.1 staged
+// beside it.
+type installed struct {
+	t      *testing.T
+	in     *Installer
+	staged Staged
+}
+
+func newInstalled(t *testing.T) *installed {
+	t.Helper()
+	root := t.TempDir()
+	in := &Installer{Dir: filepath.Join(root, "update"), BinDir: filepath.Join(root, "bin"), GOOS: runtime.GOOS}
+	stage := filepath.Join(in.Dir, "staged", "v0.1.1")
+	for _, dir := range []string{in.BinDir, stage} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x := &installed{t: t, in: in}
+	for _, name := range in.programs() {
+		x.write(filepath.Join(in.BinDir, name), "0.1.0 "+name)
+		x.write(filepath.Join(stage, name), "0.1.1 "+name)
+	}
+	x.staged = Staged{Release: mustTag(t, "v0.1.1"), CLI: filepath.Join(stage, in.programs()[0]), Daemon: filepath.Join(stage, in.programs()[1])}
+	return x
+}
+
+func (x *installed) write(path, body string) {
+	x.t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // a stand-in program
+		x.t.Fatal(err)
+	}
+}
+
+// onDisk asserts which version each installed program is.
+func (x *installed) onDisk(want string) {
+	x.t.Helper()
+	for _, name := range x.in.programs() {
+		got, err := os.ReadFile(filepath.Join(x.in.BinDir, name))
+		if err != nil || string(got) != want+" "+name {
+			x.t.Errorf("%s is %q (%v), want version %s", name, got, err, want)
+		}
+	}
+	left, _ := os.ReadDir(x.in.BinDir)
+	if len(left) != 2 {
+		x.t.Errorf("the bin directory holds %d files, want the two programs", len(left))
+	}
+}
+
+func (x *installed) start(running string, crashed bool, want Outcome) {
+	x.t.Helper()
+	got, err := x.in.AtStart(running, crashed)
+	if err != nil || got != want {
+		x.t.Fatalf("AtStart(%s, crashed=%v) = %v, %v; want %v", running, crashed, got, err, want)
+	}
+}
+
+func (x *installed) noPrevious() {
+	x.t.Helper()
+	if _, err := os.Stat(x.in.previousDir()); !os.IsNotExist(err) {
+		x.t.Errorf("the previous pair is still kept: %v", err)
+	}
+}
+
+func TestInstallSwapsThePairAndKeepsThePrevious(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Update(func(r *Record) { r.RolledBack, r.Available, r.LastError = "0.0.9", "0.1.1", "old news" }); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	x.onDisk("0.1.1")
+	for _, name := range x.in.programs() {
+		got, err := os.ReadFile(filepath.Join(x.in.previousDir(), name))
+		if err != nil || string(got) != "0.1.0 "+name {
+			t.Errorf("the kept %s is %q (%v)", name, got, err)
+		}
+		info, err := os.Stat(filepath.Join(x.in.BinDir, name))
+		if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o755) {
+			t.Errorf("%s has mode %v", name, info.Mode())
+		}
+	}
+	r := x.in.Load()
+	if r.Pending == nil || *r.Pending != (Pending{From: "0.1.0", To: "0.1.1", Phase: phaseApplied}) {
+		t.Errorf("pending %+v", r.Pending)
+	}
+	if r.RolledBack != "" || r.Available != "" || r.LastError != "" {
+		t.Errorf("an installation left old news in the record: %+v", r)
+	}
+	if _, err := os.Stat(x.staged.Daemon); !os.IsNotExist(err) {
+		t.Errorf("the staged release was not removed")
+	}
+}
+
+func TestAVersionThatDoesNotStayUpIsRolledBack(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	// Two starts that are never confirmed and never end cleanly: killed, or exiting on an error.
+	x.start("0.1.1", false, Counted)
+	x.start("0.1.1", false, Counted)
+	x.onDisk("0.1.1")
+	x.start("0.1.1", false, RolledBack)
+
+	x.onDisk("0.1.0")
+	x.noPrevious()
+	r := x.in.Load()
+	if r.Pending != nil || r.RolledBack != "0.1.1" || !slices.Contains(r.Bad, "0.1.1") {
+		t.Errorf("after a rollback: %+v", r)
+	}
+	// The previous version starts, and finds nothing to do.
+	x.start("0.1.0", false, Nothing)
+	// And the version is not chosen again.
+	if got, ok := Choose(Policy{Current: version(t, "0.1.0"), Bad: r.Bad}, releasesOf(t, "v0.1.1")); ok {
+		t.Errorf("a version rolled back from was chosen again: %s", got.Tag)
+	}
+}
+
+func TestACrashRollsBackAtTheNextStart(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	// A traceback found by the new version's first start was the old version's: it does not count.
+	x.start("0.1.1", true, Counted)
+	x.onDisk("0.1.1")
+	// One found by its second start is its own.
+	x.start("0.1.1", true, RolledBack)
+	x.onDisk("0.1.0")
+}
+
+func TestStartsThatEndCleanlyAreNotCounted(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		x.start("0.1.1", false, Counted)
+		x.in.CleanExit()
+	}
+	x.onDisk("0.1.1")
+	if p := x.in.Load().Pending; p == nil || p.Starts != 0 {
+		t.Errorf("pending %+v", p)
+	}
+}
+
+func TestConfirmEndsTheTrial(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	x.start("0.1.1", false, Counted)
+	if err := x.in.Confirm(); err != nil {
+		t.Fatal(err)
+	}
+	x.noPrevious()
+	for i := 0; i < 4; i++ {
+		x.start("0.1.1", true, Nothing)
+	}
+	x.onDisk("0.1.1")
+	if r := x.in.Load(); r.Pending != nil || len(r.Bad) != 0 {
+		t.Errorf("after confirming: %+v", r)
+	}
+}
+
+// A machine switched off between the two renames: the command is the new one and the daemon the old.
+func TestAnInterruptedInstallationIsUndoneAtTheNextStart(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	daemon := x.in.programs()[1]
+	x.write(filepath.Join(x.in.BinDir, daemon), "0.1.0 "+daemon)
+	if err := x.in.Update(func(r *Record) { r.Pending.Phase = phaseSwapping }); err != nil {
+		t.Fatal(err)
+	}
+
+	x.start("0.1.0", false, Recovered)
+	x.onDisk("0.1.0")
+	x.noPrevious()
+	if r := x.in.Load(); r.Pending != nil || len(r.Bad) != 0 {
+		t.Errorf("an interrupted installation is nobody's bad version: %+v", r)
+	}
+}
+
+// Switched off after both renames and before the record said so: the daemon that starts is the new one.
+func TestAnInstallationWhoseRecordWasLeftBehindIsOnTrial(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.in.Update(func(r *Record) { r.Pending.Phase = phaseSwapping }); err != nil {
+		t.Fatal(err)
+	}
+	x.start("0.1.1", false, Counted)
+	x.onDisk("0.1.1")
+	if p := x.in.Load().Pending; p == nil || p.Phase != phaseApplied || p.Starts != 1 {
+		t.Errorf("pending %+v", p)
+	}
+}
+
+func TestARecordAboutAnotherInstallationIsDropped(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	// Somebody ran the installer by hand: 0.1.2 is what starts.
+	for i := 0; i < 5; i++ {
+		x.start("0.1.2", true, Nothing)
+	}
+	x.onDisk("0.1.1") // untouched: nothing was restored over what the installer put there
+	x.noPrevious()
+}
+
+func TestAFailedInstallationLeavesThePairThatWasRunning(t *testing.T) {
+	// The staged daemon has gone: the command is replaced, the daemon cannot be.
+	x := newInstalled(t)
+	if err := os.Remove(x.staged.Daemon); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.in.Install(x.staged, "0.1.0"); err == nil {
+		t.Fatal("an installation with no daemon to install succeeded")
+	}
+	x.onDisk("0.1.0")
+	if p := x.in.Load().Pending; p != nil {
+		t.Errorf("a failed installation is still pending: %+v", p)
+	}
+	x.start("0.1.0", false, Nothing)
+
+	// The installed command is not there to keep: nothing is touched.
+	x = newInstalled(t)
+	if err := os.Remove(filepath.Join(x.in.BinDir, x.in.programs()[0])); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.in.Install(x.staged, "0.1.0"); err == nil {
+		t.Fatal("an installation over a missing program succeeded")
+	}
+	if got, _ := os.ReadFile(filepath.Join(x.in.BinDir, x.in.programs()[1])); string(got) != "0.1.0 "+x.in.programs()[1] {
+		t.Errorf("the daemon was replaced by an installation that failed: %q", got)
+	}
+	if p := x.in.Load().Pending; p != nil {
+		t.Errorf("pending %+v", p)
+	}
+}
+
+func TestTheRecordIsForgivingAndBounded(t *testing.T) {
+	x := newInstalled(t)
+	if err := os.MkdirAll(x.in.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{"", "not json", `{"pending":{"phase":"something else","to":"9.9.9"}}`, `[1,2]`} {
+		x.write(x.in.recordPath(), body)
+		if r := x.in.Load(); r.Pending != nil {
+			t.Errorf("record %q: pending %+v", body, r.Pending)
+		}
+		x.start("0.1.0", true, Nothing)
+	}
+	if err := x.in.Update(func(r *Record) {
+		for i := 0; i < maxBad+10; i++ {
+			r.Bad = append(r.Bad, fmt.Sprintf("0.0.%d", i))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if bad := x.in.Load().Bad; len(bad) != maxBad || bad[len(bad)-1] != fmt.Sprintf("0.0.%d", maxBad+9) {
+		t.Errorf("the bad list holds %d, ending %v", len(bad), bad[len(bad)-1:])
+	}
+	if info, err := os.Stat(x.in.recordPath()); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+		t.Errorf("the record's mode: %v", info.Mode())
+	}
+}
