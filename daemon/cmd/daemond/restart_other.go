@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Alexandre Duffez
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//go:build !unix
+//go:build !unix && !windows
 
 package main
 
-// startAgain does nothing where a process cannot replace itself. The caller exits with exitRestart, and
-// the Windows task's restart-on-failure starts the program now on disk.
-func startAgain(string) error { return nil }
+import "errors"
+
+// startAgain cannot be done here. The caller exits with exitRestart, for whatever runs the daemon.
+func startAgain(string) error {
+	return errors.New("this platform has no way to start the installed version from the running one")
+}

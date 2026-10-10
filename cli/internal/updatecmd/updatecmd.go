@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -55,7 +56,7 @@ func Command(connect Connector) *cli.Command {
 			{
 				Name:  "status",
 				Usage: "Say which version runs, and what is known about a newer one",
-				Action: run(connect, 0, func(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
+				Action: run(connect, nil, func(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
 					var st ipc.UpdateStatus
 					return st, daemonclient.LocalRead(ctx, c, ipc.PathUpdate, &st)
 				}),
@@ -63,7 +64,7 @@ func Command(connect Connector) *cli.Command {
 			{
 				Name:  "check",
 				Usage: "Look for a newer release now",
-				Action: run(connect, 0, func(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
+				Action: run(connect, nil, func(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
 					var st ipc.UpdateStatus
 					return st, daemonclient.Local(ctx, c, ipc.PathUpdateCheck, &st)
 				}),
@@ -73,7 +74,7 @@ func Command(connect Connector) *cli.Command {
 				Usage: "Download, verify and install the newer release",
 				Description: "The daemon restarts as the new version when it has installed it. Attached clients\n" +
 					"are disconnected for a moment, and an older `norite` left open is told to restart.",
-				Action: run(connect, 0, apply),
+				Action: run(connect, nil, apply),
 			},
 			{
 				Name:      "mode",
@@ -81,9 +82,11 @@ func Command(connect Connector) *cli.Command {
 				ArgsUsage: "auto|notify|off",
 				Description: "auto installs a verified release by itself. notify checks, says so, and waits for\n" +
 					"`norite update apply`. off checks nothing unless you ask.",
-				Action: run(connect, 1, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
-					return choose(ctx, c, ipc.PathUpdateMode, cmd.Args().First(), ipc.UpdateAuto, ipc.UpdateNotify, ipc.UpdateOff)
-				}),
+				Action: run(connect, []string{ipc.UpdateAuto, ipc.UpdateNotify, ipc.UpdateOff},
+					func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
+						var st ipc.UpdateStatus
+						return st, daemonclient.Local(ctx, c, ipc.PathUpdateMode+cmd.Args().First(), &st)
+					}),
 			},
 			{
 				Name:      "channel",
@@ -91,9 +94,11 @@ func Command(connect Connector) *cli.Command {
 				ArgsUsage: "stable|prerelease",
 				Description: "stable is releases only. prerelease also offers alphas, betas and release\n" +
 					"candidates, which are for testing and may not talk to your instance.",
-				Action: run(connect, 1, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
-					return choose(ctx, c, ipc.PathUpdateChannel, cmd.Args().First(), ipc.ChannelStable, ipc.ChannelPrerelease)
-				}),
+				Action: run(connect, []string{ipc.ChannelStable, ipc.ChannelPrerelease},
+					func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
+						var st ipc.UpdateStatus
+						return st, daemonclient.Local(ctx, c, ipc.PathUpdateChannel+cmd.Args().First(), &st)
+					}),
 			},
 			{
 				// For the installer scripts, which know where they put the programs and should not be
@@ -112,14 +117,22 @@ func Command(connect Connector) *cli.Command {
 	}
 }
 
-// run wraps one request to the daemon and the printing of its answer.
-func run(connect Connector, args int, ask func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error)) cli.ActionFunc {
+// run wraps one request to the daemon and the printing of its answer. words is the fixed set a command's
+// one argument is taken from, or nil for a command that takes none.
+//
+// The argument is checked here, before anything is attached to, for two reasons. A mistyped word is a
+// usage error on a machine with no daemon running too, and not "the daemon is not running". And a request
+// to the daemon carries nothing of the user's in its path, because a daemon from before these requests
+// would relay that path to its instance: only one of the words is ever sent.
+func run(connect Connector, words []string, ask func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error)) cli.ActionFunc {
 	return func(ctx context.Context, cmd *cli.Command) error {
 		switch {
-		case args == 0 && cmd.Args().Len() != 0:
+		case words == nil && cmd.Args().Len() != 0:
 			return clierr.Usage("norite update %s takes no arguments", cmd.Name)
-		case args == 1 && cmd.Args().Len() != 1:
+		case words != nil && cmd.Args().Len() != 1:
 			return clierr.Usage("norite update %s takes one word: %s", cmd.Name, cmd.ArgsUsage)
+		case words != nil && !slices.Contains(words, cmd.Args().First()):
+			return clierr.Usage("%q is not one of: %s", output.Clean(cmd.Args().First()), cmd.ArgsUsage)
 		}
 		if connect == nil {
 			return errors.New("this build has no way to reach the daemon")
@@ -137,21 +150,8 @@ func run(connect Connector, args int, ask func(ctx context.Context, cmd *cli.Com
 	}
 }
 
-// choose sends one of a fixed set of words. The word is checked here, before anything is attached to or
-// sent: a request to the daemon carries nothing of the user's in its path, because a daemon from before
-// these requests would relay that path to its instance.
-func choose(ctx context.Context, c daemonclient.Caller, path, word string, words ...string) (ipc.UpdateStatus, error) {
-	var st ipc.UpdateStatus
-	for _, w := range words {
-		if word == w {
-			return st, daemonclient.Local(ctx, c, path+word, &st)
-		}
-	}
-	return st, clierr.Usage("%q is not one of: %v", output.Clean(word), words)
-}
-
-// apply asks how things stand first, so that a daemon which installs nothing is said as that, with its
-// reason, and not as a refusal.
+// apply asks for the newer release to be installed. A daemon that installs nothing refuses, with its
+// reason.
 func apply(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.UpdateStatus, error) {
 	var st ipc.UpdateStatus
 	return st, daemonclient.Local(ctx, c, ipc.PathUpdateApply, &st)

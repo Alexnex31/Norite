@@ -122,6 +122,7 @@ function Install-Norite {
         Step "Removing Norite from $BinDir"
         & $norite logout 2>$null | Out-Null
         & $norite daemon uninstall 2>$null | Out-Null
+        try { & $norite update receipt --forget 2>$null | Out-Null } catch { }
         Stop-Daemon
         Start-Sleep -Milliseconds 500
         Remove-Item -Force -ErrorAction SilentlyContinue $norite, $daemon
@@ -248,6 +249,18 @@ function Install-Norite {
     & $norite --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$norite was installed but does not run on this machine" }
 
+    # Where the two programs were put, which is what lets the daemon install a later release itself (M24):
+    # it writes over the pair only in a directory an installer named. A build of a checkout is not a
+    # release and is not updated, so a receipt left by an earlier install is removed.
+    try {
+        if ($fromSourceMode) { & $norite update receipt --forget 2>$null | Out-Null }
+        else {
+            & $norite update receipt --bin-dir $BinDir --by install.ps1
+            if ($LASTEXITCODE -ne 0) { Note 'could not record where Norite was installed; it will tell you about new releases and not install them.' }
+        }
+    }
+    catch { Note 'could not record where Norite was installed; it will tell you about new releases and not install them.' }
+
     if ((Get-UserPathEntries) -notcontains $BinDir) {
         $entries = @(Get-UserPathEntries) + $BinDir
         [Environment]::SetEnvironmentVariable('Path', ($entries -join ';'), 'User')
@@ -315,6 +328,12 @@ function Install-Norite {
     }
 
     Step 'Done'
+    if (-not $fromSourceMode -and -not $NoDaemon) {
+        Say 'Norite keeps itself up to date: once a day it checks for a new release, verifies its'
+        Say "signature, and installs it. 'norite update mode notify' makes it ask first, and"
+        Say "'norite update mode off' stops the check. 'norite update status' says where it stands."
+        Say ''
+    }
     Say "Run 'norite' to open the client, and 'norite --help' for everything else."
 }
 

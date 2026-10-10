@@ -194,11 +194,22 @@ func TestAWordThatIsNotOneIsRefusedBeforeAnythingIsSent(t *testing.T) {
 		{"channel"}, {"channel", "nightly"}, {"channel", "stable/../../stop"},
 		{"status", "now"}, {"check", "x"}, {"apply", "0.1.1"},
 	} {
-		d := &fakeDaemon{status: installed()}
-		r := norite(t, d, false, args...)
+		// With a connector that fails the test if it is used: the word is refused before anything is
+		// attached to, so a typo is a usage error on a machine with no daemon running and not "the daemon
+		// is not running" (found by running the command by hand).
+		attached := false
+		connect := Connector(func(context.Context) (daemonclient.Caller, func(), error) {
+			attached = true
+			return &fakeDaemon{status: installed()}, func() {}, nil
+		})
+		root := &cli.Command{Name: "norite", Writer: &bytes.Buffer{}, ErrWriter: &bytes.Buffer{},
+			Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
+			ExitErrHandler: func(context.Context, *cli.Command, error) {},
+			Commands:       []*cli.Command{Command(connect)}}
+		err := root.Run(context.Background(), append([]string{"norite", "update"}, args...))
 		var usage *clierr.UsageError
-		require.ErrorAs(t, r.err, &usage, "%v", args)
-		assert.Empty(t, d.asked, "%v reached the daemon", args)
+		require.ErrorAs(t, err, &usage, "%v", args)
+		assert.False(t, attached, "%v attached to the daemon", args)
 	}
 }
 
