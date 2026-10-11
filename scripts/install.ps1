@@ -122,7 +122,7 @@ function Install-Norite {
         Step "Removing Norite from $BinDir"
         & $norite logout 2>$null | Out-Null
         & $norite daemon uninstall 2>$null | Out-Null
-        try { & $norite update receipt --forget 2>$null | Out-Null } catch { }
+        try { & $norite update receipt --forget --bin-dir $BinDir 2>$null | Out-Null } catch { }
         Stop-Daemon
         Start-Sleep -Milliseconds 500
         Remove-Item -Force -ErrorAction SilentlyContinue $norite, $daemon
@@ -250,11 +250,13 @@ function Install-Norite {
     if ($LASTEXITCODE -ne 0) { throw "$norite was installed but does not run on this machine" }
 
     # Where the two programs were put, which is what lets the daemon install a later release itself (M24):
-    # it writes over the pair only in a directory an installer named. A build of a checkout is not a
-    # release and is not updated, so a receipt left by an earlier install is removed.
+    # it writes over the pair only in a directory an installer named. There is one receipt per account, for
+    # the install its daemon runs from, so it is written only when this run starts the daemon, and
+    # forgotten only when it names this directory. A build of a checkout is not a release and is not
+    # updated, so a receipt an earlier install left here is removed.
     try {
-        if ($fromSourceMode) { & $norite update receipt --forget 2>$null | Out-Null }
-        else {
+        if ($fromSourceMode) { & $norite update receipt --forget --bin-dir $BinDir 2>$null | Out-Null }
+        elseif (-not $NoDaemon) {
             & $norite update receipt --bin-dir $BinDir --by install.ps1
             if ($LASTEXITCODE -ne 0) { Note 'could not record where Norite was installed; it will tell you about new releases and not install them.' }
         }

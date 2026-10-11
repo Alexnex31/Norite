@@ -110,3 +110,22 @@ func Forget() error {
 	}
 	return Remove(dir)
 }
+
+// ForgetIfNames removes the current user's receipt only when it names binDir. An installer that put
+// programs somewhere else, or removed them from somewhere else, has nothing to say about the install the
+// receipt is for.
+func ForgetIfNames(binDir string) error {
+	dir, err := paths.StateDir()
+	if err != nil {
+		return err
+	}
+	r, err := Read(dir)
+	if err != nil {
+		// None, or one that cannot be read: nothing names this directory.
+		return nil
+	}
+	if r.BinDir != filepath.Clean(binDir) {
+		return nil
+	}
+	return Remove(dir)
+}

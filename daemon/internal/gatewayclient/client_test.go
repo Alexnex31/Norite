@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -645,9 +646,12 @@ func TestEachCloseCodeGetsItsAnswer(t *testing.T) {
 // until somebody upgrades something.
 func TestAVersionMismatchIsNotRetriedSoon(t *testing.T) {
 	t.Run("the daemon refuses the server", func(t *testing.T) {
-		h := start(t, func(o *Options) { o.Version = "0.1.0" })
+		var refused atomic.Int32
+		h := start(t, func(o *Options) { o.Version = "0.1.0"; o.OnVersionRefused = func() { refused.Add(1) } })
 		c := h.g.next()
 		c.hello(time.Now(), "0.2.0", time.Minute)
+		// Whoever looks for a newer release is told now (M24).
+		require.Eventually(t, func() bool { return refused.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
 		assert.Equal(t, websocket.StatusNormalClosure, c.closedWith(), "and no IDENTIFY was sent")
 		h.g.noConnectionWithin(200 * time.Millisecond)
 		assert.Contains(t, h.logs.String(), "upgrade the client")

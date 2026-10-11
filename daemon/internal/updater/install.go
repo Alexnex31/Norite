@@ -224,6 +224,14 @@ func (in *Installer) AtStart(running string, crashed bool) (Outcome, error) {
 			p.Phase, p.Starts = phaseApplied, 1
 			return Counted, in.save(r)
 		}
+		if running != p.From {
+			// Neither version of the interrupted installation: somebody installed a third by hand, and
+			// restoring the kept pair over it would undo their install (M24 /code-review). The record
+			// describes something no longer on disk, as below.
+			r.Pending = nil
+			_ = os.RemoveAll(in.previousDir())
+			return Nothing, in.save(r)
+		}
 		if err := in.restore(); err != nil {
 			return Nothing, err
 		}
@@ -306,6 +314,21 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// oldSuffix begins the name a program is moved to on Windows when it is in the way and still running.
+const oldSuffix = ".old-"
+
+// sweepOld removes the programs set aside for dst that nothing runs any more. One still running cannot be
+// removed, and is left for the next sweep.
+func sweepOld(dst string) {
+	left, err := filepath.Glob(dst + oldSuffix + "*")
+	if err != nil {
+		return
+	}
+	for _, path := range left {
+		_ = os.Remove(path)
+	}
 }
 
 // replaceProgram puts a copy of src where dst is, so that anything opening dst finds either the old

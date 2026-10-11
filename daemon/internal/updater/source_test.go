@@ -68,6 +68,22 @@ func TestReleasesKeepsOnlyWhatIsAVersion(t *testing.T) {
 	}
 }
 
+// A tag is a few characters. SemVer lets a pre-release run to any length, and one of a megabyte, kept as
+// "available", made a record too large to read back.
+func TestATagLongerThanATagIsNotOne(t *testing.T) {
+	if _, ok := parseTag("v0.1.1-" + strings.Repeat("a", maxTag)); ok {
+		t.Error("a tag past the bound was taken")
+	}
+	longest := "v0.1.1-" + strings.Repeat("a", maxTag-len("v0.1.1-"))
+	if _, ok := parseTag(longest); !ok {
+		t.Errorf("a tag of exactly %d bytes was refused", maxTag)
+	}
+	// The page asked for is as many as are kept.
+	if !strings.HasSuffix(defaultListURL, fmt.Sprintf("per_page=%d", maxReleases)) {
+		t.Errorf("the listing asks for %s and keeps %d", defaultListURL, maxReleases)
+	}
+}
+
 func TestTheListingIsBounded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("shape") {

@@ -67,6 +67,10 @@ type Options struct {
 	// gatewayproto.DevVersion: the server refuses an empty one, and an unstamped build is a dev build.
 	Version string
 	Log     zerolog.Logger
+	// OnVersionRefused is called when the instance and this daemon turn out not to talk for their
+	// versions, whichever side said so. It must not block. Nil is nothing (M24: the updater looks for a
+	// release then, and not a day later).
+	OnVersionRefused func()
 
 	// The waits between connections. Zero means the defaults; tests shrink them.
 	RetryMin, RetryMax time.Duration
@@ -116,11 +120,12 @@ type Client struct {
 	// updater from another goroutine (M24).
 	serverVersion atomic.Pointer[string]
 
-	creds   Credentials
-	sink    Sink
-	version string
-	log     zerolog.Logger
-	http    *http.Client
+	creds            Credentials
+	sink             Sink
+	version          string
+	onVersionRefused func()
+	log              zerolog.Logger
+	http             *http.Client
 
 	retryMin, retryMax                           time.Duration
 	rateLimitedFloor, protocolFloor, versionHold time.Duration
@@ -138,6 +143,7 @@ func New(opts Options) *Client {
 		creds:            opts.Credentials,
 		sink:             opts.Sink,
 		version:          opts.Version,
+		onVersionRefused: opts.OnVersionRefused,
 		log:              opts.Log,
 		retryMin:         orDefault(opts.RetryMin, defaultRetryMin),
 		retryMax:         orDefault(opts.RetryMax, defaultRetryMax),
@@ -252,6 +258,9 @@ func (c *Client) after(out outcome, retry *backoff.Backoff) time.Duration {
 		return max(retry.Next(), c.rateLimitedFloor)
 
 	case endVersion:
+		if c.onVersionRefused != nil {
+			c.onVersionRefused()
+		}
 		return c.versionHold
 
 	case endProtocol:

@@ -38,6 +38,7 @@ func TestChoose(t *testing.T) {
 		current     string
 		instance    string
 		prereleases bool
+		signedIn    bool
 		bad         []string
 		want        string // "" for none
 	}{
@@ -59,6 +60,16 @@ func TestChoose(t *testing.T) {
 		{name: "an instance with no version is nobody to ask", current: "0.1.0", instance: "dev", want: "v0.1.1"},
 		{name: "nor is one whose version cannot be read", current: "0.1.0", instance: "0.1", want: "v0.1.1"},
 
+		// Signed in, and the instance not heard from in this run: nothing, until it is. The case that
+		// mattered is the first: a pre-release daemon whose pre-release instance is down was moved to the
+		// release, which that instance then refused for good (M24 /code-review).
+		{name: "signed in to an instance not yet heard from", current: "0.1.0-alpha", signedIn: true, want: ""},
+		{name: "and not a patch either", current: "0.1.0", signedIn: true, want: ""},
+		{name: "signed in to an instance that has no version to give", current: "0.1.0", signedIn: true,
+			instance: "dev", want: "v0.1.1"},
+		{name: "heard from, the instance decides as before", current: "0.1.0", signedIn: true, instance: "0.1.0",
+			want: "v0.1.1"},
+
 		// The channel.
 		{name: "a stable install is never offered a pre-release", current: "0.1.1", instance: "0.1.0", want: ""},
 		// Opted in, and still not past what the instance talks to: a release instance refuses every
@@ -73,7 +84,8 @@ func TestChoose(t *testing.T) {
 		{name: "and the next one still is", current: "0.2.0", instance: "0.2.0", bad: []string{"0.1.1"}, want: "v0.2.1"},
 	}
 	for _, tc := range cases {
-		got, ok := Choose(Policy{Current: version(t, tc.current), Instance: tc.instance, Prereleases: tc.prereleases, Bad: tc.bad},
+		got, ok := Choose(Policy{Current: version(t, tc.current), Instance: tc.instance, SignedIn: tc.signedIn,
+			Prereleases: tc.prereleases, Bad: tc.bad},
 			releasesOf(t, all...))
 		switch {
 		case tc.want == "" && ok:

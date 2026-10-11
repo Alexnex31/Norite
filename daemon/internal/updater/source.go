@@ -19,8 +19,11 @@ import (
 // sends is trusted for its size or its shape, and nothing it says is believed until a signature says so.
 const (
 	// defaultListURL is this repository's release listing, newest first: what scripts/install.sh reads.
-	// The list and not /releases/latest, which never names a pre-release.
-	defaultListURL = "https://api.github.com/repos/Alexnex31/Norite/releases?per_page=30"
+	// The list and not /releases/latest, which never names a pre-release. The largest page GitHub gives,
+	// which is as many as are kept: an install signed in to an instance that stays on an old minor
+	// version needs that minor's newest patch, and it is on the first page only while fewer releases
+	// than a page have followed it (M24 /code-review; it asked for 30).
+	defaultListURL = "https://api.github.com/repos/Alexnex31/Norite/releases?per_page=100"
 	// defaultDownloadBase is where a release's files are, under its tag.
 	defaultDownloadBase = "https://github.com/Alexnex31/Norite/releases/download"
 
@@ -30,6 +33,10 @@ const (
 	maxBundle    = 256 << 10
 	maxArchive   = 256 << 20
 	maxRedirects = 5
+	// maxTag bounds a tag. A version is a few characters, and SemVer lets a pre-release run to any
+	// length: a tag of a megabyte, kept as "available", made a record too large to be read back, which
+	// forgot the mode, the channel and every version rolled back from (M24 /code-review).
+	maxTag = 64
 
 	requestTimeout  = 30 * time.Second
 	downloadTimeout = 15 * time.Minute
@@ -114,6 +121,9 @@ func (s Source) Releases(ctx context.Context) ([]Release, error) {
 // version as SemVer writes it, with no build metadata, so the tag, the archive's name and the identity in
 // the certificate are all the same text.
 func parseTag(tag string) (Release, bool) {
+	if len(tag) > maxTag {
+		return Release{}, false
+	}
 	version, err := gatewayproto.ParseVersion(tag)
 	if err != nil || tag != "v"+version.String() {
 		return Release{}, false

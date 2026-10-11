@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,7 +35,16 @@ var (
 	confirmAfter = 10 * time.Minute
 	// applyTimeout bounds an installation somebody asked for and is waiting on.
 	applyTimeout = 100 * time.Second
+	// requestWait is how long a request waits for a check or a download already under way before it
+	// says so. The schedule's own download may take a quarter of an hour, and a client waits two minutes:
+	// waiting it out reported a healthy daemon as one that did not answer (M24 /code-review).
+	requestWait = 5 * time.Second
+	// nudgeFloor is the least time between two checks a refused handshake asks for.
+	nudgeFloor = 15 * time.Minute
 )
+
+// errBusy is a request that found a check or a download already under way.
+var errBusy = &ErrRefused{"a check or a download is already under way; ask again in a moment"}
 
 // The three things the norite_testrelease build replaces (testrelease.go). In every other build they are
 // nil and nothing assigns them: where releases come from, what makes one believed, and a hook run once the
@@ -58,8 +68,9 @@ type Options struct {
 	StateDir string
 	// Executable is the running daemon's own path, resolved.
 	Executable string
-	// Instance returns the version the signed-in instance reported, or "".
-	Instance func() string
+	// Instance returns the version the signed-in instance reported in this run, or "" when it has
+	// reported none, and whether the daemon holds a sign-in at all.
+	Instance func() (version string, signedIn bool)
 	// Busy reports that this is no moment to restart: a voice session is active (architecture.md §6).
 	// Nil is never. Nothing sets it before Phase E.
 	Busy func() bool
@@ -90,8 +101,11 @@ type Updater struct {
 	// staged is a release ready to install, and applying that Finish should install it.
 	staged   *Staged
 	applying bool
-	// working is held by whichever of the loop and a request is checking or staging.
-	working sync.Mutex
+	// working is held by whichever of the loop and a request is checking or staging: a channel of one, so
+	// that a request can stop waiting for it.
+	working chan struct{}
+	// nudged asks the loop for a check soon, outside its schedule.
+	nudged chan struct{}
 }
 
 // New builds the Updater for a daemon. It reads the receipt and touches nothing.
@@ -115,7 +129,8 @@ func New(o Options) *Updater {
 	if o.Changed == nil {
 		o.Changed = func() {}
 	}
-	u := &Updater{opts: o, installer: &Installer{Dir: filepath.Join(o.StateDir, "update"), GOOS: o.GOOS}}
+	u := &Updater{opts: o, installer: &Installer{Dir: filepath.Join(o.StateDir, "update"), GOOS: o.GOOS},
+		working: make(chan struct{}, 1), nudged: make(chan struct{}, 1)}
 	u.installs, u.reason = u.standing()
 	return u
 }
@@ -132,7 +147,7 @@ func (u *Updater) standing() (bool, string) {
 		return false, "this install was not made by Norite's installer, so whatever installed it updates it"
 	}
 	u.installer.BinDir = receipt.BinDir
-	if u.opts.Executable != filepath.Join(receipt.BinDir, daemonName+exeSuffix(u.opts.GOOS)) {
+	if !samePath(u.opts.Executable, filepath.Join(receipt.BinDir, daemonName+exeSuffix(u.opts.GOOS)), u.opts.GOOS) {
 		return false, "this daemon is not the one the installer put in " + termsafe.Text(receipt.BinDir)
 	}
 	if u.opts.GOOS == "darwin" {
@@ -187,6 +202,17 @@ func (u *Updater) Run(ctx context.Context) {
 				u.opts.Log.Warn().Str("error", termsafe.Text(err.Error())).Msg("could not record that this version stayed up")
 			}
 			u.opts.Changed()
+		case <-u.nudged:
+			// The instance has just refused this daemon for its version, which is the one moment a newer
+			// release is needed and not merely wanted. Waiting out the schedule left a client locked out
+			// for up to a day with the release that fixes it already published (M24 /code-review). Not
+			// more often than nudgeFloor, so an instance that refuses in a loop asks the host once.
+			if last := u.installer.Load().LastCheck; u.mode() != ipc.UpdateOff &&
+				(last.IsZero() || u.opts.Now().Sub(last) >= nudgeFloor) {
+				if u.scheduled(ctx) {
+					next.Reset(retryStaged)
+				}
+			}
 		case <-next.C:
 			wait := checkEvery + jitter()
 			if u.mode() != ipc.UpdateOff {
@@ -214,8 +240,10 @@ func (u *Updater) untilFirstCheck() time.Duration {
 // scheduled is one turn of the loop. It reports whether a release is staged and waiting for a better
 // moment.
 func (u *Updater) scheduled(ctx context.Context) bool {
-	u.working.Lock()
-	defer u.working.Unlock()
+	if !u.acquire(ctx, 0) {
+		return false
+	}
+	defer u.release()
 
 	u.mu.Lock()
 	staged := u.staged
@@ -250,11 +278,11 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 		u.opts.Changed()
 		return Release{}, false, err
 	}
-	instance := ""
+	instance, signedIn := "", false
 	if u.opts.Instance != nil {
-		instance = u.opts.Instance()
+		instance, signedIn = u.opts.Instance()
 	}
-	release, found := Choose(Policy{Current: u.current, Instance: instance,
+	release, found := Choose(Policy{Current: u.current, Instance: instance, SignedIn: signedIn,
 		Prereleases: record.Channel == ipc.ChannelPrerelease, Bad: record.Bad}, releases)
 	available := ""
 	if found {
@@ -365,7 +393,8 @@ func (u *Updater) modeOf(r Record) string {
 func (u *Updater) Status() ipc.UpdateStatus {
 	r := u.installer.Load()
 	s := ipc.UpdateStatus{Version: u.opts.Version, Mode: u.modeOf(r), Channel: ipc.ChannelStable,
-		Installs: u.installs, Reason: u.reason, Available: r.Available, RolledBack: r.RolledBack, LastError: r.LastError}
+		Installs: u.installs, Reason: u.reason, Available: u.stillNewer(r.Available), RolledBack: r.RolledBack,
+		LastError: r.LastError}
 	if r.Channel == ipc.ChannelPrerelease {
 		s.Channel = ipc.ChannelPrerelease
 	}
@@ -380,8 +409,10 @@ func (u *Updater) Status() ipc.UpdateStatus {
 
 // Check reads the listing now, whatever the mode: somebody asked.
 func (u *Updater) Check(ctx context.Context) (ipc.UpdateStatus, error) {
-	u.working.Lock()
-	defer u.working.Unlock()
+	if !u.acquire(ctx, requestWait) {
+		return u.Status(), errBusy
+	}
+	defer u.release()
 	if _, _, err := u.check(ctx); err != nil {
 		var refused *ErrRefused
 		if errors.As(err, &refused) {
@@ -395,11 +426,13 @@ func (u *Updater) Check(ctx context.Context) (ipc.UpdateStatus, error) {
 // Apply checks, stages and begins installing, because somebody asked. The daemon restarts after the
 // answer has left.
 func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
-	u.working.Lock()
-	defer u.working.Unlock()
 	if !u.installs {
 		return u.Status(), &ErrRefused{u.reason}
 	}
+	if !u.acquire(ctx, requestWait) {
+		return u.Status(), errBusy
+	}
+	defer u.release()
 	// Somebody is waiting for this answer, and a client gives a request two minutes. A download that
 	// takes longer is given up on here and said, where the schedule's own has a quarter of an hour.
 	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
@@ -460,4 +493,62 @@ func jitter() time.Duration {
 		return 0
 	}
 	return rand.N(checkJitter)
+}
+
+// acquire takes the working turn, waiting at most wait for it, or for as long as ctx lasts when wait is
+// zero. It reports whether it was taken.
+func (u *Updater) acquire(ctx context.Context, wait time.Duration) bool {
+	if wait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+	}
+	select {
+	case u.working <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (u *Updater) release() { <-u.working }
+
+// Nudge asks for a check soon: the instance has refused this daemon for its version. It never blocks, and
+// asking twice before the loop has looked is asking once.
+func (u *Updater) Nudge() {
+	select {
+	case u.nudged <- struct{}{}:
+	default:
+	}
+}
+
+// stillNewer is a recorded "available" version, or "" once it is no longer above what runs. The record is
+// written by a check and outlives the daemon that made it: after somebody runs the installer by hand, the
+// version it named is the one running, and it was still being announced as out until the next check, up
+// to a day later (M24 /code-review).
+func (u *Updater) stillNewer(available string) string {
+	version, err := gatewayproto.ParseVersion(available)
+	if err != nil || version.Compare(u.current) <= 0 {
+		return ""
+	}
+	return available
+}
+
+// samePath reports whether two paths name the same file. Both are resolved through any links first: the
+// daemon's own path arrives resolved and the receipt's as the installer typed it, and a home or a bin
+// directory reached through a link made the two differ, which silently turned updating off for an install
+// that had just been told it updates itself (M24 /code-review). Windows compares names without regard to
+// case.
+func samePath(a, b, goos string) bool {
+	resolve := func(p string) string {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return resolved
+		}
+		return filepath.Clean(p)
+	}
+	a, b = resolve(a), resolve(b)
+	if goos == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }

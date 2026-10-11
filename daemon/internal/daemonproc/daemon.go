@@ -172,14 +172,23 @@ func Run(ctx context.Context, opts Options) error {
 	// stay up is undone here, and this process then makes way for the one put back (M24). The gateway
 	// client does not exist yet, so the instance's version is asked through a pointer filled in below.
 	var gateway atomic.Pointer[gatewayclient.Client]
+	var signIn atomic.Pointer[*session.Source]
 	var local *localRequests
 	update := updater.New(updater.Options{
 		Version: opts.Version, StateDir: stateDir, Executable: executable(), Log: log.With().Str("subsystem", "update").Logger(),
-		Instance: func() string {
+		Instance: func() (string, bool) {
+			version := ""
 			if gw := gateway.Load(); gw != nil {
-				return gw.ServerVersion()
+				version = gw.ServerVersion()
 			}
-			return ""
+			// Signed in, or still finding out: until the session says it is signed out, there may be an
+			// instance whose version decides what this daemon may become.
+			signedIn := false
+			if s := signIn.Load(); s != nil {
+				standing, _ := (*s).Status()
+				signedIn = standing != session.SignedOut
+			}
+			return version, signedIn
 		},
 		Restart: stopRun,
 		Changed: func() {
@@ -249,6 +258,7 @@ func Run(ctx context.Context, opts Options) error {
 			// log at a level that gets read.
 			store.Notify = func(msg string) { log.Warn().Msg(msg) }
 			src := session.New(session.Options{Store: store, Log: part("session")})
+			signIn.Store(&src)
 			components.Go(func() { src.Run(ctx) })
 			components.Go(func() {
 				// Without it the daemon still works, as it did before M19 had it: a logout is noticed at the
@@ -273,7 +283,7 @@ func Run(ctx context.Context, opts Options) error {
 			local.bind(server)
 			gw := gatewayclient.New(gatewayclient.Options{
 				Credentials: src, Sink: server, Version: opts.Version,
-				Log: part("gateway"),
+				Log: part("gateway"), OnVersionRefused: update.Nudge,
 			})
 			gateway.Store(gw)
 			components.Go(func() { gw.Run(ctx) })

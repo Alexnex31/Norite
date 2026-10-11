@@ -35,6 +35,7 @@ type world struct {
 	changes   atomic.Int32
 	busy      atomic.Bool
 	instance  atomic.Value // string
+	signedIn  atomic.Bool
 	verifyErr atomic.Value // error
 }
 
@@ -82,7 +83,7 @@ func (w *world) updater(version string, change ...func(*Options)) *Updater {
 	src := sourceAt(w.host.server)
 	o := Options{Version: version, StateDir: w.state, Executable: filepath.Join(w.bin, daemonName),
 		Source: &src, GOOS: "linux", Log: zerolog.Nop(),
-		Instance: func() string { return w.instance.Load().(string) },
+		Instance: func() (string, bool) { return w.instance.Load().(string), w.signedIn.Load() },
 		Busy:     w.busy.Load,
 		Restart:  func() { w.restarts.Add(1) },
 		Changed:  func() { w.changes.Add(1) },
@@ -413,5 +414,151 @@ func TestARolledBackVersionIsSaidAndNotOfferedAgain(t *testing.T) {
 	back.scheduled(t.Context())
 	if s := back.Status(); s.RolledBack != "0.1.1" || s.Available != "" || w.restarts.Load() != restarts {
 		t.Errorf("after a rollback: %+v", s)
+	}
+}
+
+// ---------- what /code-review found ----------
+
+// A home or a bin directory reached through a link: the daemon's own path arrives resolved and the
+// receipt's as the installer typed it.
+func TestAnInstallReachedThroughALinkStillUpdatesItself(t *testing.T) {
+	w := newWorld(t)
+	link := filepath.Join(filepath.Dir(w.bin), "linked-bin")
+	if err := os.Symlink(w.bin, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := installreceipt.Write(w.state, installreceipt.Receipt{BinDir: link, By: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if u := w.updater("0.1.0"); !u.installs {
+		t.Errorf("a receipt naming the directory through a link: %s", u.reason)
+	}
+	// Windows names files without regard to case; nothing else does.
+	if !samePath(`C:\Users\Ada\norite-daemon.exe`, `c:\users\ada\NORITE-DAEMON.EXE`, "windows") {
+		t.Error("two spellings of one Windows path were told apart")
+	}
+	if samePath("/home/ada/bin/norite-daemon", "/home/ada/BIN/norite-daemon", "linux") {
+		t.Error("two Linux paths differing in case were taken for one")
+	}
+}
+
+// The record outlives the daemon that wrote it. After somebody runs the installer by hand, the version a
+// check called available is the one running.
+func TestAVersionAlreadyRunningIsNotAnnouncedAsOut(t *testing.T) {
+	w := newWorld(t)
+	old := w.updater("0.1.0")
+	if _, err := old.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := old.Check(t.Context()); err != nil || s.Available != "0.1.1" {
+		t.Fatalf("check: %+v, %v", s, err)
+	}
+	for _, running := range []string{"0.1.1", "0.1.2"} {
+		if s := w.updater(running).Status(); s.Available != "" {
+			t.Errorf("a daemon at %s says %s is out", running, s.Available)
+		}
+	}
+	if s := w.updater("0.1.0").Status(); s.Available != "0.1.1" {
+		t.Errorf("the version still below it lost the notice: %+v", s)
+	}
+}
+
+func TestARefusedHandshakeAsksForACheckAtOnce(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	time.Sleep(100 * time.Millisecond)
+	if w.listed.Load() != 0 {
+		t.Fatal("the listing was read before anything asked")
+	}
+	u.Nudge()
+	u.Nudge() // twice before the loop looks is once
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.listed.Load() != 1 {
+		t.Fatalf("after a refused handshake the listing was read %d times", w.listed.Load())
+	}
+	// An instance that refuses in a loop asks the host once, not once a refusal.
+	for i := 0; i < 5; i++ {
+		u.Nudge()
+		time.Sleep(30 * time.Millisecond)
+	}
+	if n := w.listed.Load(); n != 1 {
+		t.Errorf("refused again a moment later, the listing was read %d times", n)
+	}
+}
+
+// With updates off, a refused handshake asks nobody anything either.
+func TestARefusedHandshakeAsksNothingWithUpdatesOff(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateOff); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	u.Nudge()
+	time.Sleep(200 * time.Millisecond)
+	if n := w.listed.Load(); n != 0 {
+		t.Errorf("with updates off a refused handshake read the listing (%d)", n)
+	}
+}
+
+// A request does not wait out a download the schedule is making.
+func TestARequestSaysWhenACheckIsAlreadyUnderWay(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &requestWait, 50*time.Millisecond)
+	u := w.updater("0.1.0")
+	if !u.acquire(t.Context(), 0) {
+		t.Fatal("the turn could not be taken")
+	}
+	started := time.Now()
+	for name, ask := range map[string]func(context.Context) (ipc.UpdateStatus, error){"check": u.Check, "apply": u.Apply} {
+		_, err := ask(t.Context())
+		var refused *ErrRefused
+		if !errors.As(err, &refused) || !strings.Contains(refused.Msg, "already under way") {
+			t.Errorf("%s behind a download: %v", name, err)
+		}
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Errorf("the two requests waited %s", time.Since(started))
+	}
+	u.release()
+	if _, err := u.Check(t.Context()); err != nil {
+		t.Errorf("once it is free: %v", err)
+	}
+	if w.restarts.Load() != 0 {
+		t.Error("a refused request restarted the daemon")
+	}
+}
+
+// A signed-in daemon that has not heard from its instance in this run moves nowhere.
+func TestNothingIsChosenUntilTheInstanceHasBeenHeardFrom(t *testing.T) {
+	w := newWorld(t)
+	w.signedIn.Store(true)
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	if s := u.Status(); s.Available != "" || w.restarts.Load() != 0 {
+		t.Fatalf("moved before the instance said its version: %+v", s)
+	}
+	w.instance.Store("0.1.0")
+	u.scheduled(t.Context())
+	if w.restarts.Load() != 1 {
+		t.Errorf("heard from, and still not moved")
 	}
 }

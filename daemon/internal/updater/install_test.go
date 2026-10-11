@@ -285,3 +285,44 @@ func TestTheRecordIsForgivingAndBounded(t *testing.T) {
 		t.Errorf("the record's mode: %v", info.Mode())
 	}
 }
+
+// An installation was interrupted, and before the daemon next started somebody ran the installer by hand:
+// what starts is neither version of the interrupted one. The kept pair is not theirs to be restored over.
+func TestAnInterruptedInstallationIsNotRestoredOverAThirdVersion(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.in.Update(func(r *Record) { r.Pending.Phase = phaseSwapping }); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range x.in.programs() {
+		x.write(filepath.Join(x.in.BinDir, name), "0.1.2 "+name)
+	}
+	x.start("0.1.2", false, Nothing)
+	x.onDisk("0.1.2")
+	x.noPrevious()
+	if p := x.in.Load().Pending; p != nil {
+		t.Errorf("pending %+v", p)
+	}
+}
+
+// The programs Windows set aside because they were running are removed once nothing runs them.
+func TestProgramsSetAsideAreSweptWhenTheyCanBe(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "norite.exe")
+	for _, name := range []string{"norite.exe", "norite.exe.old-a1", "norite.exe.old-b2", "norite.exe.older", "norite-daemon.exe.old-c3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepOld(dst)
+	left, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range left {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"norite-daemon.exe.old-c3", "norite.exe", "norite.exe.older"}) {
+		t.Errorf("left %v", names)
+	}
+}

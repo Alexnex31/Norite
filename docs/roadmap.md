@@ -1557,8 +1557,10 @@ of this section.
   - **The instance.** `gatewayproto.Check(instance, candidate)` must pass, the handshake's own function
     (M20's rule): while MAJOR is 0 that is the instance's MINOR, and for a pre-release instance the
     identical version. The daemon knows the instance's version from HELLO, including when HELLO refused
-    it, which is the case where the update is needed. Signed out, the daemon's own version stands in for
-    the instance's, so only patches are taken.
+    it, which is the case where the update is needed, and a refused HELLO asks for a check at once
+    rather than at the next daily one. Signed in to an instance not yet heard from in this run, nothing
+    is chosen. Signed out, the daemon's own version stands in for the instance's, so only patches are
+    taken.
   - **Not known bad.** A version this installation rolled back from is not offered again.
 
   **Verifying it.** `checksums.txt`, its Sigstore bundle and this platform's client archive are

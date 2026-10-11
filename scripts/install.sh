@@ -158,14 +158,19 @@ place() {
 }
 
 # leave_receipt records where the two programs were put, which is what lets the daemon install a later
-# release itself (M24): it writes over the pair only in a directory an installer named. A build of a
-# checkout is not a release and is not updated, so a receipt left by an earlier install is removed.
+# release itself (M24): it writes over the pair only in a directory an installer named.
+#
+# There is one receipt per account, for the install its daemon runs from. So it is written only when this
+# run sets the daemon up: with --no-daemon the programs are being put somewhere for another purpose, a
+# server's in /opt or a test's in a temporary directory, and writing then would point the account's real
+# install at the wrong place. A build of a checkout is not a release and is not updated, so a receipt an
+# earlier install left for this directory is removed; one for another directory is not this run's.
 leave_receipt() {
-    if [ "$mode" = release ]; then
+    if [ "$mode" = release ] && [ "$daemon" = 1 ]; then
         "$norite" update receipt --bin-dir "$bin_dir" --by install.sh ||
             warn "could not record where Norite was installed; it will tell you about new releases and not install them."
-    else
-        "$norite" update receipt --forget >/dev/null 2>&1 || true
+    elif [ "$mode" != release ]; then
+        "$norite" update receipt --forget --bin-dir "$bin_dir" >/dev/null 2>&1 || true
     fi
 }
 
@@ -258,7 +263,7 @@ uninstall() {
     step "Removing Norite from $bin_dir"
     "$norite" logout >/dev/null 2>&1 || true
     "$norite" daemon uninstall >/dev/null 2>&1 || true
-    "$norite" update receipt --forget >/dev/null 2>&1 || true
+    "$norite" update receipt --forget --bin-dir "$bin_dir" >/dev/null 2>&1 || true
     rm -f "$bin_dir/norite" "$bin_dir/norite-daemon"
     say "Removed. The daemon's state directory is left in place; delete it for a clean slate:"
     case "$os" in

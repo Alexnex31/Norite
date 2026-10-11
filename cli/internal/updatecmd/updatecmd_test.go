@@ -28,7 +28,7 @@ import (
 // from, the state directory of whoever runs the suite, and with it decide whether their daemon updates.
 func TestMain(m *testing.M) {
 	recordReceipt = func(installreceipt.Receipt) error { panic("a test reached the real install receipt") }
-	forgetReceipt = func() error { panic("a test reached the real install receipt") }
+	forgetReceipt = func(string) error { panic("a test reached the real install receipt") }
 	zone = time.UTC
 	os.Exit(m.Run())
 }
@@ -228,12 +228,12 @@ func TestARefusalIsTheDaemonsReason(t *testing.T) {
 
 func TestTheReceiptNamesADirectoryThatHoldsTheTwoPrograms(t *testing.T) {
 	var written []installreceipt.Receipt
-	var forgotten int
+	var forgotten []string
 	recordReceipt = func(r installreceipt.Receipt) error { written = append(written, r); return nil }
-	forgetReceipt = func() error { forgotten++; return nil }
+	forgetReceipt = func(dir string) error { forgotten = append(forgotten, dir); return nil }
 	t.Cleanup(func() {
 		recordReceipt = func(installreceipt.Receipt) error { panic("a test reached the real install receipt") }
-		forgetReceipt = func() error { panic("a test reached the real install receipt") }
+		forgetReceipt = func(string) error { panic("a test reached the real install receipt") }
 	})
 
 	dir := t.TempDir()
@@ -254,6 +254,8 @@ func TestTheReceiptNamesADirectoryThatHoldsTheTwoPrograms(t *testing.T) {
 
 	var usage *clierr.UsageError
 	require.ErrorAs(t, norite(t, nil, false, "receipt").err, &usage)
-	require.NoError(t, norite(t, nil, false, "receipt", "--forget").err)
-	assert.Equal(t, 1, forgotten)
+	// Forgetting names the directory too, and only a receipt for that directory is forgotten.
+	require.ErrorAs(t, norite(t, nil, false, "receipt", "--forget").err, &usage)
+	require.NoError(t, norite(t, nil, false, "receipt", "--forget", "--bin-dir", dir).err)
+	assert.Equal(t, []string{dir}, forgotten)
 }

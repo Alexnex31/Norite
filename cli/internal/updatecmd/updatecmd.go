@@ -35,7 +35,7 @@ type Connector func(ctx context.Context) (daemonclient.Caller, func(), error)
 // The seams the tests use: where a receipt is written and removed, and the zone a time is shown in.
 var (
 	recordReceipt = installreceipt.Record
-	forgetReceipt = installreceipt.Forget
+	forgetReceipt = installreceipt.ForgetIfNames
 	zone          = time.Local
 )
 
@@ -109,7 +109,7 @@ func Command(connect Connector) *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "bin-dir", Usage: "the `DIR` holding norite and norite-daemon"},
 					&cli.StringFlag{Name: "by", Usage: "the installer's `NAME`"},
-					&cli.BoolFlag{Name: "forget", Usage: "remove the receipt"},
+					&cli.BoolFlag{Name: "forget", Usage: "remove the receipt, if it names --bin-dir"},
 				},
 				Action: receipt,
 			},
@@ -161,9 +161,6 @@ func receipt(_ context.Context, cmd *cli.Command) error {
 	if cmd.Args().Len() != 0 {
 		return clierr.Usage("norite update receipt takes no arguments")
 	}
-	if cmd.Bool("forget") {
-		return forgetReceipt()
-	}
 	dir := cmd.String("bin-dir")
 	if dir == "" {
 		return clierr.Usage("--bin-dir is needed")
@@ -171,6 +168,12 @@ func receipt(_ context.Context, cmd *cli.Command) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
+	}
+	// One receipt per account, for the install its daemon runs from. Forgetting names a directory so that
+	// an installer run against another one, a server's programs in /opt or a test's in a temporary
+	// directory, leaves the real install's receipt alone (M24 /code-review).
+	if cmd.Bool("forget") {
+		return forgetReceipt(abs)
 	}
 	// A receipt names a directory that holds the two programs, or the daemon would be told it may write
 	// somewhere it has never run from.
