@@ -12,7 +12,7 @@ wrong for the reason given.
 - **The "version-check endpoint" is GitHub's release listing**, read once a day. No endpoint of the
   project's own exists and an instance cannot be one. "Never a live call to Sigstore's infrastructure"
   stands and is met; the check itself is a call to a third party, which this record had not considered.
-  It carries the daemon's version and nothing else, and `update = "off"` stops it.
+  It carries the daemon's version and nothing else, and `norite update mode off` stops it.
 - **Verification is `sigstore-go` against a trusted root embedded in the binary.** A root embedded is a
   root that ages: an install that outlives a Sigstore key rotation without updating fails closed and is
   told to reinstall.

@@ -97,6 +97,9 @@ type Options struct {
 func Run(ctx context.Context, opts Options) error {
 	// The run ends when the caller's context does, which is a signal, or when an attached client asks
 	// (ipc.PathStop). Both are this one cancellation, so nothing below can tell them apart or needs to.
+	// asked is the caller's context: done when a signal asked the daemon to stop, and not when the daemon
+	// ended its own run.
+	asked := ctx
 	ctx, stopRun := context.WithCancel(ctx)
 	defer stopRun()
 
@@ -174,6 +177,8 @@ func Run(ctx context.Context, opts Options) error {
 	var gateway atomic.Pointer[gatewayclient.Client]
 	var signIn atomic.Pointer[*session.Source]
 	var local *localRequests
+	// stopRequested is that a stop request ended the run (M23), which like a signal means stay stopped.
+	var stopRequested atomic.Bool
 	update := updater.New(updater.Options{
 		Version: opts.Version, StateDir: stateDir, Executable: executable(), Log: log.With().Str("subsystem", "update").Logger(),
 		Instance: func() (string, bool) {
@@ -235,7 +240,7 @@ func Run(ctx context.Context, opts Options) error {
 		st := state.New(part("state"), state.DefaultLimits)
 		// The requests the daemon answers itself. They are about this machine, so they are served whichever
 		// branch below is taken: signed in or not, credential store or none.
-		local = newLocal(stateDir, stopRun, log, part("config"))
+		local = newLocal(stateDir, func() { stopRequested.Store(true); stopRun() }, log, part("config"))
 		local.update = update
 
 		store, err := credentials.OpenIn(stateDir)
@@ -320,7 +325,7 @@ func Run(ctx context.Context, opts Options) error {
 	components.Wait()
 	// Everything that writes has stopped and the lock is still held: the one moment the programs on disk
 	// can be replaced. A run that ended to install a release ends by asking to be replaced.
-	if update.Finish() {
+	if update.Finish(func() bool { return asked.Err() != nil || stopRequested.Load() }) {
 		log.Info().Msg("daemon stopped, to start again as the version now installed")
 		return ErrRestart
 	}
@@ -330,7 +335,7 @@ func Run(ctx context.Context, opts Options) error {
 
 // ErrRestart is a run that ended so that the program now on disk can take its place: a release was
 // installed, or one that did not stay up was undone (M24). cmd/daemond replaces the process on Unix, and
-// on Windows exits with a code its task restarts on.
+// on Windows starts the installed version as a process of its own and exits 0.
 var ErrRestart = errors.New("the daemon must start again as the version now installed")
 
 // executable is this daemon's own path with links resolved, or "" when it cannot be found. Asked at the

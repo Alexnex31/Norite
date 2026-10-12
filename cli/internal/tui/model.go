@@ -177,7 +177,7 @@ func (m *Model) onAttached(msg attachedMsg) tea.Cmd {
 	// The daemon reports a changed config only to clients attached when it changes, so whatever was saved
 	// while this one was not is read now.
 	// And what it knows about a newer release, which it otherwise says only when that changes (M24).
-	cmds := []tea.Cmd{listen(m.gen, m.sess), m.reloadConfig(), loadUpdate(m.gen, m.sess)}
+	cmds := []tea.Cmd{listen(m.gen, m.sess), m.reloadConfig(), loadUpdate(m.gen, m.sess, m.opts.Version)}
 
 	ready := m.sess.Ready()
 	switch ready.Standing {
@@ -257,7 +257,7 @@ func (m *Model) onEvent(ev ipc.Event) tea.Cmd {
 	case ipc.EventUpdate:
 		// Also the daemon's own and also empty: the client asks.
 		if m.sess != nil {
-			return loadUpdate(m.gen, m.sess)
+			return loadUpdate(m.gen, m.sess, m.opts.Version)
 		}
 	case "MESSAGE_CREATE", "MESSAGE_UPDATE":
 		var msg apicontract.Message

@@ -138,3 +138,27 @@ func TestARedirectNeverLeavesHTTPS(t *testing.T) {
 		t.Errorf("a redirect from HTTPS to HTTP was followed: %v", err)
 	}
 }
+
+// A real listing is large: each release's entry lists every file it has, and the first release's is 32 KB.
+// A page of a hundred, at that size and more, is read. The bound once stood at 2 MiB, which the
+// sixty-fifth release would have passed, on every install at once (M24 /code-review).
+func TestAListingAsLargeAsARealOneIsRead(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		assets := strings.Repeat(`{"name":"norite_0.1.0_linux_amd64.tar.gz","browser_download_url":"https://example.invalid/a"},`, 500)
+		_, _ = fmt.Fprint(w, "[")
+		for i := 0; i < 100; i++ {
+			if i > 0 {
+				_, _ = fmt.Fprint(w, ",")
+			}
+			_, _ = fmt.Fprintf(w, `{"tag_name":"v0.1.%d","draft":false,"assets":[%s{}]}`, i, assets)
+		}
+		_, _ = fmt.Fprint(w, "]")
+	}))
+	defer server.Close()
+	src := sourceAt(server)
+	src.ListURL = server.URL + "/releases"
+	releases, err := src.Releases(t.Context())
+	if err != nil || len(releases) != 100 {
+		t.Fatalf("%d releases (%v)", len(releases), err)
+	}
+}

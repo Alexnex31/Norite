@@ -1608,6 +1608,7 @@ automation port refuses every `/@daemon/` path.
   nothing in it is believed.
 - **Choosing.** The highest release that is on the channel, higher than what runs by SemVer order, one
   the signed-in instance's handshake accepts (`gatewayproto.Check`), and not one rolled back from here.
+  An install that is itself a pre-release is on the pre-release channel unless told otherwise.
 - **Verifying.** `checksums.txt` and its Sigstore bundle are verified offline with `sigstore-go`, against
   a trusted root embedded in the binary and the identity `release.yml@refs/tags/<tag>`. Then the archive
   against the checksums, then the two programs by exact name, then the new daemon is run once with
@@ -1619,7 +1620,8 @@ automation port refuses every `/@daemon/` path.
   the kept pair and lists the version as bad. A run that stays up ten minutes is kept.
 - **Who.** Only an install with a receipt (`install.json` in the state directory) naming the directory the
   daemon runs from, which the installer scripts leave. Any other install, a development build, and macOS
-  check and say so. The mode (`auto`, `notify`, `off`) and the channel are in the updater's own record
+  check and say so. Windows installs when asked and not by itself, until that has been watched working
+  there. The mode (`auto`, `notify`, `off`) and the channel are in the updater's own record
   in the state directory, set with `norite update mode|channel`, and not in `config.toml`: they are this
   machine's and the daemon's own.
 - **Surface.** Five requests under `/@daemon/update`, first-party tier only; `DAEMON_UPDATE`, which carries

@@ -113,7 +113,7 @@ func New(out, errOut io.Writer) *cli.Command {
 				}
 				return cli.ShowAppHelp(cmd)
 			}
-			return tui.Run(ctx, tui.Options{Dial: tui.DaemonDialer(Version), Channel: channel})
+			return tui.Run(ctx, tui.Options{Dial: tui.DaemonDialer(Version), Channel: channel, Version: Version})
 		},
 
 		Flags: []cli.Flag{

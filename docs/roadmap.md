@@ -1597,12 +1597,13 @@ of this section.
   as the port for scripts' switch is, and the daemon interprets nobody's config file (M21).
 
   **Platforms.** Linux is walked in a VM. Windows is walked by the author on a real machine, with M23's
-  task, which that milestone never ran: applying is enabled there only if that pass succeeds, and
-  `install.ps1` registers the task by default once it has. macOS checks and notifies and does not apply,
+  task, which that milestone never ran: until that pass succeeds the default there is `notify`, so
+  nothing is installed unasked on a platform nobody has watched (`norite update apply` and `mode auto`
+  work), and `install.ps1` registers the task by default once it has. macOS checks and notifies and does not apply,
   no Mac being available; its guide says so.
 
-  **Surface.** `norite update status|check|apply` with `--json`; a line in `norite daemon status`; three
-  requests under `/@daemon/update/`, the attach socket's tier and refused by the port for scripts
+  **Surface.** `norite update status|check|apply` with `--json`; a line in `norite daemon status`; five
+  requests under `/@daemon/update`, the attach socket's tier and refused by the port for scripts
   (rule 16); a `DAEMON_UPDATE` dispatch; one line in the terminal client (`7a`'s health block, and until
   M42 draws that, home). The GUI's half is M78's.
 

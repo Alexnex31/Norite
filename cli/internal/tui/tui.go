@@ -70,6 +70,9 @@ type Options struct {
 	// Config reads the client's settings, at start and whenever the daemon says the file changed. Nil is
 	// FileConfig, the user's own config.toml.
 	Config ConfigReader
+	// Version is this program's own version, which the update notice compares with the daemon's (M24).
+	// Empty is a build that is not a release.
+	Version string
 }
 
 // Run draws the client until it is quit, on the terminal's alternate screen.

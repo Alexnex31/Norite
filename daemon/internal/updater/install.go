@@ -59,7 +59,13 @@ type Record struct {
 	// port for scripts' switch is: the daemon interprets nobody's config file (M21).
 	Mode    string `json:"mode,omitempty"`
 	Channel string `json:"channel,omitempty"`
+
+	// unreadable is a record that is there and could not be read. It is not an empty one: see load.
+	unreadable bool
 }
+
+// errUnreadable is a change refused because the record on disk could not be read.
+var errUnreadable = errors.New("the updater's record cannot be read, so nothing is checked or installed; remove it to start over")
 
 // Outcome is what a start found in the record.
 type Outcome int
@@ -95,8 +101,12 @@ func (in *Installer) programs() []string {
 	return []string{cliName + exeSuffix(in.GOOS), daemonName + exeSuffix(in.GOOS)}
 }
 
-// Load reads the record. One that is missing or unreadable is an empty one: the worst that follows is a
-// version offered again, or an update that is never confirmed and never undone.
+// Load reads the record. One that is missing is an empty one.
+//
+// One that is there and cannot be read is not: a file the disk would not give, or one somebody's edit
+// broke, used to be read as empty and then written over by the next change, which turned "off" back into
+// "auto" and forgot every version rolled back from (M24 /code-review). It is marked unreadable, nothing
+// is written over it, and the updater does nothing by itself until somebody removes it.
 func (in *Installer) Load() Record {
 	in.mu.Lock()
 	defer in.mu.Unlock()
@@ -105,8 +115,15 @@ func (in *Installer) Load() Record {
 
 func (in *Installer) load() Record {
 	var r Record
-	if data, err := os.ReadFile(in.recordPath()); err == nil && len(data) < 1<<20 {
-		_ = json.Unmarshal(data, &r)
+	data, err := os.ReadFile(in.recordPath())
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return r
+	case err != nil, len(data) >= 1<<20:
+		return Record{unreadable: true}
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return Record{unreadable: true}
 	}
 	if r.Pending != nil && (r.Pending.Phase != phaseSwapping && r.Pending.Phase != phaseApplied) {
 		r.Pending = nil
@@ -119,6 +136,9 @@ func (in *Installer) Update(change func(*Record)) error {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	r := in.load()
+	if r.unreadable {
+		return errUnreadable
+	}
 	change(&r)
 	return in.save(r)
 }
@@ -189,6 +209,9 @@ func (in *Installer) Install(staged Staged, from string) error {
 	}
 
 	r := in.load()
+	if r.unreadable {
+		return errUnreadable
+	}
 	r.Pending = &Pending{From: from, To: staged.Release.Version.String(), Phase: phaseSwapping}
 	r.RolledBack, r.Available, r.LastError = "", "", ""
 	if err := in.save(r); err != nil {
@@ -292,7 +315,7 @@ func (in *Installer) Confirm() error {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	r := in.load()
-	if r.Pending == nil || r.Pending.Phase != phaseApplied {
+	if r.unreadable || r.Pending == nil || r.Pending.Phase != phaseApplied {
 		return nil
 	}
 	r.Pending = nil
@@ -307,7 +330,7 @@ func (in *Installer) CleanExit() {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	r := in.load()
-	if r.Pending != nil && r.Pending.Phase == phaseApplied && r.Pending.Starts > 0 {
+	if !r.unreadable && r.Pending != nil && r.Pending.Phase == phaseApplied && r.Pending.Starts > 0 {
 		r.Pending.Starts--
 		_ = in.save(r)
 	}

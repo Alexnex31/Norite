@@ -418,8 +418,9 @@ of the terminal, present on **every** screen above with screen-specific content.
 `TOKENS.md → Status bar`. Per-screen row-2 chord sets are listed in `KEYMAP.md`.
 
 **Update notice (M24).** The health block carries one more state, after the daemon's health dot and only
-when there is something to say: `↑ 0.1.1 ready` in `accent` when a verified update waits to be applied,
-`↑ 0.1.1 installed · restart norite` in `warn` when the daemon is already running it and this client is
-the older program, `↓ 0.1.1 undone` in `danger` when an update was rolled back. The version is the
-daemon's own text, never the listing's. Until M42 draws this bar, the terminal client shows the same
-sentence as one line on home.
+when there is something to say: `↑ 0.1.1 is out` in `accent` when a newer release is listed,
+`↑ 0.1.1 installed · restart norite` in `warn` when the daemon runs a newer version than this client,
+for as long as it does, `↓ 0.1.1 undone` in `danger` when an update was rolled back. A release is "out"
+and never "ready": it is named by the listing, and is verified when it is installed, not before it is
+drawn. The version is one the daemon parsed as a release tag, cleaned and cut by the client. Until M42
+draws this bar, the terminal client shows the same sentence as one line on home.

@@ -159,7 +159,7 @@ func TestAnAutomaticUpdateInstallsWhenTheRunEnds(t *testing.T) {
 	if w.daemonOnDisk() != "0.1.0 norite-daemon" {
 		t.Fatal("the program was replaced while the daemon was still running")
 	}
-	if !u.Finish() {
+	if !u.Finish(notStopped) {
 		t.Fatal("Finish did not ask for the new version to be started")
 	}
 	if w.daemonOnDisk() != newDaemonScript {
@@ -189,7 +189,7 @@ func TestNotifyChecksAndDownloadsNothing(t *testing.T) {
 	if n := w.host.asked["checksums.txt"].Load(); n != 0 || w.restarts.Load() != 0 {
 		t.Errorf("notify downloaded (%d) or restarted (%d)", n, w.restarts.Load())
 	}
-	if u.Finish() {
+	if u.Finish(notStopped) {
 		t.Errorf("a run that ended for no update asked to be replaced")
 	}
 
@@ -201,7 +201,7 @@ func TestNotifyChecksAndDownloadsNothing(t *testing.T) {
 	for w.restarts.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if w.restarts.Load() != 1 || !u.Finish() || w.daemonOnDisk() != newDaemonScript {
+	if w.restarts.Load() != 1 || !u.Finish(notStopped) || w.daemonOnDisk() != newDaemonScript {
 		t.Errorf("apply: restarts=%d, on disk %q", w.restarts.Load(), w.daemonOnDisk())
 	}
 }
@@ -218,11 +218,12 @@ func TestAnUnverifiedReleaseIsRefusedAndTheVersionKeepsRunning(t *testing.T) {
 	if !errors.As(err, &refused) || !strings.Contains(refused.Msg, "keeps running") {
 		t.Errorf("apply: %v", err)
 	}
-	if w.restarts.Load() != 0 || u.Finish() || w.daemonOnDisk() != "0.1.0 norite-daemon" {
+	if w.restarts.Load() != 0 || u.Finish(notStopped) || w.daemonOnDisk() != "0.1.0 norite-daemon" {
 		t.Errorf("an unverified release changed something")
 	}
-	if s := u.Status(); !strings.Contains(s.LastError, "did not verify") {
-		t.Errorf("last error %q", s.LastError)
+	// And it is not announced as out: the listing named it, and no signature stands behind it.
+	if s := u.Status(); !strings.Contains(s.LastError, "did not verify") || s.Available != "" {
+		t.Errorf("status %+v", s)
 	}
 }
 
@@ -242,10 +243,20 @@ func TestADowngradeIsNeverChosen(t *testing.T) {
 func TestTheInstanceBoundsTheChoice(t *testing.T) {
 	w := newWorld(t)
 	w.instance.Store("0.2.0")
+	w.signedIn.Store(true)
 	u := w.updater("0.1.0")
 	u.scheduled(t.Context())
 	if s := u.Status(); s.Available != "" || w.restarts.Load() != 0 {
 		t.Errorf("moved within 0.1 while signed in to a 0.2 instance: %+v", s)
+	}
+	// Signed out of it, its version is nobody's: the running version's own patches are taken, and it
+	// used to go on bounding the choice (M24 /code-review).
+	w.signedIn.Store(false)
+	if _, err := u.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if s := u.Status(); s.Available != "0.1.1" {
+		t.Errorf("signed out, an instance left behind still chose: %+v", s)
 	}
 }
 
@@ -278,7 +289,7 @@ func TestAFailedInstallationStillStartsTheDaemonAgain(t *testing.T) {
 	if err := os.Remove(filepath.Join(w.bin, cliName)); err != nil {
 		t.Fatal(err)
 	}
-	if !u.Finish() {
+	if !u.Finish(notStopped) {
 		t.Error("a run that ended to install, and could not, did not ask to be started again")
 	}
 	if w.daemonOnDisk() != "0.1.0 norite-daemon" {
@@ -383,7 +394,7 @@ func TestARolledBackVersionIsSaidAndNotOfferedAgain(t *testing.T) {
 	w := newWorld(t)
 	u := w.updater("0.1.0")
 	u.scheduled(t.Context())
-	u.Finish()
+	u.Finish(notStopped)
 
 	// A 0.1.1 that is not the installed daemon, a build somebody is running from a checkout, is not the one
 	// on trial: however it starts, it counts for nothing and writes over nothing.
@@ -652,5 +663,191 @@ func TestAClockSetBackDoesNotHoldOffARefusedHandshakesCheck(t *testing.T) {
 	}
 	if w.listed.Load() != 1 {
 		t.Errorf("the listing was read %d times", w.listed.Load())
+	}
+}
+
+// notStopped is a daemon nobody has asked to stop.
+func notStopped() bool { return false }
+
+// An install that is itself a pre-release is offered the next one without being told to: the installer
+// installs the newest release of any kind, and a release candidate never offered its successor stayed
+// locked out of an instance that had moved to it (M24 /code-review). Saying "stable" still holds.
+func TestAPreReleaseInstallIsOfferedPreReleases(t *testing.T) {
+	w := newWorld(t)
+	w.listing.Store(`[{"tag_name":"v0.1.0-rc.2"},{"tag_name":"v0.1.0-rc.1"}]`)
+	w.instance.Store("0.1.0-rc.2")
+	w.signedIn.Store(true)
+	u := w.updater("0.1.0-rc.1")
+	if s, err := u.Check(t.Context()); err != nil || s.Available != "0.1.0-rc.2" || s.Channel != ipc.ChannelPrerelease {
+		t.Errorf("a release candidate was not offered the next: %+v (%v)", s, err)
+	}
+	if _, err := u.SetChannel(ipc.ChannelStable); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := u.Check(t.Context()); s.Available != "" || s.Channel != ipc.ChannelStable {
+		t.Errorf("told stable, it was offered a pre-release: %+v", s)
+	}
+	// A release is offered releases only, as before.
+	if s := w.updater("0.1.0").Status(); s.Channel != ipc.ChannelStable {
+		t.Errorf("a release's channel is %q", s.Channel)
+	}
+}
+
+// On Windows nothing is installed unasked until somebody has watched it work there: the default is to
+// say so and wait. Asking still installs, and so does choosing auto.
+func TestWindowsWaitsToBeAsked(t *testing.T) {
+	w := newWorld(t)
+	onWindows := func(o *Options) {
+		o.GOOS = "windows"
+		o.Executable = filepath.Join(w.bin, daemonName+".exe")
+	}
+	for _, name := range []string{cliName, daemonName} {
+		if err := os.Rename(filepath.Join(w.bin, name), filepath.Join(w.bin, name+".exe")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u := w.updater("0.1.0", onWindows)
+	if s := u.Status(); !s.Installs || s.Mode != ipc.UpdateNotify {
+		t.Fatalf("on Windows: %+v", s)
+	}
+	u.scheduled(t.Context())
+	if w.restarts.Load() != 0 {
+		t.Errorf("a release was installed on Windows without anybody asking")
+	}
+	if s, err := u.SetMode(ipc.UpdateAuto); err != nil || s.Mode != ipc.UpdateAuto {
+		t.Errorf("choosing auto on Windows: %+v (%v)", s, err)
+	}
+	if s := w.updater("0.1.0").Status(); s.Mode != ipc.UpdateAuto {
+		t.Errorf("elsewhere the default is %q", s.Mode)
+	}
+}
+
+// A daemon told to stop stops. Stopping and updating end the run the same way, and a stop that arrived
+// once an update had begun used to be taken for part of it: the daemon started again.
+func TestAStopThatArrivesDuringAnUpdateIsAStop(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	if w.restarts.Load() != 1 {
+		t.Fatal("the update did not begin")
+	}
+	if u.Finish(func() bool { return true }) {
+		t.Error("a daemon asked to stop started again")
+	}
+	if w.daemonOnDisk() != "0.1.0 norite-daemon" {
+		t.Errorf("installed anyway: %q", w.daemonOnDisk())
+	}
+	// Asked while the programs were being replaced: they are in place, and it still stops.
+	w2 := newWorld(t)
+	u2 := w2.updater("0.1.0")
+	u2.scheduled(t.Context())
+	calls := 0
+	if u2.Finish(func() bool { calls++; return calls > 1 }) {
+		t.Error("a daemon asked to stop while installing started again")
+	}
+	if w2.daemonOnDisk() != newDaemonScript {
+		t.Errorf("on disk: %q", w2.daemonOnDisk())
+	}
+	// And a run already ending is not ended again to install. Tried many times, since a turn taken with
+	// a context already done is taken only some of the time.
+	w3 := newWorld(t)
+	w3.busy.Store(true)
+	u3 := w3.updater("0.1.0")
+	if !u3.scheduled(t.Context()) {
+		t.Fatal("nothing was staged")
+	}
+	w3.busy.Store(false)
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	for i := 0; i < 40; i++ {
+		u3.scheduled(ended)
+	}
+	if w3.restarts.Load() != 0 {
+		t.Errorf("a run that was ending was ended again to install")
+	}
+}
+
+// A record that cannot be read turns nothing on: no mode can be read from it, and "off" may be what it
+// said. It is said, and left for a person.
+func TestAnUnreadableRecordChecksAndInstallsNothing(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateOff); err != nil {
+		t.Fatal(err)
+	}
+	broken := `{"mode":"off","bad":["0.1.1"]`
+	if err := os.WriteFile(u.installer.recordPath(), []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := u.Status()
+	if s.Mode != ipc.UpdateOff || !strings.Contains(s.LastError, "cannot be read") {
+		t.Errorf("status %+v", s)
+	}
+	lower(t, &firstCheck, 10*time.Millisecond)
+	lower(t, &checkJitter, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	u.Nudge()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+	if w.listed.Load() != 0 || w.restarts.Load() != 0 {
+		t.Errorf("listed %d, restarted %d", w.listed.Load(), w.restarts.Load())
+	}
+	if got, _ := os.ReadFile(u.installer.recordPath()); string(got) != broken {
+		t.Errorf("the record was written over: %q", got)
+	}
+}
+
+// What somebody asked for during a call is installed when the call ends: soon, and whatever the mode. It
+// used to wait for the next daily check, and never came with updates off.
+func TestWhatWasAskedForWhileBusyIsInstalledWhenFree(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	lower(t, &retryStaged, 20*time.Millisecond)
+	w.busy.Store(true)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateOff); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	if _, err := u.Apply(t.Context()); err == nil || !strings.Contains(err.Error(), "ready") {
+		t.Fatalf("apply while busy: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if w.restarts.Load() != 0 {
+		t.Fatal("installed during the call")
+	}
+	w.busy.Store(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for w.restarts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.restarts.Load() != 1 {
+		t.Errorf("not installed once the call ended")
+	}
+}
+
+// A release staged while the mode was auto is not installed by the schedule once somebody has said to
+// ask first.
+func TestAStagedReleaseIsNotInstalledOnceToldToAskFirst(t *testing.T) {
+	w := newWorld(t)
+	w.busy.Store(true)
+	u := w.updater("0.1.0")
+	if !u.scheduled(t.Context()) {
+		t.Fatal("nothing was staged")
+	}
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	w.busy.Store(false)
+	u.scheduled(t.Context())
+	if w.restarts.Load() != 0 {
+		t.Errorf("installed after being told to ask first")
 	}
 }

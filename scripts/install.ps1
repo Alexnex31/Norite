@@ -331,9 +331,9 @@ function Install-Norite {
 
     Step 'Done'
     if (-not $fromSourceMode -and -not $NoDaemon) {
-        Say 'Norite keeps itself up to date: once a day it checks for a new release, verifies its'
-        Say "signature, and installs it. 'norite update mode notify' makes it ask first, and"
-        Say "'norite update mode off' stops the check. 'norite update status' says where it stands."
+        Say 'Once a day Norite checks for a new release and tells you.'
+        Say "'norite update apply' verifies its signature and installs it, 'norite update mode auto'"
+        Say "makes it do that by itself, and 'norite update mode off' stops the check."
         Say ''
     }
     Say "Run 'norite' to open the client, and 'norite --help' for everything else."

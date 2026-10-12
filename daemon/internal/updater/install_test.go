@@ -4,6 +4,7 @@
 package updater
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -265,12 +266,33 @@ func TestTheRecordIsForgivingAndBounded(t *testing.T) {
 	if err := os.MkdirAll(x.in.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, body := range []string{"", "not json", `{"pending":{"phase":"something else","to":"9.9.9"}}`, `[1,2]`} {
+	x.write(x.in.recordPath(), `{"pending":{"phase":"something else","to":"9.9.9"}}`)
+	if r := x.in.Load(); r.Pending != nil {
+		t.Errorf("a phase that is not one: pending %+v", r.Pending)
+	}
+	x.start("0.1.0", true, Nothing)
+	// A record that is there and cannot be read is not an empty one. Nothing is written over it: read as
+	// empty, the next change saved a record that had forgotten "off" and every version rolled back from
+	// (M24 /code-review).
+	for _, body := range []string{"", "not json", `[1,2]`, `{"mode":"off","bad":["0.1.1"]`} {
 		x.write(x.in.recordPath(), body)
-		if r := x.in.Load(); r.Pending != nil {
-			t.Errorf("record %q: pending %+v", body, r.Pending)
-		}
 		x.start("0.1.0", true, Nothing)
+		if err := x.in.Update(func(r *Record) { r.LastError = "something" }); !errors.Is(err, errUnreadable) {
+			t.Errorf("record %q: a change was made over it: %v", body, err)
+		}
+		x.in.CleanExit()
+		if err := x.in.Confirm(); err != nil {
+			t.Errorf("record %q: confirm: %v", body, err)
+		}
+		if err := x.in.Install(x.staged, "0.1.0"); !errors.Is(err, errUnreadable) {
+			t.Errorf("record %q: installed over it: %v", body, err)
+		}
+		if got, _ := os.ReadFile(x.in.recordPath()); string(got) != body {
+			t.Errorf("record %q was written over with %q", body, got)
+		}
+	}
+	if err := os.Remove(x.in.recordPath()); err != nil {
+		t.Fatal(err)
 	}
 	if err := x.in.Update(func(r *Record) {
 		for i := 0; i < maxBad+10; i++ {

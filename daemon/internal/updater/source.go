@@ -27,7 +27,12 @@ const (
 	// defaultDownloadBase is where a release's files are, under its tag.
 	defaultDownloadBase = "https://github.com/Alexnex31/Norite/releases/download"
 
-	maxListing   = 2 << 20
+	// maxListing bounds the listing as it is read. A release's entry lists every file it has, and the
+	// first release's is 32 KB with fourteen files, so a page of a hundred is over 3 MB: at 2 MiB every
+	// check would have failed from about the sixty-fifth release on, on every install, with the updater
+	// that would fix it the thing broken (M24 /code-review, measured against the live listing). It is read
+	// as a stream, an entry at a time, so the bound is on what is read and not on what is held.
+	maxListing   = 32 << 20
 	maxReleases  = 100
 	maxChecksums = 64 << 10
 	maxBundle    = 256 << 10
@@ -94,25 +99,40 @@ func newHTTPClient() *http.Client {
 func (s Source) Releases(ctx context.Context) ([]Release, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	body, err := s.get(ctx, s.ListURL, maxListing)
+	resp, err := s.open(ctx, s.ListURL)
 	if err != nil {
 		return nil, fmt.Errorf("reading the release listing: %w", err)
 	}
-	var listed []struct {
-		Tag   string `json:"tag_name"`
-		Draft bool   `json:"draft"`
-	}
-	if err := json.Unmarshal(body, &listed); err != nil {
+	defer func() { _ = resp.Body.Close() }()
+	limited := &io.LimitedReader{R: resp.Body, N: maxListing + 1}
+	entries := json.NewDecoder(limited)
+	notAList := func(err error) ([]Release, error) {
+		if limited.N <= 0 {
+			return nil, fmt.Errorf("reading the release listing: %w", ErrTooLarge)
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("reading the release listing: %w", err)
+		}
 		return nil, errors.New("the release listing is not a list of releases")
 	}
+	if opening, err := entries.Token(); err != nil || opening != json.Delim('[') {
+		return notAList(err)
+	}
 	var out []Release
-	for _, item := range listed {
-		if len(out) == maxReleases {
-			break
+	for entries.More() && len(out) < maxReleases {
+		var item struct {
+			Tag   string `json:"tag_name"`
+			Draft bool   `json:"draft"`
+		}
+		if err := entries.Decode(&item); err != nil {
+			return notAList(err)
 		}
 		if release, ok := parseTag(item.Tag); ok && !item.Draft {
 			out = append(out, release)
 		}
+	}
+	if limited.N <= 0 {
+		return notAList(nil)
 	}
 	return out, nil
 }

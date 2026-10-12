@@ -103,11 +103,16 @@ type Updater struct {
 	// staged is a release ready to install, and applying that Finish should install it.
 	staged   *Staged
 	applying bool
+	// wanted is that somebody asked for what is staged to be installed, and it was put off: it is
+	// installed when it can be, whatever the mode.
+	wanted bool
 	// working is held by whichever of the loop and a request is checking or staging: a channel of one, so
 	// that a request can stop waiting for it.
 	working chan struct{}
-	// nudged asks the loop for a check soon, outside its schedule.
+	// nudged asks the loop for a check soon, outside its schedule, and retry for another try at
+	// installing what is staged.
 	nudged chan struct{}
+	retry  chan struct{}
 }
 
 // New builds the Updater for a daemon. It reads the receipt and touches nothing.
@@ -132,7 +137,7 @@ func New(o Options) *Updater {
 		o.Changed = func() {}
 	}
 	u := &Updater{opts: o, installer: &Installer{Dir: filepath.Join(o.StateDir, "update"), GOOS: o.GOOS},
-		working: make(chan struct{}, 1), nudged: make(chan struct{}, 1)}
+		working: make(chan struct{}, 1), nudged: make(chan struct{}, 1), retry: make(chan struct{}, 1)}
 	u.installs, u.reason = u.standing()
 	return u
 }
@@ -216,9 +221,11 @@ func (u *Updater) Run(ctx context.Context) {
 					next.Reset(retryStaged)
 				}
 			}
+		case <-u.retry:
+			next.Reset(retryStaged)
 		case <-next.C:
 			wait := checkEvery + jitter()
-			if u.mode() != ipc.UpdateOff {
+			if u.mode() != ipc.UpdateOff || u.isWanted() {
 				if u.scheduled(ctx) {
 					// Ready and deferred: tried again soon, without asking the listing again.
 					wait = retryStaged
@@ -249,6 +256,12 @@ func (u *Updater) scheduled(ctx context.Context) bool {
 	defer u.release()
 
 	u.mu.Lock()
+	// What is staged is installed by the schedule only while that is still what was chosen: the mode is
+	// auto, or somebody asked. Staged under auto and then told to ask first, it used to be installed at
+	// the next turn all the same (M24 /code-review).
+	if u.staged != nil && !u.wanted && u.mode() != ipc.UpdateAuto {
+		u.staged = nil
+	}
 	staged := u.staged
 	u.mu.Unlock()
 	if staged == nil {
@@ -263,8 +276,18 @@ func (u *Updater) scheduled(ctx context.Context) bool {
 	if u.opts.Busy != nil && u.opts.Busy() {
 		return true
 	}
+	// A run that is already ending is not ended again to install: whatever is stopping it was asked for.
+	if ctx.Err() != nil {
+		return false
+	}
 	u.begin()
 	return false
+}
+
+func (u *Updater) isWanted() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.wanted && u.staged != nil
 }
 
 // check reads the listing and chooses. What it finds, or why it could not, goes into the record.
@@ -285,8 +308,14 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 	if u.opts.Instance != nil {
 		instance, signedIn = u.opts.Instance()
 	}
+	if !signedIn {
+		// The version heard belongs to an instance this daemon has signed out of. It bounded the choice
+		// still: a daemon refused by its instance and then signed out was moved to that instance's
+		// version, where signed out only the running version's own patches are taken (M24 /code-review).
+		instance = ""
+	}
 	release, found := Choose(Policy{Current: u.current, Instance: instance, SignedIn: signedIn,
-		Prereleases: record.Channel == ipc.ChannelPrerelease, Bad: record.Bad}, releases)
+		Prereleases: u.channelOf(record) == ipc.ChannelPrerelease, Bad: record.Bad}, releases)
 	available := ""
 	if found {
 		available = release.Version.String()
@@ -333,7 +362,13 @@ func (u *Updater) failed(release Release, err error) error {
 	}
 	level.Str("version", release.Version.String()).Str("error", said(err)).
 		Msg("a release was not installed; this version keeps running")
-	_ = u.installer.Update(func(r *Record) { r.LastError = said(err) })
+	_ = u.installer.Update(func(r *Record) {
+		r.LastError = said(err)
+		if errors.Is(err, ErrNotVerified) {
+			// The listing named it and no signature stands behind it: it is not announced as out.
+			r.Available = ""
+		}
+	})
 	u.opts.Changed()
 	return err
 }
@@ -359,7 +394,14 @@ func (u *Updater) begin() {
 //
 // It reports true whenever the run ended to install, including when the installation failed: the run has
 // ended either way, and a daemon that stopped to update and then merely exited would stay stopped.
-func (u *Updater) Finish() bool {
+//
+// stopped reports whether somebody has asked the daemon to stop: a signal, or a stop request. Stopping and
+// updating end the run the same way, so a stop that arrived once the update had begun was taken for part
+// of it, and the daemon started again after being told to stop: under systemd, to be killed ninety
+// seconds later, which counted against the new version (M24 /code-review). A daemon told to stop stops.
+// It is asked again after the installation, which takes a moment: the new version is then on disk and
+// starts at the next start.
+func (u *Updater) Finish(stopped func() bool) bool {
 	u.mu.Lock()
 	staged, applying := u.staged, u.applying
 	u.mu.Unlock()
@@ -367,11 +409,21 @@ func (u *Updater) Finish() bool {
 		u.installer.CleanExit()
 		return false
 	}
+	if stopped() {
+		u.opts.Log.Info().Msg("asked to stop before the release was installed; it is installed another time")
+		u.installer.CleanExit()
+		return false
+	}
 	if err := u.installer.Install(*staged, u.current.String()); err != nil {
 		u.opts.Log.Error().Str("error", said(err)).
 			Msg("the release could not be installed; the version that was running starts again")
 		_ = u.installer.Update(func(r *Record) { r.LastError = said(err) })
-		return true
+		return !stopped()
+	}
+	if stopped() {
+		u.opts.Log.Info().Str("to", staged.Release.Version.String()).
+			Msg("a release is installed, and the daemon was asked to stop; it starts as that version next time")
+		return false
 	}
 	u.opts.Log.Info().Str("from", u.current.String()).Str("to", staged.Release.Version.String()).
 		Msg("a release is installed; starting it")
@@ -384,25 +436,49 @@ func (u *Updater) mode() string {
 
 // modeOf is the mode in force. Unset, it is auto where this daemon installs and notify where it does not:
 // an install nobody's installer made has never been told it would be changed.
+//
+// On Windows it is notify until somebody chooses: installing there has not been watched working, and what
+// nobody has watched does not happen unasked (M23's rule for install.ps1's task). `norite update apply`
+// and `norite update mode auto` both work there.
+//
+// A record that cannot be read is off: nothing says what was chosen, and "off" may be it.
 func (u *Updater) modeOf(r Record) string {
+	if r.unreadable {
+		return ipc.UpdateOff
+	}
 	switch r.Mode {
 	case ipc.UpdateAuto, ipc.UpdateNotify, ipc.UpdateOff:
 		return r.Mode
 	}
-	if u.installs {
+	if u.installs && u.opts.GOOS != "windows" {
 		return ipc.UpdateAuto
 	}
 	return ipc.UpdateNotify
 }
 
+// channelOf is the channel in force. Unset, an install that is itself a pre-release is offered
+// pre-releases: the installer installs the newest release of any kind, and a release candidate that was
+// never offered the next one stayed locked out of an instance that had moved to it, with the release that
+// fixed it published (M24 /code-review).
+func (u *Updater) channelOf(r Record) string {
+	switch r.Channel {
+	case ipc.ChannelStable, ipc.ChannelPrerelease:
+		return r.Channel
+	}
+	if u.current.Pre != "" {
+		return ipc.ChannelPrerelease
+	}
+	return ipc.ChannelStable
+}
+
 // Status reports where updating stands.
 func (u *Updater) Status() ipc.UpdateStatus {
 	r := u.installer.Load()
-	s := ipc.UpdateStatus{Version: u.opts.Version, Mode: u.modeOf(r), Channel: ipc.ChannelStable,
+	s := ipc.UpdateStatus{Version: u.opts.Version, Mode: u.modeOf(r), Channel: u.channelOf(r),
 		Installs: u.installs, Reason: u.reason, Available: u.stillNewer(r.Available), RolledBack: r.RolledBack,
 		LastError: r.LastError}
-	if r.Channel == ipc.ChannelPrerelease {
-		s.Channel = ipc.ChannelPrerelease
+	if r.unreadable {
+		s.LastError = errUnreadable.Error() + ": " + termsafe.Text(u.installer.recordPath())
 	}
 	if r.Pending != nil && r.Pending.Phase == phaseApplied {
 		s.Trial = r.Pending.To
@@ -460,6 +536,15 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 		}
 	}
 	if u.opts.Busy != nil && u.opts.Busy() {
+		// Asked for, so it is installed when it can be whatever the mode, and tried again soon and not at
+		// the next daily check.
+		u.mu.Lock()
+		u.wanted = true
+		u.mu.Unlock()
+		select {
+		case u.retry <- struct{}{}:
+		default:
+		}
 		return u.Status(), &ErrRefused{"the release is ready and will be installed when the voice call ends"}
 	}
 	status := u.Status()

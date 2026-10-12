@@ -85,12 +85,12 @@ type homeModel struct {
 // status bar exists (M42).
 type updateNotice struct {
 	text string
-	// tone is which of the three states it is: a release ready, one installed, one undone.
+	// tone is which of the three states it is: a release out, one installed, one undone.
 	tone int
 }
 
 const (
-	toneReady = iota
+	toneOut = iota
 	toneInstalled
 	toneUndone
 )
@@ -99,9 +99,17 @@ const (
 // what is drawn on every frame is not left to the length of somebody else's string.
 const maxNoticeVersion = 32
 
-// noticeOf turns the daemon's status into the sentence, or nil when there is nothing to say. Undone comes
-// first, since it is the one a person did not expect; then a version on trial; then one that is out.
-func noticeOf(st ipc.UpdateStatus) *updateNotice {
+// noticeOf turns the daemon's status into the sentence, or nil when there is nothing to say. own is this
+// client's version. Undone comes first, since it is the one a person did not expect; then a daemon newer
+// than this client; then a release that is out.
+//
+// "Restart norite" is said when this program is older than the daemon it is attached to, and for as long
+// as it is. It was said while the new version was on trial, which told a client opened after the update
+// to restart, and stopped telling one left open across it after ten minutes (M24 /code-review).
+//
+// A release is "out" and never "ready": what the daemon reports is the listing's choice, and nothing has
+// been downloaded or verified when it is drawn.
+func noticeOf(st ipc.UpdateStatus, own string) *updateNotice {
 	ver := func(s string) string {
 		s = termsafe.Text(s)
 		if r := []rune(s); len(r) > maxNoticeVersion {
@@ -112,19 +120,28 @@ func noticeOf(st ipc.UpdateStatus) *updateNotice {
 	switch {
 	case st.RolledBack != "":
 		return &updateNotice{text: "↓ " + ver(st.RolledBack) + " undone", tone: toneUndone}
-	case st.Trial != "":
-		return &updateNotice{text: "↑ " + ver(st.Trial) + " installed · restart norite", tone: toneInstalled}
-	case st.Available != "" && st.Installs:
-		return &updateNotice{text: "↑ " + ver(st.Available) + " ready", tone: toneReady}
+	case olderThan(own, st.Version):
+		return &updateNotice{text: "↑ " + ver(st.Version) + " installed · restart norite", tone: toneInstalled}
 	case st.Available != "":
-		return &updateNotice{text: "↑ " + ver(st.Available) + " is out", tone: toneReady}
+		return &updateNotice{text: "↑ " + ver(st.Available) + " is out", tone: toneOut}
 	}
 	return nil
 }
 
+// olderThan reports whether own is a release below the daemon's. A build that is not a release, on either
+// side, is not told to restart.
+func olderThan(own, daemon string) bool {
+	mine, err := gatewayproto.ParseVersion(own)
+	if err != nil {
+		return false
+	}
+	theirs, err := gatewayproto.ParseVersion(daemon)
+	return err == nil && mine.Compare(theirs) < 0
+}
+
 // loadUpdate asks the daemon where updating stands. A daemon from before the request, or one that does
 // not answer, is nothing to say: the notice is a convenience and never an error on screen.
-func loadUpdate(gen int, s Session) tea.Cmd {
+func loadUpdate(gen int, s Session, own string) tea.Cmd {
 	return func() tea.Msg {
 		st, err := call(s, func(ctx context.Context, s Session) (ipc.UpdateStatus, error) {
 			var st ipc.UpdateStatus
@@ -133,7 +150,7 @@ func loadUpdate(gen int, s Session) tea.Cmd {
 		if err != nil {
 			return updateMsg{gen: gen}
 		}
-		return updateMsg{gen: gen, notice: noticeOf(st)}
+		return updateMsg{gen: gen, notice: noticeOf(st, own)}
 	}
 }
 
