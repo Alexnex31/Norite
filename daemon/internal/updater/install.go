@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,6 +127,8 @@ func (in *Installer) save(r Record) error {
 	if len(r.Bad) > maxBad {
 		r.Bad = r.Bad[len(r.Bad)-maxBad:]
 	}
+	// Whatever a caller put here, the record stays one that load reads back.
+	r.LastError = cut(r.LastError, 2*maxSaid)
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
@@ -138,6 +141,29 @@ func (in *Installer) save(r Record) error {
 		return nil
 	}
 	return err
+}
+
+// Ready reports why an installation here would fail, or nil: each program must be a regular file, and the
+// directory one this account can write in. Asked before a release is downloaded and before the daemon
+// stops for it. An install whose programs are links into somewhere else, or whose directory has been made
+// read-only, otherwise downloaded the release, stopped the daemon, failed and started it again, once a day
+// for as long as it stayed that way (M24 /code-review, second round).
+func (in *Installer) Ready() error {
+	for _, name := range in.programs() {
+		info, err := os.Lstat(filepath.Join(in.BinDir, name))
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return &fs.PathError{Op: "install", Path: filepath.Join(in.BinDir, name), Err: errors.New("is not a regular file")}
+		}
+	}
+	probe, err := os.CreateTemp(in.BinDir, ".norite-update-*")
+	if err != nil {
+		return err
+	}
+	_ = probe.Close()
+	return os.Remove(probe.Name())
 }
 
 // Install replaces the installed pair with the staged one. from is the version running.
@@ -321,13 +347,19 @@ const oldSuffix = ".old-"
 
 // sweepOld removes the programs set aside for dst that nothing runs any more. One still running cannot be
 // removed, and is left for the next sweep.
+//
+// The directory is listed and the names compared: a pattern built from the path would read a "[" in
+// somebody's folder name as the start of a set.
 func sweepOld(dst string) {
-	left, err := filepath.Glob(dst + oldSuffix + "*")
+	dir, prefix := filepath.Dir(dst), filepath.Base(dst)+oldSuffix
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	for _, path := range left {
-		_ = os.Remove(path)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
 	}
 }
 

@@ -6,12 +6,14 @@ package updater
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 
@@ -166,7 +168,7 @@ func (u *Updater) AtStart(crashed bool) bool {
 	}
 	outcome, err := u.installer.AtStart(u.current.String(), crashed)
 	if err != nil {
-		u.opts.Log.Error().Str("error", termsafe.Text(err.Error())).
+		u.opts.Log.Error().Str("error", said(err)).
 			Msg("an update that did not stay up could not be undone; this version keeps running")
 		return false
 	}
@@ -199,7 +201,7 @@ func (u *Updater) Run(ctx context.Context) {
 			return
 		case <-confirm.C:
 			if err := u.installer.Confirm(); err != nil {
-				u.opts.Log.Warn().Str("error", termsafe.Text(err.Error())).Msg("could not record that this version stayed up")
+				u.opts.Log.Warn().Str("error", said(err)).Msg("could not record that this version stayed up")
 			}
 			u.opts.Changed()
 		case <-u.nudged:
@@ -207,8 +209,9 @@ func (u *Updater) Run(ctx context.Context) {
 			// release is needed and not merely wanted. Waiting out the schedule left a client locked out
 			// for up to a day with the release that fixes it already published (M24 /code-review). Not
 			// more often than nudgeFloor, so an instance that refuses in a loop asks the host once.
-			if last := u.installer.Load().LastCheck; u.mode() != ipc.UpdateOff &&
-				(last.IsZero() || u.opts.Now().Sub(last) >= nudgeFloor) {
+			// A last check dated after now is a clock that was set back, and holds nothing off.
+			if since := u.opts.Now().Sub(u.installer.Load().LastCheck); u.mode() != ipc.UpdateOff &&
+				(since < 0 || since >= nudgeFloor) {
 				if u.scheduled(ctx) {
 					next.Reset(retryStaged)
 				}
@@ -273,8 +276,8 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 	releases, err := u.opts.Source.Releases(ctx)
 	now := u.opts.Now()
 	if err != nil {
-		u.opts.Log.Warn().Str("error", termsafe.Text(err.Error())).Msg("could not check for a new release")
-		_ = u.installer.Update(func(r *Record) { r.LastCheck, r.LastError = now, termsafe.Text(err.Error()) })
+		u.opts.Log.Warn().Str("error", said(err)).Msg("could not check for a new release")
+		_ = u.installer.Update(func(r *Record) { r.LastCheck, r.LastError = now, said(err) })
 		u.opts.Changed()
 		return Release{}, false, err
 	}
@@ -298,6 +301,9 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 
 // stage downloads and verifies a release and keeps it ready.
 func (u *Updater) stage(ctx context.Context, release Release) error {
+	if err := u.installer.Ready(); err != nil {
+		return u.failed(release, fmt.Errorf("it cannot be installed here: %w", err))
+	}
 	verify := u.opts.Verify
 	if verify == nil {
 		v, err := NewVerifier()
@@ -325,9 +331,9 @@ func (u *Updater) failed(release Release, err error) error {
 	if errors.Is(err, ErrNotVerified) {
 		level = u.opts.Log.Error()
 	}
-	level.Str("version", release.Version.String()).Str("error", termsafe.Text(err.Error())).
+	level.Str("version", release.Version.String()).Str("error", said(err)).
 		Msg("a release was not installed; this version keeps running")
-	_ = u.installer.Update(func(r *Record) { r.LastError = termsafe.Text(err.Error()) })
+	_ = u.installer.Update(func(r *Record) { r.LastError = said(err) })
 	u.opts.Changed()
 	return err
 }
@@ -362,9 +368,9 @@ func (u *Updater) Finish() bool {
 		return false
 	}
 	if err := u.installer.Install(*staged, u.current.String()); err != nil {
-		u.opts.Log.Error().Str("error", termsafe.Text(err.Error())).
+		u.opts.Log.Error().Str("error", said(err)).
 			Msg("the release could not be installed; the version that was running starts again")
-		_ = u.installer.Update(func(r *Record) { r.LastError = termsafe.Text(err.Error()) })
+		_ = u.installer.Update(func(r *Record) { r.LastError = said(err) })
 		return true
 	}
 	u.opts.Log.Info().Str("from", u.current.String()).Str("to", staged.Release.Version.String()).
@@ -418,7 +424,7 @@ func (u *Updater) Check(ctx context.Context) (ipc.UpdateStatus, error) {
 		if errors.As(err, &refused) {
 			return u.Status(), err
 		}
-		return u.Status(), &ErrRefused{"the release listing could not be read: " + termsafe.Text(err.Error())}
+		return u.Status(), &ErrRefused{"the release listing could not be read: " + said(err)}
 	}
 	return u.Status(), nil
 }
@@ -443,14 +449,14 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 	if staged == nil {
 		release, found, err := u.check(ctx)
 		if err != nil {
-			return u.Status(), &ErrRefused{"the release listing could not be read: " + termsafe.Text(err.Error())}
+			return u.Status(), &ErrRefused{"the release listing could not be read: " + said(err)}
 		}
 		if !found {
 			return u.Status(), &ErrRefused{"there is no newer release this install can move to"}
 		}
 		if err := u.stage(ctx, release); err != nil {
 			return u.Status(), &ErrRefused{"the release was not installed, and this version keeps running: " +
-				termsafe.Text(err.Error())}
+				said(err)}
 		}
 	}
 	if u.opts.Busy != nil && u.opts.Busy() {
@@ -486,6 +492,29 @@ func (u *Updater) SetChannel(channel string) (ipc.UpdateStatus, error) {
 	err := u.installer.Update(func(r *Record) { r.Channel, r.Available = channel, "" })
 	u.opts.Changed()
 	return u.Status(), err
+}
+
+// maxSaid bounds what is kept or repeated of an error. Its text is partly a release host's: the address a
+// redirect named, a body a parser quoted. A megabyte of it, kept as the last error, made a record too
+// large to be read back, which forgot the mode, the channel and every version rolled back from
+// (M24 /security-sweep).
+const maxSaid = 300
+
+// said is an error's text, cleaned, and cut to a length a person reads.
+func said(err error) string {
+	return cut(termsafe.Text(err.Error()), maxSaid)
+}
+
+// cut shortens s to at most limit bytes, on a character's boundary, and marks that it did.
+func cut(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "…"
 }
 
 func jitter() time.Duration {

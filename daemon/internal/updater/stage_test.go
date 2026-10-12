@@ -354,3 +354,24 @@ func TestWhatAStagedDaemonPrintsIsCapped(t *testing.T) {
 		t.Errorf("kept %q", kept.String())
 	}
 }
+
+// One release is staged at a time. A release staged and never installed, because the daemon stopped
+// first, used to stay beside every later one for good (M24 /security-sweep).
+func TestStagingKeepsNothingOfAnEarlierRelease(t *testing.T) {
+	h := newHost(t, "v0.1.1", linuxArchive, goodArchive(t))
+	s := stagerFor(t, h)
+	earlier := filepath.Join(s.Dir, "v0.1.0-rc.1")
+	if err := os.MkdirAll(earlier, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(earlier, "norite-daemon"), []byte("an earlier one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Stage(t.Context(), mustTag(t, "v0.1.1")); err != nil {
+		t.Fatal(err)
+	}
+	left, err := os.ReadDir(s.Dir)
+	if err != nil || len(left) != 1 || left[0].Name() != "v0.1.1" {
+		t.Errorf("the staging directory holds %v (%v), want the one release", left, err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -324,5 +325,30 @@ func TestProgramsSetAsideAreSweptWhenTheyCanBe(t *testing.T) {
 	}
 	if !slices.Equal(names, []string{"norite-daemon.exe.old-c3", "norite.exe", "norite.exe.older"}) {
 		t.Errorf("left %v", names)
+	}
+}
+
+// The programs set aside on Windows are found by listing the directory. A pattern made from the path read
+// a "[" in a folder's name as the start of a set, matched nothing, and left every one of them for good.
+func TestSweepingFindsWhatWasSetAsideInAnyDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "bin [work]")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "norite.exe")
+	for _, name := range []string{"norite.exe", "norite.exe.old-abc", "norite.exe.old-def", "norite-daemon.exe.old-abc", "norite.exe.older"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepOld(dst)
+	var left []string
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		left = append(left, entry.Name())
+	}
+	want := []string{"norite-daemon.exe.old-abc", "norite.exe", "norite.exe.older"}
+	if strings.Join(left, " ") != strings.Join(want, " ") {
+		t.Errorf("left %v, want %v", left, want)
 	}
 }

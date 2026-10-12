@@ -55,7 +55,9 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 		return outcome{ending: ending}
 	}
 
-	// Bounded before it is kept: a version is a few bytes, and this is a stranger's text.
+	// Bounded before it is kept: a version is a few bytes, and this is a stranger's text. One that is too
+	// long replaces what an earlier HELLO said with nothing, since the earlier one no longer holds.
+	c.serverVersion.Store(nil)
 	if reported := hello.Version; len(reported) <= 64 {
 		c.serverVersion.Store(&reported)
 	}

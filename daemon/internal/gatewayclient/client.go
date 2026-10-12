@@ -190,6 +190,9 @@ func (c *Client) Run(ctx context.Context) {
 				c.sink.End()
 			}
 			c.generation, c.sessionID, c.seq = cred.Generation, "", 0
+			// And the version heard belongs to the instance the previous sign-in was to. Kept, it bounded
+			// what the updater chose by an instance this daemon had left (M24 /security-sweep).
+			c.serverVersion.Store(nil)
 		}
 
 		started := time.Now()

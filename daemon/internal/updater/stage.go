@@ -68,8 +68,9 @@ type Stager struct {
 // (ADR 0020: fail closed).
 func (s *Stager) Stage(ctx context.Context, r Release) (staged Staged, err error) {
 	dir := filepath.Join(s.Dir, r.Tag)
-	// Whatever an earlier attempt left is not built on.
-	if err := os.RemoveAll(dir); err != nil {
+	// Whatever an earlier attempt left is not built on, and one release is staged at a time: a release
+	// staged and never installed, because the daemon stopped first, is not kept beside the next one.
+	if err := os.RemoveAll(s.Dir); err != nil {
 		return Staged{}, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {

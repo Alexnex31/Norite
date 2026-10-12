@@ -562,3 +562,95 @@ func TestNothingIsChosenUntilTheInstanceHasBeenHeardFrom(t *testing.T) {
 		t.Errorf("heard from, and still not moved")
 	}
 }
+
+// A release host's words are bounded before they are kept. An error names the address a redirect sent
+// the request to, which is the host's to choose and megabytes long if it likes: kept whole as the last
+// error, it made a record too large to be read back, and the mode, the channel and every version rolled
+// back from were forgotten (M24 /security-sweep).
+func TestAHostsWordsCannotOutgrowTheRecord(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.installer.Update(func(r *Record) { r.Bad = []string{"0.1.1"} }); err != nil {
+		t.Fatal(err)
+	}
+	w.host.server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		// Somewhere nothing listens, with a megabyte and a half of "<", which JSON writes six bytes for.
+		http.Redirect(rw, r, "http://127.0.0.1:1/"+strings.Repeat("<", 1500<<10), http.StatusFound)
+	})
+	_, err := u.Check(context.Background())
+	if err == nil {
+		t.Fatal("a listing that redirects nowhere was read")
+	}
+	if len(err.Error()) > 1024 {
+		t.Errorf("the refusal is %d bytes of the host's words", len(err.Error()))
+	}
+	r := u.installer.Load()
+	if r.Mode != ipc.UpdateNotify || len(r.Bad) != 1 {
+		t.Errorf("the record forgot what it held: mode %q, bad %v", r.Mode, r.Bad)
+	}
+	if r.LastError == "" || len(r.LastError) > 512 {
+		t.Errorf("the last error is %d bytes", len(r.LastError))
+	}
+}
+
+// An install that cannot be written over is found out before anything is downloaded and before the
+// daemon stops: it used to download, stop, fail and start again once a day (M24 /code-review).
+func TestAnInstallThatCannotBeReplacedIsNotStoppedFor(t *testing.T) {
+	w := newWorld(t)
+	// The command is a link to a program kept somewhere else, as a dotfiles manager leaves it.
+	elsewhere := filepath.Join(t.TempDir(), "norite")
+	if err := os.Rename(filepath.Join(w.bin, cliName), elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(w.bin, cliName)); err != nil {
+		t.Fatal(err)
+	}
+	u := w.updater("0.1.0")
+	if u.scheduled(t.Context()) {
+		t.Errorf("a release was left waiting")
+	}
+	if w.restarts.Load() != 0 {
+		t.Errorf("the daemon was stopped for an installation that could not happen")
+	}
+	for name, n := range w.host.asked {
+		if n.Load() != 0 {
+			t.Errorf("%s was downloaded for it", name)
+		}
+	}
+	if s := u.Status(); !strings.Contains(s.LastError, "not a regular file") || s.Available != "0.1.1" {
+		t.Errorf("status %+v", s)
+	}
+	if _, err := u.Apply(t.Context()); err == nil || !strings.Contains(err.Error(), "cannot be installed here") {
+		t.Errorf("apply: %v", err)
+	}
+	if entries, _ := os.ReadDir(w.bin); len(entries) != 2 {
+		t.Errorf("the check left something in the bin directory: %v", entries)
+	}
+}
+
+// A last check dated in the future is a clock that was set back since. It holds a refused handshake's
+// check off no more than no check at all does: it used to hold it off until the clock caught up.
+func TestAClockSetBackDoesNotHoldOffARefusedHandshakesCheck(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	u := w.updater("0.1.0")
+	if err := u.installer.Update(func(r *Record) { r.LastCheck = time.Now().Add(48 * time.Hour) }); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	u.Nudge()
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.listed.Load() != 1 {
+		t.Errorf("the listing was read %d times", w.listed.Load())
+	}
+}

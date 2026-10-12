@@ -1661,3 +1661,56 @@ carries the condition that would reopen it.
 - **Reopens if**: the list grows past the handful a person reads carefully, or a module is added to it
   whose file is anything other than a recognised license's short form.
 
+
+### A release host can send the daemon to any address with a redirect
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: a release's files are served by a redirect to wherever GitHub keeps them, so the client
+  follows one to any HTTPS host, a loopback or private address included. What comes back is read only as
+  a listing, a checksum file, a bundle or an archive, each bounded, and none of it is believed or sent
+  anywhere: the host learns nothing from the answer. It takes control of `github.com`'s answers under a
+  valid certificate, and buys one unauthenticated GET with no body. The words of an error, which name the
+  address, are cut before they are kept or shown.
+- **Reopens if**: anything read from the release host is ever reported back to it or to an instance, or
+  the request comes to carry a credential.
+
+### The installed programs' directory is trusted not to be writable by anybody else
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: an installation writes `norite.new` and `norite-daemon.new` in the receipt's directory, by a
+  name anybody could guess, and follows a link planted under it. Somebody who can create a file there can
+  already replace `norite-daemon` itself, which is code run as the account at its next start. The
+  installers put the programs in a directory of the account's own.
+- **Reopens if**: an installer ever offers a shared directory, or the daemon installs with more
+  privilege than the account.
+
+### A crash in a new version's first ten minutes marks that version bad for good
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the rollback cannot tell a release that is broken from one that crashed for a reason of this
+  machine's, or because an instance sent something that panics it. Either way the version is undone and
+  never offered here again, and nothing clears the list. The cost is one release skipped on one install:
+  the next release is offered as usual, and the installer installs the skipped one by hand. An instance
+  that can crash the daemon at will has that with or without an updater.
+- **Reopens if**: a release line ends, so that the skipped version is the last one an install could
+  move to, or the field shows releases being skipped for crashes that were not theirs.
+
+### The instance decides which signed releases its clients may move to
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the version an instance reports in HELLO bounds the choice, and an instance may report any
+  version it likes. It can hold its clients where they are by naming a pre-release, or let them move
+  ahead to a release that then refuses it. It cannot move one backwards, to a version rolled back from,
+  or to anything the release workflow did not sign, and a version reported by one sign-in's instance is
+  forgotten when the sign-in changes. Staying is the outcome the instance rule exists to prefer: a client
+  that cannot talk to the instance somebody chose is the failure it prevents.
+- **Reopens if**: a release ever fixes something an instance could exploit in its own clients, where
+  being held back by that instance is the attack.
+
+### `norite update check` asks GitHub as often as it is run
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the schedule asks once a day and a refused handshake at most every fifteen minutes, and a
+  check somebody asks for is not throttled. It is an attach-socket request, so only the account's own
+  programs can make it, and any of them can ask GitHub directly. One check or download runs at a time.
+- **Reopens if**: the request is ever reachable from the port for scripts, or from an instance.

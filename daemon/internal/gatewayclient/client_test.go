@@ -686,11 +686,21 @@ func TestASignInThatChangesStartsAFreshSession(t *testing.T) {
 	c.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
 
 	c2 := h.g.next()
+	// The new sign-in may be to another instance, which has said nothing yet: what the last one reported
+	// as its version is not this one's, and the updater must not choose by it (M24 /security-sweep).
+	assert.Empty(t, h.client.ServerVersion(), "the previous sign-in's instance still spoke for this one")
 	c2.hello(time.Now(), gatewayproto.DevVersion, time.Minute)
 	f := c2.expect(gatewayproto.OpIdentify)
 	var id gatewayproto.Identify
 	require.NoError(t, json.Unmarshal(f.D, &id))
 	assert.Equal(t, "eyJ.grace", id.Token, "a RESUME would name the previous sign-in's session")
+
+	// And within one sign-in, a version too long to be one replaces the last with nothing.
+	require.Eventually(t, func() bool { return h.client.ServerVersion() != "" }, time.Second, time.Millisecond)
+	c2.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
+	c3 := h.g.next()
+	c3.hello(time.Now(), strings.Repeat("9", 65), time.Minute)
+	require.Eventually(t, func() bool { return h.client.ServerVersion() == "" }, time.Second, time.Millisecond)
 }
 
 // A logout whose hand-back never reached the instance leaves the server no reason to close the connection,
