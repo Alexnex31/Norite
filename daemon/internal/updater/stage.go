@@ -40,6 +40,10 @@ var (
 	smokeTimeout = 10 * time.Second
 )
 
+// errDownload is a file of a release that could not be fetched: the host's or the network's failure, and
+// not the release's.
+var errDownload = errors.New("downloading")
+
 // Staged is a release downloaded, verified, unpacked and run once: ready to be installed.
 type Staged struct {
 	Release Release
@@ -86,12 +90,12 @@ func (s *Stager) Stage(ctx context.Context, r Release) (staged Staged, err error
 	checksums, err := s.Source.get(small, s.Source.fileURL(r, "checksums.txt"), maxChecksums)
 	if err != nil {
 		cancel()
-		return Staged{}, fmt.Errorf("downloading checksums.txt: %w", err)
+		return Staged{}, fmt.Errorf("%w checksums.txt: %w", errDownload, err)
 	}
 	bundle, err := s.Source.get(small, s.Source.fileURL(r, "checksums.txt.sigstore.json"), maxBundle)
 	cancel()
 	if err != nil {
-		return Staged{}, fmt.Errorf("downloading the signature bundle: %w", err)
+		return Staged{}, fmt.Errorf("%w the signature bundle: %w", errDownload, err)
 	}
 	// Before anything checksums.txt vouches for is so much as downloaded.
 	if err := s.Verify(checksums, bundle, r.Tag); err != nil {
@@ -149,7 +153,7 @@ func (s *Stager) fetchArchive(ctx context.Context, r Release, name, path, want s
 		err = closeErr
 	}
 	if err != nil {
-		return fmt.Errorf("downloading %s: %w", name, err)
+		return fmt.Errorf("%w %s: %w", errDownload, name, err)
 	}
 	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
 		return fmt.Errorf("%w: %s is not the file checksums.txt names", ErrNotVerified, name)

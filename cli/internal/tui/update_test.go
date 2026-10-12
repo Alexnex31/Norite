@@ -33,7 +33,7 @@ func TestHomeSaysWhatTheDaemonKnowsAboutANewerRelease(t *testing.T) {
 	c.shows("↑ 0.1.1 installed · restart norite")
 
 	// It did not stay up.
-	f.d.OnLocal(ipc.PathUpdate, ipc.UpdateStatus{Version: "0.1.0", Installs: true, RolledBack: "0.1.1", Available: "0.1.2"})
+	f.d.OnLocal(ipc.PathUpdate, ipc.UpdateStatus{Version: "0.1.0", Installs: true, RolledBack: "0.1.1"})
 	f.d.Dispatch(ipc.EventUpdate, []byte(`{}`))
 	c.shows("↓ 0.1.1 undone")
 
@@ -91,11 +91,12 @@ func TestTheNoticeIsBoundedAndInert(t *testing.T) {
 	if got := len([]rune(n.text)); got > maxNoticeVersion+16 {
 		t.Errorf("the notice is %d runes", got)
 	}
-	// Each state has its own tone, and undone is said before anything else.
+	// Each state has its own tone. A version undone is said until something newer is: said first, it
+	// hid for good the release that fixes it, which in notify mode nothing else announces.
 	for want, st := range map[int]ipc.UpdateStatus{
-		toneUndone:    {Version: "0.1.2", RolledBack: "0.1.1", Trial: "0.1.2", Available: "0.1.3", Installs: true},
-		toneInstalled: {Version: "0.1.2", Trial: "0.1.2", Available: "0.1.3", Installs: true},
-		toneOut:       {Version: "0.1.0", Available: "0.1.3", Installs: true},
+		toneUndone:    {Version: "0.1.0", RolledBack: "0.1.1", Installs: true},
+		toneInstalled: {Version: "0.1.2", RolledBack: "0.1.1", Trial: "0.1.2", Available: "0.1.3", Installs: true},
+		toneOut:       {Version: "0.1.0", RolledBack: "0.1.1", Available: "0.1.3", Installs: true},
 	} {
 		if got := noticeOf(st, "0.1.0"); got == nil || got.tone != want {
 			t.Errorf("status %+v: notice %+v", st, got)

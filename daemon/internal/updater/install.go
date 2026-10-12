@@ -115,11 +115,17 @@ func (in *Installer) Load() Record {
 
 func (in *Installer) load() Record {
 	var r Record
-	data, err := os.ReadFile(in.recordPath())
+	// Asked before it is opened: opening a pipe waits for ever, and this is read with the daemon's lock
+	// held, as the first thing a start does (M21's rule for a config).
+	info, err := os.Stat(in.recordPath())
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return r
-	case err != nil, len(data) >= 1<<20:
+	case err != nil, !info.Mode().IsRegular(), info.Size() >= 1<<20:
+		return Record{unreadable: true}
+	}
+	data, err := os.ReadFile(in.recordPath())
+	if err != nil || len(data) >= 1<<20 {
 		return Record{unreadable: true}
 	}
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -292,6 +298,13 @@ func (in *Installer) AtStart(running string, crashed bool) (Outcome, error) {
 	if running != p.To {
 		// Something else put another version here: an installer run by hand. The record describes an
 		// installation that is no longer the one on disk.
+		if running == p.From {
+			// The version it replaced, back before the new one was kept: this installation's own undoing
+			// whose record could not be written, or somebody going back by hand. Either way the new one
+			// did not stay, and offering it again would install it again (M24 /code-review).
+			r.Bad = append(r.Bad, p.To)
+			r.RolledBack = p.To
+		}
 		r.Pending = nil
 		_ = os.RemoveAll(in.previousDir())
 		return Nothing, in.save(r)
@@ -303,8 +316,14 @@ func (in *Installer) AtStart(running string, crashed bool) (Outcome, error) {
 		}
 		r.Bad = append(r.Bad, p.To)
 		r.RolledBack, r.Pending = p.To, nil
+		// Recorded before the kept pair is dropped, and the pair kept when it cannot be: the previous
+		// version is on disk now whatever the record says, and the start that follows reads the record
+		// as it was and finishes this.
+		if err := in.save(r); err != nil {
+			return RolledBack, err
+		}
 		_ = os.RemoveAll(in.previousDir())
-		return RolledBack, in.save(r)
+		return RolledBack, nil
 	}
 	p.Starts++
 	return Counted, in.save(r)

@@ -374,3 +374,52 @@ func TestSweepingFindsWhatWasSetAsideInAnyDirectory(t *testing.T) {
 		t.Errorf("left %v, want %v", left, want)
 	}
 }
+
+// An undoing whose record could not be written is still an undoing: the previous pair is on disk, the
+// daemon makes way for it, and the start that follows lists the version as bad. It used to be reported
+// as not done, and the version, never listed, was installed again at the next check.
+func TestAnUndoingThatCouldNotBeRecordedIsFinishedAtTheNextStart(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("needs a directory this account cannot write in")
+	}
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	x.start("0.1.1", false, Counted)
+	// The record cannot be replaced: its directory takes no new file.
+	if err := os.Chmod(x.in.Dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := x.in.AtStart("0.1.1", true)
+	if err := os.Chmod(x.in.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != RolledBack || err == nil {
+		t.Fatalf("outcome %v, error %v: want the undoing done and its record failed", outcome, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(x.in.BinDir, daemonName)); string(got) != "0.1.0 "+daemonName {
+		t.Fatalf("on disk: %q", got)
+	}
+	// The previous version starts, and finds the record as it was.
+	x.start("0.1.0", false, Nothing)
+	r := x.in.Load()
+	if r.Pending != nil || len(r.Bad) != 1 || r.Bad[0] != "0.1.1" || r.RolledBack != "0.1.1" {
+		t.Errorf("the record after: %+v", r)
+	}
+}
+
+// The record is asked about before it is opened: a pipe at its path would hold the daemon's start for
+// ever, with its lock taken.
+func TestARecordThatIsNotAFileIsNotOpened(t *testing.T) {
+	x := newInstalled(t)
+	if err := os.MkdirAll(x.in.recordPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if r := x.in.Load(); !r.unreadable {
+		t.Errorf("a directory was read as a record: %+v", r)
+	}
+	if err := x.in.Update(func(r *Record) { r.Mode = "off" }); !errors.Is(err, errUnreadable) {
+		t.Errorf("written over: %v", err)
+	}
+}

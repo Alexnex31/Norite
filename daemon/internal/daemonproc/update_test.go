@@ -94,3 +94,15 @@ func TestWithNoUpdaterTheRequestsAreNobodys(t *testing.T) {
 	resp := l.Do(context.Background(), ipc.Request{Method: http.MethodGet, Path: ipc.PathUpdate})
 	require.NotNil(t, resp.Error)
 }
+
+// A release host that cannot be reached is said as that, and not as a refusal: `norite update check`
+// exits 3 for it, where "nothing newer" is not an error at all and a refusal is 4.
+func TestAReleaseHostThatCannotBeReachedIsNotARefusal(t *testing.T) {
+	nowhere := updater.Source{ListURL: "http://127.0.0.1:1/releases", DownloadBase: "http://127.0.0.1:1/download",
+		UserAgent: "test", Client: http.DefaultClient}
+	up := updater.New(updater.Options{Version: "0.1.0", StateDir: t.TempDir(), Log: zerolog.Nop(), Source: &nowhere})
+	l := &localRequests{log: zerolog.Nop(), update: up}
+	resp := l.Do(context.Background(), ipc.Request{Method: http.MethodPost, Path: ipc.PathUpdateCheck})
+	require.NotNil(t, resp.Error)
+	require.Equal(t, ipc.RelayUnreachable, resp.Error.Code)
+}

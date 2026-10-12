@@ -150,7 +150,14 @@ func TestAnIncompatibleDaemonIsRefusedBeforeIdentifying(t *testing.T) {
 	var ve *VersionError
 	require.ErrorAs(t, err, &ve)
 	assert.Equal(t, "0.3.0", ve.Daemon)
-	assert.Contains(t, err.Error(), "norite daemon restart")
+	// The program to restart is the older one. A client older than its daemon was left open across an
+	// update, and was told to restart the daemon, which was already the installed version (M24).
+	assert.Contains(t, err.Error(), "quit this program and start it again")
+	assert.NotContains(t, err.Error(), "norite daemon restart")
+	for _, pair := range [][2]string{{"0.2.0", "0.3.0"}, {"0.1.0-rc.1", "0.1.0"}, {"dev", "0.1.0"}, {"0.1.0", "nonsense"}} {
+		said := (&VersionError{Daemon: pair[0], Client: pair[1]}).Error()
+		assert.Contains(t, said, "norite daemon restart", "daemon %s, client %s", pair[0], pair[1])
+	}
 
 	assert.ErrorIs(t, <-received, io.EOF, "the client closed without identifying")
 }

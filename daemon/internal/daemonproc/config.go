@@ -180,10 +180,15 @@ func (l *localRequests) updateRequested(ctx context.Context, req ipc.Request) ip
 	default:
 		return ipc.Failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
 	}
-	var refused *updater.ErrRefused
+	var (
+		refused     *updater.ErrRefused
+		unreachable *updater.ErrUnreachable
+	)
 	switch {
 	case errors.As(err, &refused):
 		return ipc.Failure(ipc.RelayConflict, refused.Msg)
+	case errors.As(err, &unreachable):
+		return ipc.Failure(ipc.RelayUnreachable, unreachable.Msg)
 	case err != nil:
 		l.log.Error().Str("error", termsafe.Text(err.Error())).Msg("a request about updating failed")
 		return ipc.Failure(ipc.RelayFailed, termsafe.Text(err.Error()))

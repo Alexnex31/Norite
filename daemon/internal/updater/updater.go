@@ -43,6 +43,8 @@ var (
 	requestWait = 5 * time.Second
 	// nudgeFloor is the least time between two checks a refused handshake asks for.
 	nudgeFloor = 15 * time.Minute
+	// wake is the longest the schedule sleeps without looking at the clock.
+	wake = time.Hour
 )
 
 // errBusy is a request that found a check or a download already under way.
@@ -61,6 +63,13 @@ var (
 type ErrRefused struct{ Msg string }
 
 func (e *ErrRefused) Error() string { return e.Msg }
+
+// ErrUnreachable is a request that could not be carried out because the release host could not be read:
+// offline, rate limited, too slow. It is not a refusal: a script must be able to tell "nothing newer"
+// from "could not find out" (M24 /code-review).
+type ErrUnreachable struct{ Msg string }
+
+func (e *ErrUnreachable) Error() string { return e.Msg }
 
 // Options configures an Updater.
 type Options struct {
@@ -113,6 +122,10 @@ type Updater struct {
 	// installing what is staged.
 	nudged chan struct{}
 	retry  chan struct{}
+	// life ends when the schedule's run does. It bounds a download a request started and stopped waiting
+	// for.
+	life context.Context
+	end  context.CancelFunc
 }
 
 // New builds the Updater for a daemon. It reads the receipt and touches nothing.
@@ -138,6 +151,7 @@ func New(o Options) *Updater {
 	}
 	u := &Updater{opts: o, installer: &Installer{Dir: filepath.Join(o.StateDir, "update"), GOOS: o.GOOS},
 		working: make(chan struct{}, 1), nudged: make(chan struct{}, 1), retry: make(chan struct{}, 1)}
+	u.life, u.end = context.WithCancel(context.Background())
 	u.installs, u.reason = u.standing()
 	return u
 }
@@ -172,6 +186,13 @@ func (u *Updater) AtStart(crashed bool) bool {
 		return false
 	}
 	outcome, err := u.installer.AtStart(u.current.String(), crashed)
+	if err != nil && outcome == RolledBack {
+		// The previous pair is back on disk and only the record of it could not be written. This
+		// version is the one undone either way, and must make way.
+		u.opts.Log.Error().Str("error", said(err)).Str("version", u.current.String()).
+			Msg("this version did not stay up and the previous one is restored, but that could not be recorded")
+		return true
+	}
 	if err != nil {
 		u.opts.Log.Error().Str("error", said(err)).
 			Msg("an update that did not stay up could not be undone; this version keeps running")
@@ -196,15 +217,31 @@ func (u *Updater) AtStart(crashed bool) bool {
 
 // Run checks on a schedule and confirms a version on trial, until ctx ends.
 func (u *Updater) Run(ctx context.Context) {
+	// What a request left downloading ends with the run.
+	defer u.end()
 	confirm := time.NewTimer(confirmAfter)
 	defer confirm.Stop()
-	next := time.NewTimer(u.untilFirstCheck())
+	// The schedule is kept as a time of day and not as a timer's length. A timer counts the time this
+	// machine is awake, so on a laptop that sleeps at night "once a day" was once every three days
+	// (M24 /code-review). The timer only wakes the loop, at least every wake, to look at the clock.
+	due := u.opts.Now().Add(u.untilFirstCheck()).Round(0)
+	next := time.NewTimer(u.nap(due))
 	defer next.Stop()
+	arm := func(wait time.Duration) {
+		due = u.opts.Now().Add(wait).Round(0)
+		next.Reset(u.nap(due))
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-confirm.C:
+			// Only the daemon that installs releases has one on trial. Any other program that held this
+			// state directory for ten minutes, a development build or a copy run from elsewhere, used to
+			// confirm a version it was not, and drop the pair kept to go back to (M24 /code-review).
+			if !u.installs {
+				continue
+			}
 			if err := u.installer.Confirm(); err != nil {
 				u.opts.Log.Warn().Str("error", said(err)).Msg("could not record that this version stayed up")
 			}
@@ -218,12 +255,16 @@ func (u *Updater) Run(ctx context.Context) {
 			if since := u.opts.Now().Sub(u.installer.Load().LastCheck); u.mode() != ipc.UpdateOff &&
 				(since < 0 || since >= nudgeFloor) {
 				if u.scheduled(ctx) {
-					next.Reset(retryStaged)
+					arm(retryStaged)
 				}
 			}
 		case <-u.retry:
-			next.Reset(retryStaged)
+			arm(retryStaged)
 		case <-next.C:
+			if u.opts.Now().Before(due) {
+				next.Reset(u.nap(due))
+				continue
+			}
 			wait := checkEvery + jitter()
 			if u.mode() != ipc.UpdateOff || u.isWanted() {
 				if u.scheduled(ctx) {
@@ -231,9 +272,15 @@ func (u *Updater) Run(ctx context.Context) {
 					wait = retryStaged
 				}
 			}
-			next.Reset(wait)
+			arm(wait)
 		}
 	}
+}
+
+// nap is how long the loop sleeps before it next looks at the clock: until due, and never longer than
+// wake.
+func (u *Updater) nap(due time.Time) time.Duration {
+	return min(max(due.Sub(u.opts.Now()), 0), wake)
 }
 
 // untilFirstCheck is how long after starting the listing is first read: soon, unless it was read lately.
@@ -298,6 +345,12 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 	record := u.installer.Load()
 	releases, err := u.opts.Source.Releases(ctx)
 	now := u.opts.Now()
+	if err != nil && ctx.Err() != nil {
+		// Whoever asked went away, or the daemon is stopping. That is not a check that failed: recorded
+		// as one, it put the next check off by a day and left "context canceled" as the last error after
+		// an ordinary stop (M24 /code-review).
+		return Release{}, false, err
+	}
 	if err != nil {
 		u.opts.Log.Warn().Str("error", said(err)).Msg("could not check for a new release")
 		_ = u.installer.Update(func(r *Record) { r.LastCheck, r.LastError = now, said(err) })
@@ -344,6 +397,9 @@ func (u *Updater) stage(ctx context.Context, release Release) error {
 	stager := &Stager{Source: *u.opts.Source, Verify: verify, Dir: filepath.Join(u.installer.Dir, "staged"),
 		GOOS: u.opts.GOOS, GOARCH: runtime.GOARCH}
 	staged, err := stager.Stage(ctx, release)
+	if err != nil && ctx.Err() != nil {
+		return err
+	}
 	if err != nil {
 		return u.failed(release, err)
 	}
@@ -406,12 +462,12 @@ func (u *Updater) Finish(stopped func() bool) bool {
 	staged, applying := u.staged, u.applying
 	u.mu.Unlock()
 	if !applying || staged == nil {
-		u.installer.CleanExit()
+		u.cleanExit()
 		return false
 	}
 	if stopped() {
 		u.opts.Log.Info().Msg("asked to stop before the release was installed; it is installed another time")
-		u.installer.CleanExit()
+		u.cleanExit()
 		return false
 	}
 	if err := u.installer.Install(*staged, u.current.String()); err != nil {
@@ -428,6 +484,14 @@ func (u *Updater) Finish(stopped func() bool) bool {
 	u.opts.Log.Info().Str("from", u.current.String()).Str("to", staged.Release.Version.String()).
 		Msg("a release is installed; starting it")
 	return true
+}
+
+// cleanExit takes back this start's count against a version on trial. Only the daemon that installs
+// releases is that version: see Run.
+func (u *Updater) cleanExit() {
+	if u.installs {
+		u.installer.CleanExit()
+	}
 }
 
 func (u *Updater) mode() string {
@@ -500,13 +564,22 @@ func (u *Updater) Check(ctx context.Context) (ipc.UpdateStatus, error) {
 		if errors.As(err, &refused) {
 			return u.Status(), err
 		}
-		return u.Status(), &ErrRefused{"the release listing could not be read: " + said(err)}
+		return u.Status(), &ErrUnreachable{"the release listing could not be read: " + said(err)}
 	}
 	return u.Status(), nil
 }
 
+// errDeferred is an installation asked for and put off until the daemon is free.
+var errDeferred = errors.New("deferred")
+
 // Apply checks, stages and begins installing, because somebody asked. The daemon restarts after the
 // answer has left.
+//
+// The download belongs to the daemon and not to the request. A client waits two minutes for an answer,
+// and a download given only that long, and thrown away when it ran out, could never finish on a slow
+// link: with the mode on notify, which is the default on Windows, that is the only way a release is
+// installed (M24 /code-review). The request waits applyTimeout and is then answered that the release is
+// on its way, and the download goes on, with the quarter of an hour the schedule's own has.
 func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 	if !u.installs {
 		return u.Status(), &ErrRefused{u.reason}
@@ -514,43 +587,72 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 	if !u.acquire(ctx, requestWait) {
 		return u.Status(), errBusy
 	}
-	defer u.release()
-	// Somebody is waiting for this answer, and a client gives a request two minutes. A download that
-	// takes longer is given up on here and said, where the schedule's own has a quarter of an hour.
-	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
-	defer cancel()
 	u.mu.Lock()
 	staged := u.staged
 	u.mu.Unlock()
+	var release Release
 	if staged == nil {
-		release, found, err := u.check(ctx)
-		if err != nil {
-			return u.Status(), &ErrRefused{"the release listing could not be read: " + said(err)}
-		}
-		if !found {
+		var (
+			found bool
+			err   error
+		)
+		release, found, err = u.check(ctx)
+		if err != nil || !found {
+			u.release()
+			if err != nil {
+				return u.Status(), &ErrUnreachable{"the release listing could not be read: " + said(err)}
+			}
 			return u.Status(), &ErrRefused{"there is no newer release this install can move to"}
 		}
-		if err := u.stage(ctx, release); err != nil {
-			return u.Status(), &ErrRefused{"the release was not installed, and this version keeps running: " +
-				said(err)}
-		}
 	}
-	if u.opts.Busy != nil && u.opts.Busy() {
-		// Asked for, so it is installed when it can be whatever the mode, and tried again soon and not at
-		// the next daily check.
+	done := make(chan error, 1)
+	go func() {
+		defer u.release()
+		if staged == nil {
+			if err := u.stage(u.life, release); err != nil {
+				done <- err
+				return
+			}
+		}
+		// Asked for: installed whatever the mode, and not dropped by a turn of the schedule that finds
+		// it staged with the mode on notify. That turn, arriving between this answer and the restart,
+		// used to leave "Installing" said and nothing installed (M24 /code-review).
 		u.mu.Lock()
 		u.wanted = true
 		u.mu.Unlock()
-		select {
-		case u.retry <- struct{}{}:
-		default:
+		if u.opts.Busy != nil && u.opts.Busy() {
+			// Tried again soon, and not at the next daily check.
+			select {
+			case u.retry <- struct{}{}:
+			default:
+			}
+			done <- errDeferred
+			return
 		}
-		return u.Status(), &ErrRefused{"the release is ready and will be installed when the voice call ends"}
+		done <- nil
+		// After the answer is on its way: the daemon's own stop request does the same (M23).
+		time.AfterFunc(200*time.Millisecond, u.begin)
+	}()
+	wait := time.NewTimer(applyTimeout)
+	defer wait.Stop()
+	select {
+	case err := <-done:
+		switch {
+		case err == nil:
+			return u.Status(), nil
+		case errors.Is(err, errDeferred):
+			return u.Status(), &ErrRefused{"the release is ready and will be installed when the voice call ends"}
+		case errors.Is(err, errDownload):
+			return u.Status(), &ErrUnreachable{"the release could not be downloaded, and this version keeps running: " + said(err)}
+		default:
+			return u.Status(), fmt.Errorf("the release was not installed, and this version keeps running: %s", said(err))
+		}
+	case <-wait.C:
+		// Still downloading. It is installed when it has been verified, and `update status` says so.
+		return u.Status(), nil
+	case <-ctx.Done():
+		return u.Status(), ctx.Err()
 	}
-	status := u.Status()
-	// After the answer is on its way: the daemon's own stop request does the same (M23).
-	time.AfterFunc(200*time.Millisecond, u.begin)
-	return status, nil
 }
 
 // SetMode and SetChannel record a choice. An unknown word is refused.

@@ -213,9 +213,11 @@ func TestAnUnverifiedReleaseIsRefusedAndTheVersionKeepsRunning(t *testing.T) {
 	if waiting := u.scheduled(t.Context()); waiting {
 		t.Error("a refused release is waiting to be installed")
 	}
+	// A failure, and neither a refusal nor a host that could not be reached.
 	_, err := u.Apply(t.Context())
 	var refused *ErrRefused
-	if !errors.As(err, &refused) || !strings.Contains(refused.Msg, "keeps running") {
+	var unreachable *ErrUnreachable
+	if err == nil || errors.As(err, &refused) || errors.As(err, &unreachable) || !strings.Contains(err.Error(), "keeps running") {
 		t.Errorf("apply: %v", err)
 	}
 	if w.restarts.Load() != 0 || u.Finish(notStopped) || w.daemonOnDisk() != "0.1.0 norite-daemon" {
@@ -350,9 +352,10 @@ func TestAListingThatCannotBeReadIsSaidAndNothingElse(t *testing.T) {
 	w := newWorld(t)
 	w.listing.Store("<html>rate limited \x1b[2J</html>")
 	u := w.updater("0.1.0")
+	// Not a refusal: a script tells "nothing newer" from "could not find out" (M24 /code-review).
 	_, err := u.Check(t.Context())
-	var refused *ErrRefused
-	if !errors.As(err, &refused) || strings.ContainsRune(refused.Msg, 0x1b) {
+	var unreachable *ErrUnreachable
+	if !errors.As(err, &unreachable) || strings.ContainsRune(unreachable.Msg, 0x1b) {
 		t.Errorf("check: %v", err)
 	}
 	if s := u.Status(); s.LastError == "" || strings.ContainsRune(s.LastError, 0x1b) || s.Available != "" {
@@ -849,5 +852,144 @@ func TestAStagedReleaseIsNotInstalledOnceToldToAskFirst(t *testing.T) {
 	u.scheduled(t.Context())
 	if w.restarts.Load() != 0 {
 		t.Errorf("installed after being told to ask first")
+	}
+}
+
+// "Once a day" is a day by the clock, not a day of the machine being awake: a timer does not count the
+// time a laptop sleeps, and one that sleeps at night checked every third day.
+func TestTheScheduleFollowsTheClockAndNotTheTimeAwake(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	lower(t, &wake, 20*time.Millisecond)
+	var slept atomic.Int64
+	u := w.updater("0.1.0", func(o *Options) {
+		o.Now = func() time.Time { return time.Now().Add(time.Duration(slept.Load())) }
+	})
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	time.Sleep(150 * time.Millisecond)
+	if w.listed.Load() != 0 {
+		t.Fatal("the listing was read before it was due")
+	}
+	// The machine sleeps two hours: the clock moves and no timer counts it.
+	slept.Store(int64(2 * time.Hour))
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.listed.Load() != 1 {
+		t.Errorf("after the clock passed the time due, the listing was read %d times", w.listed.Load())
+	}
+}
+
+// A check or a download cut short because the daemon is stopping, or whoever asked went away, is not a
+// check that failed: recorded as one, it put the next off by a day and left "context canceled" as the
+// last error after an ordinary stop.
+func TestAStopDuringACheckIsNotAFailedCheck(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	gone, cancel := context.WithCancel(t.Context())
+	cancel()
+	for i := 0; i < 40; i++ {
+		u.scheduled(gone)
+	}
+	if _, _, err := u.check(gone); err == nil {
+		t.Fatal("a check with nobody waiting read the listing")
+	}
+	if r := u.installer.Load(); !r.LastCheck.IsZero() || r.LastError != "" {
+		t.Errorf("recorded as a failed check: %+v", r)
+	}
+}
+
+// What `norite update apply` started is the daemon's to finish. Given only as long as the request waits
+// and thrown away after, a download on a slow link never finished, and with the mode on notify asking is
+// the only way a release is installed.
+func TestAnInstallationAskedForOutlastsTheRequest(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &applyTimeout, 50*time.Millisecond)
+	slow := make(chan struct{})
+	inner := w.host.server.Config.Handler
+	w.host.server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".tar.gz") {
+			<-slow
+		}
+		inner.ServeHTTP(rw, r)
+	})
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.Apply(t.Context()); err != nil {
+		t.Fatalf("apply on a slow link: %v", err)
+	}
+	if w.restarts.Load() != 0 {
+		t.Fatal("restarted before the download finished")
+	}
+	// A turn of the schedule arriving meanwhile neither waits for ever nor drops what was asked for.
+	turn := make(chan struct{})
+	go func() { u.scheduled(t.Context()); close(turn) }()
+	close(slow)
+	deadline := time.Now().Add(10 * time.Second)
+	for w.restarts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	<-turn
+	if w.restarts.Load() != 1 || !u.Finish(notStopped) || w.daemonOnDisk() != newDaemonScript {
+		t.Errorf("restarts %d, on disk %q", w.restarts.Load(), w.daemonOnDisk())
+	}
+}
+
+// A program that is not the installed daemon, holding the state directory, neither confirms a version
+// on trial nor takes a start back from it.
+func TestOnlyTheInstalledDaemonSettlesATrial(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	if !u.Finish(notStopped) {
+		t.Fatal("not installed")
+	}
+	if w.updater("0.1.1").AtStart(false) {
+		t.Fatal("rolled back at its first start")
+	}
+	lower(t, &confirmAfter, 20*time.Millisecond)
+	lower(t, &firstCheck, time.Hour)
+	other := w.updater("dev", func(o *Options) { o.Executable = "/somewhere/else/norite-daemon" })
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { other.Run(ctx); close(done) }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+	other.Finish(notStopped)
+	r := u.installer.Load()
+	if r.Pending == nil || r.Pending.Starts != 1 {
+		t.Errorf("another program settled the trial: %+v", r.Pending)
+	}
+	if _, err := os.Stat(filepath.Join(u.installer.previousDir(), daemonName)); err != nil {
+		t.Errorf("the pair kept to go back to is gone: %v", err)
+	}
+}
+
+// A download that fails is the host's failure too, and not a refusal.
+func TestADownloadThatFailsIsUnreachableAndNotARefusal(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	var unreachable *ErrUnreachable
+	w.listing.Store(`[{"tag_name":"v0.1.1"}]`)
+	w.host.server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/releases" {
+			_, _ = fmt.Fprint(rw, w.listing.Load().(string))
+			return
+		}
+		http.Error(rw, "gone", http.StatusServiceUnavailable)
+	})
+	if _, err := u.Apply(t.Context()); !errors.As(err, &unreachable) {
+		t.Errorf("apply with the files unreachable: %v", err)
 	}
 }

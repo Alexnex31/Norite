@@ -100,8 +100,8 @@ const (
 const maxNoticeVersion = 32
 
 // noticeOf turns the daemon's status into the sentence, or nil when there is nothing to say. own is this
-// client's version. Undone comes first, since it is the one a person did not expect; then a daemon newer
-// than this client; then a release that is out.
+// client's version. A daemon newer than this client comes first, then a release that is out, then a
+// version undone.
 //
 // "Restart norite" is said when this program is older than the daemon it is attached to, and for as long
 // as it is. It was said while the new version was on trial, which told a client opened after the update
@@ -117,13 +117,15 @@ func noticeOf(st ipc.UpdateStatus, own string) *updateNotice {
 		}
 		return s
 	}
+	// A version undone is said until something newer is: the record keeps it until another installation,
+	// and said first it hid for good the release that fixes it (M24 /code-review).
 	switch {
-	case st.RolledBack != "":
-		return &updateNotice{text: "↓ " + ver(st.RolledBack) + " undone", tone: toneUndone}
 	case olderThan(own, st.Version):
 		return &updateNotice{text: "↑ " + ver(st.Version) + " installed · restart norite", tone: toneInstalled}
 	case st.Available != "":
 		return &updateNotice{text: "↑ " + ver(st.Available) + " is out", tone: toneOut}
+	case st.RolledBack != "":
+		return &updateNotice{text: "↓ " + ver(st.RolledBack) + " undone", tone: toneUndone}
 	}
 	return nil
 }

@@ -33,6 +33,17 @@ type VersionError struct {
 func (e *VersionError) Error() string {
 	// Not gatewayproto.Check's own reason: it names a "server", and here that is the daemon. The two ship
 	// together, so the ordinary cause is an upgrade the running daemon has not restarted into.
+	//
+	// Since M24 the other ordinary cause is the reverse: the daemon installed a release and restarted as
+	// it, and this program was left open across that. Restarting the daemon changes nothing then, and
+	// saying so sent somebody to the wrong program (M24 /code-review).
+	if daemon, err := gatewayproto.ParseVersion(e.Daemon); err == nil {
+		if client, err := gatewayproto.ParseVersion(e.Client); err == nil && client.Compare(daemon) < 0 {
+			return fmt.Sprintf("the running daemon is version %s and this program is the older %s, which cannot "+
+				"talk to each other; the daemon has been updated, so quit this program and start it again",
+				e.Daemon, e.Client)
+		}
+	}
 	return fmt.Sprintf("the running daemon is version %s and this client is %s, which cannot talk to each "+
 		"other; restart the daemon so both run the installed version (`norite daemon restart`)",
 		e.Daemon, e.Client)
