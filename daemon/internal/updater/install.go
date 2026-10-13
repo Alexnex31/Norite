@@ -231,7 +231,6 @@ func (in *Installer) Install(staged Staged, from string) error {
 		return err
 	}
 	r.Pending = &Pending{From: from, To: staged.Release.Version.String(), Phase: phaseSwapping}
-	r.RolledBack, r.Available, r.LastError = "", "", ""
 	if err := in.save(r); err != nil {
 		// The record still describes whatever was pending before, and the pair kept is no longer that
 		// one's. With nothing kept, undoing it fails and says so; with this pair kept, it would
@@ -254,7 +253,10 @@ func (in *Installer) Install(staged Staged, from string) error {
 		}
 	}
 
+	// Only now is the last version undone no longer the news, and the release out no longer out. Cleared
+	// before the swap, an installation that failed took both lines away with it (M24 /code-review).
 	r.Pending.Phase = phaseApplied
+	r.RolledBack, r.Available, r.LastError = "", "", ""
 	if err := in.save(r); err != nil {
 		return fmt.Errorf("recording the installation: %w", err)
 	}

@@ -8,7 +8,7 @@
     "status": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "mode", "channel", "installs", "reason", "available", "trial", "rolled_back", "last_check", "last_error"],
+      "required": ["version", "mode", "channel", "installs", "reason", "available", "staging", "trial", "rolled_back", "last_check", "last_error"],
       "properties": {
         "version": {
           "type": "string",
@@ -33,6 +33,10 @@
         "available": {
           "type": "string",
           "description": "A newer version the last check chose, as SemVer without a leading v, or empty. It is one this install may move to: higher than what runs, on the channel, and one the signed-in instance talks to."
+        },
+        "staging": {
+          "type": "string",
+          "description": "A version being downloaded and verified now, or empty. `norite update apply` answers with it still set when the download outlasts the command: the release is installed once it is verified, and status says how it went."
         },
         "trial": {
           "type": "string",

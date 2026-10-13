@@ -646,8 +646,8 @@
     },
     "UpdateStatus": {
       "type": "object",
-      "description": "The body of a 200 answer to every request under /@daemon/update (M24, ADR 0020): GET /@daemon/update, and POST to /check, /apply, /mode/{auto|notify|off} and /channel/{stable|prerelease}. None takes a body, and a path carries one of those fixed words and nothing of the user's. Trust tier: the attach socket's alone; the port for scripts serves nothing under /@daemon/. It is carried in a Response's body like a relayed answer; no frame refers to it. A request understood and not carried out answers the relay's conflict error, with the reason.",
-      "required": ["version", "mode", "channel", "installs", "reason", "available", "trial", "rolled_back", "last_check", "last_error"],
+      "description": "The body of a 200 answer to every request under /@daemon/update (M24, ADR 0020): GET /@daemon/update, and POST to /check, /apply, /mode/{auto|notify|off} and /channel/{stable|prerelease}. None takes a body, and a path carries one of those fixed words and nothing of the user's. Trust tier: the attach socket's alone; the port for scripts serves nothing under /@daemon/. It is carried in a Response's body like a relayed answer; no frame refers to it. A request understood and not carried out answers the relay's conflict error, with the reason; one that cannot be carried out yet (the release host unreadable, a check already under way, the instance not yet heard from) answers unreachable.",
+      "required": ["version", "mode", "channel", "installs", "reason", "available", "staging", "trial", "rolled_back", "last_check", "last_error"],
       "additionalProperties": false,
       "properties": {
         "version": { "type": "string", "description": "The version this daemon is." },
@@ -656,6 +656,7 @@
         "installs": { "type": "boolean", "description": "Whether this daemon can install a release itself: only an install Norite's installer made, on a platform where it is done." },
         "reason": { "type": "string", "description": "Why it cannot, when installs is false. Empty otherwise." },
         "available": { "type": "string", "description": "A newer version the last check chose, or empty." },
+        "staging": { "type": "string", "description": "A version being downloaded and verified now, or empty. An answer to /apply that still carries it was given before the download finished." },
         "trial": { "type": "string", "description": "A version installed and not yet confirmed, which is the one running, or empty." },
         "rolled_back": { "type": "string", "description": "A version that was installed, did not stay up and was undone, or empty." },
         "last_check": { "type": "string", "description": "When the release listing was last read, RFC 3339, or empty when it never was." },

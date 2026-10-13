@@ -233,6 +233,9 @@ func TestARecordAboutAnotherInstallationIsDropped(t *testing.T) {
 func TestAFailedInstallationLeavesThePairThatWasRunning(t *testing.T) {
 	// The staged daemon has gone: the command is replaced, the daemon cannot be.
 	x := newInstalled(t)
+	if err := x.in.Update(func(r *Record) { r.RolledBack, r.Available = "0.0.9", "0.1.1" }); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(x.staged.Daemon); err != nil {
 		t.Fatal(err)
 	}
@@ -240,8 +243,13 @@ func TestAFailedInstallationLeavesThePairThatWasRunning(t *testing.T) {
 		t.Fatal("an installation with no daemon to install succeeded")
 	}
 	x.onDisk("0.1.0")
-	if p := x.in.Load().Pending; p != nil {
-		t.Errorf("a failed installation is still pending: %+v", p)
+	r := x.in.Load()
+	if r.Pending != nil {
+		t.Errorf("a failed installation is still pending: %+v", r.Pending)
+	}
+	// What was true before it is still said: the last version undone, and the release that is out.
+	if r.RolledBack != "0.0.9" || r.Available != "0.1.1" {
+		t.Errorf("a failed installation took what the record said with it: %+v", r)
 	}
 	x.start("0.1.0", false, Nothing)
 

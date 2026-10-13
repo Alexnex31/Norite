@@ -703,6 +703,24 @@ func TestAVersionHoldEndsWithItsSignIn(t *testing.T) {
 	c2.expect(gatewayproto.OpIdentify)
 }
 
+// And so does every other wait: a backoff or a floor slept through kept the instance left as the one the
+// updater chose by, for as long as it lasted.
+func TestAnyWaitEndsWithItsSignIn(t *testing.T) {
+	h := start(t, func(o *Options) { o.Version = "0.1.5"; o.RateLimitedFloor = time.Hour })
+	c := h.g.next()
+	c.hello(time.Now(), "0.1.5", time.Minute)
+	c.expect(gatewayproto.OpIdentify)
+	c.closeWith(gatewayproto.CloseRateLimited, "slow down")
+	h.g.noConnectionWithin(100 * time.Millisecond)
+	require.Equal(t, "0.1.5", h.client.ServerVersion())
+
+	h.creds.signInAgain(h.g.srv.URL)
+	c2 := h.g.next()
+	assert.Empty(t, h.client.ServerVersion(), "the instance left still spoke for the one signed in to")
+	c2.hello(time.Now(), "0.1.5", time.Minute)
+	c2.expect(gatewayproto.OpIdentify)
+}
+
 // ---------- the daemon's own discipline ----------
 
 func TestASignInThatChangesStartsAFreshSession(t *testing.T) {

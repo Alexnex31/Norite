@@ -2446,12 +2446,14 @@ And on the client config and the daemon's own requests, from M21:
   uses it.** A new local dispatch is a constant in `daemon/ipc`, a row in `daemon-ipc.schema.json`'s
   `LocalDispatch`, and sent through `Server.Local`.
 - **A request the daemon answers itself lives under `/@daemon/`** on the relay's own request frame, so no
-  frame changes. It is answered signed in or not, with 200 and a body or with `conflict` or `failed`, never
-  a status; since M24 also `unreachable`, when the daemon's own request could not reach the release host. It takes no body and carries nothing of the user's in its path, because a daemon older than the
-  prefix relays the path to its instance (ledger). One exception since M22: the port number in
-  `/@daemon/automation/enable/{port}`, sent only after a request that says nothing has shown the daemon
-  knows these requests. `relay.Target` refuses the prefix, and a test holds
-  `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and `LocalRead`.
+  frame changes. It is answered signed in or not, with 200 and a body or with `conflict` or `failed`, never a
+  status; since M24 also `unreachable`, when the request cannot be carried out yet: the release host could
+  not be read, a check is already under way, or the instance has not been heard from. It takes no body and
+  carries nothing of the user's in its path, because a daemon older than the prefix relays the path to its
+  instance (ledger). One exception since M22: the port number in `/@daemon/automation/enable/{port}`, sent
+  only after a request that says nothing has shown the daemon knows these requests. `relay.Target` refuses
+  the prefix, and a test holds `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and
+  `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
   which nothing outside the daemon module can import. A write puts back the fields it did not understand.
   A step that must follow the state and not be interleaved with the next update goes in `Update`'s `then`.

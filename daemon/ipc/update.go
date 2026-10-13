@@ -56,6 +56,9 @@ type UpdateStatus struct {
 	Reason   string `json:"reason"`
 	// Available is a newer version the last check chose, or "".
 	Available string `json:"available"`
+	// Staging is a version being downloaded and verified now, or "". An installation asked for answers
+	// while this is still set when the download outlasts the request.
+	Staging string `json:"staging"`
 	// Trial is a version installed and not yet confirmed: the one running, until it has stayed up.
 	Trial string `json:"trial"`
 	// RolledBack is a version that was installed, did not stay up, and was undone, or "".

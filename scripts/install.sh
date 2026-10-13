@@ -165,9 +165,15 @@ place() {
 # server's in /opt or a test's in a temporary directory, and writing then would point the account's real
 # install at the wrong place. A build of a checkout is not a release and is not updated, so a receipt an
 # earlier install left for this directory is removed; one for another directory is not this run's.
+#
+# A version from before the updater has no such command and no updater either: nothing is recorded, and
+# nothing is said of updates it does not make. It used to print that version's usage error and then
+# describe a daily check the version does not have.
 leave_receipt() {
     receipt=0
-    if [ "$mode" = release ] && [ "$daemon" = 1 ]; then
+    if ! "$norite" --help 2>/dev/null | grep -q '^ *update '; then
+        receipt=none
+    elif [ "$mode" = release ] && [ "$daemon" = 1 ]; then
         if "$norite" update receipt --bin-dir "$bin_dir" --by install.sh; then
             receipt=1
         else
@@ -358,7 +364,9 @@ main() {
     step "Done"
     # What is said here is what this install does. Without its receipt the daemon installs nothing, and
     # saying it kept itself up to date straight after warning that it would not was two answers.
-    if [ "$mode" = release ] && [ "$daemon" = 1 ] && [ "$receipt" = 0 ]; then
+    if [ "$receipt" = none ]; then
+        :
+    elif [ "$mode" = release ] && [ "$daemon" = 1 ] && [ "$receipt" = 0 ]; then
         say "Norite checks once a day for a new release and tells you. This install does not install one:"
         say "run this installer again for that. 'norite update mode off' stops the check."
         say ""

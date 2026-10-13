@@ -51,11 +51,11 @@ var (
 )
 
 // errUndecided is a check that cannot be made yet: signed in, and the instance not yet heard from.
-var errUndecided = &ErrRefused{"this daemon is signed in to an instance it has not heard from in this run, and that " +
+var errUndecided = &ErrUnreachable{"this daemon is signed in to an instance it has not heard from in this run, and that " +
 	"instance's version decides which release it may move to; ask again once it is connected"}
 
 // errBusy is a request that found a check or a download already under way.
-var errBusy = &ErrRefused{"a check or a download is already under way; ask again in a moment"}
+var errBusy = &ErrUnreachable{"a check or a download is already under way; ask again in a moment"}
 
 // The three things the norite_testrelease build replaces (testrelease.go). In every other build they are
 // nil and nothing assigns them: where releases come from, what makes one believed, and a hook run once the
@@ -71,9 +71,11 @@ type ErrRefused struct{ Msg string }
 
 func (e *ErrRefused) Error() string { return e.Msg }
 
-// ErrUnreachable is a request that could not be carried out because the release host could not be read:
-// offline, rate limited, too slow. It is not a refusal: a script must be able to tell "nothing newer"
-// from "could not find out" (M24 /code-review).
+// ErrUnreachable is a request that could not be carried out now and may be in a moment: the release host
+// could not be read (offline, rate limited, too slow), a check is already under way, or the instance has
+// not been heard from yet. It is not a refusal: a script must be able to tell "nothing newer" from "could
+// not find out", and one that tries again on "unavailable" and stops on "refused" must not stop for a
+// daemon that was busy (M24 /code-review, twice).
 type ErrUnreachable struct{ Msg string }
 
 func (e *ErrUnreachable) Error() string { return e.Msg }
@@ -124,10 +126,17 @@ type Updater struct {
 	wanted bool
 	// tried is when the listing was last asked for in this run, read or not, and unverified the releases
 	// whose signature did not stand up in this run. Neither is kept between runs: see check and failed.
-	tried      time.Time
-	unverified []string
-	// withheld is the release the last check would have chosen had its signature not failed in this run.
+	tried time.Time
+	// dropped are the releases given up on in this run, and failures how often each one's download has
+	// failed: see strike. withheld is the release the last check would have chosen had it not been
+	// dropped. None of it is kept between runs.
+	dropped  []string
+	failures map[string]int
 	withheld string
+	// staging is the version being downloaded and verified now, or "".
+	staging string
+	// changed asks the loop for a turn now: the mode or the channel was set.
+	changed chan struct{}
 	// working is held by whichever of the loop and a request is checking or staging: a channel of one, so
 	// that a request can stop waiting for it.
 	working chan struct{}
@@ -163,7 +172,8 @@ func New(o Options) *Updater {
 		o.Changed = func() {}
 	}
 	u := &Updater{opts: o, installer: &Installer{Dir: filepath.Join(o.StateDir, "update"), GOOS: o.GOOS},
-		working: make(chan struct{}, 1), nudged: make(chan struct{}, 1), retry: make(chan struct{}, 1)}
+		working: make(chan struct{}, 1), nudged: make(chan struct{}, 1), retry: make(chan struct{}, 1),
+		changed: make(chan struct{}, 1), failures: map[string]int{}}
 	u.life, u.end = context.WithCancel(context.Background())
 	u.installs, u.reason = u.standing()
 	return u
@@ -283,6 +293,11 @@ func (u *Updater) Run(ctx context.Context) {
 			}
 		case <-u.retry:
 			arm(retryStaged)
+		case <-u.changed:
+			// The mode or the channel was just set, and what that asks for is done now. Left to the
+			// schedule, "auto" chosen with a release already out installed it up to a day later, and a
+			// channel answered "no newer release" from the other channel's check (M24 /code-review).
+			arm(0)
 		case <-next.C:
 			if u.opts.Now().Before(due) {
 				next.Reset(u.nap(due))
@@ -342,7 +357,7 @@ func (u *Updater) canFollow() bool {
 // onTrial reports whether the version running was installed here and has not yet stayed up.
 func (u *Updater) onTrial() bool {
 	p := u.installer.Load().Pending
-	return u.installs && p != nil && p.Phase == phaseApplied
+	return u.installs && p != nil && p.Phase == phaseApplied && p.To == u.current.String()
 }
 
 // turn is one turn of the loop. waiting is a release staged and waiting for a better moment; again is how
@@ -367,6 +382,14 @@ func (u *Updater) turn(ctx context.Context) (waiting bool, again time.Duration) 
 		// version stands in for the instance it has none of (Choose). Holding a signed-out pre-release
 		// back until somebody asked was built on a review's finding and taken out again on the author's
 		// decision: an install nobody has signed in to yet is the one that most needs to be current.
+		// A version on trial is not installed over. Its predecessor is the pair kept to go back to, and
+		// an installation replaces that pair with the version on trial before it has swapped anything:
+		// one that then failed left a version nobody had confirmed with nothing to go back to
+		// (M24 /code-review). It waits out the trial, which is ten minutes of staying up, and the
+		// listing is not read for a release that could not be acted on.
+		if u.onTrial() {
+			return false, retryStaged
+		}
 		release, found, err := u.check(ctx)
 		switch {
 		case errors.Is(err, errUndecided):
@@ -378,15 +401,14 @@ func (u *Updater) turn(ctx context.Context) (waiting bool, again time.Duration) 
 		if err != nil || !found || u.mode() != ipc.UpdateAuto || !u.installs {
 			return false, 0
 		}
-		// A version on trial is not installed over. Its predecessor is the pair kept to go back to, and
-		// an installation replaces that pair with the version on trial before it has swapped anything:
-		// one that then failed left a version nobody had confirmed with nothing to go back to
-		// (M24 /code-review). It waits out the trial, which is ten minutes of staying up.
-		if u.onTrial() {
-			return false, retryStaged
-		}
 		if err := u.stage(ctx, release); err != nil {
-			if errors.Is(err, errDownload) && ctx.Err() == nil {
+			switch {
+			case ctx.Err() != nil:
+				return false, 0
+			case u.isDropped(release):
+				// Given up on for this run: the next turn, soon, chooses among the others.
+				return false, retryStaged
+			case errors.Is(err, errDownload):
 				// A download that dropped, or a release listed before its files were all there: tried
 				// again as a listing that could not be read is, and not a day later.
 				return false, retryFailed
@@ -445,7 +467,7 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 	now := u.opts.Now()
 	u.mu.Lock()
 	u.tried = now
-	unverified := append([]string(nil), u.unverified...)
+	dropped := append([]string(nil), u.dropped...)
 	u.mu.Unlock()
 	if err != nil && ctx.Err() != nil {
 		// Whoever asked went away, or the daemon is stopping. That is not a check that failed: recorded
@@ -464,16 +486,13 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 	}
 	policy := Policy{Current: u.current, Instance: instance, SignedIn: signedIn,
 		Prereleases: u.channelOf(record) == ipc.ChannelPrerelease, Bad: record.Bad}
-	newest, _ := Choose(policy, releases)
-	policy.Bad = append(append([]string(nil), record.Bad...), unverified...)
+	newest, any := Choose(policy, releases)
+	policy.Bad = append(append([]string(nil), record.Bad...), dropped...)
 	release, found := Choose(policy, releases)
 	// Why a newer release is not the one offered stays said for as long as it is so.
 	withheld := ""
-	if !found || newest.Version != release.Version {
+	if any && (!found || newest.Version != release.Version) {
 		withheld = newest.Version.String()
-	}
-	if len(unverified) == 0 {
-		withheld = ""
 	}
 	u.mu.Lock()
 	u.withheld = withheld
@@ -497,6 +516,8 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 
 // stage downloads and verifies a release and keeps it ready.
 func (u *Updater) stage(ctx context.Context, release Release) error {
+	u.setStaging(release.Version.String())
+	defer u.setStaging("")
 	if err := u.installer.Ready(); err != nil {
 		return u.failed(release, fmt.Errorf("it cannot be installed here: %w", err))
 	}
@@ -515,6 +536,7 @@ func (u *Updater) stage(ctx context.Context, release Release) error {
 		return err
 	}
 	if err != nil {
+		u.strike(release, err)
 		return u.failed(release, err)
 	}
 	u.opts.Log.Info().Str("version", release.Version.String()).Msg("a release is downloaded and verified")
@@ -522,6 +544,53 @@ func (u *Updater) stage(ctx context.Context, release Release) error {
 	u.staged = &staged
 	u.mu.Unlock()
 	return nil
+}
+
+func (u *Updater) setStaging(version string) {
+	u.mu.Lock()
+	u.staging = version
+	u.mu.Unlock()
+	u.opts.Changed()
+}
+
+// maxDownloads is how many times one release's download may fail in a run before it is given up on.
+const maxDownloads = 3
+
+// strike counts a release that could not be staged, and gives up on it for this run when trying again
+// would do the same: its signature did not verify, its programs did not unpack or run, or its files
+// could not be fetched maxDownloads times. A release given up on is not chosen again, so the next check
+// falls back to the newest of the others.
+//
+// Only a signature that failed used to do this. A release published without its checksums was fetched
+// every hour for good, one whose daemon would not run was downloaded and thrown away every day, and
+// neither let the release before it be installed (M24 /code-review).
+//
+// Not kept in the record: a signature may fail because this install's root is too old, and a download
+// because of where this machine is, and an install made afresh must be offered the release.
+func (u *Updater) strike(release Release, err error) {
+	version := release.Version.String()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if errors.Is(err, errDownload) && !errors.Is(err, ErrNotVerified) {
+		u.failures[version]++
+		if u.failures[version] < maxDownloads {
+			return
+		}
+	}
+	if len(u.dropped) < maxBad {
+		u.dropped = append(u.dropped, version)
+	}
+}
+
+func (u *Updater) isDropped(release Release) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, version := range u.dropped {
+		if version == release.Version.String() {
+			return true
+		}
+	}
+	return false
 }
 
 // failed records why a release was not staged. The current version goes on running (ADR 0020).
@@ -532,24 +601,14 @@ func (u *Updater) failed(release Release, err error) error {
 	}
 	level.Str("version", release.Version.String()).Str("error", said(err)).
 		Msg("a release was not installed; this version keeps running")
+	dropped := u.isDropped(release)
 	_ = u.installer.Update(func(r *Record) {
 		r.LastError = said(err)
-		if errors.Is(err, ErrNotVerified) {
-			// The listing named it and no signature stands behind it: it is not announced as out.
+		if dropped {
+			// Not announced as out: the listing named it, and it is not one this run will install.
 			r.Available = ""
 		}
 	})
-	if errors.Is(err, ErrNotVerified) {
-		// Nor chosen again in this run. The next check used to announce it again and clear the error,
-		// and with the mode on auto its files were fetched and refused every day (M24 /code-review).
-		// Not kept in the record: a signature may fail because this install's root is too old, and an
-		// install made afresh must be offered the release.
-		u.mu.Lock()
-		if len(u.unverified) < maxBad {
-			u.unverified = append(u.unverified, release.Version.String())
-		}
-		u.mu.Unlock()
-	}
 	u.opts.Changed()
 	return err
 }
@@ -636,8 +695,16 @@ func (u *Updater) modeOf(r Record) string {
 		return ipc.UpdateOff
 	}
 	switch r.Mode {
-	case ipc.UpdateAuto, ipc.UpdateNotify, ipc.UpdateOff:
+	case ipc.UpdateNotify, ipc.UpdateOff:
 		return r.Mode
+	case ipc.UpdateAuto:
+		// Chosen when this daemon installed, and no longer true of one that does not: the receipt is
+		// gone, or names another directory. Said as chosen, the status read "does not install
+		// releases" and "installed by themselves" one line apart (M24 /code-review).
+		if u.installs {
+			return r.Mode
+		}
+		return ipc.UpdateNotify
 	}
 	if u.installs && u.opts.GOOS != "windows" {
 		return ipc.UpdateAuto
@@ -669,9 +736,14 @@ func (u *Updater) Status() ipc.UpdateStatus {
 	if r.unreadable {
 		s.LastError = errUnreadable.Error() + ": " + termsafe.Text(u.installer.recordPath())
 	}
-	if r.Pending != nil && r.Pending.Phase == phaseApplied {
-		s.Trial = r.Pending.To
+	// A trial is this daemon's own: a record left by an install since replaced by hand, read by a build
+	// that is not the version named, said "was just installed" of a version not running, for good.
+	if p := r.Pending; u.installs && p != nil && p.Phase == phaseApplied && p.To == u.current.String() {
+		s.Trial = p.To
 	}
+	u.mu.Lock()
+	s.Staging = u.staging
+	u.mu.Unlock()
 	if !r.LastCheck.IsZero() {
 		s.LastCheck = r.LastCheck.UTC().Format(time.RFC3339)
 	}
@@ -692,8 +764,11 @@ func (u *Updater) Check(ctx context.Context) (ipc.UpdateStatus, error) {
 
 // unreachable is a failed check as a request answers it: a refusal stays one.
 func unreachable(err error) error {
-	var refused *ErrRefused
-	if errors.As(err, &refused) {
+	var (
+		refused *ErrRefused
+		already *ErrUnreachable
+	)
+	if errors.As(err, &refused) || errors.As(err, &already) {
 		return err
 	}
 	return &ErrUnreachable{"the release listing could not be read: " + said(err)}
@@ -717,8 +792,7 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 	// Counted from here. Counted from after the check, the wait for whatever was under way and a slow
 	// listing came on top of it, and the answer left after the client had stopped waiting for it
 	// (M24 /code-review).
-	wait := time.NewTimer(applyTimeout)
-	defer wait.Stop()
+	arrived := u.opts.Now()
 	if u.onTrial() {
 		return u.Status(), &ErrRefused{"the version running was just installed and is kept once it has stayed up for " +
 			"ten minutes; ask again then"}
@@ -745,11 +819,16 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 			withheld := u.withheld
 			u.mu.Unlock()
 			if withheld != "" {
-				return u.Status(), &ErrRefused{"release " + withheld + " was refused because its signature did not " +
-					"verify, and is not tried again until the daemon is restarted (`norite daemon restart`)"}
+				return u.Status(), &ErrRefused{"release " + withheld + " could not be installed earlier in this run of " +
+					"the daemon, and is not tried again until it is restarted (`norite daemon restart`); " +
+					"`norite update status` says why"}
 			}
 			return u.Status(), &ErrRefused{"there is no newer release this install can move to"}
 		}
+	}
+	if staged == nil {
+		// Said before the answer can leave: one given while the download is still going says so.
+		u.setStaging(release.Version.String())
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -779,6 +858,8 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 		// After the answer is on its way: the daemon's own stop request does the same (M23).
 		time.AfterFunc(200*time.Millisecond, u.begin)
 	}()
+	wait := time.NewTimer(applyTimeout - u.opts.Now().Sub(arrived))
+	defer wait.Stop()
 	select {
 	case err := <-done:
 		switch {
@@ -811,6 +892,7 @@ func (u *Updater) SetMode(mode string) (ipc.UpdateStatus, error) {
 	}
 	err := u.installer.Update(func(r *Record) { r.Mode = mode })
 	u.opts.Changed()
+	u.poke()
 	return u.Status(), err
 }
 
@@ -820,8 +902,11 @@ func (u *Updater) SetChannel(channel string) (ipc.UpdateStatus, error) {
 	default:
 		return u.Status(), &ErrRefused{"the channel is stable or prerelease"}
 	}
-	err := u.installer.Update(func(r *Record) { r.Channel, r.Available = channel, "" })
+	// Nothing has been asked on this channel: what the other one's check found is not its answer, and
+	// neither is "no newer release, as of" that check.
+	err := u.installer.Update(func(r *Record) { r.Channel, r.Available, r.LastCheck = channel, "", time.Time{} })
 	u.opts.Changed()
+	u.poke()
 	return u.Status(), err
 }
 
@@ -872,6 +957,14 @@ func (u *Updater) acquire(ctx context.Context, wait time.Duration) bool {
 }
 
 func (u *Updater) release() { <-u.working }
+
+// poke asks the loop for a turn now.
+func (u *Updater) poke() {
+	select {
+	case u.changed <- struct{}{}:
+	default:
+	}
+}
 
 // Nudge asks for a check soon: the instance has refused this daemon for its version. It never blocks, and
 // asking twice before the loop has looked is asking once.

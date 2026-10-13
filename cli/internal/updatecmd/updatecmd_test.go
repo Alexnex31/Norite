@@ -143,6 +143,12 @@ func TestWhatAPersonIsTold(t *testing.T) {
 			says: []string{"The last check or installation failed: the release's signature did not verify."}},
 		{name: "applying", args: []string{"apply"}, change: func(s *ipc.UpdateStatus) { s.Available = "0.1.1" },
 			says: []string{"Installing 0.1.1."}, not: []string{"is running", "Updates:"}},
+		// Answered before the download finished: it may yet fail, and is not said to be installing.
+		{name: "applying, still downloading", args: []string{"apply"},
+			change: func(s *ipc.UpdateStatus) { s.Available, s.Staging = "0.1.1", "0.1.1" },
+			says:   []string{"Downloading 0.1.1. It is installed once it is verified"}, not: []string{"Installing"}},
+		{name: "downloading", change: func(s *ipc.UpdateStatus) { s.Available, s.Staging = "0.1.1", "0.1.1" },
+			says: []string{"0.1.1 is being downloaded and verified."}},
 	}
 	for _, tc := range cases {
 		d := &fakeDaemon{status: installed()}

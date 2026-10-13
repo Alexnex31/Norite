@@ -1573,9 +1573,11 @@ of this section.
   `release.yml@refs/tags/<the candidate's tag>` under GitHub's OIDC issuer: the identity names the tag,
   so one version's bundle cannot stand for another. Then the archive's SHA-256 against `checksums.txt`,
   then `norite` and `norite-daemon` are taken from the archive by exact name. Any failure deletes what
-  was downloaded, leaves the current version running, and is reported (fail closed). A release whose
-  signature did not verify is not chosen again in that run of the daemon, and not remembered past it: the
-  cause may be this install's own root. No flag, file or environment variable changes the root or the
+  was downloaded, leaves the current version running, and is reported (fail closed). A release that
+  cannot be staged is given up on for that run of the daemon, at once when its signature or its programs
+  are refused and after three failed downloads otherwise, so the next check falls back to the newest of
+  the others. It is not remembered past the run: the cause may be this install's own root, or its
+  network. No flag, file or environment variable changes the root or the
   identity in a release build.
 
   **Installing it.** The staged daemon is first run with `-version` and must report the candidate's
@@ -1589,6 +1591,13 @@ of this section.
   swap interrupted half-way is finished or undone from the record at the next start. Once Phase E
   exists, applying is deferred while a voice session is active (`architecture.md` §6); the seam is built
   here.
+
+  **What a restart costs a script.** The port for scripts mints its secret per run (M22), so a daemon
+  that restarts to install a release closes every script's connection and opens the port under a new
+  secret: a bot started with `norite automation run` has to be started again, as after any restart of
+  the daemon, and with the mode on `auto` that moment is the updater's to choose. Accepted for M24:
+  `norite update mode notify` puts the moment back in a person's hands. Deferring an update while a
+  script is connected would let one long-running bot hold every release off for good.
 
   **Undoing it.** The first thing the daemon does at start is read the update record. A start that finds
   two unconfirmed starts before it, or the previous run's crash file (M23), restores the pair set aside,

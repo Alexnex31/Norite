@@ -205,18 +205,15 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		wait := c.after(out, retry)
-		// A hold for a refused version is an hour, and it is for this sign-in's instance: the next sign-in
-		// may be to another. Slept through, the hold kept a daemon signed in to a new instance from
-		// connecting to it, and kept the old instance's version as the one the updater chose by, which
-		// could install a release the new instance refuses (M24 /code-review).
-		var ended <-chan struct{}
-		if out.ending == endVersion {
-			ended = c.creds.Ended(cred.Generation)
-		}
+		// Every wait is for this sign-in's instance, and the next sign-in may be to another: the hold
+		// for a refused version is an hour, a backoff up to a minute. Slept through, the wait kept a
+		// daemon signed in to a new instance from connecting to it, and kept the old instance's version
+		// as the one the updater chose by, which could install a release the new instance refuses
+		// (M24 /code-review: first the hold alone, then every wait).
 		select {
 		case <-ctx.Done():
 			return
-		case <-ended:
+		case <-c.creds.Ended(cred.Generation):
 			c.serverVersion.Store(nil)
 		case <-time.After(wait):
 		}

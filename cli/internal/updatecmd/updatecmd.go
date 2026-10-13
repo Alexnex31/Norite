@@ -205,6 +205,10 @@ type view struct {
 func (v view) Text(t *output.Text) {
 	version, available := output.Clean(v.Version), output.Clean(v.Available)
 	switch {
+	case v.applying && v.Staging != "":
+		// Not "installing": the download may yet fail, or its signature be refused.
+		t.Line("Downloading %s. It is installed once it is verified; `norite update status` says how it went.", output.Clean(v.Staging))
+		return
 	case v.applying:
 		t.Line("Installing %s. The daemon restarts as it in a moment; `norite update status` says how it went.", available)
 		return
@@ -212,6 +216,9 @@ func (v view) Text(t *output.Text) {
 		t.Line("Norite %s was just installed. It is kept once it has stayed up for ten minutes.", output.Clean(v.Trial))
 	default:
 		t.Line("Norite %s is running.", version)
+	}
+	if v.Staging != "" {
+		t.Line("%s is being downloaded and verified.", output.Clean(v.Staging))
 	}
 	if v.RolledBack != "" {
 		t.Line("%s was installed, did not stay up, and was undone. It will not be installed again.", output.Clean(v.RolledBack))

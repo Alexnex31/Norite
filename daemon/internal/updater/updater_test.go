@@ -505,6 +505,7 @@ func TestARefusedHandshakeAsksForACheckAtOnce(t *testing.T) {
 	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
 		t.Fatal(err)
 	}
+	u.unasked()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { u.Run(ctx); close(done) }()
@@ -563,9 +564,12 @@ func TestARequestSaysWhenACheckIsAlreadyUnderWay(t *testing.T) {
 	}
 	started := time.Now()
 	for name, ask := range map[string]func(context.Context) (ipc.UpdateStatus, error){"check": u.Check, "apply": u.Apply} {
+		// Not a refusal: a script that tries again on "unavailable" and stops on "refused" must not stop
+		// for a daemon that was busy for a moment.
 		_, err := ask(t.Context())
+		var later *ErrUnreachable
 		var refused *ErrRefused
-		if !errors.As(err, &refused) || !strings.Contains(refused.Msg, "already under way") {
+		if !errors.As(err, &later) || errors.As(err, &refused) || !strings.Contains(later.Msg, "already under way") {
 			t.Errorf("%s behind a download: %v", name, err)
 		}
 	}
@@ -889,6 +893,7 @@ func TestTheScheduleFollowsTheClockAndNotTheTimeAwake(t *testing.T) {
 	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
 		t.Fatal(err)
 	}
+	u.unasked()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { u.Run(ctx); close(done) }()
@@ -1038,12 +1043,13 @@ func TestACheckThatCannotBeMadeYetIsNotOneThatFoundNothing(t *testing.T) {
 	if waiting, again := u.turn(t.Context()); waiting || again != retryStaged {
 		t.Errorf("the schedule comes back in %v", again)
 	}
+	// Something to ask again, and so not a refusal; and said as itself, not as a listing unread.
 	_, err := u.Check(t.Context())
-	var refused *ErrRefused
-	if !errors.As(err, &refused) || !strings.Contains(refused.Msg, "not heard from") {
+	var later *ErrUnreachable
+	if !errors.As(err, &later) || !strings.HasPrefix(later.Msg, "this daemon is signed in") {
 		t.Errorf("check: %v", err)
 	}
-	if _, err := u.Apply(t.Context()); !errors.As(err, &refused) || !strings.Contains(refused.Msg, "not heard from") {
+	if _, err := u.Apply(t.Context()); !errors.As(err, &later) || !strings.HasPrefix(later.Msg, "this daemon is signed in") {
 		t.Errorf("apply: %v", err)
 	}
 	if r := u.installer.Load(); !r.LastCheck.IsZero() || w.listed.Load() != 0 {
@@ -1089,6 +1095,7 @@ func TestARefusedHandshakeInsideTheFloorIsDeferredAndNotDropped(t *testing.T) {
 	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
 		t.Fatal(err)
 	}
+	u.unasked()
 	if _, err := u.Check(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -1217,9 +1224,13 @@ func TestAVersionOnTrialIsNotInstalledOver(t *testing.T) {
 		t.Fatal("rolled back at its first start")
 	}
 	w.listing.Store(`[{"tag_name":"v0.1.2"},{"tag_name":"v0.1.1"}]`)
-	fetched := w.host.asked["checksums.txt"].Load()
+	fetched, listed := w.host.asked["checksums.txt"].Load(), w.listed.Load()
 	if waiting, again := trial.turn(t.Context()); waiting || again != retryStaged {
 		t.Errorf("on trial: waiting=%v again=%s", waiting, again)
+	}
+	// Nor is the listing read, every five minutes, for a release that could not be acted on.
+	if w.listed.Load() != listed {
+		t.Error("the listing was read for a version on trial")
 	}
 	var refused *ErrRefused
 	if _, err := trial.Apply(t.Context()); !errors.As(err, &refused) || !strings.Contains(err.Error(), "just installed") {
@@ -1232,11 +1243,14 @@ func TestAVersionOnTrialIsNotInstalledOver(t *testing.T) {
 	if err != nil || string(kept) != "0.1.0 norite-daemon" {
 		t.Errorf("the pair kept to go back to: %q, %v", kept, err)
 	}
-	// It is still told what is out, and once kept it moves on. The host here has no files for 0.1.2, so
-	// moving on shows as a download tried.
-	if s := trial.Status(); s.Available != "0.1.2" {
+	// The trial is this daemon's own: another build reading the record is not "just installed".
+	if s := trial.Status(); s.Trial != "0.1.1" {
 		t.Errorf("status on trial: %+v", s)
 	}
+	if s := w.updater("0.1.3").Status(); s.Trial != "" {
+		t.Errorf("a version the record does not name says it is on trial: %+v", s)
+	}
+	// Once kept it moves on. The host here has no files for 0.1.2, so moving on shows as a download tried.
 	if err := trial.installer.Confirm(); err != nil {
 		t.Fatal(err)
 	}
@@ -1247,27 +1261,161 @@ func TestAVersionOnTrialIsNotInstalledOver(t *testing.T) {
 
 // The request's wait is counted from when it arrived, and not from after the listing was read: on a slow
 // link the two together outlasted the client, which then said a healthy daemon had not answered.
+//
+// Held by the clock and not by a stopwatch: the listing takes two hours of the daemon's clock, and the
+// request has one to answer in. Counted from arrival there is nothing left to wait; counted from after the
+// listing, the answer is an hour away.
 func TestAnInstallationAskedForAnswersWithinItsOwnTime(t *testing.T) {
 	w := newWorld(t)
-	lower(t, &applyTimeout, time.Second)
+	lower(t, &applyTimeout, time.Hour)
+	var passed atomic.Int64
 	release := make(chan struct{})
-	defer close(release)
 	inner := w.host.server.Config.Handler
 	w.host.server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/releases":
-			time.Sleep(800 * time.Millisecond)
+			passed.Store(int64(2 * time.Hour))
 		case strings.HasSuffix(r.URL.Path, ".tar.gz"):
 			<-release
 		}
 		inner.ServeHTTP(rw, r)
 	})
+	u := w.updater("0.1.0", func(o *Options) {
+		o.Now = func() time.Time { return time.Now().Add(time.Duration(passed.Load())) }
+	})
+	answered := make(chan ipc.UpdateStatus, 1)
+	go func() {
+		st, err := u.Apply(t.Context())
+		if err != nil {
+			t.Errorf("apply: %v", err)
+		}
+		answered <- st
+	}()
+	select {
+	case st := <-answered:
+		// And the answer says the release is still on its way, not that it is being installed.
+		if st.Staging != "0.1.1" {
+			t.Errorf("answered mid-download with %+v", st)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("the request was still waiting, with its hour already spent on the listing")
+	}
+	// The download is the daemon's and outlives the request: it is let finish before the test's directory
+	// goes, which it would otherwise be unpacking into.
+	close(release)
+	deadline := time.Now().Add(10 * time.Second)
+	for w.restarts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.restarts.Load() != 1 || u.Status().Staging != "" {
+		t.Errorf("the download did not finish: restarts=%d, status %+v", w.restarts.Load(), u.Status())
+	}
+}
+
+// A release that cannot be staged is given up on for the run, and the newest of the others is installed.
+// Only a signature that failed used to do that: a release published without its files was fetched every
+// hour for good, and the release before it was never installed.
+func TestAReleaseThatCannotBeFetchedGivesWayToTheOneBeforeIt(t *testing.T) {
+	w := newWorld(t)
+	w.listing.Store(`[{"tag_name":"v0.1.2"},{"tag_name":"v0.1.1"}]`)
 	u := w.updater("0.1.0")
-	began := time.Now()
-	if _, err := u.Apply(t.Context()); err != nil {
+	for try := 1; try < maxDownloads; try++ {
+		if waiting, again := u.turn(t.Context()); waiting || again != retryFailed {
+			t.Fatalf("try %d: waiting=%v again=%s", try, waiting, again)
+		}
+		if s := u.Status(); s.Available != "0.1.2" {
+			t.Fatalf("try %d: %+v", try, s)
+		}
+	}
+	// The last try gives up on it, and the next turn comes soon.
+	if waiting, again := u.turn(t.Context()); waiting || again != retryStaged {
+		t.Fatalf("the last try: waiting=%v again=%s", waiting, again)
+	}
+	if s := u.Status(); s.Available != "" || s.LastError == "" {
+		t.Errorf("given up on, and still announced or unexplained: %+v", s)
+	}
+	if u.scheduled(t.Context()) || w.restarts.Load() != 1 || !u.Finish(notStopped) || w.daemonOnDisk() != newDaemonScript {
+		t.Errorf("the release before it was not installed: restarts=%d", w.restarts.Load())
+	}
+}
+
+// What was refused earlier is named only while the listing still offers it.
+func TestARefusedReleaseThatIsNoLongerListedIsNotNamed(t *testing.T) {
+	w := newWorld(t)
+	w.verifyErr.Store(fmt.Errorf("%w: test", ErrNotVerified))
+	u := w.updater("0.1.0")
+	if _, err := u.Apply(t.Context()); err == nil {
+		t.Fatal("an unverified release was installed")
+	}
+	w.listing.Store(`[{"tag_name":"v0.1.0"}]`)
+	_, err := u.Apply(t.Context())
+	var refused *ErrRefused
+	if !errors.As(err, &refused) || refused.Msg != "there is no newer release this install can move to" {
+		t.Errorf("apply: %v", err)
+	}
+	if s := u.Status(); s.LastError != "" {
+		t.Errorf("the reason for a release no longer offered is still the last error: %+v", s)
+	}
+}
+
+// A mode or a channel that was just set is acted on now, and not at the next daily turn.
+func TestAChoiceJustMadeIsActedOnNow(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	u := w.updater("0.1.0")
+	if err := u.installer.Update(func(r *Record) { r.Mode = ipc.UpdateNotify }); err != nil {
 		t.Fatal(err)
 	}
-	if took := time.Since(began); took > 1500*time.Millisecond {
-		t.Errorf("answered after %s with a second to answer in", took)
+	if _, err := u.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	// The channel's own answer is asked for, and until it is, the other channel's is not given as its.
+	listed := w.listed.Load()
+	st, err := u.SetChannel(ipc.ChannelPrerelease)
+	if err != nil || st.LastCheck != "" || st.Available != "" {
+		t.Errorf("a channel just set: %+v, %v", st, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() == listed && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.listed.Load() == listed || w.restarts.Load() != 0 {
+		t.Fatalf("after the channel was set: listed %d times more, restarts %d", w.listed.Load()-listed, w.restarts.Load())
+	}
+	// "auto", with a release out, installs it.
+	if _, err := u.SetMode(ipc.UpdateAuto); err != nil {
+		t.Fatal(err)
+	}
+	for w.restarts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.restarts.Load() != 1 {
+		t.Errorf("told to install by itself with a release out, it waited")
+	}
+}
+
+// "auto" chosen by an install that no longer installs is not said as the mode in force.
+func TestAutoChosenByAnInstallThatNoLongerInstallsIsNotInForce(t *testing.T) {
+	w := newWorld(t)
+	if _, err := w.updater("0.1.0").SetMode(ipc.UpdateAuto); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := w.updater("0.1.0", func(o *Options) { o.Executable = "/usr/bin/norite-daemon" })
+	if s := elsewhere.Status(); s.Installs || s.Mode != ipc.UpdateNotify {
+		t.Errorf("status %+v", s)
+	}
+}
+
+// unasked takes back the turn SetMode and SetChannel ask for, for a test of the schedule alone.
+func (u *Updater) unasked() {
+	select {
+	case <-u.changed:
+	default:
 	}
 }

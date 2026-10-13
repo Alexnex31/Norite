@@ -25,6 +25,10 @@ const (
 	// The two programs a client archive holds (.goreleaser.yaml), which are one install.
 	cliName    = "norite"
 	daemonName = "norite-daemon"
+	// The file naming every archive's hash, and the signature over it. With the archive's name
+	// (archiveName) these are .goreleaser.yaml's, and a test holds them to it.
+	checksumsName = "checksums.txt"
+	bundleName    = checksumsName + ".sigstore.json"
 
 	// stagedMode is a program's mode: the account's to run, nobody else's to change.
 	stagedMode = 0o755
@@ -87,12 +91,12 @@ func (s *Stager) Stage(ctx context.Context, r Release) (staged Staged, err error
 	}()
 
 	small, cancel := context.WithTimeout(ctx, requestTimeout)
-	checksums, err := s.Source.get(small, s.Source.fileURL(r, "checksums.txt"), maxChecksums)
+	checksums, err := s.Source.get(small, s.Source.fileURL(r, checksumsName), maxChecksums)
 	if err != nil {
 		cancel()
 		return Staged{}, fmt.Errorf("%w checksums.txt: %w", errDownload, err)
 	}
-	bundle, err := s.Source.get(small, s.Source.fileURL(r, "checksums.txt.sigstore.json"), maxBundle)
+	bundle, err := s.Source.get(small, s.Source.fileURL(r, bundleName), maxBundle)
 	cancel()
 	if err != nil {
 		return Staged{}, fmt.Errorf("%w the signature bundle: %w", errDownload, err)
@@ -282,8 +286,8 @@ func unpackZip(path string, take func(name string, regular bool, content io.Read
 	}
 	defer func() { _ = archive.Close() }()
 	for _, entry := range archive.File {
-		// Opened only when it is one of the names wanted, which take decides; an entry passed over is
-		// never decompressed.
+		// Opening reads an entry's header and nothing of its content: take reads only the names wanted,
+		// so an entry passed over is never decompressed.
 		err := func() error {
 			var content io.Reader = bytes.NewReader(nil)
 			regular := entry.Mode().IsRegular()
