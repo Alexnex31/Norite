@@ -652,7 +652,7 @@
       "properties": {
         "version": { "type": "string", "description": "The version this daemon is." },
         "mode": { "enum": ["auto", "notify", "off"], "description": "auto installs a verified release by itself; notify checks and waits to be asked; off asks nobody anything." },
-        "channel": { "enum": ["stable", "prerelease"], "description": "Whether pre-releases are offered. Never unless asked for." },
+        "channel": { "enum": ["stable", "prerelease"], "description": "Whether pre-releases are offered: to an install that is itself one unless told stable, to any other only when asked." },
         "installs": { "type": "boolean", "description": "Whether this daemon can install a release itself: only an install Norite's installer made, on a platform where it is done." },
         "reason": { "type": "string", "description": "Why it cannot, when installs is false. Empty otherwise." },
         "available": { "type": "string", "description": "A newer version the last check chose, or empty." },

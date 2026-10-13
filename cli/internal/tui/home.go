@@ -110,13 +110,7 @@ const maxNoticeVersion = 32
 // A release is "out" and never "ready": what the daemon reports is the listing's choice, and nothing has
 // been downloaded or verified when it is drawn.
 func noticeOf(st ipc.UpdateStatus, own string) *updateNotice {
-	ver := func(s string) string {
-		s = termsafe.Text(s)
-		if r := []rune(s); len(r) > maxNoticeVersion {
-			s = string(r[:maxNoticeVersion]) + "…"
-		}
-		return s
-	}
+	ver := func(s string) string { return cut(termsafe.Text(s), maxNoticeVersion) }
 	// A version undone is said until something newer is: the record keeps it until another installation,
 	// and said first it hid for good the release that fixes it (M24 /code-review).
 	switch {

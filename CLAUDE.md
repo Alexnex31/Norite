@@ -2447,7 +2447,7 @@ And on the client config and the daemon's own requests, from M21:
   `LocalDispatch`, and sent through `Server.Local`.
 - **A request the daemon answers itself lives under `/@daemon/`** on the relay's own request frame, so no
   frame changes. It is answered signed in or not, with 200 and a body or with `conflict` or `failed`, never
-  a status. It takes no body and carries nothing of the user's in its path, because a daemon older than the
+  a status; since M24 also `unreachable`, when the daemon's own request could not reach the release host. It takes no body and carries nothing of the user's in its path, because a daemon older than the
   prefix relays the path to its instance (ledger). One exception since M22: the port number in
   `/@daemon/automation/enable/{port}`, sent only after a request that says nothing has shown the daemon
   knows these requests. `relay.Target` refuses the prefix, and a test holds
@@ -2529,7 +2529,8 @@ And on the daemon's lifecycle and its log, from M23:
 - **A stop is asked of the daemon first** (`ipc.PathStop`), then of the service manager, by `stop`,
   `restart` and `uninstall`, and by `install.ps1` using the `norite` already installed, which is the
   running daemon's version. The answer is queued before the stop begins. Anything new that stops or
-  replaces the daemon, M24's updater first, goes through `socketStop`.
+  replaces the daemon from outside it goes through `socketStop`. M24's updater is inside the daemon and
+  ends its own run with the same cancellation.
 - **`norite daemon status`: 0 means a daemon is running, however it was started.** It asks the service
   manager and the socket. A daemon started by hand is running and not installed, and anything that offers
   to install must treat it as running.

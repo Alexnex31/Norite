@@ -993,3 +993,101 @@ func TestADownloadThatFailsIsUnreachableAndNotARefusal(t *testing.T) {
 		t.Errorf("apply with the files unreachable: %v", err)
 	}
 }
+
+// A pre-release that is signed out is not moved by the schedule: a pre-release talks only to the
+// identical version, and nothing says which instance this one is for. Asked, it moves.
+func TestASignedOutPreReleaseMovesOnlyWhenAsked(t *testing.T) {
+	w := newWorld(t)
+	w.listing.Store(`[{"tag_name":"v0.1.1"},{"tag_name":"v0.1.1-rc.2"}]`)
+	u := w.updater("0.1.1-rc.1")
+	if waiting, again := u.turn(t.Context()); waiting || again != 0 || w.listed.Load() != 0 || w.restarts.Load() != 0 {
+		t.Errorf("moved by itself: listed %d, restarts %d", w.listed.Load(), w.restarts.Load())
+	}
+	if s, err := u.Check(t.Context()); err != nil || s.Available != "0.1.1" {
+		t.Errorf("asked: %+v (%v)", s, err)
+	}
+	if _, err := u.Apply(t.Context()); err != nil {
+		t.Errorf("apply: %v", err)
+	}
+}
+
+// Signed in to an instance not heard from yet, a check is not one that found nothing: it is said, nothing
+// is recorded, the host is not asked, and the schedule comes back soon.
+func TestACheckThatCannotBeMadeYetIsNotOneThatFoundNothing(t *testing.T) {
+	w := newWorld(t)
+	w.signedIn.Store(true)
+	u := w.updater("0.1.0")
+	if waiting, again := u.turn(t.Context()); waiting || again != retryStaged {
+		t.Errorf("the schedule comes back in %v", again)
+	}
+	_, err := u.Check(t.Context())
+	var refused *ErrRefused
+	if !errors.As(err, &refused) || !strings.Contains(refused.Msg, "not heard from") {
+		t.Errorf("check: %v", err)
+	}
+	if _, err := u.Apply(t.Context()); !errors.As(err, &refused) || !strings.Contains(refused.Msg, "not heard from") {
+		t.Errorf("apply: %v", err)
+	}
+	if r := u.installer.Load(); !r.LastCheck.IsZero() || w.listed.Load() != 0 {
+		t.Errorf("recorded as a check, or the host was asked: %+v, listed %d", r, w.listed.Load())
+	}
+	// And a listing that could not be read is asked for again in an hour, not a day.
+	w.instance.Store("0.1.0")
+	w.listing.Store("not a listing")
+	if _, again := u.turn(t.Context()); again != retryFailed {
+		t.Errorf("after a failed listing the schedule comes back in %v", again)
+	}
+}
+
+// With a record that cannot be read, asking installs nothing: it used to download, stop the daemon, fail
+// and start it again.
+func TestAskingWithAnUnreadableRecordIsRefusedAtOnce(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	if err := os.MkdirAll(u.installer.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(u.installer.recordPath(), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var refused *ErrRefused
+	for name, ask := range map[string]func(context.Context) (ipc.UpdateStatus, error){"check": u.Check, "apply": u.Apply} {
+		if _, err := ask(t.Context()); !errors.As(err, &refused) || !strings.Contains(refused.Msg, "cannot be read") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if w.listed.Load() != 0 || w.restarts.Load() != 0 {
+		t.Errorf("listed %d, restarts %d", w.listed.Load(), w.restarts.Load())
+	}
+}
+
+// A refused handshake that asks inside the floor is answered when the floor is past, and not dropped.
+func TestARefusedHandshakeInsideTheFloorIsDeferredAndNotDropped(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	lower(t, &nudgeFloor, 300*time.Millisecond)
+	u := w.updater("0.1.0")
+	if _, err := u.SetMode(ipc.UpdateNotify); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	u.Nudge()
+	time.Sleep(100 * time.Millisecond)
+	if w.listed.Load() != 1 {
+		t.Fatalf("asked again inside the floor (%d)", w.listed.Load())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() == 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w.listed.Load() != 2 {
+		t.Errorf("the check asked for inside the floor never came")
+	}
+}

@@ -201,26 +201,41 @@ func (in *Installer) Install(staged Staged, from string) error {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 
-	previous := in.previousDir()
-	if err := os.RemoveAll(previous); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(previous, 0o700); err != nil {
-		return err
-	}
-	for _, name := range in.programs() {
-		if err := copyFile(filepath.Join(in.BinDir, name), filepath.Join(previous, name)); err != nil {
-			return fmt.Errorf("keeping the current %s: %w", name, err)
-		}
-	}
-
 	r := in.load()
 	if r.unreadable {
 		return errUnreadable
 	}
+	// The current pair is kept beside the pair already kept, and takes its place only once it is whole.
+	// A version on trial has its predecessor there: an installation begun during the trial that failed
+	// while copying used to leave that predecessor replaced by half of the version on trial, which is
+	// what a rollback then restored (M24 /code-review).
+	previous, keeping := in.previousDir(), in.previousDir()+".new"
+	if err := os.RemoveAll(keeping); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(keeping, 0o700); err != nil {
+		return err
+	}
+	for _, name := range in.programs() {
+		if err := copyFile(filepath.Join(in.BinDir, name), filepath.Join(keeping, name)); err != nil {
+			_ = os.RemoveAll(keeping)
+			return fmt.Errorf("keeping the current %s: %w", name, err)
+		}
+	}
+	if err := os.RemoveAll(previous); err != nil {
+		_ = os.RemoveAll(keeping)
+		return err
+	}
+	if err := os.Rename(keeping, previous); err != nil {
+		return err
+	}
 	r.Pending = &Pending{From: from, To: staged.Release.Version.String(), Phase: phaseSwapping}
 	r.RolledBack, r.Available, r.LastError = "", "", ""
 	if err := in.save(r); err != nil {
+		// The record still describes whatever was pending before, and the pair kept is no longer that
+		// one's. With nothing kept, undoing it fails and says so; with this pair kept, it would
+		// "restore" the wrong version.
+		_ = os.RemoveAll(previous)
 		return fmt.Errorf("recording the installation: %w", err)
 	}
 

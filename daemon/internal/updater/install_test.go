@@ -423,3 +423,38 @@ func TestARecordThatIsNotAFileIsNotOpened(t *testing.T) {
 		t.Errorf("written over: %v", err)
 	}
 }
+
+// An installation begun while a version is on trial, and failing as it keeps the current pair, leaves the
+// pair kept for that trial as it was: it is what a rollback restores.
+func TestAFailedSecondInstallationKeepsTheFirstOnesWayBack(t *testing.T) {
+	x := newInstalled(t)
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	x.start("0.1.1", false, Counted)
+	// The second installation cannot keep the current pair: the daemon on disk is gone.
+	daemon := filepath.Join(x.in.BinDir, daemonName)
+	now, err := os.ReadFile(daemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(daemon); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.in.Install(x.staged, "0.1.1"); err == nil {
+		t.Fatal("installed with no daemon to keep")
+	}
+	x.write(daemon, string(now))
+	kept, err := os.ReadFile(filepath.Join(x.in.previousDir(), daemonName))
+	if err != nil || string(kept) != "0.1.0 "+daemonName {
+		t.Errorf("the pair kept for the trial is now %q (%v)", kept, err)
+	}
+	if _, err := os.Stat(x.in.previousDir() + ".new"); err == nil {
+		t.Errorf("the half-kept pair was left behind")
+	}
+	// And the trial is still undone to it.
+	x.start("0.1.1", true, RolledBack)
+	if got, _ := os.ReadFile(daemon); string(got) != "0.1.0 "+daemonName {
+		t.Errorf("rolled back to %q", got)
+	}
+}

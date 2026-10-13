@@ -93,22 +93,13 @@ func Remove(stateDir string) error {
 	return err
 }
 
-// Record writes a receipt in the current user's state directory, and Forget removes it: what the CLI does
-// for an installer and for an uninstall.
+// Record writes a receipt in the current user's state directory: what the CLI does for an installer.
 func Record(r Receipt) error {
 	dir, err := paths.StateDir()
 	if err != nil {
 		return err
 	}
 	return Write(dir, r)
-}
-
-func Forget() error {
-	dir, err := paths.StateDir()
-	if err != nil {
-		return err
-	}
-	return Remove(dir)
 }
 
 // ForgetIfNames removes the current user's receipt only when it names binDir. An installer that put

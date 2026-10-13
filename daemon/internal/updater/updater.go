@@ -23,7 +23,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
-// Variables so that a test, and the one build that carries a test root (testroot.go), can run a day in a
+// Variables so that a test, and the one build that carries a test root (testrelease.go), can run a day in a
 // second. Nothing in a release build writes to them.
 var (
 	// checkEvery is how often the listing is read. firstCheck and checkJitter keep a daemon that has just
@@ -45,7 +45,14 @@ var (
 	nudgeFloor = 15 * time.Minute
 	// wake is the longest the schedule sleeps without looking at the clock.
 	wake = time.Hour
+	// retryFailed is how soon a listing that could not be read is asked for again. A day was the answer
+	// for a laptop that was offline at the one moment it asked.
+	retryFailed = time.Hour
 )
+
+// errUndecided is a check that cannot be made yet: signed in, and the instance not yet heard from.
+var errUndecided = &ErrRefused{"this daemon is signed in to an instance it has not heard from in this run, and that " +
+	"instance's version decides which release it may move to; ask again once it is connected"}
 
 // errBusy is a request that found a check or a download already under way.
 var errBusy = &ErrRefused{"a check or a download is already under way; ask again in a moment"}
@@ -252,11 +259,17 @@ func (u *Updater) Run(ctx context.Context) {
 			// for up to a day with the release that fixes it already published (M24 /code-review). Not
 			// more often than nudgeFloor, so an instance that refuses in a loop asks the host once.
 			// A last check dated after now is a clock that was set back, and holds nothing off.
-			if since := u.opts.Now().Sub(u.installer.Load().LastCheck); u.mode() != ipc.UpdateOff &&
-				(since < 0 || since >= nudgeFloor) {
-				if u.scheduled(ctx) {
-					arm(retryStaged)
+			since := u.opts.Now().Sub(u.installer.Load().LastCheck)
+			switch {
+			case u.mode() == ipc.UpdateOff:
+			case since < 0 || since >= nudgeFloor:
+				if waiting, again := u.turn(ctx); waiting || again > 0 {
+					arm(max(again, retryStaged))
 				}
+			case u.opts.Now().Add(nudgeFloor - since).Before(due):
+				// Asked for inside the floor: made when the floor is past, and not dropped. Dropped, the
+				// next came only when the gateway tried again, an hour later (M24 /code-review).
+				arm(nudgeFloor - since)
 			}
 		case <-u.retry:
 			arm(retryStaged)
@@ -267,9 +280,12 @@ func (u *Updater) Run(ctx context.Context) {
 			}
 			wait := checkEvery + jitter()
 			if u.mode() != ipc.UpdateOff || u.isWanted() {
-				if u.scheduled(ctx) {
+				switch waiting, again := u.turn(ctx); {
+				case waiting:
 					// Ready and deferred: tried again soon, without asking the listing again.
 					wait = retryStaged
+				case again > 0:
+					wait = again
 				}
 			}
 			arm(wait)
@@ -297,8 +313,15 @@ func (u *Updater) untilFirstCheck() time.Duration {
 // scheduled is one turn of the loop. It reports whether a release is staged and waiting for a better
 // moment.
 func (u *Updater) scheduled(ctx context.Context) bool {
+	waiting, _ := u.turn(ctx)
+	return waiting
+}
+
+// turn is one turn of the loop. waiting is a release staged and waiting for a better moment; again is how
+// soon to take another turn when this one could not be finished, or zero for the usual day.
+func (u *Updater) turn(ctx context.Context) (waiting bool, again time.Duration) {
 	if !u.acquire(ctx, 0) {
-		return false
+		return false, 0
 	}
 	defer u.release()
 
@@ -312,23 +335,51 @@ func (u *Updater) scheduled(ctx context.Context) bool {
 	staged := u.staged
 	u.mu.Unlock()
 	if staged == nil {
+		if _, signedIn := u.instance(); !signedIn && u.current.Pre != "" {
+			// A pre-release, signed out: nothing says which instance it is for, and a pre-release talks
+			// only to the identical version. Moved on by itself, an install pinned to its instance's
+			// release candidate was past it before its first sign-in, with no way back (M24
+			// /code-review). It moves when somebody asks, or once it is signed in.
+			return false, 0
+		}
 		release, found, err := u.check(ctx)
+		switch {
+		case errors.Is(err, errUndecided):
+			// Asked again soon, and without reading the listing: nothing was learned from the host.
+			return false, retryStaged
+		case err != nil && ctx.Err() == nil:
+			return false, retryFailed
+		}
 		if err != nil || !found || u.mode() != ipc.UpdateAuto || !u.installs {
-			return false
+			return false, 0
 		}
 		if err := u.stage(ctx, release); err != nil {
-			return false
+			return false, 0
 		}
 	}
 	if u.opts.Busy != nil && u.opts.Busy() {
-		return true
+		return true, 0
 	}
 	// A run that is already ending is not ended again to install: whatever is stopping it was asked for.
 	if ctx.Err() != nil {
-		return false
+		return false, 0
 	}
 	u.begin()
-	return false
+	return false, 0
+}
+
+// instance is the signed-in instance's version as heard in this run, and whether the daemon is signed in.
+func (u *Updater) instance() (version string, signedIn bool) {
+	if u.opts.Instance != nil {
+		version, signedIn = u.opts.Instance()
+	}
+	if !signedIn {
+		// The version heard belongs to an instance this daemon has signed out of. It bounded the choice
+		// still: a daemon refused by its instance and then signed out was moved to that instance's
+		// version, where signed out only the running version's own patches are taken (M24 /code-review).
+		version = ""
+	}
+	return version, signedIn
 }
 
 func (u *Updater) isWanted() bool {
@@ -343,6 +394,16 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 		return Release{}, false, &ErrRefused{u.reason}
 	}
 	record := u.installer.Load()
+	if record.unreadable {
+		// Nothing found could be kept, and an installation would stop the daemon only to fail.
+		return Release{}, false, &ErrRefused{errUnreadable.Error() + ": " + termsafe.Text(u.installer.recordPath())}
+	}
+	instance, signedIn := u.instance()
+	if signedIn && instance == "" {
+		// Not a check that found nothing. Recorded as one, it said "no newer release" of a question it
+		// had not been able to ask, and was not asked again for a day (M24 /code-review).
+		return Release{}, false, errUndecided
+	}
 	releases, err := u.opts.Source.Releases(ctx)
 	now := u.opts.Now()
 	if err != nil && ctx.Err() != nil {
@@ -356,16 +417,6 @@ func (u *Updater) check(ctx context.Context) (Release, bool, error) {
 		_ = u.installer.Update(func(r *Record) { r.LastCheck, r.LastError = now, said(err) })
 		u.opts.Changed()
 		return Release{}, false, err
-	}
-	instance, signedIn := "", false
-	if u.opts.Instance != nil {
-		instance, signedIn = u.opts.Instance()
-	}
-	if !signedIn {
-		// The version heard belongs to an instance this daemon has signed out of. It bounded the choice
-		// still: a daemon refused by its instance and then signed out was moved to that instance's
-		// version, where signed out only the running version's own patches are taken (M24 /code-review).
-		instance = ""
 	}
 	release, found := Choose(Policy{Current: u.current, Instance: instance, SignedIn: signedIn,
 		Prereleases: u.channelOf(record) == ipc.ChannelPrerelease, Bad: record.Bad}, releases)
@@ -569,6 +620,15 @@ func (u *Updater) Check(ctx context.Context) (ipc.UpdateStatus, error) {
 	return u.Status(), nil
 }
 
+// unreachable is a failed check as a request answers it: a refusal stays one.
+func unreachable(err error) error {
+	var refused *ErrRefused
+	if errors.As(err, &refused) {
+		return err
+	}
+	return &ErrUnreachable{"the release listing could not be read: " + said(err)}
+}
+
 // errDeferred is an installation asked for and put off until the daemon is free.
 var errDeferred = errors.New("deferred")
 
@@ -600,7 +660,7 @@ func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 		if err != nil || !found {
 			u.release()
 			if err != nil {
-				return u.Status(), &ErrUnreachable{"the release listing could not be read: " + said(err)}
+				return u.Status(), unreachable(err)
 			}
 			return u.Status(), &ErrRefused{"there is no newer release this install can move to"}
 		}

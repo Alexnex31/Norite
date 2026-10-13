@@ -20,7 +20,7 @@
         },
         "channel": {
           "enum": ["stable", "prerelease"],
-          "description": "Whether alphas, betas and release candidates are offered. Never unless asked for."
+          "description": "Whether alphas, betas and release candidates are offered. An install that is itself a pre-release is offered them unless told stable; any other, only when asked."
         },
         "installs": {
           "type": "boolean",

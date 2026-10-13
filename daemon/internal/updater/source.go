@@ -134,6 +134,15 @@ func (s Source) Releases(ctx context.Context) ([]Release, error) {
 	if limited.N <= 0 {
 		return notAList(nil)
 	}
+	// The list must end as a list: a body cut between two entries is not the whole listing, and newest
+	// first, what it loses is the older line an install held back by its instance needs. The decoder
+	// of this Go version already reports such a body when the next entry is read, so removing this
+	// changes no test; it is here so that the listing's end does not rest on how More treats an error.
+	if len(out) < maxReleases {
+		if closing, err := entries.Token(); err != nil || closing != json.Delim(']') {
+			return notAList(err)
+		}
+	}
 	return out, nil
 }
 

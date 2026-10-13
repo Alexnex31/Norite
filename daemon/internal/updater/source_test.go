@@ -162,3 +162,17 @@ func TestAListingAsLargeAsARealOneIsRead(t *testing.T) {
 		t.Fatalf("%d releases (%v)", len(releases), err)
 	}
 }
+
+// A listing cut between two entries is not the whole listing. "No more entries" is also what a body that
+// ended early looks like.
+func TestAListingCutShortIsNotTakenForTheWhole(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `[{"tag_name":"v0.2.0"},{"tag_name":"v0.1.9"}`)
+	}))
+	defer server.Close()
+	src := sourceAt(server)
+	src.ListURL = server.URL + "/releases"
+	if got, err := src.Releases(t.Context()); err == nil {
+		t.Errorf("a listing with no end was read as %v", got)
+	}
+}

@@ -1549,9 +1549,11 @@ of this section.
   a `norite-daemon/<version>` user agent and nothing else, and `norite update mode off` stops it.
 
   **Choosing one.** A candidate must pass all four:
-  - **Channel.** A stable install is never offered a pre-release. Receiving them is an explicit opt-in
-    (`norite update channel prerelease`), and an opted-in install takes the highest precedence the
-    instance rule allows, stable releases included.
+  - **Channel.** A stable install is never offered a pre-release unless it opts in
+    (`norite update channel prerelease`). An install that is itself a pre-release is offered them unless
+    told `stable`, since the installer installs the newest release of any kind. Either takes the highest
+    precedence the instance rule allows, stable releases included. A pre-release that is signed out is
+    moved only when asked: nothing says which instance it is for.
   - **Order.** Higher precedence than what runs, under SemVer §11: a pre-release sorts below its release,
     build metadata is ignored. The comparison lives in `gatewayproto`, beside the parser.
   - **The instance.** `gatewayproto.Check(instance, candidate)` must pass, the handshake's own function
@@ -2525,8 +2527,8 @@ when a constraint the terminal imposed is lifted.
   via the same local socket/protocol the terminal clients use (M20). Done when: the GUI receives the same
   DISPATCH events the TUI does, from the same daemon.
 
-  **Inherited from M24.** The GUI shows what `DAEMON_UPDATE` and `/@daemon/update/status` say: that an
-  update is ready, was installed, or was undone. M24 built the daemon's half and the terminal's.
+  **Inherited from M24.** The GUI shows what `DAEMON_UPDATE` and `GET /@daemon/update` say: that a
+  release is out, was installed, or was undone. M24 built the daemon's half and the terminal's.
 - **M79 — GUI message rendering**: the virtualized message list, the allow-list markdown renderer
   reimplemented for Gio's immediate-mode primitives (the same allow-list as M43, including emoji-shortcode
   resolution, on a different rendering target). Done when: a long channel scrolls smoothly and renders the
