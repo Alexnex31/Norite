@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/Alexnex31/Norite/cli/internal/daemontest"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
@@ -117,4 +118,23 @@ func TestAnAnswerFromAnAttachmentThatHasGoneIsDropped(t *testing.T) {
 	c.settle()
 	assert.NotContains(t, c.screen(), "9.9.9")
 	assert.Contains(t, c.screen(), "↑ 0.1.1 is out")
+}
+
+// A daemon that did not answer has said nothing, and what is on screen stays. A sign-in that ends still
+// clears it, which is forget's and not this answer's.
+func TestAReadThatFailedLeavesTheNoticeUp(t *testing.T) {
+	f := newFixture(t)
+	f.d.OnLocal(ipc.PathUpdate, ipc.UpdateStatus{Version: "0.1.0", Installs: true, Available: "0.1.1"})
+	c := drive(t, Options{Dial: f.dialer(signedIn("alice"), nil)}, 100, 24)
+	c.shows("↑ 0.1.1 is out")
+	gen := c.m.(Model).gen
+	c.send(updateMsg{gen: gen, unanswered: true})
+	c.settle()
+	assert.Contains(t, c.screen(), "↑ 0.1.1 is out")
+	// An answer with nothing to say takes it down.
+	c.send(updateMsg{gen: gen})
+	c.settle()
+	assert.NotContains(t, c.screen(), "is out")
+	// And the read was a read: the fake refuses any other method, as the daemon does.
+	assert.Contains(t, f.d.Requests(), daemontest.Request{Method: "GET", Path: ipc.PathUpdate})
 }

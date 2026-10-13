@@ -99,7 +99,7 @@ func tail(ctx context.Context, cmd *cli.Command) error {
 	}
 	follow := cmd.Bool("follow")
 
-	emit := printer(writer(cmd), cmd.Root().Bool("json"))
+	emit := printer(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"))
 	entries, follower, err := logfile.Tail(path, logfile.Options{Lines: lines, Keep: keep, Follow: follow})
 	switch {
 	case errors.Is(err, fs.ErrNotExist) && follow:
@@ -243,13 +243,6 @@ func valueText(raw json.RawMessage) string {
 		return clean
 	}
 	return output.Clean(string(raw))
-}
-
-func writer(cmd *cli.Command) io.Writer {
-	if w := cmd.Root().Writer; w != nil {
-		return w
-	}
-	return os.Stdout
 }
 
 func errWriter(cmd *cli.Command) io.Writer {

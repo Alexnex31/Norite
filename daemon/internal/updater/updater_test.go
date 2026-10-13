@@ -210,9 +210,6 @@ func TestAnUnverifiedReleaseIsRefusedAndTheVersionKeepsRunning(t *testing.T) {
 	w := newWorld(t)
 	w.verifyErr.Store(fmt.Errorf("%w: test", ErrNotVerified))
 	u := w.updater("0.1.0")
-	if waiting := u.scheduled(t.Context()); waiting {
-		t.Error("a refused release is waiting to be installed")
-	}
 	// A failure, and neither a refusal nor a host that could not be reached.
 	_, err := u.Apply(t.Context())
 	var refused *ErrRefused
@@ -226,6 +223,29 @@ func TestAnUnverifiedReleaseIsRefusedAndTheVersionKeepsRunning(t *testing.T) {
 	// And it is not announced as out: the listing named it, and no signature stands behind it.
 	if s := u.Status(); !strings.Contains(s.LastError, "did not verify") || s.Available != "" {
 		t.Errorf("status %+v", s)
+	}
+
+	// Nor at the next check, which used to announce it again and forget why it was refused; and with the
+	// mode on auto its files were fetched and refused again every day (M24 /code-review).
+	fetched := w.host.asked["checksums.txt"].Load()
+	if waiting, again := u.turn(t.Context()); waiting || again != 0 {
+		t.Errorf("the next turn: waiting=%v again=%v", waiting, again)
+	}
+	if s := u.Status(); !strings.Contains(s.LastError, "did not verify") || s.Available != "" || s.LastCheck == "" {
+		t.Errorf("after the next check: %+v", s)
+	}
+	if w.host.asked["checksums.txt"].Load() != fetched {
+		t.Error("the refused release was downloaded again")
+	}
+	// Asked for again, the refusal names it.
+	if _, err := u.Apply(t.Context()); !errors.As(err, &refused) || !strings.Contains(err.Error(), "0.1.1") {
+		t.Errorf("a second apply: %v", err)
+	}
+	// It is this run's judgement and not the install's: a signature can fail because this install's root
+	// is too old, and the next run asks again.
+	passes := func(o *Options) { o.Verify = func(_, _ []byte, _ string) error { return nil } }
+	if next := w.updater("0.1.0", passes); next.scheduled(t.Context()) || w.restarts.Load() != 1 {
+		t.Errorf("the next run was not offered the release: restarts=%d", w.restarts.Load())
 	}
 }
 
@@ -1087,5 +1107,167 @@ func TestARefusedHandshakeInsideTheFloorIsDeferredAndNotDropped(t *testing.T) {
 	}
 	if w.listed.Load() != 2 {
 		t.Errorf("the check asked for inside the floor never came")
+	}
+}
+
+// scheduled is one turn of the loop, for a test that asks only whether a release is left waiting.
+func (u *Updater) scheduled(ctx context.Context) bool {
+	waiting, _ := u.turn(ctx)
+	return waiting
+}
+
+// The time of the last check is the last time the listing was read. A failure dated there made a start
+// after it wait out a day, and the status say "no newer release, as of" a moment nothing was learned at.
+func TestAFailedCheckIsNotTheLastCheck(t *testing.T) {
+	w := newWorld(t)
+	w.listing.Store("<html>offline</html>")
+	u := w.updater("0.1.0")
+	if _, err := u.Check(t.Context()); err == nil {
+		t.Fatal("a listing that is not one was read")
+	}
+	if s := u.Status(); s.LastCheck != "" || s.LastError == "" {
+		t.Errorf("status %+v", s)
+	}
+	if wait := w.updater("0.1.0").untilFirstCheck(); wait > firstCheck+checkJitter {
+		t.Errorf("after a check that failed, the next start waits %s", wait)
+	}
+}
+
+// A refused handshake's check that failed still counts against the floor, in the run that made it.
+func TestAFailedCheckStillHoldsOffTheNextRefusedHandshake(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	w.listing.Store("<html>offline</html>")
+	u := w.updater("0.1.0")
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	u.Nudge()
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	for i := 0; i < 5; i++ {
+		u.Nudge()
+		time.Sleep(30 * time.Millisecond)
+	}
+	if n := w.listed.Load(); n != 1 {
+		t.Errorf("refused in a loop with the host unreadable, the listing was asked for %d times", n)
+	}
+}
+
+// A daemon refused for being ahead of its instance has no release to find, and reads no listing for it.
+func TestARefusedHandshakeAheadOfTheInstanceAsksNothing(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &firstCheck, time.Hour)
+	lower(t, &checkJitter, 0)
+	w.signedIn.Store(true)
+	w.instance.Store("0.1.3")
+	u := w.updater("0.2.0")
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { u.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	u.Nudge()
+	time.Sleep(150 * time.Millisecond)
+	if n := w.listed.Load(); n != 0 {
+		t.Errorf("ahead of its instance, the listing was read %d times", n)
+	}
+	// Behind it, the listing is what it needs.
+	w.instance.Store("0.3.0")
+	u.Nudge()
+	deadline := time.Now().Add(5 * time.Second)
+	for w.listed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := w.listed.Load(); n != 1 {
+		t.Errorf("behind its instance, the listing was read %d times", n)
+	}
+}
+
+// A download that dropped is tried again in an hour, as a listing that could not be read is.
+func TestADownloadThatFailsIsTriedAgainSoon(t *testing.T) {
+	w := newWorld(t)
+	w.host.server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/releases" {
+			_, _ = fmt.Fprint(rw, w.listing.Load().(string))
+			return
+		}
+		http.Error(rw, "gone", http.StatusServiceUnavailable)
+	})
+	u := w.updater("0.1.0")
+	if waiting, again := u.turn(t.Context()); waiting || again != retryFailed {
+		t.Errorf("waiting=%v again=%s", waiting, again)
+	}
+}
+
+// A version on trial is not installed over: its predecessor is what a rollback restores, and installing
+// replaces the pair kept before anything is swapped.
+func TestAVersionOnTrialIsNotInstalledOver(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	if !u.Finish(notStopped) {
+		t.Fatal("not installed")
+	}
+	trial := w.updater("0.1.1")
+	if trial.AtStart(false) {
+		t.Fatal("rolled back at its first start")
+	}
+	w.listing.Store(`[{"tag_name":"v0.1.2"},{"tag_name":"v0.1.1"}]`)
+	fetched := w.host.asked["checksums.txt"].Load()
+	if waiting, again := trial.turn(t.Context()); waiting || again != retryStaged {
+		t.Errorf("on trial: waiting=%v again=%s", waiting, again)
+	}
+	var refused *ErrRefused
+	if _, err := trial.Apply(t.Context()); !errors.As(err, &refused) || !strings.Contains(err.Error(), "just installed") {
+		t.Errorf("apply on trial: %v", err)
+	}
+	if w.restarts.Load() != 1 || w.host.asked["checksums.txt"].Load() != fetched {
+		t.Errorf("a version on trial was stopped or downloaded for")
+	}
+	kept, err := os.ReadFile(filepath.Join(trial.installer.previousDir(), daemonName))
+	if err != nil || string(kept) != "0.1.0 norite-daemon" {
+		t.Errorf("the pair kept to go back to: %q, %v", kept, err)
+	}
+	// It is still told what is out, and once kept it moves on. The host here has no files for 0.1.2, so
+	// moving on shows as a download tried.
+	if s := trial.Status(); s.Available != "0.1.2" {
+		t.Errorf("status on trial: %+v", s)
+	}
+	if err := trial.installer.Confirm(); err != nil {
+		t.Fatal(err)
+	}
+	if _, again := trial.turn(t.Context()); again != retryFailed {
+		t.Errorf("once kept, the next turn tried nothing: again=%s", again)
+	}
+}
+
+// The request's wait is counted from when it arrived, and not from after the listing was read: on a slow
+// link the two together outlasted the client, which then said a healthy daemon had not answered.
+func TestAnInstallationAskedForAnswersWithinItsOwnTime(t *testing.T) {
+	w := newWorld(t)
+	lower(t, &applyTimeout, time.Second)
+	release := make(chan struct{})
+	defer close(release)
+	inner := w.host.server.Config.Handler
+	w.host.server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/releases":
+			time.Sleep(800 * time.Millisecond)
+		case strings.HasSuffix(r.URL.Path, ".tar.gz"):
+			<-release
+		}
+		inner.ServeHTTP(rw, r)
+	})
+	u := w.updater("0.1.0")
+	began := time.Now()
+	if _, err := u.Apply(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(began); took > 1500*time.Millisecond {
+		t.Errorf("answered after %s with a second to answer in", took)
 	}
 }

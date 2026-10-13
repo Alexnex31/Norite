@@ -152,15 +152,8 @@ func run(connect Connector, v func(ctx context.Context, cmd *cli.Command, c daem
 		if err != nil {
 			return err
 		}
-		return output.Render(writer(cmd), cmd.Root().Bool("json"), result)
+		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), result)
 	}
-}
-
-func writer(cmd *cli.Command) io.Writer {
-	if w := cmd.Root().Writer; w != nil {
-		return w
-	}
-	return os.Stdout
 }
 
 // enable asks how the port stands, then asks for it to be opened.
@@ -326,7 +319,7 @@ func request(ctx context.Context, cmd *cli.Command) error {
 		}
 		return clierr.Unavailable("%s", output.Clean(err.Error()))
 	}
-	return outcome(writer(cmd), resp)
+	return outcome(output.Writer(cmd.Root().Writer), resp)
 }
 
 func bodyOf(cmd *cli.Command) (json.RawMessage, error) {

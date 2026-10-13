@@ -166,9 +166,13 @@ place() {
 # install at the wrong place. A build of a checkout is not a release and is not updated, so a receipt an
 # earlier install left for this directory is removed; one for another directory is not this run's.
 leave_receipt() {
+    receipt=0
     if [ "$mode" = release ] && [ "$daemon" = 1 ]; then
-        "$norite" update receipt --bin-dir "$bin_dir" --by install.sh ||
+        if "$norite" update receipt --bin-dir "$bin_dir" --by install.sh; then
+            receipt=1
+        else
             warn "could not record where Norite was installed; it will tell you about new releases and not install them."
+        fi
     elif [ "$mode" != release ]; then
         "$norite" update receipt --forget --bin-dir "$bin_dir" >/dev/null 2>&1 || true
     fi
@@ -352,7 +356,13 @@ main() {
     [ "$summary" = 1 ] || return 0
 
     step "Done"
-    if [ "$mode" = release ] && [ "$daemon" = 1 ]; then
+    # What is said here is what this install does. Without its receipt the daemon installs nothing, and
+    # saying it kept itself up to date straight after warning that it would not was two answers.
+    if [ "$mode" = release ] && [ "$daemon" = 1 ] && [ "$receipt" = 0 ]; then
+        say "Norite checks once a day for a new release and tells you. This install does not install one:"
+        say "run this installer again for that. 'norite update mode off' stops the check."
+        say ""
+    elif [ "$mode" = release ] && [ "$daemon" = 1 ]; then
         case "$os" in
             darwin)
                 say "Norite checks once a day for a new release and tells you. On macOS it does not install"

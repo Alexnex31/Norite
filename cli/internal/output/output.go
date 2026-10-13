@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -142,4 +143,13 @@ func OrNone(s *string) string {
 		return "-"
 	}
 	return Clean(*s)
+}
+
+// Writer is where a command prints: its root's writer, or standard output when a tree was built with
+// none.
+func Writer(w io.Writer) io.Writer {
+	if w != nil {
+		return w
+	}
+	return os.Stdout
 }

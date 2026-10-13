@@ -144,16 +144,19 @@ func loadUpdate(gen int, s Session, own string) tea.Cmd {
 			return st, daemonclient.LocalRead(ctx, s, ipc.PathUpdate, &st)
 		})
 		if err != nil {
-			return updateMsg{gen: gen}
+			return updateMsg{gen: gen, unanswered: true}
 		}
 		return updateMsg{gen: gen, notice: noticeOf(st, own)}
 	}
 }
 
-// updateMsg is the answer, naming the attachment that asked.
+// updateMsg is the answer, naming the attachment that asked. unanswered is a daemon that did not say:
+// what is on screen stays, since nothing was learned. Taken for "nothing to say", a daemon slow for one
+// read took a notice down that was still true (M24 /code-review).
 type updateMsg struct {
-	gen    int
-	notice *updateNotice
+	gen        int
+	notice     *updateNotice
+	unanswered bool
 }
 
 func newHome() homeModel {

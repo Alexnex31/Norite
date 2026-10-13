@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -422,7 +423,9 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// OnLocal scripts the 200 answer to one of the daemon's own requests (ipc.LocalPathPrefix), by its path.
+// OnLocal scripts the 200 answer to a read of one of the daemon's own requests (ipc.LocalPathPrefix), by
+// its path. It is answered to a GET alone, as the daemon answers a read, and the request is recorded: a
+// client that read with POST passed here and was refused by every real daemon.
 // These are not in openapi.yaml, which a test holds to never using the prefix, so they are answered as
 // scripted and not checked against it. One nobody scripted is refused, as a daemon that does not know the
 // request refuses it: a client has to live with that, since the daemon it attaches to may be older.
@@ -449,6 +452,12 @@ func (d *Daemon) Do(_ context.Context, method, rawPath string, body any) (ipc.Re
 		if !ok {
 			return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "the daemon answers no request of its own at that path"}
 		}
+		if method != http.MethodGet {
+			return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "that request is read with GET"}
+		}
+		d.mu.Lock()
+		d.calls = append(d.calls, Request{Method: method, Path: rawPath})
+		d.mu.Unlock()
 		return ipc.Result{Status: 200, Body: raw}, nil
 	}
 	path, rawQuery, _ := strings.Cut(rawPath, "?")

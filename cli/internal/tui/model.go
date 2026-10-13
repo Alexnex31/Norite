@@ -369,7 +369,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case updateMsg:
 		// An answer for an attachment that has gone is dropped, as every answer is.
-		if msg.gen == m.gen {
+		if msg.gen == m.gen && !msg.unanswered {
 			m.home.update = msg.notice
 		}
 		return m, nil

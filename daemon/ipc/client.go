@@ -44,8 +44,12 @@ func (e *VersionError) Error() string {
 				e.Daemon, e.Client)
 		}
 	}
+	// The reverse of that, and no more certain which program is the stale one: an install the daemon has
+	// not restarted into, or a release undone while this program stayed open, which restarting the daemon
+	// does not change (M24 /code-review).
 	return fmt.Sprintf("the running daemon is version %s and this client is %s, which cannot talk to each "+
-		"other; restart the daemon so both run the installed version (`norite daemon restart`)",
+		"other; restart the daemon so both run the installed version (`norite daemon restart`), and if it "+
+		"still says so, quit this program and start it again",
 		e.Daemon, e.Client)
 }
 

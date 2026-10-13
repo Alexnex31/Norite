@@ -25,8 +25,9 @@ const (
 	phaseApplied  = "applied"
 
 	// unconfirmedStarts is how many starts of a new version may end badly before the next one undoes it.
-	// The Windows task restarts a failed daemon three times and then stops trying (M23), so the undoing
-	// has to happen within those.
+	// On Windows the daemon that installed a version starts it and, when it fails at once, starts it twice
+	// more (cmd/daemond's startAndWatch); the task restarts a failed daemon three times and then stops
+	// trying (M23). The undoing has to happen within either.
 	unconfirmedStarts = 2
 	// maxBad bounds the list of versions rolled back from.
 	maxBad = 32

@@ -305,6 +305,16 @@ func (f *fakeCreds) signOut() {
 	close(f.ended)
 }
 
+// signInAgain ends the sign-in and starts another, as a logout and a login to some instance do.
+func (f *fakeCreds) signInAgain(instanceURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	close(f.ended)
+	f.ended = make(chan struct{})
+	f.cred.Generation++
+	f.cred.InstanceURL = instanceURL
+}
+
 func (f *fakeCreds) Current(ctx context.Context) (session.Credential, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -673,6 +683,24 @@ func TestAVersionMismatchIsNotRetriedSoon(t *testing.T) {
 		c.closeWith(gatewayproto.CloseVersionMismatch, "upgrade the client")
 		h.g.noConnectionWithin(200 * time.Millisecond)
 	})
+}
+
+// The hold after a refused version is for the instance that refused. A sign-in to another instance ends
+// it: slept through, the daemon stayed off the new instance for an hour and went on reporting the old
+// one's version, by which the updater chose (M24 /code-review).
+func TestAVersionHoldEndsWithItsSignIn(t *testing.T) {
+	h := start(t, func(o *Options) { o.Version = "0.1.5" })
+	c := h.g.next()
+	c.hello(time.Now(), "0.2.0", time.Minute)
+	c.closedWith()
+	require.Equal(t, "0.2.0", h.client.ServerVersion())
+	h.g.noConnectionWithin(100 * time.Millisecond)
+
+	h.creds.signInAgain(h.g.srv.URL)
+	c2 := h.g.next()
+	assert.Empty(t, h.client.ServerVersion(), "the instance left still spoke for the one signed in to")
+	c2.hello(time.Now(), "0.1.5", time.Minute)
+	c2.expect(gatewayproto.OpIdentify)
 }
 
 // ---------- the daemon's own discipline ----------

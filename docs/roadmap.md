@@ -1573,22 +1573,27 @@ of this section.
   `release.yml@refs/tags/<the candidate's tag>` under GitHub's OIDC issuer: the identity names the tag,
   so one version's bundle cannot stand for another. Then the archive's SHA-256 against `checksums.txt`,
   then `norite` and `norite-daemon` are taken from the archive by exact name. Any failure deletes what
-  was downloaded, leaves the current version running, and is reported (fail closed). No flag, file or
-  environment variable changes the root or the identity in a release build.
+  was downloaded, leaves the current version running, and is reported (fail closed). A release whose
+  signature did not verify is not chosen again in that run of the daemon, and not remembered past it: the
+  cause may be this install's own root. No flag, file or environment variable changes the root or the
+  identity in a release build.
 
   **Installing it.** The staged daemon is first run with `-version` and must report the candidate's
   version, which stops a binary that cannot start. The daemon then ends its run as a stop request does
   (M23), so an answered token renewal is stored; with its lock still held it sets the current pair aside,
   renames the new pair in, and writes an update record. On Unix the process replaces itself with the new
   binary, keeping its PID. On Windows, where a process cannot do that, it starts the installed version as
-  a process of its own, with a hidden console, and exits 0: the installer there starts the daemon by hand
-  unless asked to register a task, so nothing else would start it. A swap interrupted
-  half-way is finished or undone from the record at the next start. Once Phase E exists, applying is
-  deferred while a voice session is active (`architecture.md` §6); the seam is built here.
+  a process of its own, with a hidden console, watches it for twenty seconds, starting it again up to
+  twice if it fails in them, and exits 0: the installer there starts the daemon by hand unless asked to
+  register a task, so nothing else would start it, or start it again for the start that undoes it. A
+  swap interrupted half-way is finished or undone from the record at the next start. Once Phase E
+  exists, applying is deferred while a voice session is active (`architecture.md` §6); the seam is built
+  here.
 
   **Undoing it.** The first thing the daemon does at start is read the update record. A start that finds
   two unconfirmed starts before it, or the previous run's crash file (M23), restores the pair set aside,
-  records the version as bad and starts that. A run that stays up ten minutes confirms the update.
+  records the version as bad and starts that. A run that stays up ten minutes confirms the update, and
+  until one has, no other release is installed over it: the pair set aside is its predecessor's.
   Rollback is not an exception to the order rule, because it is not an update: it restores what this
   installation already ran and never accepts an offered version.
 
@@ -1603,8 +1608,8 @@ of this section.
   **Platforms.** Linux is walked in a VM. Windows is walked by the author on a real machine, with M23's
   task, which that milestone never ran: until that pass succeeds the default there is `notify`, so
   nothing is installed unasked on a platform nobody has watched (`norite update apply` and `mode auto`
-  work), and `install.ps1` registers the task by default once it has. macOS checks and notifies and does not apply,
-  no Mac being available; its guide says so.
+  work), and `install.ps1` registers the task by default once it has. macOS checks and notifies and does
+  not apply, no Mac being available; its guide says so.
 
   **Surface.** `norite update status|check|apply` with `--json`; a line in `norite daemon status`; five
   requests under `/@daemon/update`, the attach socket's tier and refused by the port for scripts

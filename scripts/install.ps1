@@ -254,11 +254,13 @@ function Install-Norite {
     # the install its daemon runs from, so it is written only when this run starts the daemon, and
     # forgotten only when it names this directory. A build of a checkout is not a release and is not
     # updated, so a receipt an earlier install left here is removed.
+    $receipt = $false
     try {
         if ($fromSourceMode) { & $norite update receipt --forget --bin-dir $BinDir 2>$null | Out-Null }
         elseif (-not $NoDaemon) {
             & $norite update receipt --bin-dir $BinDir --by install.ps1
-            if ($LASTEXITCODE -ne 0) { Note 'could not record where Norite was installed; it will tell you about new releases and not install them.' }
+            if ($LASTEXITCODE -eq 0) { $receipt = $true }
+            else { Note 'could not record where Norite was installed; it will tell you about new releases and not install them.' }
         }
     }
     catch { Note 'could not record where Norite was installed; it will tell you about new releases and not install them.' }
@@ -330,7 +332,13 @@ function Install-Norite {
     }
 
     Step 'Done'
-    if (-not $fromSourceMode -and -not $NoDaemon) {
+    # What is said here is what this install does: without its receipt the daemon installs nothing.
+    if (-not $fromSourceMode -and -not $NoDaemon -and -not $receipt) {
+        Say 'Once a day Norite checks for a new release and tells you. This install does not install one:'
+        Say "run this installer again for that. 'norite update mode off' stops the check."
+        Say ''
+    }
+    elseif (-not $fromSourceMode -and -not $NoDaemon) {
         Say 'Once a day Norite checks for a new release and tells you.'
         Say "'norite update apply' verifies its signature and installs it, 'norite update mode auto'"
         Say "makes it do that by itself, and 'norite update mode off' stops the check."

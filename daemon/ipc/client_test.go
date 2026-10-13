@@ -157,6 +157,8 @@ func TestAnIncompatibleDaemonIsRefusedBeforeIdentifying(t *testing.T) {
 	for _, pair := range [][2]string{{"0.2.0", "0.3.0"}, {"0.1.0-rc.1", "0.1.0"}, {"dev", "0.1.0"}, {"0.1.0", "nonsense"}} {
 		said := (&VersionError{Daemon: pair[0], Client: pair[1]}).Error()
 		assert.Contains(t, said, "norite daemon restart", "daemon %s, client %s", pair[0], pair[1])
+		// And when that changes nothing, a release was undone under an open client: the other program.
+		assert.Contains(t, said, "quit this program and start it again", "daemon %s, client %s", pair[0], pair[1])
 	}
 
 	assert.ErrorIs(t, <-received, io.EOF, "the client closed without identifying")

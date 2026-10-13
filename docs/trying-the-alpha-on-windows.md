@@ -224,12 +224,14 @@ it stops the daemon. Everything else happens in the first tab.
 **To have it start by itself whenever you log in**, `.\norite.exe daemon install` registers it as a Task
 Scheduler task named "Norite Daemon", running as you and needing no administrator rights;
 `.\norite.exe daemon start` starts it now, and `.\norite.exe daemon status` reports on it.
+`.\norite.exe daemon stop` stops the daemon, however it was started.
 
 Once a day the daemon checks for a new release and tells you: `.\norite.exe update status` says where
-that stands. `.\norite.exe update apply` verifies the release's signature, installs it and starts the new
-version in the daemon's place. `.\norite.exe update mode auto` makes it do that by itself, and
-`.\norite.exe update mode off` stops the check.
-`.\norite.exe daemon stop` stops it, however it was started.
+that stands, and `.\norite.exe update mode off` stops the check. **If you installed with `install.ps1`**,
+`norite update apply` also verifies the release's signature, installs it and starts the new version in
+the daemon's place, and `norite update mode auto` makes it do that by itself. Programs you extracted or
+built yourself, as in this step, are told about a release and are not replaced: both commands say so,
+and running `install.ps1` is how such an install becomes one that updates.
 
 This path was rebuilt for this release and **has not yet been run on Windows**: the task is registered
 from a definition that starts it at your logon, on battery as on mains, with no time limit. Because the

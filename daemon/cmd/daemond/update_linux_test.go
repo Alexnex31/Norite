@@ -69,7 +69,9 @@ func newReleaseHost(t *testing.T) *releaseHost {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if r.URL.Path == "/releases" {
-			var listed []map[string]string
+			// Never nil: with nothing published yet that is `null`, which is not a listing, and the wait
+			// below for a first check passed on one that had failed for as long as a failure was dated.
+			listed := []map[string]string{}
 			for _, tag := range h.tags {
 				listed = append(listed, map[string]string{"tag_name": tag})
 			}

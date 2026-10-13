@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -147,7 +146,7 @@ func run(connect Connector, words []string, ask func(ctx context.Context, cmd *c
 		if err != nil {
 			return err
 		}
-		return output.Render(writer(cmd), cmd.Root().Bool("json"), view{UpdateStatus: st, applying: cmd.Name == "apply"})
+		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), view{UpdateStatus: st, applying: cmd.Name == "apply"})
 	}
 }
 
@@ -258,11 +257,4 @@ func when(stamp string) string {
 		return output.Clean(stamp)
 	}
 	return at.In(zone).Format("2006-01-02 15:04")
-}
-
-func writer(cmd *cli.Command) io.Writer {
-	if w := cmd.Root().Writer; w != nil {
-		return w
-	}
-	return os.Stdout
 }

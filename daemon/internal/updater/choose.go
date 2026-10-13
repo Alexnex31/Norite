@@ -84,3 +84,16 @@ func (p Policy) knownBad(v gatewayproto.Version) bool {
 	}
 	return false
 }
+
+// reachable reports whether any version could be both above current and one instance's handshake accepts
+// (gatewayproto.Check). A pre-release instance takes itself alone; a release takes its own minor line
+// before 1.0.0 and its own major, up to its minor, after.
+func reachable(current, instance gatewayproto.Version) bool {
+	if instance.Pre != "" {
+		return instance.Compare(current) > 0
+	}
+	if current.Major != instance.Major {
+		return current.Major < instance.Major
+	}
+	return current.Minor <= instance.Minor
+}

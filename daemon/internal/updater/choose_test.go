@@ -105,3 +105,34 @@ func TestChooseDoesNotDependOnTheListingsOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestReachable(t *testing.T) {
+	cases := []struct {
+		current, instance string
+		want              bool
+	}{
+		{"0.1.0", "0.1.3", true},       // the same line: a patch above both
+		{"0.1.5", "0.2.0", true},       // behind
+		{"0.2.0", "0.1.3", false},      // ahead: the instance takes only 0.1.x
+		{"0.1.5-rc.1", "0.1.3", true},  // 0.1.5 is above the candidate and on the instance's line
+		{"0.1.0", "0.1.1-rc.1", true},  // a pre-release instance takes itself
+		{"0.1.1", "0.1.1-rc.1", false}, // and nothing above it
+		{"1.4.0", "1.2.0", false},      // after 1.0.0, never above the instance's minor
+		{"1.2.0", "1.4.0", true},
+		{"1.9.0", "2.0.0", true},
+		{"2.0.0", "1.9.0", false},
+	}
+	for _, c := range cases {
+		current, err := gatewayproto.ParseVersion(c.current)
+		if err != nil {
+			t.Fatal(err)
+		}
+		instance, err := gatewayproto.ParseVersion(c.instance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := reachable(current, instance); got != c.want {
+			t.Errorf("reachable(%s, %s) = %v", c.current, c.instance, got)
+		}
+	}
+}
