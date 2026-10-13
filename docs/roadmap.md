@@ -1552,8 +1552,10 @@ of this section.
   - **Channel.** A stable install is never offered a pre-release unless it opts in
     (`norite update channel prerelease`). An install that is itself a pre-release is offered them unless
     told `stable`, since the installer installs the newest release of any kind. Either takes the highest
-    precedence the instance rule allows, stable releases included. A pre-release that is signed out is
-    moved only when asked: nothing says which instance it is for.
+    precedence the instance rule allows, stable releases included. Signed out, a daemon updates by
+    itself all the same, a pre-release too. The cost is accepted: an install pinned to an instance's
+    release candidate can be moved past it before its first sign-in, and is then reinstalled at that
+    version with `norite update mode notify` set.
   - **Order.** Higher precedence than what runs, under SemVer §11: a pre-release sorts below its release,
     build metadata is ignored. The comparison lives in `gatewayproto`, beside the parser.
   - **The instance.** `gatewayproto.Check(instance, candidate)` must pass, the handshake's own function

@@ -994,20 +994,18 @@ func TestADownloadThatFailsIsUnreachableAndNotARefusal(t *testing.T) {
 	}
 }
 
-// A pre-release that is signed out is not moved by the schedule: a pre-release talks only to the
-// identical version, and nothing says which instance this one is for. Asked, it moves.
-func TestASignedOutPreReleaseMovesOnlyWhenAsked(t *testing.T) {
+// Signed out, a daemon updates by itself, a pre-release included: the running version stands in for the
+// instance it has none of. The author's decision, after a review's fix had held a signed-out pre-release
+// back until somebody asked.
+func TestASignedOutPreReleaseUpdatesByItself(t *testing.T) {
 	w := newWorld(t)
 	w.listing.Store(`[{"tag_name":"v0.1.1"},{"tag_name":"v0.1.1-rc.2"}]`)
 	u := w.updater("0.1.1-rc.1")
-	if waiting, again := u.turn(t.Context()); waiting || again != 0 || w.listed.Load() != 0 || w.restarts.Load() != 0 {
-		t.Errorf("moved by itself: listed %d, restarts %d", w.listed.Load(), w.restarts.Load())
+	if waiting, again := u.turn(t.Context()); waiting || again != 0 {
+		t.Errorf("the turn asks to come back: %v, %v", waiting, again)
 	}
-	if s, err := u.Check(t.Context()); err != nil || s.Available != "0.1.1" {
-		t.Errorf("asked: %+v (%v)", s, err)
-	}
-	if _, err := u.Apply(t.Context()); err != nil {
-		t.Errorf("apply: %v", err)
+	if w.restarts.Load() != 1 || u.Status().Available != "0.1.1" {
+		t.Errorf("not moved by itself: restarts %d, status %+v", w.restarts.Load(), u.Status())
 	}
 }
 

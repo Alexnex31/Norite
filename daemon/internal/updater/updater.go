@@ -335,13 +335,10 @@ func (u *Updater) turn(ctx context.Context) (waiting bool, again time.Duration) 
 	staged := u.staged
 	u.mu.Unlock()
 	if staged == nil {
-		if _, signedIn := u.instance(); !signedIn && u.current.Pre != "" {
-			// A pre-release, signed out: nothing says which instance it is for, and a pre-release talks
-			// only to the identical version. Moved on by itself, an install pinned to its instance's
-			// release candidate was past it before its first sign-in, with no way back (M24
-			// /code-review). It moves when somebody asks, or once it is signed in.
-			return false, 0
-		}
+		// Signed out, a daemon updates by itself like any other, a pre-release included: the running
+		// version stands in for the instance it has none of (Choose). Holding a signed-out pre-release
+		// back until somebody asked was built on a review's finding and taken out again on the author's
+		// decision: an install nobody has signed in to yet is the one that most needs to be current.
 		release, found, err := u.check(ctx)
 		switch {
 		case errors.Is(err, errUndecided):
