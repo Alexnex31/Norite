@@ -14,8 +14,8 @@ software.
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
-[![Status](https://img.shields.io/badge/status-alpha-yellow.svg)](#status)
-[![Release](https://img.shields.io/badge/release-v0.1.0--alpha-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0-alpha)
+[![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
+[![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0)
 [![Milestone](https://img.shields.io/badge/milestone-M24%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
@@ -130,9 +130,10 @@ API by anyone in the guild, and the first client does not draw it.
 > **On releases.** Norite uses [Semantic Versioning](https://semver.org/).
 >
 > **When versions are cut:**
-> - **[`v0.1.0-alpha`](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0-alpha)** is out, cut from
->   `M20a`, the first usable client.
-> - **`v0.1.0`** ships at the end of Phase D.
+> - **[`v0.1.0`](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0)** is out, cut from `M24` at the
+>   end of Phase D: the first that is not a pre-release, and the first client that keeps itself up to date.
+> - **[`v0.1.0-alpha`](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0-alpha)** came before it,
+>   cut from `M20a`, the first usable client.
 > - **A MINOR version** follows at the end of each feature phase after that: `v0.2.0`, `v0.3.0`, and so on.
 > - **`v1.0.0`** comes only after every milestone is done and a release-candidate stage has reviewed and
 >   tested the whole thing. `1.0.0` means the planned scope exists.
@@ -145,7 +146,7 @@ API by anyone in the guild, and the first client does not draw it.
 > is well advanced and its Kubernetes deployment is ready. Until then the author's test instance takes
 > testers by invite: email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for one.
 >
-> The status badge above says `alpha` and will until `v0.1.0` ships. See
+> The status badge above says `pre-1.0`, and will until `v1.0.0` ships. See
 > [ADR 0033](docs/adr/0033-semver-release-progression.md).
 
 [`docs/roadmap.md`](docs/roadmap.md) is the dependency-ordered sequence, `M0` through `M125`, each with a
