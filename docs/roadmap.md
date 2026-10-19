@@ -1518,6 +1518,7 @@ of this section.
   job. **It has not been run on Windows from this branch unless the PR says so**: the definition and the
   command lines are asserted through `Runner`, and `install.ps1` therefore still registers the task only
   with `-AutoStart`. Making that the default is one line, owed once somebody has watched it work.
+  **M24's pass in a Windows VM watched it, and made it the default.**
 
   **The console window is left as it was**, open while the task runs. Two ways of removing it were written
   and neither kept. A windowless build stops the daemon printing in a tab. Letting go of the console
@@ -1525,6 +1526,8 @@ of this section.
   logging off through its console, so a daemon without one is killed at every logoff and shutdown where
   it now gets to stop, which is the spent-token kill the stop request exists to prevent, on the commonest
   path there is. Hiding the window and keeping the console is the candidate, and needs a Windows machine.
+  **Done at M24**, which had one in a VM: the task runs the daemon in `conhost.exe --headless`, a console
+  with no window, and a sign-out and a shutdown were both seen to stop it cleanly.
 
   **`norite daemon status` also asks the socket**: version, standing, and "running, started by hand" where
   the service manager knows nothing. A daemon that answers is exit 0 however it was started. `--json`.
@@ -1586,11 +1589,12 @@ of this section.
   renames the new pair in, and writes an update record. On Unix the process replaces itself with the new
   binary, keeping its PID. On Windows, where a process cannot do that, it starts the installed version as
   a process of its own, with a hidden console, watches it for twenty seconds, starting it again up to
-  twice if it fails in them, and exits 0: the installer there starts the daemon by hand unless asked to
-  register a task, so nothing else would start it, or start it again for the start that undoes it. A
-  swap interrupted half-way is finished or undone from the record at the next start. Once Phase E
-  exists, applying is deferred while a voice session is active (`architecture.md` §6); the seam is built
-  here.
+  twice if it fails in them, and exits 0: a daemon started by hand has nothing else to start it, and the
+  task's restart-on-failure cannot see a crash through the console host it runs the daemon in. The task
+  does not count that process as its own, so it runs outside the task until the next logon, and
+  `norite daemon status` says so. A swap interrupted half-way is finished or undone from the record at
+  the next start. Once Phase E exists, applying is deferred while a voice session is active
+  (`architecture.md` §6); the seam is built here.
 
   **What a restart costs a script.** The port for scripts mints its secret per run (M22), so a daemon
   that restarts to install a release closes every script's connection and opens the port under a new
@@ -1614,11 +1618,11 @@ of this section.
   own record in the state directory, not in `config.toml`: they are this machine's and the daemon's own,
   as the port for scripts' switch is, and the daemon interprets nobody's config file (M21).
 
-  **Platforms.** Linux is walked in a VM. Windows is walked by the author on a real machine, with M23's
-  task, which that milestone never ran: until that pass succeeds the default there is `notify`, so
-  nothing is installed unasked on a platform nobody has watched (`norite update apply` and `mode auto`
-  work), and `install.ps1` registers the task by default once it has. macOS checks and notifies and does
-  not apply, no Mac being available; its guide says so.
+  **Platforms.** Linux and Windows are each walked in a VM. The Windows walk was to be the author's on a
+  real machine, and the first try there found the guide written for it hard to follow, so it ran in a
+  Windows 11 VM instead, with M23's task, which that milestone never ran. It passed, so `auto` is the
+  default there as everywhere, which had waited on it, and `install.ps1` registers the task by default.
+  macOS checks and notifies and does not apply, no Mac being available; its guide says so.
 
   **Surface.** `norite update status|check|apply` with `--json`; a line in `norite daemon status`; five
   requests under `/@daemon/update`, the attach socket's tier and refused by the port for scripts

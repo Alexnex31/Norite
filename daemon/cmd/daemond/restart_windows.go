@@ -28,15 +28,14 @@ const (
 // startAgain starts the program now at path as a process of its own and watches it for a moment; the
 // caller then exits. Windows has no way for a process to replace itself.
 //
-// It does not lean on the task's restart-on-failure, because the installer starts the daemon by hand
-// unless it is asked to register one, and a daemon nobody restarts would stay stopped after every update.
-// For the same reason it starts a version that failed at once again itself (startAndWatch): this process
-// exits 0, so to the task nothing failed.
+// It does not lean on the task's restart-on-failure. A daemon started by hand has no task, and the task
+// runs the daemon inside a console host that exits 0 whatever the daemon did, so it never sees a failure.
+// So this starts a version that failed at once again itself (startAndWatch).
 //
 // The new daemon gets a console of its own, hidden. A console is how Windows tells a program about a
 // logoff or a shutdown, and Go turns that into the signal the daemon stops on; a daemon started with none
 // is killed where it stands (M23). This is what the installer's own `Start-Process -WindowStyle Hidden`
-// does. Not run on Windows before M24's own pass there.
+// does. Walked in M24's pass in a Windows VM: an update, a crash undone, and sign-outs inside the trial.
 func startAgain(path string) error {
 	return startAndWatch(func() (func() error, error) {
 		cmd := exec.Command(path, os.Args[1:]...) //nolint:gosec // this program's own path and arguments

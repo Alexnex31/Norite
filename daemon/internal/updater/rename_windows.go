@@ -21,8 +21,8 @@ import (
 //
 // The name is new each time. With one fixed name, a `norite.exe` left open across two updates still ran
 // from that name at the second, which could then neither remove it nor rename over it, and every
-// installation and every restore failed until that window was closed (M24 /code-review). Not run on
-// Windows before M24's own pass there.
+// installation and every restore failed until that window was closed (M24 /code-review). Walked in
+// M24's pass in a Windows VM, where the daemon's old copy is renamed aside at every update.
 func renameOver(tmp, dst string) error {
 	sweepOld(dst)
 	old := dst + oldSuffix + strconv.FormatInt(time.Now().UnixNano(), 36)
