@@ -263,56 +263,58 @@ func TestWindowsStopToleratesAnAlreadyStoppedTask(t *testing.T) {
 	}
 }
 
+// stateLine is the question the state is read with; the answer is a number, which no Windows translates.
+var stateLine = "powershell.exe -NoProfile -NonInteractive -Command " + taskStateScript
+
 func TestWindowsStatusReportsEachState(t *testing.T) {
 	cases := []struct {
 		name          string
 		query         Result
+		state         Result
 		wantInstalled bool
 		wantRunning   bool
+		wantDetail    string
 	}{
-		{"not installed", taskMissing(), false, false},
-		{"installed and waiting", taskExists(), true, false},
-		{"running", Result{ExitCode: 0, Stdout: "TaskName:      \\" + windowsTaskName + "\r\nStatus:        Running"}, true, true},
-		{"disabled", Result{ExitCode: 0, Stdout: "Status:        Disabled"}, true, false},
+		{"not installed", taskMissing(), Result{}, false, false, ""},
+		{"installed and waiting", taskExists(), Result{Stdout: "3\r\n"}, true, false, "Ready"},
+		{"running", taskExists(), Result{Stdout: "4\r\n"}, true, true, "Running"},
+		{"disabled", taskExists(), Result{Stdout: "1\r\n"}, true, false, "Disabled"},
+		{"queued", taskExists(), Result{Stdout: "2"}, true, false, "Queued"},
+		// What M24's pass found on a French Windows: schtasks says "Statut: En cours", and a
+		// daemon the task had started was reported as one started by hand.
+		{"running, on a French Windows", Result{Stdout: "Dossier : \\\r\nNom de la tâche : \\" + windowsTaskName +
+			"\r\nStatut :                      En cours\r\n"}, Result{Stdout: "4\r\n"}, true, true, "Running"},
+		// The state could not be read: installed, and not claimed to be running or stopped by the task.
+		{"PowerShell refused", taskExists(), Result{ExitCode: 1, Stderr: "Accès refusé. (Exception de HRESULT : 0x80070005 (E_ACCESSDENIED))"}, true, false, "Unknown"},
+		{"an answer that is not a state", taskExists(), Result{Stdout: "Running"}, true, false, "Unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newFakeRunner()
 			r.respond(queryLine, tc.query)
+			r.respond(listLine, taskNotListed())
+			r.respond(stateLine, tc.state)
 			w := &windowsTask{run: r}
 
 			state, err := w.Status(t.Context())
 			if err != nil {
 				t.Fatalf("Status: %v", err)
 			}
-			if state.Installed != tc.wantInstalled || state.Running != tc.wantRunning {
-				t.Errorf("got %+v, want installed=%v running=%v", state, tc.wantInstalled, tc.wantRunning)
+			if state.Installed != tc.wantInstalled || state.Running != tc.wantRunning || state.Detail != tc.wantDetail {
+				t.Errorf("got %+v, want installed=%v running=%v detail=%q", state, tc.wantInstalled, tc.wantRunning, tc.wantDetail)
+			}
+			if tc.wantInstalled && !r.ran(stateLine) {
+				t.Errorf("the state was not asked of Task Scheduler; ran: %v", r.lines())
 			}
 		})
 	}
 }
 
-func TestTaskStatusFieldParsing(t *testing.T) {
-	cases := []struct {
-		name string
-		out  string
-		want string
-	}{
-		{"CRLF output", "TaskName: \\X\r\nStatus:        Ready\r\n", "Ready"},
-		{"LF output", "Status: Running\n", "Running"},
-		{"case-insensitive key", "STATUS: Ready", "Ready"},
-		// A localized Windows names the key in its own language. Degrading to "" — which the caller shows
-		// as "unknown" — is the honest outcome, and Installed stays correct regardless because it comes
-		// from the task listing rather than from any translated text.
-		{"localized key", "Statut:        Prêt", ""},
-		{"no status line", "TaskName: \\X", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := taskStatusField(tc.out); got != tc.want {
-				t.Errorf("taskStatusField(%q) = %q, want %q", tc.out, got, tc.want)
-			}
-		})
+// The script names this task and no other, by a name in single quotes, where PowerShell expands nothing.
+func TestTheStateScriptNamesTheTask(t *testing.T) {
+	want := `$s = New-Object -ComObject Schedule.Service; $s.Connect(); [int]$s.GetFolder('\').GetTask('Norite Daemon').State`
+	if windowsTaskName != "Norite Daemon" || taskStateScript != want {
+		t.Errorf("taskStateScript = %s\nwant %s", taskStateScript, want)
 	}
 }
 

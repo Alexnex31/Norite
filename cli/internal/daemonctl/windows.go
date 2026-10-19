@@ -244,13 +244,13 @@ func (w *windowsTask) Status(ctx context.Context) (State, error) {
 		return State{}, nil
 	}
 
-	status := taskStatusField(res.Stdout)
+	status := w.taskState(ctx)
 	return State{
 		Installed: true,
-		// "Running" is the only status meaning the process is up; "Ready" means installed and waiting for
+		// "Running" is the only state meaning the process is up; "Ready" means installed and waiting for
 		// its trigger, and "Disabled" means it will not fire at all.
-		Running: strings.EqualFold(status, "Running"),
-		Detail:  firstNonEmpty(status, "unknown"),
+		Running: status == "Running",
+		Detail:  status,
 	}, nil
 }
 
@@ -262,21 +262,33 @@ func (w *windowsTask) installed(ctx context.Context) (bool, error) {
 	return state.Installed, nil
 }
 
-// taskStatusField pulls the Status value out of `schtasks /FO LIST` output.
+// taskStateScript asks Task Scheduler for the task's state as a number, which no Windows translates.
 //
-// The output is a block of "Key: value" lines, and both the key and the value are localized on a
-// non-English Windows. Matching the English key is a deliberate best effort: a mismatch degrades Status to
-// "unknown" rather than misreporting it. The Installed flag — which is what the CLI actually turns into an
-// exit code — does not depend on this at all; it comes from taskExists, which reads no translated text.
-func taskStatusField(out string) string {
-	for line := range strings.SplitSeq(out, "\n") {
-		key, value, found := strings.Cut(line, ":")
-		if !found || !strings.EqualFold(strings.TrimSpace(key), "Status") {
-			continue
-		}
-		return strings.TrimSpace(value)
+// Through Task Scheduler's own COM interface and not Get-ScheduledTask, which goes through WMI, and
+// WMI refuses a standard account signed in over the network: over SSH it answered "Access denied".
+const taskStateScript = `$s = New-Object -ComObject Schedule.Service; $s.Connect(); ` +
+	`[int]$s.GetFolder('\').GetTask('` + windowsTaskName + `').State`
+
+// taskStates are Task Scheduler's TASK_STATE values, named as it names them in English.
+var taskStates = map[string]string{"0": "Unknown", "1": "Disabled", "2": "Queued", "3": "Ready", "4": "Running"}
+
+// taskState is the task's state: Ready, Running, Disabled, Queued, or Unknown when it could not be read.
+//
+// Not from schtasks, whose `Status:` line is translated, key and value both: on a French Windows it reads
+// "Statut: En cours". Until M24's pass on one, this read the English key, found nothing, and
+// called the state unknown, so `norite daemon status` said a daemon the task had started was "started by
+// hand" on every Windows not in English. And not in English either: the runner cleans what a tool prints, a
+// carriage return included, so the English word arrived as "Running" and a replacement character. Asked
+// through Windows PowerShell 5.1, which every Windows 10 and 11 has, for the number behind the state.
+func (w *windowsTask) taskState(ctx context.Context) string {
+	res, err := w.run.Run(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", taskStateScript)
+	if err != nil || res.ExitCode != 0 {
+		return "Unknown"
 	}
-	return ""
+	if state, ok := taskStates[strings.TrimSpace(res.Stdout)]; ok {
+		return state
+	}
+	return "Unknown"
 }
 
 // taskExists answers "is this task registered at all", without reading a single word of English.

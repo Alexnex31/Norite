@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -31,6 +33,11 @@ type socketAnswer struct {
 	// Update is a newer version the daemon says is out, or "" (M24).
 	Update string
 }
+
+// updateStartsItself is that an update starts the new daemon outside the service manager, which is so on
+// Windows, where a process cannot replace itself (daemon/cmd/daemond/restart_windows.go). Elsewhere it
+// replaces itself in place and the service manager never sees it go. A variable for the tests.
+var updateStartsItself = runtime.GOOS == "windows"
 
 // statusAskTimeout bounds the handshake. A daemon answers in milliseconds when it answers.
 const statusAskTimeout = 5 * time.Second
@@ -158,6 +165,17 @@ func (v statusView) Text(t *output.Text) {
 	switch {
 	case v.Running && v.ServiceRunning:
 		t.Line("%s is running (%s).", ServiceName, output.Clean(v.Service))
+	case v.Running && v.Installed && strings.EqualFold(v.Service, "unknown"):
+		// Without the service's state there is no telling who started it, and "by hand" would be a guess.
+		t.Line("%s is running. The service manager did not say whether it started it (%s).", ServiceName,
+			output.Clean(v.Service))
+	case v.Running && v.Installed && updateStartsItself:
+		// An update on Windows starts the new version as a process of its own, which the task does not know
+		// is its; "by hand" would be wrong after every update (M24's pass on Windows).
+		t.Line("%s is running, though not by the installed service (%s): an update starts the new version",
+			ServiceName, output.Clean(v.Service))
+		t.Line("itself, or it was started by hand. The service starts it at your next login, and")
+		t.Line("`norite daemon restart` hands it to the service now.")
 	case v.Running && v.Installed:
 		// Not "running (inactive)": the word is the service's, and the service is not what is running.
 		t.Line("%s is running, started by hand. The installed service is not running (%s), and",
