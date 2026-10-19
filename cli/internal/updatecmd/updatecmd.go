@@ -47,8 +47,7 @@ func Command(connect Connector) *cli.Command {
 			"after its signature has been verified, on this machine, as the one this project's release\n" +
 			"workflow made; anything else is refused and the version you have keeps running. A version\n" +
 			"that does not stay up after it is installed is undone by itself.\n\n" +
-			"An install made by Norite's installer updates itself unless you say otherwise; on Windows\n" +
-			"it tells you and waits for `norite update apply`, unless you choose `mode auto`. Any other\n" +
+			"An install made by Norite's installer updates itself unless you say otherwise. Any other\n" +
 			"install is told when a release is out, and is updated by whatever installed it.\n\n" +
 			"The check asks GitHub for the list of releases and sends nothing but this program's version.\n" +
 			"`norite update mode off` stops it.",

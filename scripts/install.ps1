@@ -5,8 +5,8 @@ client) and norite-daemon.exe (the background program it talks to). It never ask
 
 .DESCRIPTION
 In order: gets the two programs (a release archive, checked, or a build of the checkout it sits in), puts
-them in %LOCALAPPDATA%\Programs\Norite and on your PATH, starts the daemon, then offers to create an account
-or sign in.
+them in %LOCALAPPDATA%\Programs\Norite and on your PATH, registers the daemon to start at every logon and
+starts it, then offers to create an account or sign in.
 
     irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex
 
@@ -32,8 +32,12 @@ The instance to register on or sign in to. Default: ask.
 The instance invite code, for an instance that needs one to register.
 .PARAMETER NoDaemon
 Do not start the daemon.
+.PARAMETER NoAutoStart
+Do not register the daemon to start at every logon; start it for this session only.
 .PARAMETER AutoStart
-Also register the daemon to start at every logon, with `norite daemon install`.
+Register the daemon to start at every logon. The default since M24; accepted so older instructions work.
+.PARAMETER ShowConsole
+Run the daemon in a console window that shows its log as it is written, for testing. It has none otherwise.
 .PARAMETER NoAccount
 Do not offer to register or sign in.
 .PARAMETER RequireSignature
@@ -51,6 +55,8 @@ param(
     [string]$InviteCode,
     [switch]$NoDaemon,
     [switch]$AutoStart,
+    [switch]$NoAutoStart,
+    [switch]$ShowConsole,
     [switch]$NoAccount,
     [switch]$RequireSignature,
     [switch]$Uninstall
@@ -59,7 +65,8 @@ param(
 function Install-Norite {
     param(
         [string]$Version, [bool]$FromSource, [bool]$Release, [string]$BinDir, [string]$Instance,
-        [string]$InviteCode, [bool]$NoDaemon, [bool]$AutoStart, [bool]$NoAccount, [bool]$RequireSignature,
+        [string]$InviteCode, [bool]$NoDaemon, [bool]$AutoStart, [bool]$NoAutoStart, [bool]$ShowConsole,
+        [bool]$NoAccount, [bool]$RequireSignature,
         [bool]$Uninstall, [string]$ScriptPath
     )
 
@@ -68,6 +75,10 @@ function Install-Norite {
     $ProgressPreference = 'SilentlyContinue'   # the progress bar makes Invoke-WebRequest many times slower
 
     $repo = 'Alexnex31/Norite'
+    # The logon task is the default: M23 registered it only when asked until somebody had watched it work on
+    # Windows, and M24's pass in a VM did. -AutoStart is kept so instructions that say it still work.
+    if ($AutoStart -and $NoAutoStart) { throw '-AutoStart and -NoAutoStart say opposite things; pass one' }
+    $AutoStart = -not $NoAutoStart
 
     function Step($text) { Write-Host ''; Write-Host "==> $text" }
     function Say($text) { Write-Host $text }
@@ -280,7 +291,7 @@ function Install-Norite {
         Step 'Starting the daemon'
         $byTask = $false
         if ($AutoStart) {
-            & $norite daemon install
+            if ($ShowConsole) { & $norite daemon install --show-console } else { & $norite daemon install }
             if ($LASTEXITCODE -eq 0) { & $norite daemon start }
             if ($LASTEXITCODE -eq 0) { $byTask = $true }
             else { Note 'the daemon could not be registered to start at logon; starting it for this session instead.' }
@@ -304,7 +315,7 @@ function Install-Norite {
         if (-not $AutoStart) {
             Say 'It does not start by itself after a restart of Windows. To start it then:'
             Say "  Start-Process '$daemon' -WindowStyle Hidden"
-            Say 'or run this installer again with -AutoStart to register it at logon.'
+            Say 'or run this installer again without -NoAutoStart to register it at logon.'
         }
     }
 
@@ -358,9 +369,9 @@ function Install-Norite {
         Say ''
     }
     elseif (-not $fromSourceMode -and -not $NoDaemon) {
-        Say 'Once a day Norite checks for a new release and tells you.'
-        Say "'norite update apply' verifies its signature and installs it, 'norite update mode auto'"
-        Say "makes it do that by itself, and 'norite update mode off' stops the check."
+        Say 'Norite keeps itself up to date: once a day it checks for a new release, verifies its'
+        Say "signature, and installs it. 'norite update mode notify' makes it ask first, and"
+        Say "'norite update mode off' stops the check. 'norite update status' says where it stands."
         Say ''
     }
     Say "Run 'norite' to open the client, and 'norite --help' for everything else."
@@ -368,5 +379,6 @@ function Install-Norite {
 
 Install-Norite -Version $Version -FromSource $FromSource.IsPresent -Release $Release.IsPresent -BinDir $BinDir `
     -Instance $Instance -InviteCode $InviteCode -NoDaemon $NoDaemon.IsPresent -AutoStart $AutoStart.IsPresent `
+    -NoAutoStart $NoAutoStart.IsPresent -ShowConsole $ShowConsole.IsPresent `
     -NoAccount $NoAccount.IsPresent -RequireSignature $RequireSignature.IsPresent -Uninstall $Uninstall.IsPresent `
     -ScriptPath $PSCommandPath

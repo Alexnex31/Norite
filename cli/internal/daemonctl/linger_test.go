@@ -196,3 +196,33 @@ func TestOnlyTheSystemdBackendLingers(t *testing.T) {
 		}
 	}
 }
+
+// consoleManager is a stubManager on Windows, whose daemon may run with a console window or without.
+type consoleManager struct {
+	*stubManager
+	shown []bool
+}
+
+func (c *consoleManager) ShowConsole(show bool) { c.shown = append(c.shown, show) }
+
+// --show-console is passed to Windows and refused elsewhere, before anything is written.
+func TestShowConsoleIsForWindowsOnly(t *testing.T) {
+	mgr := &stubManager{}
+	out, err := installWith(t, mgr, "--show-console")
+	var usage *clierr.UsageError
+	if !errors.As(err, &usage) || len(mgr.installed) != 0 || out != "" {
+		t.Errorf("--show-console where there is no window: err=%v, installed %v, printed %q", err, mgr.installed, out)
+	}
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{{nil, false}, {[]string{"--show-console"}, true}} {
+		win := &consoleManager{stubManager: &stubManager{}}
+		if _, err := installWith(t, win, tc.args...); err != nil {
+			t.Fatalf("install %v: %v", tc.args, err)
+		}
+		if len(win.shown) != 1 || win.shown[0] != tc.want || len(win.installed) != 1 {
+			t.Errorf("install %v: asked to show %v, installed %v", tc.args, win.shown, win.installed)
+		}
+	}
+}

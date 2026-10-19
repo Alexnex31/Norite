@@ -46,6 +46,12 @@ func taskNotListed() Result {
 // schtasks was handed, decoded, with the command lines that were run.
 func installed(t *testing.T, user, binary string) (definition string, raw []byte, lines []string, err error) {
 	t.Helper()
+	return installedShowing(t, false, user, binary)
+}
+
+// installedShowing is installed with the console's window shown or not.
+func installedShowing(t *testing.T, show bool, user, binary string) (definition string, raw []byte, lines []string, err error) {
+	t.Helper()
 	r := newFakeRunner()
 	r.respond("whoami", Result{Stdout: user})
 	var path string
@@ -58,7 +64,9 @@ func installed(t *testing.T, user, binary string) (definition string, raw []byte
 			}
 		}
 	}
-	err = (&windowsTask{run: r}).Install(t.Context(), binary)
+	w := &windowsTask{run: r}
+	w.ShowConsole(show)
+	err = w.Install(t.Context(), binary)
 	if path != "" {
 		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 			t.Errorf("the definition was left behind at %s: %v", path, statErr)
@@ -115,7 +123,8 @@ func TestWindowsInstallRegistersADefinitionForThisUsersLogon(t *testing.T) {
 			Limit       string `xml:"ExecutionTimeLimit"`
 			Restarts    string `xml:"RestartOnFailure>Count"`
 		} `xml:"Settings"`
-		Command string `xml:"Actions>Exec>Command"`
+		Command   string `xml:"Actions>Exec>Command"`
+		Arguments string `xml:"Actions>Exec>Arguments"`
 	}
 	// encoding/xml reads UTF-8, which the decoded string is; the declaration is for schtasks.
 	body := strings.Replace(definition, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
@@ -139,28 +148,51 @@ func TestWindowsInstallRegistersADefinitionForThisUsersLogon(t *testing.T) {
 	if parsed.Settings.Instances != "IgnoreNew" || parsed.Settings.Restarts != "3" {
 		t.Errorf("settings: %+v", parsed.Settings)
 	}
-	// A path, not a command line: nothing re-parses it, so the space needs no quotes.
-	if parsed.Command != `C:\Program Files\Norite\norite-daemon.exe` {
-		t.Errorf("the task runs %q", parsed.Command)
+	// In a console with no window: a console, because that is how Windows tells the daemon about a logoff,
+	// and no window, which showed every user the daemon's log and stopped it when closed. The path is one
+	// argument, quoted for its space.
+	if parsed.Command != `%SystemRoot%\System32\conhost.exe` ||
+		parsed.Arguments != `--headless "C:\Program Files\Norite\norite-daemon.exe"` {
+		t.Errorf("the task runs %q with %q", parsed.Command, parsed.Arguments)
 	}
 }
 
-// A path or an account name is text in a document, and a document has characters that end its elements.
-func TestWindowsDefinitionEscapesWhatItIsGiven(t *testing.T) {
-	definition, _, _, err := installed(t, `CORP&CO\a<b>`, `C:\R&D\"x"\norite-daemon.exe`)
+// --show-console runs the daemon as the task's own program, in a console window that shows its log.
+func TestWindowsInstallCanShowTheConsole(t *testing.T) {
+	definition, _, _, err := installedShowing(t, true, `PC\ada`, `C:\Program Files\Norite\norite-daemon.exe`)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	var parsed struct {
-		User    string `xml:"Principals>Principal>UserId"`
-		Command string `xml:"Actions>Exec>Command"`
+		Command   string `xml:"Actions>Exec>Command"`
+		Arguments string `xml:"Actions>Exec>Arguments"`
 	}
 	body := strings.Replace(definition, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
 	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
 		t.Fatalf("the definition is not well-formed: %v\n%s", err, definition)
 	}
-	if parsed.User != `CORP&CO\a<b>` || parsed.Command != `C:\R&D\"x"\norite-daemon.exe` {
-		t.Errorf("round trip: %q, %q", parsed.User, parsed.Command)
+	// A path, not a command line: nothing re-parses it, so the space needs no quotes.
+	if parsed.Command != `C:\Program Files\Norite\norite-daemon.exe` || strings.Contains(definition, "<Arguments>") {
+		t.Errorf("the task runs %q with %q", parsed.Command, parsed.Arguments)
+	}
+}
+
+// A path or an account name is text in a document, and a document has characters that end its elements.
+func TestWindowsDefinitionEscapesWhatItIsGiven(t *testing.T) {
+	definition, _, _, err := installed(t, `CORP&CO\a<b>`, `C:\R&D\<x>\norite-daemon.exe`)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	var parsed struct {
+		User      string `xml:"Principals>Principal>UserId"`
+		Arguments string `xml:"Actions>Exec>Arguments"`
+	}
+	body := strings.Replace(definition, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
+	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("the definition is not well-formed: %v\n%s", err, definition)
+	}
+	if parsed.User != `CORP&CO\a<b>` || parsed.Arguments != `--headless "C:\R&D\<x>\norite-daemon.exe"` {
+		t.Errorf("round trip: %q, %q", parsed.User, parsed.Arguments)
 	}
 }
 
@@ -170,6 +202,10 @@ func TestWindowsInstallRefusesWhatItCannotName(t *testing.T) {
 		if _, _, lines, err := installed(t, user, `C:\norite-daemon.exe`); err == nil || len(lines) != 1 {
 			t.Errorf("whoami answered %q: err=%v, ran %v", user, err, lines)
 		}
+	}
+	// A quote would end the path's argument to the console host and begin another.
+	if _, _, lines, err := installed(t, `PC\ada`, `C:\a" --x "b\norite-daemon.exe`); err == nil || len(lines) != 0 {
+		t.Errorf("a path with a quote: err=%v, ran %v", err, lines)
 	}
 	// A control character in the path is refused before anything is asked.
 	if _, _, lines, err := installed(t, `PC\ada`, "C:\\a\nb.exe"); err == nil || len(lines) != 0 {
