@@ -278,15 +278,29 @@ function Install-Norite {
 
     if (-not $NoDaemon) {
         Step 'Starting the daemon'
+        $byTask = $false
         if ($AutoStart) {
             & $norite daemon install
             if ($LASTEXITCODE -eq 0) { & $norite daemon start }
-            if ($LASTEXITCODE -ne 0) { Note 'the daemon could not be registered to start at logon; starting it for this session instead.' }
+            if ($LASTEXITCODE -eq 0) { $byTask = $true }
+            else { Note 'the daemon could not be registered to start at logon; starting it for this session instead.' }
         }
-        if (-not (Get-Process -Name 'norite-daemon' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $daemon })) {
+        # Only when the task did not start it. `schtasks /Run` returns before the task's daemon exists, so a
+        # look for the process straight after it found none, and a second daemon started here took the lock
+        # and left the task's to exit: `norite daemon status` then said, truly, that it had been started by
+        # hand (M24's pass on Windows).
+        if (-not $byTask -and -not (Get-Process -Name 'norite-daemon' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $daemon })) {
             Start-Process -FilePath $daemon -WindowStyle Hidden
         }
-        Say 'The daemon is running in the background.'
+        # Said once it is so: status exits 0 when a daemon is running, however it was started.
+        $up = $false
+        foreach ($i in 1..20) {
+            try { & $norite daemon status 2>$null | Out-Null } catch { }
+            if ($LASTEXITCODE -eq 0) { $up = $true; break }
+            Start-Sleep -Milliseconds 500
+        }
+        if ($up) { Say 'The daemon is running in the background.' }
+        else { Note "the daemon has not answered after ten seconds; 'norite daemon status' and 'norite logs tail' say why." }
         if (-not $AutoStart) {
             Say 'It does not start by itself after a restart of Windows. To start it then:'
             Say "  Start-Process '$daemon' -WindowStyle Hidden"
