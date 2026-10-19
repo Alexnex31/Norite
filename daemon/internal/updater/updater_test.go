@@ -4,6 +4,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -720,9 +721,13 @@ func TestAPreReleaseInstallIsOfferedPreReleases(t *testing.T) {
 	}
 }
 
-// On Windows nothing is installed unasked until somebody has watched it work there: the default is to
-// say so and wait. Asking still installs, and so does choosing auto.
-func TestWindowsWaitsToBeAsked(t *testing.T) {
+// Windows waited to be asked until installing there had been watched working, which M24's pass in a VM
+// did. A receipted install there is auto like any other.
+//
+// The mode and not an installation is what this holds: this test's host serves a Linux archive only, so
+// on "Windows" nothing can be staged. The test this replaces asserted that nothing was installed unasked,
+// and passed for that reason rather than for the default it named.
+func TestWindowsInstallsByItselfToo(t *testing.T) {
 	w := newWorld(t)
 	onWindows := func(o *Options) {
 		o.GOOS = "windows"
@@ -733,19 +738,8 @@ func TestWindowsWaitsToBeAsked(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	u := w.updater("0.1.0", onWindows)
-	if s := u.Status(); !s.Installs || s.Mode != ipc.UpdateNotify {
-		t.Fatalf("on Windows: %+v", s)
-	}
-	u.scheduled(t.Context())
-	if w.restarts.Load() != 0 {
-		t.Errorf("a release was installed on Windows without anybody asking")
-	}
-	if s, err := u.SetMode(ipc.UpdateAuto); err != nil || s.Mode != ipc.UpdateAuto {
-		t.Errorf("choosing auto on Windows: %+v (%v)", s, err)
-	}
-	if s := w.updater("0.1.0").Status(); s.Mode != ipc.UpdateAuto {
-		t.Errorf("elsewhere the default is %q", s.Mode)
+	if s := w.updater("0.1.0", onWindows).Status(); !s.Installs || s.Mode != ipc.UpdateAuto {
+		t.Errorf("on Windows: %+v", s)
 	}
 }
 
@@ -998,6 +992,40 @@ func TestOnlyTheInstalledDaemonSettlesATrial(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(u.installer.previousDir(), daemonName)); err != nil {
 		t.Errorf("the pair kept to go back to is gone: %v", err)
+	}
+}
+
+// Keeping a version is said in the log, once and only when one was on trial: the Linux pass found the log
+// ended at "running a newly installed version" and the record simply emptied.
+func TestKeepingAVersionIsLogged(t *testing.T) {
+	w := newWorld(t)
+	u := w.updater("0.1.0")
+	u.scheduled(t.Context())
+	if !u.Finish(notStopped) {
+		t.Fatal("not installed")
+	}
+	lower(t, &confirmAfter, 20*time.Millisecond)
+	lower(t, &firstCheck, time.Hour)
+	run := func(version string) string {
+		var log bytes.Buffer
+		installed := w.updater(version, func(o *Options) { o.Log = zerolog.New(&log) })
+		if installed.AtStart(false) {
+			t.Fatal("rolled back at its start")
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { installed.Run(ctx); close(done) }()
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		<-done
+		installed.Finish(notStopped)
+		return log.String()
+	}
+	if got := run("0.1.1"); strings.Count(got, "this version stayed up and is kept") != 1 || !strings.Contains(got, `"version":"0.1.1"`) {
+		t.Errorf("the trial's end, logged:\n%s", got)
+	}
+	if got := run("0.1.1"); strings.Contains(got, "is kept") {
+		t.Errorf("a version already kept was said to be kept again:\n%s", got)
 	}
 }
 

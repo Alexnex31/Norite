@@ -265,8 +265,13 @@ func (u *Updater) Run(ctx context.Context) {
 			if !u.installs {
 				continue
 			}
+			// Said, so the log tells the whole of an update: until M24's pass on Linux it ended at
+			// "running a newly installed version" and the record simply emptied.
+			trial := u.onTrial()
 			if err := u.installer.Confirm(); err != nil {
 				u.opts.Log.Warn().Str("error", said(err)).Msg("could not record that this version stayed up")
+			} else if trial {
+				u.opts.Log.Info().Str("version", u.current.String()).Msg("this version stayed up and is kept")
 			}
 			u.opts.Changed()
 		case <-u.nudged:
@@ -685,9 +690,9 @@ func (u *Updater) mode() string {
 // modeOf is the mode in force. Unset, it is auto where this daemon installs and notify where it does not:
 // an install nobody's installer made has never been told it would be changed.
 //
-// On Windows it is notify until somebody chooses: installing there has not been watched working, and what
-// nobody has watched does not happen unasked (M23's rule for install.ps1's task). `norite update apply`
-// and `norite update mode auto` both work there.
+// Windows was notify until installing there had been watched working, since what nobody has watched does
+// not happen unasked. M24's pass in a Windows VM watched it: an update to the published release candidate,
+// a rollback, and sign-outs inside the trial. It is auto there as everywhere.
 //
 // A record that cannot be read is off: nothing says what was chosen, and "off" may be it.
 func (u *Updater) modeOf(r Record) string {
@@ -706,7 +711,7 @@ func (u *Updater) modeOf(r Record) string {
 		}
 		return ipc.UpdateNotify
 	}
-	if u.installs && u.opts.GOOS != "windows" {
+	if u.installs {
 		return ipc.UpdateAuto
 	}
 	return ipc.UpdateNotify
@@ -782,8 +787,7 @@ var errDeferred = errors.New("deferred")
 //
 // The download belongs to the daemon and not to the request. A client waits two minutes for an answer,
 // and a download given only that long, and thrown away when it ran out, could never finish on a slow
-// link: with the mode on notify, which is the default on Windows, that is the only way a release is
-// installed (M24 /code-review). The request waits applyTimeout and is then answered that the release is
+// link: with the mode on notify, that is the only way a release is installed (M24 /code-review). The request waits applyTimeout and is then answered that the release is
 // on its way, and the download goes on, with the quarter of an hour the schedule's own has.
 func (u *Updater) Apply(ctx context.Context) (ipc.UpdateStatus, error) {
 	if !u.installs {

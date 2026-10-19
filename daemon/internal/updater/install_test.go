@@ -181,6 +181,52 @@ func TestConfirmEndsTheTrial(t *testing.T) {
 	}
 }
 
+// On Windows the programs a version replaced were renamed out of its way, the daemon still running. Keeping
+// the version removes them; M24's pass on Windows found the daemon's copy left until the next update.
+// Elsewhere nothing is set aside, so a file of that name is somebody's own and stays.
+func TestKeepingAVersionRemovesWhatItSetAside(t *testing.T) {
+	for _, tc := range []struct {
+		goos     string
+		setAside []string
+		kept     []string
+	}{
+		{"windows", []string{"norite.exe.old-dm8ts25yx2g8", "norite-daemon.exe.old-dm8tcwoasncc", "norite-daemon.exe.old-x"},
+			[]string{"norite.exe", "norite-daemon.exe", "notes.old-1", "norite.exe.older"}},
+		{"linux", nil, []string{"norite", "norite-daemon", "norite.old-mine", "norite-daemon.old-backup"}},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			root := t.TempDir()
+			in := &Installer{Dir: filepath.Join(root, "update"), BinDir: filepath.Join(root, "bin"), GOOS: tc.goos}
+			for _, dir := range []string{in.Dir, in.BinDir} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range append(append([]string{}, tc.setAside...), tc.kept...) {
+				if err := os.WriteFile(filepath.Join(in.BinDir, name), []byte(name), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := in.save(Record{Pending: &Pending{From: "0.1.0", To: "0.1.1", Phase: phaseApplied, Starts: 1}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := in.Confirm(); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range tc.setAside {
+				if _, err := os.Lstat(filepath.Join(in.BinDir, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("%s is still there after the version was kept: %v", name, err)
+				}
+			}
+			for _, name := range tc.kept {
+				if _, err := os.Lstat(filepath.Join(in.BinDir, name)); err != nil {
+					t.Errorf("%s was removed: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
 // A machine switched off between the two renames: the command is the new one and the daemon the old.
 func TestAnInterruptedInstallationIsUndoneAtTheNextStart(t *testing.T) {
 	x := newInstalled(t)

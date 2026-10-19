@@ -357,6 +357,15 @@ func (in *Installer) Confirm() error {
 	}
 	r.Pending = nil
 	_ = os.RemoveAll(in.previousDir())
+	// On Windows the programs this version replaced were renamed out of its way, and the daemon among them
+	// was still running then. By now it has long exited, so they go here rather than at the next update,
+	// which left a copy of the daemon beside the new one for days (M24's pass on Windows). Only there:
+	// elsewhere nothing is set aside, and a file of somebody's own of that name is theirs.
+	if in.GOOS == "windows" {
+		for _, name := range in.programs() {
+			sweepOld(filepath.Join(in.BinDir, name))
+		}
+	}
 	return in.save(r)
 }
 
