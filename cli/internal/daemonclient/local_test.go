@@ -61,6 +61,15 @@ func TestEveryLocalOutcomeEndsInItsExitCode(t *testing.T) {
 			assert.False(t, errors.As(err, &refused) || errors.As(err, &unavailable), "exit 1: %v", err)
 			assert.Contains(t, err.Error(), "disk full")
 		}},
+		// The daemon's own request could not reach somebody else, the release host (M24): unavailable (3),
+		// which a script tells from a refusal such as "nothing newer" (4).
+		"the daemon could not reach who it had to ask": {relay(ipc.RelayUnreachable, "the release listing could not be read\x1b[2J"), func(t *testing.T, err error) {
+			var unavailable *clierr.UnavailableError
+			require.ErrorAs(t, err, &unavailable)
+			assert.Contains(t, err.Error(), "could not be read")
+			assert.NotContains(t, err.Error(), "\x1b")
+			assert.NotContains(t, err.Error(), "older than this command")
+		}},
 		"an older daemon, signed in, relayed it and the instance answered": {
 			answer{res: ipc.Result{Status: 404, Body: json.RawMessage(`{"error":{"code":"not_found","message":"no"}}`)}},
 			older},

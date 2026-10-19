@@ -19,7 +19,23 @@ import (
 // difference matters: a real service is machine-wide, needs Administrator to install, and runs in session 0
 // with no access to the interactive user's credential store — all three wrong for a per-user daemon holding
 // that user's tokens. A logon task installs unelevated, runs as the user, and starts when they log in.
-type windowsTask struct{ run Runner }
+type windowsTask struct {
+	run Runner
+	// showConsole runs the daemon in a console window of its own, which shows its log as it is written.
+	showConsole bool
+}
+
+// ConsoleShower is a Manager whose daemon may run with a console window or without one: Windows.
+type ConsoleShower interface {
+	// ShowConsole chooses, for the next Install, whether the daemon's console has a window.
+	ShowConsole(show bool)
+}
+
+// ShowConsole chooses, for the next Install, whether the daemon's console has a window.
+func (w *windowsTask) ShowConsole(show bool) { w.showConsole = show }
+
+// headlessHost is the console host, run without a window. Task Scheduler expands the variable.
+const headlessHost = `%SystemRoot%\System32\conhost.exe`
 
 // DefinitionPath reports no path: Task Scheduler keeps its definitions in a registry-backed store rather
 // than a file the user can usefully be pointed at.
@@ -40,6 +56,13 @@ func (w *windowsTask) StartsOnInstall() bool { return false }
 //   - IgnoreNew: a second start while one runs does nothing, which is what makes start idempotent.
 //   - PT0S is no time limit.
 //   - Three restarts a minute apart after a failure. An exit of 0, which a requested stop is, is not one.
+//   - The daemon runs inside `conhost.exe --headless`: a console with no window. M23 left the window
+//     showing, because a console is how Windows tells a program about a logoff and a program without one
+//     is killed where it stands. M24's pass in a VM showed every user a window of raw log lines at every
+//     login, which closed the daemon if closed; and that a headless console is still told: a sign-out
+//     logged "daemon stopping", "daemon stopped". The cost is the restarts above: conhost exits 0 whatever
+//     the daemon did, so a daemon that crashes comes back at the next login and not a minute later.
+//     `norite daemon install --show-console` runs it as before, for testing.
 //
 // The element order is the one Task Scheduler exports. Written from its documented schema and not yet
 // registered on a Windows machine from this code; docs/roadmap.md's M23 entry says so.
@@ -88,16 +111,23 @@ var taskTemplate = template.Must(template.New("task").Funcs(template.FuncMap{
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{{ .Program | xml }}</Command>
+      <Command>{{ .Command | xml }}</Command>
+{{- if .Arguments }}
+      <Arguments>{{ .Arguments | xml }}</Arguments>
+{{- end }}
     </Exec>
   </Actions>
 </Task>
 `))
 
-// taskXML renders the definition for one user and one executable.
-func taskXML(user, program string) (string, error) {
+// taskXML renders the definition for one user and one executable, in a console with a window or without.
+func taskXML(user, program string, showConsole bool) (string, error) {
+	command, arguments := headlessHost, `--headless "`+program+`"`
+	if showConsole {
+		command, arguments = program, ""
+	}
 	var b strings.Builder
-	if err := taskTemplate.Execute(&b, struct{ User, Program string }{user, program}); err != nil {
+	if err := taskTemplate.Execute(&b, struct{ User, Command, Arguments string }{user, command, arguments}); err != nil {
 		return "", fmt.Errorf("rendering the task definition: %w", err)
 	}
 	return b.String(), nil
@@ -120,6 +150,12 @@ func (w *windowsTask) Install(ctx context.Context, daemonBinary string) error {
 		return fmt.Errorf("refusing to register a task: the executable path contains a control character (%s)",
 			strconv.Quote(daemonBinary))
 	}
+	// The path is one quoted argument to the console host, so a quote in it would end that argument and
+	// start another. Windows allows none in a file name; this says so rather than relying on it.
+	if strings.ContainsRune(daemonBinary, '"') {
+		return fmt.Errorf("refusing to register a task: the executable path contains a quote (%s)",
+			strconv.Quote(daemonBinary))
+	}
 	// Who the task is for, in the form Task Scheduler names accounts: DOMAIN\user. Asked of Windows
 	// rather than assembled from the environment, which a shell can set to anything.
 	res, err := mustSucceed(ctx, w.run, "whoami")
@@ -132,7 +168,7 @@ func (w *windowsTask) Install(ctx context.Context, daemonBinary string) error {
 			strconv.Quote(user))
 	}
 
-	definition, err := taskXML(user, daemonBinary)
+	definition, err := taskXML(user, daemonBinary, w.showConsole)
 	if err != nil {
 		return err
 	}
@@ -244,13 +280,13 @@ func (w *windowsTask) Status(ctx context.Context) (State, error) {
 		return State{}, nil
 	}
 
-	status := taskStatusField(res.Stdout)
+	status := w.taskState(ctx)
 	return State{
 		Installed: true,
-		// "Running" is the only status meaning the process is up; "Ready" means installed and waiting for
+		// "Running" is the only state meaning the process is up; "Ready" means installed and waiting for
 		// its trigger, and "Disabled" means it will not fire at all.
-		Running: strings.EqualFold(status, "Running"),
-		Detail:  firstNonEmpty(status, "unknown"),
+		Running: status == "Running",
+		Detail:  status,
 	}, nil
 }
 
@@ -262,21 +298,33 @@ func (w *windowsTask) installed(ctx context.Context) (bool, error) {
 	return state.Installed, nil
 }
 
-// taskStatusField pulls the Status value out of `schtasks /FO LIST` output.
+// taskStateScript asks Task Scheduler for the task's state as a number, which no Windows translates.
 //
-// The output is a block of "Key: value" lines, and both the key and the value are localized on a
-// non-English Windows. Matching the English key is a deliberate best effort: a mismatch degrades Status to
-// "unknown" rather than misreporting it. The Installed flag — which is what the CLI actually turns into an
-// exit code — does not depend on this at all; it comes from taskExists, which reads no translated text.
-func taskStatusField(out string) string {
-	for line := range strings.SplitSeq(out, "\n") {
-		key, value, found := strings.Cut(line, ":")
-		if !found || !strings.EqualFold(strings.TrimSpace(key), "Status") {
-			continue
-		}
-		return strings.TrimSpace(value)
+// Through Task Scheduler's own COM interface and not Get-ScheduledTask, which goes through WMI, and
+// WMI refuses a standard account signed in over the network: over SSH it answered "Access denied".
+const taskStateScript = `$s = New-Object -ComObject Schedule.Service; $s.Connect(); ` +
+	`[int]$s.GetFolder('\').GetTask('` + windowsTaskName + `').State`
+
+// taskStates are Task Scheduler's TASK_STATE values, named as it names them in English.
+var taskStates = map[string]string{"0": "Unknown", "1": "Disabled", "2": "Queued", "3": "Ready", "4": "Running"}
+
+// taskState is the task's state: Ready, Running, Disabled, Queued, or Unknown when it could not be read.
+//
+// Not from schtasks, whose `Status:` line is translated, key and value both: on a French Windows it reads
+// "Statut: En cours". Until M24's pass on one, this read the English key, found nothing, and
+// called the state unknown, so `norite daemon status` said a daemon the task had started was "started by
+// hand" on every Windows not in English. And not in English either: the runner cleans what a tool prints, a
+// carriage return included, so the English word arrived as "Running" and a replacement character. Asked
+// through Windows PowerShell 5.1, which every Windows 10 and 11 has, for the number behind the state.
+func (w *windowsTask) taskState(ctx context.Context) string {
+	res, err := w.run.Run(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", taskStateScript)
+	if err != nil || res.ExitCode != 0 {
+		return "Unknown"
 	}
-	return ""
+	if state, ok := taskStates[strings.TrimSpace(res.Stdout)]; ok {
+		return state
+	}
+	return "Unknown"
 }
 
 // taskExists answers "is this task registered at all", without reading a single word of English.

@@ -6,8 +6,10 @@ package daemonproc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/config"
 	"github.com/Alexnex31/Norite/daemon/internal/configwatch"
 	"github.com/Alexnex31/Norite/daemon/internal/toggle"
+	"github.com/Alexnex31/Norite/daemon/internal/updater"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
@@ -70,6 +73,8 @@ type localRequests struct {
 	// automation answers the requests about the port for scripts (M22). Set before the attach server
 	// serves, by whichever branch of startup knows what the daemon is signed in to.
 	automation *automationControl
+	// update answers the requests about the daemon updating itself (M24). Nil answers none.
+	update *updater.Updater
 	// stop ends the daemon's run, as a signal does (M23). Nil answers no stop request.
 	stop     func()
 	stopOnce sync.Once
@@ -111,6 +116,9 @@ func (l *localRequests) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	if req.Path == ipc.PathStop {
 		return l.stopRequested(req)
 	}
+	if l.update != nil && (req.Path == ipc.PathUpdate || strings.HasPrefix(req.Path, ipc.PathUpdate+"/")) {
+		return l.updateRequested(ctx, req)
+	}
 	if l.automation != nil && l.automation.handles(req.Path) {
 		return l.automation.Do(ctx, req)
 	}
@@ -141,6 +149,54 @@ func (l *localRequests) stopRequested(req ipc.Request) ipc.Response {
 		l.log.Info().Msg("an attached client asked the daemon to stop")
 		time.AfterFunc(stopGrace, l.stop)
 	})
+	status := http.StatusOK
+	return ipc.Response{Status: &status, Body: body}
+}
+
+// updateRequested answers the requests under ipc.PathUpdate.
+func (l *localRequests) updateRequested(ctx context.Context, req ipc.Request) ipc.Response {
+	const wrongMethod = "updating is read with GET and changed with POST"
+	var (
+		out ipc.UpdateStatus
+		err error
+	)
+	mode, settingMode := strings.CutPrefix(req.Path, ipc.PathUpdateMode)
+	channel, settingChannel := strings.CutPrefix(req.Path, ipc.PathUpdateChannel)
+	switch {
+	case req.Path == ipc.PathUpdate && req.Method != http.MethodGet:
+		return ipc.Failure(ipc.RelayBadRequest, wrongMethod)
+	case req.Path == ipc.PathUpdate:
+		out = l.update.Status()
+	case req.Method != http.MethodPost:
+		return ipc.Failure(ipc.RelayBadRequest, wrongMethod)
+	case req.Path == ipc.PathUpdateCheck:
+		out, err = l.update.Check(ctx)
+	case req.Path == ipc.PathUpdateApply:
+		out, err = l.update.Apply(ctx)
+	case settingMode:
+		out, err = l.update.SetMode(mode)
+	case settingChannel:
+		out, err = l.update.SetChannel(channel)
+	default:
+		return ipc.Failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
+	}
+	var (
+		refused     *updater.ErrRefused
+		unreachable *updater.ErrUnreachable
+	)
+	switch {
+	case errors.As(err, &refused):
+		return ipc.Failure(ipc.RelayConflict, refused.Msg)
+	case errors.As(err, &unreachable):
+		return ipc.Failure(ipc.RelayUnreachable, unreachable.Msg)
+	case err != nil:
+		l.log.Error().Str("error", termsafe.Text(err.Error())).Msg("a request about updating failed")
+		return ipc.Failure(ipc.RelayFailed, termsafe.Text(err.Error()))
+	}
+	body, err := json.Marshal(out)
+	if err != nil {
+		return ipc.Failure(ipc.RelayFailed, "the daemon could not encode its answer")
+	}
 	status := http.StatusOK
 	return ipc.Response{Status: &status, Body: body}
 }

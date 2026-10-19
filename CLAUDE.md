@@ -238,6 +238,8 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
   for every OS and arch into `dist/`, then `norite about` from this machine's archive must report a stamped
   revision `git cat-file` finds. Signing needs the release workflow's identity, so a `v*` tag is its first
   real run (M20a). CI's `build` job runs the same snapshot release on every push.
+- `just trusted-root` — regenerate the trusted root the daemon's updater verifies releases against, from
+  Sigstore through TUF, and commit the diff after reading it. CI fails when the committed copy is behind.
 - `just build-local` — plain `go build` of all four binaries into `./bin/`, at paths that do not vary by
   platform the way `just build`'s goreleaser output does. `just notices` and CI's assertions both read them.
 - `just notices` — regenerate each binary's `internal/notices/THIRD-PARTY-NOTICES.txt` from
@@ -386,7 +388,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D under way, M23 done**. Full
+**Phase D complete through M24**. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -1170,6 +1172,63 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   a real reboot, a login, and with lingering the daemon up four seconds after boot and 36 seconds before
   anybody logged in. **A stand-in for a machine is not safe because it is small**; ask what it shares
   with the machine it runs on.
+
+- **M24 — Client auto-update mechanism**: done. `daemon/internal/updater` (the listing, the choice, the
+  offline verifier on `sigstore-go` against an embedded trusted root, staging, the swap, the record and the
+  undoing), `daemon/installreceipt`, SemVer precedence in `gatewayproto`, the restart in
+  `daemon/cmd/daemond` (`exec` on Unix, a watched successor on Windows), `norite update
+  status|check|apply|mode|channel` in `cli/internal/updatecmd`, five requests under `/@daemon/update`, a
+  `DAEMON_UPDATE` dispatch, a line in `norite daemon status` and on the terminal client's home,
+  `contracts/cli-json/update.schema.json`, the `norite_testrelease` build tag, receipts from both
+  installers, `just trusted-root` and CI's staleness check of it, and hand-read licenses checked by hash.
+  Decisions are in the roadmap entry, in `architecture.md` §3, in ADR 0020 as amended, and in
+  `docs/security-ledger.md`.
+
+  **Planning found eleven things the entry could not build as written** — twelve milestones running.
+  There was no version-check endpoint and an instance cannot be one: the listing is GitHub's, a daily
+  third-party call ADR 0020 had not considered. `gatewayproto` could not order two versions. "Never
+  installs a version its instance would refuse" already existed, as the handshake's own `Check`. And the
+  done-when's crashing release could not be a real one, since one signed by the real workflow is public.
+
+  **A signature binds a version, and the listing is only a hint.** The certificate names
+  `release.yml@refs/tags/<tag>`, and the updater verifies against the candidate's own tag, so one release's
+  bundle cannot stand for another. The listing can withhold a release and never forge one (ledger).
+
+  **Seven `/code-review` rounds, and all but one found ten or more.** They did not converge on their own,
+  which is M22's lesson again: a round's fixes are code nobody has reviewed. The two worst both locked a
+  client out of its own instance: a daemon not yet heard from by its instance was treated as signed out and
+  moved a release candidate to the release that instance refused; and a release host's error text, one
+  redirect long enough, outgrew the record's bound and forgot the mode, the channel and every version rolled
+  back from. **What a stranger's server says is bounded where it is kept, not only where it is read.**
+
+  **The listing's bound was measured against the wrong thing.** 2 MiB looked generous against the test's
+  23-byte entries; one real release's entry is 32 KB, so from about the sixty-fifth release every check on
+  every install, the updater's own fix included, would have failed. Measure a bound against the live shape.
+
+  **The Windows pass ran in a VM, and found three things nothing else could.** The author's first try on
+  their own machine found the guide written for it hard to follow, so it moved to a Windows 11 VM:
+  unattended install, SSH, QEMU screenshots for what a person would see. `daemon status` said "started by
+  hand" for the task's own daemon on every Windows: `schtasks` translates its `Status:` line (French:
+  "Statut: En cours"), and in English the runner's cleaning turned the line's carriage return into
+  U+FFFD, which the tests' raw `\r\n` never went through. It now reads the state as a number from Task
+  Scheduler's COM interface; `Get-ScheduledTask` was tried first and WMI refuses it to a standard account
+  over SSH. `install.ps1` raced its own task and started a second daemon. **A test that feeds a parser raw
+  output has not tested what the runner hands it.**
+
+  **The console window is gone, and the console is not.** M23 kept the window because a program without a
+  console is killed at logoff. The task now runs the daemon in `conhost.exe --headless`; a sign-out and a
+  shutdown were both seen to stop it cleanly. The cost is written in `windows.go`: conhost exits 0
+  whatever the daemon did, so the task's restart-on-failure no longer sees a crash.
+  `norite daemon install --show-console` keeps the window, for testing.
+
+  **A test can pass for a reason other than the one it names.** `TestWindowsWaitsToBeAsked` held "nothing
+  installed unasked" on Windows, and its host served no Windows archive, so nothing could have been
+  installed whatever the default. Replaced by one that asserts the mode. Remove the guard and watch the
+  test fail, every time; this one would have stayed green.
+
+  **Linux was walked in a VM too**, against the real `v0.1.0-rc.1`: installed by itself in five seconds,
+  same PID, byte-identical to the published archive; rolled back under systemd from a release built to
+  crash; two reboots inside a trial counted against nothing.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -2446,12 +2505,14 @@ And on the client config and the daemon's own requests, from M21:
   uses it.** A new local dispatch is a constant in `daemon/ipc`, a row in `daemon-ipc.schema.json`'s
   `LocalDispatch`, and sent through `Server.Local`.
 - **A request the daemon answers itself lives under `/@daemon/`** on the relay's own request frame, so no
-  frame changes. It is answered signed in or not, with 200 and a body or with `conflict` or `failed`, never
-  a status. It takes no body and carries nothing of the user's in its path, because a daemon older than the
-  prefix relays the path to its instance (ledger). One exception since M22: the port number in
-  `/@daemon/automation/enable/{port}`, sent only after a request that says nothing has shown the daemon
-  knows these requests. `relay.Target` refuses the prefix, and a test holds
-  `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and `LocalRead`.
+  frame changes. It is answered signed in or not, with 200 and a body or with `conflict` or `failed`, never a
+  status; since M24 also `unreachable`, when the request cannot be carried out yet: the release host could
+  not be read, a check is already under way, or the instance has not been heard from. It takes no body and
+  carries nothing of the user's in its path, because a daemon older than the prefix relays the path to its
+  instance (ledger). One exception since M22: the port number in `/@daemon/automation/enable/{port}`, sent
+  only after a request that says nothing has shown the daemon knows these requests. `relay.Target` refuses
+  the prefix, and a test holds `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and
+  `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
   which nothing outside the daemon module can import. A write puts back the fields it did not understand.
   A step that must follow the state and not be interleaved with the next update goes in `Update`'s `then`.
@@ -2529,14 +2590,18 @@ And on the daemon's lifecycle and its log, from M23:
 - **A stop is asked of the daemon first** (`ipc.PathStop`), then of the service manager, by `stop`,
   `restart` and `uninstall`, and by `install.ps1` using the `norite` already installed, which is the
   running daemon's version. The answer is queued before the stop begins. Anything new that stops or
-  replaces the daemon, M24's updater first, goes through `socketStop`.
+  replaces the daemon from outside it goes through `socketStop`. M24's updater is inside the daemon and
+  ends its own run with the same cancellation.
 - **`norite daemon status`: 0 means a daemon is running, however it was started.** It asks the service
   manager and the socket. A daemon started by hand is running and not installed, and anything that offers
   to install must treat it as running.
-- **On Windows the daemon keeps its console.** A console program is told about a logoff, a shutdown and
-  its window closing through the console, and Go turns each into the SIGTERM the daemon stops on. Letting
-  go of the console to hide the window was built and removed: without one the daemon is killed where it
-  stands at every logoff. Whatever hides that window must leave the daemon told.
+- **On Windows the daemon keeps its console, and since M24 the console has no window.** A console
+  program is told about a logoff and a shutdown through the console, and Go turns each into the SIGTERM
+  the daemon stops on. Letting go of the console (`FreeConsole`) was built and removed at M23: without one
+  the daemon is killed where it stands at every logoff. The task runs it in `conhost.exe --headless`,
+  which keeps the console and shows nothing, seen to stop it cleanly at a sign-out and a shutdown; the
+  updater's successor gets a hidden console of its own. conhost exits 0 whatever its program did, which
+  is why the updater watches the successor itself.
 - **A daemon is running when something answered, never when a connection could not be made.** A dial
   that fails for any reason but "nothing is listening" says so as a problem and reports no daemon.
 - **Every "it has not stopped" has waited.** `askToStop` waits for the process the daemon named, or for
@@ -2556,6 +2621,36 @@ And on the daemon's lifecycle and its log, from M23:
   whose command is an init system, or anything else that can reach the host's ttys, devices, cgroups or
   logind: one ended the author's whole desktop session at M23. Where no VM is to be had, the clause is
   reported as not walked.
+
+And on the updater, from M24:
+
+- **Nothing the listing says is believed until a signature says it too.** The bundle is verified offline
+  against `daemon/internal/updater/trusted_root.json` and the identity for the candidate's own tag; then
+  the archive's SHA-256; then two programs by exact name. Any failure fails closed and the version running
+  stays. No flag, file or environment variable changes the root or the identity in a release build.
+- **The trusted root ages.** `just trusted-root` regenerates it through TUF, and CI fails when the
+  committed copy is behind Sigstore's, like govulncheck, on a PR that changed nothing. Read its diff: it
+  decides whose signature the daemon believes.
+- **A candidate passes four filters**: the channel, higher SemVer precedence (`gatewayproto`), the
+  instance's own `gatewayproto.Check`, and not rolled back from here. Signed in to an instance not yet
+  heard from, nothing is chosen.
+- **Only a receipted install writes a binary** (`daemon/installreceipt`), and it is `auto` by default on
+  Linux and Windows. Any other install checks and says so. macOS checks and does not apply.
+- **The record is the updater's own** (`<state>/update/state.json`): the mode, the channel, a version on
+  trial, versions rolled back from. Not `config.toml`, which the daemon interprets for nobody (M21). What
+  it keeps of a host's words is cut short before it is written; a record that cannot be read is off and
+  never written over.
+- **A version is on trial for ten minutes of being up.** Two unconfirmed starts, or the previous run's
+  crash file, put the previous pair back and mark the version bad. A clean stop gives its start back, so
+  reboots inside a trial count against nothing. Nothing is installed over a trial.
+- **On Unix the daemon replaces itself (`exec`), keeping its PID; on Windows it starts its successor,
+  watches it for twenty seconds and exits 0.** The successor runs outside the task until the next logon,
+  and `daemon status` says so rather than "started by hand".
+- **`norite_testrelease`** is the one way a daemon believes another signer, for the end-to-end test and a
+  manual pass; a test holds a release build to containing none of it. Never ship a build with it.
+- **Testing the updater**: `newWorld` in `updater_test.go` serves a listing and a Linux archive, so a test
+  that sets `GOOS` to Windows stages nothing — assert the decision, not an install. A manual pass on
+  Windows runs in a VM, unprivileged, with SSH on loopback; M23's rule for a pass with an init system.
 
 ## Project-specific skills
 

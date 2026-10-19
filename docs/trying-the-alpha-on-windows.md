@@ -56,15 +56,15 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 What to know about it:
 
-- **It has run the least of anything here.** Its downloading and checking were exercised under PowerShell
-  on Linux, tampered archive included. Everything after the files are in place — the `PATH`, the daemon,
-  the questions — had not run on a real Windows machine when this was written. If it stops, the steps
+- **It was walked on Windows 11 in a virtual machine** for the release that updates itself: installing,
+  the daemon at logon, an update and its undoing. Not on every Windows there is; if it stops, the steps
   below do the same by hand, and its output is worth an issue.
 - **A download is checked before it is installed**: the archive must match the release's `checksums.txt`,
   and with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) installed that file's
   signature is verified too. Without it the script says the signature was not checked.
-- **The daemon is started hidden, for now.** It does not come back after Windows restarts unless you pass
-  `-AutoStart`, which registers it at logon; that path has not yet been run on Windows (see step 3).
+- **The daemon starts at every logon**, as a Task Scheduler task with no window. `-NoAutoStart` starts it
+  for this session only, and `-ShowConsole` gives it a window that shows its log as it is written, for
+  testing (see step 3).
 - **Options need the longer form**, since `irm | iex` cannot carry any:
 
   ```powershell
@@ -224,14 +224,22 @@ it stops the daemon. Everything else happens in the first tab.
 **To have it start by itself whenever you log in**, `.\norite.exe daemon install` registers it as a Task
 Scheduler task named "Norite Daemon", running as you and needing no administrator rights;
 `.\norite.exe daemon start` starts it now, and `.\norite.exe daemon status` reports on it.
-`.\norite.exe daemon stop` stops it, however it was started.
+`.\norite.exe daemon stop` stops the daemon, however it was started.
 
-This path was rebuilt for this release and **has not yet been run on Windows**: the task is registered
-from a definition that starts it at your logon, on battery as on mains, with no time limit. Because the
-daemon is a console program, Windows shows its console window while the task runs; closing that window
-stops the daemon. If the task does not start, a tab is the reliable way, and the output of
-`.\norite.exe daemon status` and `.\norite.exe logs tail` is worth an issue (see the last row of the
-table at the end for what that output names).
+Once a day the daemon checks for a new release and tells you: `.\norite.exe update status` says where
+that stands, and `.\norite.exe update mode off` stops the check. **If you installed with `install.ps1`**,
+the daemon verifies a new release's signature, installs it and starts it in its own place by itself;
+`norite update mode notify` makes it wait for `norite update apply`. Programs you extracted or built
+yourself, as in this step, are told about a release and are not replaced: both commands say so, and
+running `install.ps1` is how such an install becomes one that updates.
+
+The task starts the daemon at your logon, on battery as on mains, with no time limit, and with no window:
+it runs in a console nobody sees, which is how Windows still tells it you are signing out.
+`.\norite.exe logs tail --follow` shows what it is doing, and `.\norite.exe daemon install --show-console`
+gives it a window that shows its log, for testing. After an update the new version runs on its own until
+your next logon, and `daemon status` says so. If the task does not start, a tab is the reliable way, and
+the output of `.\norite.exe daemon status` and `.\norite.exe logs tail` is worth an issue (see the last
+row of the table at the end for what that output names).
 
 ## Step 4 — sign in
 

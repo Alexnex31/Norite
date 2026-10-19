@@ -185,7 +185,9 @@ func local(ctx context.Context, c Caller, method, path string, out any) error {
 			return &clierr.RefusedError{Message: termsafe.Text(re.Message)}
 		case ipc.RelayFailed:
 			return fmt.Errorf("the daemon could not do it: %s", termsafe.Text(re.Message))
-		case ipc.RelayTooManyRequests:
+		case ipc.RelayTooManyRequests, ipc.RelayUnreachable:
+			// Unreachable is the daemon's own request failing to reach somebody else, the release host
+			// (M24): unavailable, like an instance that cannot be reached, and not a refusal.
 			return fromRelay(err)
 		}
 		return older

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/update.schema.json",
+  "title": "norite update --json",
+  "description": "The machine-readable output of `norite update status`, `check`, `apply`, `mode` and `channel` (M24): what the daemon knows about a newer release of the client, and what it will do about one.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. Every field is always present.\n\nEach command prints how things stand after it. `apply` prints the status as the daemon answered it, before it restarts as the new version: `available` is the version being installed, and a later `status` says whether it is on `trial` or was `rolled_back`. `norite update receipt` is the installer scripts' and prints nothing.",
+  "$ref": "#/$defs/status",
+  "$defs": {
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "mode", "channel", "installs", "reason", "available", "staging", "trial", "rolled_back", "last_check", "last_error"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "The version the running daemon is. `dev` for a build that is not a release."
+        },
+        "mode": {
+          "enum": ["auto", "notify", "off"],
+          "description": "auto: a verified release is installed by itself. notify: the daemon checks and waits for `norite update apply`. off: nothing is checked unless asked."
+        },
+        "channel": {
+          "enum": ["stable", "prerelease"],
+          "description": "Whether alphas, betas and release candidates are offered. An install that is itself a pre-release is offered them unless told stable; any other, only when asked."
+        },
+        "installs": {
+          "type": "boolean",
+          "description": "Whether this daemon installs a release itself: only an install Norite's installer made, on a platform where it is done."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why it does not, when `installs` is false. Empty otherwise."
+        },
+        "available": {
+          "type": "string",
+          "description": "A newer version the last check chose, as SemVer without a leading v, or empty. It is one this install may move to: higher than what runs, on the channel, and one the signed-in instance talks to."
+        },
+        "staging": {
+          "type": "string",
+          "description": "A version being downloaded and verified now, or empty. `norite update apply` answers with it still set when the download outlasts the command: the release is installed once it is verified, and status says how it went."
+        },
+        "trial": {
+          "type": "string",
+          "description": "A version installed and not yet confirmed, which is the one running, or empty. It is kept once it has stayed up; one that does not is undone."
+        },
+        "rolled_back": {
+          "type": "string",
+          "description": "A version that was installed, did not stay up and was undone, or empty. It is not installed again."
+        },
+        "last_check": {
+          "type": "string",
+          "description": "When the release listing was last read, RFC 3339 in UTC, or empty when it never was."
+        },
+        "last_error": {
+          "type": "string",
+          "description": "Why the last check or installation failed, or empty. A release whose signature did not verify is said here."
+        }
+      }
+    }
+  }
+}

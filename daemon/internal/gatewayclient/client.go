@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -66,6 +67,10 @@ type Options struct {
 	// gatewayproto.DevVersion: the server refuses an empty one, and an unstamped build is a dev build.
 	Version string
 	Log     zerolog.Logger
+	// OnVersionRefused is called when the instance and this daemon turn out not to talk for their
+	// versions, whichever side said so. It must not block. Nil is nothing (M24: the updater looks for a
+	// release then, and not a day later).
+	OnVersionRefused func()
 
 	// The waits between connections. Zero means the defaults; tests shrink them.
 	RetryMin, RetryMax time.Duration
@@ -111,11 +116,16 @@ const (
 
 // Client is the daemon's gateway connection.
 type Client struct {
-	creds   Credentials
-	sink    Sink
-	version string
-	log     zerolog.Logger
-	http    *http.Client
+	// serverVersion is the version the instance last reported in HELLO, as it wrote it. Read by the
+	// updater from another goroutine (M24).
+	serverVersion atomic.Pointer[string]
+
+	creds            Credentials
+	sink             Sink
+	version          string
+	onVersionRefused func()
+	log              zerolog.Logger
+	http             *http.Client
 
 	retryMin, retryMax                           time.Duration
 	rateLimitedFloor, protocolFloor, versionHold time.Duration
@@ -133,6 +143,7 @@ func New(opts Options) *Client {
 		creds:            opts.Credentials,
 		sink:             opts.Sink,
 		version:          opts.Version,
+		onVersionRefused: opts.OnVersionRefused,
 		log:              opts.Log,
 		retryMin:         orDefault(opts.RetryMin, defaultRetryMin),
 		retryMax:         orDefault(opts.RetryMax, defaultRetryMax),
@@ -179,6 +190,9 @@ func (c *Client) Run(ctx context.Context) {
 				c.sink.End()
 			}
 			c.generation, c.sessionID, c.seq = cred.Generation, "", 0
+			// And the version heard belongs to the instance the previous sign-in was to. Kept, it bounded
+			// what the updater chose by an instance this daemon had left (M24 /security-sweep).
+			c.serverVersion.Store(nil)
 		}
 
 		started := time.Now()
@@ -191,9 +205,16 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		wait := c.after(out, retry)
+		// Every wait is for this sign-in's instance, and the next sign-in may be to another: the hold
+		// for a refused version is an hour, a backoff up to a minute. Slept through, the wait kept a
+		// daemon signed in to a new instance from connecting to it, and kept the old instance's version
+		// as the one the updater chose by, which could install a release the new instance refuses
+		// (M24 /code-review: first the hold alone, then every wait).
 		select {
 		case <-ctx.Done():
 			return
+		case <-c.creds.Ended(cred.Generation):
+			c.serverVersion.Store(nil)
 		case <-time.After(wait):
 		}
 	}
@@ -247,6 +268,9 @@ func (c *Client) after(out outcome, retry *backoff.Backoff) time.Duration {
 		return max(retry.Next(), c.rateLimitedFloor)
 
 	case endVersion:
+		if c.onVersionRefused != nil {
+			c.onVersionRefused()
+		}
 		return c.versionHold
 
 	case endProtocol:
@@ -349,3 +373,14 @@ func closeEnding(code websocket.StatusCode) ending {
 
 // errHeartbeatMissed is how the heartbeat ends a connection the server has stopped answering.
 var errHeartbeatMissed = errors.New("the gateway stopped acknowledging heartbeats")
+
+// ServerVersion is the version the instance reported in its last HELLO, or "" before any. It is kept
+// whether or not the handshake then went on: an instance that refuses this daemon for its version is the
+// one whose version the updater most needs (M24). The text is the instance's, to be parsed and never
+// printed as it is.
+func (c *Client) ServerVersion() string {
+	if v := c.serverVersion.Load(); v != nil {
+		return *v
+	}
+	return ""
+}

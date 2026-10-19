@@ -33,6 +33,10 @@ var signedIn = socketAnswer{Running: true, Attached: true, Version: "0.1.0", Sta
 	Account: &ipc.Account{InstanceURL: "https://chat.example.com", UserID: "1", Username: "ada"}}
 
 func TestStatusAsksTheDaemonAsWellAsTheServiceManager(t *testing.T) {
+	// The wording where an update starts the daemon outside the service has a test of its own.
+	saved := updateStartsItself
+	updateStartsItself = false
+	t.Cleanup(func() { updateStartsItself = saved })
 	cases := []struct {
 		name   string
 		state  State
@@ -57,6 +61,14 @@ func TestStatusAsksTheDaemonAsWellAsTheServiceManager(t *testing.T) {
 				Instance: "https://chat.example.com", Username: "ada"},
 			text:   []string{"started by hand", "norite daemon install"},
 			absent: []string{"is not installed."},
+		},
+		{
+			// M24: a newer version the daemon knows of is one line, and a field.
+			name: "a newer version is out", state: State{Installed: true, Running: true, Detail: "active"},
+			socket: func() socketAnswer { s := signedIn; s.Update = "0.1.1"; return s }(), code: 0,
+			view: statusView{Running: true, Answering: true, Installed: true, Service: "active", ServiceRunning: true, Version: "0.1.0",
+				Standing: "signed_in", Instance: "https://chat.example.com", Username: "ada", Update: "0.1.1"},
+			text: []string{"update:   0.1.1 is out", "norite update status"},
 		},
 		{
 			name: "installed and stopped", state: State{Installed: true, Detail: "inactive"}, code: 1,
@@ -122,6 +134,16 @@ func TestStatusAsksTheDaemonAsWellAsTheServiceManager(t *testing.T) {
 			text:   []string{"started by hand", "The installed service is not running (inactive)", "norite daemon restart"},
 			absent: []string{"is running (inactive)"},
 		},
+		{
+			// The service manager's state could not be read, which is what a French Windows gave until M24's
+			// pass: who started the daemon is not known, so it is not said.
+			name: "installed, state unknown, and one running", state: State{Installed: true, Detail: "Unknown"},
+			socket: signedIn, code: 0,
+			view: statusView{Running: true, Answering: true, Installed: true, Service: "Unknown", Version: "0.1.0",
+				Standing: "signed_in", Instance: "https://chat.example.com", Username: "ada"},
+			text:   []string{"is running. The service manager did not say whether it started it (Unknown)."},
+			absent: []string{"started by hand", "norite daemon restart"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,7 +189,8 @@ func TestStatusPrintsNothingThatActsOnTheTerminal(t *testing.T) {
 	state := State{Installed: true, Running: true, Detail: "active" + hostile}
 	for _, argv := range [][]string{{"daemon", "status"}, {"--json", "daemon", "status"}} {
 		answerStatus(t, socketAnswer{Running: true, Attached: true, Version: "1" + hostile, Standing: ipc.StandingSignedIn,
-			Account: &ipc.Account{InstanceURL: "https://x" + hostile, Username: "ada" + hostile}, Problem: "p" + hostile})
+			Account: &ipc.Account{InstanceURL: "https://x" + hostile, Username: "ada" + hostile}, Problem: "p" + hostile,
+			Update: "0.1.1" + hostile})
 		out, err := runCommand(t, &stubManager{state: state}, argv...)
 		if err != nil {
 			t.Fatalf("%v: %v", argv, err)
@@ -213,5 +236,28 @@ func TestAPathNoSocketCanHaveIsNotARunningDaemon(t *testing.T) {
 	out, err := runCommand(t, &stubManager{}, "daemon", "status")
 	if code := exitCodeOf(t, err); code != 2 || !strings.Contains(out, "is not installed") || !strings.Contains(out, "problem:") {
 		t.Errorf("exit %d, output:\n%s", code, out)
+	}
+}
+
+// On Windows an update starts the new daemon outside the task, so the task says Ready while it runs. M24's
+// pass there found status calling it "started by hand" after every update.
+func TestStatusAfterAnUpdateOnWindowsDoesNotClaimItWasByHand(t *testing.T) {
+	saved := updateStartsItself
+	updateStartsItself = true
+	t.Cleanup(func() { updateStartsItself = saved })
+	answerStatus(t, signedIn)
+
+	out, err := runCommand(t, &stubManager{state: State{Installed: true, Detail: "Ready"}}, "daemon", "status")
+	if got := exitCodeOf(t, err); got != 0 {
+		t.Errorf("exit %d, want 0", got)
+	}
+	for _, want := range []string{"though not by the installed service (Ready): an update starts the new version",
+		"itself, or it was started by hand", "`norite daemon restart` hands it to the service now"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "is running, started by hand") {
+		t.Errorf("output still says it was started by hand:\n%s", out)
 	}
 }

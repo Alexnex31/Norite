@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -304,6 +305,16 @@ func (f *fakeCreds) signOut() {
 	close(f.ended)
 }
 
+// signInAgain ends the sign-in and starts another, as a logout and a login to some instance do.
+func (f *fakeCreds) signInAgain(instanceURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	close(f.ended)
+	f.ended = make(chan struct{})
+	f.cred.Generation++
+	f.cred.InstanceURL = instanceURL
+}
+
 func (f *fakeCreds) Current(ctx context.Context) (session.Credential, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -411,6 +422,7 @@ type harness struct {
 	creds  *fakeCreds
 	sink   *recordingSink
 	logs   *syncBuffer
+	client *Client
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -432,6 +444,7 @@ func start(t *testing.T, tweak ...func(*Options)) *harness {
 	ctx, cancel := context.WithCancel(t.Context())
 	h.cancel, h.done = cancel, make(chan struct{})
 	client := New(opts)
+	h.client = client
 	go func() { defer close(h.done); client.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
@@ -643,12 +656,25 @@ func TestEachCloseCodeGetsItsAnswer(t *testing.T) {
 // until somebody upgrades something.
 func TestAVersionMismatchIsNotRetriedSoon(t *testing.T) {
 	t.Run("the daemon refuses the server", func(t *testing.T) {
-		h := start(t, func(o *Options) { o.Version = "0.1.0" })
+		var refused atomic.Int32
+		h := start(t, func(o *Options) { o.Version = "0.1.0"; o.OnVersionRefused = func() { refused.Add(1) } })
 		c := h.g.next()
 		c.hello(time.Now(), "0.2.0", time.Minute)
+		// Whoever looks for a newer release is told now (M24).
+		require.Eventually(t, func() bool { return refused.Load() == 1 }, 2*time.Second, 5*time.Millisecond)
 		assert.Equal(t, websocket.StatusNormalClosure, c.closedWith(), "and no IDENTIFY was sent")
 		h.g.noConnectionWithin(200 * time.Millisecond)
 		assert.Contains(t, h.logs.String(), "upgrade the client")
+		// The version of the instance that refused it is the one the updater needs (M24).
+		assert.Equal(t, "0.2.0", h.client.ServerVersion())
+	})
+	t.Run("a version too long to be one is not kept", func(t *testing.T) {
+		h := start(t, func(o *Options) { o.Version = "0.1.0" })
+		assert.Empty(t, h.client.ServerVersion(), "before any HELLO")
+		c := h.g.next()
+		c.hello(time.Now(), strings.Repeat("9", 65), time.Minute)
+		c.closedWith()
+		assert.Empty(t, h.client.ServerVersion())
 	})
 	t.Run("the server refuses the daemon", func(t *testing.T) {
 		h := start(t)
@@ -657,6 +683,42 @@ func TestAVersionMismatchIsNotRetriedSoon(t *testing.T) {
 		c.closeWith(gatewayproto.CloseVersionMismatch, "upgrade the client")
 		h.g.noConnectionWithin(200 * time.Millisecond)
 	})
+}
+
+// The hold after a refused version is for the instance that refused. A sign-in to another instance ends
+// it: slept through, the daemon stayed off the new instance for an hour and went on reporting the old
+// one's version, by which the updater chose (M24 /code-review).
+func TestAVersionHoldEndsWithItsSignIn(t *testing.T) {
+	h := start(t, func(o *Options) { o.Version = "0.1.5" })
+	c := h.g.next()
+	c.hello(time.Now(), "0.2.0", time.Minute)
+	c.closedWith()
+	require.Equal(t, "0.2.0", h.client.ServerVersion())
+	h.g.noConnectionWithin(100 * time.Millisecond)
+
+	h.creds.signInAgain(h.g.srv.URL)
+	c2 := h.g.next()
+	assert.Empty(t, h.client.ServerVersion(), "the instance left still spoke for the one signed in to")
+	c2.hello(time.Now(), "0.1.5", time.Minute)
+	c2.expect(gatewayproto.OpIdentify)
+}
+
+// And so does every other wait: a backoff or a floor slept through kept the instance left as the one the
+// updater chose by, for as long as it lasted.
+func TestAnyWaitEndsWithItsSignIn(t *testing.T) {
+	h := start(t, func(o *Options) { o.Version = "0.1.5"; o.RateLimitedFloor = time.Hour })
+	c := h.g.next()
+	c.hello(time.Now(), "0.1.5", time.Minute)
+	c.expect(gatewayproto.OpIdentify)
+	c.closeWith(gatewayproto.CloseRateLimited, "slow down")
+	h.g.noConnectionWithin(100 * time.Millisecond)
+	require.Equal(t, "0.1.5", h.client.ServerVersion())
+
+	h.creds.signInAgain(h.g.srv.URL)
+	c2 := h.g.next()
+	assert.Empty(t, h.client.ServerVersion(), "the instance left still spoke for the one signed in to")
+	c2.hello(time.Now(), "0.1.5", time.Minute)
+	c2.expect(gatewayproto.OpIdentify)
 }
 
 // ---------- the daemon's own discipline ----------
@@ -670,11 +732,21 @@ func TestASignInThatChangesStartsAFreshSession(t *testing.T) {
 	c.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
 
 	c2 := h.g.next()
+	// The new sign-in may be to another instance, which has said nothing yet: what the last one reported
+	// as its version is not this one's, and the updater must not choose by it (M24 /security-sweep).
+	assert.Empty(t, h.client.ServerVersion(), "the previous sign-in's instance still spoke for this one")
 	c2.hello(time.Now(), gatewayproto.DevVersion, time.Minute)
 	f := c2.expect(gatewayproto.OpIdentify)
 	var id gatewayproto.Identify
 	require.NoError(t, json.Unmarshal(f.D, &id))
 	assert.Equal(t, "eyJ.grace", id.Token, "a RESUME would name the previous sign-in's session")
+
+	// And within one sign-in, a version too long to be one replaces the last with nothing.
+	require.Eventually(t, func() bool { return h.client.ServerVersion() != "" }, time.Second, time.Millisecond)
+	c2.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
+	c3 := h.g.next()
+	c3.hello(time.Now(), strings.Repeat("9", 65), time.Minute)
+	require.Eventually(t, func() bool { return h.client.ServerVersion() == "" }, time.Second, time.Millisecond)
 }
 
 // A logout whose hand-back never reached the instance leaves the server no reason to close the connection,

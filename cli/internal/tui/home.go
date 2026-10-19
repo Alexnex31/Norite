@@ -13,6 +13,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -74,6 +75,88 @@ type homeModel struct {
 	pending string      // a guild just joined, to select once home reloads
 
 	look *look // how it is drawn; the client's, replaced when the config is read again
+
+	// update is what the daemon last said about a newer release, or nil when it has said nothing (M24).
+	// It is about this machine and not the account, so a sign-out leaves it.
+	update *updateNotice
+}
+
+// updateNotice is the one sentence 7a's health block carries about updating, which home draws until the
+// status bar exists (M42).
+type updateNotice struct {
+	text string
+	// tone is which of the three states it is: a release out, one installed, one undone.
+	tone int
+}
+
+const (
+	toneOut = iota
+	toneInstalled
+	toneUndone
+)
+
+// maxNoticeVersion bounds a version drawn from the daemon's answer: a version is a few characters, and
+// what is drawn on every frame is not left to the length of somebody else's string.
+const maxNoticeVersion = 32
+
+// noticeOf turns the daemon's status into the sentence, or nil when there is nothing to say. own is this
+// client's version. A daemon newer than this client comes first, then a release that is out, then a
+// version undone.
+//
+// "Restart norite" is said when this program is older than the daemon it is attached to, and for as long
+// as it is. It was said while the new version was on trial, which told a client opened after the update
+// to restart, and stopped telling one left open across it after ten minutes (M24 /code-review).
+//
+// A release is "out" and never "ready": what the daemon reports is the listing's choice, and nothing has
+// been downloaded or verified when it is drawn.
+func noticeOf(st ipc.UpdateStatus, own string) *updateNotice {
+	ver := func(s string) string { return cut(termsafe.Text(s), maxNoticeVersion) }
+	// A version undone is said until something newer is: the record keeps it until another installation,
+	// and said first it hid for good the release that fixes it (M24 /code-review).
+	switch {
+	case olderThan(own, st.Version):
+		return &updateNotice{text: "↑ " + ver(st.Version) + " installed · restart norite", tone: toneInstalled}
+	case st.Available != "":
+		return &updateNotice{text: "↑ " + ver(st.Available) + " is out", tone: toneOut}
+	case st.RolledBack != "":
+		return &updateNotice{text: "↓ " + ver(st.RolledBack) + " undone", tone: toneUndone}
+	}
+	return nil
+}
+
+// olderThan reports whether own is a release below the daemon's. A build that is not a release, on either
+// side, is not told to restart.
+func olderThan(own, daemon string) bool {
+	mine, err := gatewayproto.ParseVersion(own)
+	if err != nil {
+		return false
+	}
+	theirs, err := gatewayproto.ParseVersion(daemon)
+	return err == nil && mine.Compare(theirs) < 0
+}
+
+// loadUpdate asks the daemon where updating stands. A daemon from before the request, or one that does
+// not answer, is nothing to say: the notice is a convenience and never an error on screen.
+func loadUpdate(gen int, s Session, own string) tea.Cmd {
+	return func() tea.Msg {
+		st, err := call(s, func(ctx context.Context, s Session) (ipc.UpdateStatus, error) {
+			var st ipc.UpdateStatus
+			return st, daemonclient.LocalRead(ctx, s, ipc.PathUpdate, &st)
+		})
+		if err != nil {
+			return updateMsg{gen: gen, unanswered: true}
+		}
+		return updateMsg{gen: gen, notice: noticeOf(st, own)}
+	}
+}
+
+// updateMsg is the answer, naming the attachment that asked. unanswered is a daemon that did not say:
+// what is on screen stays, since nothing was learned. Taken for "nothing to say", a daemon slow for one
+// read took a notice down that was still true (M24 /code-review).
+type updateMsg struct {
+	gen        int
+	notice     *updateNotice
+	unanswered bool
 }
 
 func newHome() homeModel {
@@ -417,7 +500,18 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 		// Read from a file a person can edit, and sanitized there; sanitized again, since it is drawn.
 		who = "signed in as @" + termsafe.Text(account.Username)
 	}
-	top = append(top, clip(h.look.bold.Render("Norite")+h.look.dim.Render(" · "+who), width), "")
+	title := h.look.bold.Render("Norite") + h.look.dim.Render(" · "+who)
+	if n := h.update; n != nil {
+		style := h.look.accent
+		switch n.tone {
+		case toneInstalled:
+			style = h.look.warn
+		case toneUndone:
+			style = h.look.danger
+		}
+		title += h.look.dim.Render(" · ") + style.Render(n.text)
+	}
+	top = append(top, clip(title, width), "")
 
 	// The redeem box, drawn below the list but sized first, since the list takes whatever it leaves.
 	box := []string{h.look.label.Render("REDEEM AN INVITE"), "  " + h.code.View()}

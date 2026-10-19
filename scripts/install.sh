@@ -157,6 +157,33 @@ place() {
     mv -f "$bin_dir/.$1.new.$$" "$bin_dir/$1"
 }
 
+# leave_receipt records where the two programs were put, which is what lets the daemon install a later
+# release itself (M24): it writes over the pair only in a directory an installer named.
+#
+# There is one receipt per account, for the install its daemon runs from. So it is written only when this
+# run sets the daemon up: with --no-daemon the programs are being put somewhere for another purpose, a
+# server's in /opt or a test's in a temporary directory, and writing then would point the account's real
+# install at the wrong place. A build of a checkout is not a release and is not updated, so a receipt an
+# earlier install left for this directory is removed; one for another directory is not this run's.
+#
+# A version from before the updater has no such command and no updater either: nothing is recorded, and
+# nothing is said of updates it does not make. It used to print that version's usage error and then
+# describe a daily check the version does not have.
+leave_receipt() {
+    receipt=0
+    if ! "$norite" --help 2>/dev/null | grep -q '^ *update '; then
+        receipt=none
+    elif [ "$mode" = release ] && [ "$daemon" = 1 ]; then
+        if "$norite" update receipt --bin-dir "$bin_dir" --by install.sh; then
+            receipt=1
+        else
+            warn "could not record where Norite was installed; it will tell you about new releases and not install them."
+        fi
+    elif [ "$mode" != release ]; then
+        "$norite" update receipt --forget --bin-dir "$bin_dir" >/dev/null 2>&1 || true
+    fi
+}
+
 on_path() {
     case ":$PATH:" in
         *":$bin_dir:"*) return 0 ;;
@@ -246,6 +273,7 @@ uninstall() {
     step "Removing Norite from $bin_dir"
     "$norite" logout >/dev/null 2>&1 || true
     "$norite" daemon uninstall >/dev/null 2>&1 || true
+    "$norite" update receipt --forget --bin-dir "$bin_dir" >/dev/null 2>&1 || true
     rm -f "$bin_dir/norite" "$bin_dir/norite-daemon"
     say "Removed. The daemon's state directory is left in place; delete it for a clean slate:"
     case "$os" in
@@ -327,12 +355,35 @@ main() {
     norite="$bin_dir/norite"
     "$norite" --help >/dev/null 2>&1 || die "$norite was installed but does not run on this machine"
     say "norite, norite-daemon$([ "$with_server" = 1 ] && printf ', norite-server')"
+    leave_receipt
 
     [ "$daemon" = 1 ] && setup_daemon
     [ "$account" = 1 ] && setup_account
     [ "$summary" = 1 ] || return 0
 
     step "Done"
+    # What is said here is what this install does. Without its receipt the daemon installs nothing, and
+    # saying it kept itself up to date straight after warning that it would not was two answers.
+    if [ "$receipt" = none ]; then
+        :
+    elif [ "$mode" = release ] && [ "$daemon" = 1 ] && [ "$receipt" = 0 ]; then
+        say "Norite checks once a day for a new release and tells you. This install does not install one:"
+        say "run this installer again for that. 'norite update mode off' stops the check."
+        say ""
+    elif [ "$mode" = release ] && [ "$daemon" = 1 ]; then
+        case "$os" in
+            darwin)
+                say "Norite checks once a day for a new release and tells you. On macOS it does not install"
+                say "one yet: run this installer again. 'norite update mode off' stops the check."
+                ;;
+            *)
+                say "Norite keeps itself up to date: once a day it checks for a new release, verifies its"
+                say "signature, and installs it. 'norite update mode notify' makes it ask first, and"
+                say "'norite update mode off' stops the check. 'norite update status' says where it stands."
+                ;;
+        esac
+        say ""
+    fi
     if on_path; then
         say "Run 'norite' to open the client, and 'norite --help' for everything else."
     else

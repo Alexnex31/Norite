@@ -148,7 +148,7 @@ func TestLocalDispatchTypesAreTheirOwnNamespace(t *testing.T) {
 		} `json:"$defs"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &doc))
-	require.Equal(t, []string{EventConfigUpdate}, doc.Defs.LocalDispatch.Properties.T.Enum)
+	require.Equal(t, []string{EventConfigUpdate, EventUpdate}, doc.Defs.LocalDispatch.Properties.T.Enum)
 	for _, name := range doc.Defs.LocalDispatch.Properties.T.Enum {
 		require.True(t, strings.HasPrefix(name, LocalEventPrefix))
 	}

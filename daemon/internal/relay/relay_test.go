@@ -93,6 +93,7 @@ func TestBuildKeepsTheInstancesPathPrefix(t *testing.T) {
 func TestTheDaemonsOwnPathsAreNeitherRelayedNorInTheContract(t *testing.T) {
 	for _, path := range []string{
 		ipc.PathConfigSplit, ipc.PathConfigUnsplit, "/@daemon", "/@daemon/anything", "/@DAEMON/config/split",
+		ipc.PathUpdate, ipc.PathUpdateCheck, ipc.PathUpdateApply, ipc.PathUpdateMode + "auto", ipc.PathUpdateChannel + "stable",
 	} {
 		_, err := Target(path)
 		require.Error(t, err, path)

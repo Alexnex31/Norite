@@ -1558,3 +1558,159 @@ carries the condition that would reopen it.
 - **Reopens if**: the path ever comes from somewhere other than the command line or `daemon/logfile`,
   such as `state.json` or the daemon's answer, or the command comes to run with more than its user's
   permissions.
+
+## M24 — client auto-update
+
+### A release host that withholds a release cannot be told from one with nothing new
+- **Raised**: M24, planning
+- **Verdict**: accepted risk
+- **Why**: the listing is unauthenticated and the updater believes nothing in it, which stops a forged
+  release and does nothing about a missing one. Whoever controls what the daemon reads from GitHub can
+  keep an install on an old version by listing nothing newer. Detecting that needs a signed, dated
+  statement of what the newest release is, which is what TUF's timestamp role is, and ADR 0020 keeps
+  Sigstore's infrastructure out of the update check.
+- **Reopens if**: a release is ever a security fix whose withholding is itself the attack worth defending
+  against at this layer, or the project comes to run a TUF repository of its own.
+
+### A signed release found to be bad cannot be revoked
+- **Raised**: M24, planning
+- **Verdict**: accepted risk
+- **Why**: a release's signature stays valid for ever, and the updater offers any release of higher
+  precedence than what runs. One withdrawn from GitHub can still be served, by whoever controls the host,
+  to an install older than it. The order rule bounds this: an install already past the bad version is
+  never moved back to it. The fix for a bad release is a newer one.
+- **Reopens if**: a release ships something that must not be installed by anybody, such as a signing
+  mistake or a data-destroying bug, and a newer release is not answer enough.
+
+### Anybody who can push a `v*` tag to the repository signs a release
+- **Raised**: M24, planning
+- **Verdict**: accepted risk
+- **Why**: the identity the updater trusts is `release.yml@refs/tags/<tag>`, and Sigstore issues that
+  certificate to the workflow run for any tag pushed, whichever commit it names and whatever that
+  commit's `release.yml` says. Write access to the repository is therefore code execution on every
+  auto-updating client within a day. That is one account today, and it is the same trust a user already
+  places in the installer script fetched from the same repository.
+- **Reopens if**: a second account gains write access, or tags come to be created by automation: then
+  tag protection, or an identity that also names the commit's branch, is owed.
+
+### A new version that crashes before the updater's start check is not rolled back
+- **Raised**: M24, planning (question D), and again when the end-to-end test was written
+- **Verdict**: accepted risk
+- **Why**: the rollback is done by the new version itself, as the first thing its run does after taking
+  the lock. A version that cannot get that far, because it crashes in `init`, in flag parsing, or
+  opening its log, counts no starts and restores nothing, and the daemon stays down until somebody runs
+  the installer. Two things narrow it: the new daemon is run once with `-version` before anything is
+  swapped, so one that cannot start at all is never installed; and the code before the check is small and
+  does not change often. A launcher that outlives the daemon would close it, at the cost of a third
+  program and a second process for good.
+- **Reopens if**: a release ever does crash before the check in the field, or anything substantial is
+  added to the daemon's start ahead of `updater.AtStart`.
+
+### An install that outlives a Sigstore key rotation without updating can no longer update itself
+- **Raised**: M24, planning (question H)
+- **Verdict**: accepted risk
+- **Why**: verifying offline means the trusted root is in the binary, and a release signed under a key
+  that root does not hold fails to verify on that binary. It fails closed: the version keeps running and
+  `norite update status` says the signature did not verify. The installer still works, since it verifies
+  with cosign, which fetches the current root. CI fails when the committed root is behind Sigstore's, so
+  each release carries a current one, and only an install that skipped every release across a rotation
+  is stranded.
+- **Reopens if**: Sigstore's rotations become frequent enough that ordinary installs miss one, in which
+  case each release should also carry the current root under `checksums.txt`.
+
+### The daily check tells GitHub this machine's address and the daemon's version
+- **Raised**: M24, planning (question C)
+- **Verdict**: accepted risk
+- **Why**: the request goes to `api.github.com` with a `norite-daemon/<version>` user agent, no cookie
+  and no credential. GitHub learns that an address runs Norite, and which version. It is said in the
+  command's help, in the guide and in ADR 0020, and `norite update mode off` stops it. Routing it through
+  the instance was declined: it would make every instance a relay and add a backend route for it.
+- **Reopens if**: the check ever carries more than the version, or a flagship deployment makes it
+  reasonable to serve the listing from the project's own host.
+
+### Whoever can write the account's state directory decides what the updater does
+- **Raised**: M24, building the installer
+- **Verdict**: not a vulnerability
+- **Why**: the receipt, the record of bad versions, the mode and the kept previous pair are files in the
+  `0700` state directory, and the installed programs are files the account owns. A program running as the
+  account can edit any of them, and can as easily replace `norite-daemon` outright. The updater crosses
+  no boundary that file access has not already crossed. What it must not do is let a file there change
+  whose signature is believed, and nothing does: the root and the identity are compiled in.
+- **Reopens if**: the daemon ever runs with more privilege than the account that owns its state
+  directory, or any file comes to influence the trusted root or the identity.
+
+### A build tag turns the daemon into one that believes a test's signer
+- **Raised**: M24, the end-to-end test
+- **Verdict**: not a vulnerability
+- **Why**: `norite_testrelease` compiles in a file that takes the release host, the signer and a crash
+  switch from the environment. It is a build tag and not a flag because a released daemon must have no
+  value it can be given that changes the signer. A test builds the daemon without the tag and holds the
+  binary to containing none of the names that file reads, having shown with a tagged build that it can
+  see them; another holds every build recipe and workflow to not naming the tag.
+- **Reopens if**: any release configuration, recipe or installer passes build tags, or the seam is
+  ever reached by something other than a build tag.
+
+### Three dependencies pass the license gate on a hand-read license
+- **Raised**: M24, adding `sigstore-go`
+- **Verdict**: accepted risk
+- **Why**: `in-toto-golang`, `in-toto/attestation` and `json-canonicalization` ship a LICENSE holding only
+  the Apache-2.0 notice, which `go-licenses` cannot classify. Each was read, and is listed in
+  `contracts/license-overrides.txt` with the SHA-256 of the file that was read; a version whose LICENSE
+  differs fails the gate until it is read again. Their rows in the notices carry that short notice, and
+  the full Apache-2.0 text is in the same file under other modules.
+- **Reopens if**: the list grows past the handful a person reads carefully, or a module is added to it
+  whose file is anything other than a recognised license's short form.
+
+
+### A release host can send the daemon to any address with a redirect
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: a release's files are served by a redirect to wherever GitHub keeps them, so the client
+  follows one to any HTTPS host, a loopback or private address included. What comes back is read only as
+  a listing, a checksum file, a bundle or an archive, each bounded, and none of it is believed or sent
+  anywhere: the host learns nothing from the answer. It takes control of `github.com`'s answers under a
+  valid certificate, and buys one unauthenticated GET with no body. The words of an error, which name the
+  address, are cut before they are kept or shown.
+- **Reopens if**: anything read from the release host is ever reported back to it or to an instance, or
+  the request comes to carry a credential.
+
+### The installed programs' directory is trusted not to be writable by anybody else
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: an installation writes `norite.new` and `norite-daemon.new` in the receipt's directory, by a
+  name anybody could guess, and follows a link planted under it. Somebody who can create a file there can
+  already replace `norite-daemon` itself, which is code run as the account at its next start. The
+  installers put the programs in a directory of the account's own.
+- **Reopens if**: an installer ever offers a shared directory, or the daemon installs with more
+  privilege than the account.
+
+### A crash in a new version's first ten minutes marks that version bad for good
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the rollback cannot tell a release that is broken from one that crashed for a reason of this
+  machine's, or because an instance sent something that panics it. Either way the version is undone and
+  never offered here again, and nothing clears the list. The cost is one release skipped on one install:
+  the next release is offered as usual, and the installer installs the skipped one by hand. An instance
+  that can crash the daemon at will has that with or without an updater.
+- **Reopens if**: a release line ends, so that the skipped version is the last one an install could
+  move to, or the field shows releases being skipped for crashes that were not theirs.
+
+### The instance decides which signed releases its clients may move to
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the version an instance reports in HELLO bounds the choice, and an instance may report any
+  version it likes. It can hold its clients where they are by naming a pre-release, or let them move
+  ahead to a release that then refuses it. It cannot move one backwards, to a version rolled back from,
+  or to anything the release workflow did not sign, and a version reported by one sign-in's instance is
+  forgotten when the sign-in changes. Staying is the outcome the instance rule exists to prefer: a client
+  that cannot talk to the instance somebody chose is the failure it prevents.
+- **Reopens if**: a release ever fixes something an instance could exploit in its own clients, where
+  being held back by that instance is the attack.
+
+### `norite update check` asks GitHub as often as it is run
+- **Raised**: M24, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the schedule asks once a day and a refused handshake at most every fifteen minutes, and a
+  check somebody asks for is not throttled. It is an attach-socket request, so only the account's own
+  programs can make it, and any of them can ask GitHub directly. One check or download runs at a time.
+- **Reopens if**: the request is ever reachable from the port for scripts, or from an instance.

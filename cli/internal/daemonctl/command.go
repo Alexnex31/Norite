@@ -19,6 +19,7 @@ import (
 const (
 	daemonBinaryFlag = "daemon-binary"
 	lingerFlag       = "linger"
+	showConsoleFlag  = "show-console"
 )
 
 // managerFor builds the Manager each action operates through.
@@ -78,6 +79,11 @@ func installCommand() *cli.Command {
 					DaemonBinaryEnvVar + ", then next to this binary, then PATH)",
 			},
 			&cli.BoolFlag{
+				Name: showConsoleFlag,
+				Usage: "Windows: run the daemon in a console window that shows its log as it is written, " +
+					"for testing; by default it has none",
+			},
+			&cli.BoolFlag{
 				Name: lingerFlag,
 				Usage: "Linux: keep your account's services running after you log out, so the daemon " +
 					"starts at boot and survives an SSH session ending",
@@ -93,6 +99,15 @@ func installCommand() *cli.Command {
 			if cmd.Bool(lingerFlag) && !canLinger {
 				return clierr.Usage("--linger is for Linux, where a service stops at logout; on this platform " +
 					"the daemon starts at login and there is nothing to keep it running without one")
+			}
+
+			shower, canShow := mgr.(ConsoleShower)
+			if cmd.Bool(showConsoleFlag) && !canShow {
+				return clierr.Usage("--show-console is for Windows; on this platform the daemon has no window, " +
+					"and `norite logs tail -f` follows its log")
+			}
+			if canShow {
+				shower.ShowConsole(cmd.Bool(showConsoleFlag))
 			}
 
 			binary, err := LocateDaemon(cmd.String(daemonBinaryFlag))

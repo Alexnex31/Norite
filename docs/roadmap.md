@@ -1518,6 +1518,7 @@ of this section.
   job. **It has not been run on Windows from this branch unless the PR says so**: the definition and the
   command lines are asserted through `Runner`, and `install.ps1` therefore still registers the task only
   with `-AutoStart`. Making that the default is one line, owed once somebody has watched it work.
+  **M24's pass in a Windows VM watched it, and made it the default.**
 
   **The console window is left as it was**, open while the task runs. Two ways of removing it were written
   and neither kept. A windowless build stops the daemon printing in a tab. Letting go of the console
@@ -1525,6 +1526,8 @@ of this section.
   logging off through its console, so a daemon without one is killed at every logoff and shutdown where
   it now gets to stop, which is the spent-token kill the stop request exists to prevent, on the commonest
   path there is. Hiding the window and keeping the console is the candidate, and needs a Windows machine.
+  **Done at M24**, which had one in a VM: the task runs the daemon in `conhost.exe --headless`, a console
+  with no window, and a sign-out and a shutdown were both seen to stop it cleanly.
 
   **`norite daemon status` also asks the socket**: version, standing, and "running, started by hand" where
   the service manager knows nothing. A daemon that answers is exit 0 however it was started. `--json`.
@@ -1537,47 +1540,123 @@ of this section.
   the test fails if a cap is removed; a daemon stopped through the socket exits 0 and is not
   restarted; and `norite logs tail` on a log holding escape sequences and an over-long line prints neither.
   macOS and Windows are covered by command-line tests, and by a manual pass only where the PR says one ran.
-- **M24 — Client auto-update mechanism**: version-check endpoint polling; Sigstore/cosign signature
-  verification, using self-contained offline-verifiable bundles, before any binary swap; anti-downgrade
-  protection; fail-closed behavior on verify failure; auto-rollback on repeated crash-loop after an update;
-  surfaced to the user in CLI/TUI/GUI. Depends on M23. Done when: a signed test release installs and the
-  daemon swaps to it, verified with no network call beyond the version-check/download itself; an unsigned or
-  downgrade-attempt release is rejected and the current version keeps running; and a deliberately-crashing
-  "bad" release triggers automatic rollback to the previous binary. Once Phase E exists, this milestone's
-  guard additionally defers applying a downloaded update while the daemon is tracking an active voice
-  session, applying it only once the call ends (`architecture.md` §6).
+- **M24 — Client auto-update mechanism**: the daemon finds, verifies, installs and if need be undoes a
+  release of the client. Depends on M23. Rewritten at planning on 2026-10-10; what the entry said before,
+  and why it could not be built as written, is the list under "Corrected at planning".
 
-  **Inherited from M23.** The updater stops the daemon through `POST /@daemon/stop` and never through the
-  service manager, whose stop is a kill on Windows; the old binary asks, since it is the running daemon's
-  version and the new one may not be able to attach. And the Windows task M23 rebuilt as an XML
-  definition has not been run on Windows: this milestone cannot be done there until it has, and
-  `install.ps1` registers the task by default once somebody has watched it work. The task's console
-  window is still shown; M23's entry says which two ways of removing it are wrong and which is left to
-  try, and whatever is chosen must leave the daemon told about a logoff.
+  **Finding one.** Once a day, with jitter, and on `norite update check`, the daemon reads this
+  repository's release listing from GitHub: the listing `install.sh` has used since M20a. There is no
+  version-check endpoint of the project's own, and an instance cannot be one, since it knows its own
+  version and not what has been released. The listing is a hint and nothing more: it is bounded, its tags
+  are parsed strictly, and nothing it says is believed until a signature says it too. The request carries
+  a `norite-daemon/<version>` user agent and nothing else, and `norite update mode off` stops it.
 
-  **Versions are compared by SemVer precedence, noted 2026-09-30 with ADR 0033**, which makes the three
-  guards above consistent rather than changing any of them.
-  - **Downgrade.** "Downgrade" means lower precedence under SemVer §11: a pre-release sorts below its
-    release (`0.2.0-rc.1` < `0.2.0`), build metadata is ignored, and moving from `0.2.0-beta.1` to
-    `0.2.0` is an upgrade while the reverse is refused.
-  - **Rollback.** Auto-rollback is not an exception to anti-downgrade, because it is not an update: it
-    restores the binary this installation already ran and kept, and never accepts an offered one. It
-    records the crashing version so that version is not offered again.
-  - **Channels.** A stable install is **never offered a pre-release**. Receiving alphas, betas and rcs is an
-    explicit opt-in, and an opted-in install takes whichever candidate has the highest precedence, stable
-    releases included.
-  - **The instance's version.** While MAJOR is 0 every MINOR may be incompatible (ADR 0033), and the backend
-    is not auto-updated (ADR 0020). So a client **never installs a version its own instance's handshake
-    would refuse** (M20's rule): a daemon signed in to a `0.2.x` instance is not moved to `0.3.0` by the
-    update check.
+  **Choosing one.** A candidate must pass all four:
+  - **Channel.** A stable install is never offered a pre-release unless it opts in
+    (`norite update channel prerelease`). An install that is itself a pre-release is offered them unless
+    told `stable`, since the installer installs the newest release of any kind. Either takes the highest
+    precedence the instance rule allows, stable releases included. Signed out, a daemon updates by
+    itself all the same, a pre-release too. The cost is accepted: an install pinned to an instance's
+    release candidate can be moved past it before its first sign-in, and is then reinstalled at that
+    version with `norite update mode notify` set.
+  - **Order.** Higher precedence than what runs, under SemVer §11: a pre-release sorts below its release,
+    build metadata is ignored. The comparison lives in `gatewayproto`, beside the parser.
+  - **The instance.** `gatewayproto.Check(instance, candidate)` must pass, the handshake's own function
+    (M20's rule): while MAJOR is 0 that is the instance's MINOR, and for a pre-release instance the
+    identical version. The daemon knows the instance's version from HELLO, including when HELLO refused
+    it, which is the case where the update is needed, and a refused HELLO asks for a check at once
+    rather than at the next daily one. Signed in to an instance not yet heard from in this run, nothing
+    is chosen. Signed out, the daemon's own version stands in for the instance's, so only patches are
+    taken.
+  - **Not known bad.** A version this installation rolled back from is not offered again.
 
-  **This is the last milestone of Phase D, so its completion cuts `v0.1.0`** (ADR 0033), unless the
-  phase's last milestone changes. It was also to be the milestone that wires release signing, with
-  `v0.1.0-alpha` at M20a shipping checksums and no signature. **Signing moved to M20a on 2026-10-02**: the
-  release workflow signs `checksums.txt` with cosign, keyless, under its own GitHub OIDC identity, and a
-  tester verifies with `cosign verify-blob`. What stays here is what this milestone was always about —
-  the updater verifying a release before it swaps anything in, against that same identity, offline from
-  the bundle — so the signatures it checks exist from the first release rather than from this one.
+  **Verifying it.** `checksums.txt`, its Sigstore bundle and this platform's client archive are
+  downloaded into the state directory, each bounded. The bundle is verified with `sigstore-go`, offline,
+  against a trusted root embedded in the binary and the identity
+  `release.yml@refs/tags/<the candidate's tag>` under GitHub's OIDC issuer: the identity names the tag,
+  so one version's bundle cannot stand for another. Then the archive's SHA-256 against `checksums.txt`,
+  then `norite` and `norite-daemon` are taken from the archive by exact name. Any failure deletes what
+  was downloaded, leaves the current version running, and is reported (fail closed). A release that
+  cannot be staged is given up on for that run of the daemon, at once when its signature or its programs
+  are refused and after three failed downloads otherwise, so the next check falls back to the newest of
+  the others. It is not remembered past the run: the cause may be this install's own root, or its
+  network. No flag, file or environment variable changes the root or the
+  identity in a release build.
+
+  **Installing it.** The staged daemon is first run with `-version` and must report the candidate's
+  version, which stops a binary that cannot start. The daemon then ends its run as a stop request does
+  (M23), so an answered token renewal is stored; with its lock still held it sets the current pair aside,
+  renames the new pair in, and writes an update record. On Unix the process replaces itself with the new
+  binary, keeping its PID. On Windows, where a process cannot do that, it starts the installed version as
+  a process of its own, with a hidden console, watches it for twenty seconds, starting it again up to
+  twice if it fails in them, and exits 0: a daemon started by hand has nothing else to start it, and the
+  task's restart-on-failure cannot see a crash through the console host it runs the daemon in. The task
+  does not count that process as its own, so it runs outside the task until the next logon, and
+  `norite daemon status` says so. A swap interrupted half-way is finished or undone from the record at
+  the next start. Once Phase E exists, applying is deferred while a voice session is active
+  (`architecture.md` §6); the seam is built here.
+
+  **What a restart costs a script.** The port for scripts mints its secret per run (M22), so a daemon
+  that restarts to install a release closes every script's connection and opens the port under a new
+  secret: a bot started with `norite automation run` has to be started again, as after any restart of
+  the daemon, and with the mode on `auto` that moment is the updater's to choose. Accepted for M24:
+  `norite update mode notify` puts the moment back in a person's hands. Deferring an update while a
+  script is connected would let one long-running bot hold every release off for good.
+
+  **Undoing it.** The first thing the daemon does at start is read the update record. A start that finds
+  two unconfirmed starts before it, or the previous run's crash file (M23), restores the pair set aside,
+  records the version as bad and starts that. A run that stays up ten minutes confirms the update, and
+  until one has, no other release is installed over it: the pair set aside is its predecessor's.
+  Rollback is not an exception to the order rule, because it is not an update: it restores what this
+  installation already ran and never accepts an offered version.
+
+  **Which installs.** Only one the installer scripts made, which leave a receipt naming where the two
+  programs are. Any other install, a package manager's or a checkout's, checks and says so and never
+  writes a binary. A `dev` build does neither. `auto` is the default for a receipted install, said by the
+  installer with how to change it; `notify` checks and waits for `norite update apply`; `off` asks
+  nobody. The mode and the channel are set with `norite update mode|channel` and kept in the updater's
+  own record in the state directory, not in `config.toml`: they are this machine's and the daemon's own,
+  as the port for scripts' switch is, and the daemon interprets nobody's config file (M21).
+
+  **Platforms.** Linux and Windows are each walked in a VM. The Windows walk was to be the author's on a
+  real machine, and the first try there found the guide written for it hard to follow, so it ran in a
+  Windows 11 VM instead, with M23's task, which that milestone never ran. It passed, so `auto` is the
+  default there as everywhere, which had waited on it, and `install.ps1` registers the task by default.
+  macOS checks and notifies and does not apply, no Mac being available; its guide says so.
+
+  **Surface.** `norite update status|check|apply` with `--json`; a line in `norite daemon status`; five
+  requests under `/@daemon/update`, the attach socket's tier and refused by the port for scripts
+  (rule 16); a `DAEMON_UPDATE` dispatch; one line in the terminal client (`7a`'s health block, and until
+  M42 draws that, home). The GUI's half is M78's.
+
+  Done when: against a real signed pre-release cut from this branch, a daemon one version lower installs
+  it and is running it, with no network call beyond the listing and the downloads; an unsigned release
+  and a downgrade are each refused and the current version keeps running; and a release that crashes at
+  start is rolled back to the previous pair and not offered again. The last three are walked by a test
+  with real daemon binaries on a signer of the test's own, which only a build tag reaches
+  (`norite_testrelease`), since a crashing release signed by the real workflow would be a public one; a
+  test holds a build without the tag to containing none of it. The real verifier is tested against the
+  published alpha's bundle and against an authority made in the test.
+
+  **Corrected at planning.**
+  - "Version-check endpoint polling" named an endpoint nobody serves. It is GitHub's listing, a daily
+    call to a third party, which ADR 0020's "no phone-home dependency" was written about Sigstore and had
+    not considered for the check itself. ADR 0020 is amended.
+  - `gatewayproto` parsed versions and could not order them.
+  - Nothing said who rolls back, and a binary that crashes at start cannot be trusted with all of it:
+    hence the run with `-version` before the swap. A crash before `main` after that run passed is not
+    covered (ledger).
+  - The note inherited from M23 had "the old binary" ask through `POST /@daemon/stop`, which fits an
+    updater outside the daemon. The daemon updates itself (ADR 0020) and ends its own run with the same
+    cancellation. The rule that note protects holds: never the service manager's stop.
+  - The embedded root goes stale when Sigstore rotates a key. `just trusted-root` regenerates it, CI
+    fails when it is behind, and an install that outlives a rotation without updating fails closed and is
+    told to reinstall (ledger).
+  - "Surfaced in CLI/TUI/GUI" had no screen and no GUI.
+
+  **This is the last milestone of Phase D, so its completion cuts `v0.1.0`** (ADR 0033), after
+  `v0.1.0-rc.1` from this branch. Release signing itself moved to M20a on 2026-10-02; what is here is the
+  updater verifying against that same identity.
 
 #### Phase E — Voice
 
@@ -1717,6 +1796,9 @@ of this section.
   row 2 the contextual chord set. Never wraps: segments truncate in the documented order. Done when: every
   screen built after this feeds it without special-casing, and a narrow terminal truncates rather than
   reflowing.
+
+  **Inherited from M24.** The health block carries the update notice `7a` now specifies; M24 drew the
+  same sentence on home, which this replaces.
 - **M43 — TUI message rendering** (`1a`): author grouping, day dividers, system lines, the composer, and the
   small allow-list-only markdown renderer (bold/italic/code/links/mentions — not `glamour`, to keep the
   trusted-rendering surface as narrow as the security posture used everywhere else). Every rendered string
@@ -2464,6 +2546,9 @@ when a constraint the terminal imposed is lifted.
 - **M78 — GUI skeleton**: the Gio app scaffold and the `1a` frame rendered natively, attaching to the daemon
   via the same local socket/protocol the terminal clients use (M20). Done when: the GUI receives the same
   DISPATCH events the TUI does, from the same daemon.
+
+  **Inherited from M24.** The GUI shows what `DAEMON_UPDATE` and `GET /@daemon/update` say: that a
+  release is out, was installed, or was undone. M24 built the daemon's half and the terminal's.
 - **M79 — GUI message rendering**: the virtualized message list, the allow-list markdown renderer
   reimplemented for Gio's immediate-mode primitives (the same allow-list as M43, including emoji-shortcode
   resolution, on a different rendering target). Done when: a long channel scrolls smoothly and renders the

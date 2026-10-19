@@ -1603,6 +1603,31 @@ The request exists because on Windows the service manager's stop is a kill, and 
 refresh's answer and its write-back leaves a spent token on disk. It is first-party tier only: the
 automation port refuses every `/@daemon/` path.
 
+**Updating** (M24, ADR 0020): the daemon updates the client, which is itself and `norite`.
+- **Finding.** Once a day it reads this repository's release listing from GitHub. The listing is a hint:
+  nothing in it is believed.
+- **Choosing.** The highest release that is on the channel, higher than what runs by SemVer order, one
+  the signed-in instance's handshake accepts (`gatewayproto.Check`), and not one rolled back from here.
+  An install that is itself a pre-release is on the pre-release channel unless told otherwise.
+- **Verifying.** `checksums.txt` and its Sigstore bundle are verified offline with `sigstore-go`, against
+  a trusted root embedded in the binary and the identity `release.yml@refs/tags/<tag>`. Then the archive
+  against the checksums, then the two programs by exact name, then the new daemon is run once with
+  `-version`. Any failure leaves the running version running.
+- **Installing.** The daemon ends its own run, as a stop request does, and with its lock still held keeps
+  the current pair aside and renames the new pair in. On Unix the process then replaces itself; on
+  Windows it starts its successor and exits.
+- **Undoing.** A start that finds two starts of a new version that ended badly, or a crash file, restores
+  the kept pair and lists the version as bad. A run that stays up ten minutes is kept.
+- **Who.** Only an install with a receipt (`install.json` in the state directory) naming the directory the
+  daemon runs from, which the installer scripts leave. Any other install, a development build, and macOS
+  check and say so. Windows installs when asked and not by itself, until that has been watched working
+  there. The mode (`auto`, `notify`, `off`) and the channel are in the updater's own record
+  in the state directory, set with `norite update mode|channel`, and not in `config.toml`: they are this
+  machine's and the daemon's own.
+- **Surface.** Five requests under `/@daemon/update`, first-party tier only; `DAEMON_UPDATE`, which carries
+  nothing; `norite update status|check|apply`; one line in `norite daemon status` and on the terminal
+  client's home.
+
 **Service installation** (settled at Milestone M3): `norite daemon install | uninstall | start | stop |
 restart | status`, implemented in `cli/internal/daemonctl` behind one `Manager` interface with a backend per
 platform. Always a **user-scoped** service — a systemd *user* unit (`~/.config/systemd/user/`), a launchd
