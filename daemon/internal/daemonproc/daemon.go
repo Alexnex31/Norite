@@ -180,7 +180,7 @@ func Run(ctx context.Context, opts Options) error {
 	// stopRequested is that a stop request ended the run (M23), which like a signal means stay stopped.
 	var stopRequested atomic.Bool
 	update := updater.New(updater.Options{
-		Version: opts.Version, StateDir: stateDir, Executable: executable(), Log: log.With().Str("subsystem", "update").Logger(),
+		Version: opts.Version, StateDir: stateDir, Executable: executable(), Program: program(), Log: log.With().Str("subsystem", "update").Logger(),
 		Instance: func() (string, bool) {
 			version := ""
 			if gw := gateway.Load(); gw != nil {
@@ -337,6 +337,16 @@ func Run(ctx context.Context, opts Options) error {
 // installed, or one that did not stay up was undone (M24). cmd/daemond replaces the process on Unix, and
 // on Windows starts the installed version as a process of its own and exits 0.
 var ErrRestart = errors.New("the daemon must start again as the version now installed")
+
+// program is the path this program was started by, not resolved: the one cmd/daemond starts again when the
+// run ends to restart, asked here before anything could replace it.
+func program() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return path
+}
 
 // executable is this daemon's own path with links resolved, or "" when it cannot be found. Asked at the
 // start of a run, before anything is renamed over it.

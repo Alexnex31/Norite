@@ -132,7 +132,7 @@ func TestWhatAPersonIsTold(t *testing.T) {
 				s.Available, s.Installs, s.Mode, s.Reason = "0.1.1", false, ipc.UpdateNotify, "this install was not made by Norite's installer"
 			},
 			says: []string{"0.1.1 is out.", "does not install releases: this install was not made by Norite's installer."},
-			not:  []string{"norite update apply"}},
+			not:  []string{"norite update apply", "installed when you ask"}},
 		{name: "off, pre-releases", change: func(s *ipc.UpdateStatus) { s.Mode, s.Channel = ipc.UpdateOff, ipc.ChannelPrerelease },
 			says: []string{"Updates are off", "pre-releases too"}},
 		{name: "on trial", change: func(s *ipc.UpdateStatus) { s.Version, s.Trial = "0.1.1", "0.1.1" },

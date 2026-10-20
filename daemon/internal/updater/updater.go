@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -88,6 +89,9 @@ type Options struct {
 	StateDir string
 	// Executable is the running daemon's own path, resolved.
 	Executable string
+	// Program is the path this program was started by, not resolved: the one cmd/daemond starts again,
+	// and the one a package manager replaces. Empty, a packaged daemon does not watch it (watchReplaced).
+	Program string
 	// Instance returns the version the signed-in instance reported in this run, or "" when it has
 	// reported none, and whether the daemon holds a sign-in at all.
 	Instance func() (version string, signedIn bool)
@@ -135,6 +139,11 @@ type Updater struct {
 	withheld string
 	// staging is the version being downloaded and verified now, or "".
 	staging string
+	// replaced is the version a package manager installed over this program, which Finish starts, or "".
+	replaced string
+	// program is what was at Options.Program when the daemon was built, before anything could replace it,
+	// or nil. watchReplaced compares against it.
+	program os.FileInfo
 	// changed asks the loop for a turn now: the mode or the channel was set.
 	changed chan struct{}
 	// working is held by whichever of the loop and a request is checking or staging: a channel of one, so
@@ -176,6 +185,9 @@ func New(o Options) *Updater {
 		changed: make(chan struct{}, 1), failures: map[string]int{}}
 	u.life, u.end = context.WithCancel(context.Background())
 	u.installs, u.reason = u.standing()
+	if o.Program != "" {
+		u.program, _ = os.Stat(o.Program)
+	}
 	return u
 }
 
@@ -186,12 +198,20 @@ func (u *Updater) standing() (bool, string) {
 		return false, "this is a development build, which is not a release and does not update"
 	}
 	u.current = current
+	// A receipt naming this daemon wins over a package's marker: the installer's copy is the updater's,
+	// whatever else is on the machine. Any other install that a package manager made names its command.
 	receipt, err := installreceipt.Read(u.opts.StateDir)
 	if err != nil {
+		if reason := packageManager(u.opts.Executable, u.opts.GOOS); reason != "" {
+			return false, reason
+		}
 		return false, "this install was not made by Norite's installer, so whatever installed it updates it"
 	}
 	u.installer.BinDir = receipt.BinDir
 	if !samePath(u.opts.Executable, filepath.Join(receipt.BinDir, daemonName+exeSuffix(u.opts.GOOS)), u.opts.GOOS) {
+		if reason := packageManager(u.opts.Executable, u.opts.GOOS); reason != "" {
+			return false, reason
+		}
 		return false, "this daemon is not the one the installer put in " + termsafe.Text(receipt.BinDir)
 	}
 	if u.opts.GOOS == "darwin" {
@@ -242,6 +262,7 @@ func (u *Updater) AtStart(crashed bool) bool {
 func (u *Updater) Run(ctx context.Context) {
 	// What a request left downloading ends with the run.
 	defer u.end()
+	go u.watchReplaced(ctx)
 	confirm := time.NewTimer(confirmAfter)
 	defer confirm.Stop()
 	// The schedule is kept as a time of day and not as a timer's length. A timer counts the time this
@@ -648,8 +669,16 @@ func (u *Updater) begin() {
 // starts at the next start.
 func (u *Updater) Finish(stopped func() bool) bool {
 	u.mu.Lock()
-	staged, applying := u.staged, u.applying
+	staged, applying, replaced := u.staged, u.applying, u.replaced
 	u.mu.Unlock()
+	if replaced != "" {
+		// A package manager's install, not the updater's: nothing to install, only to start.
+		if stopped() {
+			u.opts.Log.Info().Str("to", replaced).Msg("asked to stop; it starts as the version installed next time")
+			return false
+		}
+		return true
+	}
 	if !applying || staged == nil {
 		u.cleanExit()
 		return false
