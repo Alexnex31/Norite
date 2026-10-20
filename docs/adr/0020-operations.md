@@ -18,6 +18,10 @@ wrong for the reason given.
   told to reinstall.
 - **Only an install the installer scripts made updates itself.** Any other checks and says so.
 
+**Amended by [ADR 0035](0035-package-managers.md) (2026-10-20)** in one place: an install a package
+manager made checks and names that manager's command. The package manager updates it; the daemon never
+writes a binary it did not install.
+
 ## Context
 A daemon-based client architecture that self-updates, plus a self-hosting story that needs to stay
 one-command-simple, both need real operational decisions: how updates are verified and rolled back, how

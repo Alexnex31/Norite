@@ -402,12 +402,13 @@ the milestone number lowercased, so a copy here carries no information and only 
 **`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
 dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
 reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Twelve exist:
+tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Fourteen exist:
 `M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
-surface), `M16b` (opt-in per-guild message audit), `M20a` (first usable client), `M56a` (message
-reactions), `M62a` (guild info and per-guild preferences), `M67a`
+surface), `M16b` (opt-in per-guild message audit), `M20a` (first usable client), `M37a` (Snap package),
+`M56a` (message reactions), `M62a` (guild info and per-guild preferences), `M67a`
 (registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional),
-`M76a` (self-service account export and deletion) and `M93a` (instance announcements). `M72b` was the
+`M76a` (self-service account export and deletion), `M78a` (Flatpak package) and `M93a` (instance
+announcements). `M72b` was the
 first `b`, which the convention already allowed — letters run `a`, `b`, `c` in insertion order after the
 same number.
 
@@ -2708,6 +2709,28 @@ And on voice input, from M25 (ADR 0034):
 - **A Linux app id needs an installed `.desktop` file.** `install.sh` owns it, and uninstall removes it.
 - **A pass that captures audio checks its wiring.** `pw-link -l` before and after every capture in a VM,
   because a virtual source's name is a request PipeWire may not honor.
+
+And on packages, from the `package-managers` branch (ADR 0035):
+
+- **The package definitions restate a release too.** `.goreleaser.yaml`'s nFPM packages, casks, Scoop and
+  winget manifests and AUR packages name the same archives, programs and notice paths as `install.sh` and
+  `install.ps1`; a change to one changes the others in the same commit. `just release-dry-run` checks
+  each client package holds both programs and its marker.
+- **A package installs files and starts nothing.** `norite login` offers the service (M23). No package
+  script reaches a user's service manager: removal says what to run.
+- **A packaged install is its package manager's to update.** The daemon checks and names the command.
+  How it knows is `daemon/internal/updater/packaged.go`: the `packaged-by` marker a package installs, or
+  the directory Homebrew, winget or Nix installs into. A new channel is a row there and in ADR 0035 §4.
+- **A packaged daemon starts the version installed over it**, by watching the path it was started by
+  (`updater/replaced.go`) and ending its run as an update does. Only a packaged daemon, never on Windows,
+  never during a voice session.
+- **A service names the path the manager keeps.** `daemonctl` takes the daemon beside the link first,
+  because Homebrew and Scoop replace what the link points at on every upgrade.
+- **Each channel is gated on its own secret** in `release.yml`, and skipped while it is unset. Pre-releases
+  are never packaged.
+- **The GPG key for the apt, rpm and pacman repositories never enters this repository.** It is
+  `Alexnex31/packages`' secret, whose workflow verifies the release's cosign signature and checksums
+  before signing anything, and never runs on a pull request.
 
 ## Project-specific skills
 

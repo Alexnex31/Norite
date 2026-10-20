@@ -1584,7 +1584,9 @@ exists, the E2E keystore (§7) — nothing credential-bearing lives in an attach
 
 **Lifecycle**: a real OS-level service (systemd user unit / launchd agent / Windows logon task), running
 from login. The installers register and start it, and `norite login` on a terminal offers to when it finds
-no daemon and no service; nothing installs or starts one without asking (M23). "From login" is exact: on a
+no daemon and no service; nothing installs or starts one without asking (M23). A package from a package
+manager installs files and starts nothing, so on those installs the offer is the path
+([ADR 0035](adr/0035-package-managers.md)). "From login" is exact: on a
 machine used only over SSH the systemd user manager stops at the last logout unless the account lingers,
 which `norite daemon install` reports and `--linger` asks for.
 
@@ -1619,9 +1621,13 @@ automation port refuses every `/@daemon/` path.
 - **Undoing.** A start that finds two starts of a new version that ended badly, or a crash file, restores
   the kept pair and lists the version as bad. A run that stays up ten minutes is kept.
 - **Who.** Only an install with a receipt (`install.json` in the state directory) naming the directory the
-  daemon runs from, which the installer scripts leave. Any other install, a development build, and macOS
-  check and say so. Windows installs when asked and not by itself, until that has been watched working
-  there. The mode (`auto`, `notify`, `off`) and the channel are in the updater's own record
+  daemon runs from, which the installer scripts leave, and `auto` by default on Linux and Windows. Any
+  other install, a development build, and macOS check and say so. An install a package manager made
+  says which command updates it ([ADR 0035](adr/0035-package-managers.md)): the daemon reads the
+  `packaged-by` marker the package installed, or recognises the directory Homebrew, winget or Nix
+  installs into. A receipt naming the running daemon wins over both. After the package manager installs
+  another version over it, a packaged daemon starts that version itself, as an update does. The mode
+  (`auto`, `notify`, `off`) and the channel are in the updater's own record
   in the state directory, set with `norite update mode|channel`, and not in `config.toml`: they are this
   machine's and the daemon's own.
 - **Surface.** Five requests under `/@daemon/update`, first-party tier only; `DAEMON_UPDATE`, which carries

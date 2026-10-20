@@ -45,6 +45,14 @@ is well advanced and the Phase P deployment track is ready. See ADR 0033.
 **Milestone tags are not versions.** `m<N>` marks a completed milestone and stays; release automation fires
 only on `v*`.
 
+**Packages** ([ADR 0035](adr/0035-package-managers.md)). From v0.1.1, every release that is not a
+pre-release also reaches the project's own APT, RPM and pacman repositories, the AUR, a Homebrew tap,
+winget, a Scoop bucket, and nixpkgs by pull request. Snap is M37a and Flatpak M78a. **A distribution's
+own repository** (Arch `extra`, homebrew-core, Debian, Ubuntu, Fedora) gets a suffixed milestone when its
+condition holds, and not before: an adopter or sponsor in that project, and for a distribution that freezes
+versions, a handshake that tolerates an older MINOR, which ADR 0033 gives MAJOR ≥ 1. ADR 0035 states each
+condition.
+
 Read as a long-term, dependency-ordered critical path, not a near-term v1 promise — the accumulated scope
 (custom SFU, custom crypto, native GUI, plugin sandbox, a Kubernetes deployment) is realistically multi-year
 work. Every milestone is scoped to one coherent deliverable, states what it depends on when that is not simply
@@ -1810,6 +1818,27 @@ of this section.
   `norite instance init`, extending M2/M10), the SFU/TURN never start when off, voice+text channels degrade to text-only,
   voice UI is hidden entirely (not grayed out) in CLI/TUI/GUI when disabled. Done when: an instance with
   voice disabled shows no voice-related UI anywhere and never starts the SFU/TURN processes.
+- **M37a — Snap package**: `norite` and `norite-server` in the Snap Store, the one channel
+  [ADR 0035](adr/0035-package-managers.md) held back. Both names were registered when that ADR landed,
+  so nobody else takes them. Placed after Phase E because the client snap carries the voice-worker, and
+  the Store should judge the confinement request on what will ship.
+
+  **Classic confinement, requested from the Store.** Strict is a port, not a package: it moves `$HOME`,
+  and with it M3's state directory and M21's config; the keyring sits behind a plug a user connects by
+  hand; a strict snap cannot write the systemd user unit `norite daemon install` writes; and the
+  microphone sits behind `audio-record`, the one Linux gate ADR 0034 names. Classic runs the client as
+  every other channel does, and is granted by a reviewer on the Snapcraft forum. If it is refused, this
+  milestone becomes the strict port, each of those four answered, and is re-planned rather than
+  shipped half-confined.
+
+  **Updates are the Store's.** A snap refreshes itself, so its daemon names no command and installs
+  nothing (ADR 0035 §4), and the service question is the snap's own: a snap may declare a user daemon,
+  which is the one place a package would start the service itself, and M23's rule says it must not
+  start unasked.
+
+  Done when: `snap install norite --classic` on a clean Ubuntu VM gives a client that signs in, joins a
+  voice channel and survives a Store refresh with its sign-in, its config and its service intact; and
+  `norite-server` installs its binary and documentation and sets up nothing.
 
 #### Phase F — Presence, Deep Work, and the TUI foundation
 
@@ -2633,6 +2662,20 @@ when a constraint the terminal imposed is lifted.
 
   **Inherited from M24.** The GUI shows what `DAEMON_UPDATE` and `GET /@daemon/update` say: that a
   release is out, was installed, or was undone. M24 built the daemon's half and the terminal's.
+- **M78a — Flatpak package**: the GUI on Flathub, which takes graphical applications and so had nothing
+  to take before M78 ([ADR 0035](adr/0035-package-managers.md)). The questions are Snap's (M37a) in
+  another sandbox: the config and state directories inside the sandbox, the keyring through the Secret
+  portal, the daemon as a background process the Background portal allows, the microphone through
+  PipeWire's portal, and push-to-talk through the `GlobalShortcuts` portal ADR 0034 already chose for
+  Wayland. Flathub prefers building from source, and the GUI, the daemon and the worker are three
+  programs in one application.
+
+  Updates are Flatpak's, and the daemon names `flatpak update` (ADR 0035 §4). Whether the command tree
+  is reachable from a terminal (`flatpak run --command=norite`, or an alias the user makes) is settled
+  here; the other channels stay the command tree's home.
+
+  Done when: the GUI installed from Flathub on a clean VM signs in, holds its session across a restart,
+  and joins a voice channel with push-to-talk; and a Flatpak update leaves its sign-in and config intact.
 - **M79 — GUI message rendering**: the virtualized message list, the allow-list markdown renderer
   reimplemented for Gio's immediate-mode primitives (the same allow-list as M43, including emoji-shortcode
   resolution, on a different rendering target). Done when: a long channel scrolls smoothly and renders the
