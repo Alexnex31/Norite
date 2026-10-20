@@ -79,6 +79,75 @@ func TestLocateDaemonFindsItOnPATH(t *testing.T) {
 	}
 }
 
+// linkFarm builds Homebrew's shape: the programs in a directory per version, and links to them in a bin
+// directory that survives upgrades. Only the programs named in linked get a link.
+func linkFarm(t *testing.T, linked ...string) (bin, cellar string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symbolic link on Windows needs a privilege the test runner may not hold")
+	}
+	// Resolved, so the temporary directory's own links (macOS's /var is /private/var) do not show up as a
+	// difference between the two candidates.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, cellar = filepath.Join(root, "bin"), filepath.Join(root, "Caskroom", "norite", "0.1.1")
+	for _, dir := range []string{bin, cellar} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable(t, cellar, "norite")
+	writeExecutable(t, cellar, daemonBinaryName)
+	for _, name := range linked {
+		if err := os.Symlink(filepath.Join(cellar, name), filepath.Join(bin, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return bin, cellar
+}
+
+// A service records the daemon beside the link a package manager keeps, not beside the file it points at:
+// that file's directory is the version's own, and the next upgrade deletes it (ADR 0035).
+func TestTheDaemonBesideTheLinkComesFirst(t *testing.T) {
+	bin, cellar := linkFarm(t, "norite", daemonBinaryName)
+
+	got := siblingDaemons(filepath.Join(bin, "norite"))
+	want := []string{filepath.Join(bin, daemonBinaryName), filepath.Join(cellar, daemonBinaryName)}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("siblingDaemons = %q, want %q", got, want)
+	}
+	if path, err := verifyDaemonBinary(got[0], ""); err != nil || path != want[0] {
+		t.Errorf("the first candidate verifies as %q, %v; want %q, which a link resolves through", path, err, want[0])
+	}
+}
+
+// A `norite` linked on its own, from a dotfiles directory say, still finds the daemon beside the real file.
+func TestALoneLinkStillFindsTheDaemonBesideTheRealFile(t *testing.T) {
+	bin, cellar := linkFarm(t, "norite")
+
+	got := siblingDaemons(filepath.Join(bin, "norite"))
+	if len(got) != 2 {
+		t.Fatalf("siblingDaemons = %q, want two candidates", got)
+	}
+	if _, err := verifyDaemonBinary(got[0], ""); err == nil {
+		t.Fatalf("%s verified, and nothing is there", got[0])
+	}
+	if path, err := verifyDaemonBinary(got[1], ""); err != nil || path != filepath.Join(cellar, daemonBinaryName) {
+		t.Errorf("the second candidate verifies as %q, %v; want the daemon beside the real file", path, err)
+	}
+}
+
+// A binary that is not a link has one candidate, not the same one twice.
+func TestAnUnlinkedBinaryHasOneCandidate(t *testing.T) {
+	dir := t.TempDir()
+	self := writeExecutable(t, dir, "norite")
+	if got := siblingDaemons(self); len(got) != 1 {
+		t.Errorf("siblingDaemons = %q, want one", got)
+	}
+}
+
 func TestLocateDaemonReturnsAnAbsolutePath(t *testing.T) {
 	isolate(t)
 

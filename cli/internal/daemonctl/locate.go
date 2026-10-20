@@ -50,9 +50,11 @@ func LocateDaemon(explicit string) (string, error) {
 		return verifyDaemonBinary(fromEnv, DaemonBinaryEnvVar)
 	}
 
-	if sibling, err := siblingDaemon(); err == nil {
-		if resolved, err := verifyDaemonBinary(sibling, ""); err == nil {
-			return resolved, nil
+	if self, err := os.Executable(); err == nil {
+		for _, sibling := range siblingDaemons(self) {
+			if resolved, err := verifyDaemonBinary(sibling, ""); err == nil {
+				return resolved, nil
+			}
 		}
 	}
 
@@ -66,18 +68,28 @@ func LocateDaemon(explicit string) (string, error) {
 		daemonBinaryName, daemonBinaryName, DaemonBinaryEnvVar)
 }
 
-// siblingDaemon returns the daemon path implied by where the running binary lives.
-func siblingDaemon() (string, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("locating this executable: %w", err)
-	}
-	// EvalSymlinks so that a `norite` reached through a symlink farm — Homebrew's bin, a dotfiles link,
-	// GOPATH/bin — resolves next to the real file rather than next to the link.
+// siblingDaemons returns the daemon paths implied by where the running binary lives, the one to prefer
+// first.
+//
+// Beside the path as run comes first, and beside the file it links to second. A package manager that links
+// both programs into one directory keeps that directory and replaces what it points at: Homebrew's
+// `/opt/homebrew/bin` links into a directory per version, which `brew upgrade` deletes, and Scoop runs
+// through `apps\norite\current`, a junction to one. A service recording the resolved path stops starting
+// after the next upgrade (ADR 0035). Resolving is still the fallback, for a `norite` linked on its own from
+// a dotfiles directory or GOPATH/bin, whose daemon is only beside the real file.
+//
+// What "as run" is depends on the OS: macOS and Windows report the path the program was started by, while
+// Linux reads /proc/self/exe, which is already resolved. No Linux package this project publishes links its
+// programs, so there the two candidates are one.
+func siblingDaemons(self string) []string {
+	name := daemonBinaryName + exeSuffix()
+	candidates := []string{filepath.Join(filepath.Dir(self), name)}
 	if resolved, err := filepath.EvalSymlinks(self); err == nil {
-		self = resolved
+		if real := filepath.Join(filepath.Dir(resolved), name); real != candidates[0] {
+			candidates = append(candidates, real)
+		}
 	}
-	return filepath.Join(filepath.Dir(self), daemonBinaryName+exeSuffix()), nil
+	return candidates
 }
 
 // verifyDaemonBinary turns a candidate into an absolute path, or explains why it cannot be used.
