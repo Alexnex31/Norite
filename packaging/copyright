@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Norite
+Upstream-Contact: Alexnex31 <norite.chat@gmail.com>
+Source: https://github.com/Alexnex31/Norite
+
+Files: *
+Copyright: 2026 Alexandre Duffez
+License: AGPL-3.0-or-later
+ The full text is in LICENSE, in this directory. The programs also contain third-party Go modules under
+ their own licences, whose notices are in the THIRD-PARTY-NOTICES files in this directory.

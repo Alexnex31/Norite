@@ -113,6 +113,359 @@ archives:
       - src: daemon/internal/notices/THIRD-PARTY-NOTICES.txt
         dst: THIRD-PARTY-NOTICES-norite-daemon.txt
 
+# The tag's source as a release asset, which the AUR's source packages build from and which is AGPL's
+# Corresponding Source in the plainest form. Named apart from both archive patterns, since install.sh and
+# the updater pick archives by exact name.
+source:
+  enabled: true
+  name_template: "norite-source_{{ .Version }}"
+  # One top directory, which the AUR's source packages build in, rather than the tag's files loose in
+  # makepkg's source directory beside the archive.
+  prefix_template: "norite-{{ .Version }}/"
+
+# ---------------------------------------------------------------------------------------------------------
+# Packages (ADR 0035). None sets up a service: the first `norite login` offers that (M23).
+#
+# Each publisher below runs only for a release that is not a pre-release *and* when its credential is in
+# release.yml's environment, so a channel goes live when its secret is added and a missing one skips that
+# channel rather than failing the release after GitHub's half is already published. A skipped channel is
+# said in the run's log.
+#
+# The .deb, .rpm and pacman packages are release assets, so checksums.txt lists them and the cosign
+# signature covers them. They are signed for apt, dnf and pacman by a separate repository's workflow
+# (Alexnex31/packages), which verifies that signature first; the GPG key never enters this repository.
+#
+# The installers in scripts/ and these definitions restate the same facts — the archive names, the two
+# programs, where the notices go — and change together (CLAUDE.md, on the installers).
+nfpms:
+  - id: client
+    package_name: norite
+    ids: [cli, daemon]
+    vendor: Norite
+    maintainer: "Alexnex31 <norite.chat@gmail.com>"
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    description: "A voice-and-text chat platform with a terminal client that is not second-class"
+    formats: [deb, rpm, archlinux]
+    file_name_template: "{{ .ConventionalFileName }}"
+    section: net
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/norite/README.md
+      - src: cli/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: /usr/share/doc/norite/THIRD-PARTY-NOTICES-norite.txt
+      - src: daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: /usr/share/doc/norite/THIRD-PARTY-NOTICES-norite-daemon.txt
+      # Debian and Fedora keep a package's licence beside its documentation; Arch keeps it apart.
+      - src: LICENSE
+        dst: /usr/share/doc/norite/LICENSE
+        packager: deb
+      - src: packaging/copyright
+        dst: /usr/share/doc/norite/copyright
+        packager: deb
+      - src: LICENSE
+        dst: /usr/share/licenses/norite/LICENSE
+        packager: rpm
+      - src: LICENSE
+        dst: /usr/share/licenses/norite/LICENSE
+        packager: archlinux
+      # Which manager installed the daemon, so it names that manager's command rather than installing a
+      # release itself (ADR 0035 §4, daemon/internal/updater/packaged.go).
+      - src: packaging/packaged-by/apt
+        dst: /usr/lib/norite/packaged-by
+        packager: deb
+      - src: packaging/packaged-by/rpm
+        dst: /usr/lib/norite/packaged-by
+        packager: rpm
+      - src: packaging/packaged-by/pacman
+        dst: /usr/lib/norite/packaged-by
+        packager: archlinux
+    scripts:
+      preremove: packaging/preremove.sh
+    archlinux:
+      packager: "Alexnex31 <norite.chat@gmail.com>"
+
+  - id: server
+    package_name: norite-server
+    ids: [backend]
+    vendor: Norite
+    maintainer: "Alexnex31 <norite.chat@gmail.com>"
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    description: "The Norite server. Installs the program and its documentation; sets nothing up"
+    formats: [deb, rpm, archlinux]
+    file_name_template: "{{ .ConventionalFileName }}"
+    section: net
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/norite-server/README.md
+      - src: backend/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: /usr/share/doc/norite-server/THIRD-PARTY-NOTICES.txt
+      - src: contracts/instance-config.toml
+        dst: /usr/share/doc/norite-server/instance-config-reference.toml
+      - src: LICENSE
+        dst: /usr/share/doc/norite-server/LICENSE
+        packager: deb
+      - src: packaging/copyright
+        dst: /usr/share/doc/norite-server/copyright
+        packager: deb
+      - src: LICENSE
+        dst: /usr/share/licenses/norite-server/LICENSE
+        packager: rpm
+      - src: LICENSE
+        dst: /usr/share/licenses/norite-server/LICENSE
+        packager: archlinux
+    archlinux:
+      packager: "Alexnex31 <norite.chat@gmail.com>"
+
+# The AUR: the release's binaries as norite-bin and norite-server-bin, and the same programs built from
+# the source archive as norite and norite-server, which is what an Arch maintainer would adopt into
+# `extra`. Pushed over SSH with the author's AUR key.
+aurs:
+  - name: norite-bin
+    description: "A voice-and-text chat platform with a terminal client that is not second-class"
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    maintainers: ["Alexnex31 <norite.chat@gmail.com>"]
+    ids: [client]
+    provides: [norite]
+    conflicts: [norite]
+    private_key: "{{ .Env.AUR_SSH_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/norite-bin.git"
+    skip_upload: '{{ if and (isEnvSet "AUR_SSH_KEY") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    install: ./packaging/aur.install
+    package: |-
+      install -Dm755 ./norite "${pkgdir}/usr/bin/norite"
+      install -Dm755 ./norite-daemon "${pkgdir}/usr/bin/norite-daemon"
+      install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 ./README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+      install -Dm644 ./THIRD-PARTY-NOTICES-norite.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite.txt"
+      install -Dm644 ./THIRD-PARTY-NOTICES-norite-daemon.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-daemon.txt"
+      install -d "${pkgdir}/usr/lib/norite"
+      printf 'aur\n' >"${pkgdir}/usr/lib/norite/packaged-by"
+
+  - name: norite-server-bin
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    maintainers: ["Alexnex31 <norite.chat@gmail.com>"]
+    ids: [backend]
+    description: "The Norite server. Installs the program and its documentation; sets nothing up"
+    provides: [norite-server]
+    conflicts: [norite-server]
+    private_key: "{{ .Env.AUR_SSH_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/norite-server-bin.git"
+    skip_upload: '{{ if and (isEnvSet "AUR_SSH_KEY") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    package: |-
+      install -Dm755 ./norite-server "${pkgdir}/usr/bin/norite-server"
+      install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 ./README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+      install -Dm644 ./THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES.txt"
+
+# Built from source as the release is: each module with the workspace off, cgo off, and the same stamped
+# version and revision, so `norite about` reports the commit the tag names.
+aur_sources:
+  - name: norite
+    description: "A voice-and-text chat platform with a terminal client that is not second-class"
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    maintainers: ["Alexnex31 <norite.chat@gmail.com>"]
+    conflicts: [norite-bin]
+    private_key: "{{ .Env.AUR_SSH_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/norite.git"
+    skip_upload: '{{ if and (isEnvSet "AUR_SSH_KEY") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    makedepends: [go]
+    install: ./packaging/aur.install
+    prepare: |-
+      cd "${srcdir}/norite-${pkgver}"
+      export GOWORK=off GOFLAGS="-mod=readonly -modcacherw"
+      (cd cli && go mod download)
+      (cd daemon && go mod download)
+    build: |-
+      cd "${srcdir}/norite-${pkgver}"
+      export GOWORK=off CGO_ENABLED=0 GOFLAGS="-trimpath -mod=readonly -modcacherw"
+      (cd cli && go build -o ../norite -ldflags "-s -w -X github.com/Alexnex31/Norite/cli/internal/cliapp.Version=${pkgver} -X github.com/Alexnex31/Norite/cli/internal/cliapp.Revision={{ .FullCommit }}" ./cmd/app)
+      (cd daemon && go build -o ../norite-daemon -ldflags "-s -w -X main.Version=${pkgver}" ./cmd/daemond)
+    package: |-
+      cd "${srcdir}/norite-${pkgver}"
+      install -Dm755 ./norite "${pkgdir}/usr/bin/norite"
+      install -Dm755 ./norite-daemon "${pkgdir}/usr/bin/norite-daemon"
+      install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 ./README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+      install -Dm644 ./cli/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite.txt"
+      install -Dm644 ./daemon/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-daemon.txt"
+      install -d "${pkgdir}/usr/lib/norite"
+      printf 'aur\n' >"${pkgdir}/usr/lib/norite/packaged-by"
+
+  - name: norite-server
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    maintainers: ["Alexnex31 <norite.chat@gmail.com>"]
+    description: "The Norite server. Installs the program and its documentation; sets nothing up"
+    provides: [norite-server]
+    conflicts: [norite-server-bin]
+    private_key: "{{ .Env.AUR_SSH_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/norite-server.git"
+    skip_upload: '{{ if and (isEnvSet "AUR_SSH_KEY") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    makedepends: [go]
+    prepare: |-
+      cd "${srcdir}/norite-${pkgver}/backend"
+      GOWORK=off GOFLAGS="-mod=readonly -modcacherw" go mod download
+    build: |-
+      cd "${srcdir}/norite-${pkgver}/backend"
+      export GOWORK=off CGO_ENABLED=0 GOFLAGS="-trimpath -mod=readonly -modcacherw"
+      go build -o ../norite-server -ldflags "-s -w -X github.com/Alexnex31/Norite/backend/internal/meta.Revision={{ .FullCommit }} -X github.com/Alexnex31/Norite/backend/internal/meta.Version=${pkgver}" ./cmd/server
+    package: |-
+      cd "${srcdir}/norite-${pkgver}"
+      install -Dm755 ./norite-server "${pkgdir}/usr/bin/norite-server"
+      install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 ./README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+      install -Dm644 ./backend/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES.txt"
+
+# Homebrew: casks in the author's tap. The quarantine attribute is removed from the two programs once
+# Homebrew has checked them against the SHA-256 the cask names: an unsigned, quarantined program is refused
+# even from a terminal, and install.sh's curl download sets none, so this reaches the installer's state by
+# another tool (ADR 0035 §6). Homebrew runs a cask's uninstall steps on an upgrade too, so the service is
+# left to the caveat rather than removed by one.
+homebrew_casks:
+  - name: norite
+    description: "A voice-and-text chat platform with a terminal client that is not second-class"
+    homepage: "https://github.com/Alexnex31/Norite"
+    ids: [client]
+    binaries: [norite, norite-daemon]
+    directory: Casks
+    skip_upload: '{{ if and (isEnvSet "HOMEBREW_TAP_TOKEN") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    repository:
+      owner: Alexnex31
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    caveats: |-
+      Nothing was started. `norite login` offers to run the daemon at login.
+      Before `brew uninstall norite`, run `norite daemon uninstall` if you set the daemon up.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{staged_path}/norite"], must_succeed: false
+            system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{staged_path}/norite-daemon"], must_succeed: false
+          end
+
+  - name: norite-server
+    homepage: "https://github.com/Alexnex31/Norite"
+    ids: [backend]
+    binaries: [norite-server]
+    description: "The Norite server. Installs the program and its documentation; sets nothing up"
+    directory: Casks
+    skip_upload: '{{ if and (isEnvSet "HOMEBREW_TAP_TOKEN") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    repository:
+      owner: Alexnex31
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{staged_path}/norite-server"], must_succeed: false
+          end
+
+# Scoop: the author's bucket. The marker goes beside the programs, in the version's own directory.
+scoops:
+  - name: norite
+    description: "A voice-and-text chat platform with a terminal client that is not second-class"
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    ids: [client]
+    skip_upload: '{{ if and (isEnvSet "SCOOP_BUCKET_TOKEN") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    repository:
+      owner: Alexnex31
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    post_install:
+      - "Set-Content -LiteralPath \"$dir\\packaged-by\" -Value 'scoop'"
+
+  - name: norite-server
+    homepage: "https://github.com/Alexnex31/Norite"
+    license: "AGPL-3.0-or-later"
+    ids: [backend]
+    description: "The Norite server. Installs the program and its documentation; sets nothing up"
+    skip_upload: '{{ if and (isEnvSet "SCOOP_BUCKET_TOKEN") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    repository:
+      owner: Alexnex31
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+
+# winget: a pull request from the author's fork to microsoft/winget-pkgs, which its moderators approve.
+# A portable package installs into winget's Packages directory, which is how the daemon knows it.
+winget:
+  - name: Norite
+    publisher: Norite
+    package_identifier: Norite.Norite
+    ids: [client]
+    short_description: "A voice-and-text chat platform with a terminal client"
+    license: "AGPL-3.0-or-later"
+    publisher_url: "https://github.com/Alexnex31/Norite"
+    skip_upload: '{{ if and (isEnvSet "WINGET_TOKEN") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    repository:
+      owner: Alexnex31
+      name: winget-pkgs
+      branch: "norite-{{ .Version }}"
+      token: "{{ .Env.WINGET_TOKEN }}"
+      pull_request:
+        enabled: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
+
+  - name: Norite Server
+    publisher: Norite
+    package_identifier: Norite.NoriteServer
+    ids: [backend]
+    short_description: "The Norite server. Installs the program and its documentation; sets nothing up"
+    license: "AGPL-3.0-or-later"
+    publisher_url: "https://github.com/Alexnex31/Norite"
+    skip_upload: '{{ if and (isEnvSet "WINGET_TOKEN") (not .Prerelease) }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Alexnex31
+      email: norite.chat@gmail.com
+    repository:
+      owner: Alexnex31
+      name: winget-pkgs
+      branch: "norite-server-{{ .Version }}"
+      token: "{{ .Env.WINGET_TOKEN }}"
+      pull_request:
+        enabled: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
+
 checksum:
   name_template: "checksums.txt"
 
