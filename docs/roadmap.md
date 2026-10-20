@@ -1671,6 +1671,39 @@ of this section.
   reuse a foreground client's mic grant, and can the daemon register a global hotkey — each recorded as
   yes, no, or conditional-on-what, with M32's and M35's shapes chosen from those answers. A spike whose
   output is a document still needs a completion condition, and gating five milestones is the reason.
+
+  **The finding is [ADR 0034](adr/0034-mic-permission-and-global-hotkey.md).** Each answer there says
+  whether it was run or read. Answered, in the done-when's terms:
+
+  | | Can a headless worker use the mic, and whose grant is it? | Can the daemon register a global hotkey? |
+  | --- | --- | --- |
+  | Linux | **Yes, conditional on a seat session**: no gate, no prompt; no device before login | **Yes, conditional on a session**: the portal on Wayland (app id via a `.desktop` file), a grab on X11 |
+  | Windows | **Yes**: no prompt today; one device-wide switch; the worker's exe is the one named | **Yes, conditional on an interactive session**: the logon task can, a service cannot |
+  | macOS | **Yes, after one prompt naming the daemon**: the worker's use is charged to its parent; a new daemon build is asked again | **Yes, with no permission**: Carbon `RegisterEventHotKey` from the LaunchAgent |
+
+  **No client's grant is reused anywhere**, which is the question as the entry asked it: there is nothing
+  to reuse on Linux and Windows, and on macOS a TUI's grant is the terminal emulator's. M32's and M35's
+  entries are rewritten from these answers.
+
+  It ran on Linux (the author's Hyprland session, a Fedora 44 KDE VM, Xvfb), on a Windows 11 Pro 26H2
+  VM, and on the author's Mac (macOS 27.0, Apple silicon), with throwaway pure-Go probes kept outside the
+  repository.
+
+  **Corrected at planning**, by reading this entry, §6, §17 and ADR 0012 against the hotkey library's
+  source and the release configuration:
+  - **The library M35 named cannot build into the daemon.** `golang.design/x/hotkey` keeps its Linux and
+    macOS halves in cgo files, and the release builds the daemon with `CGO_ENABLED=0`. A program using it
+    compiles for Windows and fails to compile for the other two.
+  - **On Linux it is X11 only**, and the commonest Linux desktops are Wayland, the author's among them.
+  - **On macOS it needs Accessibility, not Input Monitoring.** It uses a `CGEventTap`; the documents named
+    the other permission.
+  - **"The foreground client triggers the prompt" names the wrong program on two OSes.** On Windows the
+    program attributed is the one that opens the device; on macOS, TCC asks about the responsible process.
+    A terminal's TUI would put the prompt on the terminal emulator.
+  - **A daemon started at boot has no session.** With M23's `--linger`, the daemon starts before anybody
+    logs in, and neither the audio devices nor a desktop's shortcut service exist yet.
+  - **KEYMAP's `C-space (hold)` assumes a key release a terminal does not send.**
+  - **M29 names a codec as the capture library.**
 - **M26 — Pion SFU core**: room/participant model, codec/track-kind-agnostic RTP forwarding (built
   generically from day one so M106–M107's video activation is additive, not a redesign). Done when: two test
   clients can exchange audio through the SFU.
@@ -1685,6 +1718,16 @@ of this section.
 - **M29 — Opus audio pipeline**: `hraban/opus` (cgo) capture/encode/decode/playback in the voice-worker.
   Depends on M25's finding for how mic access is actually obtained. Done when: two voice-worker instances can
   exchange intelligible audio through the SFU from M26.
+
+  **From M25 ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)):**
+  - **`hraban/opus` is a codec and captures nothing.** This milestone chooses the capture library
+    (miniaudio through `malgo`, PortAudio, or the OS APIs directly), and that choice decides which OS API
+    opens the device.
+  - **The worker opens the device in its own process**, and nothing is handed to it. That is the program
+    each OS attributes the use to.
+  - **The worker's cgo cannot be built where every other binary is.** The release cross-compiles all OSes
+    on one Linux runner with `CGO_ENABLED=0`, and cgo for darwin does not cross-compile there without
+    Apple's SDK. How the worker is built for each OS is decided here or at M28.
 - **M30 — Audio DSP**: RNNoise (noise suppression) plus WebRTC's Audio Processing Module (AEC3 echo
   cancellation plus AGC2 — replacing `libspeexdsp`, ADR 0023), both cgo,
   contained entirely to the voice-worker binary, wired in this exact order: Mic Capture → AEC → RNNoise → AGC
@@ -1695,10 +1738,31 @@ of this section.
   `hraban/opus`'s runtime bitrate control, audio-only, no simulcast. Depends on M26, M29, and M30. Done when:
   a simulated packet-loss/bandwidth-constrained test shows the encoder's bitrate measurably drop and recover
   in response, rather than staying fixed regardless of network conditions.
-- **M32 — Mic-permission handoff, real implementation**: built per M25's actual finding — either the
-  foreground-client-triggers-prompt design as originally intended, or whatever the spike determined actually
-  works. Done when: first voice use on a clean OS install prompts for mic permission exactly once, and the
-  worker successfully captures audio afterward.
+- **M32 — Mic permission, real implementation**: built per M25's finding
+  ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §1). There is no handoff: the worker opens the
+  device itself and no client ever does. The worker reports the outcome of opening it, and the daemon
+  carries it as call state (M34). The outcomes:
+  - capturing;
+  - waiting on the OS's question;
+  - refused, with the setting that changes it;
+  - no input device;
+  - on Linux, no session yet.
+
+  The clients word each one. On macOS the worker asks AVFoundation for the outcome explicitly, because
+  samples arriving and a status read once both misled the spike. Titled "Mic-permission handoff" until
+  M25, which withdrew the handoff.
+
+  Done when, per OS:
+  - **Linux**: first voice use captures with no prompt. With no seat session, joining says so instead of
+    failing silently.
+  - **Windows**: first voice use captures with no prompt. With "Let desktop apps access your microphone"
+    off, the client names that setting. If the per-app prompt Microsoft is testing has shipped by then, it
+    names the worker and comes once.
+  - **macOS**: first voice use prompts once, naming `norite-daemon`, and the worker captures afterward. A
+    refusal names System Settings → Privacy & Security → Microphone.
+
+  **Carried from M25, the author's decision: an Apple Developer ID.** An ad-hoc signed daemon is asked again
+  after every new daemon build (run at M25), so without one "exactly once" holds per build, not per install.
 - **M33 — Voice signaling, real**: `VOICE_STATE_UPDATE`/`VOICE_SERVER_UPDATE` go from inert stub to real,
   `MediaCoordinator` becomes `PionMediaCoordinator`, and the `supports_video: bool` capability field is added
   to the voice-join payload now (the terminal clients always send `false`) even though nothing consumes it
@@ -1714,11 +1778,31 @@ of this section.
   done-when phrased as "control a voice session from the TUI" could not be checked when it is built. Done
   when: `norite voice join/leave/mute/deafen` fully control a session; a test client attached to the daemon
   receives active-speaker updates and can local-mute and report a participant independently of each other.
-- **M35 — Voice input mode**: voice-activity-detection is the default; push-to-talk via
-  `golang.design/x/hotkey`, registered by the daemon (per M25's finding), as a true OS-wide global hotkey,
-  including the macOS Input Monitoring entitlement flow. Done when: push-to-talk works while the TUI/GUI is
-  unfocused (e.g. alt-tabbed into another app), and registering the hotkey from a TUI and a GUI attach
-  session simultaneously does not double-register or double-trigger.
+- **M35 — Voice input mode**: voice-activity-detection is the default; push-to-talk is a true OS-wide
+  global hotkey registered by the daemon, per M25's finding
+  ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §2–§5):
+  - **Pure Go, per OS:**
+    - Windows: `RegisterHotKey`;
+    - Linux Wayland: the `GlobalShortcuts` portal (`godbus/dbus`);
+    - Linux X11: a root-window grab (`jezek/xgb`);
+    - macOS: Carbon's `RegisterEventHotKey` (`ebitengine/purego`), on an application run loop that the
+      daemon's main thread gives itself to.
+  - **Held only during a call**, since on Windows and X11 a registered key is taken from every other
+    program.
+  - **Registered once a session exists.** A failure is reported in the call state, never fatal to the call.
+  - **`install.sh` writes the `.desktop` file** the portal needs for an app id; this milestone chooses the id.
+
+  `golang.design/x/hotkey`, which this entry named until M25, cannot build into the cgo-free daemon on
+  Linux or macOS, and is X11-only on Linux. The macOS Input Monitoring flow it implied is not needed:
+  Carbon needs no permission.
+
+  Done when: push-to-talk works while the TUI/GUI is unfocused (e.g. alt-tabbed into another app), on
+  Windows, on a Wayland desktop through the portal, on X11, and on macOS from the installed LaunchAgent
+  with no permission granted; and registering the hotkey from a TUI and a GUI attach session
+  simultaneously does not double-register or double-trigger.
+
+  **What the terminal's own push-to-talk becomes** is settled here with M44. KEYMAP's `C-space (hold)`
+  needs a key release, which a terminal sends only with the kitty keyboard protocol's event types.
 - **M36 — Voice auto-rejoin**: the "last active voice channel" breadcrumb (the one exception to in-memory
   daemon state), the daemon respawns the worker and rejoins on crash/restart. Done when: killing the daemon
   process mid-call results in automatic rejoin within a few seconds of restart.
