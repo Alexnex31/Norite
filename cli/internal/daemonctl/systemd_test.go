@@ -131,6 +131,23 @@ func TestSystemdEscapesAPathWithSpaces(t *testing.T) {
 	}
 }
 
+// A unit whose program a package removal took away is skipped at login rather than retried every five
+// seconds, and the condition names the path by its own rule: never quoted, `%` doubled (ADR 0035).
+func TestSystemdSkipsAUnitWhoseProgramIsGone(t *testing.T) {
+	s, _, unitPath := newSystemd(t)
+
+	if err := s.Install(t.Context(), "/home/a b/100%/norite-daemon"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	body, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("reading the unit file: %v", err)
+	}
+	if !strings.Contains(string(body), "\nConditionFileIsExecutable=/home/a b/100%%/norite-daemon\n") {
+		t.Errorf("the condition is missing or escaped by another rule:\n%s", body)
+	}
+}
+
 func TestSystemdUninstallRemovesTheUnit(t *testing.T) {
 	s, r, unitPath := newSystemd(t)
 
