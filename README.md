@@ -16,7 +16,7 @@ software.
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
 [![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0)
-[![Milestone](https://img.shields.io/badge/milestone-M24%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M25%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -69,7 +69,8 @@ message's edit history, a guild's opt-in message recording, message tagging, the
 daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
 the settings file the clients share, a local port for scripts and bots, the daemon as a service you can
 stop, inspect and read the log of, and a client that keeps itself up to date, are done — `M0` through
-`M24`, which completes Phase D.**
+`M24`, which completes Phase D. Phase E, voice, has begun with `M25`: a finding rather than code, which
+settles on each OS who opens the microphone and how push-to-talk is held.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -106,6 +107,7 @@ stop, inspect and read the log of, and a client that keeps itself up to date, ar
 | `M22` | Scripts and bots — `norite token` mints an API token limited to the scopes you name; `norite automation enable` opens a port on your own machine, closed until you ask, that forwards a script's requests with the script's own token and never the daemon's sign-in; `norite automation run` and `request` are how a shell script uses it, and any language can speak its framing; and the instance marks every message a token sends or edits, however it arrived, so every reader sees `AUTO` beside it |
 | `M23` | The daemon as a service — `norite logs tail` reads its log, with `--follow`, whether or not it is running; `norite daemon status` says whether it is running, signed in and which version, however it was started; `norite daemon stop` lets it finish what it has begun; `norite daemon install --linger` keeps it up on a Linux machine you only reach over SSH; a crash is written beside the log and the next start says so; and `norite login` offers to install it. The Windows service was rebuilt, and first run on Windows at `M24` |
 | `M24` | A client that updates itself — once a day the daemon reads this project's list of releases, and installs a newer one only after verifying on your machine, against Sigstore and offline, that this project's release workflow signed it; it never moves to a version your instance would refuse; a release that does not stay up is undone by itself and never offered again; `norite update` says what is out and lets you install it now, ask first, or turn the check off; on Linux and Windows for an install the installers made, while macOS is told and not changed. On Windows the daemon now starts at logon by default, with no window |
+| `M25` | A finding, not code — run on Linux, Windows and macOS, it settles how voice will reach the microphone and hold a push-to-talk key: the voice process opens the microphone itself, so no client asks for it; push-to-talk is held by the daemon only during a call, by a different mechanism on each OS, none of which needs a permission; written down in [ADR 0034](docs/adr/0034-mic-permission-and-global-hotkey.md) |
 
 </details>
 
