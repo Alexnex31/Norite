@@ -4,7 +4,10 @@
 Accepted. Supersedes [ADR 0006](0006-voice-deferred-with-seams.md) entirely — the decision to defer real
 media is reversed. **Amended by [ADR 0023](0023-voice-connection-authentication.md)** in two places: the
 echo canceller and AGC move from `libspeexdsp` to WebRTC's Audio Processing Module (AEC3), and how a client
-authenticates to the SFU is settled there. Everything else below stands, including the DSP chain order.
+authenticates to the SFU is settled there. **Amended by [ADR 0034](0034-mic-permission-and-global-hotkey.md)**
+(M25), which answers the consequence below about the mic-permission handoff and the daemon's global
+hotkey: there is no handoff, and the hotkey is the daemon's by a different mechanism per OS. Everything
+else below stands, including the DSP chain order.
 
 ## Context
 ADR 0006 deferred all real voice/video media to an undetermined later phase. The revised project scope makes
@@ -48,7 +51,9 @@ surfaces mitigate this with a real-time active-speaker indicator plus separate l
   materially bigger operational burden than text-only, which is exactly why voice is opt-out, not mandatory.
 - Mic-permission handoff (which binary actually triggers the OS prompt vs. which one opens the audio device)
   and headless-daemon global-hotkey registration are both unverified per-OS behavior until a dedicated
-  throwaway spike milestone determines the real answer on each target OS.
+  throwaway spike milestone determines the real answer on each target OS. *(Answered at M25 by
+  [ADR 0034](0034-mic-permission-and-global-hotkey.md): the worker opens the device itself; the daemon
+  holds the hotkey.)*
 - The daemon respawns the worker and rejoins on crash/restart via a persisted "last active voice channel"
   breadcrumb — the one exception to otherwise-ephemeral daemon state. The client auto-update mechanism must
   defer applying an update while a voice session is active, so it doesn't force a mid-call daemon restart.
