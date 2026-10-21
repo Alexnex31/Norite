@@ -243,10 +243,14 @@ func (v view) Text(t *output.Text) {
 	if v.Channel == ipc.ChannelPrerelease {
 		channel = "pre-releases too"
 	}
-	switch v.Mode {
-	case ipc.UpdateOff:
+	switch {
+	case v.Mode == ipc.UpdateOff:
 		t.Line("Updates are off: nothing is checked unless you ask (%s).", channel)
-	case ipc.UpdateNotify:
+	case !v.Installs:
+		// "Installed when you ask" would promise `norite update apply`, which refuses here: the line above
+		// names what installs a release instead (ADR 0035 §4).
+		t.Line("Updates: checked once a day and said here (%s).", channel)
+	case v.Mode == ipc.UpdateNotify:
 		t.Line("Updates: checked once a day and installed when you ask (%s).", channel)
 	default:
 		t.Line("Updates: checked once a day and installed by themselves (%s).", channel)

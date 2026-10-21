@@ -18,7 +18,7 @@ env:
   # and "1.26" went on choosing 1.26.8, so the `security` job failed on a toolchain nothing here named.
   # An exact version that list does not hold yet is fetched from go.dev. When govulncheck next reports an
   # advisory "Fixed in" a newer patch, this is the line to move, with release.yml's.
-  GO_VERSION: "1.26.9"
+  GO_VERSION: "1.26.10"
   # Keep in sync with `sqlc_version` in the justfile.
   SQLC_VERSION: "v1.30.0"
   # Keep in sync with `oapi_codegen_version` in the justfile. Pinned for the same reason as the other two:

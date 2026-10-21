@@ -35,6 +35,10 @@ Documentation=https://github.com/Alexnex31/Norite
 # No ordering after the network. network-online.target is the system manager's; in a user manager it does
 # not exist, so the After= and Wants= this unit carried until M23 did nothing. The daemon starts with or
 # without a route and its own backoff reconnects.
+# A package removed with this unit still installed takes the program away (ADR 0035). A start whose
+# condition fails is skipped rather than failed, so Restart= below does not retry it every five seconds
+# for ever, which it would: five-second restarts never reach the default start limit.
+ConditionFileIsExecutable={{ .Condition }}
 
 [Service]
 Type=simple
@@ -124,8 +128,9 @@ func (s *systemdUser) Install(ctx context.Context, daemonBinary string) error {
 	}
 
 	var unit strings.Builder
-	err = unitTemplate.Execute(&unit, struct{ ExecStart, StateHome, ConfigHome string }{
+	err = unitTemplate.Execute(&unit, struct{ ExecStart, Condition, StateHome, ConfigHome string }{
 		ExecStart:  systemdEscape(daemonBinary),
+		Condition:  systemdConditionEscape(daemonBinary),
 		StateHome:  stateHome,
 		ConfigHome: configHome,
 	})
@@ -240,6 +245,14 @@ func systemdEscape(path string) string {
 	}
 	replaced := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `$$`, `%`, `%%`).Replace(path)
 	return `"` + replaced + `"`
+}
+
+// systemdConditionEscape writes a path for a Condition…= line, which is a third rule: the whole value is
+// the path, so it is never quoted (a quote is taken as the path's first character, and the path is then
+// not absolute), and specifiers are expanded, so `%` is doubled. Read back from systemd 262 with
+// `systemd-analyze condition` on a path holding a space and a `%`.
+func systemdConditionEscape(path string) string {
+	return strings.ReplaceAll(path, "%", "%%")
 }
 
 // systemdEnvEscape quotes a path for the value of an Environment= assignment, which is not ExecStart's

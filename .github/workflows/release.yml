@@ -25,7 +25,7 @@ concurrency:
 
 env:
   # Keep in sync with GO_VERSION in ci.yml.
-  GO_VERSION: "1.26.9"
+  GO_VERSION: "1.26.10"
   # Keep in sync with GORELEASER_VERSION in ci.yml and `goreleaser_version` in the justfile, which
   # `just release-dry-run` uses. Pinned for the reason every tool here is: `latest` would make an upstream
   # release the first thing a tag tests, on the one run that publishes.
@@ -75,3 +75,12 @@ jobs:
           # commit completing a phase carries an `m<N>` tag as well as the version, so discovery could hand
           # it the milestone tag, which is not SemVer, or pick between the two by accident.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          # The package channels' credentials (ADR 0035 §5), each reaching one place: the tap, the bucket,
+          # the author's fork of winget-pkgs, the author's AUR account. A channel whose secret is not set
+          # is skipped (.goreleaser.yaml's skip_upload), so each goes live when its secret is added. None
+          # can change a release's signed files. The GPG key for the apt, rpm and pacman repositories is not
+          # here and never is: it is Alexnex31/packages' secret.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}

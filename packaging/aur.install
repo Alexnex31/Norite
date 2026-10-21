@@ -1,0 +1,17 @@
+# The norite AUR packages' install script (ADR 0035 §3). pacman runs pre_remove on a removal only, never on
+# an upgrade, and as root, which cannot reach a user's systemd manager.
+post_install() {
+	echo "norite: nothing was started. \`norite login\` offers to run the daemon at login."
+}
+
+pre_remove() {
+	cat <<'MESSAGE'
+norite: removing the package leaves the daemon's service of every account that ran `norite daemon install`.
+It no longer starts, and stays listed. To remove it, run as that account:
+
+    systemctl --user disable --now norite-daemon.service
+    rm "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/norite-daemon.service"
+    systemctl --user daemon-reload
+
+MESSAGE
+}
