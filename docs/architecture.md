@@ -2309,11 +2309,22 @@ evidence; both TUI and GUI mitigate this with a real-time **active-speaker indic
 around whoever is transmitting) plus two **separate** actions (each its own keybind/click) — local-mute
 (silences a participant for this user alone) and report.
 
-**Mic permission and global hotkey**: the foreground TUI/GUI triggers the OS permission prompt on first voice
-use, then hands capture to the worker once granted — unverified per-OS behavior until a dedicated spike
-milestone determines the real answer (macOS TCC, Input Monitoring entitlement for global hotkeys).
-Voice-activity-detection is the default input mode; push-to-talk (`golang.design/x/hotkey`) is registered
-once by the daemon (not an attach client), avoiding double-registration if several clients are attached.
+**Mic permission and global hotkey**, settled by M25
+([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)):
+- **The worker opens the microphone itself, and no attach client ever does.**
+  - Linux has no per-program gate, but no device before somebody logs in.
+  - Windows names the worker's exe in its one device-wide switch.
+  - macOS charges the worker's use to the daemon, its parent, so the prompt reads "norite-daemon" and comes
+    again after each new daemon build while releases are ad-hoc signed.
+  - The worker reports the outcome and the daemon carries it as call state; the clients explain it.
+- **Voice-activity detection is the default input mode.** Push-to-talk is registered by the daemon (never
+  an attach client, so several attached clients cannot double-register), in pure Go per OS:
+  - `RegisterHotKey` on Windows;
+  - the `GlobalShortcuts` portal on Wayland, and a root-window grab on X11;
+  - Carbon's `RegisterEventHotKey` on macOS, which needs no permission.
+
+  It is held only during a call, and only once a session exists. `golang.design/x/hotkey`, named here until
+  M25, needs cgo the daemon does not have.
 
 **Auto-rejoin**: on daemon crash/restart mid-call, the daemon respawns the worker and rejoins using the
 persisted "last active voice channel" breadcrumb (§3) — the one exception to otherwise-ephemeral daemon
@@ -2956,15 +2967,17 @@ during implementation, and must be documented plainly wherever the relevant subs
   isolated voice-worker subprocess, spawned on demand by the daemon and torn down when a voice session ends —
   never inside the daemon process itself. A crash in the voice-worker must never take down messaging,
   presence, or plugins.
-- **Mic-permission handoff is unverified until Milestone M25 completes.** The design intent is that a
-  foreground TUI/GUI client triggers the OS permission prompt on first voice use, then hands audio capture off
-  to the voice-worker subprocess once granted. OS mic-permission grants (especially macOS TCC) are typically
-  tied to whichever binary actually opens the audio device, which may end up being the voice-worker process
-  rather than whichever attach client displayed the prompt. Milestone M25 is a throwaway prototype/spike that
-  determines the real per-OS answer before the real voice milestones are designed in further detail.
-  Milestone M25 also determines whether a headless daemon process can register an OS-wide global hotkey (for
-  push-to-talk) on each target OS, including the macOS Input Monitoring entitlement — the same category of
-  "which OS-level binary actually holds this capability" question as the mic-permission handoff.
+- **The microphone permission belongs to different programs on different OSes** (M25,
+  [ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)). This bullet said until M25 that the handoff
+  from a foreground client was unverified. It is withdrawn: the worker opens the device itself.
+  - On macOS the grant is the daemon's, since TCC charges a child to its parent. An ad-hoc signed daemon is
+    asked again after every new build. A Developer ID would end that, and is the author's decision, carried
+    by M32.
+  - On Windows the worker's exe is the one named. A per-app prompt Microsoft is testing would name it too.
+  - On Linux nothing is asked, and nothing can capture before a seat session exists, which a daemon started
+    by `--linger` has not got.
+  - The global hotkey needs no permission on any OS by the routes chosen. It needs an interactive session
+    on Windows (a service cannot hold one) and a session on Linux.
 - **Self-hosting simplicity and voice-in-v1 are in real, unreconciled tension.** Postgres-only self-hosting
   keeps the database story simple, but the custom SFU and embedded TURN server mean self-hosters must still
   handle UDP port ranges and NAT/firewall traversal — a materially bigger operational burden than pure

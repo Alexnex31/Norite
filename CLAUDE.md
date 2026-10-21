@@ -388,7 +388,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D complete through M24**. Full
+**Phase D complete through M24**; Phase E under way, M25 done. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -1229,6 +1229,48 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   **Linux was walked in a VM too**, against the real `v0.1.0-rc.1`: installed by itself in five seconds,
   same PID, byte-identical to the published archive; rolled back under systemd from a release built to
   crash; two reboots inside a trial counted against nothing.
+
+- **M25 — Mic-permission and global-hotkey spike**: done. A finding and no code: ADR 0034, the M25,
+  M29, M32 and M35 roadmap entries rewritten from it, `architecture.md` §6 and §17, ADR 0012 amended, and
+  a note under KEYMAP's push-to-talk row. The throwaway probes stay outside the repository, as the entry
+  asked.
+
+  **Planning found the design's hotkey half could not work on any OS's answer**, thirteen milestones
+  running. The library §6 and M35 named, `golang.design/x/hotkey`, keeps its Linux and macOS halves in
+  cgo files, and the release builds the daemon with `CGO_ENABLED=0`: a program using it compiles for
+  Windows and **fails to compile** for the other two. It is X11-only on Linux, and on macOS it needs
+  Accessibility where the documents said Input Monitoring. **Build a named library with the release's
+  flags before designing around it**; reading its README did not show any of this.
+
+  **Each OS answered, and no answer was the design's.**
+  - **The worker opens the microphone itself.** Linux asks nothing, but has no device before somebody logs
+    in. Windows names the worker's exe in one device-wide switch. macOS charges the worker to the daemon
+    that started it: the prompt reads "norite-daemon", and every new ad-hoc daemon build is asked again.
+  - **Push-to-talk is the daemon's, in pure Go, with no permission anywhere**: `RegisterHotKey`, the
+    Wayland `GlobalShortcuts` portal, an X11 grab, and Carbon on macOS through `purego`.
+  - **The key is held only during a call**, because on Windows and X11 a registered key is taken from
+    every other program.
+
+  **A probe that cannot tell two programs apart cannot say which one holds a grant.** The first macOS run
+  used one binary as both daemon and worker. It showed the child authorized, and could not show whose
+  authorization that was. A second run with two binaries showed it was the parent's, and that a new
+  worker build changes nothing while a new daemon build is asked again. **When the question is "which
+  program", the test needs two programs.**
+
+  **A stand-in device can be the real one.** To feed the Windows VM a tone, QEMU was pointed at a null
+  sink by name, and WirePlumber linked the VM's input to the author's real microphone instead. It was
+  caught at the first link check, before anything in the guest recorded. Every capture after that was
+  bracketed by a check. **Check where a virtual device is wired, not what it was asked to be wired to.**
+
+  **A setting's storage is not the setting.** Writing Windows's "deny desktop apps" registry value changed
+  nothing; turned off in Settings, the same value refused the device. A test that flips state behind the
+  OS's back can pass for the wrong reason, which is M14's removal lesson moved to the platform.
+
+  **The passes ran where M23 says they must**:
+  - Linux: the author's Hyprland session, asked first, with nothing left in its config; a Fedora KDE live
+    VM; Xvfb.
+  - Windows: a Windows 11 VM from the ordinary ISO, with SSH on loopback.
+  - macOS: the author's Mac, driven by a script that removed what it installed.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -2651,6 +2693,21 @@ And on the updater, from M24:
 - **Testing the updater**: `newWorld` in `updater_test.go` serves a listing and a Linux archive, so a test
   that sets `GOOS` to Windows stages nothing — assert the decision, not an install. A manual pass on
   Windows runs in a VM, unprivileged, with SSH on loopback; M23's rule for a pass with an init system.
+
+And on voice input, from M25 (ADR 0034):
+
+- **No attach client opens the microphone.** The worker does, and the outcome reaches the clients as call
+  state from the daemon. A client explains a refusal and names the setting; it never asks for the device
+  to trigger a prompt.
+- **On macOS the daemon is the identity.** The worker's use is charged to it, so the worker never
+  disclaims its parent. The worker asks AVFoundation for the outcome; samples arriving prove nothing.
+- **The daemon stays cgo-free, and push-to-talk does not change that.** Every mechanism is pure Go. On
+  macOS, Carbon needs the main thread's run loop, so the daemon's `main` gives it that thread.
+- **A global key is registered at join and released at leave**, never held all day, and never before a
+  session exists. Failing to register is call state, not a failed call.
+- **A Linux app id needs an installed `.desktop` file.** `install.sh` owns it, and uninstall removes it.
+- **A pass that captures audio checks its wiring.** `pw-link -l` before and after every capture in a VM,
+  because a virtual source's name is a request PipeWire may not honor.
 
 ## Project-specific skills
 

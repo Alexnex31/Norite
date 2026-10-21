@@ -73,6 +73,13 @@ filter, `C-c z` reverting an unsaved settings section — it keeps the global ch
 | `C-c V` | promote in-call strip to full voice view (`4b` → `4a`) | global |
 | `C-space` (hold) | push to talk | global |
 
+> **`C-space` (hold) is not deliverable as drawn**
+> ([ADR 0034](../../adr/0034-mic-permission-and-global-hotkey.md), M25). A terminal reports no key release
+> unless it speaks the kitty keyboard protocol with event types, so "hold" arrives as a press and then
+> autorepeat. `C-space` is NUL in most terminals, and the input-source switch on macOS. Push-to-talk's real
+> path is the daemon's OS-wide hotkey (M35). What this row becomes in the terminal, release events where the
+> terminal has them and a toggle where it does not, is M35's and M44's to settle.
+
 ## Client & trust
 | Chord | Action | Scope |
 | --- | --- | --- |
