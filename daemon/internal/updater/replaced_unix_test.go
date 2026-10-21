@@ -116,6 +116,45 @@ func TestOnlyAProgramThatRunsAsAnotherVersionIsStarted(t *testing.T) {
 	}
 }
 
+// Another program under an inode number already seen is still another program. On ext4 two renames apart
+// it is the ordinary case, which CI met in the test above: a reinstall noted, then an upgrade given the
+// noted file's freed number. Built here without renames, so it does not depend on which number a
+// filesystem hands out: the same inode rewritten, with its size and modification time put back.
+func TestAnotherProgramUnderAnInodeAlreadySeenIsStarted(t *testing.T) {
+	w := newWorld(t)
+	packaged(t, w)
+	path := filepath.Join(w.bin, daemonName)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho 0.1.0\n"), 0o755); err != nil { //nolint:gosec // a stand-in program
+		t.Fatal(err)
+	}
+	u := w.updater("0.1.0", atProgram(w))
+	seen := u.program
+	if _, ok := changedAt(seen); !ok {
+		t.Skip("no change time on this system")
+	}
+
+	// Past the kernel's coarse clock, so the change time moves.
+	time.Sleep(50 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho 0.1.1\n"), 0o755); err != nil { //nolint:gosec // a stand-in program
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, time.Time{}, seen.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	now, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(seen, now) || !now.ModTime().Equal(seen.ModTime()) || now.Size() != seen.Size() {
+		t.Fatal("the fixture is not the same inode, size and modification time it means to be")
+	}
+
+	watching(t, u)
+	if !w.restartedWithin(5 * time.Second) {
+		t.Fatal("a new program under an inode number already seen was not started")
+	}
+}
+
 // A voice session puts the restart off, as it puts off an update.
 func TestAVoiceSessionPutsTheRestartOff(t *testing.T) {
 	w := newWorld(t)

@@ -48,7 +48,7 @@ func (u *Updater) watchReplaced(ctx context.Context) {
 		case <-tick.C:
 		}
 		now, err := os.Stat(u.opts.Program)
-		if err != nil || os.SameFile(seen, now) {
+		if err != nil || sameProgram(seen, now) {
 			continue
 		}
 		said, err := reportedVersion(ctx, u.opts.Program)
@@ -74,4 +74,20 @@ func (u *Updater) watchReplaced(ctx context.Context) {
 		u.opts.Restart()
 		return
 	}
+}
+
+// sameProgram is whether a look at the program's path found the file looked at last time.
+//
+// The inode number alone cannot say. A package manager renames a new file over the old one, the old inode
+// is freed, and ext4 gives its number to the next file created in the directory: two upgrades apart, a new
+// program sits under a number already seen. CI found it, a reinstall of the same version followed by an
+// upgrade, which the watch then missed until the next start. A new file also has its own change time, which
+// the kernel sets and a package cannot carry over, and usually its own modification time and size.
+func sameProgram(a, b os.FileInfo) bool {
+	if !os.SameFile(a, b) || !a.ModTime().Equal(b.ModTime()) || a.Size() != b.Size() {
+		return false
+	}
+	ac, aok := changedAt(a)
+	bc, bok := changedAt(b)
+	return aok == bok && ac.Equal(bc)
 }
