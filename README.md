@@ -420,6 +420,12 @@ reporting path and how disclosure is coordinated.
 Norite has not been reviewed by a third party. The end-to-end encryption work carries a hard release gate
 requiring an external cryptographic review before it is trusted with real conversations.
 
+**The APT, RPM and pacman repositories** at `https://alexnex31.github.io/packages`, from v0.1.1, are signed
+with the key whose fingerprint is **`957766F18D782E9296272EBF390A66B4FAC33217`**. The same fingerprint is
+in [that repository's README](https://github.com/Alexnex31/packages); a key that does not match both is
+not this project's. The key never enters this repository, and the packages are signed only after their
+release's cosign signature has been verified ([ADR 0035](docs/adr/0035-package-managers.md) §5).
+
 ---
 
 ## License
