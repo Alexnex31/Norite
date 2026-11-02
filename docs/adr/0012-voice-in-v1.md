@@ -6,8 +6,10 @@ media is reversed. **Amended by [ADR 0023](0023-voice-connection-authentication.
 echo canceller and AGC move from `libspeexdsp` to WebRTC's Audio Processing Module (AEC3), and how a client
 authenticates to the SFU is settled there. **Amended by [ADR 0034](0034-mic-permission-and-global-hotkey.md)**
 (M25), which answers the consequence below about the mic-permission handoff and the daemon's global
-hotkey: there is no handoff, and the hotkey is the daemon's by a different mechanism per OS. Everything
-else below stands, including the DSP chain order.
+hotkey: there is no handoff, and the hotkey is the daemon's by a different mechanism per OS. **Amended at
+M26 (2026-11-02)** in one place: the SFU carries every connection on one UDP port through Pion's ICE UDP
+mux, so "a forwarded UDP range" below is that one port plus TURN's, which M27 decides. Everything else
+below stands, including the DSP chain order.
 
 ## Context
 ADR 0006 deferred all real voice/video media to an undetermined later phase. The revised project scope makes
@@ -32,7 +34,8 @@ into Opus's runtime control, audio-only, no simulcast.
 
 An embedded Go TURN server (`pion/turn`, also answering plain STUN) ships in the backend, so self-hosters
 don't need to separately run `coturn`. Voice is a deployment-time opt-out (TURN/SFU need a reachable public
-IP and forwarded UDP range) — when disabled, voice UI is hidden entirely in CLI/GUI, never grayed out.
+IP and forwarded UDP ports; *the SFU's is one, from M26*) — when disabled, voice UI is hidden entirely in
+CLI/GUI, never grayed out.
 
 Video/screen-share stays owned directly by the GUI/web client — a second, separate WebRTC connection to the
 SFU, never through the daemon. The voice-join payload carries `supports_video: bool` from day one (CLI always
@@ -47,7 +50,7 @@ surfaces mitigate this with a real-time active-speaker indicator plus separate l
 
 ## Consequences
 - Self-hosting simplicity and voice-in-v1 are in real, unreconciled tension: Postgres-only self-hosting stays
-  simple, but the custom SFU/TURN mean self-hosters must handle UDP port ranges and NAT traversal — a
+  simple, but the custom SFU/TURN mean self-hosters must handle forwarded UDP ports and NAT traversal — a
   materially bigger operational burden than text-only, which is exactly why voice is opt-out, not mandatory.
 - Mic-permission handoff (which binary actually triggers the OS prompt vs. which one opens the audio device)
   and headless-daemon global-hotkey registration are both unverified per-OS behavior until a dedicated
