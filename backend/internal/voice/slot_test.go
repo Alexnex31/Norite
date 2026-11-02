@@ -144,7 +144,28 @@ func TestASwitchWhoseClockReadsEarlierStillAdvances(t *testing.T) {
 	s.write(a, pkt(1, 0), nil, at)
 	s.assign(b)
 	s.write(b, pkt(9, 0), nil, at.Add(-time.Millisecond))
-	if d := int32(w.out[1].Timestamp - w.out[0].Timestamp); d != 1 {
-		t.Fatalf("the timestamp moved %d ticks across a switch read a moment early, want 1", d)
+	if d := int32(w.out[1].Timestamp - w.out[0].Timestamp); d != 960 {
+		t.Fatalf("the timestamp moved %d ticks across a switch read a moment early, want one frame", d)
+	}
+}
+
+// A switch a moment after the last packet starts the new sender's frame where the old sender's ends, not
+// inside it: a jitter buffer drops or overlaps a frame that starts before the last one finished.
+func TestASwitchStartsAfterTheLastFrameEnds(t *testing.T) {
+	for _, step := range []uint32{960, 2880} {
+		w := &written{}
+		s := testSlot(w)
+		a := &source{id: 1, codec: "audio/opus"}
+		b := &source{id: 2, codec: "audio/opus"}
+		at := time.Now()
+		s.assign(a)
+		for i := range 5 {
+			s.write(a, pkt(uint16(i), uint32(i)*step), nil, at.Add(time.Duration(i)*20*time.Millisecond))
+		}
+		s.assign(b)
+		s.write(b, pkt(700, 12345), nil, at.Add(4*20*time.Millisecond+5*time.Millisecond))
+		if d := w.out[5].Timestamp - w.out[4].Timestamp; d != step {
+			t.Fatalf("frames of %d ticks, a switch 5 ms on: the new frame starts %d ticks after the last", step, d)
+		}
 	}
 }

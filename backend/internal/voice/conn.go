@@ -45,9 +45,12 @@ type conn struct {
 	speaking        []string
 	speakingVersion uint64
 	closed          bool
-	connected       bool
-	timer           *time.Timer
-	done            chan struct{}
+	// cause is what closed the connection, when that is something Provision reports: an eviction, the SFU
+	// stopping, the provision timing out.
+	cause     error
+	connected bool
+	timer     *time.Timer
+	done      chan struct{}
 
 	// tracks counts the tracks the peer has sent, against what its offer said it would.
 	tracks    int
@@ -55,13 +58,17 @@ type conn struct {
 	// streams counts the SRTP and SRTCP streams the connection has opened, against maxStreams.
 	streams    int
 	maxStreams int
+	// candidates counts the remote candidates ICE has been allowed to add (streams.go).
+	candidates int
 	// rtcp and messages meter what the peer sends besides media, under mu.
 	rtcp     meter
 	messages meter
 
-	// sendMu orders what goes out on the data channel; mapSent is the newest slot map sent.
+	// sendMu orders what goes out on the data channel; mapSent is the newest slot map sent, once one has
+	// been, and speakingSent the newest speaking list.
 	sendMu       sync.Mutex
 	mapSent      uint64
+	mapSentOnce  bool
 	speakingSent uint64
 }
 
@@ -79,14 +86,18 @@ func newConn(s *SFU, r *room, id, user, issued snowflake.ID) *conn {
 		done:     make(chan struct{}),
 	}
 	// A provision nobody connects to is dropped, or a client could hold places in rooms without ever
-	// sending a packet: unbounded growth in the shape M6's sweeper fixed.
+	// sending a packet: unbounded growth in the shape M6's sweeper fixed. So is one that connects and never
+	// says hello, which takes no part in the room and is never refused for its version.
 	c.timer = time.AfterFunc(s.lim.ProvisionTimeout, func() {
 		defer c.contain("the provision timeout")
 		c.mu.Lock()
-		connected := c.connected
+		connected, helloed := c.connected, c.helloed
 		c.mu.Unlock()
-		if !connected {
-			c.close("not connected within the provision timeout")
+		switch {
+		case !connected:
+			c.closeFor(ErrStale, "not connected within the provision timeout")
+		case !helloed:
+			c.close("no hello within the provision timeout")
 		}
 	})
 	return c
@@ -117,7 +128,7 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 	if c.closed {
 		c.mu.Unlock()
 		_ = pc.Close()
-		return "", ErrEvicted
+		return "", errClosedWhileProvisioned
 	}
 	c.pc = pc
 	c.mu.Unlock()
@@ -200,23 +211,46 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-c.done:
-		return "", ErrEvicted
+		return "", errClosedWhileProvisioned
 	}
 	c.mu.Lock()
 	closed := c.closed
 	c.slots = slots
 	c.mu.Unlock()
 	if closed {
-		return "", ErrEvicted
+		return "", errClosedWhileProvisioned
 	}
 	c.room.changed()
 	return pc.LocalDescription().SDP, nil
 }
 
-func (c *conn) isClosed() bool {
+// closedBy says whether the connection is closed, and what Provision answers for it if so.
+func (c *conn) closedBy() (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.closed
+	if c.cause != nil {
+		return c.closed, c.cause
+	}
+	return c.closed, errClosedWhileProvisioned
+}
+
+// errClosedWhileProvisioned is a connection closed during its provision for no reason Provision has a
+// sentinel for, such as a panic contained in one of its callbacks.
+var errClosedWhileProvisioned = errors.New("voice: the connection was closed while it was provisioned")
+
+// closeAll closes conns, each with the cause and reason given, all at once and waiting for all of them:
+// one at a time, each peer connection's close (DTLS's alert, SCTP's abort) waits on the last.
+func closeAll(conns []*conn, cause error, reason string) {
+	var wg sync.WaitGroup
+	for _, c := range conns {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer c.contain("closing")
+			c.closeFor(cause, reason)
+		}()
+	}
+	wg.Wait()
 }
 
 // codecFor is the codec the SFU carries for a kind. Video has none until M107.
@@ -225,6 +259,15 @@ func codecFor(kind string) (webrtc.RTPCodecCapability, bool) {
 		return opusCapability, true
 	}
 	return webrtc.RTPCodecCapability{}, false
+}
+
+// isHelloed says whether the client's hello has been accepted. Until it has, the connection takes no part in
+// its room: nothing is forwarded to it and nothing it sends is forwarded, so a client whose version would
+// be refused gains nothing by never saying which it is.
+func (c *conn) isHelloed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.helloed
 }
 
 // slotsByKind is the connection's slots, empty until it is negotiated.
@@ -310,13 +353,18 @@ func panicHook(where string, input []byte) {
 
 // close ends the connection, once, for the reason given. It is safe from any goroutine but Pion's own
 // callbacks, which go through a goroutine of their own.
-func (c *conn) close(reason string) {
+func (c *conn) close(reason string) { c.closeFor(nil, reason) }
+
+// closeFor is close, recording cause as what Provision answers if the connection was still being
+// negotiated.
+func (c *conn) closeFor(cause error, reason string) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return
 	}
 	c.closed = true
+	c.cause = cause
 	pc := c.pc
 	c.mu.Unlock()
 

@@ -1721,9 +1721,12 @@ carries the condition that would reopen it.
 - **Raised**: M26, planning's `/code-review`
 - **Verdict**: accepted risk
 - **Why**: selection and the speaking indicator read the RFC 6464 level each packet reports, and the
-  sender writes it. What bounds the claim: a packet counts for the time it covers, at most one 20 ms
-  frame, and only above a speech floor, so it is believed only while packets flow and lapses within a
-  second of them stopping, and sending more packets buys nothing (`source.hear`); packets past the rate
+  sender writes it. What bounds the claim: a packet counts for the time it covers, no more than the
+  sender's own frame and no more than the wall clock has given it, and only above a speech floor, so it
+  is believed only while packets flow and lapses within a second of them stopping, and neither sending
+  more packets nor claiming longer ones buys more than speaking all the time (`source.hear`; the first
+  version capped each packet at 20 ms, which made an honest sender of 60 ms frames never speak, found by
+  the branch's second `/code-review`); packets past the rate
   bound count for nothing and a sender far past it is closed (`meter`); and the receiver's drop removes
   anybody from its slots without asking the server. A griefer inside the bound claiming full volume still takes a slot at
   every receiver that has not dropped them. Reading the level from the audio instead means decoding every
@@ -1736,7 +1739,10 @@ carries the condition that would reopen it.
 - **Verdict**: accepted risk
 - **Why**: the self-hosted SFU shares the backend's process, and parses strangers' RTP, RTCP, DTLS and
   SCTP. Every goroutine and callback this package runs recovers and closes only that connection
-  (`conn.contain`), and the offer validator, the data-channel decoder and the forward path are fuzzed;
+  (`conn.contain`), and the room's selection recovers wherever it runs (`room.contain`: the second
+  `/code-review` found it contained only in the room's tick, so a panic the tick survived came back on
+  the next close, in a goroutine nothing recovered); the offer validator, the data-channel decoder and
+  the forward path are fuzzed;
   Pion's internal goroutines (ICE, DTLS, SCTP, SRTP) are beyond any recover the package can place. A panic
   there is a bug in a widely used library, and on the flagship the SFU runs in pods of its own (M116).
 - **Reopens if**: a panic reachable from the network is found in a Pion release this project uses.
@@ -1747,8 +1753,14 @@ carries the condition that would reopen it.
 - **Why**: every datagram on the SFU's port is demultiplexed, and once a connection is up its SRTP is
   authenticated and decrypted, before `source.run` meters it. Per connection what that work can build up
   is bounded: the streams SRTP opens are counted and the connection closed past its offer's
-  (`conn.buffer`), and each track, RTCP and data channel is metered. What is left is per-packet CPU at the
-  rate a sender can reach the port, which is any UDP service's exposure and is answered in front of it.
+  (`conn.buffer`), and so are the remote candidates ICE adds (`conn.remoteCandidate`), and each track,
+  RTCP and data channel is metered. What is left is per-packet CPU at the rate a sender can reach the
+  port, which is any UDP service's exposure and is answered in front of it.
+- **Reopened once, on the branch**: the second `/code-review` found the condition below already met.
+  Pion's ICE adds a peer-reflexive candidate for every source address that sends an authenticated
+  binding request, pairs it and sends it up to seven checks of its own, with no bound, and the peer
+  holds the credentials. Measured: binding requests from 100 ports left 105 remote candidates. Bounded
+  since by the remote IP filter on each connection's own API.
 - **Reopens if**: something per packet before the meter starts keeping state, or the port answers a
   packet with more than it received.
 

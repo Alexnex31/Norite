@@ -42,6 +42,13 @@ type source struct {
 	speaking bool
 	lastTS   uint32
 	heardTS  bool
+	// frame is the shortest timestamp advance between two packets heard, the sender's frame as far as
+	// the SFU can tell without reading a payload; zero until two have been heard.
+	frame float64
+	// credit is the time, in clock ticks, the sender may still claim: it fills with the wall clock up to
+	// maxCredit, and each packet spends what it counts for.
+	credit   float64
+	creditAt time.Time
 }
 
 // Loudness and speaking are judged from the RFC 6464 level each packet reports, counted per packet, so the
@@ -59,34 +66,60 @@ const (
 	// speechFloor is the quietest level, in -dBov, that counts at all. At 50 frames a second a steady
 	// level L settles near 15.5 (60-L)/60, so speaking starts around -40 dBov and noise at -55 is far off.
 	speechFloor = 60.0
-	// frameTicks is one 20 ms frame at the audio clock, the most time one packet counts for.
+	// frameTicks is one 20 ms frame at the audio clock: what the loudness counts in, and what a sender's
+	// first packet counts for.
 	frameTicks = float64(voiceproto.ClockRateAudio / 50)
+	// maxCredit is the most time a sender may claim ahead of the wall clock: Opus's longest packet,
+	// 120 ms, so one of those counts whole.
+	maxCredit = float64(voiceproto.ClockRateAudio * 120 / 1000)
 )
 
 // hear counts one packet's level: 0 is the loudest a sender can claim, 127 silence.
 //
-// Two corrections from /code-review on the first version, which summed (127-level)/127 per packet:
-//   - Only a level above speechFloor counts. A microphone's noise floor sits around -50 to -70 dBov, and
-//     on the linear scale a client sending packets through silence counted as speaking for ever.
-//   - Each packet counts for the time it covers, read off its timestamp's advance and at most one 20 ms
-//     frame. Counted per packet, a sender of 10 ms frames, which the SFU's own minptime=10 invites, was
-//     twice as loud as one of 20 ms at the same level. A sender claiming more time than it covers gains
-//     nothing past one frame a packet, and its timestamps outrun the clock for everybody listening.
+// Only a level above speechFloor counts. A microphone's noise floor sits around -50 to -70 dBov, and the
+// first version, which summed (127-level)/127 per packet, counted a client sending packets through
+// silence as speaking for ever (/code-review).
+//
+// Each packet counts for the time it covers, so 10, 20 and 60 ms frames at one level are equally loud.
+// The time is read off the timestamp's advance, which the sender writes, and held by two bounds it does
+// not: no more than the sender's frame, the shortest advance it has sent, so the first packet after a
+// silence does not count the silence; and no more than the wall clock has given, through credit, so a
+// sender claiming more time than passes counts as no more than one speaking all the time. The first
+// version capped every packet at one 20 ms frame instead, which made an honest sender of 60 ms frames a
+// third as loud and never speaking (/code-review, second pass).
 func (src *source) hear(level []byte, ts uint32, now time.Time) {
 	if level == nil {
 		return
 	}
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	weight := 1.0
-	if src.heardTS {
-		adv := int32(ts - src.lastTS)
-		weight = min(max(float64(adv), 0), frameTicks) / frameTicks
+	if src.creditAt.IsZero() {
+		src.credit = maxCredit
+	} else {
+		earned := max(float64(now.Sub(src.creditAt)), 0) / float64(time.Second) * voiceproto.ClockRateAudio
+		src.credit = min(src.credit+earned, maxCredit)
 	}
-	src.lastTS, src.heardTS = ts, true
+	src.creditAt = now
+
+	weight := frameTicks
+	if src.heardTS {
+		weight = 0
+		if adv := float64(int32(ts - src.lastTS)); adv > 0 {
+			if src.frame == 0 || adv < src.frame {
+				src.frame = min(adv, maxCredit)
+			}
+			weight = min(adv, src.frame)
+			src.lastTS = ts
+		}
+	} else {
+		src.lastTS, src.heardTS = ts, true
+	}
+	weight = min(weight, src.credit)
+	src.credit -= weight
+
 	dBov := float64(level[0] & 0x7f)
 	loud := max(speechFloor-dBov, 0) / speechFloor
-	src.loudness = src.decayedLocked(now) + loud*weight
+	src.loudness = src.decayedLocked(now) + loud*weight/frameTicks
 	src.heardAt = now
 }
 

@@ -4,6 +4,7 @@
 package voice
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -90,4 +91,38 @@ func (l Limits) maxSections() int {
 		n += b.Send + b.Slots
 	}
 	return n
+}
+
+// validate refuses limits an SFU would start with and admit nobody under: a bound left at zero refuses
+// every provision, every packet or every message, and nothing at construction would say why.
+func (l Limits) validate() error {
+	for name, v := range map[string]int{
+		"Rooms": l.Rooms, "ParticipantsPerRoom": l.ParticipantsPerRoom, "ConnsPerUser": l.ConnsPerUser,
+		"MaxCandidates": l.MaxCandidates, "PacketsPerSecond": l.PacketsPerSecond,
+		"BitsPerSecond": l.BitsPerSecond, "StrikesToEvict": l.StrikesToEvict,
+		"RTCPPerSecond": l.RTCPPerSecond, "MessagesPerSecond": l.MessagesPerSecond,
+	} {
+		if v <= 0 {
+			return fmt.Errorf("voice: Limits.%s is %d, and must be positive", name, v)
+		}
+	}
+	if l.ProvisionTimeout <= 0 {
+		return fmt.Errorf("voice: Limits.ProvisionTimeout is %s, and must be positive", l.ProvisionTimeout)
+	}
+	if l.ExtraChannels < 0 {
+		return fmt.Errorf("voice: Limits.ExtraChannels is %d, and must not be negative", l.ExtraChannels)
+	}
+	for kind, b := range l.Tracks {
+		if kind != voiceproto.KindAudio && kind != voiceproto.KindVideo {
+			return fmt.Errorf("voice: Limits.Tracks names %q, which is not a kind", kind)
+		}
+		if b.Send < 0 || b.Slots < 0 {
+			return fmt.Errorf("voice: Limits.Tracks[%q] is negative", kind)
+		}
+	}
+	// Every valid offer sends one audio track and receives on at least one audio slot (readOffer).
+	if a := l.Tracks[voiceproto.KindAudio]; a.Send < 1 || a.Slots < 1 {
+		return fmt.Errorf("voice: Limits.Tracks must allow one audio track sent and one audio slot")
+	}
+	return nil
 }

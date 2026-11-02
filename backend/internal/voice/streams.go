@@ -5,6 +5,7 @@ package voice
 
 import (
 	"io"
+	"net"
 	"time"
 
 	"github.com/pion/transport/v5/packetio"
@@ -36,10 +37,12 @@ func streamsFor(tracks, slots int) int {
 	return 2*tracks + slots + 8
 }
 
-// apiFor builds the API a connection's peer connection comes from, with the connection's buffer factory.
+// apiFor builds the API a connection's peer connection comes from, with the connection's buffer factory
+// and its count of remote candidates.
 func (s *SFU) apiFor(c *conn) *webrtc.API {
 	se := s.se
 	se.BufferFactory = c.buffer
+	se.SetRemoteIPFilter(c.remoteCandidate)
 	return webrtc.NewAPI(webrtc.WithMediaEngine(s.media), webrtc.WithInterceptorRegistry(s.reg),
 		webrtc.WithSettingEngine(se))
 }
@@ -88,3 +91,35 @@ func (b streamBuffer) WriteWithAttributes(p []byte, a packetio.Attributes) (int,
 }
 
 func (b streamBuffer) SetReadDeadline(t time.Time) error { return b.Buffer.SetReadDeadline(t) }
+
+// The offer's candidates are bounded (readOffer), and those are not all the remote candidates ICE keeps.
+// For every source address that sends an authenticated binding request and is not yet a candidate, Pion's
+// ICE adds a peer-reflexive one, pairs it with each local candidate and checks each pair up to seven
+// times; it has no bound of its own. A peer knows its credentials and the SFU's, from the answer, so it
+// can send checks from thousands of ports, or from every address of its /64, and the SFU holds a
+// candidate, its pairs and a mux mapping for each, and sends checks to addresses the peer never declared.
+// Found by /code-review, by reading pion/ice's handleInboundRequest: the reopening condition of the
+// ledger's "the SFU does work for a packet before any meter counts it".
+//
+// Pion asks the remote IP filter about each candidate before it adds one, signaled or peer-reflexive, so
+// the filter counts the asking, and refuses past the bound. It is asked twice about each of the offer's
+// candidates, once as the offer is applied and once as ICE starts, and once about each new source
+// address; the filter sees only the IP, so it cannot tell the two apart and counts every ask.
+
+// remoteCandidates is how many times a connection's filter says yes: twice for each of the offer's
+// candidates, and as many peer-reflexive ones again as the offer may carry, which is more than a client
+// behind NATs on two address families needs.
+func remoteCandidates(lim Limits) int {
+	return 3 * lim.MaxCandidates
+}
+
+// remoteCandidate is the connection's remote IP filter. Called on ICE's own goroutine, so it only counts.
+func (c *conn) remoteCandidate(net.IP) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.candidates >= remoteCandidates(c.sfu.lim) {
+		return false
+	}
+	c.candidates++
+	return true
+}

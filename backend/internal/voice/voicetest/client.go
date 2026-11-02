@@ -45,6 +45,9 @@ type Client struct {
 	sender     *webrtc.RTPSender
 	slotMids   []string
 	recordings sync.WaitGroup
+	// closing is set by Close before it waits, under mu, so a track arriving as it closes is not recorded:
+	// a WaitGroup's Add racing its Wait from zero is a misuse.
+	closing bool
 
 	dc *webrtc.DataChannel
 
@@ -237,6 +240,9 @@ func (c *Client) Connected() <-chan struct{} { return c.connected }
 
 // Close closes the peer connection and waits for its recordings to stop.
 func (c *Client) Close() error {
+	c.mu.Lock()
+	c.closing = true
+	c.mu.Unlock()
 	err := c.pc.Close()
 	c.recordings.Wait()
 	return err
@@ -439,7 +445,13 @@ func (c *Client) record(track *webrtc.TrackRemote, r *webrtc.RTPReceiver) {
 		}
 	}
 	levelID := extensionID(r.GetParameters().HeaderExtensions, voiceproto.AudioLevelURI)
+	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		return
+	}
 	c.recordings.Add(1)
+	c.mu.Unlock()
 	go func() {
 		defer c.recordings.Done()
 		go drainReceiverRTCP(r)

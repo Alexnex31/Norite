@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/voice/voicetest"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -228,6 +230,69 @@ func TestLoudnessIsPerTimeNotPerPacket(t *testing.T) {
 	}
 }
 
+// A sender of 40 or 60 ms frames, which Opus allows and the answer does not forbid, is as loud as one of
+// 20 ms frames at the same level, and speaks. Capped at one 20 ms frame a packet, 60 ms frames of a
+// steady voice settled below the speaking threshold and lost every slot.
+func TestLongerFramesAreAsLoud(t *testing.T) {
+	at := time.Now()
+	settle := func(frame time.Duration) (float64, bool) {
+		src := &source{}
+		ticks := uint32(frame / (20 * time.Millisecond) * 960)
+		n := int(2 * time.Second / frame)
+		for i := range n {
+			src.hear([]byte{20}, uint32(i)*ticks, at.Add(time.Duration(i)*frame))
+		}
+		// Judged half a frame after the last packet: the selection's tick lands anywhere between two.
+		return src.judge(at.Add(time.Duration(n-1)*frame + frame/2))
+	}
+	twenty, _ := settle(20 * time.Millisecond)
+	for _, frame := range []time.Duration{40 * time.Millisecond, 60 * time.Millisecond} {
+		l, speaking := settle(frame)
+		if !speaking || l < twenty*0.75 {
+			t.Fatalf("%s frames: loudness %.1f against %.1f for 20 ms, speaking %v", frame, l, twenty, speaking)
+		}
+	}
+}
+
+// A sender claiming more time than passes, 120 ms a packet at the packet bound, counts as no more than
+// one speaking all the time: the wall clock bounds the claim, not the sender's timestamps.
+func TestTimeClaimedPastTheClockCountsForNothing(t *testing.T) {
+	at := time.Now()
+	honest := &source{}
+	liar := &source{}
+	for i := range 100 {
+		honest.hear([]byte{20}, uint32(i)*960, at.Add(time.Duration(i)*20*time.Millisecond))
+	}
+	// 150 packets a second, each claiming 120 ms.
+	pace := time.Second / 150
+	n := int(2 * time.Second / pace)
+	for i := range n {
+		liar.hear([]byte{20}, uint32(i)*5760, at.Add(time.Duration(i)*pace))
+	}
+	h, _ := honest.judge(at.Add(99 * 20 * time.Millisecond))
+	l, _ := liar.judge(at.Add(time.Duration(n-1) * pace))
+	if l > h*1.1 {
+		t.Fatalf("claiming 120 ms a packet: loudness %.1f against %.1f speaking honestly", l, h)
+	}
+}
+
+// The first packet after a silence counts for one frame, not for the silence its timestamp skipped.
+func TestASilenceIsNotCountedAsSpeech(t *testing.T) {
+	at := time.Now()
+	src := &source{}
+	for i := range 5 {
+		src.hear([]byte{20}, uint32(i)*960, at.Add(time.Duration(i)*20*time.Millisecond))
+	}
+	before, _ := src.judge(at.Add(80 * time.Millisecond))
+	// Two seconds of DTX, then one loud packet.
+	resume := at.Add(80*time.Millisecond + 2*time.Second)
+	src.hear([]byte{0}, 4*960+96000, resume)
+	after, speaking := src.judge(resume)
+	if speaking || after > 1.01 {
+		t.Fatalf("one packet after a silence: loudness %.2f (from %.2f), speaking %v", after, before, speaking)
+	}
+}
+
 // A tick that changes nothing publishes nothing: the forward path keeps the slice it has.
 func TestAQuietTickPublishesNothing(t *testing.T) {
 	r := benchRoom(8, 8)
@@ -241,5 +306,37 @@ func TestAQuietTickPublishesNothing(t *testing.T) {
 		if src.slots.Load() != before[src] {
 			t.Fatal("a tick that changed nothing published a new slice")
 		}
+	}
+}
+
+// A cap is over the connection's slots of every kind together, as the contract says, not per kind: with
+// video slots (M105–M107), a cap of two per kind would fill four.
+func TestACapCountsEveryKindTogether(t *testing.T) {
+	s := &SFU{lim: DefaultLimits(), log: zerolog.Nop()}
+	r := newRoom(s, ids.MustNext())
+	member := func() *conn {
+		uid, cid := ids.MustNext(), ids.MustNext()
+		c := &conn{sfu: s, room: r, id: cid, user: uid, userText: uid.String(), idText: cid.String(),
+			sub: noSubscription, log: zerolog.Nop(), helloed: true}
+		r.conns[c.id] = c
+		r.perUser[c.user]++
+		return c
+	}
+	recv := member()
+	recv.slots = map[string][]*slot{}
+	for _, kind := range []string{voiceproto.KindAudio, voiceproto.KindVideo} {
+		for j := range 2 {
+			recv.slots[kind] = append(recv.slots[kind], &slot{conn: recv, index: j, kind: kind, codec: "audio/opus",
+				track: newSlotTrack(kind, j, opusCapability)})
+		}
+	}
+	for i, kind := range []string{voiceproto.KindAudio, voiceproto.KindAudio, voiceproto.KindVideo, voiceproto.KindVideo} {
+		src := &source{conn: member(), id: uint32(i + 1), kind: kind, codec: "audio/opus"}
+		r.sources[src.id] = src
+	}
+	recv.sub = subscription{cap: 2}
+	r.assign()
+	if n := len(recv.slotMap); n != 2 {
+		t.Fatalf("a cap of two filled %d slots across two kinds", n)
 	}
 }

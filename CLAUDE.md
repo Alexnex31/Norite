@@ -1324,6 +1324,14 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   could not be updated while it ran, so the first rerun tested the old binary: **check the hash of what a
   pass runs.**
 
+  **A second `/code-review` on the finished branch found fifteen more**, M22's lesson again. The worst two
+  were each a fix's own blind spot: the selection's panic was contained only in the room's tick, so the
+  panic it survived came back on the next close, in a bare goroutine, and ended the process; and the
+  offer's candidate bound said nothing of the peer-reflexive ones ICE adds for every address that sends
+  an authenticated check, 105 from 100 ports, measured. A client that never said hello was never refused
+  for its version, and was forwarded all the same. **A bound on what the peer declares is not a bound on
+  what the peer can make the server hold.**
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -2795,10 +2803,14 @@ And on the SFU, from M26 (ADR 0023 as amended):
   A slot writes its own header: its SSRC, the sender's source id as CSRC, no extension but the audio
   level re-encoded, and no RTCP crosses a hop.
 - **Everything a peer sends is bounded against a hostile one**, and each bound has a test that plays it:
-  packets and bits per track, RTCP and messages per connection, data channels, and SRTP streams against
-  the offer. A rate past its bound is dropped, and past twice it for three seconds closed.
-- **Every goroutine and Pion callback the package runs defers `conn.contain`**, and a lock a contained
-  panic could cross is released by defer.
+  packets and bits per track, RTCP and messages per connection, data channels, SRTP streams against
+  the offer, and the remote candidates ICE adds. A rate past its bound is dropped, and past twice it for
+  three seconds closed.
+- **Every goroutine and Pion callback the package runs defers `conn.contain`**, the room's selection
+  contains its own on whatever goroutine runs it, and a lock a contained panic could cross is released
+  by defer.
+- **A connection takes part in its room only once its hello is accepted.** Anything new that forwards to
+  a connection or from it asks `isHelloed`.
 - **The slot map and the speaking list are sent after the room's lock**, and each send is of the state
   as it is then. Nothing is sent under a lock a close takes.
 - **The data channel is `contracts/voice-datachannel.schema.json`**, decoded strictly; a field added is a

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 
@@ -119,8 +120,17 @@ func New(opts Options) (*SFU, error) {
 	if opts.Conn == nil {
 		return nil, errors.New("voice: no UDP socket")
 	}
-	if opts.Limits.Rooms == 0 {
+	// The zero Limits is the defaults. Anything else is the caller's whole, and checked whole: a Limits
+	// with one field set and the rest left at zero would admit nobody.
+	if reflect.ValueOf(opts.Limits).IsZero() {
 		opts.Limits = DefaultLimits()
+	}
+	if err := opts.Limits.validate(); err != nil {
+		return nil, err
+	}
+	// The hello is checked against it; empty, every client's version is refused.
+	if opts.Version == "" {
+		return nil, errors.New("voice: no server version")
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -203,12 +213,15 @@ func (s *SFU) Close() error {
 	for _, c := range s.conns {
 		all = append(all, c)
 	}
+	// Every room is shut first, so the closes below choose no slots again and send nobody a slot map:
+	// all of it would go to connections about to close.
+	for _, r := range s.rooms {
+		r.shut()
+	}
 	s.mu.Unlock()
 
 	close(s.stop)
-	for _, c := range all {
-		c.close("the SFU is stopping")
-	}
+	closeAll(all, ErrClosed, "the SFU is stopping")
 	s.wg.Wait()
 	return s.mux.Close()
 }
@@ -226,12 +239,13 @@ func (s *SFU) Provision(ctx context.Context, roomID, user, connID, issued snowfl
 	}
 	answer, err := c.negotiate(ctx, offer, shape)
 	if err != nil {
-		// Evicted while Pion was busy: its own call then fails on a closed connection, and that is not a
-		// bad offer, which is what M33 would otherwise tell the user who was kicked.
-		evicted := c.isClosed()
+		// Closed while Pion was busy: its own call then fails on a closed connection, and that is not a
+		// bad offer. What closed it is the answer, so a user who was kicked is told so, and one whose join
+		// met a restarting server is not told they were kicked.
+		closed, cause := c.closedBy()
 		c.close("negotiation failed")
-		if evicted {
-			return "", ErrEvicted
+		if closed {
+			return "", cause
 		}
 		return "", err
 	}
@@ -332,9 +346,7 @@ func (s *SFU) Evict(_ context.Context, roomID, user, cut snowflake.ID) error {
 	}
 	s.mu.Unlock()
 
-	for _, c := range victims {
-		c.close("evicted")
-	}
+	closeAll(victims, ErrEvicted, "evicted")
 	return nil
 }
 
@@ -345,7 +357,7 @@ func (s *SFU) EvictConnection(_ context.Context, connID snowflake.ID) error {
 	s.evictedConns[connID] = s.now().Add(s.lim.ProvisionTimeout)
 	s.mu.Unlock()
 	if c != nil {
-		c.close("evicted")
+		c.closeFor(ErrEvicted, "evicted")
 	}
 	return nil
 }
@@ -374,11 +386,14 @@ func (s *SFU) CloseRoom(_ context.Context, roomID, cut snowflake.ID) error {
 	var all []*conn
 	if r := s.rooms[roomID]; r != nil {
 		all = r.members()
+		// Shut and let go of before its members close, so their closes choose no slots again: one at a
+		// time, each would reselect the room and send every member left a slot map, 63 selections and
+		// thousands of messages for a full room, all to connections about to close. A provision issued
+		// after the cutoff opens a new room under the same id.
+		s.dropRoomLocked(r)
 	}
 	s.mu.Unlock()
-	for _, c := range all {
-		c.close("the room was closed")
-	}
+	closeAll(all, ErrEvicted, "the room was closed")
 	return nil
 }
 

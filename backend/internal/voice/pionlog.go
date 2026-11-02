@@ -4,8 +4,6 @@
 package voice
 
 import (
-	"fmt"
-
 	"github.com/pion/logging"
 	"github.com/rs/zerolog"
 )
@@ -15,7 +13,8 @@ import (
 // per packet. Its warnings are debug here because the manual pass found four on every ordinary
 // connection, none meaning anything: a ping before the client's candidates arrive, and three on close
 // ("stream is already closed", "dtls fatal: conn is closed", "read/write on closed pipe"). At warn, a
-// busy instance's log would be mostly those.
+// busy instance's log would be mostly those. Each goes through Msgf, which formats nothing when its level
+// is off.
 type pionLogs struct{ log zerolog.Logger }
 
 func (f pionLogs) NewLogger(scope string) logging.LeveledLogger {
@@ -32,6 +31,6 @@ func (pionLogger) Info(string)           {}
 func (pionLogger) Infof(string, ...any)  {}
 
 func (l pionLogger) Warn(msg string)                { l.log.Debug().Msg(msg) }
-func (l pionLogger) Warnf(format string, a ...any)  { l.log.Debug().Msg(fmt.Sprintf(format, a...)) }
+func (l pionLogger) Warnf(format string, a ...any)  { l.log.Debug().Msgf(format, a...) }
 func (l pionLogger) Error(msg string)               { l.log.Error().Msg(msg) }
-func (l pionLogger) Errorf(format string, a ...any) { l.log.Error().Msg(fmt.Sprintf(format, a...)) }
+func (l pionLogger) Errorf(format string, a ...any) { l.log.Error().Msgf(format, a...) }

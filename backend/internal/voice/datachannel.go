@@ -54,7 +54,9 @@ func (c *conn) onDataChannel(dc *webrtc.DataChannel) {
 	if extra {
 		_ = dc.Close()
 		if tooMany {
-			c.close("too many data channels")
+			// From a goroutine of its own, like every close in a Pion callback: pc.Close here would run on
+			// the goroutine Pion's accept loop is waiting on.
+			go c.close("too many data channels")
 		}
 		return
 	}
@@ -68,12 +70,18 @@ func (c *conn) onDataChannel(dc *webrtc.DataChannel) {
 
 // onMessage handles one message from the client.
 func (c *conn) onMessage(msg webrtc.DataChannelMessage) error {
+	// Past the bound a message is dropped unread, as a packet past its bound is; only a peer past twice it
+	// for StrikesToEvict seconds is refused. A client that bursts, a few pins clicked at once, keeps its
+	// call, and since a subscribe replaces the last whole, its next one makes good what was dropped.
 	lim := c.sfu.lim
 	c.mu.Lock()
-	ok, _ := c.messages.admit(time.Now(), 0, lim.MessagesPerSecond, 0, lim.StrikesToEvict)
+	ok, out := c.messages.admit(time.Now(), 0, lim.MessagesPerSecond, 0, lim.StrikesToEvict)
 	c.mu.Unlock()
-	if !ok {
+	if out {
 		return refusalf("more than %d messages a second", lim.MessagesPerSecond)
+	}
+	if !ok {
+		return nil
 	}
 	panicHook("a data-channel message", msg.Data)
 	if !msg.IsString || len(msg.Data) > voiceproto.MaxMessage {
@@ -128,9 +136,11 @@ func (c *conn) onHello(b []byte) error {
 		c.helloed = true
 		c.mu.Unlock()
 	}()
-	// The slot map as it stands, which nothing has sent while the client could not yet read it, and who is
-	// speaking if anybody is.
-	c.flushSlots(true)
+	// The connection takes part in its room from here, so the room chooses again now rather than at its
+	// next tick; once per connection, unlike a subscribe. Then the slot map, sent even when that choice
+	// left it empty, since the client has had none yet, and who is speaking if anybody is.
+	c.room.changed()
+	c.flushSlots()
 	c.flushSpeaking()
 	return nil
 }
@@ -197,17 +207,18 @@ func (c *conn) setSlotMap(m []voiceproto.SlotEntry) bool {
 
 // flushSlots sends the slot map as it is now, unless that version has gone already. Two reassignments
 // racing each flush after the room's lock, in either order; each sends the newest map, never the one it
-// computed, so the last to arrive is the current one. force sends it even if sent, for the client's hello.
-func (c *conn) flushSlots(force bool) {
+// computed, so the last to arrive is the current one. The first flush after hello always sends, since an
+// empty map is version zero.
+func (c *conn) flushSlots() {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	c.mu.Lock()
 	m, v, helloed := c.slotMap, c.mapVersion, c.helloed
 	c.mu.Unlock()
-	if !helloed || (!force && v <= c.mapSent) {
+	if !helloed || (c.mapSentOnce && v <= c.mapSent) {
 		return
 	}
-	c.mapSent = v
+	c.mapSent, c.mapSentOnce = v, true
 	if m == nil {
 		m = []voiceproto.SlotEntry{}
 	}

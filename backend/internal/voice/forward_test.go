@@ -199,7 +199,9 @@ func TestASlotChangingHandsStaysOneStream(t *testing.T) {
 	assertContinuous(t, got)
 	gap := got[switched].At.Sub(got[switched-1].At)
 	ticks := got[switched].TS - got[switched-1].TS
-	if want := uint32(gap.Seconds() * 48000); ticks+960 < want || ticks > want+960*5 {
+	// At least one frame, so the new sender's frame starts where the last one ended, and about the time
+	// that passed.
+	if want := uint32(gap.Seconds() * 48000); ticks < 960 || ticks+960 < want || ticks > want+960*5 {
 		t.Fatalf("the timestamp advanced %d ticks over %s at the switch", ticks, gap)
 	}
 }

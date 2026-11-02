@@ -1752,7 +1752,9 @@ of this section.
     into another. Header extensions are stripped on forward except the audio level. Congestion control is
     per hop, which is the shape M31 needs.
   - **The data channel** opens with a versioned hello (gatewayproto's rule), then carries the slot map,
-    pin, drop and cap, each a row in `contracts/voice-datachannel.schema.json`.
+    pin, drop and cap, each a row in `contracts/voice-datachannel.schema.json`. A connection takes no
+    part in its room, sending or receiving, until its hello is accepted, and one that never says hello
+    is closed at the provision timeout.
   - **Selection.** When senders outnumber slots, the loudest recent speakers fill them, behind the
     server's exclusion and the client's pins and drops. The **active speaker** is the RFC 6464 level,
     believed only while packets flow and only within the sender's rate bound.
@@ -1763,7 +1765,8 @@ of this section.
   **Bounds**, each with a test that plays the hostile peer: participants per room, rooms per process,
   connections per user per room, tracks per connection, slots per receiver, packets per second and bitrate
   per sender, RTCP per peer, one data channel per peer, data-channel message size and rate, offer size and
-  candidates, and the provision timeout. **Containment**: the self-hosted SFU shares `norite-server`'s
+  candidates, the remote candidates ICE adds for addresses the offer never named, and the provision
+  timeout. **Containment**: the self-hosted SFU shares `norite-server`'s
   process, so every goroutine the package starts recovers a panic and closes that one peer, and the offer
   validator, the data-channel decoder and the rewrite path are fuzzed.
 

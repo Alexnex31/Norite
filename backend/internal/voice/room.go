@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -34,6 +35,8 @@ type room struct {
 	nextSource uint32
 	gone       bool
 	stop       chan struct{}
+	// panicked is set by the first panic in the room's selection, which alone is logged.
+	panicked atomic.Bool
 }
 
 // selectEvery is how often a room chooses its slots again as loudness changes, and so how quickly a new
@@ -66,7 +69,7 @@ func (r *room) run() {
 		case <-r.stop:
 			return
 		case <-t.C:
-			r.tick()
+			r.changed()
 		}
 	}
 }
@@ -119,18 +122,6 @@ func (r *room) members() []*conn {
 		out = append(out, c)
 	}
 	return out
-}
-
-// tick chooses again, containing a panic: the selection runs for every connection in the room, and one
-// connection's state is not a reason to end the process or stop the room's selection.
-func (r *room) tick() {
-	defer func() {
-		if v := recover(); v != nil {
-			r.sfu.log.Error().Stringer("room", r.id).Str("panic", fmt.Sprint(v)).
-				Bytes("stack", debug.Stack()).Msg("a voice room's selection panicked")
-		}
-	}()
-	r.changed()
 }
 
 // shut marks the room gone and stops its selection. A room is freed when its last connection leaves.
@@ -189,15 +180,33 @@ func (r *room) removeSource(src *source) {
 // changed chooses the room's slots again, after anything that can change who fills them, and sends each
 // connection whose slot map changed its new one. The sending happens after the room's lock is released:
 // a connection too slow to take it is closed, and closing one takes the SFU's lock, which comes first.
+//
+// It contains a panic itself, because it runs on whatever goroutine changed the room: the room's tick, a
+// close (and so every eviction, and the goroutine a contained panic starts), a track ending, a hello, and
+// the backend's own SetExclusion. Contained only in the tick, the panic the tick survived came back on the
+// next close, in a goroutine nothing recovers, and ended norite-server.
 func (r *room) changed() {
+	defer r.contain()
 	for _, c := range r.assign() {
-		c.flushSlots(false)
+		c.flushSlots()
 		c.flushSpeaking()
 	}
 }
 
-// assign runs assignLocked under the room's lock, released by a defer: a panic in it is recovered by the
-// room's tick, and a lock it left held would stop the room, then the SFU, whose lock is taken first.
+// contain recovers a panic in the room's selection. One connection's state is not a reason to end the
+// process, and the room goes on as well as it can. The first is logged with its stack and the rest are
+// not: a panic on the room's own state recurs on every tick, ten a second, for as long as the room lasts.
+func (r *room) contain() {
+	v := recover()
+	if v == nil || r.panicked.Swap(true) {
+		return
+	}
+	r.sfu.log.Error().Stringer("room", r.id).Str("panic", fmt.Sprint(v)).
+		Bytes("stack", debug.Stack()).Msg("a voice room's selection panicked; later panics in it are not logged")
+}
+
+// assign runs assignLocked under the room's lock, released by a defer: a panic in it is recovered by
+// changed, and a lock it left held would stop the room, then the SFU, whose lock is taken first.
 func (r *room) assign() []*conn {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -207,14 +216,22 @@ func (r *room) assign() []*conn {
 // assignLocked fills every receiver's slots, tells each source which slots it fills, and returns the
 // connections whose slot map or speaking list changed.
 func (r *room) assignLocked(now time.Time) []*conn {
-	panicHook("selection", nil)
 	fills := map[*source][]*slot{}
 	var moved []*conn
 	if !r.gone {
+		panicHook("selection", nil)
+		// Only a connection that has said hello takes part, as a receiver or as a sender (isHelloed).
+		helloed := make(map[*conn]bool, len(r.conns))
+		for _, c := range r.conns {
+			helloed[c] = c.isHelloed()
+		}
 		sources := make([]*source, 0, len(r.sources))
 		loudness := make(map[*source]float64, len(r.sources))
 		speaking := map[snowflake.ID]string{}
 		for _, src := range r.sources {
+			if !helloed[src.conn] {
+				continue
+			}
 			sources = append(sources, src)
 			l, sp := src.judge(now)
 			loudness[src] = l
@@ -235,6 +252,9 @@ func (r *room) assignLocked(now time.Time) []*conn {
 			sub := c.subscription()
 			changed := false
 			entries := []voiceproto.SlotEntry{}
+			// The cap is over the connection's slots of every kind together, as the contract says, so
+			// what one kind fills is spent before the next.
+			left := sub.cap
 			for _, kind := range []string{voiceproto.KindAudio, voiceproto.KindVideo} {
 				slots := c.slotsByKind()[kind]
 				if len(slots) == 0 {
@@ -242,18 +262,21 @@ func (r *room) assignLocked(now time.Time) []*conn {
 				}
 				var candidates []*source
 				for _, src := range sources {
-					if src.kind == kind && r.mayReceive(c, src) && !sub.drop[src.conn.user] {
+					if helloed[c] && src.kind == kind && r.mayReceive(c, src) && !sub.drop[src.conn.user] {
 						candidates = append(candidates, src)
 					}
 				}
 				chosen := choose(candidates, sub, loudness, slots)
-				if sub.cap >= 0 && len(chosen) > sub.cap {
-					chosen = chosen[:sub.cap]
+				if left >= 0 {
+					chosen = chosen[:min(len(chosen), left)]
 				}
 				for _, s := range place(slots, chosen) {
 					src := s.current()
 					if src == nil {
 						continue
+					}
+					if left > 0 {
+						left--
 					}
 					fills[src] = append(fills[src], s)
 					entries = append(entries, voiceproto.SlotEntry{

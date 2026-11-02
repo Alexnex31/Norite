@@ -6,9 +6,14 @@ package voice
 import (
 	"bytes"
 	"context"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pion/stun/v4"
+	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/internal/voice/voicetest"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -134,22 +139,55 @@ func TestAPeerPastTheRTCPBoundIsClosed(t *testing.T) {
 	}
 }
 
-func TestMessagesPastTheBoundAreRefused(t *testing.T) {
+// Past the bound a message is dropped and the connection kept: a burst of pins clicked at once is a
+// client, not a flood.
+func TestMessagesPastTheBoundAreDropped(t *testing.T) {
 	s := newSFU(t, func(l *Limits) { l.MessagesPerSecond = 5 })
 	j := join(t, s, ids.MustNext(), ids.MustNext(), 1)
 	waitOp(t, j.client, voiceproto.OpReady, nil)
-	for range 10 {
+	for range 9 {
 		if err := j.client.Subscribe(nil, nil, nil); err != nil {
-			break
+			t.Fatal(err)
 		}
 	}
+	time.Sleep(1500 * time.Millisecond)
+	if !s.hasConn(j.conn) {
+		t.Fatal("a burst within twice the bound closed the connection")
+	}
+	for _, m := range j.client.Messages() {
+		if op, _ := voiceproto.OpOf(m); op == voiceproto.OpRefused {
+			t.Fatalf("a burst within twice the bound was refused: %s", m)
+		}
+	}
+}
+
+// Past twice the bound for StrikesToEvict seconds in a row, the peer is refused and closed.
+func TestAPeerPastTwiceTheMessageBoundIsRefused(t *testing.T) {
+	s := newSFU(t, func(l *Limits) { l.MessagesPerSecond = 5; l.StrikesToEvict = 2 })
+	j := join(t, s, ids.MustNext(), ids.MustNext(), 1)
+	waitOp(t, j.client, voiceproto.OpReady, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	go func() {
+		// Fifteen a second, past twice five.
+		tick := time.NewTicker(time.Second / 15)
+		defer tick.Stop()
+		for ctx.Err() == nil {
+			<-tick.C
+			if j.client.Subscribe(nil, nil, nil) != nil {
+				return
+			}
+		}
+	}()
 	var r voiceproto.Refused
 	if err := voiceproto.Decode(waitOp(t, j.client, voiceproto.OpRefused, nil), &r); err != nil {
 		t.Fatal(err)
 	}
+	cancel()
 	if !strings.Contains(r.Reason, "messages a second") {
 		t.Fatalf("refused for another reason: %q", r.Reason)
 	}
+	eventually(t, 5*time.Second, "the flooding peer is closed", func() bool { return !s.hasConn(j.conn) })
 }
 
 // A panic where a stranger's input is handled ends that one connection: the SFU shares the server's
@@ -206,9 +244,10 @@ func TestAPeerSendingToUndeclaredSSRCsIsClosed(t *testing.T) {
 	}
 }
 
-// A panic in the room's selection is recovered by its tick, and must not leave the room's lock held:
-// the next close in the room takes the SFU's lock and then the room's, and would hold the first for ever.
-func TestAPanicInSelectionLeavesNoLockHeld(t *testing.T) {
+// A panic in the room's selection is contained wherever the selection runs, and leaves no lock held. The
+// tick is one place; a close is another, and there the panic would otherwise surface in the goroutine of
+// whoever closed: here the test's own, which it would end.
+func TestAPanicInSelectionIsContainedWhereverItRuns(t *testing.T) {
 	s := newSFU(t, nil)
 	room := ids.MustNext()
 	a := join(t, s, room, ids.MustNext(), 1)
@@ -217,14 +256,16 @@ func TestAPanicInSelectionLeavesNoLockHeld(t *testing.T) {
 	r := s.rooms[room]
 	s.mu.Unlock()
 
+	var panics atomic.Int32
 	hook := func(where string, _ []byte) {
 		if where == "selection" {
+			panics.Add(1)
 			panic("a panic in selection")
 		}
 	}
 	testPanic.Store(&hook)
-	r.tick()
-	testPanic.Store(nil)
+	t.Cleanup(func() { testPanic.Store(nil) })
+	r.changed()
 
 	done := make(chan struct{})
 	go func() {
@@ -236,7 +277,78 @@ func TestAPanicInSelectionLeavesNoLockHeld(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a close after a contained panic never finished: a lock was left held")
 	}
+	testPanic.Store(nil)
+	if panics.Load() < 2 {
+		t.Fatalf("the selection ran %d times, and the close's run is the one under test", panics.Load())
+	}
 	if !s.hasConn(b.conn) {
 		t.Fatal("the other connection went too")
+	}
+}
+
+// A peer knows its own ICE credentials and the SFU's, from the answer, so it can send authenticated
+// binding requests from as many source addresses as it likes, and ICE adds a peer-reflexive candidate for
+// each. Past the bound, none is added.
+func TestBindingRequestsFromManyAddressesAreBounded(t *testing.T) {
+	s := newSFU(t, nil)
+	client := newClient(t, 1)
+	offer := offerOf(t, client)
+	connID := ids.MustNext()
+	answer, err := s.Provision(context.Background(), ids.MustNext(), ids.MustNext(), connID, ids.MustNext(), offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attr := func(sdp, key string) string {
+		for line := range strings.SplitSeq(sdp, "\r\n") {
+			if v, ok := strings.CutPrefix(line, "a="+key+":"); ok {
+				return v
+			}
+		}
+		t.Fatalf("no a=%s", key)
+		return ""
+	}
+	username := attr(answer, "ice-ufrag") + ":" + attr(offer, "ice-ufrag")
+	password := attr(answer, "ice-pwd")
+	target := s.opts.Conn.LocalAddr()
+
+	const sources = 100
+	for range sources {
+		pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pc.Close() })
+		msg, err := stun.Build(stun.TransactionID, stun.BindingRequest, stun.NewUsername(username),
+			stun.NewShortTermIntegrity(password), stun.Fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pc.WriteTo(msg.Raw, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s.mu.Lock()
+	c := s.conns[connID]
+	s.mu.Unlock()
+	c.mu.Lock()
+	pc := c.pc
+	c.mu.Unlock()
+	remote := func() int {
+		n := 0
+		for _, st := range pc.GetStats() {
+			if cs, ok := st.(webrtc.ICECandidateStats); ok && cs.Type == webrtc.StatsTypeRemoteCandidate {
+				n++
+			}
+		}
+		return n
+	}
+	bound := remoteCandidates(s.lim)
+	// The requests reached ICE: it holds most of what the bound lets it, the rest spent on asks about
+	// the offer's own candidates.
+	eventually(t, 5*time.Second, "the binding requests reach ICE", func() bool { return remote() > bound/2 })
+	time.Sleep(300 * time.Millisecond)
+	if n := remote(); n > bound {
+		t.Fatalf("binding requests from %d addresses left %d remote candidates, past the bound of %d", sources, n, bound)
 	}
 }

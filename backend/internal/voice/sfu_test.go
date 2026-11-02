@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -414,7 +415,9 @@ func TestAdmissionHoldsItsBounds(t *testing.T) {
 		}
 	})
 	t.Run("a refused provision in a new room leaves no room", func(t *testing.T) {
-		s := newSFU(t, func(l *Limits) { l.ParticipantsPerRoom = 0 })
+		// Set after New, which refuses a bound of zero.
+		s := newSFU(t, nil)
+		s.lim.ParticipantsPerRoom = 0
 		if err := provision(s, ids.MustNext(), ids.MustNext(), ids.MustNext()); !errors.Is(err, ErrFull) {
 			t.Fatalf("got %v, want ErrFull", err)
 		}
@@ -483,5 +486,87 @@ func TestAnEvictionDuringNegotiationIsReportedAsOne(t *testing.T) {
 	_, err := s.Provision(context.Background(), ids.MustNext(), ids.MustNext(), conn, ids.MustNext(), offerOf(t, newClient(t, 1)))
 	if !errors.Is(err, ErrEvicted) {
 		t.Fatalf("got %v, want ErrEvicted", err)
+	}
+}
+
+// Limits with a field left at zero would start an SFU that admits nobody, and nothing would say why. The
+// zero Limits is the defaults; anything else must be whole.
+func TestNewRefusesLimitsThatAdmitNobody(t *testing.T) {
+	open := func(t *testing.T) net.PacketConn {
+		t.Helper()
+		pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pc.Close() })
+		return pc
+	}
+	partial := DefaultLimits()
+	partial.ProvisionTimeout = 0
+	noAudio := DefaultLimits()
+	noAudio.Tracks = map[string]TrackBounds{"audio": {Send: 1, Slots: 0}}
+	for name, opts := range map[string]Options{
+		"one field set":        {Limits: Limits{Rooms: 100}, Version: "dev"},
+		"no provision timeout": {Limits: partial, Version: "dev"},
+		"no audio slot":        {Limits: noAudio, Version: "dev"},
+		"no version":           {Version: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts.Conn = open(t)
+			if s, err := New(opts); err == nil {
+				_ = s.Close()
+				t.Fatal("New accepted it")
+			}
+		})
+	}
+	t.Run("the zero Limits", func(t *testing.T) {
+		s, err := New(Options{Conn: open(t), Version: "dev"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = s.Close()
+	})
+}
+
+// Closing a room closes its members without choosing its slots again for each one that goes: one at a
+// time, a full room would be 63 selections and thousands of slot maps sent to connections about to close.
+func TestCloseRoomChoosesNoSlotsAgain(t *testing.T) {
+	s := newSFU(t, nil)
+	room := ids.MustNext()
+	for range 5 {
+		join(t, s, room, ids.MustNext(), 1)
+	}
+	var selections atomic.Int32
+	hook := func(where string, _ []byte) {
+		if where == "selection" {
+			selections.Add(1)
+		}
+	}
+	testPanic.Store(&hook)
+	t.Cleanup(func() { testPanic.Store(nil) })
+	if err := s.CloseRoom(context.Background(), room, ids.MustNext()); err != nil {
+		t.Fatal(err)
+	}
+	testPanic.Store(nil)
+	// The room's own tick may land once before the room is shut.
+	if n := selections.Load(); n > 1 {
+		t.Fatalf("closing a room of five chose its slots %d times", n)
+	}
+}
+
+// A join in flight when the SFU stops is told the SFU stopped, not that it was evicted.
+func TestAStopDuringNegotiationIsReportedAsOne(t *testing.T) {
+	s := newSFU(t, nil)
+	hook := func(where string, _ []byte) {
+		if where == "negotiating" {
+			_ = s.Close()
+		}
+	}
+	testPanic.Store(&hook)
+	t.Cleanup(func() { testPanic.Store(nil) })
+	_, err := s.Provision(context.Background(), ids.MustNext(), ids.MustNext(), ids.MustNext(), ids.MustNext(),
+		offerOf(t, newClient(t, 1)))
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("got %v, want ErrClosed", err)
 	}
 }

@@ -64,7 +64,8 @@ func benchRoom(n, slotsEach int) *room {
 	r := newRoom(s, ids.MustNext())
 	for i := range n {
 		uid, cid := ids.MustNext(), ids.MustNext()
-		c := &conn{sfu: s, room: r, id: cid, user: uid, userText: uid.String(), idText: cid.String(), sub: noSubscription, log: zerolog.Nop()}
+		c := &conn{sfu: s, room: r, id: cid, user: uid, userText: uid.String(), idText: cid.String(), sub: noSubscription,
+			log: zerolog.Nop(), helloed: true}
 		var sl []*slot
 		for j := range slotsEach {
 			sl = append(sl, &slot{conn: c, index: j, kind: "audio", codec: "audio/opus", track: newSlotTrack("audio", j, opusCapability)})

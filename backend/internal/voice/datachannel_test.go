@@ -363,3 +363,35 @@ func TestABurstOfBadMessagesIsRefusedOnce(t *testing.T) {
 		t.Fatalf("%d refusals for one connection", refused)
 	}
 }
+
+// A connection that never says hello takes no part in its room, either way: a client whose version would
+// be refused gains nothing by never naming it. Then it is closed, at the provision timeout.
+func TestAConnectionThatNeverSaysHelloTakesNoPart(t *testing.T) {
+	s := newSFU(t, func(l *Limits) { l.ProvisionTimeout = 3 * time.Second })
+	room := ids.MustNext()
+	silent := joinWith(t, s, room, ids.MustNext(), voicetest.Options{Slots: 1, NoHello: true})
+	talker := join(t, s, room, ids.MustNext(), 1)
+	listener := join(t, s, room, ids.MustNext(), 2)
+	waitOp(t, listener.client, voiceproto.OpReady, nil)
+
+	send(t, map[*voicetest.Client][][]byte{
+		silent.client: voicetest.TonePackets()[:20],
+		talker.client: voicetest.TonePackets()[:20],
+	}, voicetest.SendOptions{})
+	time.Sleep(300 * time.Millisecond)
+	if got := silent.client.ReceivedAll(); len(got) != 0 {
+		t.Fatalf("a connection that never said hello received %d packets", len(got))
+	}
+	// The listener has a slot for each sender, so one source heard is the talker alone.
+	sources := map[uint32]bool{}
+	for _, p := range listener.client.ReceivedAll() {
+		sources[p.CSRC[0]] = true
+	}
+	if len(sources) != 1 {
+		t.Fatalf("the listener heard %d sources, and only the talker said hello", len(sources))
+	}
+	eventually(t, 5*time.Second, "a connection that never says hello is closed", func() bool { return !s.hasConn(silent.conn) })
+	if !s.hasConn(talker.conn) || !s.hasConn(listener.conn) {
+		t.Fatal("the timeout closed a connection that said hello")
+	}
+}

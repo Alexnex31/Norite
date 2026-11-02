@@ -45,11 +45,13 @@ type slot struct {
 	seqOff   uint16
 	tsOff    uint32
 
-	// sent is whether anything has gone out, and last* describe the newest packet that has.
-	sent    bool
-	lastSeq uint16
-	lastTS  uint32
-	lastAt  time.Time
+	// sent is whether anything has gone out, and last* describe the newest packet that has. lastStep is
+	// the timestamp advance from the packet before it, within one sender's run: how long its frames are.
+	sent     bool
+	lastSeq  uint16
+	lastTS   uint32
+	lastAt   time.Time
+	lastStep uint32
 
 	hdr  rtp.Header
 	csrc [1]uint32
@@ -87,14 +89,15 @@ func (s *slot) write(src *source, p *rtp.Packet, level []byte, now time.Time) {
 	}
 
 	marker := p.Marker
+	switched := s.fresh
 	if s.fresh {
 		s.fresh = false
 		s.first = p.SequenceNumber
 		s.guarding = true
 		if s.sent {
 			// Continue from the last packet out: the next sequence number, and the timestamp advanced by
-			// the time that has passed, at least one tick, so the receiver's jitter buffer sees one
-			// stream with a gap in it rather than a jump back.
+			// the time that has passed, so the receiver's jitter buffer sees one stream with a gap in it
+			// rather than a jump back.
 			s.seqOff = s.lastSeq + 1 - p.SequenceNumber
 			// Capped, since a float past uint32's range converts to whatever the platform makes of it, and
 			// a gap of minutes needs no more precision than a gap of seconds.
@@ -103,7 +106,15 @@ func (s *slot) write(src *source, p *rtp.Packet, level []byte, now time.Time) {
 			// platform's to decide.
 			gap := max(min(now.Sub(s.lastAt), maxGap), 0)
 			adv := uint32(gap.Seconds() * float64(b.clockRate))
-			s.tsOff = s.lastTS + max(adv, 1) - p.Timestamp
+			// At least the last packet's own length, so the new sender's first frame starts where the old
+			// sender's last one ends. Floored at one tick, a switch a few milliseconds after the last
+			// packet put the new frame inside the old one, and a jitter buffer drops or overlaps it: that
+			// is most switches, since two people are talking when one takes the slot from the other.
+			frame := s.lastStep
+			if frame == 0 {
+				frame = b.clockRate / 50
+			}
+			s.tsOff = s.lastTS + max(adv, frame, 1) - p.Timestamp
 		} else {
 			s.seqOff, s.tsOff = 0, 0
 		}
@@ -125,6 +136,11 @@ func (s *slot) write(src *source, p *rtp.Packet, level []byte, now time.Time) {
 	seq := p.SequenceNumber + s.seqOff
 	ts := p.Timestamp + s.tsOff
 	if !s.sent || int16(seq-s.lastSeq) > 0 {
+		// A step is measured between two packets of one sender in a row, at most 120 ms, Opus's longest
+		// packet: not across a switch, which is the gap, nor across a loss.
+		if step := ts - s.lastTS; s.sent && !switched && seq == s.lastSeq+1 && step <= b.clockRate*120/1000 {
+			s.lastStep = step
+		}
 		s.sent, s.lastSeq, s.lastTS, s.lastAt = true, seq, ts, now
 	}
 
