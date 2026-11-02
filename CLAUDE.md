@@ -2809,8 +2809,9 @@ And on the SFU, from M26 (ADR 0023 as amended):
 - **Every goroutine and Pion callback the package runs defers `conn.contain`**, the room's selection
   contains its own on whatever goroutine runs it, and a lock a contained panic could cross is released
   by defer.
-- **A connection takes part in its room only once its hello is accepted.** Anything new that forwards to
-  a connection or from it asks `isHelloed`.
+- **A connection takes part in its room only once its hello is accepted**, and is counted before `ready`
+  goes out, so a client may send the moment it reads it. Anything new that forwards to a connection or
+  from it asks `takesPart`. A test client is joined once it has read `ready`, as a real one is.
 - **The slot map and the speaking list are sent after the room's lock**, and each send is of the state
   as it is then. Nothing is sent under a lock a close takes.
 - **The data channel is `contracts/voice-datachannel.schema.json`**, decoded strictly; a field added is a

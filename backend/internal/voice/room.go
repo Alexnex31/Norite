@@ -220,16 +220,16 @@ func (r *room) assignLocked(now time.Time) []*conn {
 	var moved []*conn
 	if !r.gone {
 		panicHook("selection", nil)
-		// Only a connection that has said hello takes part, as a receiver or as a sender (isHelloed).
-		helloed := make(map[*conn]bool, len(r.conns))
+		// Only a connection that has said hello takes part, as a receiver or as a sender (takesPart).
+		inRoom := make(map[*conn]bool, len(r.conns))
 		for _, c := range r.conns {
-			helloed[c] = c.isHelloed()
+			inRoom[c] = c.takesPart()
 		}
 		sources := make([]*source, 0, len(r.sources))
 		loudness := make(map[*source]float64, len(r.sources))
 		speaking := map[snowflake.ID]string{}
 		for _, src := range r.sources {
-			if !helloed[src.conn] {
+			if !inRoom[src.conn] {
 				continue
 			}
 			sources = append(sources, src)
@@ -262,7 +262,7 @@ func (r *room) assignLocked(now time.Time) []*conn {
 				}
 				var candidates []*source
 				for _, src := range sources {
-					if helloed[c] && src.kind == kind && r.mayReceive(c, src) && !sub.drop[src.conn.user] {
+					if inRoom[c] && src.kind == kind && r.mayReceive(c, src) && !sub.drop[src.conn.user] {
 						candidates = append(candidates, src)
 					}
 				}

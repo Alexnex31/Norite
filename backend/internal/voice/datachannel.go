@@ -125,6 +125,14 @@ func (c *conn) onHello(b []byte) error {
 			ready.Slots = append(ready.Slots, voiceproto.SlotIdent{Slot: s.index, Kind: s.kind, Mid: s.mid})
 		}
 	}
+	// The connection takes part in its room from here, so the room chooses again now, before ready goes
+	// out: a client may send as soon as it reads ready, and a packet arriving before the room counted it
+	// would be dropped. Once per connection, unlike a subscribe. What the choice gives this connection is
+	// recorded, not sent, until it is helloed below.
+	c.mu.Lock()
+	c.inRoom = true
+	c.mu.Unlock()
+	c.room.changed()
 	// Ready goes first: a reassignment racing this waits on sendMu, and finds the client helloed only once
 	// ready is out.
 	func() {
@@ -136,10 +144,8 @@ func (c *conn) onHello(b []byte) error {
 		c.helloed = true
 		c.mu.Unlock()
 	}()
-	// The connection takes part in its room from here, so the room chooses again now rather than at its
-	// next tick; once per connection, unlike a subscribe. Then the slot map, sent even when that choice
-	// left it empty, since the client has had none yet, and who is speaking if anybody is.
-	c.room.changed()
+	// Then the slot map, sent even when the choice left it empty, since the client has had none yet, and
+	// who is speaking if anybody is.
 	c.flushSlots()
 	c.flushSpeaking()
 	return nil

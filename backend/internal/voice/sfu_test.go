@@ -16,6 +16,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/voice/voicetest"
+	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
 var ids = func() *snowflake.Generator {
@@ -116,6 +117,15 @@ func joinWith(t *testing.T, s *SFU, room, user snowflake.ID, opts voicetest.Opti
 	case <-c.ChannelOpen():
 	case <-ctx.Done():
 		t.Fatal("the data channel did not open")
+	}
+	// A client takes part once its hello is answered, as a real one does: a packet sent before then is
+	// one the room has not counted yet, and is not forwarded.
+	if !opts.NoHello {
+		if _, err := c.WaitFor(ctx, func(op string, _ []byte) bool {
+			return op == voiceproto.OpReady || op == voiceproto.OpRefused
+		}); err != nil {
+			t.Fatalf("no answer to the hello: %v", err)
+		}
 	}
 	return joined{client: c, user: user, conn: conn}
 }

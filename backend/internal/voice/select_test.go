@@ -317,7 +317,7 @@ func TestACapCountsEveryKindTogether(t *testing.T) {
 	member := func() *conn {
 		uid, cid := ids.MustNext(), ids.MustNext()
 		c := &conn{sfu: s, room: r, id: cid, user: uid, userText: uid.String(), idText: cid.String(),
-			sub: noSubscription, log: zerolog.Nop(), helloed: true}
+			sub: noSubscription, log: zerolog.Nop(), inRoom: true}
 		r.conns[c.id] = c
 		r.perUser[c.user]++
 		return c

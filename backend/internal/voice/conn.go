@@ -32,12 +32,16 @@ type conn struct {
 	// receiver on every selection tick.
 	userText, idText string
 
-	mu              sync.Mutex
-	pc              *webrtc.PeerConnection
-	slots           map[string][]*slot
-	dc              *webrtc.DataChannel
-	extraChannels   int
-	helloed         bool
+	mu            sync.Mutex
+	pc            *webrtc.PeerConnection
+	slots         map[string][]*slot
+	dc            *webrtc.DataChannel
+	extraChannels int
+	helloed       bool
+	// inRoom is set by an accepted hello just before helloed, and is what the room's selection reads
+	// (takesPart); helloed is what the sends read. Two flags, so the room counts the connection before
+	// ready goes out and sends it nothing before ready has.
+	inRoom          bool
 	refused         bool
 	sub             subscription
 	slotMap         []voiceproto.SlotEntry
@@ -261,13 +265,13 @@ func codecFor(kind string) (webrtc.RTPCodecCapability, bool) {
 	return webrtc.RTPCodecCapability{}, false
 }
 
-// isHelloed says whether the client's hello has been accepted. Until it has, the connection takes no part in
+// takesPart says whether the client's hello has been accepted. Until it has, the connection takes no part in
 // its room: nothing is forwarded to it and nothing it sends is forwarded, so a client whose version would
 // be refused gains nothing by never saying which it is.
-func (c *conn) isHelloed() bool {
+func (c *conn) takesPart() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.helloed
+	return c.inRoom
 }
 
 // slotsByKind is the connection's slots, empty until it is negotiated.
