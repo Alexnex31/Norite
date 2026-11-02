@@ -79,7 +79,7 @@ func FuzzForward(f *testing.F) {
 		if switchFirst {
 			s.assign(b)
 		}
-		a.hear(a.readLevel(&p), now)
+		a.hear(a.readLevel(&p), p.Timestamp, now)
 		s.write(b, &p, b.readLevel(&p), now.Add(time.Duration(p.Timestamp)))
 		s.write(a, &p, nil, now)
 	})

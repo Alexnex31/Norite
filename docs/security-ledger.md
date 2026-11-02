@@ -1721,10 +1721,11 @@ carries the condition that would reopen it.
 - **Raised**: M26, planning's `/code-review`
 - **Verdict**: accepted risk
 - **Why**: selection and the speaking indicator read the RFC 6464 level each packet reports, and the
-  sender writes it. What bounds the claim: it counts per packet, so it is believed only while packets
-  flow and lapses within a second of them stopping (`source.hear`); packets past the rate bound count for
-  nothing and a sender far past it is closed (`meter`); and the receiver's drop removes anybody from its
-  slots without asking the server. A griefer inside the bound claiming full volume still takes a slot at
+  sender writes it. What bounds the claim: a packet counts for the time it covers, at most one 20 ms
+  frame, and only above a speech floor, so it is believed only while packets flow and lapses within a
+  second of them stopping, and sending more packets buys nothing (`source.hear`); packets past the rate
+  bound count for nothing and a sender far past it is closed (`meter`); and the receiver's drop removes
+  anybody from its slots without asking the server. A griefer inside the bound claiming full volume still takes a slot at
   every receiver that has not dropped them. Reading the level from the audio instead means decoding every
   sender's Opus on the server, which this SFU never does.
 - **Reopens if**: the SFU ever decodes payloads, or a client cannot drop a participant (M34's local mute

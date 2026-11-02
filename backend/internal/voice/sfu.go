@@ -34,13 +34,15 @@ type Control interface {
 	// Evict closes the user's connections in the room issued at or before cutoff, and refuses any
 	// provision issued at or before it that arrives afterwards.
 	Evict(ctx context.Context, room, user, cutoff snowflake.ID) error
-	// EvictConnection closes one connection. A connection already gone is not an error.
+	// EvictConnection closes one connection, and refuses that connection's provision if it arrives
+	// afterwards. A connection already gone is not an error.
 	EvictConnection(ctx context.Context, conn snowflake.ID) error
 	// SetExclusion sets the users whose tracks are never forwarded to receiver, over the client's own
 	// subscription; a pin does not override it. Empty until M70 decides what fills it.
 	SetExclusion(ctx context.Context, room, receiver snowflake.ID, excluded []snowflake.ID) error
-	// CloseRoom closes every connection in the room.
-	CloseRoom(ctx context.Context, room snowflake.ID) error
+	// CloseRoom closes every connection in the room, and refuses any provision for the room issued at or
+	// before cutoff that arrives afterwards: a deleted channel is not reopened by a join already in flight.
+	CloseRoom(ctx context.Context, room, cutoff snowflake.ID) error
 }
 
 // Errors Provision answers with. M33 maps each to what the client is told.
@@ -94,6 +96,9 @@ type SFU struct {
 	rooms   map[snowflake.ID]*room
 	conns   map[snowflake.ID]*conn
 	cutoffs map[roomUser]cutoff
+	// closedRooms and evictedConns are CloseRoom's and EvictConnection's memory, kept as cutoffs are.
+	closedRooms  map[snowflake.ID]cutoff
+	evictedConns map[snowflake.ID]time.Time
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -169,7 +174,10 @@ func New(opts Options) (*SFU, error) {
 		rooms:   map[snowflake.ID]*room{},
 		conns:   map[snowflake.ID]*conn{},
 		cutoffs: map[roomUser]cutoff{},
-		stop:    make(chan struct{}),
+
+		closedRooms:  map[snowflake.ID]cutoff{},
+		evictedConns: map[snowflake.ID]time.Time{},
+		stop:         make(chan struct{}),
 	}
 	s.wg.Add(1)
 	go s.sweep()
@@ -218,7 +226,13 @@ func (s *SFU) Provision(ctx context.Context, roomID, user, connID, issued snowfl
 	}
 	answer, err := c.negotiate(ctx, offer, shape)
 	if err != nil {
+		// Evicted while Pion was busy: its own call then fails on a closed connection, and that is not a
+		// bad offer, which is what M33 would otherwise tell the user who was kicked.
+		evicted := c.isClosed()
 		c.close("negotiation failed")
+		if evicted {
+			return "", ErrEvicted
+		}
 		return "", err
 	}
 	return answer, nil
@@ -239,6 +253,12 @@ func (s *SFU) reserve(roomID, user, connID, issued snowflake.ID) (*conn, error) 
 		return nil, ErrStale
 	}
 	if cut, ok := s.cutoffs[roomUser{roomID, user}]; ok && now.Before(cut.until) && issued <= cut.id {
+		return nil, ErrEvicted
+	}
+	if cut, ok := s.closedRooms[roomID]; ok && now.Before(cut.until) && issued <= cut.id {
+		return nil, ErrEvicted
+	}
+	if until, ok := s.evictedConns[connID]; ok && now.Before(until) {
 		return nil, ErrEvicted
 	}
 	if _, ok := s.conns[connID]; ok {
@@ -322,6 +342,7 @@ func (s *SFU) Evict(_ context.Context, roomID, user, cut snowflake.ID) error {
 func (s *SFU) EvictConnection(_ context.Context, connID snowflake.ID) error {
 	s.mu.Lock()
 	c := s.conns[connID]
+	s.evictedConns[connID] = s.now().Add(s.lim.ProvisionTimeout)
 	s.mu.Unlock()
 	if c != nil {
 		c.close("evicted")
@@ -342,8 +363,14 @@ func (s *SFU) SetExclusion(_ context.Context, roomID, receiver snowflake.ID, exc
 }
 
 // CloseRoom implements Control.
-func (s *SFU) CloseRoom(_ context.Context, roomID snowflake.ID) error {
+func (s *SFU) CloseRoom(_ context.Context, roomID, cut snowflake.ID) error {
 	s.mu.Lock()
+	prev, ok := s.closedRooms[roomID]
+	if !ok || cut > prev.id {
+		prev.id = cut
+	}
+	prev.until = s.now().Add(s.lim.ProvisionTimeout)
+	s.closedRooms[roomID] = prev
 	var all []*conn
 	if r := s.rooms[roomID]; r != nil {
 		all = r.members()
@@ -371,6 +398,16 @@ func (s *SFU) sweep() {
 		for k, c := range s.cutoffs {
 			if !now.Before(c.until) {
 				delete(s.cutoffs, k)
+			}
+		}
+		for k, c := range s.closedRooms {
+			if !now.Before(c.until) {
+				delete(s.closedRooms, k)
+			}
+		}
+		for k, until := range s.evictedConns {
+			if !now.Before(until) {
+				delete(s.evictedConns, k)
 			}
 		}
 		s.mu.Unlock()

@@ -180,6 +180,7 @@ func TestAProtocolViolationIsRefusedAndClosed(t *testing.T) {
 	}{
 		"subscribe before hello": {false, `{"op":"subscribe","pin":[],"drop":[]}`, "first message must be hello"},
 		"a malformed hello":      {false, `{"op":"hello","version":"dev","extra":1}`, "hello is malformed"},
+		"too long a version":     {false, `{"op":"hello","version":"` + strings.Repeat("9", 65) + `"}`, "hello is malformed"},
 		"not JSON":               {true, `nope`, "name its op"},
 		"an unknown op":          {true, `{"op":"speaking","users":[]}`, "not a message the client sends"},
 		"an unknown field":       {true, `{"op":"subscribe","pin":[],"drop":[],"mute":true}`, "subscribe is malformed"},

@@ -2260,13 +2260,15 @@ type Control interface {
     Evict(ctx context.Context, room, user, cutoff snowflake.ID) error
     EvictConnection(ctx context.Context, conn snowflake.ID) error
     SetExclusion(ctx context.Context, room, receiver snowflake.ID, excluded []snowflake.ID) error
-    CloseRoom(ctx context.Context, room snowflake.ID) error
+    CloseRoom(ctx context.Context, room, cutoff snowflake.ID) error
 }
 ```
 
 Admission is keyed by **connection**, not by user, so one user may hold two (a second machine; the GUI's
 separate video connection). `Evict` carries a cutoff: a provision issued before it and delivered after it
 is refused, which is M18's cutoff for a revocation racing a sign-in, applied to a kick racing a join.
+`CloseRoom` carries one for a channel deleted while a join is in flight, and `EvictConnection` refuses
+its connection's provision if that arrives after it.
 `SetExclusion` is a per-receiver set the server controls and the client cannot override (M70 decides
 whether blocks fill it).
 

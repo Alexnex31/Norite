@@ -365,7 +365,7 @@ func TestCloseRoomClosesEveryConnection(t *testing.T) {
 	room := ids.MustNext()
 	a := join(t, s, room, ids.MustNext(), 1)
 	b := join(t, s, room, ids.MustNext(), 1)
-	if err := s.CloseRoom(context.Background(), room); err != nil {
+	if err := s.CloseRoom(context.Background(), room, ids.MustNext()); err != nil {
 		t.Fatal(err)
 	}
 	if s.hasConn(a.conn) || s.hasConn(b.conn) || s.roomCount() != 0 {
@@ -432,4 +432,56 @@ func TestAdmissionHoldsItsBounds(t *testing.T) {
 			t.Fatalf("got %v, want ErrDuplicate", err)
 		}
 	})
+}
+
+// A channel deleted while a join for it is in flight: the join was authorized first and arrives last, and
+// must not reopen the room.
+func TestAProvisionIssuedBeforeARoomClosedIsRefused(t *testing.T) {
+	s := newSFU(t, nil)
+	room := ids.MustNext()
+	before := ids.MustNext()
+	if err := s.CloseRoom(context.Background(), room, ids.MustNext()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Provision(context.Background(), room, ids.MustNext(), ids.MustNext(), before, offerOf(t, newClient(t, 1)))
+	if !errors.Is(err, ErrEvicted) {
+		t.Fatalf("got %v, want ErrEvicted", err)
+	}
+	if s.roomCount() != 0 {
+		t.Fatal("a closed room was reopened")
+	}
+	if _, err := s.Provision(context.Background(), room, ids.MustNext(), ids.MustNext(), ids.MustNext(),
+		offerOf(t, newClient(t, 1))); err != nil {
+		t.Fatalf("a provision issued after the close: %v", err)
+	}
+}
+
+// A connection evicted before its own provision arrives is not admitted when it does.
+func TestAConnectionEvictedBeforeItsProvisionIsRefused(t *testing.T) {
+	s := newSFU(t, nil)
+	conn := ids.MustNext()
+	if err := s.EvictConnection(context.Background(), conn); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Provision(context.Background(), ids.MustNext(), ids.MustNext(), conn, ids.MustNext(), offerOf(t, newClient(t, 1)))
+	if !errors.Is(err, ErrEvicted) {
+		t.Fatalf("got %v, want ErrEvicted", err)
+	}
+}
+
+// Evicted while Pion is applying the offer: the answer is the eviction, not a bad offer.
+func TestAnEvictionDuringNegotiationIsReportedAsOne(t *testing.T) {
+	s := newSFU(t, nil)
+	conn := ids.MustNext()
+	hook := func(where string, _ []byte) {
+		if where == "negotiating" {
+			_ = s.EvictConnection(context.Background(), conn)
+		}
+	}
+	testPanic.Store(&hook)
+	t.Cleanup(func() { testPanic.Store(nil) })
+	_, err := s.Provision(context.Background(), ids.MustNext(), ids.MustNext(), conn, ids.MustNext(), offerOf(t, newClient(t, 1)))
+	if !errors.Is(err, ErrEvicted) {
+		t.Fatalf("got %v, want ErrEvicted", err)
+	}
 }

@@ -168,6 +168,8 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 		}
 	})
 
+	panicHook("negotiating", nil)
+
 	// Pion's own refusal is logged and not returned: its text can quote the offer, and what the client is
 	// told says which rule was broken, not what it sent.
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
@@ -209,6 +211,12 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 	}
 	c.room.changed()
 	return pc.LocalDescription().SDP, nil
+}
+
+func (c *conn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 // codecFor is the codec the SFU carries for a kind. Video has none until M107.

@@ -190,18 +190,24 @@ func (r *room) removeSource(src *source) {
 // connection whose slot map changed its new one. The sending happens after the room's lock is released:
 // a connection too slow to take it is closed, and closing one takes the SFU's lock, which comes first.
 func (r *room) changed() {
-	r.mu.Lock()
-	moved := r.assignLocked(time.Now())
-	r.mu.Unlock()
-	for _, c := range moved {
+	for _, c := range r.assign() {
 		c.flushSlots(false)
 		c.flushSpeaking()
 	}
 }
 
+// assign runs assignLocked under the room's lock, released by a defer: a panic in it is recovered by the
+// room's tick, and a lock it left held would stop the room, then the SFU, whose lock is taken first.
+func (r *room) assign() []*conn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.assignLocked(time.Now())
+}
+
 // assignLocked fills every receiver's slots, tells each source which slots it fills, and returns the
 // connections whose slot map or speaking list changed.
 func (r *room) assignLocked(now time.Time) []*conn {
+	panicHook("selection", nil)
 	fills := map[*source][]*slot{}
 	var moved []*conn
 	if !r.gone {
@@ -218,7 +224,14 @@ func (r *room) assignLocked(now time.Time) []*conn {
 		}
 		slices.SortFunc(sources, func(a, b *source) int { return cmp.Compare(a.id, b.id) })
 
+		// In id order, not the map's: each source's slots are then listed the same way tick after tick,
+		// which is what lets a tick that changed nothing publish nothing.
+		conns := make([]*conn, 0, len(r.conns))
 		for _, c := range r.conns {
+			conns = append(conns, c)
+		}
+		slices.SortFunc(conns, func(a, b *conn) int { return cmp.Compare(a.id, b.id) })
+		for _, c := range conns {
 			sub := c.subscription()
 			changed := false
 			entries := []voiceproto.SlotEntry{}
@@ -269,6 +282,10 @@ func (r *room) assignLocked(now time.Time) []*conn {
 	}
 	for _, src := range r.sources {
 		slots := fills[src]
+		// Only when it changed: most ticks change nothing, and a new slice per source per tick is garbage.
+		if old := src.slots.Load(); old != nil && slices.Equal(*old, slots) {
+			continue
+		}
 		src.slots.Store(&slots)
 	}
 	return moved

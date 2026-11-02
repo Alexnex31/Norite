@@ -34,8 +34,16 @@ import (
 func main() {
 	media := flag.String("media", "127.0.0.1:3479", "the UDP address every connection's media arrives on")
 	httpAddr := flag.String("http", "127.0.0.1:8089", "the address the provisioning endpoint listens on")
-	loopback := flag.Bool("loopback", false, "offer loopback candidates, for clients on this machine")
+	loopback := flag.Bool("loopback", false, "offer loopback candidates, for clients on this machine "+
+		"(always, when -media is a loopback address)")
 	flag.Parse()
+	// Pion's ICE drops loopback addresses unless asked, so an SFU on 127.0.0.1 without this offers no
+	// candidate at all and nothing can connect.
+	if host, _, err := net.SplitHostPort(*media); err == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			*loopback = true
+		}
+	}
 	if err := run(*media, *httpAddr, *loopback); err != nil {
 		fmt.Fprintln(os.Stderr, "voice-sfu:", err)
 		os.Exit(1)

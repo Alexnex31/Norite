@@ -37,10 +37,13 @@ type slot struct {
 
 	// fresh is true until the current sender's first packet has gone out.
 	fresh bool
-	// first is the current sender's first sequence number; anything older predates the switch.
-	first  uint16
-	seqOff uint16
-	tsOff  uint32
+	// first is the current sender's first sequence number; anything older predates the switch. It is
+	// only a guard while guarding: sequence numbers wrap, and once the sender is past half the space
+	// from first, every packet would look older than it.
+	first    uint16
+	guarding bool
+	seqOff   uint16
+	tsOff    uint32
 
 	// sent is whether anything has gone out, and last* describe the newest packet that has.
 	sent    bool
@@ -87,6 +90,7 @@ func (s *slot) write(src *source, p *rtp.Packet, level []byte, now time.Time) {
 	if s.fresh {
 		s.fresh = false
 		s.first = p.SequenceNumber
+		s.guarding = true
 		if s.sent {
 			// Continue from the last packet out: the next sequence number, and the timestamp advanced by
 			// the time that has passed, at least one tick, so the receiver's jitter buffer sees one
@@ -94,7 +98,10 @@ func (s *slot) write(src *source, p *rtp.Packet, level []byte, now time.Time) {
 			s.seqOff = s.lastSeq + 1 - p.SequenceNumber
 			// Capped, since a float past uint32's range converts to whatever the platform makes of it, and
 			// a gap of minutes needs no more precision than a gap of seconds.
-			gap := min(now.Sub(s.lastAt), maxGap)
+			// And floored: the new sender's goroutine can read its clock before the old sender's last write
+			// does, which makes the gap negative, and a negative float converted to uint32 is the
+			// platform's to decide.
+			gap := max(min(now.Sub(s.lastAt), maxGap), 0)
 			adv := uint32(gap.Seconds() * float64(b.clockRate))
 			s.tsOff = s.lastTS + max(adv, 1) - p.Timestamp
 		} else {
@@ -102,9 +109,17 @@ func (s *slot) write(src *source, p *rtp.Packet, level []byte, now time.Time) {
 		}
 		// The start of a talkspurt (RFC 3551 §4.1), which is what a receiver resets its playout on.
 		marker = true
-	} else if int16(p.SequenceNumber-s.first) < 0 {
-		// Reordered from before the switch; its rewritten number would collide with one already sent.
-		return
+	} else if s.guarding {
+		since := int16(p.SequenceNumber - s.first)
+		if since < 0 {
+			// Reordered from before the switch; its rewritten number would collide with one already sent.
+			return
+		}
+		// A thousand packets on, twenty seconds of audio, nothing from before the switch is still in
+		// flight, and the guard stops before the wrap could make it drop everything.
+		if since > switchGuard {
+			s.guarding = false
+		}
 	}
 
 	seq := p.SequenceNumber + s.seqOff
@@ -138,6 +153,9 @@ func (s *slot) write(src *source, p *rtp.Packet, level []byte, now time.Time) {
 
 // maxGap is the most time a switch's timestamp advance stands for.
 const maxGap = 10 * time.Second
+
+// switchGuard is how many packets after a switch the slot still drops one from before it.
+const switchGuard = 1000
 
 // slotTrack is the TrackLocal behind a slot: Pion binds it once the connection is negotiated, and the
 // slot writes through the binding.

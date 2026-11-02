@@ -40,6 +40,8 @@ type source struct {
 	loudness float64
 	heardAt  time.Time
 	speaking bool
+	lastTS   uint32
+	heardTS  bool
 }
 
 // Loudness and speaking are judged from the RFC 6464 level each packet reports, counted per packet, so the
@@ -54,17 +56,37 @@ const (
 	// speakingFrom and speakingUntil are the two thresholds, apart so a voice near one does not flicker.
 	speakingFrom  = 5.0
 	speakingUntil = 2.5
+	// speechFloor is the quietest level, in -dBov, that counts at all. At 50 frames a second a steady
+	// level L settles near 15.5 (60-L)/60, so speaking starts around -40 dBov and noise at -55 is far off.
+	speechFloor = 60.0
+	// frameTicks is one 20 ms frame at the audio clock, the most time one packet counts for.
+	frameTicks = float64(voiceproto.ClockRateAudio / 50)
 )
 
 // hear counts one packet's level: 0 is the loudest a sender can claim, 127 silence.
-func (src *source) hear(level []byte, now time.Time) {
+//
+// Two corrections from /code-review on the first version, which summed (127-level)/127 per packet:
+//   - Only a level above speechFloor counts. A microphone's noise floor sits around -50 to -70 dBov, and
+//     on the linear scale a client sending packets through silence counted as speaking for ever.
+//   - Each packet counts for the time it covers, read off its timestamp's advance and at most one 20 ms
+//     frame. Counted per packet, a sender of 10 ms frames, which the SFU's own minptime=10 invites, was
+//     twice as loud as one of 20 ms at the same level. A sender claiming more time than it covers gains
+//     nothing past one frame a packet, and its timestamps outrun the clock for everybody listening.
+func (src *source) hear(level []byte, ts uint32, now time.Time) {
 	if level == nil {
 		return
 	}
-	loud := float64(127-(level[0]&0x7f)) / 127
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	src.loudness = src.decayedLocked(now) + loud
+	weight := 1.0
+	if src.heardTS {
+		adv := int32(ts - src.lastTS)
+		weight = min(max(float64(adv), 0), frameTicks) / frameTicks
+	}
+	src.lastTS, src.heardTS = ts, true
+	dBov := float64(level[0] & 0x7f)
+	loud := max(speechFloor-dBov, 0) / speechFloor
+	src.loudness = src.decayedLocked(now) + loud*weight
 	src.heardAt = now
 }
 
@@ -137,7 +159,7 @@ func (src *source) run() {
 		}
 		panicHook("forwarding", p.Payload)
 		level := src.readLevel(&p)
-		src.hear(level, now)
+		src.hear(level, p.Timestamp, now)
 		if slots := src.slots.Load(); slots != nil {
 			for _, s := range *slots {
 				s.write(src, &p, level, now)

@@ -1727,7 +1727,8 @@ of this section.
     refuses a `Provision` issued before it and delivered after it: M18's cutoff, for a kick and a join
     resolved concurrently and delivered in the wrong order. A cutoff is kept for the provision timeout,
     after which the late provision is refused anyway.
-  - `EvictConnection(conn)`, `CloseRoom(room)`, and `SetExclusion(room, receiver, users)`: a per-receiver
+  - `EvictConnection(conn)` and `CloseRoom(room, cutoff)`, each refusing a provision it outran, as
+    `Evict` does; and `SetExclusion(room, receiver, users)`: a per-receiver
     set the server controls, which wins over the client's own pin, empty until M70.
 
   **Admission.** The client's SDP offer is relayed whole (ADR 0023, amended here) and validated on its
@@ -1872,7 +1873,7 @@ of this section.
   M26's control interface: it resolves `PermConnectVoice` against fresh data, mints the connection id and
   the `issued` snowflake, and calls `Provision` with the client's offer, which op 4 carries under M26's
   12 KiB bound. A kick, a ban and a lost `PermConnectVoice` call `Evict` with a cutoff, after the
-  transaction commits. The `supports_video: bool` capability field is added to the voice-join payload now
+  transaction commits, and a deleted voice channel calls `CloseRoom` with one. The `supports_video: bool` capability field is added to the voice-join payload now
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
   end to end, and a kick mid-call drops the connection.

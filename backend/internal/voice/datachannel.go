@@ -104,7 +104,7 @@ func (c *conn) onMessage(msg webrtc.DataChannelMessage) error {
 
 func (c *conn) onHello(b []byte) error {
 	var h voiceproto.Hello
-	if err := voiceproto.Decode(b, &h); err != nil {
+	if err := voiceproto.Decode(b, &h); err != nil || len(h.Version) > voiceproto.MaxVersion {
 		return refusalf("hello is malformed")
 	}
 	if compat := gatewayproto.Check(c.sfu.opts.Version, h.Version); !compat.Compatible {
@@ -119,12 +119,15 @@ func (c *conn) onHello(b []byte) error {
 	}
 	// Ready goes first: a reassignment racing this waits on sendMu, and finds the client helloed only once
 	// ready is out.
-	c.sendMu.Lock()
-	c.sendLocked(ready)
-	c.mu.Lock()
-	c.helloed = true
-	c.mu.Unlock()
-	c.sendMu.Unlock()
+	func() {
+		// Deferred, for the reason room.assign's is: a contained panic must not leave sendMu held.
+		c.sendMu.Lock()
+		defer c.sendMu.Unlock()
+		c.sendLocked(ready)
+		c.mu.Lock()
+		c.helloed = true
+		c.mu.Unlock()
+	}()
 	// The slot map as it stands, which nothing has sent while the client could not yet read it, and who is
 	// speaking if anybody is.
 	c.flushSlots(true)
@@ -166,7 +169,9 @@ func (c *conn) onSubscribe(b []byte) error {
 	c.mu.Lock()
 	c.sub = sub
 	c.mu.Unlock()
-	c.room.changed()
+	// Applied by the room's next tick, within selectEvery, rather than here: a subscribe arrives on Pion's
+	// data-channel read loop, and a room recomputed per message is a peer choosing how much of the
+	// room's CPU to spend, twenty times a second each.
 	return nil
 }
 
@@ -271,6 +276,8 @@ func (c *conn) sendLocked(v any) {
 // with the reason still queued, so it waits, briefly, for the reason to leave.
 func (c *conn) refuse(reason string) {
 	defer c.contain("a refusal")
+	// A reason can quote what the client sent; it is cut so the refusal stays within the contract's size.
+	reason = truncate(reason, maxReason)
 	// Once: a peer sending one bad message after another gets one refusal and one close.
 	c.mu.Lock()
 	refused := c.refused
@@ -301,6 +308,9 @@ func (c *conn) refuse(reason string) {
 	}
 	c.close("refused: " + reason)
 }
+
+// maxReason is the longest refusal reason sent, well inside voiceproto.MaxMessage with JSON's escaping.
+const maxReason = 512
 
 func truncate(s string, n int) string {
 	if len(s) > n {

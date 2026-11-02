@@ -20,10 +20,10 @@ func TestLoudnessIsBelievedOnlyWhilePacketsFlow(t *testing.T) {
 	at := time.Now()
 	loud := []byte{20}
 	for i := range 50 {
-		src.hear(loud, at.Add(time.Duration(i)*20*time.Millisecond))
+		src.hear(loud, uint32(i)*960, at.Add(time.Duration(i)*20*time.Millisecond))
 	}
 	end := at.Add(49 * 20 * time.Millisecond)
-	if l, speaking := src.judge(end); !speaking || l < 10 {
+	if l, speaking := src.judge(end); !speaking || l < 8 {
 		t.Fatalf("a second of loud packets: loudness %.1f, speaking %v", l, speaking)
 	}
 	// Between the thresholds it stays as it was: no flicker on the way down.
@@ -36,13 +36,13 @@ func TestLoudnessIsBelievedOnlyWhilePacketsFlow(t *testing.T) {
 
 	quiet := &source{}
 	for i := range 50 {
-		quiet.hear([]byte{127}, at.Add(time.Duration(i)*20*time.Millisecond))
+		quiet.hear([]byte{127}, uint32(i)*960, at.Add(time.Duration(i)*20*time.Millisecond))
 	}
 	if _, speaking := quiet.judge(end); speaking {
 		t.Fatal("a sender reporting silence is speaking")
 	}
 	none := &source{}
-	none.hear(nil, at)
+	none.hear(nil, 0, at)
 	if l, speaking := none.judge(at); speaking || l != 0 {
 		t.Fatal("a sender reporting no level is speaking")
 	}
@@ -191,5 +191,55 @@ func TestIncumbencyKeepsASlotAgainstAVoiceALittleLouder(t *testing.T) {
 	}
 	if got := pick(0, 0); got != c {
 		t.Fatal("in silence the slot left its holder")
+	}
+}
+
+// A microphone's noise floor, sent through silence without DTX, is not speech.
+func TestNoiseIsNotSpeaking(t *testing.T) {
+	src := &source{}
+	at := time.Now()
+	for i := range 250 {
+		src.hear([]byte{55}, uint32(i)*960, at.Add(time.Duration(i)*20*time.Millisecond))
+	}
+	if l, speaking := src.judge(at.Add(5 * time.Second)); speaking {
+		t.Fatalf("five seconds of -55 dBov is speaking, loudness %.1f", l)
+	}
+}
+
+// Loudness is per time, not per packet: 10 ms frames at a level are as loud as 20 ms frames at it, and a
+// sender claiming more time per packet than one frame gains nothing past it.
+func TestLoudnessIsPerTimeNotPerPacket(t *testing.T) {
+	at := time.Now()
+	settle := func(frame time.Duration, ticksPerPacket uint32) float64 {
+		src := &source{}
+		n := int(2 * time.Second / frame)
+		for i := range n {
+			src.hear([]byte{20}, uint32(i)*ticksPerPacket, at.Add(time.Duration(i)*frame))
+		}
+		l, _ := src.judge(at.Add(time.Duration(n-1) * frame))
+		return l
+	}
+	twenty, ten := settle(20*time.Millisecond, 960), settle(10*time.Millisecond, 480)
+	if ten > twenty*1.1 || ten < twenty*0.9 {
+		t.Fatalf("10 ms frames %.1f against 20 ms frames %.1f", ten, twenty)
+	}
+	if liar := settle(20*time.Millisecond, 4800); liar > twenty*1.01 {
+		t.Fatalf("a sender claiming 100 ms a packet is %.1f against %.1f", liar, twenty)
+	}
+}
+
+// A tick that changes nothing publishes nothing: the forward path keeps the slice it has.
+func TestAQuietTickPublishesNothing(t *testing.T) {
+	r := benchRoom(8, 8)
+	r.assign()
+	before := map[*source]*[]*slot{}
+	for _, src := range r.sources {
+		before[src] = src.slots.Load()
+	}
+	r.assign()
+	for _, src := range r.sources {
+		if src.slots.Load() != before[src] {
+			t.Fatal("a tick that changed nothing published a new slice")
+		}
 	}
 }

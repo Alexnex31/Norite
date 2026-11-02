@@ -47,7 +47,7 @@ func BenchmarkForward(b *testing.B) {
 				p.SequenceNumber = uint16(i)
 				p.Timestamp = uint32(i) * 960
 				level := src.readLevel(p)
-				src.hear(level, now)
+				src.hear(level, p.Timestamp, now)
 				for _, s := range *src.slots.Load() {
 					s.write(src, p, level, now)
 				}
@@ -73,7 +73,7 @@ func benchRoom(n, slotsEach int) *room {
 		r.conns[c.id] = c
 		r.perUser[c.user]++
 		src := &source{conn: c, id: uint32(i + 1), kind: "audio", codec: "audio/opus"}
-		src.hear([]byte{byte(i % 127)}, time.Now())
+		src.hear([]byte{byte(i % 127)}, 0, time.Now())
 		r.sources[src.id] = src
 	}
 	return r

@@ -16,8 +16,7 @@ func TestAClientsOfferHasTheShapeTheSFUAdmits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shape.sends[voiceproto.KindAudio] != 1 || shape.slots[voiceproto.KindAudio] != 3 ||
-		len(shape.slotMids[voiceproto.KindAudio]) != 3 {
+	if shape.sends[voiceproto.KindAudio] != 1 || shape.slots[voiceproto.KindAudio] != 3 {
 		t.Fatalf("shape: %+v", shape)
 	}
 }

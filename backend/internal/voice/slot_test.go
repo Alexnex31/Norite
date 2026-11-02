@@ -116,3 +116,35 @@ func TestALongGapAdvancesBoundedly(t *testing.T) {
 		t.Fatalf("a two-day gap advanced %d ticks", d)
 	}
 }
+
+// A sender holding a slot for good passes the point where its sequence numbers are half the space from
+// its first: eleven minutes at 50 packets a second. Every packet must still go out.
+func TestALongTenureIsNotDroppedAtTheWrap(t *testing.T) {
+	w := &written{}
+	s := testSlot(w)
+	a := &source{id: 1, codec: "audio/opus"}
+	s.assign(a)
+	at := time.Now()
+	const n = 70000
+	for i := range n {
+		s.write(a, pkt(uint16(i), uint32(i)*960), nil, at.Add(time.Duration(i)*20*time.Millisecond))
+	}
+	if len(w.out) != n {
+		t.Fatalf("%d of %d packets written", len(w.out), n)
+	}
+}
+
+func TestASwitchWhoseClockReadsEarlierStillAdvances(t *testing.T) {
+	w := &written{}
+	s := testSlot(w)
+	a := &source{id: 1, codec: "audio/opus"}
+	b := &source{id: 2, codec: "audio/opus"}
+	at := time.Now()
+	s.assign(a)
+	s.write(a, pkt(1, 0), nil, at)
+	s.assign(b)
+	s.write(b, pkt(9, 0), nil, at.Add(-time.Millisecond))
+	if d := int32(w.out[1].Timestamp - w.out[0].Timestamp); d != 1 {
+		t.Fatalf("the timestamp moved %d ticks across a switch read a moment early, want 1", d)
+	}
+}

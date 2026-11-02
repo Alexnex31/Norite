@@ -22,8 +22,6 @@ type offerShape struct {
 	// sends counts the media sections the client sends on, per kind; slots counts those it receives on.
 	sends map[string]int
 	slots map[string]int
-	// slotMids are the receiving sections' mids, per kind, in the order they appear.
-	slotMids map[string][]string
 }
 
 // readOffer checks an offer's structure against the limits and returns what it asks for.
@@ -42,7 +40,7 @@ func readOffer(offer string, lim Limits) (offerShape, error) {
 		return offerShape{}, fmt.Errorf("%w: it is not SDP", ErrBadOffer)
 	}
 
-	shape := offerShape{sends: map[string]int{}, slots: map[string]int{}, slotMids: map[string][]string{}}
+	shape := offerShape{sends: map[string]int{}, slots: map[string]int{}}
 	fingerprints := map[string]bool{}
 	ufrags := map[string]bool{}
 	candidates := 0
@@ -100,7 +98,6 @@ func readOffer(offer string, lim Limits) (offerShape, error) {
 				shape.sends[kind]++
 			case "recvonly":
 				shape.slots[kind]++
-				shape.slotMids[kind] = append(shape.slotMids[kind], mid)
 			default:
 				return offerShape{}, fmt.Errorf("%w: a %s section must be sendonly or recvonly", ErrBadOffer, kind)
 			}

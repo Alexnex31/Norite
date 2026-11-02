@@ -12,6 +12,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"time"
 
@@ -25,8 +27,14 @@ func main() {
 	slots := flag.Int("slots", 2, "how many slots to receive on")
 	seconds := flag.Int("seconds", 10, "how long to send and receive")
 	out := flag.String("out", "received", "the prefix of the Ogg files written, one per slot")
-	loopback := flag.Bool("loopback", false, "offer loopback candidates, for an SFU on this machine")
+	loopback := flag.Bool("loopback", false, "offer loopback candidates, for an SFU on this machine "+
+		"(always, when -sfu names a loopback address)")
 	flag.Parse()
+	if u, err := url.Parse(*sfu); err == nil {
+		if ip := net.ParseIP(u.Hostname()); (ip != nil && ip.IsLoopback()) || u.Hostname() == "localhost" {
+			*loopback = true
+		}
+	}
 	if *user == "" {
 		fmt.Fprintln(os.Stderr, "voice-client: -user is required")
 		os.Exit(2)

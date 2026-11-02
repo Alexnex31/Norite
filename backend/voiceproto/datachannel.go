@@ -20,6 +20,9 @@ const (
 	OpRefused   = "refused"
 )
 
+// MaxVersion is the longest version a hello may name, as the contract says.
+const MaxVersion = 64
+
 // Hello is the client's first message, naming its version. Anything else first is a protocol error.
 type Hello struct {
 	Op      string `json:"op"`
@@ -107,7 +110,8 @@ func Decode(b []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
-	if dec.More() {
+	// Not dec.More, which reports false before a ']' or a '}' and so let `{...}]x` through.
+	if len(bytes.TrimSpace(b[dec.InputOffset():])) != 0 {
 		return fmt.Errorf("%w: trailing data", ErrMalformed)
 	}
 	return nil

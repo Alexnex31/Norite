@@ -205,3 +205,38 @@ func TestAPeerSendingToUndeclaredSSRCsIsClosed(t *testing.T) {
 		t.Fatal("another peer was closed with it")
 	}
 }
+
+// A panic in the room's selection is recovered by its tick, and must not leave the room's lock held:
+// the next close in the room takes the SFU's lock and then the room's, and would hold the first for ever.
+func TestAPanicInSelectionLeavesNoLockHeld(t *testing.T) {
+	s := newSFU(t, nil)
+	room := ids.MustNext()
+	a := join(t, s, room, ids.MustNext(), 1)
+	b := join(t, s, room, ids.MustNext(), 1)
+	s.mu.Lock()
+	r := s.rooms[room]
+	s.mu.Unlock()
+
+	hook := func(where string, _ []byte) {
+		if where == "selection" {
+			panic("a panic in selection")
+		}
+	}
+	testPanic.Store(&hook)
+	r.tick()
+	testPanic.Store(nil)
+
+	done := make(chan struct{})
+	go func() {
+		_ = s.EvictConnection(context.Background(), a.conn)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a close after a contained panic never finished: a lock was left held")
+	}
+	if !s.hasConn(b.conn) {
+		t.Fatal("the other connection went too")
+	}
+}

@@ -70,8 +70,9 @@ func DefaultLimits() Limits {
 		},
 		MaxCandidates:    16,
 		ProvisionTimeout: 30 * time.Second,
-		// Opus at its shortest frame is 400 packets a second; the clients send 20 ms frames, 50.
-		PacketsPerSecond: 100,
+		// The answer's minptime=10 allows 10 ms frames, 100 a second; half again above that leaves room
+		// for a burst after a stall. The bit bound and the strikes, at twice this, are what catch a flood.
+		PacketsPerSecond: 150,
 		BitsPerSecond:    256_000,
 		StrikesToEvict:   3,
 		// A client reports on every slot once a second, and its own sender too; M31's congestion
