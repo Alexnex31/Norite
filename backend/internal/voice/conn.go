@@ -28,23 +28,26 @@ type conn struct {
 	issued snowflake.ID
 	log    zerolog.Logger
 
-	mu            sync.Mutex
-	pc            *webrtc.PeerConnection
-	slots         map[string][]*slot
-	dc            *webrtc.DataChannel
-	extraChannels int
-	helloed       bool
-	sub           subscription
-	slotMap       []voiceproto.SlotEntry
-	mapVersion    uint64
-	closed        bool
-	connected     bool
-	timer         *time.Timer
-	done          chan struct{}
+	mu              sync.Mutex
+	pc              *webrtc.PeerConnection
+	slots           map[string][]*slot
+	dc              *webrtc.DataChannel
+	extraChannels   int
+	helloed         bool
+	sub             subscription
+	slotMap         []voiceproto.SlotEntry
+	mapVersion      uint64
+	speaking        []string
+	speakingVersion uint64
+	closed          bool
+	connected       bool
+	timer           *time.Timer
+	done            chan struct{}
 
 	// sendMu orders what goes out on the data channel; mapSent is the newest slot map sent.
-	sendMu  sync.Mutex
-	mapSent uint64
+	sendMu       sync.Mutex
+	mapSent      uint64
+	speakingSent uint64
 }
 
 func newConn(s *SFU, r *room, id, user, issued snowflake.ID) *conn {

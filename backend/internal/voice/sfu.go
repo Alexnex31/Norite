@@ -244,6 +244,8 @@ func (s *SFU) reserve(roomID, user, connID, issued snowflake.ID) (*conn, error) 
 		}
 		r = newRoom(s, roomID)
 		s.rooms[roomID] = r
+		s.wg.Add(1)
+		go r.run()
 	}
 	if !r.admit(user) {
 		if r.empty() {

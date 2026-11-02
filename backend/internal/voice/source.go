@@ -4,7 +4,9 @@
 package voice
 
 import (
+	"math"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +33,60 @@ type source struct {
 	// slots are the slots this source fills now, swapped whole when the room reassigns them, so the
 	// read loop never takes the room's lock.
 	slots atomic.Pointer[[]*slot]
+
+	// loudness is how loud the sender has been lately, by the levels it reports, and speaking whether it
+	// counts as speaking. Both decay when packets stop.
+	mu       sync.Mutex
+	loudness float64
+	heardAt  time.Time
+	speaking bool
+}
+
+// Loudness and speaking are judged from the RFC 6464 level each packet reports, counted per packet, so the
+// level is believed only while packets flow: Opus DTX sends almost nothing in silence, and a sender that
+// stops sending stops counting within a second whatever it last claimed. That does not stop a sender
+// claiming to be loud while it sends; the receiver's drop and M74's moderation answer that, and the rate
+// bound keeps the claim from being worth more than one sender's share.
+const (
+	// loudnessDecay is the time constant of the decay. At 50 packets a second the loudness of a steady
+	// level L settles near 15.5 L.
+	loudnessDecay = 300 * time.Millisecond
+	// speakingFrom and speakingUntil are the two thresholds, apart so a voice near one does not flicker.
+	speakingFrom  = 5.0
+	speakingUntil = 2.5
+)
+
+// hear counts one packet's level: 0 is the loudest a sender can claim, 127 silence.
+func (src *source) hear(level []byte, now time.Time) {
+	if level == nil {
+		return
+	}
+	loud := float64(127-(level[0]&0x7f)) / 127
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	src.loudness = src.decayedLocked(now) + loud
+	src.heardAt = now
+}
+
+// judge returns the source's loudness now, and whether it is speaking, updating the latter.
+func (src *source) judge(now time.Time) (float64, bool) {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	l := src.decayedLocked(now)
+	switch {
+	case l >= speakingFrom:
+		src.speaking = true
+	case l < speakingUntil:
+		src.speaking = false
+	}
+	return l, src.speaking
+}
+
+func (src *source) decayedLocked(now time.Time) float64 {
+	if src.heardAt.IsZero() {
+		return 0
+	}
+	return src.loudness * math.Exp(-float64(now.Sub(src.heardAt))/float64(loudnessDecay))
 }
 
 func newSource(c *conn, id uint32, track *webrtc.TrackRemote, r *webrtc.RTPReceiver) *source {
@@ -69,6 +125,7 @@ func (src *source) run() {
 		}
 		level := src.readLevel(&p)
 		now := time.Now()
+		src.hear(level, now)
 		if slots := src.slots.Load(); slots != nil {
 			for _, s := range *slots {
 				s.write(src, &p, level, now)

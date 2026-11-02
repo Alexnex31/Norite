@@ -115,8 +115,10 @@ func (c *conn) onHello(b []byte) error {
 	c.helloed = true
 	c.mu.Unlock()
 	c.sendMu.Unlock()
-	// The slot map as it stands, which nothing has sent while the client could not yet read it.
+	// The slot map as it stands, which nothing has sent while the client could not yet read it, and who is
+	// speaking if anybody is.
 	c.flushSlots(true)
+	c.flushSpeaking()
 	return nil
 }
 
@@ -195,6 +197,36 @@ func (c *conn) flushSlots(force bool) {
 		m = []voiceproto.SlotEntry{}
 	}
 	c.sendLocked(voiceproto.Slots{Op: voiceproto.OpSlots, Map: m})
+}
+
+// setSpeaking records who the connection hears speaking, to be sent by flushSpeaking, as setSlotMap does
+// for the slot map.
+func (c *conn) setSpeaking(users []string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if slices.Equal(c.speaking, users) {
+		return false
+	}
+	c.speaking = users
+	c.speakingVersion++
+	return true
+}
+
+// flushSpeaking sends who is speaking now, unless that version has gone already.
+func (c *conn) flushSpeaking() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	c.mu.Lock()
+	users, v, helloed := c.speaking, c.speakingVersion, c.helloed
+	c.mu.Unlock()
+	if !helloed || v <= c.speakingSent {
+		return
+	}
+	c.speakingSent = v
+	if users == nil {
+		users = []string{}
+	}
+	c.sendLocked(voiceproto.Speaking{Op: voiceproto.OpSpeaking, Users: users})
 }
 
 // send sends one message.

@@ -4,8 +4,10 @@
 package voice
 
 import (
+	"cmp"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 
@@ -29,7 +31,16 @@ type room struct {
 	// nextSource numbers the room's sources; a source id is a CSRC, unique in the room.
 	nextSource uint32
 	gone       bool
+	stop       chan struct{}
 }
+
+// selectEvery is how often a room chooses its slots again as loudness changes, and so how quickly a new
+// speaker takes a slot and the speaking indicator follows.
+const selectEvery = 100 * time.Millisecond
+
+// incumbency is how much louder than a slot's current sender somebody must be to take it, so two voices
+// near the boundary do not trade the slot back and forth.
+const incumbency = 1.25
 
 func newRoom(s *SFU, id snowflake.ID) *room {
 	return &room{
@@ -39,6 +50,22 @@ func newRoom(s *SFU, id snowflake.ID) *room {
 		perUser:  map[snowflake.ID]int{},
 		excluded: map[snowflake.ID]map[snowflake.ID]bool{},
 		sources:  map[uint32]*source{},
+		stop:     make(chan struct{}),
+	}
+}
+
+// run chooses the room's slots again every selectEvery until the room is gone.
+func (r *room) run() {
+	defer r.sfu.wg.Done()
+	t := time.NewTicker(selectEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-t.C:
+			r.changed()
+		}
 	}
 }
 
@@ -92,11 +119,14 @@ func (r *room) members() []*conn {
 	return out
 }
 
-// shut marks the room gone. A room is freed when its last connection leaves.
+// shut marks the room gone and stops its selection. A room is freed when its last connection leaves.
 func (r *room) shut() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.gone = true
+	if !r.gone {
+		r.gone = true
+		close(r.stop)
+	}
 }
 
 // exclude replaces receiver's exclusion set. The receiver must hold a connection in the room: the set lives
@@ -147,27 +177,36 @@ func (r *room) removeSource(src *source) {
 // a connection too slow to take it is closed, and closing one takes the SFU's lock, which comes first.
 func (r *room) changed() {
 	r.mu.Lock()
-	moved := r.assignLocked()
+	moved := r.assignLocked(time.Now())
 	r.mu.Unlock()
 	for _, c := range moved {
 		c.flushSlots(false)
+		c.flushSpeaking()
 	}
 }
 
 // assignLocked fills every receiver's slots, tells each source which slots it fills, and returns the
-// connections whose slot map changed.
-func (r *room) assignLocked() []*conn {
+// connections whose slot map or speaking list changed.
+func (r *room) assignLocked(now time.Time) []*conn {
 	fills := map[*source][]*slot{}
 	var moved []*conn
 	if !r.gone {
 		sources := make([]*source, 0, len(r.sources))
+		loudness := make(map[*source]float64, len(r.sources))
+		speaking := map[snowflake.ID]bool{}
 		for _, src := range r.sources {
 			sources = append(sources, src)
+			l, sp := src.judge(now)
+			loudness[src] = l
+			if sp {
+				speaking[src.conn.user] = true
+			}
 		}
-		slices.SortFunc(sources, func(a, b *source) int { return int(a.id) - int(b.id) })
+		slices.SortFunc(sources, func(a, b *source) int { return cmp.Compare(a.id, b.id) })
 
 		for _, c := range r.conns {
 			sub := c.subscription()
+			changed := false
 			entries := []voiceproto.SlotEntry{}
 			for _, kind := range []string{voiceproto.KindAudio, voiceproto.KindVideo} {
 				slots := c.slotsByKind()[kind]
@@ -180,7 +219,7 @@ func (r *room) assignLocked() []*conn {
 						candidates = append(candidates, src)
 					}
 				}
-				chosen := choose(candidates, sub)
+				chosen := choose(candidates, sub, loudness, slots)
 				if sub.cap >= 0 && len(chosen) > sub.cap {
 					chosen = chosen[:sub.cap]
 				}
@@ -197,6 +236,19 @@ func (r *room) assignLocked() []*conn {
 				}
 			}
 			if c.setSlotMap(entries) {
+				changed = true
+			}
+			var heard []string
+			for user := range speaking {
+				if !r.excluded[c.user][user] {
+					heard = append(heard, user.String())
+				}
+			}
+			slices.Sort(heard)
+			if c.setSpeaking(heard) {
+				changed = true
+			}
+			if changed {
 				moved = append(moved, c)
 			}
 		}
@@ -209,8 +261,9 @@ func (r *room) assignLocked() []*conn {
 }
 
 // choose orders the candidates for a receiver's slots: the users it pinned first, in the order it pinned
-// them, then everybody else.
-func choose(candidates []*source, sub subscription) []*source {
+// them, then everybody else from the loudest down. Whoever already holds one of these slots counts as
+// louder by incumbency and wins a tie; otherwise equal loudness keeps the order sources arrived in.
+func choose(candidates []*source, sub subscription, loudness map[*source]float64, slots []*slot) []*source {
 	chosen := make([]*source, 0, len(candidates))
 	taken := make(map[*source]bool, len(candidates))
 	for _, user := range sub.pin {
@@ -221,12 +274,40 @@ func choose(candidates []*source, sub subscription) []*source {
 			}
 		}
 	}
-	for _, src := range candidates {
-		if !taken[src] {
-			chosen = append(chosen, src)
+	holding := make(map[*source]bool, len(slots))
+	for _, s := range slots {
+		if src := s.current(); src != nil {
+			holding[src] = true
 		}
 	}
-	return chosen
+	score := func(src *source) float64 {
+		if holding[src] {
+			return loudness[src] * incumbency
+		}
+		return loudness[src]
+	}
+	rest := make([]*source, 0, len(candidates)-len(chosen))
+	for _, src := range candidates {
+		if !taken[src] {
+			rest = append(rest, src)
+		}
+	}
+	// Stable, over candidates already in arrival order. A tie goes to the holder first: in silence every
+	// score is zero, and without that the slot would move to the earliest arrival each time the room
+	// went quiet.
+	slices.SortStableFunc(rest, func(a, b *source) int {
+		if c := cmp.Compare(score(b), score(a)); c != 0 {
+			return c
+		}
+		switch {
+		case holding[a] && !holding[b]:
+			return -1
+		case holding[b] && !holding[a]:
+			return 1
+		}
+		return 0
+	})
+	return append(chosen, rest...)
 }
 
 // mayReceive says whether c may be sent src at all: never its own user's tracks, and never a user the
