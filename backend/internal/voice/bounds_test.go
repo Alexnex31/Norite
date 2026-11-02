@@ -185,3 +185,20 @@ func TestAPanicClosesOneConnectionAndNothingElse(t *testing.T) {
 		t.Fatalf("after the panics the room forwarded %d of 10 packets", got)
 	}
 }
+
+// An admitted peer holds the SRTP keys, and each SSRC it invents would open a stream with a buffer of its
+// own that nothing reads and nothing frees until the connection ends. Past what its offer accounts for,
+// the connection is closed.
+func TestAPeerSendingToUndeclaredSSRCsIsClosed(t *testing.T) {
+	s := newSFU(t, nil)
+	room := ids.MustNext()
+	spray := join(t, s, room, ids.MustNext(), 1)
+	other := join(t, s, room, ids.MustNext(), 1)
+	if err := spray.client.SprayRTP(200); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "a peer sending to undeclared SSRCs is closed", func() bool { return !s.hasConn(spray.conn) })
+	if !s.hasConn(other.conn) {
+		t.Fatal("another peer was closed with it")
+	}
+}

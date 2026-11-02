@@ -35,6 +35,7 @@ type conn struct {
 	dc              *webrtc.DataChannel
 	extraChannels   int
 	helloed         bool
+	refused         bool
 	sub             subscription
 	slotMap         []voiceproto.SlotEntry
 	mapVersion      uint64
@@ -48,6 +49,9 @@ type conn struct {
 	// tracks counts the tracks the peer has sent, against what its offer said it would.
 	tracks    int
 	maxTracks int
+	// streams counts the SRTP and SRTCP streams the connection has opened, against maxStreams.
+	streams    int
+	maxStreams int
 	// rtcp and messages meter what the peer sends besides media, under mu.
 	rtcp     meter
 	messages meter
@@ -89,7 +93,18 @@ func newConn(s *SFU, r *room, id, user, issued snowflake.ID) *conn {
 // sections by kind and direction: each section the client sends on gets a receiving transceiver, and each
 // slot the client receives on gets a sending one.
 func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (string, error) {
-	pc, err := c.sfu.api.NewPeerConnection(webrtc.Configuration{})
+	c.mu.Lock()
+	for _, n := range shape.sends {
+		c.maxTracks += n
+	}
+	slotCount := 0
+	for _, n := range shape.slots {
+		slotCount += n
+	}
+	c.maxStreams = streamsFor(c.maxTracks, slotCount)
+	c.mu.Unlock()
+
+	pc, err := c.sfu.apiFor(c).NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		return "", err
 	}
@@ -100,9 +115,6 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 		return "", ErrEvicted
 	}
 	c.pc = pc
-	for _, n := range shape.sends {
-		c.maxTracks += n
-	}
 	c.mu.Unlock()
 
 	for kind, n := range shape.sends {

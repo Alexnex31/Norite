@@ -1739,3 +1739,33 @@ carries the condition that would reopen it.
   Pion's internal goroutines (ICE, DTLS, SCTP, SRTP) are beyond any recover the package can place. A panic
   there is a bug in a widely used library, and on the flagship the SFU runs in pods of its own (M116).
 - **Reopens if**: a panic reachable from the network is found in a Pion release this project uses.
+
+### The SFU does work for a packet before any meter counts it
+- **Raised**: M26, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: every datagram on the SFU's port is demultiplexed, and once a connection is up its SRTP is
+  authenticated and decrypted, before `source.run` meters it. Per connection what that work can build up
+  is bounded: the streams SRTP opens are counted and the connection closed past its offer's
+  (`conn.buffer`), and each track, RTCP and data channel is metered. What is left is per-packet CPU at the
+  rate a sender can reach the port, which is any UDP service's exposure and is answered in front of it.
+- **Reopens if**: something per packet before the meter starts keeping state, or the port answers a
+  packet with more than it received.
+
+### A debug log of an offer Pion would not apply can carry the client's ICE password
+- **Raised**: M26, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `conn.negotiate` logs Pion's refusal at debug, and Pion's text can quote the offer. The ICE
+  password only authenticates connectivity checks; what admits a peer is DTLS against the offer's
+  fingerprint, whose private key never leaves the client (ADR 0023). A refused offer was never
+  provisioned, so there is no session it opens.
+- **Reopens if**: anything secret is ever carried in an offer, or the log is raised above debug.
+
+### Everybody in a room learns everybody's user and connection id
+- **Raised**: M26, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the slot map names who fills each slot, and the speaking list who is speaking, by user id;
+  being in a voice channel is visible to the channel by design, as M33's voice state will be. The
+  connection id is a snowflake the backend minted, which authorizes nothing: only the backend evicts by
+  it. The server's exclusion keeps an excluded user out of both lists.
+- **Reopens if**: M70 decides a blocked user must not learn the blocker is in the call, which the
+  exclusion as it stands does not cover in that direction.

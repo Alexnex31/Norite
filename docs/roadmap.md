@@ -1817,7 +1817,9 @@ of this section.
   Depends on M25's finding for how mic access is actually obtained. Done when: two voice-worker instances can
   exchange intelligible audio through the SFU from M26. Being before M33, they signal through M26's harness.
   The worker attributes received audio by CSRC, as M26 sends it, and resets its decoder and FEC state when
-  a slot's CSRC changes.
+  a slot's CSRC changes. **What it decodes is a stranger's**: the SFU never reads a payload, so whatever
+  another participant sends reaches this decoder as they sent it. The worker's crash isolation (rule 11)
+  bounds the damage; the decode path is fuzzed here, with payloads that are not Opus.
 
   **From M25 ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)):**
   - **`hraban/opus` is a codec and captures nothing.** This milestone chooses the capture library

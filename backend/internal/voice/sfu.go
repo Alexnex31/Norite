@@ -80,9 +80,14 @@ type SFU struct {
 	opts Options
 	lim  Limits
 	log  zerolog.Logger
-	api  *webrtc.API
 	mux  ice.UDPMux
 	now  func() time.Time
+
+	// media, reg and se are what every connection's API is built from. Each connection gets an API of its
+	// own because its SettingEngine carries that connection's buffer factory (streams.go).
+	media *webrtc.MediaEngine
+	reg   *interceptor.Registry
+	se    webrtc.SettingEngine
 
 	mu      sync.Mutex
 	closed  bool
@@ -156,7 +161,9 @@ func New(opts Options) (*SFU, error) {
 		opts:    opts,
 		lim:     opts.Limits,
 		log:     opts.Logger.With().Str("subsystem", "voice").Logger(),
-		api:     webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(reg), webrtc.WithSettingEngine(se)),
+		media:   media,
+		reg:     reg,
+		se:      se,
 		mux:     mux,
 		now:     opts.Now,
 		rooms:   map[snowflake.ID]*room{},

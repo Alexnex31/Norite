@@ -365,6 +365,46 @@ func (c *Client) FloodRTCP(ctx context.Context, ssrc uint32, n int, pace time.Du
 	return nil
 }
 
+// SprayRTP sends one packet to each of n SSRCs its offer never declared, encrypted like any other: what a
+// hostile peer holding the session keys can do. It replaces the client's track for good.
+func (c *Client) SprayRTP(n int) error {
+	raw := &rawTrack{bound: make(chan webrtc.TrackLocalWriter, 1)}
+	if err := c.sender.ReplaceTrack(raw); err != nil {
+		return err
+	}
+	var ws webrtc.TrackLocalWriter
+	select {
+	case ws = <-raw.bound:
+	case <-time.After(5 * time.Second):
+		return errors.New("voicetest: the raw track was not bound")
+	}
+	for i := range n {
+		h := rtp.Header{Version: 2, PayloadType: 111, SequenceNumber: uint16(i), Timestamp: uint32(i) * 960,
+			SSRC: 0x10000000 + uint32(i)}
+		if _, err := ws.WriteRTP(&h, []byte{0xfc, 0xff, 0xfe}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rawTrack hands over its write stream so a test can write any header through it.
+type rawTrack struct{ bound chan webrtc.TrackLocalWriter }
+
+func (t *rawTrack) Bind(ctx webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error) {
+	select {
+	case t.bound <- ctx.WriteStream():
+	default:
+	}
+	return ctx.CodecParameters()[0], nil
+}
+
+func (t *rawTrack) Unbind(webrtc.TrackLocalContext) error { return nil }
+func (t *rawTrack) ID() string                            { return "raw" }
+func (t *rawTrack) RID() string                           { return "" }
+func (t *rawTrack) StreamID() string                      { return "voicetest" }
+func (t *rawTrack) Kind() webrtc.RTPCodecType             { return webrtc.RTPCodecTypeAudio }
+
 // SlotMids are the mids of the client's receiving sections, in slot order.
 func (c *Client) SlotMids() []string {
 	c.mu.Lock()

@@ -65,6 +65,15 @@ func TestAnOfferOutsideTheShapeIsRefused(t *testing.T) {
 		"too large": base + strings.Repeat("a=x-padding:0123456789\r\n", voiceproto.MaxOffer/20),
 		"not SDP":   "hello",
 		"setup":     replace("a=setup:actpass", "a=setup:active"),
+		"no setup": func() string {
+			var out []string
+			for _, l := range lines {
+				if !strings.HasPrefix(l, "a=setup:") {
+					out = append(out, l)
+				}
+			}
+			return join(out)
+		}(),
 		"no channel": func() string {
 			// The data channel is the last section; the offer still ends with its CRLF.
 			s, _ := section(3)
@@ -118,6 +127,7 @@ func TestAnOfferOutsideTheShapeIsRefused(t *testing.T) {
 		"too large":           "bytes",
 		"not SDP":             "not SDP",
 		"setup":               "DTLS role",
+		"no setup":            "DTLS role",
 		"no channel":          "one data channel",
 		"two sends":           "sends more audio",
 		"sendrecv":            "sendonly or recvonly",

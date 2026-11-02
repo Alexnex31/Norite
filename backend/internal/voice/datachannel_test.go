@@ -342,3 +342,23 @@ func TestAPinDoesNotOverrideTheServersExclusion(t *testing.T) {
 		t.Fatalf("a pin brought back an excluded user: %s", got)
 	}
 }
+
+func TestABurstOfBadMessagesIsRefusedOnce(t *testing.T) {
+	s := newSFU(t, nil)
+	j := join(t, s, ids.MustNext(), ids.MustNext(), 1)
+	waitOp(t, j.client, voiceproto.OpReady, nil)
+	for range 5 {
+		_ = j.client.SendRawUnchecked([]byte("nope"))
+	}
+	eventually(t, 5*time.Second, "the connection is closed", func() bool { return !s.hasConn(j.conn) })
+	time.Sleep(300 * time.Millisecond)
+	refused := 0
+	for _, m := range j.client.Messages() {
+		if op, _ := voiceproto.OpOf(m); op == voiceproto.OpRefused {
+			refused++
+		}
+	}
+	if refused != 1 {
+		t.Fatalf("%d refusals for one connection", refused)
+	}
+}

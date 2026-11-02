@@ -46,6 +46,7 @@ func readOffer(offer string, lim Limits) (offerShape, error) {
 	fingerprints := map[string]bool{}
 	ufrags := map[string]bool{}
 	candidates := 0
+	setups := 0
 	apps := 0
 	mids := map[string]bool{}
 
@@ -55,6 +56,7 @@ func readOffer(offer string, lim Limits) (offerShape, error) {
 			case "fingerprint":
 				fingerprints[strings.ToLower(a.Value)] = true
 			case "setup":
+				setups++
 				if a.Value != "actpass" {
 					return fmt.Errorf("%w: the DTLS role must be the SFU's to choose (a=setup:actpass)", ErrBadOffer)
 				}
@@ -132,6 +134,10 @@ func readOffer(offer string, lim Limits) (offerShape, error) {
 		if !strings.HasPrefix(f, "sha-256 ") {
 			return offerShape{}, fmt.Errorf("%w: the fingerprint must be SHA-256", ErrBadOffer)
 		}
+	}
+	// Present, not only never wrong: an offer naming no role leaves Pion to assume one.
+	if setups == 0 {
+		return offerShape{}, fmt.Errorf("%w: the DTLS role must be the SFU's to choose (a=setup:actpass)", ErrBadOffer)
 	}
 	if len(ufrags) != 1 {
 		return offerShape{}, fmt.Errorf("%w: it must carry exactly one ICE username", ErrBadOffer)

@@ -271,6 +271,14 @@ func (c *conn) sendLocked(v any) {
 // with the reason still queued, so it waits, briefly, for the reason to leave.
 func (c *conn) refuse(reason string) {
 	defer c.contain("a refusal")
+	// Once: a peer sending one bad message after another gets one refusal and one close.
+	c.mu.Lock()
+	refused := c.refused
+	c.refused = true
+	c.mu.Unlock()
+	if refused {
+		return
+	}
 	c.send(voiceproto.Refused{Op: voiceproto.OpRefused, Reason: reason})
 	c.mu.Lock()
 	dc := c.dc

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/backend/internal/voice/voicetest"
-	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
 func main() {
@@ -72,7 +71,8 @@ func run(sfu, room, user string, slots int, d time.Duration, out string, loopbac
 	if err := c.Send(ctx, packets, voicetest.SendOptions{Level: voicetest.Loud}); err != nil {
 		return err
 	}
-	time.Sleep(500 * time.Millisecond)
+	// Long enough for another client that started a moment later to finish too.
+	time.Sleep(2 * time.Second)
 
 	if m, ok := c.LatestSlots(); ok {
 		for _, e := range m.Map {
@@ -98,9 +98,7 @@ func run(sfu, room, user string, slots int, d time.Duration, out string, loopbac
 		fmt.Printf("slot %d: %d packets from sources %v, written to %s\n", i, len(got), sources, name)
 	}
 	for _, m := range c.Messages() {
-		if op, _ := voiceproto.OpOf(m); op == voiceproto.OpRefused {
-			fmt.Printf("refused: %s\n", m)
-		}
+		fmt.Printf("received: %s\n", m)
 	}
 	return nil
 }
