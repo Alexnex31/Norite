@@ -39,8 +39,9 @@ software.
 Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invite.
 
 > [!NOTE]
-> **It is still early, and text only.** Voice, DMs, presence and the GUI are not built yet; the client
-> shows one channel at a time, in plain text; and no third party has reviewed the code. The full scope is
+> **It is still early, and text only.** Voice calls, DMs, presence and the GUI are not built yet: the server
+> half of a call exists since `M26`, but no client can join one until `M33`. The client shows one channel at a
+> time, in plain text, and no third party has reviewed the code. The full scope is
 > multi-year work — [Status](#status) says exactly what exists.
 
 ---
@@ -69,9 +70,10 @@ message's edit history, a guild's opt-in message recording, message tagging, the
 daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
 the settings file the clients share, a local port for scripts and bots, the daemon as a service you can
 stop, inspect and read the log of, and a client that keeps itself up to date, are done — `M0` through
-`M24`, which completes Phase D. Phase E, voice, has begun with `M25`, a finding rather than code, which
-settles on each OS who opens the microphone and how push-to-talk is held, and `M26`, the server that
-carries a call's audio between its participants.**
+`M24`, which completes Phase D. Phase E, voice, has begun, and its first two milestones are done too:
+`M25`, a finding rather than code, which settles on each OS who opens the microphone and how push-to-talk is
+held, and `M26`, the server that carries a call's audio between its participants, which nothing starts until
+`M33` lets a client join a call.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -290,7 +292,8 @@ an instance you can host, and the source in front of you. The rest is what the p
 
 Where Discord is ahead, and will stay ahead for a long time: video and screen-share are deferred here,
 there are no mobile clients planned for v1, and there is no ecosystem and no user base. Today Norite does
-text in guild channels and nothing else: no voice yet, no DMs, no presence. Discord also end-to-end
+text in guild channels and nothing else: no voice calls yet (the server that will carry them is built,
+nothing joins it), no DMs, no presence. Discord also end-to-end
 encrypts every voice and video call by default; Norite's end-to-end encryption covers text DMs only.
 
 ---
