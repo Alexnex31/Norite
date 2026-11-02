@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/rs/zerolog"
 )
 
 // discard is a slot's writer with nothing behind it, so the benchmark measures the SFU's own work per
@@ -52,6 +53,47 @@ func BenchmarkForward(b *testing.B) {
 				}
 			}
 			b.ReportMetric(float64(b.N*receivers)/b.Elapsed().Seconds(), "writes/s")
+		})
+	}
+}
+
+// benchRoom is a room of n connections, each sending one track at a different level and receiving on
+// slotsEach slots, with no peer connection behind any of it.
+func benchRoom(n, slotsEach int) *room {
+	s := &SFU{lim: DefaultLimits(), log: zerolog.Nop()}
+	r := newRoom(s, ids.MustNext())
+	for i := range n {
+		uid, cid := ids.MustNext(), ids.MustNext()
+		c := &conn{sfu: s, room: r, id: cid, user: uid, userText: uid.String(), idText: cid.String(), sub: noSubscription, log: zerolog.Nop()}
+		var sl []*slot
+		for j := range slotsEach {
+			sl = append(sl, &slot{conn: c, index: j, kind: "audio", codec: "audio/opus", track: newSlotTrack("audio", j, opusCapability)})
+		}
+		c.slots = map[string][]*slot{"audio": sl}
+		r.conns[c.id] = c
+		r.perUser[c.user]++
+		src := &source{conn: c, id: uint32(i + 1), kind: "audio", codec: "audio/opus"}
+		src.hear([]byte{byte(i % 127)}, time.Now())
+		r.sources[src.id] = src
+	}
+	return r
+}
+
+// BenchmarkAssignTick is one selection tick of a room: run every 100 ms per room, so its cost is per room
+// rather than per packet. A full room, 64 connections of 16 slots, measured 0.85 ms and 3,899 allocations
+// a tick until the ids' text was made once per connection rather than per receiver per tick: 0.44 ms and
+// 1,851.
+func BenchmarkAssignTick(b *testing.B) {
+	for _, tc := range []struct{ n, slots int }{{2, 8}, {8, 8}, {64, 8}, {64, 16}} {
+		b.Run(fmt.Sprintf("conns=%d/slots=%d", tc.n, tc.slots), func(b *testing.B) {
+			r := benchRoom(tc.n, tc.slots)
+			now := time.Now()
+			b.ReportAllocs()
+			for b.Loop() {
+				r.mu.Lock()
+				r.assignLocked(now)
+				r.mu.Unlock()
+			}
 		})
 	}
 }

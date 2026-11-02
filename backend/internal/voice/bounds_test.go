@@ -194,8 +194,11 @@ func TestAPeerSendingToUndeclaredSSRCsIsClosed(t *testing.T) {
 	room := ids.MustNext()
 	spray := join(t, s, room, ids.MustNext(), 1)
 	other := join(t, s, room, ids.MustNext(), 1)
+	// The bound can close the connection before the spray ends, and the client's next write then fails;
+	// that is the outcome under test, so the error is logged rather than fatal. A spray that never got
+	// going leaves the connection up, which the wait below catches.
 	if err := spray.client.SprayRTP(200); err != nil {
-		t.Fatal(err)
+		t.Logf("the spray stopped: %v", err)
 	}
 	eventually(t, 5*time.Second, "a peer sending to undeclared SSRCs is closed", func() bool { return !s.hasConn(spray.conn) })
 	if !s.hasConn(other.conn) {

@@ -28,6 +28,9 @@ type conn struct {
 	user   snowflake.ID
 	issued snowflake.ID
 	log    zerolog.Logger
+	// userText and idText are the ids as the data channel names them, made once rather than by every
+	// receiver on every selection tick.
+	userText, idText string
 
 	mu              sync.Mutex
 	pc              *webrtc.PeerConnection
@@ -64,14 +67,16 @@ type conn struct {
 
 func newConn(s *SFU, r *room, id, user, issued snowflake.ID) *conn {
 	c := &conn{
-		sfu:    s,
-		room:   r,
-		id:     id,
-		user:   user,
-		issued: issued,
-		log:    s.log.With().Stringer("room", r.id).Stringer("conn", id).Logger(),
-		sub:    noSubscription,
-		done:   make(chan struct{}),
+		sfu:      s,
+		room:     r,
+		id:       id,
+		user:     user,
+		issued:   issued,
+		log:      s.log.With().Stringer("room", r.id).Stringer("conn", id).Logger(),
+		userText: user.String(),
+		idText:   id.String(),
+		sub:      noSubscription,
+		done:     make(chan struct{}),
 	}
 	// A provision nobody connects to is dropped, or a client could hold places in rooms without ever
 	// sending a packet: unbounded growth in the shape M6's sweeper fixed.

@@ -207,13 +207,13 @@ func (r *room) assignLocked(now time.Time) []*conn {
 	if !r.gone {
 		sources := make([]*source, 0, len(r.sources))
 		loudness := make(map[*source]float64, len(r.sources))
-		speaking := map[snowflake.ID]bool{}
+		speaking := map[snowflake.ID]string{}
 		for _, src := range r.sources {
 			sources = append(sources, src)
 			l, sp := src.judge(now)
 			loudness[src] = l
 			if sp {
-				speaking[src.conn.user] = true
+				speaking[src.conn.user] = src.conn.userText
 			}
 		}
 		slices.SortFunc(sources, func(a, b *source) int { return cmp.Compare(a.id, b.id) })
@@ -245,17 +245,17 @@ func (r *room) assignLocked(now time.Time) []*conn {
 					fills[src] = append(fills[src], s)
 					entries = append(entries, voiceproto.SlotEntry{
 						Slot: s.index, Kind: s.kind, Source: src.id,
-						User: src.conn.user.String(), Conn: src.conn.id.String(),
+						User: src.conn.userText, Conn: src.conn.idText,
 					})
 				}
 			}
 			if c.setSlotMap(entries) {
 				changed = true
 			}
-			var heard []string
-			for user := range speaking {
+			heard := make([]string, 0, len(speaking))
+			for user, text := range speaking {
 				if !r.excluded[c.user][user] {
-					heard = append(heard, user.String())
+					heard = append(heard, text)
 				}
 			}
 			slices.Sort(heard)
