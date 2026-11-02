@@ -28,15 +28,23 @@ var ids = func() *snowflake.Generator {
 // newSFU starts an SFU on a loopback socket, with limits adjusted by tune.
 func newSFU(t *testing.T, tune func(*Limits)) *SFU {
 	t.Helper()
+	return newSFUWith(t, func(o *Options) {
+		if tune != nil {
+			tune(&o.Limits)
+		}
+	})
+}
+
+// newSFUWith starts an SFU on a loopback socket, with its options adjusted by tune.
+func newSFUWith(t *testing.T, tune func(*Options)) *SFU {
+	t.Helper()
 	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	lim := DefaultLimits()
-	if tune != nil {
-		tune(&lim)
-	}
-	s, err := New(Options{Conn: pc, Loopback: true, Version: "dev", Limits: lim, Logger: zerolog.Nop()})
+	opts := Options{Conn: pc, Loopback: true, Version: "dev", Limits: DefaultLimits(), Logger: zerolog.Nop()}
+	tune(&opts)
+	s, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,11 +54,20 @@ func newSFU(t *testing.T, tune func(*Limits)) *SFU {
 
 func newClient(t *testing.T, slots int) *voicetest.Client {
 	t.Helper()
-	c, err := voicetest.New(voicetest.Options{Slots: slots, Loopback: true})
+	return newClientWith(t, voicetest.Options{Slots: slots})
+}
+
+// newClientWith builds a client whose every data-channel message, both ways, is held to the contract when
+// the test ends.
+func newClientWith(t *testing.T, opts voicetest.Options) *voicetest.Client {
+	t.Helper()
+	opts.Loopback = true
+	c, err := voicetest.New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	t.Cleanup(func() { checkContract(t, c) })
 	return c
 }
 
@@ -75,7 +92,12 @@ type joined struct {
 // join provisions a new client for user in room and waits for it to connect.
 func join(t *testing.T, s *SFU, room, user snowflake.ID, slots int) joined {
 	t.Helper()
-	c := newClient(t, slots)
+	return joinWith(t, s, room, user, voicetest.Options{Slots: slots})
+}
+
+func joinWith(t *testing.T, s *SFU, room, user snowflake.ID, opts voicetest.Options) joined {
+	t.Helper()
+	c := newClientWith(t, opts)
 	conn := ids.MustNext()
 	answer, err := s.Provision(context.Background(), room, user, conn, ids.MustNext(), offerOf(t, c))
 	if err != nil {
@@ -88,6 +110,11 @@ func join(t *testing.T, s *SFU, room, user snowflake.ID, slots int) joined {
 	defer cancel()
 	if err := c.WaitConnected(ctx); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-c.ChannelOpen():
+	case <-ctx.Done():
+		t.Fatal("the data channel did not open")
 	}
 	return joined{client: c, user: user, conn: conn}
 }

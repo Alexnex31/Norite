@@ -30,6 +30,10 @@ type Options struct {
 	Slots int
 	// Loopback admits loopback candidates, for a client and an SFU on one machine.
 	Loopback bool
+	// Version is what the client's hello names; empty is "dev".
+	Version string
+	// NoHello leaves the hello unsent, for a test that sends something else first.
+	NoHello bool
 }
 
 // Client is one voice connection's client end.
@@ -41,8 +45,24 @@ type Client struct {
 	slotMids   []string
 	recordings sync.WaitGroup
 
+	dc *webrtc.DataChannel
+
+	// seq and ts carry on from one Send to the next, as a real sender's do. A fresh random start per call
+	// jumps the sequence by up to 2^16, which SRTP's index estimate can read as an old packet and drop
+	// the whole burst as a replay.
+	sendMu sync.Mutex
+	seq    uint16
+	ts     uint32
+	lastAt time.Time
+
 	mu       sync.Mutex
 	received map[string][]Packet
+	// messages are what arrived on the data channel, and sent what went out, raw, in order.
+	messages [][]byte
+	sent     [][]byte
+	arrived  chan struct{}
+	openDC   chan struct{}
+	closedDC chan struct{}
 
 	connected chan struct{}
 	failed    chan struct{}
@@ -88,6 +108,11 @@ func New(opts Options) (*Client, error) {
 		opts:      opts,
 		pc:        pc,
 		received:  map[string][]Packet{},
+		seq:       uint16(rand.Uint32()),
+		ts:        rand.Uint32(),
+		arrived:   make(chan struct{}, 1),
+		openDC:    make(chan struct{}),
+		closedDC:  make(chan struct{}),
 		connected: make(chan struct{}),
 		failed:    make(chan struct{}),
 	}
@@ -136,9 +161,32 @@ func (c *Client) Offer(ctx context.Context) (string, error) {
 		}
 		slots = append(slots, tr)
 	}
-	if _, err := c.pc.CreateDataChannel(voiceproto.Label, nil); err != nil {
+	dc, err := c.pc.CreateDataChannel(voiceproto.Label, nil)
+	if err != nil {
 		return "", err
 	}
+	c.dc = dc
+	dc.OnOpen(func() {
+		defer close(c.openDC)
+		if c.opts.NoHello {
+			return
+		}
+		version := c.opts.Version
+		if version == "" {
+			version = "dev"
+		}
+		_ = c.SendMessage(voiceproto.Hello{Op: voiceproto.OpHello, Version: version})
+	})
+	dc.OnMessage(func(m webrtc.DataChannelMessage) {
+		c.mu.Lock()
+		c.messages = append(c.messages, append([]byte(nil), m.Data...))
+		c.mu.Unlock()
+		select {
+		case c.arrived <- struct{}{}:
+		default:
+		}
+	})
+	dc.OnClose(func() { close(c.closedDC) })
 	offer, err := c.pc.CreateOffer(nil)
 	if err != nil {
 		return "", err
@@ -207,6 +255,96 @@ type Packet struct {
 	Extensions int
 	At         time.Time
 }
+
+// SendMessage encodes and sends a message on the data channel.
+func (c *Client) SendMessage(v any) error {
+	b, err := voiceproto.Encode(v)
+	if err != nil {
+		return err
+	}
+	return c.SendRaw(b)
+}
+
+// SendRaw sends bytes on the data channel as they are.
+func (c *Client) SendRaw(b []byte) error {
+	c.mu.Lock()
+	c.sent = append(c.sent, append([]byte(nil), b...))
+	c.mu.Unlock()
+	return c.dc.SendText(string(b))
+}
+
+// SendRawUnchecked sends bytes and keeps them out of Sent, for a message the contract excludes on purpose.
+func (c *Client) SendRawUnchecked(b []byte) error { return c.dc.SendText(string(b)) }
+
+// Subscribe sends a subscription naming users by id.
+func (c *Client) Subscribe(pin, drop []string, slotCap *int) error {
+	if pin == nil {
+		pin = []string{}
+	}
+	if drop == nil {
+		drop = []string{}
+	}
+	return c.SendMessage(voiceproto.Subscribe{Op: voiceproto.OpSubscribe, Pin: pin, Drop: drop, Cap: slotCap})
+}
+
+// Messages is everything that arrived on the data channel, raw.
+func (c *Client) Messages() [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([][]byte(nil), c.messages...)
+}
+
+// Sent is everything the client sent on the data channel, raw.
+func (c *Client) Sent() [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([][]byte(nil), c.sent...)
+}
+
+// WaitFor waits for a message for which match is true, looking at every message so far and then at each
+// as it arrives, and returns it.
+func (c *Client) WaitFor(ctx context.Context, match func(op string, raw []byte) bool) ([]byte, error) {
+	seen := 0
+	for {
+		msgs := c.Messages()
+		for _, m := range msgs[seen:] {
+			if op, err := voiceproto.OpOf(m); err == nil && match(op, m) {
+				return m, nil
+			}
+		}
+		seen = len(msgs)
+		select {
+		case <-c.arrived:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("voicetest: no such message: %w", ctx.Err())
+		}
+	}
+}
+
+// LatestSlots is the newest slot map that arrived, and whether one has.
+func (c *Client) LatestSlots() (voiceproto.Slots, bool) {
+	msgs := c.Messages()
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if op, _ := voiceproto.OpOf(msgs[i]); op == voiceproto.OpSlots {
+			var m voiceproto.Slots
+			if voiceproto.Decode(msgs[i], &m) == nil {
+				return m, true
+			}
+		}
+	}
+	return voiceproto.Slots{}, false
+}
+
+// OpenChannel opens another data channel, which the SFU should close.
+func (c *Client) OpenChannel(label string) (*webrtc.DataChannel, error) {
+	return c.pc.CreateDataChannel(label, nil)
+}
+
+// ChannelOpen is closed once the data channel is open, and the hello, unless asked not to, sent.
+func (c *Client) ChannelOpen() <-chan struct{} { return c.openDC }
+
+// ChannelClosed is closed once the data channel is.
+func (c *Client) ChannelClosed() <-chan struct{} { return c.closedDC }
 
 // SlotMids are the mids of the client's receiving sections, in slot order.
 func (c *Client) SlotMids() []string {
@@ -295,13 +433,18 @@ func (c *Client) Send(ctx context.Context, packets [][]byte, opts SendOptions) e
 		opts.Pace = 20 * time.Millisecond
 	}
 	levelID := extensionID(c.sender.GetParameters().HeaderExtensions, voiceproto.AudioLevelURI)
-	seq := uint16(rand.Uint32())
-	ts := rand.Uint32()
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if !c.lastAt.IsZero() {
+		// The clock runs on through a pause, as a capture clock does.
+		c.ts += uint32(time.Since(c.lastAt).Seconds() * voiceproto.ClockRateAudio)
+	}
+	defer func() { c.lastAt = time.Now() }()
 	tick := time.NewTicker(opts.Pace)
 	defer tick.Stop()
 	for i, payload := range packets {
 		p := &rtp.Packet{
-			Header:  rtp.Header{Version: 2, Marker: i == 0, SequenceNumber: seq, Timestamp: ts},
+			Header:  rtp.Header{Version: 2, Marker: i == 0, SequenceNumber: c.seq, Timestamp: c.ts},
 			Payload: payload,
 		}
 		if opts.Level != nil && levelID != 0 {
@@ -323,8 +466,8 @@ func (c *Client) Send(ctx context.Context, packets [][]byte, opts SendOptions) e
 		if err := c.send.WriteRTP(p); err != nil {
 			return err
 		}
-		seq++
-		ts += FrameSamples
+		c.seq++
+		c.ts += FrameSamples
 		select {
 		case <-tick.C:
 		case <-ctx.Done():

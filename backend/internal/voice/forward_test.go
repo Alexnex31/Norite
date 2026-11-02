@@ -159,10 +159,12 @@ func TestASlotChangingHandsStaysOneStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var wg sync.WaitGroup
+	// A source is numbered when its first packet arrives, and the lower number has the slot: the first
+	// sender starts first, so it has the slot until it leaves and the second takes it.
 	wg.Go(func() { _ = first.client.Send(ctx, tagged('A', 50), voicetest.SendOptions{}) })
+	time.Sleep(200 * time.Millisecond)
 	wg.Go(func() { _ = second.client.Send(ctx, tagged('B', 100), voicetest.SendOptions{}) })
-	// The first sender has the slot; halfway through, it leaves and the second takes it.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	if err := s.EvictConnection(context.Background(), first.conn); err != nil {
 		t.Fatal(err)
 	}

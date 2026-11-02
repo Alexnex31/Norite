@@ -10,6 +10,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
 // room is one voice channel's connections.
@@ -141,16 +142,23 @@ func (r *room) removeSource(src *source) {
 	}
 }
 
-// changed chooses the room's slots again, after anything that can change who fills them.
+// changed chooses the room's slots again, after anything that can change who fills them, and sends each
+// connection whose slot map changed its new one. The sending happens after the room's lock is released:
+// a connection too slow to take it is closed, and closing one takes the SFU's lock, which comes first.
 func (r *room) changed() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.assignLocked()
+	moved := r.assignLocked()
+	r.mu.Unlock()
+	for _, c := range moved {
+		c.flushSlots(false)
+	}
 }
 
-// assignLocked fills every receiver's slots and tells each source which slots it fills.
-func (r *room) assignLocked() {
+// assignLocked fills every receiver's slots, tells each source which slots it fills, and returns the
+// connections whose slot map changed.
+func (r *room) assignLocked() []*conn {
 	fills := map[*source][]*slot{}
+	var moved []*conn
 	if !r.gone {
 		sources := make([]*source, 0, len(r.sources))
 		for _, src := range r.sources {
@@ -159,18 +167,37 @@ func (r *room) assignLocked() {
 		slices.SortFunc(sources, func(a, b *source) int { return int(a.id) - int(b.id) })
 
 		for _, c := range r.conns {
-			for kind, slots := range c.slotsByKind() {
+			sub := c.subscription()
+			entries := []voiceproto.SlotEntry{}
+			for _, kind := range []string{voiceproto.KindAudio, voiceproto.KindVideo} {
+				slots := c.slotsByKind()[kind]
+				if len(slots) == 0 {
+					continue
+				}
 				var candidates []*source
 				for _, src := range sources {
-					if src.kind == kind && r.mayReceive(c, src) {
+					if src.kind == kind && r.mayReceive(c, src) && !sub.drop[src.conn.user] {
 						candidates = append(candidates, src)
 					}
 				}
-				for _, s := range place(slots, candidates) {
-					if src := s.current(); src != nil {
-						fills[src] = append(fills[src], s)
-					}
+				chosen := choose(candidates, sub)
+				if sub.cap >= 0 && len(chosen) > sub.cap {
+					chosen = chosen[:sub.cap]
 				}
+				for _, s := range place(slots, chosen) {
+					src := s.current()
+					if src == nil {
+						continue
+					}
+					fills[src] = append(fills[src], s)
+					entries = append(entries, voiceproto.SlotEntry{
+						Slot: s.index, Kind: s.kind, Source: src.id,
+						User: src.conn.user.String(), Conn: src.conn.id.String(),
+					})
+				}
+			}
+			if c.setSlotMap(entries) {
+				moved = append(moved, c)
 			}
 		}
 	}
@@ -178,6 +205,28 @@ func (r *room) assignLocked() {
 		slots := fills[src]
 		src.slots.Store(&slots)
 	}
+	return moved
+}
+
+// choose orders the candidates for a receiver's slots: the users it pinned first, in the order it pinned
+// them, then everybody else.
+func choose(candidates []*source, sub subscription) []*source {
+	chosen := make([]*source, 0, len(candidates))
+	taken := make(map[*source]bool, len(candidates))
+	for _, user := range sub.pin {
+		for _, src := range candidates {
+			if src.conn.user == user && !taken[src] {
+				chosen = append(chosen, src)
+				taken[src] = true
+			}
+		}
+	}
+	for _, src := range candidates {
+		if !taken[src] {
+			chosen = append(chosen, src)
+		}
+	}
+	return chosen
 }
 
 // mayReceive says whether c may be sent src at all: never its own user's tracks, and never a user the

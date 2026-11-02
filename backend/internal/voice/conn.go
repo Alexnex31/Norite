@@ -28,13 +28,23 @@ type conn struct {
 	issued snowflake.ID
 	log    zerolog.Logger
 
-	mu        sync.Mutex
-	pc        *webrtc.PeerConnection
-	slots     map[string][]*slot
-	closed    bool
-	connected bool
-	timer     *time.Timer
-	done      chan struct{}
+	mu            sync.Mutex
+	pc            *webrtc.PeerConnection
+	slots         map[string][]*slot
+	dc            *webrtc.DataChannel
+	extraChannels int
+	helloed       bool
+	sub           subscription
+	slotMap       []voiceproto.SlotEntry
+	mapVersion    uint64
+	closed        bool
+	connected     bool
+	timer         *time.Timer
+	done          chan struct{}
+
+	// sendMu orders what goes out on the data channel; mapSent is the newest slot map sent.
+	sendMu  sync.Mutex
+	mapSent uint64
 }
 
 func newConn(s *SFU, r *room, id, user, issued snowflake.ID) *conn {
@@ -45,6 +55,7 @@ func newConn(s *SFU, r *room, id, user, issued snowflake.ID) *conn {
 		user:   user,
 		issued: issued,
 		log:    s.log.With().Stringer("room", r.id).Stringer("conn", id).Logger(),
+		sub:    noSubscription,
 		done:   make(chan struct{}),
 	}
 	// A provision nobody connects to is dropped, or a client could hold places in rooms without ever
@@ -110,6 +121,7 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 		}
 	}
 	pc.OnTrack(c.onTrack)
+	pc.OnDataChannel(c.onDataChannel)
 
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {

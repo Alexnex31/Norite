@@ -40,3 +40,6 @@ const ClockRateAudio = 48000
 // MaxMessage is the largest data-channel message either end sends or accepts, in bytes. The largest is a
 // subscribe naming every participant of a full room, a few kilobytes.
 const MaxMessage = 8 << 10
+
+// MaxSubscribeList is the most users a subscribe's pin or drop names: a full room's.
+const MaxSubscribeList = 64
