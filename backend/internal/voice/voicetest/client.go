@@ -18,6 +18,7 @@ import (
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 
@@ -244,6 +245,7 @@ func (c *Client) Close() error {
 // Packet is one packet received on a slot.
 type Packet struct {
 	Mid    string
+	SSRC   uint32
 	Seq    uint16
 	TS     uint32
 	CSRC   []uint32
@@ -346,6 +348,23 @@ func (c *Client) ChannelOpen() <-chan struct{} { return c.openDC }
 // ChannelClosed is closed once the data channel is.
 func (c *Client) ChannelClosed() <-chan struct{} { return c.closedDC }
 
+// FloodRTCP sends n picture-loss indications about ssrc, pace apart: RTCP a hostile peer sends.
+func (c *Client) FloodRTCP(ctx context.Context, ssrc uint32, n int, pace time.Duration) error {
+	tick := time.NewTicker(pace)
+	defer tick.Stop()
+	for range n {
+		if err := c.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}}); err != nil {
+			return err
+		}
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 // SlotMids are the mids of the client's receiving sections, in slot order.
 func (c *Client) SlotMids() []string {
 	c.mu.Lock()
@@ -390,7 +409,7 @@ func (c *Client) record(track *webrtc.TrackRemote, r *webrtc.RTPReceiver) {
 				return
 			}
 			got := Packet{
-				Mid: mid, Seq: p.SequenceNumber, TS: p.Timestamp, CSRC: append([]uint32(nil), p.CSRC...),
+				Mid: mid, SSRC: p.SSRC, Seq: p.SequenceNumber, TS: p.Timestamp, CSRC: append([]uint32(nil), p.CSRC...),
 				Marker: p.Marker, Level: -1, Payload: append([]byte(nil), p.Payload...),
 				Extensions: len(p.Extensions), At: time.Now(),
 			}

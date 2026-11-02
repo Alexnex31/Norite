@@ -71,10 +71,12 @@ func DefaultLimits() Limits {
 		MaxCandidates:    16,
 		ProvisionTimeout: 30 * time.Second,
 		// Opus at its shortest frame is 400 packets a second; the clients send 20 ms frames, 50.
-		PacketsPerSecond:  100,
-		BitsPerSecond:     256_000,
-		StrikesToEvict:    3,
-		RTCPPerSecond:     50,
+		PacketsPerSecond: 100,
+		BitsPerSecond:    256_000,
+		StrikesToEvict:   3,
+		// A client reports on every slot once a second, and its own sender too; M31's congestion
+		// feedback adds tens a second more.
+		RTCPPerSecond:     100,
 		MessagesPerSecond: 20,
 		ExtraChannels:     4,
 	}

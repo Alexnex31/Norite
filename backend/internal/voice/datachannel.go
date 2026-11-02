@@ -40,6 +40,7 @@ func refusalf(format string, a ...any) error { return refusal(fmt.Sprintf(format
 
 // onDataChannel takes the peer's one data channel and closes any other.
 func (c *conn) onDataChannel(dc *webrtc.DataChannel) {
+	defer c.contain("a new data channel")
 	c.mu.Lock()
 	extra := c.dc != nil || dc.Label() != voiceproto.Label
 	if extra {
@@ -58,6 +59,7 @@ func (c *conn) onDataChannel(dc *webrtc.DataChannel) {
 		return
 	}
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		defer c.contain("a data-channel message")
 		if err := c.onMessage(msg); err != nil {
 			go c.refuse(err.Error())
 		}
@@ -66,6 +68,14 @@ func (c *conn) onDataChannel(dc *webrtc.DataChannel) {
 
 // onMessage handles one message from the client.
 func (c *conn) onMessage(msg webrtc.DataChannelMessage) error {
+	lim := c.sfu.lim
+	c.mu.Lock()
+	ok, _ := c.messages.admit(time.Now(), 0, lim.MessagesPerSecond, 0, lim.StrikesToEvict)
+	c.mu.Unlock()
+	if !ok {
+		return refusalf("more than %d messages a second", lim.MessagesPerSecond)
+	}
+	panicHook("a data-channel message", msg.Data)
 	if !msg.IsString || len(msg.Data) > voiceproto.MaxMessage {
 		return refusalf("a message must be JSON text of at most %d bytes", voiceproto.MaxMessage)
 	}
@@ -260,6 +270,7 @@ func (c *conn) sendLocked(v any) {
 // refuse tells the client why, then closes the connection. Closing at once would tear down the association
 // with the reason still queued, so it waits, briefly, for the reason to leave.
 func (c *conn) refuse(reason string) {
+	defer c.contain("a refusal")
 	c.send(voiceproto.Refused{Op: voiceproto.OpRefused, Reason: reason})
 	c.mu.Lock()
 	dc := c.dc

@@ -112,19 +112,31 @@ func newSource(c *conn, id uint32, track *webrtc.TrackRemote, r *webrtc.RTPRecei
 // run reads the track until it ends, and forwards each packet to the slots that hold it. One goroutine per
 // source, and the packet and its buffer are reused: the forward is synchronous, so nothing outlives the
 // next read.
+//
+// Each packet is metered first: past the bound it is dropped unforwarded and its level is not counted, so
+// a sender cannot buy a slot by sending more, and one that keeps on is closed.
 func (src *source) run() {
+	defer src.conn.contain("forwarding")
+	lim := src.conn.sfu.lim
 	buf := make([]byte, 1500)
 	var p rtp.Packet
+	var m meter
 	for {
 		n, _, err := src.track.Read(buf)
 		if err != nil {
 			return
 		}
-		if p.Unmarshal(buf[:n]) != nil {
+		now := time.Now()
+		ok, out := m.admit(now, n, lim.PacketsPerSecond, lim.BitsPerSecond, lim.StrikesToEvict)
+		if out {
+			go src.conn.close("sending past its bound")
+			return
+		}
+		if !ok || p.Unmarshal(buf[:n]) != nil {
 			continue
 		}
+		panicHook("forwarding", p.Payload)
 		level := src.readLevel(&p)
-		now := time.Now()
 		src.hear(level, now)
 		if slots := src.slots.Load(); slots != nil {
 			for _, s := range *slots {

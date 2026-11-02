@@ -3206,6 +3206,12 @@ does not appear to disagree with them.
   interface from the backend to SFU pods in another namespace. On a self-hosted instance the SFU is in the
   backend's process and the interface is a Go call. The out-of-process SFU also removes the residual M26
   records, that a panic inside Pion's own goroutines ends `norite-server`.
+
+  **M26's cutoff reads two clocks here.** An eviction's cutoff is kept for the provision timeout on the
+  SFU's clock, and a provision is refused as stale by comparing its `issued` snowflake, minted on the
+  backend's clock, against the SFU's. In one process that is one clock. Across pods, a backend clock
+  ahead of the SFU's lets a provision issued before a kick outlive the cutoff that should refuse it, so
+  this milestone bounds the skew between them, or carries the backend's clock in the control message.
 - **M117 — `cert-manager` plus Ingress TLS**: disables the backend's built-in `certmagic` path for this
   deployment specifically (self-hosted instances keep it).
 

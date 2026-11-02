@@ -1714,3 +1714,28 @@ carries the condition that would reopen it.
   check somebody asks for is not throttled. It is an attach-socket request, so only the account's own
   programs can make it, and any of them can ask GitHub directly. One check or download runs at a time.
 - **Reopens if**: the request is ever reachable from the port for scripts, or from an instance.
+
+## M26 — Pion SFU core
+
+### A sender claiming to be loud wins a slot
+- **Raised**: M26, planning's `/code-review`
+- **Verdict**: accepted risk
+- **Why**: selection and the speaking indicator read the RFC 6464 level each packet reports, and the
+  sender writes it. What bounds the claim: it counts per packet, so it is believed only while packets
+  flow and lapses within a second of them stopping (`source.hear`); packets past the rate bound count for
+  nothing and a sender far past it is closed (`meter`); and the receiver's drop removes anybody from its
+  slots without asking the server. A griefer inside the bound claiming full volume still takes a slot at
+  every receiver that has not dropped them. Reading the level from the audio instead means decoding every
+  sender's Opus on the server, which this SFU never does.
+- **Reopens if**: the SFU ever decodes payloads, or a client cannot drop a participant (M34's local mute
+  is that drop).
+
+### A panic inside Pion's own goroutines ends `norite-server`
+- **Raised**: M26, planning's `/code-review`
+- **Verdict**: accepted risk
+- **Why**: the self-hosted SFU shares the backend's process, and parses strangers' RTP, RTCP, DTLS and
+  SCTP. Every goroutine and callback this package runs recovers and closes only that connection
+  (`conn.contain`), and the offer validator, the data-channel decoder and the forward path are fuzzed;
+  Pion's internal goroutines (ICE, DTLS, SCTP, SRTP) are beyond any recover the package can place. A panic
+  there is a bug in a widely used library, and on the flagship the SFU runs in pods of its own (M116).
+- **Reopens if**: a panic reachable from the network is found in a Pion release this project uses.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -44,6 +45,13 @@ type conn struct {
 	timer           *time.Timer
 	done            chan struct{}
 
+	// tracks counts the tracks the peer has sent, against what its offer said it would.
+	tracks    int
+	maxTracks int
+	// rtcp and messages meter what the peer sends besides media, under mu.
+	rtcp     meter
+	messages meter
+
 	// sendMu orders what goes out on the data channel; mapSent is the newest slot map sent.
 	sendMu       sync.Mutex
 	mapSent      uint64
@@ -64,6 +72,7 @@ func newConn(s *SFU, r *room, id, user, issued snowflake.ID) *conn {
 	// A provision nobody connects to is dropped, or a client could hold places in rooms without ever
 	// sending a packet: unbounded growth in the shape M6's sweeper fixed.
 	c.timer = time.AfterFunc(s.lim.ProvisionTimeout, func() {
+		defer c.contain("the provision timeout")
 		c.mu.Lock()
 		connected := c.connected
 		c.mu.Unlock()
@@ -91,6 +100,9 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 		return "", ErrEvicted
 	}
 	c.pc = pc
+	for _, n := range shape.sends {
+		c.maxTracks += n
+	}
 	c.mu.Unlock()
 
 	for kind, n := range shape.sends {
@@ -120,13 +132,14 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 			s := &slot{conn: c, index: i, kind: kind, codec: strings.ToLower(codec.MimeType), track: st}
 			slots[kind] = append(slots[kind], s)
 			transceivers[s] = tr
-			go drainSender(tr.Sender())
+			go c.drainSender(tr.Sender())
 		}
 	}
 	pc.OnTrack(c.onTrack)
 	pc.OnDataChannel(c.onDataChannel)
 
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
+		defer c.contain("a state change")
 		switch st {
 		case webrtc.PeerConnectionStateConnected:
 			c.mu.Lock()
@@ -197,13 +210,25 @@ func (c *conn) slotsByKind() map[string][]*slot {
 }
 
 // onTrack starts forwarding a track the connection sends.
+//
+// No more tracks than the offer's sending sections: Pion matches a track to a section, so this holds by
+// construction, and the count makes it hold whatever Pion does with an SSRC nobody declared.
 func (c *conn) onTrack(track *webrtc.TrackRemote, r *webrtc.RTPReceiver) {
+	defer c.contain("a new track")
+	c.mu.Lock()
+	c.tracks++
+	over := c.tracks > c.maxTracks
+	c.mu.Unlock()
+	if over {
+		go c.close("sending more tracks than its offer said")
+		return
+	}
 	src := c.room.addSource(c, track, r)
 	if src == nil {
 		return
 	}
 	c.room.changed()
-	go drainReceiver(r)
+	go c.drainReceiver(r)
 	go func() {
 		src.run()
 		c.room.removeSource(src)
@@ -213,22 +238,48 @@ func (c *conn) onTrack(track *webrtc.TrackRemote, r *webrtc.RTPReceiver) {
 
 // drainSender reads a slot's RTCP, which is the receiver's reports about this hop. Reading it is what runs
 // the interceptors over it; nothing read here goes to the sender.
-func drainSender(s *webrtc.RTPSender) {
+func (c *conn) drainSender(s *webrtc.RTPSender) {
+	defer c.contain("a slot's RTCP")
 	buf := make([]byte, 1500)
 	for {
-		if _, _, err := s.Read(buf); err != nil {
+		if _, _, err := s.Read(buf); err != nil || !c.meterRTCP() {
 			return
 		}
 	}
 }
 
 // drainReceiver reads a sent track's RTCP, the sender's reports about its own hop, for the same reason.
-func drainReceiver(r *webrtc.RTPReceiver) {
+func (c *conn) drainReceiver(r *webrtc.RTPReceiver) {
+	defer c.contain("a track's RTCP")
 	buf := make([]byte, 1500)
 	for {
-		if _, _, err := r.Read(buf); err != nil {
+		if _, _, err := r.Read(buf); err != nil || !c.meterRTCP() {
 			return
 		}
+	}
+}
+
+// meterRTCP counts one RTCP datagram against the connection's bound, and closes a connection that strikes
+// out. It says whether to go on reading.
+func (c *conn) meterRTCP() bool {
+	lim := c.sfu.lim
+	c.mu.Lock()
+	_, out := c.rtcp.admit(time.Now(), 0, lim.RTCPPerSecond, 0, lim.StrikesToEvict)
+	c.mu.Unlock()
+	if out {
+		go c.close("sending RTCP past its bound")
+		return false
+	}
+	return true
+}
+
+// testPanic, set only by tests, is called where a stranger's input is handled, to prove a panic there is
+// contained. Atomic, since a test sets it while read loops run.
+var testPanic atomic.Pointer[func(where string, input []byte)]
+
+func panicHook(where string, input []byte) {
+	if f := testPanic.Load(); f != nil {
+		(*f)(where, input)
 	}
 }
 

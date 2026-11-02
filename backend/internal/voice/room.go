@@ -5,6 +5,8 @@ package voice
 
 import (
 	"cmp"
+	"fmt"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -64,7 +66,7 @@ func (r *room) run() {
 		case <-r.stop:
 			return
 		case <-t.C:
-			r.changed()
+			r.tick()
 		}
 	}
 }
@@ -117,6 +119,18 @@ func (r *room) members() []*conn {
 		out = append(out, c)
 	}
 	return out
+}
+
+// tick chooses again, containing a panic: the selection runs for every connection in the room, and one
+// connection's state is not a reason to end the process or stop the room's selection.
+func (r *room) tick() {
+	defer func() {
+		if v := recover(); v != nil {
+			r.sfu.log.Error().Stringer("room", r.id).Str("panic", fmt.Sprint(v)).
+				Bytes("stack", debug.Stack()).Msg("a voice room's selection panicked")
+		}
+	}()
+	r.changed()
 }
 
 // shut marks the room gone and stops its selection. A room is freed when its last connection leaves.
