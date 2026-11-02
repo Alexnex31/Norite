@@ -4,7 +4,10 @@
 package voice
 
 import (
+	"slices"
 	"sync"
+
+	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 )
@@ -21,7 +24,10 @@ type room struct {
 	perUser map[snowflake.ID]int
 	// excluded is, per receiving user, the users never forwarded to them (Control.SetExclusion).
 	excluded map[snowflake.ID]map[snowflake.ID]bool
-	gone     bool
+	sources  map[uint32]*source
+	// nextSource numbers the room's sources; a source id is a CSRC, unique in the room.
+	nextSource uint32
+	gone       bool
 }
 
 func newRoom(s *SFU, id snowflake.ID) *room {
@@ -31,6 +37,7 @@ func newRoom(s *SFU, id snowflake.ID) *room {
 		conns:    map[snowflake.ID]*conn{},
 		perUser:  map[snowflake.ID]int{},
 		excluded: map[snowflake.ID]map[snowflake.ID]bool{},
+		sources:  map[uint32]*source{},
 	}
 }
 
@@ -55,6 +62,11 @@ func (r *room) remove(c *conn) {
 		return
 	}
 	delete(r.conns, c.id)
+	for id, src := range r.sources {
+		if src.conn == c {
+			delete(r.sources, id)
+		}
+	}
 	if r.perUser[c.user]--; r.perUser[c.user] <= 0 {
 		delete(r.perUser, c.user)
 		// Kept only while the receiver is here, so the set is bounded by the room's own bound.
@@ -107,5 +119,102 @@ func (r *room) exclude(receiver snowflake.ID, users []snowflake.ID) bool {
 	return true
 }
 
-// changed asks the room to choose its slots again. Until selection exists it has nothing to do.
-func (r *room) changed() {}
+// addSource admits a track a connection sends. It is refused once the connection is gone, since a track
+// can arrive while a connection is being closed.
+func (r *room) addSource(c *conn, track *webrtc.TrackRemote, recv *webrtc.RTPReceiver) *source {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gone || r.conns[c.id] != c {
+		return nil
+	}
+	r.nextSource++
+	src := newSource(c, r.nextSource, track, recv)
+	r.sources[src.id] = src
+	return src
+}
+
+func (r *room) removeSource(src *source) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sources[src.id] == src {
+		delete(r.sources, src.id)
+	}
+}
+
+// changed chooses the room's slots again, after anything that can change who fills them.
+func (r *room) changed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.assignLocked()
+}
+
+// assignLocked fills every receiver's slots and tells each source which slots it fills.
+func (r *room) assignLocked() {
+	fills := map[*source][]*slot{}
+	if !r.gone {
+		sources := make([]*source, 0, len(r.sources))
+		for _, src := range r.sources {
+			sources = append(sources, src)
+		}
+		slices.SortFunc(sources, func(a, b *source) int { return int(a.id) - int(b.id) })
+
+		for _, c := range r.conns {
+			for kind, slots := range c.slotsByKind() {
+				var candidates []*source
+				for _, src := range sources {
+					if src.kind == kind && r.mayReceive(c, src) {
+						candidates = append(candidates, src)
+					}
+				}
+				for _, s := range place(slots, candidates) {
+					if src := s.current(); src != nil {
+						fills[src] = append(fills[src], s)
+					}
+				}
+			}
+		}
+	}
+	for _, src := range r.sources {
+		slots := fills[src]
+		src.slots.Store(&slots)
+	}
+}
+
+// mayReceive says whether c may be sent src at all: never its own user's tracks, and never a user the
+// server has excluded for it. Neither is the client's to override.
+func (r *room) mayReceive(c *conn, src *source) bool {
+	return src.conn.user != c.user && !r.excluded[c.user][src.conn.user]
+}
+
+// place puts the first len(slots) of chosen, in order of preference, into slots. A source already in a slot
+// stays in it, so a receiver's slots change only as much as the choice does; a source no longer chosen
+// leaves its slot, and newcomers fill the slots left free in order.
+func place(slots []*slot, chosen []*source) []*slot {
+	if len(chosen) > len(slots) {
+		chosen = chosen[:len(slots)]
+	}
+	want := make(map[*source]bool, len(chosen))
+	for _, src := range chosen {
+		want[src] = true
+	}
+	placed := make(map[*source]bool, len(chosen))
+	var free []*slot
+	for _, s := range slots {
+		if cur := s.current(); cur != nil && want[cur] && !placed[cur] {
+			placed[cur] = true
+			continue
+		}
+		free = append(free, s)
+	}
+	for _, src := range chosen {
+		if placed[src] {
+			continue
+		}
+		free[0].assign(src)
+		free = free[1:]
+	}
+	for _, s := range free {
+		s.assign(nil)
+	}
+	return slots
+}

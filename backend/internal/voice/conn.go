@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
 // conn is one admitted connection: a peer connection the SFU answers, sending its tracks and receiving
@@ -28,6 +30,7 @@ type conn struct {
 
 	mu        sync.Mutex
 	pc        *webrtc.PeerConnection
+	slots     map[string][]*slot
 	closed    bool
 	connected bool
 	timer     *time.Timer
@@ -85,6 +88,28 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 			}
 		}
 	}
+	slots := map[string][]*slot{}
+	transceivers := map[*slot]*webrtc.RTPTransceiver{}
+	for kind, n := range shape.slots {
+		codec, ok := codecFor(kind)
+		if !ok {
+			return "", fmt.Errorf("%w: the SFU carries no %s codec", ErrBadOffer, kind)
+		}
+		for i := range n {
+			st := newSlotTrack(kind, i, codec)
+			tr, err := pc.AddTransceiverFromTrack(st, webrtc.RTPTransceiverInit{
+				Direction: webrtc.RTPTransceiverDirectionSendonly,
+			})
+			if err != nil {
+				return "", err
+			}
+			s := &slot{conn: c, index: i, kind: kind, codec: strings.ToLower(codec.MimeType), track: st}
+			slots[kind] = append(slots[kind], s)
+			transceivers[s] = tr
+			go drainSender(tr.Sender())
+		}
+	}
+	pc.OnTrack(c.onTrack)
 
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
@@ -103,6 +128,14 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
 		c.log.Debug().Err(err).Msg("an offer Pion would not apply")
 		return "", fmt.Errorf("%w: it could not be applied", ErrBadOffer)
+	}
+	// Pion matched the slots to the offer's receiving sections in order; the mid is how the slot map
+	// names each slot to the client.
+	for s, tr := range transceivers {
+		s.mid = tr.Mid()
+		if s.mid == "" {
+			return "", fmt.Errorf("%w: a slot matched no section", ErrBadOffer)
+		}
 	}
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
@@ -124,11 +157,64 @@ func (c *conn) negotiate(ctx context.Context, offer string, shape offerShape) (s
 	}
 	c.mu.Lock()
 	closed := c.closed
+	c.slots = slots
 	c.mu.Unlock()
 	if closed {
 		return "", ErrEvicted
 	}
+	c.room.changed()
 	return pc.LocalDescription().SDP, nil
+}
+
+// codecFor is the codec the SFU carries for a kind. Video has none until M107.
+func codecFor(kind string) (webrtc.RTPCodecCapability, bool) {
+	if kind == voiceproto.KindAudio {
+		return opusCapability, true
+	}
+	return webrtc.RTPCodecCapability{}, false
+}
+
+// slotsByKind is the connection's slots, empty until it is negotiated.
+func (c *conn) slotsByKind() map[string][]*slot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.slots
+}
+
+// onTrack starts forwarding a track the connection sends.
+func (c *conn) onTrack(track *webrtc.TrackRemote, r *webrtc.RTPReceiver) {
+	src := c.room.addSource(c, track, r)
+	if src == nil {
+		return
+	}
+	c.room.changed()
+	go drainReceiver(r)
+	go func() {
+		src.run()
+		c.room.removeSource(src)
+		c.room.changed()
+	}()
+}
+
+// drainSender reads a slot's RTCP, which is the receiver's reports about this hop. Reading it is what runs
+// the interceptors over it; nothing read here goes to the sender.
+func drainSender(s *webrtc.RTPSender) {
+	buf := make([]byte, 1500)
+	for {
+		if _, _, err := s.Read(buf); err != nil {
+			return
+		}
+	}
+}
+
+// drainReceiver reads a sent track's RTCP, the sender's reports about its own hop, for the same reason.
+func drainReceiver(r *webrtc.RTPReceiver) {
+	buf := make([]byte, 1500)
+	for {
+		if _, _, err := r.Read(buf); err != nil {
+			return
+		}
+	}
 }
 
 // close ends the connection, once, for the reason given. It is safe from any goroutine but Pion's own

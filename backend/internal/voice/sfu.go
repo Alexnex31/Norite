@@ -260,7 +260,6 @@ func (s *SFU) reserve(roomID, user, connID, issued snowflake.ID) (*conn, error) 
 // forget removes a closed connection, and its room once nobody is left in it.
 func (s *SFU) forget(c *conn) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.conns[c.id] == c {
 		delete(s.conns, c.id)
 	}
@@ -268,6 +267,8 @@ func (s *SFU) forget(c *conn) {
 	if c.room.empty() {
 		s.dropRoomLocked(c.room)
 	}
+	s.mu.Unlock()
+	c.room.changed()
 }
 
 func (s *SFU) dropRoomLocked(r *room) {

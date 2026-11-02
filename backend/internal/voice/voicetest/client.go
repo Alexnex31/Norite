@@ -12,11 +12,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -32,9 +34,15 @@ type Options struct {
 
 // Client is one voice connection's client end.
 type Client struct {
-	opts Options
-	pc   *webrtc.PeerConnection
-	send *webrtc.TrackLocalStaticRTP
+	opts       Options
+	pc         *webrtc.PeerConnection
+	send       *webrtc.TrackLocalStaticRTP
+	sender     *webrtc.RTPSender
+	slotMids   []string
+	recordings sync.WaitGroup
+
+	mu       sync.Mutex
+	received map[string][]Packet
 
 	connected chan struct{}
 	failed    chan struct{}
@@ -79,9 +87,11 @@ func New(opts Options) (*Client, error) {
 	c := &Client{
 		opts:      opts,
 		pc:        pc,
+		received:  map[string][]Packet{},
 		connected: make(chan struct{}),
 		failed:    make(chan struct{}),
 	}
+	pc.OnTrack(c.record)
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
 		case webrtc.PeerConnectionStateConnected:
@@ -108,18 +118,23 @@ func (c *Client) Offer(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := c.pc.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{
+	tr, err := c.pc.AddTransceiverFromTrack(track, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionSendonly,
-	}); err != nil {
+	})
+	if err != nil {
 		return "", err
 	}
-	c.send = track
+	c.send, c.sender = track, tr.Sender()
+	go drainRTCP(tr.Sender())
+	slots := make([]*webrtc.RTPTransceiver, 0, c.opts.Slots)
 	for range c.opts.Slots {
-		if _, err := c.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		tr, err := c.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionRecvonly,
-		}); err != nil {
+		})
+		if err != nil {
 			return "", err
 		}
+		slots = append(slots, tr)
 	}
 	if _, err := c.pc.CreateDataChannel(voiceproto.Label, nil); err != nil {
 		return "", err
@@ -137,6 +152,11 @@ func (c *Client) Offer(ctx context.Context) (string, error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+	c.mu.Lock()
+	for _, tr := range slots {
+		c.slotMids = append(c.slotMids, tr.Mid())
+	}
+	c.mu.Unlock()
 	return c.pc.LocalDescription().SDP, nil
 }
 
@@ -166,5 +186,178 @@ func (c *Client) Failed() <-chan struct{} { return c.failed }
 // Connected is closed once the connection is up.
 func (c *Client) Connected() <-chan struct{} { return c.connected }
 
-// Close closes the peer connection.
-func (c *Client) Close() error { return c.pc.Close() }
+// Close closes the peer connection and waits for its recordings to stop.
+func (c *Client) Close() error {
+	err := c.pc.Close()
+	c.recordings.Wait()
+	return err
+}
+
+// Packet is one packet received on a slot.
+type Packet struct {
+	Mid    string
+	Seq    uint16
+	TS     uint32
+	CSRC   []uint32
+	Marker bool
+	// Level is the RFC 6464 level the packet carried, or -1 for none.
+	Level   int
+	Payload []byte
+	// Extensions counts the header extensions the packet carried.
+	Extensions int
+	At         time.Time
+}
+
+// SlotMids are the mids of the client's receiving sections, in slot order.
+func (c *Client) SlotMids() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.slotMids...)
+}
+
+// Received is every packet received on the slot with that mid, in arrival order.
+func (c *Client) Received(mid string) []Packet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]Packet(nil), c.received[mid]...)
+}
+
+// ReceivedAll is every packet received on any slot, in arrival order per slot, slot after slot.
+func (c *Client) ReceivedAll() []Packet {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var all []Packet
+	for _, mid := range c.slotMids {
+		all = append(all, c.received[mid]...)
+	}
+	return all
+}
+
+// record keeps every packet a slot receives.
+func (c *Client) record(track *webrtc.TrackRemote, r *webrtc.RTPReceiver) {
+	mid := ""
+	for _, tr := range c.pc.GetTransceivers() {
+		if tr.Receiver() == r {
+			mid = tr.Mid()
+		}
+	}
+	levelID := extensionID(r.GetParameters().HeaderExtensions, voiceproto.AudioLevelURI)
+	c.recordings.Add(1)
+	go func() {
+		defer c.recordings.Done()
+		go drainReceiverRTCP(r)
+		for {
+			p, _, err := track.ReadRTP()
+			if err != nil {
+				return
+			}
+			got := Packet{
+				Mid: mid, Seq: p.SequenceNumber, TS: p.Timestamp, CSRC: append([]uint32(nil), p.CSRC...),
+				Marker: p.Marker, Level: -1, Payload: append([]byte(nil), p.Payload...),
+				Extensions: len(p.Extensions), At: time.Now(),
+			}
+			if levelID != 0 {
+				if b := p.GetExtension(levelID); b != nil {
+					var lvl rtp.AudioLevelExtension
+					if lvl.Unmarshal(b) == nil {
+						got.Level = int(lvl.Level)
+					}
+				}
+			}
+			c.mu.Lock()
+			c.received[mid] = append(c.received[mid], got)
+			c.mu.Unlock()
+		}
+	}()
+}
+
+// SendOptions shapes what Send sends.
+type SendOptions struct {
+	// Level is the RFC 6464 level on every packet: 0 is loudest, 127 silence. Nil sends none.
+	Level func(i int) *uint8
+	// Pace is the interval between packets; zero is one 20 ms frame.
+	Pace time.Duration
+	// Extra, when set, adds a header extension of no negotiated meaning under id 14 to every packet: what
+	// a sender might put there that the SFU must not forward.
+	Extra []byte
+}
+
+// Loud is a level a speaking client sends.
+func Loud(int) *uint8 { l := uint8(20); return &l }
+
+// Quiet is a level a client sends in silence.
+func Quiet(int) *uint8 { l := uint8(127); return &l }
+
+// Send sends Opus packets on the client's track, one frame apart, as a voice-worker would: one sequence
+// number and one frame of timestamp each.
+func (c *Client) Send(ctx context.Context, packets [][]byte, opts SendOptions) error {
+	if opts.Pace == 0 {
+		opts.Pace = 20 * time.Millisecond
+	}
+	levelID := extensionID(c.sender.GetParameters().HeaderExtensions, voiceproto.AudioLevelURI)
+	seq := uint16(rand.Uint32())
+	ts := rand.Uint32()
+	tick := time.NewTicker(opts.Pace)
+	defer tick.Stop()
+	for i, payload := range packets {
+		p := &rtp.Packet{
+			Header:  rtp.Header{Version: 2, Marker: i == 0, SequenceNumber: seq, Timestamp: ts},
+			Payload: payload,
+		}
+		if opts.Level != nil && levelID != 0 {
+			if lvl := opts.Level(i); lvl != nil {
+				b, err := rtp.AudioLevelExtension{Level: *lvl, Voice: *lvl < 127}.Marshal()
+				if err != nil {
+					return err
+				}
+				if err := p.SetExtension(levelID, b); err != nil {
+					return err
+				}
+			}
+		}
+		if opts.Extra != nil {
+			if err := p.SetExtension(14, opts.Extra); err != nil {
+				return err
+			}
+		}
+		if err := c.send.WriteRTP(p); err != nil {
+			return err
+		}
+		seq++
+		ts += FrameSamples
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func extensionID(exts []webrtc.RTPHeaderExtensionParameter, uri string) uint8 {
+	for _, e := range exts {
+		if e.URI == uri {
+			return uint8(e.ID)
+		}
+	}
+	return 0
+}
+
+// drainRTCP reads a sender's RTCP so its interceptors see it.
+func drainRTCP(s *webrtc.RTPSender) {
+	buf := make([]byte, 1500)
+	for {
+		if _, _, err := s.Read(buf); err != nil {
+			return
+		}
+	}
+}
+
+func drainReceiverRTCP(r *webrtc.RTPReceiver) {
+	buf := make([]byte, 1500)
+	for {
+		if _, _, err := r.Read(buf); err != nil {
+			return
+		}
+	}
+}
