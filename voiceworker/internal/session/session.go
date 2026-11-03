@@ -178,7 +178,7 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	sdp := s.pc.LocalDescription().SDP
+	sdp := offered(s.pc.LocalDescription().SDP, voiceproto.MaxCandidates)
 	if len(sdp) > voiceproto.MaxOffer {
 		return "", fmt.Errorf("the offer is %d bytes, past the SFU's %d", len(sdp), voiceproto.MaxOffer)
 	}
@@ -211,11 +211,7 @@ func (s *Session) message(b []byte) {
 			s.end("the voice server refused the call")
 			return
 		}
-		reason := "the voice server refused the call: " + m.Reason
-		if len(reason) > voiceipc.MaxReason {
-			reason = reason[:voiceipc.MaxReason]
-		}
-		s.end(reason)
+		s.end(voiceipc.CutReason("the voice server refused the call: " + m.Reason))
 	}
 }
 

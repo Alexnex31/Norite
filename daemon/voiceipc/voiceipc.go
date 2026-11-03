@@ -27,6 +27,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -148,6 +149,20 @@ func (j Join) Check() error {
 		}
 	}
 	return nil
+}
+
+// CutReason cuts a reason to MaxReason bytes on a character's boundary. A cut through a character would be
+// encoded as U+FFFD, three bytes, and a reason cut to the bound would then exceed it: the worker would be
+// killed for the length of its own error message.
+func CutReason(s string) string {
+	if len(s) <= MaxReason {
+		return s
+	}
+	cut := MaxReason
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func truncate(s string, n int) string {

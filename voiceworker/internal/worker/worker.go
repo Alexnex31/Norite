@@ -231,9 +231,7 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 
 // end reports the call ended, and why, as the worker's last frame.
 func (r *run) end(reason string) int {
-	if len(reason) > voiceipc.MaxReason {
-		reason = reason[:voiceipc.MaxReason]
-	}
+	reason = voiceipc.CutReason(reason)
 	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: reason})
 	return ExitOK
 }

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/require"
@@ -172,4 +173,20 @@ func TestTheOpsAreTheContracts(t *testing.T) {
 	want := map[int]string{int(OpHello): "Hello", int(OpOffer): "Offer", int(OpState): "State",
 		int(OpJoin): "Join", int(OpAnswer): "Answer", int(OpLeave): "Leave"}
 	require.Equal(t, want, got)
+}
+
+// A reason cut to the bound stays within it once encoded, whatever script it is in.
+func TestACutReasonStaysWithinTheBound(t *testing.T) {
+	for _, r := range []string{"é", "日", "🎙", "a"} {
+		cut := CutReason(strings.Repeat(r, MaxReason))
+		require.LessOrEqual(t, len(cut), MaxReason)
+		require.True(t, utf8.ValidString(cut), "%q", r)
+		var buf bytes.Buffer
+		require.NoError(t, Write(&buf, OpState, State{State: StateEnded, Reason: cut}))
+		f, err := Read(&buf, MaxWorkerFrame)
+		require.NoError(t, err)
+		var s State
+		require.NoError(t, ipc.Decode(f, &s))
+		require.NoError(t, s.Check())
+	}
 }
