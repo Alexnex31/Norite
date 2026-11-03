@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.chat/contracts/cli-json/voice.schema.json",
+  "title": "norite voice --json",
+  "description": "The machine-readable output of `norite voice status`, `join` and `leave` (M28): how the daemon's voice call stands after the command.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. Every field is always present.\n\n`join` prints the status once the call is up; a join refused or failed prints nothing on stdout and exits 4 or 1 with the reason. `leave` prints the status after the call has ended, its worker gone.",
+  "$ref": "#/$defs/status",
+  "$defs": {
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "channel", "reason", "available", "unavailable"],
+      "properties": {
+        "state": {
+          "enum": ["idle", "joining", "in_call"],
+          "description": "idle: no call. joining: a join under way, which another client may have asked for. in_call: connected to the voice server, which has said ready."
+        },
+        "channel": {
+          "type": "string",
+          "pattern": "^([0-9]{1,20})?$",
+          "description": "The call's channel id while there is a call, or empty."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Why the last call ended, or why the last join failed, for a person; `left` when it was left; empty when nothing has ended yet."
+        },
+        "available": {
+          "type": "boolean",
+          "description": "Whether this daemon can join a call at all. A release cannot until the instance's voice signaling exists (M33)."
+        },
+        "unavailable": {
+          "type": "string",
+          "description": "Why not, when `available` is false. Empty otherwise."
+        }
+      }
+    }
+  }
+}
