@@ -44,6 +44,8 @@ type relays struct {
 	mu      sync.Mutex
 	total   int
 	perUser map[string]int
+	// byAddr is every open relay by the address it is bound to, which is how pion's events name one.
+	byAddr map[string]*relayConn
 }
 
 var _ turn.RelayAddressGenerator = (*relays)(nil)
@@ -80,6 +82,9 @@ func (r *relays) AllocatePacketConn(conf turn.AllocateListenerConfig) (_ net.Pac
 	c.mu.Lock()
 	c.idle = time.AfterFunc(r.s.lim.Idle, c.checkIdle)
 	c.mu.Unlock()
+	r.mu.Lock()
+	r.byAddr[pc.LocalAddr().String()] = c
+	r.mu.Unlock()
 	return c, pc.LocalAddr(), nil
 }
 
@@ -129,6 +134,16 @@ func (r *relays) reserve(user string) bool {
 	r.total++
 	r.perUser[user]++
 	return true
+}
+
+// close closes the relay bound to addr, if there is one.
+func (r *relays) close(addr net.Addr) {
+	r.mu.Lock()
+	c := r.byAddr[addr.String()]
+	r.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
 }
 
 func (r *relays) release(user string) {
@@ -287,8 +302,12 @@ func (c *relayConn) Close() error {
 		c.mu.Lock()
 		c.idle.Stop()
 		c.mu.Unlock()
+		r := c.s.relays
+		r.mu.Lock()
+		delete(r.byAddr, c.PacketConn.LocalAddr().String())
+		r.mu.Unlock()
 		err = c.PacketConn.Close()
-		c.s.relays.release(c.user)
+		r.release(c.user)
 	})
 	return err
 }

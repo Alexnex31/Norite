@@ -135,7 +135,7 @@ func New(opts Options) (*Server, error) {
 		now:  opts.Now,
 		sfu:  net.UDPAddrFromAddrPort(opts.SFU),
 	}
-	s.relays = &relays{s: s, perUser: map[string]int{}}
+	s.relays = &relays{s: s, perUser: map[string]int{}, byAddr: map[string]*relayConn{}}
 	s.sources = &sources{perSource: map[string]int{}, perAddr: map[string]int{}}
 	s.streams = &streams{lim: s.lim, perSource: map[string]int{}, live: map[*streamConn]struct{}{}}
 	replies, err := newReplies(s.lim)
@@ -164,6 +164,7 @@ func New(opts Options) (*Server, error) {
 				defer s.contain("the allocation events", nil)
 				s.sources.remove(src, dst)
 			},
+			OnChannelCreated: s.channelCreated,
 		},
 	}
 	if opts.UDP != nil {
@@ -276,6 +277,19 @@ func (s *Server) permit(_ net.Addr, peer net.IP) (ok bool) {
 	defer s.contain("the permission", nil)
 	a, ok := netip.AddrFromSlice(peer)
 	return ok && s.known(a.Unmap())
+}
+
+// channelCreated ends an allocation that bound a channel to anything but an address of the SFU's at its
+// port. pion admits the binding on the peer's IP alone, and keeps up to 16,384 bindings an allocation in a
+// list it walks for every packet relayed either way, so bindings to every port of the SFU's address
+// would make each packet a call carries cost thousands of comparisons. A client in a call binds only the
+// SFU's addresses, which are few; one binding anything else is not a client in a call.
+func (s *Server) channelCreated(_, _ net.Addr, _, _, _ string, relay, peer net.Addr, _ uint16) {
+	defer s.contain("the channel events", nil)
+	if _, ok := s.sfuPeer(peer); ok {
+		return
+	}
+	s.relays.close(relay)
 }
 
 // sfuPeer is addr as an address the client knows the SFU by, and whether it is one.

@@ -151,3 +151,35 @@ func TestARelayAddressThisHostDoesNotHaveFailsTheStart(t *testing.T) {
 		}
 	}
 }
+
+// TestAChannelToAnythingButTheSFUEndsTheAllocation: pion admits a channel on the peer's IP alone and
+// keeps every binding in a list it walks for each relayed packet, so one allocation binding every port
+// of the SFU's address made each packet cost thousands of comparisons. A client in a call binds the
+// SFU's addresses only.
+func TestAChannelToAnythingButTheSFUEndsTheAllocation(t *testing.T) {
+	f := newFixture(t, nil)
+	relay, err := f.client(t, cred(1)).Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The SFU's own address and port: pion's client binds a channel for it, and the allocation stays.
+	for range 3 {
+		if _, err := relay.WriteTo([]byte("to the SFU"), f.sfuAddr()); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if n := f.s.AllocationCount(); n != 1 {
+		t.Fatalf("binding the SFU's address ended the allocation: %d left", n)
+	}
+	// Another port of the same address, which the permission admits.
+	other := net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"),
+		uint16(f.sfuAddr().(*net.UDPAddr).Port+1)))
+	for range 3 {
+		_, _ = relay.WriteTo([]byte("elsewhere"), other)
+		time.Sleep(100 * time.Millisecond)
+	}
+	eventually(t, 2*time.Second, "the allocation that bound another port ends", func() bool {
+		return f.s.AllocationCount() == 0
+	})
+}

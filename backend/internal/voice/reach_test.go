@@ -48,6 +48,42 @@ func TestTheSFUSendsNoCheckToAnOfferedAddress(t *testing.T) {
 	}
 }
 
+// TestAnOfferClaimingLiteIsSentNothing: a lite SFU and a client claiming to be lite too would select a
+// pair without a single check, Pion's lite selector taking the offer's best candidate as it stands, and a
+// DTLS client would then send its handshake there. Two guards, each enough alone: the offer is refused,
+// and the SFU is the DTLS server, which sends nothing first.
+func TestAnOfferClaimingLiteIsSentNothing(t *testing.T) {
+	s := newSFU(t, nil)
+	listener, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	port := listener.LocalAddr().(*net.UDPAddr).Port
+
+	offer := offerOf(t, newClient(t, 1))
+	planted := fmt.Sprintf("a=candidate:9 1 udp 2130706431 127.0.0.1 %d typ host\r\n", port)
+	i := strings.Index(offer, "a=candidate:")
+	if i < 0 || !strings.Contains(offer, "\r\nt=0 0\r\n") {
+		t.Fatal("the offer is not shaped as this test expects")
+	}
+	// The planted candidate alone, so that it is the best pair: what an offer aiming the SFU would send.
+	var kept []string
+	for _, l := range strings.Split(offer[:i]+planted+offer[i:], "\r\n") {
+		if !strings.HasPrefix(l, "a=candidate:") || strings.HasPrefix(l, "a=candidate:9 ") {
+			kept = append(kept, l)
+		}
+	}
+	offer = strings.Replace(strings.Join(kept, "\r\n"), "\r\nt=0 0\r\n", "\r\nt=0 0\r\na=ice-lite\r\n", 1)
+	_, _ = s.Provision(context.Background(), ids.MustNext(), ids.MustNext(), ids.MustNext(), ids.MustNext(), offer)
+
+	_ = listener.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1500)
+	if n, from, err := listener.ReadFrom(buf); err == nil {
+		t.Fatalf("the SFU sent %d bytes from %v to an address an offer claiming lite named", n, from)
+	}
+}
+
 func TestAClientsAddressIsOneAClientCanHave(t *testing.T) {
 	s := &SFU{opts: Options{Relay: netip.MustParseAddr("127.0.0.2")}}
 	for addr, want := range map[string]bool{

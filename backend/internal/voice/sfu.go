@@ -182,6 +182,11 @@ func New(opts Options) (*SFU, error) {
 	// names, which a client chooses: a LAN behind a self-hosted instance included. Measured: a Pion client
 	// connects 200 ms later, one tick of its check pacing, once per join.
 	se.SetLite(true)
+	// The DTLS server: the SFU answers a ClientHello and sends nothing first, so its first packet to any
+	// address answers one that came from there.
+	if err := se.SetAnsweringDTLSRole(webrtc.DTLSRoleServer); err != nil {
+		return nil, err
+	}
 	if len(opts.Public) > 0 {
 		external := make([]string, len(opts.Public))
 		for i, a := range opts.Public {

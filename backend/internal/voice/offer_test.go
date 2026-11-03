@@ -64,6 +64,9 @@ func TestAnOfferOutsideTheShapeIsRefused(t *testing.T) {
 		"too large": base + strings.Repeat("a=x-padding:0123456789\r\n", voiceproto.MaxOffer/20),
 		"not SDP":   "hello",
 		"setup":     replace("a=setup:actpass", "a=setup:active"),
+		// A lite client and a lite SFU select a pair unchecked, and the offer would choose it.
+		"ice-lite":              replace("\r\nt=0 0\r\n", "\r\nt=0 0\r\na=ice-lite\r\n"),
+		"ice-lite in a section": replace("a=setup:actpass", "a=ice-lite\r\na=setup:actpass"),
 		"no setup": func() string {
 			var out []string
 			for _, l := range lines {
