@@ -193,7 +193,10 @@ email = "admin@example.com"
 # for nothing. Every setting below is checked at startup whether or not this is on.
 enabled = true
 
-# The SFU's one UDP port, which every call's media arrives on. Open it to the world. Default ":3479".
+# The SFU's one UDP port, which every call's media arrives on. Open it to the world. Default ":3479", every
+# interface. A machine with several public addresses in one family names the one clients reach, e.g.
+# "203.0.113.7:3479": on every interface the SFU answers from whichever address the kernel routes a client
+# by, which may not be the one the client sent to, and the server warns about it at startup.
 media_listen = ":3479"
 
 # What the SFU announces in place of the address it is bound to, comma-separated. Needed behind a 1:1 NAT

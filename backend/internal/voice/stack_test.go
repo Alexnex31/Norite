@@ -4,6 +4,7 @@
 package voice
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -274,4 +277,65 @@ func TestAClientReachingTURNOverIPv6JoinsTheCall(t *testing.T) {
 	send(t, map[*voicetest.Client][][]byte{a.client: tone, b.client: tone}, voicetest.SendOptions{Level: voicetest.Loud})
 	assertTone(t, "the relayed client", a.client, tone)
 	assertTone(t, "the direct client", b.client, tone)
+}
+
+// TestSeveralPublicAddressesAreWarnedAbout: an SFU on every interface answers from whichever address the
+// kernel routes a client by, so a machine with two public addresses in one family may answer from the
+// one the client did not ask. The server says so at startup, and names the setting; a machine whose
+// other addresses are private, a Docker bridge or an overlay network, hears nothing.
+func TestSeveralPublicAddressesAreWarnedAbout(t *testing.T) {
+	addrs := func(s ...string) []netip.Addr {
+		out := make([]netip.Addr, len(s))
+		for i, a := range s {
+			out[i] = netip.MustParseAddr(a)
+		}
+		return out
+	}
+	for name, c := range map[string]struct {
+		host  []netip.Addr
+		media string
+		warn  bool
+	}{
+		"two public IPv4, every interface":   {addrs("203.0.113.7", "198.51.100.9", "127.0.0.1"), "0.0.0.0:0", true},
+		"two public IPv6, every interface":   {addrs("203.0.113.7", "2001:db8::7", "2001:db8::8"), ":0", true},
+		"two public IPv4, one named":         {addrs("203.0.113.7", "198.51.100.9"), "127.0.0.1:0", false},
+		"public beside Docker and Tailscale": {addrs("203.0.113.7", "172.17.0.1", "100.77.98.55", "fd7a::1"), ":0", false},
+		"one of each family":                 {addrs("203.0.113.7", "2001:db8::7", "fe80::1"), ":0", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			saved := interfaceAddrs
+			interfaceAddrs = func() []netip.Addr { return c.host }
+			t.Cleanup(func() { interfaceAddrs = saved })
+			var log syncLog
+			opts := stackOptions(t)
+			opts.MediaListen = c.media
+			opts.Logger = zerolog.New(&log)
+			st, err := StartStack(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if got := strings.Contains(log.String(), "media_listen"); got != c.warn {
+				t.Fatalf("warned %v, want %v: %s", got, c.warn, log.String())
+			}
+		})
+	}
+}
+
+// syncLog is a log the stack's goroutines write while a test reads it.
+type syncLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *syncLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *syncLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }

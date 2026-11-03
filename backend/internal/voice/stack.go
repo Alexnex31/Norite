@@ -148,6 +148,18 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	if err != nil {
 		return nil, err
 	}
+	if bound.IsUnspecified() {
+		if shared := sharedPublic(interfaceAddrs()); len(shared) > 1 {
+			names := make([]string, len(shared))
+			for i, a := range shared {
+				names[i] = a.String()
+			}
+			opts.Logger.Warn().Strs("addresses", names).Msg("voice: this machine has several public addresses " +
+				"in one family and the SFU listens on all of them, so it may answer a client from another " +
+				"address than the one the client used, which ICE refuses; name the one clients reach in " +
+				"[voice] media_listen")
+		}
+	}
 	return &Stack{SFU: sfu, TURN: srv, Secret: secret}, nil
 }
 
@@ -186,6 +198,46 @@ func relays(addrs ...netip.Addr) []netip.Addr {
 	}
 	return out
 }
+
+// interfaceAddrs is this host's addresses; a variable so that a test can give the host others.
+var interfaceAddrs = func() []netip.Addr {
+	var out []netip.Addr
+	ifaddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	for _, ia := range ifaddrs {
+		if n, ok := ia.(*net.IPNet); ok {
+			if a, ok := netip.AddrFromSlice(n.IP); ok {
+				out = append(out, a.Unmap())
+			}
+		}
+	}
+	return out
+}
+
+// sharedPublic is the public addresses of the first family that has more than one, nil when none does.
+// An SFU on every interface answers from whichever address the kernel routes the client by, and on such a
+// machine that may not be the one the client sent to. Private, loopback and link-local addresses do not
+// count, nor carrier-grade NAT's range, where Tailscale puts its own: a Docker bridge or an overlay
+// network beside a public address is not reached by the same clients.
+func sharedPublic(addrs []netip.Addr) []netip.Addr {
+	for _, v4 := range []bool{true, false} {
+		var public []netip.Addr
+		for _, a := range addrs {
+			if a.Is4() == v4 && a.IsGlobalUnicast() && !a.IsPrivate() && !sharedSpace.Contains(a) {
+				public = append(public, a)
+			}
+		}
+		if len(public) > 1 {
+			return public
+		}
+	}
+	return nil
+}
+
+// sharedSpace is RFC 6598's shared address space, behind carrier-grade NATs and overlay networks.
+var sharedSpace = netip.MustParsePrefix("100.64.0.0/10")
 
 // stackLimits are TURN's, with perAddress for what one address holds. Replies to unauthenticated requests
 // follow it up: every client's first Allocate on each transport is answered with a challenge, so an
