@@ -1835,5 +1835,36 @@ carries the condition that would reopen it.
   ICE-lite since this milestone and sends no check to any candidate, so an address an offer names is
   never sent anything; the filter decides only what the SFU pairs with, which is where a peer's own check
   came from.
-- **Reopens if**: the SFU stops being ICE-lite, or anything starts sending to a remote candidate.
+- **Corrected by `/security-sweep`, M27**: "never sent anything" was false for an offer carrying
+  `a=ice-lite`. Both sides lite, Pion's lite selector takes the best pair as it stands, unchecked, and the
+  SFU, a DTLS client by default, sent its handshake to an address the offer chose: reproduced, to a
+  loopback port, at once. `readOffer` now refuses a lite offer and the SFU is the DTLS server, so it sends
+  nothing first; `TestAnOfferClaimingLiteIsSentNothing` fails only with both removed. The relay's own
+  address, loopback by default, is admitted on every port, which is safe for the same reason: a pair is
+  selected on an authenticated check from that address, and only the client's own relay can make one.
+- **Reopens if**: the SFU stops being ICE-lite or the DTLS server, a lite offer is admitted, or anything
+  starts sending to a remote candidate.
+
+### TURN's TCP and TLS slots can be held by connections that never allocate
+- **Raised**: M27, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: a connection is closed if it holds no allocation within `AuthenticateWithin` (10 s), and the
+  server holds 1,024 in all and `relay_per_address` from one address, an IPv6 /64 being one
+  (`turn/streams.go`). Somebody with a thousand addresses, a /48 or a botnet, can reconnect each every ten
+  seconds and keep the total full, which refuses TURN over TCP and TLS to everybody else. UDP TURN and
+  the SFU are untouched, and the bound is what keeps the memory finite; a per-/48 count would move the
+  threshold, not remove it, and costs a real office on a /48 nothing it needs.
+- **Reopens if**: relaying over TCP or TLS becomes the path most clients take, or a deployment sees it.
+
+### A TURN credential survives the end of the sign-in it was minted for
+- **Raised**: M27, `/security-sweep`
+- **Verdict**: accepted risk, with M33's half named there
+- **Why**: a credential is a stateless HMAC (`turn.Mint`), so rule 17's revocation cannot reach one; it
+  starts allocations for ten minutes after a logout, a ban or an account deletion. What it reaches is the
+  SFU's media port, and the SFU admits only a connection provisioned for it, which an ended sign-in
+  cannot get. A call already under way is the SFU's to end: M33 evicts on a kick, a ban and a lost
+  permission, and its entry now says a sign-in ending evicts too, after which the relay goes quiet and
+  closes 30 s later.
+- **Reopens if**: a credential's lifetime grows, it authorizes anything beyond the relay, or M33 ships
+  without evicting on the end of a sign-in.
 

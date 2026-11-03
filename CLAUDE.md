@@ -2869,8 +2869,10 @@ And on the SFU, from M26 (ADR 0023 as amended):
   packets and bits per track, RTCP and messages per connection, data channels, SRTP streams against
   the offer, and the remote candidates ICE adds. A rate past its bound is dropped, and past twice it for
   three seconds closed, through `voice/rate`, which TURN shares.
-- **The SFU is ICE-lite** (M27) and sends nothing to any address an offer names. Its remote filter is a
-  second layer on what it pairs with; a new address class to refuse is a row in `reachable`.
+- **The SFU is ICE-lite** (M27) and sends nothing to any address an offer names. It refuses an offer
+  claiming lite, which would select a pair unchecked, and is the DTLS server, so it sends nothing first;
+  either alone holds. Its remote filter is a second layer on what it pairs with; a new address class to
+  refuse is a row in `reachable`.
 - **Every goroutine and Pion callback the package runs defers `conn.contain`**, the room's selection
   contains its own on whatever goroutine runs it, and a lock a contained panic could cross is released
   by defer.
@@ -2902,7 +2904,9 @@ And on TURN, from M27:
   Expiry is asked of an Allocate alone; nothing else in a credential is time-bound. Nothing is logged per
   request: a username is a stranger's text, and pion's own lines are sampled, ten a minute.
 - **An allocation ends when the SFU stops sending through it** (`Limits.Idle`), which is also how it ends
-  with its call. Nothing links an allocation to a connection id, and nothing needs to.
+  with its call. Nothing links an allocation to a connection id, and nothing needs to. **One that binds a
+  channel to anything but the SFU's addresses at its port ends too**: pion admits a binding on the IP
+  alone and walks every binding for each packet relayed.
 - **Every callback given to pion defers `Server.contain`**, which refuses the request and logs once for
   each place. A loop contains per iteration, or one panic ends it.
 - **Replies to unauthenticated requests are rate-limited** per destination and in all, in memory, since

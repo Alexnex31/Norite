@@ -1961,7 +1961,11 @@ of this section.
   M26's control interface: it resolves `PermConnectVoice` against fresh data, mints the connection id and
   the `issued` snowflake, and calls `Provision` with the client's offer, which op 4 carries under M26's
   12 KiB bound. A kick, a ban and a lost `PermConnectVoice` call `Evict` with a cutoff, after the
-  transaction commits, and a deleted voice channel calls `CloseRoom` with one. The `supports_video: bool` capability field is added to the voice-join payload now
+  transaction commits, and a deleted voice channel calls `CloseRoom` with one. **So does the end of a
+  sign-in** (from M27's `/security-sweep`): `revokeEverything` and the other four closes evict the
+  sign-in's voice connections as they close its gateway ones, since the TURN credential it holds is a
+  stateless HMAC no revocation reaches, valid ten minutes; and the credential is minted only for a live
+  sign-in (`RequireLiveSignIn`). The `supports_video: bool` capability field is added to the voice-join payload now
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
   end to end, and a kick mid-call drops the connection.
