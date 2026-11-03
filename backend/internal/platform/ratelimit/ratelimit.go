@@ -167,6 +167,16 @@ func (l *Limiter) Allow(ctx context.Context, key string) (Result, error) {
 	return Result{Allowed: !res.Reached, Limit: res.Limit, Remaining: res.Remaining, Reset: res.Reset}, nil
 }
 
+// Peek is whether an attempt for key would be allowed, counting nothing: for a caller that must not
+// spend this limit on an attempt a second limit will refuse.
+func (l *Limiter) Peek(ctx context.Context, key string) (Result, error) {
+	res, err := l.instance.Peek(ctx, key)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Allowed: !res.Reached, Limit: res.Limit, Remaining: res.Remaining, Reset: res.Reset}, nil
+}
+
 // Middleware builds rate-limiting middleware over opts.Backend, keyed by ClientKey.
 //
 // This is a thin handler around limiter.Limiter rather than ulule/limiter's own stdlib middleware driver,
@@ -226,6 +236,19 @@ func ClientKey(r *http.Request) string {
 		return ip.String()
 	}
 	return ip.String() + "/" + strconv.Itoa(ipv6GroupBits)
+}
+
+// AddrKey is ClientKey for an address that did not arrive in an HTTP request: TURN's sources and the
+// destinations of its replies. The same /64 rule, so a network that holds a whole /64 is one key here as
+// it is for the API.
+func AddrKey(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	if ip.To16() == nil {
+		return "unknown"
+	}
+	return ip.Mask(maskOptions.IPv6Mask).String() + "/" + strconv.Itoa(ipv6GroupBits)
 }
 
 // retryAfterSeconds renders the Retry-After value for a window resetting at the given Unix second.

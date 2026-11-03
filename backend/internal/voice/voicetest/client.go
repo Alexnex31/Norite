@@ -31,10 +31,17 @@ type Options struct {
 	Slots int
 	// Loopback admits loopback candidates, for a client and an SFU on one machine.
 	Loopback bool
+	// IPv6 gathers in IPv6 as well as IPv4, relayed candidates included: a TURN server named by an IPv6
+	// address is reached, and asked for an IPv6 relay, only then.
+	IPv6 bool
 	// Version is what the client's hello names; empty is "dev".
 	Version string
 	// NoHello leaves the hello unsent, for a test that sends something else first.
 	NoHello bool
+	// ICEServers are the TURN servers the client gathers relayed candidates from, and RelayOnly makes it
+	// offer those alone: a client whose network refuses UDP to the SFU, with nothing left but the relay.
+	ICEServers []webrtc.ICEServer
+	RelayOnly  bool
 }
 
 // Client is one voice connection's client end.
@@ -97,14 +104,22 @@ func New(opts Options) (*Client, error) {
 	}
 
 	se := webrtc.SettingEngine{}
-	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	networks := []webrtc.NetworkType{webrtc.NetworkTypeUDP4}
+	if opts.IPv6 {
+		networks = append(networks, webrtc.NetworkTypeUDP6)
+	}
+	se.SetNetworkTypes(networks)
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	se.SetIncludeLoopbackCandidate(opts.Loopback)
 	se.SetICETimeouts(3*time.Second, 6*time.Second, time.Second)
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(reg),
 		webrtc.WithSettingEngine(se))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	config := webrtc.Configuration{ICEServers: opts.ICEServers}
+	if opts.RelayOnly {
+		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	pc, err := api.NewPeerConnection(config)
 	if err != nil {
 		return nil, err
 	}
@@ -230,6 +245,16 @@ func (c *Client) WaitConnected(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("voicetest: not connected: %w", ctx.Err())
 	}
+}
+
+// SelectedCandidateType is the type of the local candidate ICE connected through: relay for a client
+// that reached the SFU through TURN.
+func (c *Client) SelectedCandidateType() webrtc.ICECandidateType {
+	pair, err := c.pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		return webrtc.ICECandidateTypeUnknown
+	}
+	return pair.Local.Typ
 }
 
 // Failed is closed once the connection has failed or been closed.

@@ -6,6 +6,8 @@ package voice
 import (
 	"io"
 	"net"
+	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/pion/transport/v5/packetio"
@@ -114,7 +116,10 @@ func remoteCandidates(lim Limits) int {
 }
 
 // remoteCandidate is the connection's remote IP filter. Called on ICE's own goroutine, so it only counts.
-func (c *conn) remoteCandidate(net.IP) bool {
+func (c *conn) remoteCandidate(ip net.IP) bool {
+	if !c.sfu.reachable(ip) {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.candidates >= remoteCandidates(c.sfu.lim) {
@@ -122,4 +127,37 @@ func (c *conn) remoteCandidate(net.IP) bool {
 	}
 	c.candidates++
 	return true
+}
+
+// metadata are cloud instance-metadata services. Two sit in ranges the filter otherwise admits, because a
+// LAN instance's clients are private: AWS's IPv6 address in fc00::/7, and Alibaba's in 100.64/10, where
+// carrier-grade NAT puts real clients too.
+var metadata = []netip.Addr{
+	netip.MustParseAddr("169.254.169.254"),
+	netip.MustParseAddr("fd00:ec2::254"),
+	netip.MustParseAddr("100.100.100.200"),
+}
+
+// reachable is whether a remote candidate's address is one a client can have. The SFU is ICE-lite and
+// sends checks to no candidate, so this is a second layer: it keeps the connection from ever pairing with
+// an address on this host or its link, where a reply would reach a service rather than a client. Private
+// ranges stay, because a LAN instance's clients are in them (security ledger).
+func (s *SFU) reachable(ip net.IP) bool {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	switch {
+	case slices.Contains(s.opts.Relays, a):
+		return true
+	case a.IsLoopback():
+		return s.opts.Loopback
+	case a.IsUnspecified(), a.IsMulticast(), a.IsLinkLocalUnicast(), a.IsLinkLocalMulticast(),
+		a.IsInterfaceLocalMulticast():
+		return false
+	case a.Is4() && (a.As4()[0] == 0 || a == netip.AddrFrom4([4]byte{255, 255, 255, 255})):
+		return false
+	}
+	return !slices.Contains(metadata, a)
 }

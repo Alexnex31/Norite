@@ -91,8 +91,11 @@ Locked-in decisions:
 │   │   │                        #   (block-aware from M70); the wire format is backend/gatewayproto,
 │   │   │                        #   outside internal/ so the daemon can import it (M19)
 │   │   ├── voice/                # Pion SFU: rooms, connections, slots, the control interface (M26);
-│   │   │                        #   PionMediaCoordinator over it (M33)
-│   │   ├── turn/                 # embedded pion/turn server
+│   │   │   │                    #   the stack starting it with TURN (M27); PionMediaCoordinator (M33)
+│   │   │   ├── turn/             # embedded pion/turn server, relaying to the SFU alone (M27)
+│   │   │   ├── rate/             # the one-second meter and strikes the SFU and TURN share
+│   │   │   ├── pionlog/          # Pion's logs into the server's logger
+│   │   │   └── voicetest/        # test client and the harness, never in a release
 │   │   └── db/                   # sqlc-generated, one package, narrow interfaces consumed per-domain
 │   ├── migrations/               # golang-migrate .sql up/down, go:embed'd into the binary
 │   ├── sqlc.yaml
@@ -2290,7 +2293,8 @@ The voice-worker generates an ephemeral DTLS keypair and ICE credentials per cal
 through the daemon and over the already-authenticated gateway (op 4); the backend resolves
 `PermConnectVoice` against fresh data and provisions the chosen SFU over internal mTLS; the DTLS handshake
 then mutually verifies both fingerprints. `VoiceServerInfo` carries connection parameters, never a
-credential. A compromised SFU pod therefore holds nothing replayable, and the client verifies the SFU's
+credential, with one exception settled at M27: a TURN credential, which reaches the SFU's port and
+nothing else, and arrives before the offer (see TURN below). A compromised SFU pod therefore holds nothing replayable, and the client verifies the SFU's
 identity too — which a bearer token would not give. Revocation mid-call (ban, kick, lost permission) is a
 **push** from the backend over the same control channel, not an expiry.
 
@@ -2332,10 +2336,32 @@ audio-only, no simulcast — the Prometheus voice/SFU metrics (§15) feed this l
 dashboard.
 
 **TURN**: an embedded Go TURN server (`pion/turn`, also answering plain STUN), bundled into the backend —
-self-hosters don't run a separate `coturn`.
+self-hosters don't run a separate `coturn`. It exists for a network that refuses UDP to the SFU's port: a
+client behind any NAT, symmetric included, reaches the SFU without it, because the SFU has an address the
+client can reach and learns the client's from its check. So it is offered over **UDP, TCP and TLS**; TLS
+takes a certificate from two files, read again when they change, and 443 is where it helps most, since a
+network refusing UDP usually allows only 80 and 443 out (M27).
+- **It relays to the SFU and nothing else.** Relay sockets are bound on the SFU's host and send to its
+  media address alone, IP and port; TCP relaying (RFC 6062) is refused. pion/turn's own permission check
+  asks of the peer's IP alone, so it is not the guard. A client names the SFU by an address it announced,
+  public or one of its interfaces', and the relay sends to the media address whichever it named,
+  answering as that address: a STUN response as the one its request went to.
+- **Its credential is the TURN REST shape**, `expiry:user`, signed with a secret HKDF-derived from the
+  instance signing key, and scoped to the account: the client gathers its relayed candidate before it
+  makes the offer, so the credential precedes the connection id. Its expiry is asked of an Allocate alone,
+  so it lives ten minutes and the allocation as long as it is refreshed; an allocation the SFU sends
+  nothing through for 30 seconds closes. What it grants is reach to the SFU's port, which anyone may send
+  to already, and the SFU admits nothing it was not told to expect.
+- **The SFU is ICE-lite**: it answers checks and never sends one, so no address an offer names is ever
+  sent anything.
 
-**Ports**: the SFU carries every connection on **one UDP port**, through Pion's ICE UDP mux; TURN's
-listeners are M27's to decide.
+**Ports**: the SFU carries every connection on **one UDP port**, through Pion's ICE UDP mux (3479 by
+default); TURN listens on one port over UDP and TCP (3478) and, with a certificate, one for TLS (5349, or
+443 behind a layer-4 proxy). Relay sockets are on the host and need no forwarding. A machine behind a 1:1
+NAT or a forwarding router announces its public address through `[voice] public_addresses`. One address
+holds at most `relay_per_address` relays and TURN connections, 64 by default, raised for an organization
+behind one NAT. With the SFU on every interface, the default, the relay serves both address families, on
+`127.0.0.1` and `::1`, since a client reaching TURN over IPv6 asks for an IPv6 relay. All of it is `[voice]`, and none of it is bound unless `enabled` is set (M27).
 
 **Voice deployment opt-out**: TURN/SFU need a reachable public IP and forwarded UDP ports — a real burden
 many home self-hosters can't satisfy. An Instance Admin can disable voice entirely; the SFU/TURN never start,
@@ -3017,8 +3043,8 @@ during implementation, and must be documented plainly wherever the relevant subs
     on Windows (a service cannot hold one) and a session on Linux.
 - **Self-hosting simplicity and voice-in-v1 are in real, unreconciled tension.** Postgres-only self-hosting
   keeps the database story simple, but the custom SFU and embedded TURN server mean self-hosters must still
-  forward UDP ports (the SFU's one, and TURN's, M27) and handle NAT/firewall traversal — a materially
-  bigger operational burden than pure text-only self-hosting. Voice is real v1 product functionality, but
+  open ports (the SFU's UDP one, TURN's on UDP and TCP, and TLS's) and announce a public address from
+  behind NAT (M27) — a materially bigger operational burden than pure text-only self-hosting. Voice is real v1 product functionality, but
   is a deployment-time opt-out (Milestone M37) specifically because of this burden.
 - **cgo is confined to the voice-worker binary.** The pure-Go, cgo-free constraint used everywhere else in the
   stack (daemon, CLI/TUI, GUI, backend) does not extend to the voice-worker: Opus (`hraban/opus`), RNNoise, and

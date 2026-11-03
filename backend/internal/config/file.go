@@ -117,6 +117,19 @@ type fileConfig struct {
 		Email   *string `toml:"email"`
 	} `toml:"acme"`
 
+	Voice struct {
+		Enabled         *bool   `toml:"enabled"`
+		MediaListen     *string `toml:"media_listen"`
+		PublicAddresses *string `toml:"public_addresses"`
+		TURNListen      *string `toml:"turn_listen"`
+		TURNTLSListen   *string `toml:"turn_tls_listen"`
+		TURNTLSCert     *string `toml:"turn_tls_cert"`
+		TURNTLSKey      *string `toml:"turn_tls_key"`
+		RelayAddress    *string `toml:"relay_address"`
+		RelayPorts      *string `toml:"relay_ports"`
+		RelayPerAddress *int32  `toml:"relay_per_address"`
+	} `toml:"voice"`
+
 	SMTP struct {
 		Enabled     *bool   `toml:"enabled"`
 		Host        *string `toml:"host"`

@@ -1,24 +1,25 @@
 // SPDX-FileCopyrightText: 2026 Alexandre Duffez
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package voice
+// Package pionlog sends Pion's logs to the server's logger, for the SFU and for TURN alike.
+package pionlog
 
 import (
 	"github.com/pion/logging"
 	"github.com/rs/zerolog"
 )
 
-// pionLogs sends Pion's errors to the server's log at error and its warnings at debug, and drops the rest.
+// Logs sends Pion's errors to the server's log at error and its warnings at debug, and drops the rest.
 // Pion's own default writes to stderr, past the server's logger and its format, and its debug output is
 // per packet. Its warnings are debug here because the manual pass found four on every ordinary
 // connection, none meaning anything: a ping before the client's candidates arrive, and three on close
 // ("stream is already closed", "dtls fatal: conn is closed", "read/write on closed pipe"). At warn, a
 // busy instance's log would be mostly those. Each goes through Msgf, which formats nothing when its level
 // is off.
-type pionLogs struct{ log zerolog.Logger }
+type Logs struct{ Log zerolog.Logger }
 
-func (f pionLogs) NewLogger(scope string) logging.LeveledLogger {
-	return pionLogger{log: f.log.With().Str("pion", scope).Logger()}
+func (f Logs) NewLogger(scope string) logging.LeveledLogger {
+	return pionLogger{log: f.Log.With().Str("pion", scope).Logger()}
 }
 
 type pionLogger struct{ log zerolog.Logger }

@@ -13,6 +13,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/Alexnex31/Norite/backend/internal/voice/rate"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
@@ -175,14 +176,14 @@ func (src *source) run() {
 	lim := src.conn.sfu.lim
 	buf := make([]byte, 1500)
 	var p rtp.Packet
-	var m meter
+	var m rate.Meter
 	for {
 		n, _, err := src.track.Read(buf)
 		if err != nil {
 			return
 		}
 		now := time.Now()
-		ok, out := m.admit(now, n, lim.PacketsPerSecond, lim.BitsPerSecond, lim.StrikesToEvict)
+		ok, out := m.Admit(now, n, lim.PacketsPerSecond, lim.BitsPerSecond, lim.StrikesToEvict)
 		if out {
 			go src.conn.close("sending past its bound")
 			return

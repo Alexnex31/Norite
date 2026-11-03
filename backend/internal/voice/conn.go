@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/voice/rate"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
@@ -65,8 +66,8 @@ type conn struct {
 	// candidates counts the remote candidates ICE has been allowed to add (streams.go).
 	candidates int
 	// rtcp and messages meter what the peer sends besides media, under mu.
-	rtcp     meter
-	messages meter
+	rtcp     rate.Meter
+	messages rate.Meter
 
 	// sendMu orders what goes out on the data channel; mapSent is the newest slot map sent, once one has
 	// been, and speakingSent the newest speaking list.
@@ -336,7 +337,7 @@ func (c *conn) drainReceiver(r *webrtc.RTPReceiver) {
 func (c *conn) meterRTCP() bool {
 	lim := c.sfu.lim
 	c.mu.Lock()
-	_, out := c.rtcp.admit(time.Now(), 0, lim.RTCPPerSecond, 0, lim.StrikesToEvict)
+	_, out := c.rtcp.Admit(time.Now(), 0, lim.RTCPPerSecond, 0, lim.StrikesToEvict)
 	c.mu.Unlock()
 	if out {
 		go c.close("sending RTCP past its bound")

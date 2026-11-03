@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/voice/pionlog"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
@@ -69,6 +71,13 @@ type Options struct {
 	Conn net.PacketConn
 	// Loopback admits loopback candidates, for tests and the harness on one machine.
 	Loopback bool
+	// Public are the addresses the SFU announces in place of the ones its socket is bound to: a server
+	// behind a 1:1 NAT or a port-forwarding router cannot be reached at an address it can see. Empty
+	// announces what is bound.
+	Public []netip.Addr
+	// Relays are the addresses TURN's relay sockets are bound on, one a family, admitted as remote
+	// candidates whatever range they are in. Empty when there is no relay.
+	Relays []netip.Addr
 	// Version is the server's version, against which a data channel's hello is checked.
 	Version string
 	Limits  Limits
@@ -135,7 +144,7 @@ func New(opts Options) (*SFU, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	logs := pionLogs{log: opts.Logger.With().Str("subsystem", "voice").Logger()}
+	logs := pionlog.Logs{Log: opts.Logger.With().Str("subsystem", "voice").Logger()}
 
 	media := &webrtc.MediaEngine{}
 	if err := media.RegisterCodec(webrtc.RTPCodecParameters{
@@ -168,6 +177,29 @@ func New(opts Options) (*SFU, error) {
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6})
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	se.SetIncludeLoopbackCandidate(opts.Loopback)
+	// ICE-lite: the SFU answers connectivity checks and never sends one. It has an address the client can
+	// reach, which is the case lite is for, and a full agent would send checks to every address an offer
+	// names, which a client chooses: a LAN behind a self-hosted instance included. Measured: a Pion client
+	// connects 200 ms later, one tick of its check pacing, once per join.
+	se.SetLite(true)
+	// The DTLS server: the SFU answers a ClientHello and sends nothing first, so its first packet to any
+	// address answers one that came from there.
+	if err := se.SetAnsweringDTLSRole(webrtc.DTLSRoleServer); err != nil {
+		return nil, err
+	}
+	if len(opts.Public) > 0 {
+		external := make([]string, len(opts.Public))
+		for i, a := range opts.Public {
+			external[i] = a.String()
+		}
+		if err := se.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
+			External:        external,
+			AsCandidateType: webrtc.ICECandidateTypeHost,
+			Mode:            webrtc.ICEAddressRewriteReplace,
+		}); err != nil {
+			return nil, fmt.Errorf("voice: public addresses: %w", err)
+		}
+	}
 	se.SetICETimeouts(5*time.Second, 10*time.Second, 2*time.Second)
 	se.SetSCTPMaxReceiveBufferSize(4 * voiceproto.MaxMessage)
 	se.SetSCTPMaxMessageSize(voiceproto.MaxMessage)

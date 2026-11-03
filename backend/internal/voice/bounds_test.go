@@ -6,64 +6,14 @@ package voice
 import (
 	"bytes"
 	"context"
-	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/pion/stun/v4"
-	"github.com/pion/webrtc/v4"
-
 	"github.com/Alexnex31/Norite/backend/internal/voice/voicetest"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
-
-func TestMeterAdmitsTheBoundAndStrikesPastTwiceIt(t *testing.T) {
-	var m meter
-	at := time.Now()
-	burst := func(n int) (admitted int, out bool) {
-		for i := range n {
-			ok, o := m.admit(at.Add(time.Duration(i)*time.Second/time.Duration(n)), 0, 10, 0, 2)
-			if ok {
-				admitted++
-			}
-			out = out || o
-		}
-		at = at.Add(time.Second)
-		return admitted, out
-	}
-	if got, out := burst(15); got != 10 || out {
-		t.Fatalf("one second at 1.5x the bound: %d admitted, out %v", got, out)
-	}
-	if _, out := burst(15); out {
-		t.Fatal("a second at 1.5x struck out")
-	}
-	burst(25)
-	if _, out := burst(25); out {
-		t.Fatal("one strike is out")
-	}
-	if _, out := burst(1); !out {
-		t.Fatal("two seconds past twice the bound are not out")
-	}
-
-	var clean meter
-	at = time.Now()
-	for i := range 25 {
-		clean.admit(at.Add(time.Duration(i)*40*time.Millisecond), 0, 10, 0, 2)
-	}
-	clean.admit(at.Add(5*time.Second), 0, 10, 0, 2)
-	for i := range 25 {
-		if _, out := clean.admit(at.Add(5*time.Second+time.Duration(i)*40*time.Millisecond), 0, 10, 0, 2); out {
-			t.Fatal("a strike survived a quiet gap")
-		}
-	}
-
-	var bits meter
-	if ok, _ := bits.admit(time.Now(), 200, 100, 1000, 3); ok {
-		t.Fatal("1600 bits admitted against a bound of 1000")
-	}
-}
 
 func sendPaced(t *testing.T, c *voicetest.Client, n, size int, pace time.Duration) {
 	t.Helper()
@@ -298,51 +248,10 @@ func TestBindingRequestsFromManyAddressesAreBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attr := func(sdp, key string) string {
-		for line := range strings.SplitSeq(sdp, "\r\n") {
-			if v, ok := strings.CutPrefix(line, "a="+key+":"); ok {
-				return v
-			}
-		}
-		t.Fatalf("no a=%s", key)
-		return ""
-	}
-	username := attr(answer, "ice-ufrag") + ":" + attr(offer, "ice-ufrag")
-	password := attr(answer, "ice-pwd")
-	target := s.opts.Conn.LocalAddr()
-
 	const sources = 100
-	for range sources {
-		pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = pc.Close() })
-		msg, err := stun.Build(stun.TransactionID, stun.BindingRequest, stun.NewUsername(username),
-			stun.NewShortTermIntegrity(password), stun.Fingerprint)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pc.WriteTo(msg.Raw, target); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	s.mu.Lock()
-	c := s.conns[connID]
-	s.mu.Unlock()
-	c.mu.Lock()
-	pc := c.pc
-	c.mu.Unlock()
-	remote := func() int {
-		n := 0
-		for _, st := range pc.GetStats() {
-			if cs, ok := st.(webrtc.ICECandidateStats); ok && cs.Type == webrtc.StatsTypeRemoteCandidate {
-				n++
-			}
-		}
-		return n
-	}
+	sendChecks(t, s, offer, answer, sources)
+	pc := peerOf(s, connID)
+	remote := func() int { return remoteCandidateCount(pc) }
 	bound := remoteCandidates(s.lim)
 	// The requests reached ICE: it holds most of what the bound lets it, the rest spent on asks about
 	// the offer's own candidates.

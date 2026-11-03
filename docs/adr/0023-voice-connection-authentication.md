@@ -15,6 +15,16 @@ isolation, and is the reasoning [ADR 0022](0022-access-token-signing-and-scope-m
   two connections (a second machine; the GUI's video connection), and a kick resolved concurrently with
   a join must not lose to it when the two arrive in the wrong order.
 
+**Amended at M27 (2026-11-03)**, in one sentence: "`VoiceServerInfo` therefore carries connection
+parameters, never a credential" now has one stated exception, **a TURN credential**, which this ADR's
+"TURN still needs a shared secret" already implied. It authenticates nothing about the call. It lets an
+account allocate a relay for ten minutes, and the relay reaches the SFU's media port and nothing else, a
+port anyone may send to already; the SFU still admits only the offer it was provisioned with, by its
+fingerprint. It is scoped to the account rather than the connection, and reaches the client before the
+offer, because the client gathers its relayed candidate with it and the offer carries that candidate
+(roadmap, M33). Its secret is derived from the instance signing key, so at M116 a TURN pod holds the
+derived secret and nothing replayable against the API.
+
 ## Context
 A client's voice-worker holds a **direct WebRTC connection to the SFU** — media never passes through the
 daemon or the backend, which is what makes both the latency and the fault isolation real. So the SFU has to

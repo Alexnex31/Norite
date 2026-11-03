@@ -194,6 +194,12 @@ domain = {{ .ACMEDomain | toml }}
 email = {{ .ACMEEmail | toml }}
 {{- end }}
 
+[voice]
+# The SFU, which carries calls' audio, and the TURN server beside it. Off until joining a call exists
+# (M33). Turned on, it needs UDP 3479 and 3478 open, and TCP 3478; see contracts/instance-config.toml for
+# a machine behind NAT, and for TURN over TLS.
+enabled = false
+
 [smtp]
 # Outbound email. Off means password reset is unavailable and the instance still runs normally — this is
 # an opt-out, not a half-configured state.

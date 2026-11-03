@@ -42,6 +42,7 @@ func TestSigningOutEverywhereElseClosesTheOtherDevicesConnections(t *testing.T) 
 	url := serveGateway(t, f.api.handler)
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	laptop := connected(t, url, f.ownerToken)
 	phone := f.api.login("owner@example.com", "owner-phone")
 	onPhone := connected(t, url, phone.AccessToken)
@@ -61,6 +62,7 @@ func TestLoggingOutClosesThatDevicesConnection(t *testing.T) {
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
 	pair := f.api.login("member@example.com", "member-laptop")
+	settle(t, f, url)
 	laptop := connected(t, url, pair.AccessToken)
 	other := connected(t, url, f.memberToken)
 
@@ -78,6 +80,7 @@ func TestRevokingADeviceClosesItsConnection(t *testing.T) {
 	url := serveGateway(t, f.api.handler)
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	laptop := connected(t, url, f.memberToken)
 	phone := f.api.login("member@example.com", "member-phone")
 	onPhone := connected(t, url, phone.AccessToken)
@@ -114,6 +117,7 @@ func TestRefreshTokenReuseClosesTheDevicesConnections(t *testing.T) {
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
 	first := f.api.login("member@example.com", "member-laptop")
+	settle(t, f, url)
 	before := connected(t, url, first.AccessToken)
 
 	rotated := f.api.call(http.MethodPost, "/api/v1/auth/refresh", map[string]string{"refresh_token": first.RefreshToken})
@@ -164,6 +168,7 @@ func TestSigningInAgainClosesOnlyTheReplacedSignInsConnection(t *testing.T) {
 	url, _ := customGateway(t, f, func(o *gateway.Options) { o.Bus = bus })
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	old := connected(t, url, f.memberToken)
 	again := f.api.login("member@example.com", "member-device")
 	fresh := connected(t, url, again.AccessToken)
@@ -198,6 +203,7 @@ func TestALostRevocationIsCaughtByTheLivenessCheck(t *testing.T) {
 		o.LivenessInterval = time.Millisecond
 	})
 
+	settle(t, f, url)
 	laptop := connected(t, url, f.ownerToken)
 	phone := f.api.login("owner@example.com", "owner-phone")
 	res := f.api.call(http.MethodPost, "/api/v1/auth/logout/all", nil, withToken(phone.AccessToken))
@@ -215,6 +221,7 @@ func TestARevokedSessionIsNotLeftToBeResumed(t *testing.T) {
 	url := serveGateway(t, f.api.handler)
 
 	pair := f.api.login("member@example.com", "member-laptop")
+	settle(t, f, url)
 	laptop, sessionID := identified(t, url, pair.AccessToken)
 
 	res := f.api.call(http.MethodPost, "/api/v1/auth/logout", map[string]string{"refresh_token": pair.RefreshToken})
@@ -247,6 +254,7 @@ func TestATokenFromAnEndedSignInCannotConnectAfterTheDeviceSignsInAgain(t *testi
 	stale.identify(ended.AccessToken, "dev")
 	assert.Contains(t, stale.expectClose(gatewayproto.CloseAuthenticationFailed), "signed out")
 
+	settle(t, f, url)
 	connected(t, url, current.AccessToken)
 }
 
@@ -261,6 +269,7 @@ func TestTheLivenessCheckAsksAboutTheSignInNotTheDevice(t *testing.T) {
 	})
 
 	ended := f.api.login("member@example.com", "member-laptop")
+	settle(t, f, url)
 	stale := connected(t, url, ended.AccessToken)
 	res := f.api.call(http.MethodPost, "/api/v1/auth/logout", map[string]string{"refresh_token": ended.RefreshToken})
 	require.Equal(t, http.StatusNoContent, res.Code, res)

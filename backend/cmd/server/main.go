@@ -314,6 +314,27 @@ func run() error {
 		return fmt.Errorf("could not bind %s: %w", cfg.ListenAddr, err)
 	}
 
+	// Voice binds its ports here too, before migrating, for the same reason: a port in use fails the
+	// start rather than leaving an instance ready without the calls it was configured for.
+	voiceStack, err := startVoice(cfg, meta.Version, logger)
+	if err != nil {
+		_ = listener.Close()
+		logger.Error().Err(err).Msg("could not start voice")
+		return fmt.Errorf("could not start voice: %w", err)
+	}
+	defer func() {
+		// After the HTTP server has drained, since nothing in it waits on voice, and before the pool
+		// closes, which the deferred calls above this one do.
+		// Closed rather than left to the process's exit, which would free the ports as well: a client
+		// in a call is told the connection ended instead of finding out when ICE times it out.
+		if voiceStack != nil {
+			if err := voiceStack.Close(); err != nil {
+				logger.Warn().Err(err).Msg("voice did not stop cleanly")
+			}
+			logger.Info().Msg("voice stopped")
+		}
+	}()
+
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info().Str("addr", listener.Addr().String()).Str("env", string(cfg.Env)).Msg("norite backend listening")

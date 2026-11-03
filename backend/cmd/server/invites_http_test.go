@@ -111,6 +111,7 @@ func TestJoiningAddsTheGuildToTheJoinerAndTheJoinerToTheGuild(t *testing.T) {
 		withToken(f.ownerToken))
 	require.Equal(t, http.StatusCreated, invite.Code, invite)
 
+	settle(t, f, url)
 	member, stranger := connected(t, url, f.memberToken), connected(t, url, f.strangerToken)
 
 	joined := f.api.call(http.MethodPost, "/api/v1/invites/redeem",

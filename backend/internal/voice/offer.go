@@ -58,6 +58,10 @@ func readOffer(offer string, lim Limits) (offerShape, error) {
 				if a.Value != "actpass" {
 					return fmt.Errorf("%w: the DTLS role must be the SFU's to choose (a=setup:actpass)", ErrBadOffer)
 				}
+			case "ice-lite":
+				// Both sides lite, Pion selects a pair without a single check and starts DTLS
+				// towards it: an address the offer chose, never heard from (security ledger).
+				return fmt.Errorf("%w: the SFU is ICE-lite, so the client must run full ICE", ErrBadOffer)
 			case "ice-ufrag":
 				ufrags[a.Value] = true
 			case "candidate":
