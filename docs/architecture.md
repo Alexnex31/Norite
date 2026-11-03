@@ -141,10 +141,12 @@ Locked-in decisions:
 │   ├── internal/configwatch/     # the fsnotify watch on the config files' directories (M21)
 │   ├── internal/toggle/          # the same-machine config toggle, as requests the daemon answers (M21)
 │   ├── plugins/                  # wazero host, capability manifest + hash-pinning
-│   ├── voiceworker/               # os/exec spawn/supervise, stdin/stdout IPC framing
+│   ├── voiceipc/                 # the worker's pipe protocol, outside internal/ for the worker (M28)
+│   ├── internal/voiceworker/     # spawns, supervises and ends the worker; the Signaler seam (M28)
 │   ├── e2e/                       # keystore (modernc.org/sqlite), ratchet, single-writer goroutine, FTS5
 │   └── go.mod
-├── voiceworker/                  # Separate binary — the only place cgo is allowed
+├── voiceworker/                  # norite-voice: a separate binary, the only place cgo is allowed (M29)
+│   ├── internal/session/         # the worker's WebRTC connection to the SFU (M28)
 │   ├── audio/                    # hraban/opus, RNNoise, WebRTC APM (AEC3) — capture/encode/DSP
 │   └── go.mod
 ├── frontend/                     # React + TS SPA — the later, tertiary web client (Phase O)
@@ -1719,6 +1721,12 @@ start — breaking the single-instance invariant with no error anywhere.
   enables it, with its own per-session secret and authenticated by scoped `api_tokens` — the
   secret-protected tier, deliberately lower-trust than the attach socket, since external scripts must not
   receive first-party trust. See "The automation port" below.
+- **Daemon↔voice-worker** (M28): two anonymous pipes the worker inherits, one each way, and nothing else
+  can reach them. Same framing as the attach socket. **The trust runs the other way**: the daemon is the
+  worker's parent and trusts it least of anything it talks to, because from M29 the worker decodes a
+  stranger's audio in C. Every frame from it is bounded, rated and strictly decoded, and the first
+  violation kills it. It holds no credential but the TURN one (ADR 0023). See "Voice-worker subprocess"
+  in §6.
 
 **The automation port** (M22). Two secrets answer two questions, and neither stands in for the other. The
 **port secret** says this process may use this daemon's port: 256 random bits minted for each run of the
@@ -2280,13 +2288,31 @@ participant) so adding video is additive — necessary but **not sufficient**: s
 for poor-connection participants is real, separate engineering work, explicitly scoped into the video phase
 rather than assumed free (§2/ADR 0012).
 
-**Voice-worker subprocess**: spawned on-demand by the daemon via `os/exec` when joining a voice channel, torn
-down on leaving (never a persistent idle process). Owns the entire audio session: capture/encode/send,
-receive/decode/play, noise suppression, echo cancellation, AGC. Daemon↔worker IPC uses the child's inherited
-stdin/stdout pipes (free, no socket/port allocation, pipe-close is itself a crash signal), the same
-4-byte-length-prefix JSON framing as the daemon↔CLI/TUI/GUI socket. The worker holds its own direct WebRTC
-connection to the SFU — RTP audio never flows through the daemon, only control signaling, which is what makes
-fault isolation real: a media-pipeline bug can only crash the worker.
+**Voice-worker subprocess**: `norite-voice`, spawned on-demand by the daemon via `os/exec` when joining a voice
+channel, torn down on leaving (never a persistent idle process). Owns the entire audio session:
+capture/encode/send, receive/decode/play, noise suppression, echo cancellation, AGC. The worker holds its own
+direct WebRTC connection to the SFU — RTP audio never flows through the daemon, only control signaling, which
+is what makes fault isolation real: a media-pipeline bug can only crash the worker. Settled at M28:
+- **The protocol has two pipes of its own**, the 4-byte-length-prefix JSON framing of the attach socket,
+  and `contracts/voice-worker.schema.json` is its contract. They are free (no socket, no port), and a
+  closed pipe is itself the crash signal. They are not stdin and stdout: from M29 the worker links C
+  libraries, and a `printf` in one would land mid-frame. Rerouting descriptor 1 afterwards does not move
+  the C runtime's on Windows. `ExtraFiles` on Unix and `AdditionalInheritedHandles` on Windows pass the
+  pipes. The worker's stdin is the null device, and its stdout and stderr are read into the daemon's
+  log, each line bounded and sanitized.
+- **The worker is the least trusted peer the daemon has** (§3's third tier), and the daemon bounds it as
+  M19 bounds a hostile instance.
+- **Its environment is an allow-list.** A daemon started by hand holds its shell's, tokens included.
+  Descriptors need nothing: Go opens everything close-on-exec.
+- **It exits when its control pipe closes**, which every way the daemon ends produces, crash and `exec`
+  included. A worker left behind would hold the microphone.
+- **On macOS it stays the daemon's direct child**, never started through a shell or `launchctl`: TCC
+  charges its microphone use to its parent (ADR 0034).
+- **A crash is a closed pipe the daemon did not ask for, or a non-zero exit.** The daemon logs it with the
+  worker's last lines, and the call ends with that reason. Nothing else in the daemon notices.
+- **It is part of the daemon's install**, never released alone. It is in the client archive beside
+  `norite-daemon`, and the updater stages, smoke-runs and installs the three together. Until M33 the
+  daemon signals through M26's harness, compiled in only under the `norite_voiceharness` tag.
 
 **Connection authentication** (settled by ADR 0023): **no bearer token participates in a voice connection.**
 The voice-worker generates an ephemeral DTLS keypair and ICE credentials per call; its fingerprint travels up
@@ -2687,7 +2713,9 @@ E2E key-boundary violations.
 
 4. **Two-tier local IPC trust model**: the daemon↔CLI/TUI/GUI Unix socket (OS-permission-protected, first-party)
    vs. the local bot-automation TCP port (secret-protected, external scripts) — never treated as
-   interchangeable; any new local IPC surface must state its trust tier explicitly.
+   interchangeable; any new local IPC surface must state its trust tier explicitly. A third since M28, the
+   voice-worker's inherited pipes, reachable by no other process and trusted least, since the worker
+   decodes strangers' audio (§3).
 
 5. **XSS / terminal-escape injection**: web/GUI message content renders through the allow-listed markdown
    subset, never raw HTML. The terminal clients have an additional risk: untrusted text (usernames, messages,

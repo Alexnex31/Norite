@@ -23,6 +23,16 @@ to the daemon: a script could avoid it by presenting the same token to the insta
 writes the tag for any message an API token sends or edits. And the port is closed until the user enables
 it.
 
+**Amended at M28: a third tier, the voice-worker's pipes.**
+- The daemon spawns `norite-voice` and speaks to it over two anonymous pipes the worker inherits. No other
+  process can reach them, so neither the socket's file permissions nor the port's secret applies.
+- What sets this tier apart is the direction of trust. The worker is the daemon's own child, and from M29
+  it decodes audio a stranger sent, in C. A worker that was exploited holds the pipe.
+- So the daemon trusts it least of anything it talks to: every frame is bounded, rated and strictly
+  decoded, and the first violation kills it.
+- It is given no credential but the TURN one, which reaches the SFU's port and nothing else (ADR 0023).
+- Its environment is an allow-list, so nothing in the daemon's own reaches it.
+
 **Integrated shell**: spawns the user's actual shell — the same trust boundary as a real terminal, with no
 extra sandboxing layer. It's not a new capability the user didn't already have; it's a convenience surface
 for a capability they already had via any other terminal on the same machine.
