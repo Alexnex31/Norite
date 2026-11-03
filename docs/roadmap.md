@@ -3087,11 +3087,21 @@ when a constraint the terminal imposed is lifted.
   into a documented production option alongside bare-metal/systemd. Done when: a fresh self-hoster can stand
   up a working instance via `docker compose up` following the docs alone.
 
-  **Two things owed here from M27.** The guide states the ports voice needs (UDP 3479, UDP and TCP 3478,
-  TCP 5349 or 443 for TURN over TLS) and `public_addresses` for a machine behind NAT, and how TURN over TLS
-  shares 443 with the web server through a layer-4 proxy. And **`[acme]` is this milestone's**: the
-  setting has been validated since M2 for "the milestone that wires certmagic in", and none did. Wire it
-  here or retire the setting; either way it stops promising a reader nobody built.
+  **Three things owed here from M27.** The guide states the ports voice needs (UDP 3479, UDP and TCP
+  3478, TCP 5349 or 443 for TURN over TLS) and `public_addresses` for a machine behind NAT, and how TURN
+  over TLS shares 443 with the web server through a layer-4 proxy. And **`[acme]` is this milestone's**:
+  the setting has been validated since M2 for "the milestone that wires certmagic in", and none did. Wire
+  it here or retire the setting; either way it stops promising a reader nobody built.
+
+  **And a machine with several public addresses names one in `media_listen`.** On every interface, the
+  default, the SFU listens on one socket and the kernel picks the source of each answer by its route to
+  the client, which on such a machine may be another address than the one the client sent to: ICE drops
+  an answer from an address it did not ask, so a failover or secondary IP announced in
+  `public_addresses` admits nobody. Naming the address in `media_listen` makes it the only one the SFU
+  answers from, and the relay follows it. `norite-server` warns at startup when it sees the case (M27).
+  One socket per address, Pion's `NewMultiUDPMuxFromPort`, is the fix that needs no setting, at the
+  price of an SFU that serves only the addresses it found at startup; it is for when a deployment needs
+  it, not before.
 
 #### Phase M — E2E encryption
 

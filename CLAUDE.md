@@ -2912,6 +2912,9 @@ And on TURN, from M27:
   pion's `StrictAddressFamily` is set, so a client naming none gets IPv4. What the SFU announces counts
   family by family, and a family nothing is announced in is every address of the host's, read every ten
   seconds off the packet path.
+- **On every interface, the SFU answers from whichever address the kernel routes a client by.** A machine
+  with several public addresses in one family names one in `media_listen`, and `StartStack` warns when it
+  sees the case; one socket per address is M96's to decide.
 - **The relay's per-packet path allocates nothing**, both ways: it reads with `ReadFromUDPAddrPort` and
   reports a peer by a `net.Addr` made when the peer changes. `TestTheRelayAllocatesNothingPerPacket`
   holds it there, and `BenchmarkRelayRoundTrip` measures it.
