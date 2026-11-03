@@ -10,8 +10,11 @@
 // the same StartStack, Mint and Provision the server and the tests do, so M33 removes nothing when it
 // arrives.
 //
-//	go run ./internal/voice/voicetest/cmd/voice-sfu -media 10.9.0.1:3479 -turn 10.9.0.1:3478 \
+//	go run ./internal/voice/voicetest/cmd/voice-sfu -media :3479 -turn 10.9.0.1:3478 \
 //		-http 10.9.0.1:8089
+//
+// -media and -public are read as [voice] reads media_listen and public_addresses, through config.Voice,
+// so the relay and the SFU's address are derived as norite-server derives them.
 package main
 
 import (
@@ -23,7 +26,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -31,6 +33,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/voice"
 	"github.com/Alexnex31/Norite/backend/internal/voice/turn"
@@ -39,6 +42,7 @@ import (
 
 func main() {
 	media := flag.String("media", "127.0.0.1:3479", "the UDP address every connection's media arrives on")
+	public := flag.String("public", "", "the addresses the SFU announces, comma-separated, as public_addresses")
 	httpAddr := flag.String("http", "127.0.0.1:8089", "the address the provisioning endpoint listens on")
 	loopback := flag.Bool("loopback", false, "offer loopback candidates, for clients on this machine "+
 		"(always, when -media is a loopback address)")
@@ -55,34 +59,44 @@ func main() {
 			*loopback = true
 		}
 	}
-	if err := run(*media, *httpAddr, *loopback, *turnAddr, *turnTLS, *cert, *key); err != nil {
+	if err := run(*media, *public, *httpAddr, *loopback, *turnAddr, *turnTLS, *cert, *key); err != nil {
 		fmt.Fprintln(os.Stderr, "voice-sfu:", err)
 		os.Exit(1)
 	}
 }
 
-func run(media, httpAddr string, loopback bool, turnAddr, turnTLS, cert, key string) error {
+func run(media, public, httpAddr string, loopback bool, turnAddr, turnTLS, cert, key string) error {
 	log := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Logger().Level(zerolog.DebugLevel)
-	mediaAddr, err := netip.ParseAddrPort(media)
-	if err != nil || mediaAddr.Addr().IsUnspecified() {
-		return fmt.Errorf("-media names one address and a port, which TURN's relay reaches the SFU at")
+	v, err := config.Config{
+		VoiceMediaListen:     media,
+		VoicePublicAddresses: public,
+		VoiceTURNListen:      turnAddr,
+		VoiceTURNTLSListen:   turnTLS,
+		VoiceTURNTLSCert:     cert,
+		VoiceTURNTLSKey:      key,
+		VoiceRelayPerAddress: 64,
+	}.Voice()
+	if err != nil {
+		return err
 	}
 	// A fresh key per run: the harness has no instance, and a credential outliving the process it was
 	// minted by has nothing to reach.
 	signingKey := make([]byte, 32)
 	_, _ = rand.Read(signingKey)
 	stack, err := voice.StartStack(voice.StackOptions{
-		MediaListen:   media,
-		TURNListen:    turnAddr,
-		TURNTLSListen: turnTLS,
-		TLSCert:       cert,
-		TLSKey:        key,
-		Relay:         mediaAddr.Addr(),
-		SFU:           mediaAddr,
-		SigningKey:    signingKey,
-		Loopback:      loopback,
-		Version:       "dev",
-		Logger:        log,
+		MediaListen:     v.MediaListen,
+		Public:          v.Public,
+		TURNListen:      v.TURNListen,
+		TURNTLSListen:   v.TURNTLSListen,
+		TLSCert:         v.TLSCert,
+		TLSKey:          v.TLSKey,
+		Relay:           v.Relay,
+		SFU:             v.SFU,
+		RelayPerAddress: v.RelayPerAddress,
+		SigningKey:      signingKey,
+		Loopback:        loopback,
+		Version:         "dev",
+		Logger:          log,
 	})
 	if err != nil {
 		return err

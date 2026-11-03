@@ -1385,7 +1385,8 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   tests the convenient configuration**: run the one the defaults produce, and the one the documentation
   tells an operator to write. The fix translates rather than widens: whatever announced address a client
   names, the relay sends to the media address, and a STUN answer goes back as the address its request
-  went to, matched by transaction.
+  went to, matched by transaction. The VM pass ran again on the default, `:3479`, with the harness now
+  reading its addresses through `config.Voice`: through TURN over TCP and over TLS, Opus both ways.
 
   The same review found fourteen more. The ones worth carrying: a bound charged before the bound that
   refuses spends a shared budget on refused work (one host could silence every client's replies); a
