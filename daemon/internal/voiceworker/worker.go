@@ -126,7 +126,7 @@ type Exit struct {
 }
 
 // ErrStart is a worker that could not be started or did not say who it is.
-var ErrStart = errors.New("voice: the voice worker could not be started")
+var ErrStart = errors.New("the voice worker could not be started")
 
 // Start starts a worker and waits for its HELLO, whose version must be compatible with the daemon's.
 func Start(ctx context.Context, opts Options) (*Worker, error) {
@@ -384,9 +384,11 @@ func (w *Worker) checkHello(f gatewayproto.Frame) error {
 	if f.Op != voiceipc.OpHello || ipc.Decode(f, &h) != nil {
 		return broke(fmt.Sprintf("op %d where HELLO was owed", f.Op))
 	}
+	// The attach socket's rule, the daemon as the server. Its reason is not quoted: it speaks of a server and
+	// a client and says which to upgrade, and here the two are one install, replaced together.
 	if c := gatewayproto.Check(w.opts.Version, h.Version); !c.Compatible {
-		return fmt.Errorf("the voice worker is version %s and this daemon %s: %s; reinstall Norite so "+
-			"both are of one release", termsafe.Text(h.Version), w.opts.Version, c.Reason)
+		return fmt.Errorf("the voice worker beside this daemon is version %s and the daemon %s; reinstall "+
+			"Norite so both are of one release", termsafe.Text(h.Version), w.opts.Version)
 	}
 	return nil
 }

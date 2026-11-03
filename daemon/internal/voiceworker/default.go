@@ -8,5 +8,5 @@ package voiceworker
 // DefaultSignaler is the signaler a daemon joins calls through, or nil and why there is none. Until M33
 // writes op 4's, a release has none: joining is refused before anything is started.
 func DefaultSignaler() (Signaler, string) {
-	return nil, "this version of Norite cannot join voice calls yet"
+	return nil, "voice calls arrive in a later version of Norite"
 }

@@ -106,11 +106,11 @@ func TestAnOlderDaemonIsNeverSentTheChannel(t *testing.T) {
 // A daemon that cannot join says why, and is not sent the channel either.
 func TestAJoinThisDaemonCannotMakeIsRefusedBeforeTheChannelIsSent(t *testing.T) {
 	d := &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceIdle,
-		Unavailable: "this version of Norite cannot join voice calls yet"}}
+		Unavailable: "voice calls arrive in a later version of Norite"}}
 	r := norite(t, d, false, "join", "1234")
 	var refused *clierr.RefusedError
 	require.True(t, errors.As(r.err, &refused), "%v", r.err)
-	assert.Contains(t, refused.Message, "cannot join voice calls yet")
+	assert.Contains(t, refused.Message, "arrive in a later version")
 	assert.Equal(t, []string{"GET " + ipc.PathVoice}, d.asked)
 }
 

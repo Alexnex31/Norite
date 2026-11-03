@@ -150,6 +150,7 @@ func TestAWorkerMustSayWhoItIs(t *testing.T) {
 	require.ErrorIs(t, err, ErrStart)
 	require.Contains(t, err.Error(), "9.0.0")
 	require.Contains(t, err.Error(), "0.4.0")
+	require.NotContains(t, err.Error(), "upgrade the server", "the two are one install, replaced together")
 }
 
 // A worker that ignores its leave and its closed pipe is killed after the bound, and one that closes its

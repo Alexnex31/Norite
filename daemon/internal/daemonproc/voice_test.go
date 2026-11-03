@@ -33,7 +33,7 @@ var errRefusing = &voiceworker.Refusal{Msg: "the voice server refused: 409 room 
 func voiceFixture(signaler voiceworker.Signaler, signedIn bool) *localRequests {
 	return &localRequests{log: zerolog.Nop(), voice: voiceworker.NewVoice(voiceworker.VoiceOptions{
 		Program: "/nonexistent/norite-voice", Version: "dev", Signaler: signaler,
-		Unavailable: "this version of Norite cannot join voice calls yet",
+		Unavailable: "voice calls arrive in a later version of Norite",
 		Account:     func() (string, bool) { return "42", signedIn },
 		Log:         zerolog.Nop(),
 	})}
@@ -47,7 +47,7 @@ func TestTheVoiceRequestsAnswerAStatus(t *testing.T) {
 	var st ipc.VoiceStatus
 	require.NoError(t, json.Unmarshal(resp.Body, &st))
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle,
-		Unavailable: "this version of Norite cannot join voice calls yet"}, st)
+		Unavailable: "voice calls arrive in a later version of Norite"}, st)
 
 	resp = l.Do(context.Background(), ipc.Request{Method: http.MethodPost, Path: ipc.PathVoiceLeave})
 	require.Nil(t, resp.Error)
@@ -68,7 +68,7 @@ func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
 		{"a channel that is not an id", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/join/general", ipc.RelayBadRequest, ""},
 		{"no channel", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/join/", ipc.RelayBadRequest, ""},
 		{"a path that is none of them", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/mute", ipc.RelayBadRequest, ""},
-		{"a release, which cannot join yet", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayConflict, "cannot join voice calls yet"},
+		{"a release, which cannot join yet", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayConflict, "arrive in a later version"},
 		{"nobody signed in", voiceFixture(refusingSignaler{}, false), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayConflict, "norite login"},
 		{"a voice server that refuses", voiceFixture(refusingSignaler{}, true), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayFailed, "room full"},
 	}
