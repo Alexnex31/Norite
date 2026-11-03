@@ -389,7 +389,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D complete through M24**; Phase E under way, M27 done. Full
+**Phase D complete through M24**; Phase E under way, M28 done. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -2547,7 +2547,7 @@ And on the daemon as gateway client, from M19:
   lossless.
 - **A sub-logger adds `subsystem`, never `component`.** The base logger sets `component=daemon`, and
   zerolog appends a field rather than replacing it.
-- **The `daemon` → `backend` edge reaches types only**: `gatewayproto` and `apicontract`. Keep both free of
+- **The `daemon` → `backend` edge reaches types only**: `gatewayproto`, `apicontract` and, since M28, `voiceproto`. Keep both free of
   anything that decides, or the daemon starts depending on the server's judgement rather than its wire.
 - **Testing the session**: `fakeClock` with `advanceUntil`, which steps rather than jumps because `Run`
   arms timers between steps; `settle` before counting refreshes; `waitingWithin` to hold `Run` inside a
@@ -2791,7 +2791,7 @@ And on the updater, from M24:
 
 - **Nothing the listing says is believed until a signature says it too.** The bundle is verified offline
   against `daemon/internal/updater/trusted_root.json` and the identity for the candidate's own tag; then
-  the archive's SHA-256; then two programs by exact name. Any failure fails closed and the version running
+  the archive's SHA-256; then three programs by exact name (the voice-worker since M28). Any failure fails closed and the version running
   stays. No flag, file or environment variable changes the root or the identity in a release build.
 - **The trusted root ages.** `just trusted-root` regenerates it through TUF, and CI fails when the
   committed copy is behind Sigstore's, like govulncheck, on a PR that changed nothing. Read its diff: it
@@ -2837,7 +2837,7 @@ And on packages, from the `package-managers` branch (ADR 0035):
 - **The package definitions restate a release too.** `.goreleaser.yaml`'s nFPM packages, casks, Scoop and
   winget manifests and AUR packages name the same archives, programs and notice paths as `install.sh` and
   `install.ps1`; a change to one changes the others in the same commit. `just release-dry-run` checks
-  each client package holds both programs and its marker.
+  each client package holds its three programs and its marker.
 - **A package installs files and starts nothing.** `norite login` offers the service (M23). No package
   script reaches a user's service manager: removal says what to run.
 - **A packaged install is its package manager's to update.** The daemon checks and names the command.
