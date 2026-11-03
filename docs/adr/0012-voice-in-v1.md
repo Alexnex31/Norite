@@ -8,7 +8,9 @@ authenticates to the SFU is settled there. **Amended by [ADR 0034](0034-mic-perm
 (M25), which answers the consequence below about the mic-permission handoff and the daemon's global
 hotkey: there is no handoff, and the hotkey is the daemon's by a different mechanism per OS. **Amended at
 M26 (2026-11-02)** in one place: the SFU carries every connection on one UDP port through Pion's ICE UDP
-mux, so "a forwarded UDP range" below is that one port plus TURN's, which M27 decides. Everything else
+mux, so "a forwarded UDP range" below is that one port plus TURN's, which M27 decides. **Amended at M27
+(2026-11-03)**: TURN's are one port on UDP and TCP and, with a certificate, one for TLS, and its relay
+sockets stay on the host, so nothing past those is forwarded (`architecture.md` §6). Everything else
 below stands, including the DSP chain order.
 
 ## Context

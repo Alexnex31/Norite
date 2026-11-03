@@ -1806,12 +1806,67 @@ of this section.
     real Opus rather than bytes shaped like it.
   - **"A UDP range"** in §6, §17 and ADR 0012 is the SFU's one port, with TURN's left to M27.
 - **M27 — Embedded TURN plus STUN**: `pion/turn` embedded in the backend (server-side, not the daemon),
-  serving both TURN relay and plain STUN binding requests. Done when: a client behind simulated NAT can
-  establish a voice connection via the embedded TURN server alone.
+  in `backend/internal/voice/turn`, serving TURN over UDP, TCP and TLS and plain STUN Binding, and relaying
+  to the SFU and nothing else. Rewritten at planning on 2026-11-03, after a review of the plan; what the
+  entry said before, and why it was not the milestone, is under "Corrected at planning". The author's
+  direction for this milestone: what can be built now is built now, even unused until later, so it takes
+  `norite-server` starting the stack from M33 and the "never start when off" half of M37.
 
-  **From M26:** the SFU has one UDP port and TURN's listeners are decided here, including whether TCP or
-  TLS is offered for networks that block UDP; §6's port sentence is completed here. Being before M33, the
-  NAT test signals through M26's harness in `backend/internal/voice/voicetest`.
+  **What a relay is for.** The SFU has an address the client can reach, and a client behind any NAT,
+  symmetric included, reaches it directly: it sends first, and the SFU learns its address from the check.
+  A relay serves a network that refuses UDP to the SFU's port, so TCP and TLS are the transports that
+  matter. TLS takes its certificate from two files, read again when they change, which are the files a
+  reverse proxy or certbot already renews; 443 is where it helps most.
+
+  **The relay reaches the SFU and nothing else.** Its sockets are bound on the SFU's host, report the
+  address they are bound to, and send to the SFU's media address alone, IP and port, whatever pion's
+  IP-only permission check admits. RFC 6062's TCP relaying is refused, being an open proxy by
+  construction.
+
+  **Credentials** are the TURN REST shape, `expiry:user`, signed with a secret HKDF-derived from the
+  instance signing key, so nothing new is configured. They are scoped to the account, not the connection:
+  the client gathers its relayed candidate before it makes the offer, and the connection id is minted when
+  the offer arrives. Expiry is asked of an Allocate alone, so a credential lives ten minutes while the
+  allocation lives as long as it is refreshed. An allocation the SFU sends nothing through for 30 s
+  is closed, which is also how one ends after its SFU connection does.
+
+  **The SFU is ICE-lite**: it answers checks and sends none, so no address an offer names is ever sent
+  anything. Its remote filter refuses unspecified, multicast, link-local and named metadata addresses,
+  loopback outside tests, and admits the relay's own. Its public addresses are configured.
+
+  **Bounds**, each played by a test: allocations in total, per account and per source (IPv6 /64, through
+  `ratelimit.AddrKey`); relay packets and bits per allocation, with M26's strikes; TCP and TLS connections
+  in total and per source, with deadlines to authenticate and to finish a handshake; and replies to
+  unauthenticated requests, per destination and in total, since each is larger than its request.
+
+  **Configuration**: a `[voice]` section, `enabled` off by default until M33. `norite-server` binds the
+  media, TURN and TLS ports before migrating when it is on, and none when it is off.
+
+  Done when:
+  - a client offering only a relayed candidate, over UDP, TCP and TLS each, exchanges real Opus with a
+    client reaching the SFU directly, every payload intact;
+  - the relay reaches no other port of the SFU's host, no other host, and grants no TCP allocation;
+  - an expired or forged credential starts no allocation, an allocation outlives its credential, and a
+    refused credential writes nothing to the log;
+  - the SFU sends nothing to an address an offer names;
+  - each bound holds against a test playing the peer;
+  - `norite-server` holds the voice ports when it answers its first request and releases them on stop;
+  - and a manual pass in three unprivileged VMs, one client behind a NAT VM refusing all outbound UDP,
+    relayed over TCP and then TLS, the other on an open network.
+
+  **Corrected at planning** (2026-11-03), by reading pion/turn, pion/ice and M26's code against the entry:
+  - **"A client behind simulated NAT, via TURN alone" tested a relay nobody needs.** Any NAT reaches this
+    SFU without one; a network that refuses UDP does not, and that is the test.
+  - **pion/turn's default relays to anything**: every peer admitted, a TCP allocation to any port, and its
+    REST handler logging every refused username at error level, quoting it.
+  - **A credential scoped to the connection could not exist in time**, and one checked for expiry on every
+    request would have had to outlive the call.
+  - **The SFU sent connectivity checks to every address an offer named**, loopback and the cloud
+    metadata address included; ICE-lite removes the sending rather than filtering it.
+  - **A Binding response is twice its request and an Allocate's challenge 2.4 times**, measured, which the
+    first plan called non-amplifying.
+  - **Nothing owned `[acme]`**: its setting said the milestone wiring certmagic would read it, and none
+    does. M96 owns it now.
 - **M28 — Voice-worker subprocess and IPC**: the daemon spawns the worker on-demand (via `os/exec`) when
   joining a voice channel, tears it down on leave; daemon↔worker control-plane IPC uses the child's
   inherited stdin/stdout pipes, framed with the same 4-byte-length-prefix-plus-JSON scheme used for the
@@ -1872,7 +1927,12 @@ of this section.
   after every new daemon build (run at M25), so without one "exactly once" holds per build, not per install.
 - **M33 — Voice signaling, real**: op 4 (Voice State Update) and `VOICE_SERVER_UPDATE`, which do not
   exist yet: op 4 is reserved and a client sending it is closed as an unknown opcode. `norite-server`
-  starts M26's SFU here. `MediaCoordinator` is built as `PionMediaCoordinator`, the backend's seam over
+  has started the SFU and TURN since M27, when `[voice] enabled` is set; this milestone turns that
+  default on. **The TURN credential reaches the client before its offer** (M27): the client gathers its
+  relayed candidate with it and the offer carries that candidate, so it cannot ride in
+  `VOICE_SERVER_UPDATE`, which answers the offer. It is `turn.Mint` for the account, ten minutes, and this
+  milestone chooses the carrier: a first step of the join, before the offer, is the shape the harness's
+  `/credentials` follows. `MediaCoordinator` is built as `PionMediaCoordinator`, the backend's seam over
   M26's control interface: it resolves `PermConnectVoice` against fresh data, mints the connection id and
   the `issued` snowflake, and calls `Provision` with the client's offer, which op 4 carries under M26's
   12 KiB bound. A kick, a ban and a lost `PermConnectVoice` call `Evict` with a cutoff, after the
@@ -1919,9 +1979,12 @@ of this section.
   daemon state), the daemon respawns the worker and rejoins on crash/restart. Done when: killing the daemon
   process mid-call results in automatic rejoin within a few seconds of restart.
 - **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to
-  `norite instance init`, extending M2/M10), the SFU/TURN never start when off, voice+text channels degrade to text-only,
+  `norite instance init`, extending M2/M10), voice+text channels degrade to text-only,
   voice UI is hidden entirely (not grayed out) in CLI/TUI/GUI when disabled. Done when: an instance with
-  voice disabled shows no voice-related UI anywhere and never starts the SFU/TURN processes.
+  voice disabled shows no voice-related UI anywhere and never starts the SFU/TURN processes. **The toggle
+  exists since M27**: `[voice] enabled`, which starts or never starts both, with a test that a disabled
+  instance binds none of their ports. What is left here is the wizard's question, the UI and the
+  degradation.
 - **M37a — Snap package**: `norite` and `norite-server` in the Snap Store, the one channel
   [ADR 0035](adr/0035-package-managers.md) held back. Both names were registered when that ADR landed,
   so nobody else takes them. Placed after Phase E because the client snap carries the voice-worker, and
@@ -2985,6 +3048,12 @@ when a constraint the terminal imposed is lifted.
   into a documented production option alongside bare-metal/systemd. Done when: a fresh self-hoster can stand
   up a working instance via `docker compose up` following the docs alone.
 
+  **Two things owed here from M27.** The guide states the ports voice needs (UDP 3479, UDP and TCP 3478,
+  TCP 5349 or 443 for TURN over TLS) and `public_addresses` for a machine behind NAT, and how TURN over TLS
+  shares 443 with the web server through a layer-4 proxy. And **`[acme]` is this milestone's**: the
+  setting has been validated since M2 for "the milestone that wires certmagic in", and none did. Wire it
+  here or retire the setting; either way it stops promising a reader nobody built.
+
 #### Phase M — E2E encryption
 
 - **M97 — Crypto base integration**: integrate `go.mau.fi/libsignal` and build the device-linking protocol
@@ -3209,7 +3278,10 @@ does not appear to disagree with them.
   exists rather than a tidier layout.
 
   **The mTLS control channel is this milestone's** (ADR 0023): the transport carrying M26's control
-  interface from the backend to SFU pods in another namespace. On a self-hosted instance the SFU is in the
+  interface from the backend to SFU pods in another namespace. **From M27:** the TURN pods are given
+  `turn.DeriveSecret`'s output, never the signing key; each serves its own replies' rate limit in memory,
+  since it is counted per packet; and an allocation ends when its SFU connection does by its idle bound,
+  which needs nothing from the control channel. On a self-hosted instance the SFU is in the
   backend's process and the interface is a Go call. The out-of-process SFU also removes the residual M26
   records, that a panic inside Pion's own goroutines ends `norite-server`.
 
