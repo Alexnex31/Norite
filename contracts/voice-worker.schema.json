@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.example/contracts/voice-worker.schema.json",
+  "title": "Norite daemon and voice-worker pipes",
+  "description": "Source of truth for every frame between the daemon and norite-voice (docs/architecture.md §6, M28): two anonymous pipes the worker inherits, one each way, each frame JSON behind a 4-byte big-endian length, as on the attach socket. daemon/voiceipc is its Go form, and the tests at both ends validate every frame they send against this document. Trust tier (rule 16, ADR 0017 as amended at M28): reachable by no other process; the daemon trusts the worker least, decodes every frame strictly, bounds each at 65536 bytes and their rate, and kills the worker at the first violation. No frame carries an access token; Join carries the TURN credential, which reaches the SFU's port and nothing else (ADR 0023). A field added to any frame is a MINOR change.",
+  "$ref": "#/$defs/Frame",
+  "$defs": {
+    "Frame": {
+      "description": "Any frame, in either direction.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WorkerFrame"
+        },
+        {
+          "$ref": "#/$defs/DaemonFrame"
+        }
+      ]
+    },
+    "WorkerFrame": {
+      "description": "What the worker sends: Hello first and once, Offer once after Join, then State as its call changes.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Hello"
+        },
+        {
+          "$ref": "#/$defs/Offer"
+        },
+        {
+          "$ref": "#/$defs/State"
+        }
+      ]
+    },
+    "DaemonFrame": {
+      "description": "What the daemon sends: Join once after Hello, Answer once after Offer, Leave when the call should end.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Join"
+        },
+        {
+          "$ref": "#/$defs/Answer"
+        },
+        {
+          "$ref": "#/$defs/Leave"
+        }
+      ]
+    },
+    "Hello": {
+      "type": "object",
+      "description": "op 1, the worker's first frame. Checked by the attach socket's version rule, the daemon as the server.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 1
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "version"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Offer": {
+      "type": "object",
+      "description": "op 2: the worker's SDP offer, every candidate gathered, under voiceproto.MaxOffer.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 2
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "sdp"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "sdp": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 12288
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "State": {
+      "type": "object",
+      "description": "op 3: what the worker's call has become. ended is its last frame before it exits.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 3
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "enum": [
+                "connecting",
+                "ready",
+                "ended"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Why a call ended, for a person, or empty."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Join": {
+      "type": "object",
+      "description": "op 10: make the call's connection, gathering with these servers, and offer.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 10
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "ice_servers",
+            "loopback"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "ice_servers": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "$ref": "#/$defs/ICEServer"
+              }
+            },
+            "loopback": {
+              "type": "boolean",
+              "description": "Admit loopback candidates, for an SFU on this machine: M26's harness and tests."
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "ICEServer": {
+      "type": "object",
+      "required": [
+        "urls",
+        "username",
+        "credential"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "urls": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "pattern": "^turns?:"
+          }
+        },
+        "username": {
+          "type": "string"
+        },
+        "credential": {
+          "type": "string"
+        }
+      },
+      "description": "One TURN server with the account's credential."
+    },
+    "Answer": {
+      "type": "object",
+      "description": "op 11: the SFU's answer to the offer.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 11
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "sdp"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "sdp": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 12288
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Leave": {
+      "type": "object",
+      "description": "op 12: end the call. The daemon then closes its pipe to the worker.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 12
+        },
+        "d": {
+          "type": "object",
+          "required": [],
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    }
+  }
+}
