@@ -244,9 +244,10 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
   platform the way `just build`'s goreleaser output does. `just notices` and CI's assertions both read them.
 - `just notices` — regenerate each binary's `internal/notices/THIRD-PARTY-NOTICES.txt` from
   `go version -m` on the built binary, and commit the diff. **Not the same artifact as the inventory
-  below**: this is the attribution obligation over what actually ships (backend: 29 modules), the inventory
-  is the allow-list policy question over all code including tests (backend: 75, the difference being
-  testcontainers and its Docker set). CI regenerates both and fails on a diff.
+  below**: this is the attribution obligation over what actually ships (backend: 53 modules since M27
+  linked Pion into `norite-server`), the inventory is the allow-list policy question over all code
+  including tests (backend: 75, the difference being testcontainers and its Docker set). CI regenerates
+  both and fails on a diff.
 - `just license-check` / `just license-inventory` — fail on a dependency license outside ADR 0032's
   allow-list, which is **per-module**: permissive-only in `backend/`, AGPL-compatible in `daemon/`, `cli/`
   and `gui/` / regenerate the committed `contracts/dependency-licenses.txt`. Both run in CI; the inventory

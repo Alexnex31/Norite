@@ -181,7 +181,7 @@ func TestContractFileCoversEveryConfigSection(t *testing.T) {
 
 	for _, section := range []string{
 		"[http]", "[database]", "[log]", "[rate_limit]", "[events]", "[redis]",
-		"[storage]", "[storage.s3]", "[acme]", "[smtp]",
+		"[storage]", "[storage.s3]", "[acme]", "[voice]", "[smtp]",
 		"[oauth.google]", "[oauth.github]", "[registration]", "[auth]",
 	} {
 		assert.Contains(t, doc, section, "the contract must document every configuration section")

@@ -6,6 +6,10 @@
 // file a person can play. A test harness, never a release.
 //
 //	go run ./internal/voice/voicetest/cmd/voice-client -sfu http://10.9.0.1:8089 -room 1 -user 2 -out b
+//
+// With -relay tcp, the client offers nothing but a candidate relayed by the harness's TURN over that
+// transport, as a client whose network refuses UDP to the SFU ends up doing. A TURNS server is verified
+// against the system's roots, so a test certificate goes in SSL_CERT_FILE.
 package main
 
 import (
@@ -15,7 +19,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/internal/voice/voicetest"
 )
@@ -29,7 +36,12 @@ func main() {
 	out := flag.String("out", "received", "the prefix of the Ogg files written, one per slot")
 	loopback := flag.Bool("loopback", false, "offer loopback candidates, for an SFU on this machine "+
 		"(always, when -sfu names a loopback address)")
+	relay := flag.String("relay", "", "join through TURN alone, over udp, tcp or tls")
 	flag.Parse()
+	if *relay != "" && *relay != "udp" && *relay != "tcp" && *relay != "tls" {
+		fmt.Fprintln(os.Stderr, "voice-client: -relay is udp, tcp or tls")
+		os.Exit(2)
+	}
 	if u, err := url.Parse(*sfu); err == nil {
 		if ip := net.ParseIP(u.Hostname()); (ip != nil && ip.IsLoopback()) || u.Hostname() == "localhost" {
 			*loopback = true
@@ -39,21 +51,40 @@ func main() {
 		fmt.Fprintln(os.Stderr, "voice-client: -user is required")
 		os.Exit(2)
 	}
-	if err := run(*sfu, *room, *user, *slots, time.Duration(*seconds)*time.Second, *out, *loopback); err != nil {
+	if err := run(*sfu, *room, *user, *slots, time.Duration(*seconds)*time.Second, *out, *loopback, *relay); err != nil {
 		fmt.Fprintln(os.Stderr, "voice-client:", err)
 		os.Exit(1)
 	}
 }
 
-func run(sfu, room, user string, slots int, d time.Duration, out string, loopback bool) error {
-	c, err := voicetest.New(voicetest.Options{Slots: slots, Loopback: loopback})
+func run(sfu, room, user string, slots int, d time.Duration, out string, loopback bool, relay string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), d+time.Minute)
+	defer cancel()
+
+	opts := voicetest.Options{Slots: slots, Loopback: loopback}
+	if relay != "" {
+		cred, err := voicetest.Credentials(ctx, sfu, voicetest.CredentialsRequest{User: user})
+		if err != nil {
+			return err
+		}
+		scheme := map[string]string{"udp": "turn:", "tcp": "turn:", "tls": "turns:"}[relay]
+		transport := map[string]string{"udp": "udp", "tcp": "tcp", "tls": "tcp"}[relay]
+		for _, u := range cred.URLs {
+			if strings.HasPrefix(u, scheme) && strings.HasSuffix(u, "?transport="+transport) {
+				opts.ICEServers = []webrtc.ICEServer{{URLs: []string{u}, Username: cred.Username, Credential: cred.Password}}
+			}
+		}
+		if opts.ICEServers == nil {
+			return fmt.Errorf("the harness offers no TURN over %s: %v", relay, cred.URLs)
+		}
+		opts.RelayOnly = true
+	}
+	c, err := voicetest.New(opts)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = c.Close() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), d+time.Minute)
-	defer cancel()
 	offer, err := c.Offer(ctx)
 	if err != nil {
 		return err
@@ -68,7 +99,8 @@ func run(sfu, room, user string, slots int, d time.Duration, out string, loopbac
 	if err := c.WaitConnected(ctx); err != nil {
 		return err
 	}
-	fmt.Printf("connected as connection %s, %d bytes of offer\n", res.Conn, len(offer))
+	fmt.Printf("connected as connection %s through a %s candidate, %d bytes of offer\n", res.Conn,
+		c.SelectedCandidateType(), len(offer))
 
 	tone := voicetest.TonePackets()
 	var packets [][]byte

@@ -164,8 +164,9 @@ type runningServer struct {
 
 func (s *runningServer) output() string { return s.logs.String() }
 
-// startServer launches the binary and arranges for it to be killed when the test ends.
-func startServer(t *testing.T, binary, addr, dsn string) *runningServer {
+// startServer launches the binary, with env added to its environment, and arranges for it to be killed
+// when the test ends.
+func startServer(t *testing.T, binary, addr, dsn string, env ...string) *runningServer {
 	t.Helper()
 
 	logs := &syncBuffer{}
@@ -181,6 +182,7 @@ func startServer(t *testing.T, binary, addr, dsn string) *runningServer {
 		// container in CI.
 		"NORITE_MIGRATE_LOCK_TIMEOUT=90s",
 	)
+	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdout = logs
 	cmd.Stderr = logs
 

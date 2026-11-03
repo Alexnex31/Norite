@@ -193,6 +193,39 @@ type Config struct {
 	ACMEDomain string `validate:"required_if=ACMEEnabled true,omitempty,hostname"`
 	ACMEEmail  string `validate:"required_if=ACMEEnabled true,omitempty,email"`
 
+	// VoiceEnabled starts the SFU and the TURN server with the instance. Default false: until op 4 exists
+	// (M33) nothing can join a call, and an instance that binds media ports nobody can use is a firewall
+	// question asked for nothing. The settings below are validated whether or not it is on.
+	VoiceEnabled bool
+
+	// VoiceMediaListen is the SFU's one UDP socket, which every call's media arrives on.
+	VoiceMediaListen string
+
+	// VoicePublicAddresses, comma-separated IPs, are what the SFU announces in place of the address it is
+	// bound to. Needed behind a 1:1 NAT or a port-forwarding router, where the bound address is one no
+	// client can reach. Empty announces what is bound.
+	VoicePublicAddresses string
+
+	// VoiceTURNListen is where TURN and STUN listen, on UDP and TCP alike. TURN runs whenever the SFU does:
+	// a client whose network refuses UDP has no other way in.
+	VoiceTURNListen string
+
+	// VoiceTURNTLSListen is where TURN listens over TLS, which happens only with a certificate: a PEM
+	// chain and its key, read from these files and read again when they change, so a renewal needs no
+	// restart. Port 443 is where TLS matters most, since a network that refuses UDP usually allows only
+	// 80 and 443 out.
+	VoiceTURNTLSListen string
+	VoiceTURNTLSCert   string
+	VoiceTURNTLSKey    string
+
+	// VoiceRelayAddress is the address TURN's relay sockets are bound on, on the SFU's own host, and the
+	// address TURN reaches the SFU at. Empty is the media address when that names one, else 127.0.0.1.
+	VoiceRelayAddress string
+
+	// VoiceRelayPorts is the range relay sockets take, "low-high". Empty for any. Relay traffic stays on
+	// the host, so the range matters only to a firewall that restricts local ports.
+	VoiceRelayPorts string
+
 	// PublicBaseURL is the origin users reach this instance on, e.g. "https://chat.example.com".
 	//
 	// The backend cannot derive this: behind a reverse proxy the Host header is whatever the proxy sends,
@@ -508,6 +541,18 @@ func Load(configPath string) (Config, error) {
 	collect(err)
 	cfg.ACMEEnabled = acmeEnabled
 
+	voiceEnabled, err := getEnvBool("VOICE_ENABLED", fileBool(file.Voice.Enabled, false))
+	collect(err)
+	cfg.VoiceEnabled = voiceEnabled
+	cfg.VoiceMediaListen = getEnvString("VOICE_MEDIA_LISTEN", fileString(file.Voice.MediaListen, ":3479"))
+	cfg.VoicePublicAddresses = getEnvString("VOICE_PUBLIC_ADDRESSES", fileString(file.Voice.PublicAddresses, ""))
+	cfg.VoiceTURNListen = getEnvString("VOICE_TURN_LISTEN", fileString(file.Voice.TURNListen, ":3478"))
+	cfg.VoiceTURNTLSListen = getEnvString("VOICE_TURN_TLS_LISTEN", fileString(file.Voice.TURNTLSListen, ":5349"))
+	cfg.VoiceTURNTLSCert = getEnvString("VOICE_TURN_TLS_CERT", fileString(file.Voice.TURNTLSCert, ""))
+	cfg.VoiceTURNTLSKey = getEnvString("VOICE_TURN_TLS_KEY", fileString(file.Voice.TURNTLSKey, ""))
+	cfg.VoiceRelayAddress = getEnvString("VOICE_RELAY_ADDRESS", fileString(file.Voice.RelayAddress, ""))
+	cfg.VoiceRelayPorts = getEnvString("VOICE_RELAY_PORTS", fileString(file.Voice.RelayPorts, ""))
+
 	smtpEnabled, err := getEnvBool("SMTP_ENABLED", fileBool(file.SMTP.Enabled, false))
 	collect(err)
 	cfg.SMTPEnabled = smtpEnabled
@@ -593,6 +638,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("config: invalid configuration: %s: must be an http:// or https:// URL, "+
 				"because it becomes a link in outbound mail and the OAuth callback", name)
 		}
+	}
+	if _, err := c.Voice(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -726,6 +774,24 @@ func fileKeyFor(field string) string {
 		return "[acme].domain"
 	case "ACMEEmail":
 		return "[acme].email"
+	case "VoiceEnabled":
+		return "[voice].enabled"
+	case "VoiceMediaListen":
+		return "[voice].media_listen"
+	case "VoicePublicAddresses":
+		return "[voice].public_addresses"
+	case "VoiceTURNListen":
+		return "[voice].turn_listen"
+	case "VoiceTURNTLSListen":
+		return "[voice].turn_tls_listen"
+	case "VoiceTURNTLSCert":
+		return "[voice].turn_tls_cert"
+	case "VoiceTURNTLSKey":
+		return "[voice].turn_tls_key"
+	case "VoiceRelayAddress":
+		return "[voice].relay_address"
+	case "VoiceRelayPorts":
+		return "[voice].relay_ports"
 	case "SMTPEnabled":
 		return "[smtp].enabled"
 	case "SMTPHost":
@@ -826,6 +892,24 @@ func envVarFor(field string) string {
 		return envPrefix + "ACME_DOMAIN"
 	case "ACMEEmail":
 		return envPrefix + "ACME_EMAIL"
+	case "VoiceEnabled":
+		return envPrefix + "VOICE_ENABLED"
+	case "VoiceMediaListen":
+		return envPrefix + "VOICE_MEDIA_LISTEN"
+	case "VoicePublicAddresses":
+		return envPrefix + "VOICE_PUBLIC_ADDRESSES"
+	case "VoiceTURNListen":
+		return envPrefix + "VOICE_TURN_LISTEN"
+	case "VoiceTURNTLSListen":
+		return envPrefix + "VOICE_TURN_TLS_LISTEN"
+	case "VoiceTURNTLSCert":
+		return envPrefix + "VOICE_TURN_TLS_CERT"
+	case "VoiceTURNTLSKey":
+		return envPrefix + "VOICE_TURN_TLS_KEY"
+	case "VoiceRelayAddress":
+		return envPrefix + "VOICE_RELAY_ADDRESS"
+	case "VoiceRelayPorts":
+		return envPrefix + "VOICE_RELAY_PORTS"
 	case "PublicBaseURL":
 		return envPrefix + "PUBLIC_BASE_URL"
 	case "SourceURL":

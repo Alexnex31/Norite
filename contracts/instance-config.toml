@@ -187,6 +187,40 @@ enabled = true
 domain = "chat.example.com"
 email = "admin@example.com"
 
+[voice]
+# Start the SFU, which carries calls' audio, and the TURN server beside it. Default false until joining a
+# call exists (M33): until then nothing can use either, and they bind ports a firewall would have to open
+# for nothing. Every setting below is checked at startup whether or not this is on.
+enabled = true
+
+# The SFU's one UDP port, which every call's media arrives on. Open it to the world. Default ":3479".
+media_listen = ":3479"
+
+# What the SFU announces in place of the address it is bound to, comma-separated. Needed behind a 1:1 NAT
+# (most clouds' public IPs) or a router forwarding the ports, where the machine's own address is one no
+# client can reach. Default empty, which announces the bound address.
+public_addresses = "203.0.113.7, 2001:db8::7"
+
+# TURN and STUN, on UDP and TCP alike: the relay for a client whose network refuses UDP to the SFU. Open it
+# on both. Default ":3478". TURN runs whenever the SFU does.
+turn_listen = ":3478"
+
+# TURN over TLS, offered only with a certificate: a PEM chain and its key, read again when they change on
+# disk, so the files a reverse proxy or certbot renews can be named here. 443 is where TLS helps most, since
+# a network refusing UDP usually allows only 80 and 443 out; sharing 443 with a web server needs a layer-4
+# proxy in front of both. Default ":5349".
+turn_tls_listen = ":5349"
+turn_tls_cert = "/etc/norite/turn.pem"
+turn_tls_key = "/etc/norite/turn.key"
+
+# Where TURN's relay sockets are bound, on this machine, and where they reach the SFU. Default the media
+# address when media_listen names one, else 127.0.0.1. Relay traffic never leaves the host, so nothing
+# here needs opening.
+relay_address = "127.0.0.1"
+
+# The ports relay sockets take, "low-high". Default empty, for any.
+relay_ports = "49152-65535"
+
 [smtp]
 # Outbound email. Off by default and a deployment-time opt-out by design: an instance with no relay still
 # runs, and the features that need one — password reset today, matchmaking's email gate later — are simply
