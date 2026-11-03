@@ -119,12 +119,12 @@ func TestAStackThatCannotStartLeavesNothingBound(t *testing.T) {
 // nowhere. Before /code-review found it, the relay worked only where the SFU announced the one address it
 // was bound to, which is what every earlier test and the manual pass had configured.
 func TestARelayedClientReachesAnSFUByWhatItAnnounces(t *testing.T) {
-	for name, tune := range map[string]func(*StackOptions){
-		"a public address": func(o *StackOptions) {
+	for name, tune := range map[string]func(*testing.T, *StackOptions){
+		"a public address": func(_ *testing.T, o *StackOptions) {
 			o.Public = []netip.Addr{netip.MustParseAddr("192.0.2.10")}
 		},
-		"every interface": func(o *StackOptions) {
-			if !hasInterfaceAddress() {
+		"every interface": func(t *testing.T, o *StackOptions) {
+			if !hasInterfaceAddress(true) {
 				t.Skip("no IPv4 address here but loopback")
 			}
 			o.MediaListen = "0.0.0.0:0"
@@ -133,7 +133,7 @@ func TestARelayedClientReachesAnSFUByWhatItAnnounces(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := stackOptions(t)
-			tune(&opts)
+			tune(t, &opts)
 			st, err := StartStack(opts)
 			if err != nil {
 				t.Fatal(err)
@@ -156,13 +156,16 @@ func TestARelayedClientReachesAnSFUByWhatItAnnounces(t *testing.T) {
 	}
 }
 
-func hasInterfaceAddress() bool {
+// hasInterfaceAddress is whether this host has an address in the family, IPv4 or not, that an SFU on
+// every interface announces: neither loopback nor link-local.
+func hasInterfaceAddress(v4 bool) bool {
 	ifaddrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return false
 	}
 	for _, ia := range ifaddrs {
-		if n, ok := ia.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+		if n, ok := ia.(*net.IPNet); ok && (n.IP.To4() != nil) == v4 && !n.IP.IsLoopback() &&
+			!n.IP.IsLinkLocalUnicast() {
 			return true
 		}
 	}
@@ -234,6 +237,12 @@ func TestAClientReachingTURNOverIPv6JoinsTheCall(t *testing.T) {
 	probe, err := net.ListenPacket("udp6", "[::1]:0")
 	if err != nil {
 		t.Skip("no IPv6 loopback here:", err)
+	}
+	// The SFU announces the host's IPv6 addresses, not ::1, so the relayed client has something to pair
+	// with only where there is one. The TURN half runs everywhere, in turn's own tests.
+	if !hasInterfaceAddress(false) {
+		_ = probe.Close()
+		t.Skip("no IPv6 address here but loopback and link-local")
 	}
 	turnAddr := probe.LocalAddr().String()
 	_ = probe.Close()
