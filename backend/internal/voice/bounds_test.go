@@ -6,14 +6,10 @@ package voice
 import (
 	"bytes"
 	"context"
-	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/pion/stun/v4"
-	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/internal/voice/voicetest"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -252,51 +248,10 @@ func TestBindingRequestsFromManyAddressesAreBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attr := func(sdp, key string) string {
-		for line := range strings.SplitSeq(sdp, "\r\n") {
-			if v, ok := strings.CutPrefix(line, "a="+key+":"); ok {
-				return v
-			}
-		}
-		t.Fatalf("no a=%s", key)
-		return ""
-	}
-	username := attr(answer, "ice-ufrag") + ":" + attr(offer, "ice-ufrag")
-	password := attr(answer, "ice-pwd")
-	target := s.opts.Conn.LocalAddr()
-
 	const sources = 100
-	for range sources {
-		pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = pc.Close() })
-		msg, err := stun.Build(stun.TransactionID, stun.BindingRequest, stun.NewUsername(username),
-			stun.NewShortTermIntegrity(password), stun.Fingerprint)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pc.WriteTo(msg.Raw, target); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	s.mu.Lock()
-	c := s.conns[connID]
-	s.mu.Unlock()
-	c.mu.Lock()
-	pc := c.pc
-	c.mu.Unlock()
-	remote := func() int {
-		n := 0
-		for _, st := range pc.GetStats() {
-			if cs, ok := st.(webrtc.ICECandidateStats); ok && cs.Type == webrtc.StatsTypeRemoteCandidate {
-				n++
-			}
-		}
-		return n
-	}
+	sendChecks(t, s, offer, answer, sources)
+	pc := peerOf(s, connID)
+	remote := func() int { return remoteCandidateCount(pc) }
 	bound := remoteCandidates(s.lim)
 	// The requests reached ICE: it holds most of what the bound lets it, the rest spent on asks about
 	// the offer's own candidates.
