@@ -54,7 +54,7 @@ func newWorld(t *testing.T) *world {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{cliName, daemonName} {
+	for _, name := range []string{cliName, workerName, daemonName} {
 		if err := os.WriteFile(filepath.Join(w.bin, name), []byte("0.1.0 "+name), 0o755); err != nil { //nolint:gosec // a stand-in program
 			t.Fatal(err)
 		}
@@ -64,7 +64,7 @@ func newWorld(t *testing.T) *world {
 	}
 	archive := fmt.Sprintf("norite_0.1.1_linux_%s.tar.gz", runtime.GOARCH)
 	w.host = newHost(t, "v0.1.1", archive, tarGz(t, entry{name: "norite", body: "0.1.1 norite"},
-		entry{name: "norite-daemon", body: newDaemonScript}))
+		entry{name: "norite-voice", body: newDaemonScript}, entry{name: "norite-daemon", body: newDaemonScript}))
 	w.listing.Store(`[{"tag_name":"v0.1.1"},{"tag_name":"v0.1.0"}]`)
 	w.instance.Store("")
 	inner := w.host.server.Config.Handler
@@ -665,7 +665,7 @@ func TestAnInstallThatCannotBeReplacedIsNotStoppedFor(t *testing.T) {
 	if _, err := u.Apply(t.Context()); err == nil || !strings.Contains(err.Error(), "cannot be installed here") {
 		t.Errorf("apply: %v", err)
 	}
-	if entries, _ := os.ReadDir(w.bin); len(entries) != 2 {
+	if entries, _ := os.ReadDir(w.bin); len(entries) != 3 {
 		t.Errorf("the check left something in the bin directory: %v", entries)
 	}
 }

@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
 Install the Norite client for the current user on Windows: norite.exe (the command line and the terminal
-client) and norite-daemon.exe (the background program it talks to). It never asks for administrator rights.
+client), norite-daemon.exe (the background program it talks to) and norite-voice.exe (the program the
+daemon starts for a voice call, beside itself). It never asks for administrator rights.
 
 .DESCRIPTION
-In order: gets the two programs (a release archive, checked, or a build of the checkout it sits in), puts
+In order: gets the three programs (a release archive, checked, or a build of the checkout it sits in), puts
 them in %LOCALAPPDATA%\Programs\Norite and on your PATH, registers the daemon to start at every logon and
 starts it, then offers to create an account or sign in.
 
@@ -106,6 +107,7 @@ function Install-Norite {
     }
     $norite = Join-Path $BinDir 'norite.exe'
     $daemon = Join-Path $BinDir 'norite-daemon.exe'
+    $worker = Join-Path $BinDir 'norite-voice.exe'
 
     # Stop-Daemon stops a daemon running from $BinDir. Windows will not replace or delete a program that is
     # running. The daemon is asked first, by the norite already installed, which is the running daemon's own
@@ -136,7 +138,7 @@ function Install-Norite {
         try { & $norite update receipt --forget --bin-dir $BinDir 2>$null | Out-Null } catch { }
         Stop-Daemon
         Start-Sleep -Milliseconds 500
-        Remove-Item -Force -ErrorAction SilentlyContinue $norite, $daemon
+        Remove-Item -Force -ErrorAction SilentlyContinue $norite, $daemon, $worker
         $kept = @(Get-UserPathEntries | Where-Object { $_ -ne $BinDir })
         [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
         Say 'Removed. The daemon''s state is left in place; delete it for a clean slate:'
@@ -173,6 +175,9 @@ function Install-Norite {
                 finally { Pop-Location }
                 Push-Location (Join-Path $checkout 'daemon')
                 try { & go build -trimpath -o (Join-Path $out 'norite-daemon.exe') ./cmd/daemond; if ($LASTEXITCODE -ne 0) { throw 'building norite-daemon.exe failed' } }
+                finally { Pop-Location }
+                Push-Location (Join-Path $checkout 'voiceworker')
+                try { & go build -trimpath -o (Join-Path $out 'norite-voice.exe') ./cmd/norite-voice; if ($LASTEXITCODE -ne 0) { throw 'building norite-voice.exe failed' } }
                 finally { Pop-Location }
             }
             finally { $env:CGO_ENABLED = $savedCgo; $env:GOWORK = $savedWork }
@@ -231,14 +236,16 @@ function Install-Norite {
             Expand-Archive -Path $zip -DestinationPath $out -Force
         }
 
-        foreach ($name in 'norite.exe', 'norite-daemon.exe') {
+        foreach ($name in 'norite.exe', 'norite-voice.exe', 'norite-daemon.exe') {
             if (-not (Test-Path (Join-Path $out $name))) { throw "$name is missing from what was fetched" }
         }
 
         Step "Installing into $BinDir"
         New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
         Stop-Daemon
-        foreach ($name in 'norite.exe', 'norite-daemon.exe') {
+        # The worker before the daemon, which finds it beside itself. A worker still running a call when the
+        # daemon was stopped is renamed out of the way like any running program, and exits as its pipe closes.
+        foreach ($name in 'norite.exe', 'norite-voice.exe', 'norite-daemon.exe') {
             $target = Join-Path $BinDir $name
             # A program still running cannot be overwritten, but it can be renamed out of the way.
             if (Test-Path $target) {
@@ -249,7 +256,7 @@ function Install-Norite {
             if ($onWindows) { Unblock-File -Path $target -ErrorAction SilentlyContinue }
         }
         Get-ChildItem -Path $BinDir -Filter '*.old-*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        Say 'norite.exe, norite-daemon.exe'
+        Say 'norite.exe, norite-voice.exe, norite-daemon.exe'
     }
     finally {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
@@ -260,7 +267,7 @@ function Install-Norite {
     & $norite --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$norite was installed but does not run on this machine" }
 
-    # Where the two programs were put, which is what lets the daemon install a later release itself (M24):
+    # Where the programs were put, which is what lets the daemon install a later release itself (M24):
     # it writes over the pair only in a directory an installer named. There is one receipt per account, for
     # the install its daemon runs from, so it is written only when this run starts the daemon, and
     # forgotten only when it names this directory. A build of a checkout is not a release and is not

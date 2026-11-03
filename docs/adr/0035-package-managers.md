@@ -242,7 +242,8 @@ the question, and every new ad-hoc daemon build re-prompting for the microphone 
   release publishes now covers the package definitions too: an archive name, a binary or a path changed
   in one changes the others in the same commit.
 - `release.yml` gains four secrets, and `just release-dry-run` builds every package without publishing and
-  checks each client package carries both programs and its marker.
+  checks each client package carries both programs and its marker. Three programs since M28, when the
+  voice-worker joined the client archive: it goes wherever the daemon goes, and is linked by no cask.
 - A release has 27 files where it had 14, so its entry in GitHub's listing roughly doubles, to about
   60 KB. The updater reads at most 32 MiB of listing (M24), which a hundred such releases stay well under.
 - `daemonctl` records the link a package manager keeps, and the systemd unit skips a program that is gone;

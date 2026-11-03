@@ -14,17 +14,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 )
 
 const (
-	// The two programs a client archive holds (.goreleaser.yaml), which are one install.
+	// The three programs a client archive holds (.goreleaser.yaml), which are one install. The voice-worker
+	// joined at M28; it has no release of its own and goes wherever the daemon goes.
 	cliName    = "norite"
 	daemonName = "norite-daemon"
+	workerName = voiceworker.Program
 	// The file naming every archive's hash, and the signature over it. With the archive's name
 	// (archiveName) these are .goreleaser.yaml's, and a test holds them to it.
 	checksumsName = "checksums.txt"
@@ -51,8 +57,8 @@ var errDownload = errors.New("downloading")
 // Staged is a release downloaded, verified, unpacked and run once: ready to be installed.
 type Staged struct {
 	Release Release
-	// CLI and Daemon are the two programs, in the staging directory.
-	CLI, Daemon string
+	// CLI, Worker and Daemon are the three programs, in the staging directory.
+	CLI, Worker, Daemon string
 }
 
 // Stager turns a release into a Staged.
@@ -64,8 +70,8 @@ type Stager struct {
 	Dir string
 	// GOOS and GOARCH name the archive this machine takes.
 	GOOS, GOARCH string
-	// smoke runs a staged daemon and returns the version it reports. Nil is the real run.
-	smoke func(ctx context.Context, daemon string) (string, error)
+	// smoke runs a staged daemon or worker and returns the version it reports. Nil is the real run.
+	smoke func(ctx context.Context, program string) (string, error)
 }
 
 // Stage downloads r, checks it, and leaves its two programs in the staging directory.
@@ -118,9 +124,11 @@ func (s *Stager) Stage(ctx context.Context, r Release) (staged Staged, err error
 
 	staged = Staged{Release: r,
 		CLI:    filepath.Join(dir, cliName+exeSuffix(s.GOOS)),
+		Worker: filepath.Join(dir, workerName+exeSuffix(s.GOOS)),
 		Daemon: filepath.Join(dir, daemonName+exeSuffix(s.GOOS))}
 	if err := unpack(archivePath, s.GOOS, map[string]string{
 		cliName + exeSuffix(s.GOOS):    staged.CLI,
+		workerName + exeSuffix(s.GOOS): staged.Worker,
 		daemonName + exeSuffix(s.GOOS): staged.Daemon,
 	}); err != nil {
 		return Staged{}, fmt.Errorf("unpacking %s: %w", archive, err)
@@ -133,12 +141,16 @@ func (s *Stager) Stage(ctx context.Context, r Release) (staged Staged, err error
 	if smoke == nil {
 		smoke = reportedVersion
 	}
-	got, err := smoke(ctx, staged.Daemon)
-	if err != nil {
-		return Staged{}, fmt.Errorf("the new daemon did not run: %w", err)
-	}
-	if got != r.Version.String() {
-		return Staged{}, fmt.Errorf("the new daemon says it is %q, and the release is %s", got, r.Version)
+	// The worker is run too: a daemon whose worker cannot start installs fine and fails every call, and
+	// a worker of another version is one the daemon refuses at its first HELLO.
+	for _, p := range []struct{ what, path string }{{"daemon", staged.Daemon}, {"voice worker", staged.Worker}} {
+		got, err := smoke(ctx, p.path)
+		if err != nil {
+			return Staged{}, fmt.Errorf("the new %s did not run: %w", p.what, err)
+		}
+		if got != r.Version.String() {
+			return Staged{}, fmt.Errorf("the new %s says it is %q, and the release is %s", p.what, got, r.Version)
+		}
 	}
 	return staged, nil
 }
@@ -241,7 +253,8 @@ func unpack(archivePath, goos string, wanted map[string]string) error {
 	if err != nil {
 		return err
 	}
-	for name := range wanted {
+	// In order, so an archive missing two says the same one every time.
+	for _, name := range slices.Sorted(maps.Keys(wanted)) {
 		if !found[name] {
 			return fmt.Errorf("the archive holds no %s", name)
 		}
@@ -308,7 +321,8 @@ func unpackZip(path string, take func(name string, regular bool, content io.Read
 	return nil
 }
 
-// reportedVersion runs a daemon with -version and returns what it prints: the version it was built as.
+// reportedVersion runs a daemon or a worker with -version and returns what it prints: the version it was
+// built as.
 // The environment is empty, so nothing of this daemon's reaches it, and it has a few seconds.
 func reportedVersion(ctx context.Context, daemon string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, smokeTimeout)

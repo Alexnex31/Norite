@@ -98,9 +98,15 @@ type Installer struct {
 func (in *Installer) recordPath() string  { return filepath.Join(in.Dir, "state.json") }
 func (in *Installer) previousDir() string { return filepath.Join(in.Dir, "previous") }
 
+// programs are the installed programs, in the order they are replaced: the command first and the daemon
+// last, so a start that finds the new daemon knows the others are new too.
 func (in *Installer) programs() []string {
-	return []string{cliName + exeSuffix(in.GOOS), daemonName + exeSuffix(in.GOOS)}
+	return []string{cliName + exeSuffix(in.GOOS), workerName + exeSuffix(in.GOOS), daemonName + exeSuffix(in.GOOS)}
 }
+
+// mayBeAbsent is a program an install may lack: the worker, which an install from before M28 has none of.
+// Such an install takes a release with one, and a rollback to it removes the worker again.
+func (in *Installer) mayBeAbsent(name string) bool { return name == workerName+exeSuffix(in.GOOS) }
 
 // Load reads the record. One that is missing is an empty one.
 //
@@ -178,6 +184,9 @@ func (in *Installer) save(r Record) error {
 func (in *Installer) Ready() error {
 	for _, name := range in.programs() {
 		info, err := os.Lstat(filepath.Join(in.BinDir, name))
+		if errors.Is(err, fs.ErrNotExist) && in.mayBeAbsent(name) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -218,7 +227,12 @@ func (in *Installer) Install(staged Staged, from string) error {
 		return err
 	}
 	for _, name := range in.programs() {
-		if err := copyFile(filepath.Join(in.BinDir, name), filepath.Join(keeping, name)); err != nil {
+		err := copyFile(filepath.Join(in.BinDir, name), filepath.Join(keeping, name))
+		if errors.Is(err, fs.ErrNotExist) && in.mayBeAbsent(name) {
+			// Nothing to keep, and so nothing restored: a rollback removes the one installed.
+			continue
+		}
+		if err != nil {
 			_ = os.RemoveAll(keeping)
 			return fmt.Errorf("keeping the current %s: %w", name, err)
 		}
@@ -240,7 +254,8 @@ func (in *Installer) Install(staged Staged, from string) error {
 	}
 
 	// The command first and the daemon last: a start that finds the new daemon knows both are new.
-	sources := map[string]string{cliName + exeSuffix(in.GOOS): staged.CLI, daemonName + exeSuffix(in.GOOS): staged.Daemon}
+	sources := map[string]string{cliName + exeSuffix(in.GOOS): staged.CLI,
+		workerName + exeSuffix(in.GOOS): staged.Worker, daemonName + exeSuffix(in.GOOS): staged.Daemon}
 	for _, name := range in.programs() {
 		if err := replaceProgram(filepath.Join(in.BinDir, name), sources[name]); err != nil {
 			// Put back whatever was replaced. If that fails too, the record still says "swapping" and the
@@ -264,10 +279,18 @@ func (in *Installer) Install(staged Staged, from string) error {
 	return nil
 }
 
-// restore puts the previous pair back over the installed one.
+// restore puts the previous programs back over the installed ones. A worker the previous install did not
+// have is removed: it is the newer version's, and nothing of the older one runs it.
 func (in *Installer) restore() error {
 	for _, name := range in.programs() {
-		if err := replaceProgram(filepath.Join(in.BinDir, name), filepath.Join(in.previousDir(), name)); err != nil {
+		kept := filepath.Join(in.previousDir(), name)
+		if _, err := os.Lstat(kept); errors.Is(err, fs.ErrNotExist) && in.mayBeAbsent(name) {
+			if err := os.Remove(filepath.Join(in.BinDir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("removing %s: %w", name, err)
+			}
+			continue
+		}
+		if err := replaceProgram(filepath.Join(in.BinDir, name), kept); err != nil {
 			return fmt.Errorf("restoring %s: %w", name, err)
 		}
 	}

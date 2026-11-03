@@ -1620,13 +1620,15 @@ automation port refuses every `/@daemon/` path.
   An install that is itself a pre-release is on the pre-release channel unless told otherwise.
 - **Verifying.** `checksums.txt` and its Sigstore bundle are verified offline with `sigstore-go`, against
   a trusted root embedded in the binary and the identity `release.yml@refs/tags/<tag>`. Then the archive
-  against the checksums, then the two programs by exact name, then the new daemon is run once with
-  `-version`. Any failure leaves the running version running.
+  against the checksums, then the three programs by exact name, then the new daemon and its voice-worker
+  are each run once with `-version` and must say the release's version. Any failure leaves the running
+  version running.
 - **Installing.** The daemon ends its own run, as a stop request does, and with its lock still held keeps
-  the current pair aside and renames the new pair in. On Unix the process then replaces itself; on
+  the current programs aside and renames the new ones in, the daemon last. An install from before M28 has
+  no worker to keep, and undoing to it removes the one installed. On Unix the process then replaces itself; on
   Windows it starts its successor and exits.
 - **Undoing.** A start that finds two starts of a new version that ended badly, or a crash file, restores
-  the kept pair and lists the version as bad. A run that stays up ten minutes is kept.
+  the kept programs and lists the version as bad. A run that stays up ten minutes is kept.
 - **Who.** Only an install with a receipt (`install.json` in the state directory) naming the directory the
   daemon runs from, which the installer scripts leave, and `auto` by default on Linux and Windows. Any
   other install, a development build, and macOS check and say so. An install a package manager made

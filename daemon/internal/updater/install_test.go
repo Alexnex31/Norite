@@ -37,7 +37,8 @@ func newInstalled(t *testing.T) *installed {
 		x.write(filepath.Join(in.BinDir, name), "0.1.0 "+name)
 		x.write(filepath.Join(stage, name), "0.1.1 "+name)
 	}
-	x.staged = Staged{Release: mustTag(t, "v0.1.1"), CLI: filepath.Join(stage, in.programs()[0]), Daemon: filepath.Join(stage, in.programs()[1])}
+	x.staged = Staged{Release: mustTag(t, "v0.1.1"), CLI: filepath.Join(stage, in.programs()[0]),
+		Worker: filepath.Join(stage, in.programs()[1]), Daemon: filepath.Join(stage, in.programs()[2])}
 	return x
 }
 
@@ -58,8 +59,8 @@ func (x *installed) onDisk(want string) {
 		}
 	}
 	left, _ := os.ReadDir(x.in.BinDir)
-	if len(left) != 2 {
-		x.t.Errorf("the bin directory holds %d files, want the two programs", len(left))
+	if len(left) != len(x.in.programs()) {
+		x.t.Errorf("the bin directory holds %d files, want the %d programs", len(left), len(x.in.programs()))
 	}
 }
 
@@ -510,5 +511,50 @@ func TestAFailedSecondInstallationKeepsTheFirstOnesWayBack(t *testing.T) {
 	x.start("0.1.1", true, RolledBack)
 	if got, _ := os.ReadFile(daemon); string(got) != "0.1.0 "+daemonName {
 		t.Errorf("rolled back to %q", got)
+	}
+}
+
+// An install from before M28 has no worker. It takes a release that has one, and a rollback to it removes
+// the worker again, since nothing of the older version runs it.
+func TestAnInstallWithNoWorkerTakesOneAndGivesItBack(t *testing.T) {
+	x := newInstalled(t)
+	worker := filepath.Join(x.in.BinDir, workerName+exeSuffix(x.in.GOOS))
+	if err := os.Remove(worker); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.in.Ready(); err != nil {
+		t.Fatalf("an install with no worker is not ready for one: %v", err)
+	}
+	if err := x.in.Install(x.staged, "0.1.0"); err != nil {
+		t.Fatal(err)
+	}
+	x.onDisk("0.1.1")
+
+	x.start("0.1.1", true, Counted)
+	x.start("0.1.1", true, RolledBack)
+	for _, name := range []string{cliName, daemonName} {
+		got, err := os.ReadFile(filepath.Join(x.in.BinDir, name+exeSuffix(x.in.GOOS)))
+		if err != nil || string(got) != "0.1.0 "+name+exeSuffix(x.in.GOOS) {
+			t.Errorf("%s is %q (%v) after the rollback", name, got, err)
+		}
+	}
+	if _, err := os.Stat(worker); !os.IsNotExist(err) {
+		t.Errorf("the rollback left the newer version's worker: %v", err)
+	}
+}
+
+// Only the worker may be missing: an install with no daemon or no command is one to refuse, as before.
+func TestOnlyTheWorkerMayBeMissing(t *testing.T) {
+	for _, name := range []string{cliName, daemonName} {
+		x := newInstalled(t)
+		if err := os.Remove(filepath.Join(x.in.BinDir, name+exeSuffix(x.in.GOOS))); err != nil {
+			t.Fatal(err)
+		}
+		if err := x.in.Ready(); err == nil {
+			t.Errorf("an install with no %s is ready", name)
+		}
+		if err := x.in.Install(x.staged, "0.1.0"); err == nil {
+			t.Errorf("an install with no %s was installed over", name)
+		}
 	}
 }
