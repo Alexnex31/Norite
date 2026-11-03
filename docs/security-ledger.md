@@ -1743,7 +1743,8 @@ carries the condition that would reopen it.
   `/code-review` found it contained only in the room's tick, so a panic the tick survived came back on
   the next close, in a goroutine nothing recovered); the offer validator, the data-channel decoder and
   the forward path are fuzzed;
-  Pion's internal goroutines (ICE, DTLS, SCTP, SRTP) are beyond any recover the package can place. A panic
+  Pion's internal goroutines (ICE, DTLS, SCTP, SRTP, and since M27 pion/turn's read loops, whose callbacks
+  into this code recover through `turn.Server.contain`) are beyond any recover the package can place. A panic
   there is a bug in a widely used library, and on the flagship the SFU runs in pods of its own (M116).
 - **Reopens if**: a panic reachable from the network is found in a Pion release this project uses.
 
@@ -1760,7 +1761,8 @@ carries the condition that would reopen it.
   Pion's ICE adds a peer-reflexive candidate for every source address that sends an authenticated
   binding request, pairs it and sends it up to seven checks of its own, with no bound, and the peer
   holds the credentials. Measured: binding requests from 100 ports left 105 remote candidates. Bounded
-  since by the remote IP filter on each connection's own API.
+  since by the remote IP filter on each connection's own API. Since M27 the SFU is ICE-lite, so it sends
+  no check to any candidate, peer-reflexive or offered.
 - **Reopens if**: something per packet before the meter starts keeping state, or the port answers a
   packet with more than it received.
 
@@ -1782,3 +1784,53 @@ carries the condition that would reopen it.
   it. The server's exclusion keeps an excluded user out of both lists.
 - **Reopens if**: M70 decides a blocked user must not learn the blocker is in the call, which the
   exclusion as it stands does not cover in that direction.
+
+## M27 — Embedded TURN plus STUN
+
+### TURN's credentials are HMAC-SHA1, keyed by MD5
+- **Raised**: M27, planning
+- **Verdict**: not a vulnerability
+- **Why**: TURN's long-term credential mechanism (RFC 8489 §9.2) keys MESSAGE-INTEGRITY, an HMAC-SHA1,
+  with MD5(username:realm:password), and the TURN REST password is HMAC-SHA1(secret, username). Every
+  client speaks it, browsers at Phase O included. Neither use depends on collision resistance: an HMAC's
+  security rests on its key, and the key here is derived from a 256-bit secret HKDF takes from the
+  signing key (`turn.DeriveSecret`). What a credential opens is a relay to the SFU's port for ten minutes.
+- **Reopens if**: a client this project supports speaks RFC 8489's SHA-256 integrity and pion/turn serves
+  it, at which point offering it costs nothing.
+
+### TURN answers an unauthenticated request with more than it received
+- **Raised**: M27, planning's review
+- **Verdict**: accepted risk
+- **Why**: measured over IPv4: a 20-byte Binding request draws 40 bytes, a 28-byte Allocate draws a 68-byte
+  challenge, 2 and 2.4 times. Over UDP the source can be forged, so TURN can reflect that factor onto
+  somebody else. Every STUN server has the same exposure; what bounds it here is a rate on such replies,
+  20 a second to one address (an IPv6 /64 being one) and 2,000 in all (`turn.replies`), so a victim
+  receives at most 1.4 KB a second from one instance, and the nonces are stateless, so a flood keeps
+  nothing.
+- **Reopens if**: a reply grows (a SOFTWARE attribute, a longer nonce), or the bound is raised past what
+  an attacker could not get more cheaply elsewhere.
+
+### A TURN credential relays its account to the SFU for as long as the call lasts
+- **Raised**: M27, planning's review
+- **Verdict**: not a vulnerability
+- **Why**: a credential starts allocations for ten minutes, and an allocation it started lives as long as
+  it is refreshed, because expiry is asked of an Allocate alone (`turn.Server.authenticate`). Whoever
+  holds one, leaked or not, reaches the SFU's media port and nothing else: the relay socket sends to that
+  address alone, IP and port, and refuses TCP relaying (`turn.relays`). Anybody on the internet can send
+  to that port already, and the SFU admits only an offer it was provisioned with, by its fingerprint. An
+  allocation the SFU sends nothing through for 30 seconds closes, so one outlives its call by that much.
+  Allocations are bounded per account, per source and in all.
+- **Reopens if**: the relay reaches anything but the SFU, or the credential ever authorizes something
+  beyond the relay.
+
+### The SFU's candidate filter admits private addresses
+- **Raised**: M27, planning (found by reading pion/ice for this milestone; M26's code)
+- **Verdict**: accepted risk
+- **Why**: a LAN instance's clients have private addresses, so 10/8, 172.16/12, 192.168/16, fc00::/7 and
+  100.64/10 are admitted. Refused: loopback (outside tests), unspecified, multicast, broadcast, link-local
+  and the metadata addresses inside admitted ranges (`fd00:ec2::254`, `100.100.100.200`). The SFU is
+  ICE-lite since this milestone and sends no check to any candidate, so an address an offer names is
+  never sent anything; the filter decides only what the SFU pairs with, which is where a peer's own check
+  came from.
+- **Reopens if**: the SFU stops being ICE-lite, or anything starts sending to a remote candidate.
+

@@ -5,6 +5,7 @@ package ratelimit
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -42,6 +43,12 @@ func TestClientKeyGroupsIPv6ByPrefixAndIPv4Exactly(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.RemoteAddr = tt.remoteAddr
 			assert.Equal(t, tt.want, ClientKey(r))
+			// AddrKey must agree with ClientKey on every address, or one source is two keys.
+			host, _, err := net.SplitHostPort(tt.remoteAddr)
+			if err != nil {
+				host = tt.remoteAddr
+			}
+			assert.Equal(t, tt.want, AddrKey(net.ParseIP(host)), "AddrKey")
 		})
 	}
 }

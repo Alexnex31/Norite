@@ -228,6 +228,19 @@ func ClientKey(r *http.Request) string {
 	return ip.String() + "/" + strconv.Itoa(ipv6GroupBits)
 }
 
+// AddrKey is ClientKey for an address that did not arrive in an HTTP request: TURN's sources and the
+// destinations of its replies. The same /64 rule, so a network that holds a whole /64 is one key here as
+// it is for the API.
+func AddrKey(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	if ip.To16() == nil {
+		return "unknown"
+	}
+	return ip.Mask(maskOptions.IPv6Mask).String() + "/" + strconv.Itoa(ipv6GroupBits)
+}
+
 // retryAfterSeconds renders the Retry-After value for a window resetting at the given Unix second.
 func retryAfterSeconds(resetUnix int64, now time.Time) int {
 	remaining := time.Unix(resetUnix, 0).Sub(now)
