@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/voice/pionlog"
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 )
 
@@ -135,7 +136,7 @@ func New(opts Options) (*SFU, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	logs := pionLogs{log: opts.Logger.With().Str("subsystem", "voice").Logger()}
+	logs := pionlog.Logs{Log: opts.Logger.With().Str("subsystem", "voice").Logger()}
 
 	media := &webrtc.MediaEngine{}
 	if err := media.RegisterCodec(webrtc.RTPCodecParameters{

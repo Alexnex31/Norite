@@ -75,7 +75,7 @@ func (c *conn) onMessage(msg webrtc.DataChannelMessage) error {
 	// call, and since a subscribe replaces the last whole, its next one makes good what was dropped.
 	lim := c.sfu.lim
 	c.mu.Lock()
-	ok, out := c.messages.admit(time.Now(), 0, lim.MessagesPerSecond, 0, lim.StrikesToEvict)
+	ok, out := c.messages.Admit(time.Now(), 0, lim.MessagesPerSecond, 0, lim.StrikesToEvict)
 	c.mu.Unlock()
 	if out {
 		return refusalf("more than %d messages a second", lim.MessagesPerSecond)
