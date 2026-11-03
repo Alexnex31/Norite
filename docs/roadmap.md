@@ -1851,8 +1851,9 @@ of this section.
   - the SFU sends nothing to an address an offer names;
   - each bound holds against a test playing the peer;
   - `norite-server` holds the voice ports when it answers its first request and releases them on stop;
-  - and a manual pass in three unprivileged VMs, one client behind a NAT VM refusing all outbound UDP,
-    relayed over TCP and then TLS, the other on an open network.
+  - and a manual pass in unprivileged VMs, one client behind a NAT VM refusing all outbound UDP, relayed
+    over TCP and then TLS, the other on an open network. Run in four: the SFU and TURN, the open client,
+    the router and the client behind it.
 
   **Corrected at planning** (2026-11-03), by reading pion/turn, pion/ice and M26's code against the entry:
   - **"A client behind simulated NAT, via TURN alone" tested a relay nobody needs.** Any NAT reaches this

@@ -389,7 +389,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D complete through M24**; Phase E under way, M26 done. Full
+**Phase D complete through M24**; Phase E under way, M27 done. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -1332,6 +1332,51 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   an authenticated check, 105 from 100 ports, measured. A client that never said hello was never refused
   for its version, and was forwarded all the same. **A bound on what the peer declares is not a bound on
   what the peer can make the server hold.**
+
+- **M27 — Embedded TURN plus STUN**: done. `backend/internal/voice/turn` (TURN over UDP, TCP and TLS, and
+  STUN Binding, relaying to the SFU alone), `voice.StartStack`, the `[voice]` settings and `norite-server`
+  starting the stack under them, an ICE-lite SFU with a public address and a remote filter,
+  `ratelimit.AddrKey`, `voice/rate` and `voice/pionlog` extracted from M26, and the harness's
+  `/credentials`. Decisions are in the roadmap entry, in `architecture.md` §6, in ADRs 0012 and 0023 as
+  amended, and in `docs/security-ledger.md`.
+
+  **The done-when tested a relay nobody needed.** "A client behind simulated NAT via TURN alone" is met
+  by forcing a relay on a client that reaches this SFU without one: the SFU has an address the client can
+  reach, so any NAT, symmetric included, gets through. What needs a relay is a network that refuses UDP,
+  and the pass put the client behind a router dropping all of it. **Ask what failure a done-when's test
+  reproduces before building to it** — fifteen milestones running, planning found the entry was not the
+  milestone.
+
+  **A library's default is a decision somebody else made for a different deployment.** pion/turn's
+  permission handler admits every peer and sees only its IP; it relays over TCP to any port when asked
+  (RFC 6062); its own auth handler logs every refused username at error level, quoting it; its TCP
+  listener bounds nothing. Each was found by reading its source for this milestone, and each is replaced
+  rather than configured. The relay's guard is the socket's own `WriteTo`, which holds whatever pion asks.
+
+  **An identifier minted after the thing that needs it cannot scope it.** The first plan scoped the TURN
+  credential to the connection id; the client gathers its relayed candidate before the offer and the id
+  is minted when the offer arrives. It is the account's, and M33's entry carries the ordering.
+
+  **The fix that removes the sending beats the filter on where it goes.** M26's SFU sent checks to every
+  address an offer named, metadata address included; a filter would have had to know every bad address.
+  ICE-lite sends none, for 200 ms on a Pion client's join, measured. The filter stays as a second layer
+  and still needed two corrections a review found: "always refuse loopback" would have broken every test,
+  and "private ranges allowed" admitted AWS's and Alibaba's metadata addresses.
+
+  **A test passed for a reason other than its guard, twice.** The stream bound's test passed with the
+  bound removed because the deadline to allocate closed the connection anyway; it now looks before that
+  deadline. Closing the stack on stop passed without the close because a process's exit frees its ports;
+  the server now logs the stop and the test reads it. A first filter test failed with the filter in place,
+  having counted the offer's own candidates on the machine's private interfaces.
+
+  **`-race` found two timers assigned after they could fire**: `time.AfterFunc`'s result stored in a field
+  its own callback reads. Assign it under the lock the callback takes.
+
+  **The manual pass ran in four unprivileged VMs on QEMU stream links**: the SFU and TURN, a client on an
+  open network, a router masquerading the fourth and dropping every UDP packet it forwarded. Without the
+  relay the fourth could not connect, and the router counted the checks it dropped; through TURN over TCP
+  and then TLS, both directions carried Opus that decodes, the SFU logged no warning, and the relay
+  sockets were gone 30 seconds after the calls.
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -2806,7 +2851,9 @@ And on the SFU, from M26 (ADR 0023 as amended):
 - **Everything a peer sends is bounded against a hostile one**, and each bound has a test that plays it:
   packets and bits per track, RTCP and messages per connection, data channels, SRTP streams against
   the offer, and the remote candidates ICE adds. A rate past its bound is dropped, and past twice it for
-  three seconds closed.
+  three seconds closed, through `voice/rate`, which TURN shares.
+- **The SFU is ICE-lite** (M27) and sends nothing to any address an offer names. Its remote filter is a
+  second layer on what it pairs with; a new address class to refuse is a row in `reachable`.
 - **Every goroutine and Pion callback the package runs defers `conn.contain`**, the room's selection
   contains its own on whatever goroutine runs it, and a lock a contained panic could cross is released
   by defer.
@@ -2823,6 +2870,30 @@ And on the SFU, from M26 (ADR 0023 as amended):
   `testPanic` a panic or an eviction at a named point. A sender's sequence numbers continue across sends,
   or SRTP drops the burst. A race between an eviction and a provision is staged with cutoffs and
   `s.now`, never by racing.
+
+And on TURN, from M27:
+
+- **The relay reaches the SFU's media address and nothing else**, IP and port, enforced by the relay
+  socket's `WriteTo` and `ReadFrom` (`turn/relay.go`). pion/turn's permission check asks of the IP alone
+  and is not the guard. TCP relaying (RFC 6062) stays refused; a new relay shape goes through the same
+  generator.
+- **No pion/turn default is trusted.** Its auth handler, permission handler, listeners and relay
+  generator are all this package's; a new pion/turn option is read in its source before it is used.
+- **A credential is the account's, minted by `turn.Mint`, and reaches the client before its offer.**
+  Expiry is asked of an Allocate alone; nothing else in a credential is time-bound. Nothing is logged per
+  request: a username is a stranger's text.
+- **An allocation ends when the SFU stops sending through it** (`Limits.Idle`), which is also how it ends
+  with its call. Nothing links an allocation to a connection id, and nothing needs to.
+- **Every callback given to pion defers `Server.contain`**, which refuses the request and logs once.
+- **Replies to unauthenticated requests are rate-limited** per destination and in all, in memory, since
+  they are counted per packet. A reply that grows reopens the ledger's amplification entry.
+- **`[voice]` is checked whether or not it is on**, and `norite-server` binds its ports before migrating.
+  A new setting goes in `config.Voice`, which every error names by setting.
+- **Testing TURN**: `newFixture` in `turn/server_test.go` stands a socket in for the SFU, so a test sees
+  exactly what the relay delivers; pion's own client plays the peer. End to end, `newRelayed` in
+  `voice/relay_test.go` runs TURN beside a real SFU, and the voice package's `TestMain` trusts a
+  certificate for 127.0.0.1 through `SSL_CERT_FILE`, since Pion verifies TURNS against the system's
+  roots and nothing else.
 
 ## Project-specific skills
 
