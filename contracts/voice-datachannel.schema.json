@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://norite.example/contracts/voice-datachannel.schema.json",
+  "title": "Norite voice data channel",
+  "description": "Source of truth for every message on a voice connection's data channel (docs/architecture.md §6, ADR 0023, M26). A connection has exactly one data channel, labelled norite-voice, and every message on it is one UTF-8 JSON text of at most 8192 bytes. backend/voiceproto is its Go form, and the SFU's tests validate every message both ends send against this document. The client speaks first, with hello; anything else first closes the connection. Decoding is strict, so a field added to a message is a MINOR change. Who a source id is lives here; which packets are theirs is the CSRC each forwarded RTP packet carries, because this channel and the media are not ordered against each other.",
+  "$ref": "#/$defs/Message",
+  "$defs": {
+    "Message": {
+      "description": "Any message, in either direction.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ClientMessage"
+        },
+        {
+          "$ref": "#/$defs/ServerMessage"
+        }
+      ]
+    },
+    "ClientMessage": {
+      "description": "What the client sends: hello first, then subscribe as often as its preferences change, within the rate bound.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Hello"
+        },
+        {
+          "$ref": "#/$defs/Subscribe"
+        }
+      ]
+    },
+    "ServerMessage": {
+      "description": "What the SFU sends: ready in answer to an accepted hello, then the slot map and who is speaking whenever either changes; refused, last, before it closes the connection.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Ready"
+        },
+        {
+          "$ref": "#/$defs/Slots"
+        },
+        {
+          "$ref": "#/$defs/Speaking"
+        },
+        {
+          "$ref": "#/$defs/Refused"
+        }
+      ]
+    },
+    "Snowflake": {
+      "description": "An id, as a quoted decimal string (ADR 0003).",
+      "type": "string",
+      "pattern": "^[0-9]{1,20}$"
+    },
+    "Kind": {
+      "description": "A track's kind. Video is admitted from M105.",
+      "type": "string",
+      "enum": [
+        "audio",
+        "video"
+      ]
+    },
+    "Hello": {
+      "description": "The client's first message: its version, which the SFU checks by the gateway's rule (ADR 0033). A mismatch is answered with refused, naming which side to upgrade.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "version"
+      ],
+      "properties": {
+        "op": {
+          "const": "hello"
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "Ready": {
+      "description": "An accepted hello's answer: the SFU's version, and which of the offer's receiving sections is which slot.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "version",
+        "slots"
+      ],
+      "properties": {
+        "op": {
+          "const": "ready"
+        },
+        "version": {
+          "type": "string"
+        },
+        "slots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SlotIdent"
+          }
+        }
+      }
+    },
+    "SlotIdent": {
+      "description": "One receiving slot: its index among the connection's slots of its kind, and the mid of the offer section it is.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot",
+        "kind",
+        "mid"
+      ],
+      "properties": {
+        "slot": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        },
+        "mid": {
+          "type": "string"
+        }
+      }
+    },
+    "Slots": {
+      "description": "The whole slot map, sent whenever it changes. A slot not listed is empty.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "map"
+      ],
+      "properties": {
+        "op": {
+          "const": "slots"
+        },
+        "map": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SlotEntry"
+          }
+        }
+      }
+    },
+    "SlotEntry": {
+      "description": "One occupied slot and who fills it. source is the CSRC on every packet forwarded from that sender's track, unique in the room.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot",
+        "kind",
+        "source",
+        "user",
+        "conn"
+      ],
+      "properties": {
+        "slot": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        },
+        "source": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "user": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "conn": {
+          "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "Speaking": {
+      "description": "Who is speaking now, sent whenever it changes: the RFC 6464 level, believed only while packets flow and only within the sender's rate bound. Never names a user the server excludes for this receiver.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "users"
+      ],
+      "properties": {
+        "op": {
+          "const": "speaking"
+        },
+        "users": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Snowflake"
+          }
+        }
+      }
+    },
+    "Subscribe": {
+      "description": "Replaces the connection's subscription whole. pin is served first, in order; drop is never served; cap, when present, uses that many of the connection's slots at most. The server's exclusion applies before any of it, and a pin does not override it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "pin",
+        "drop"
+      ],
+      "properties": {
+        "op": {
+          "const": "subscribe"
+        },
+        "pin": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/Snowflake"
+          }
+        },
+        "drop": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/Snowflake"
+          }
+        },
+        "cap": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Refused": {
+      "description": "The SFU's last message before it closes the connection, in words a person can act on.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "reason"
+      ],
+      "properties": {
+        "op": {
+          "const": "refused"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

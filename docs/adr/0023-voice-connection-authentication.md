@@ -6,6 +6,15 @@ canceller changes (see below). Fills in the part [ADR 0006](0006-voice-deferred-
 left open: what `VoiceServerInfo` contains. Depends on [ADR 0010](0010-client-daemon.md) for the voice-worker's
 isolation, and is the reasoning [ADR 0022](0022-access-token-signing-and-scope-model.md) rests on.
 
+**Amended at M26 (2026-11-02)** in two places, neither changing what authenticates a connection:
+- **The whole SDP offer travels**, not the fingerprint and ufrag alone, and the SFU answers with a whole
+  SDP answer. Both ends building SDP from parameters is more custom code and less of Pion's own handling;
+  the SFU validates the offer's structure strictly, and its answer is built from its own configuration,
+  never echoed from the offer. The fingerprint in that offer is still what DTLS verifies.
+- **Admission is keyed by connection, not by user**, and revocation carries a cutoff. One user may hold
+  two connections (a second machine; the GUI's video connection), and a kick resolved concurrently with
+  a join must not lose to it when the two arrive in the wrong order.
+
 ## Context
 A client's voice-worker holds a **direct WebRTC connection to the SFU** — media never passes through the
 daemon or the backend, which is what makes both the latency and the fault isolation real. So the SFU has to
@@ -33,11 +42,13 @@ Two observations changed the shape of the answer:
 
 1. The voice-worker generates an **ephemeral DTLS keypair and ICE credentials** per call. The private key
    never leaves the process.
-2. Its fingerprint and ICE ufrag travel up through the daemon and over the **gateway** (op 4), which is
-   already authenticated and TLS-protected.
+2. Its SDP offer, carrying that fingerprint and ufrag, travels up through the daemon and over the
+   **gateway** (op 4), which is already authenticated and TLS-protected. *(Amended at M26: the whole
+   offer, where this said the fingerprint and ufrag alone.)*
 3. The backend resolves `PermConnectVoice` against freshly-loaded data, then provisions the chosen SFU over
-   an internal **mTLS** channel: expect this fingerprint, this ufrag, in this room, as this user.
-4. `VOICE_SERVER_UPDATE` returns the SFU's endpoint, ICE credentials and fingerprint.
+   an internal **mTLS** channel: expect this offer, in this room, as this user, on this connection.
+4. `VOICE_SERVER_UPDATE` returns the SFU's SDP answer, which carries its endpoint, ICE credentials and
+   fingerprint.
 5. ICE checks are HMAC-authenticated; the DTLS handshake **mutually verifies both fingerprints**; SRTP keys
    derive from it.
 

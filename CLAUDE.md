@@ -388,7 +388,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D complete through M24**; Phase E under way, M25 done. Full
+**Phase D complete through M24**; Phase E under way, M26 done. Full
 dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
 flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
 
@@ -1272,6 +1272,65 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
     VM; Xvfb.
   - Windows: a Windows 11 VM from the ordinary ISO, with SSH on loopback.
   - macOS: the author's Mac, driven by a script that removed what it installed.
+
+- **M26 — Pion SFU core**: done. `backend/internal/voice` (the SFU, not started by `norite-server` until
+  M33: rooms, connections admitted by DTLS fingerprint, forwarding over pre-allocated slots, the data
+  channel, selection and the active speaker, bounds), `backend/voiceproto` (its wire format, outside
+  `internal/` for the voice-worker), `contracts/voice-datachannel.schema.json`, and `voicetest`'s client
+  and harness. Decisions are in the roadmap entry, in `architecture.md` §6, in ADR 0023 as amended, and in
+  `docs/security-ledger.md`.
+
+  **Planning found the milestone ADR 0023 describes was in no entry**: slots, the data channel,
+  subscription and the active speaker M34 consumes. The obvious reading of the entry, a track per
+  participant to every peer, is the design that ADR rejects. Then `/code-review` on the plan found
+  fifteen more, among them that admission keyed by user loses M105's second connection, and that a slot
+  map alone cannot say whose packet is whose: the data channel and the media have no order between them,
+  so every forwarded packet names its sender in its CSRC.
+
+  **A kick must not lose a race to the join it was meant to stop.** `Evict` carries a cutoff, M18's for a
+  revocation racing a sign-in, and a provision issued before it and delivered after it is refused; the
+  cutoff lapses exactly as such a provision turns stale, and a test pins that millisecond.
+  `/code-review` on the branch then found `CloseRoom` and `EvictConnection` with no such memory: a join
+  in flight reopened a deleted channel. **When one method of an interface needs a cutoff, ask which of
+  its siblings race the same way.**
+
+  **A stranger holding the session keys is a stranger.** `/security-sweep` found any admitted peer could
+  grow the server's memory without limit: every SSRC it invents gets an SRTP read stream with its own
+  buffer, which Pion keeps unread until the connection ends, and none of it reaches the per-track meter.
+  Found by reading Pion's and SRTP's source, not by a test; each connection now counts its streams
+  against its offer. The self-hosted SFU shares `norite-server`'s process, which is why every goroutine
+  and callback the package runs contains a panic, and why a contained panic must not leave a lock held,
+  which the review found it did.
+
+  **A guard measured against a wrapping number stops guarding at the wrap.** The check dropping a
+  packet from before a switch measured distance from the switch's first sequence number, and after
+  eleven minutes of one sender every packet looked older: eleven minutes of silence, then eleven of
+  sound. No test sent more than a few hundred packets through one slot; the one that now sends 70,000
+  takes a twentieth of a second.
+
+  **A level read on the wrong scale is a speaker for ever.** The first loudness summed every packet's
+  level above silence, so a microphone's noise floor sent without DTX was speaking, and 10 ms frames,
+  which the SFU's own answer invites, counted twice. A packet counts now only above a speech floor, and
+  for the time its timestamp covers.
+
+  **The test client lied once, in its sequence numbers.** Each send started at a random sequence number,
+  and SRTP's replay check read a jump past 2^15 as an old packet and dropped whole bursts at random. A
+  real sender's numbers continue. M19's fixture lesson again: check a stand-in fails the way the real
+  thing would.
+
+  **The manual pass ran in two unprivileged VMs on one QEMU stream link**, with no NAT between them and
+  SSH on loopback, and the media crossed it both ways as real Opus that decodes. It found Pion logging
+  four meaningless warnings on every ordinary connection; they are debug now. It also found the harness
+  could not be updated while it ran, so the first rerun tested the old binary: **check the hash of what a
+  pass runs.**
+
+  **A second `/code-review` on the finished branch found fifteen more**, M22's lesson again. The worst two
+  were each a fix's own blind spot: the selection's panic was contained only in the room's tick, so the
+  panic it survived came back on the next close, in a bare goroutine, and ended the process; and the
+  offer's candidate bound said nothing of the peer-reflexive ones ICE adds for every address that sends
+  an authenticated check, 105 from 100 ports, measured. A client that never said hello was never refused
+  for its version, and was forwarded all the same. **A bound on what the peer declares is not a bound on
+  what the peer can make the server hold.**
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -2731,6 +2790,38 @@ And on packages, from the `package-managers` branch (ADR 0035):
 - **The GPG key for the apt, rpm and pacman repositories never enters this repository.** It is
   `Alexnex31/packages`' secret, whose workflow verifies the release's cosign signature and checksums
   before signing anything, and never runs on a pull request.
+
+And on the SFU, from M26 (ADR 0023 as amended):
+
+- **The SFU's interface is `voice.Control`**, settled whole because M116 carries it over mTLS: provision
+  by connection, and `Evict`, `CloseRoom` and `EvictConnection` each refuse a provision they outran. A
+  new method that ends something gets the same memory.
+- **No bearer token reaches the SFU.** What admits a connection is `Provision` with the client's offer and
+  DTLS against its fingerprint. The offer is checked on structure and never echoed; Pion's own refusals
+  are logged, not returned.
+- **The forward path never reads a payload** and allocates nothing; `BenchmarkForward` holds it there.
+  A slot writes its own header: its SSRC, the sender's source id as CSRC, no extension but the audio
+  level re-encoded, and no RTCP crosses a hop.
+- **Everything a peer sends is bounded against a hostile one**, and each bound has a test that plays it:
+  packets and bits per track, RTCP and messages per connection, data channels, SRTP streams against
+  the offer, and the remote candidates ICE adds. A rate past its bound is dropped, and past twice it for
+  three seconds closed.
+- **Every goroutine and Pion callback the package runs defers `conn.contain`**, the room's selection
+  contains its own on whatever goroutine runs it, and a lock a contained panic could cross is released
+  by defer.
+- **A connection takes part in its room only once its hello is accepted**, and is counted before `ready`
+  goes out, so a client may send the moment it reads it. Anything new that forwards to a connection or
+  from it asks `takesPart`. A test client is joined once it has read `ready`, as a real one is.
+- **The slot map and the speaking list are sent after the room's lock**, and each send is of the state
+  as it is then. Nothing is sent under a lock a close takes.
+- **The data channel is `contracts/voice-datachannel.schema.json`**, decoded strictly; a field added is a
+  MINOR change. Every test client's messages are held to it.
+- **`voicetest`'s harness is never in a release**, and a test reads `.goreleaser.yaml` to hold that.
+  M27 and M29 signal through it until M33.
+- **Testing the SFU**: `join` gives a connected Pion client over loopback, `TonePackets` real Opus, and
+  `testPanic` a panic or an eviction at a named point. A sender's sequence numbers continue across sends,
+  or SRTP drops the burst. A race between an eviction and a provision is staged with cutoffs and
+  `s.now`, never by racing.
 
 ## Project-specific skills
 

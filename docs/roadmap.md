@@ -1712,12 +1712,106 @@ of this section.
     logs in, and neither the audio devices nor a desktop's shortcut service exist yet.
   - **KEYMAP's `C-space (hold)` assumes a key release a terminal does not send.**
   - **M29 names a codec as the capture library.**
-- **M26 — Pion SFU core**: room/participant model, codec/track-kind-agnostic RTP forwarding (built
-  generically from day one so M106–M107's video activation is additive, not a redesign). Done when: two test
-  clients can exchange audio through the SFU.
+- **M26 — Pion SFU core**: the SFU's room and connection model, admission by DTLS fingerprint, and
+  codec- and track-kind-agnostic RTP forwarding over pre-allocated slots, built generically from day one
+  so M105–M107's video is additive, not a redesign. In `backend/internal/voice`, which `norite-server` does
+  not start until M33. Rewritten at planning on 2026-11-02; what the entry said before, and why it could
+  not be built as written, is the list under "Corrected at planning".
+
+  **The control interface.** The SFU's half of ADR 0023's control channel, which M116 carries over mTLS,
+  settled whole here because changing it after that changes a wire protocol:
+  - `Provision(room, user, conn, issued, offer)` returns the SDP answer. `conn` is an id the backend mints
+    per connection, so one user may hold two (a second machine, M105's video connection); `issued` is a
+    snowflake taken when the backend authorized it.
+  - `Evict(room, user, cutoff)` closes that user's connections provisioned at or before `cutoff`, and
+    refuses a `Provision` issued before it and delivered after it: M18's cutoff, for a kick and a join
+    resolved concurrently and delivered in the wrong order. A cutoff is kept for the provision timeout,
+    after which the late provision is refused anyway.
+  - `EvictConnection(conn)` and `CloseRoom(room, cutoff)`, each refusing a provision it outran, as
+    `Evict` does; and `SetExclusion(room, receiver, users)`: a per-receiver
+    set the server controls, which wins over the client's own pin, empty until M70.
+
+  **Admission.** The client's SDP offer is relayed whole (ADR 0023, amended here) and validated on its
+  structure: under 12 KiB, so op 4 fits the gateway's 16 KiB inbound frame at M33; media sections by kind
+  within their bounds and one data channel; one fingerprint; `a=setup:actpass`; bounded candidates.
+  Attributes the SFU does not act on are ignored and never echoed, since the answer is built from the SFU's
+  own configuration. DTLS refuses a peer whose certificate is not the offer's fingerprint. A provision not
+  connected within about 30 seconds is dropped.
+
+  **Forwarding.**
+  - **Tracks, not participants.** A connection sends a bounded number of tracks, each of a kind; at M26
+    the one kind admitted is audio, one track. Nothing is keyed by "the participant's track", and the loop
+    moves RTP without reading a payload.
+  - **Slots.** A receiver gets N pre-allocated slots per kind plus one data channel, N chosen by the client
+    within a bound and echoed back, so a join, a leave or a speaker change is a message and never a
+    renegotiation. A slot keeps one SSRC towards its receiver; when its sender changes, sequence numbers
+    and timestamps are rewritten to stay continuous, and the sender's source id is put in the packet's
+    CSRC. The data channel and the media are not ordered against each other, so attribution is by CSRC,
+    exact to the packet.
+  - **RTCP is terminated per hop**, in each hop's own SSRC and clock; nothing from one hop is forwarded
+    into another. Header extensions are stripped on forward except the audio level. Congestion control is
+    per hop, which is the shape M31 needs.
+  - **The data channel** opens with a versioned hello (gatewayproto's rule), then carries the slot map,
+    pin, drop and cap, each a row in `contracts/voice-datachannel.schema.json`. A connection takes no
+    part in its room, sending or receiving, until its hello is accepted, and one that never says hello
+    is closed at the provision timeout.
+  - **Selection.** When senders outnumber slots, the loudest recent speakers fill them, behind the
+    server's exclusion and the client's pins and drops. The **active speaker** is the RFC 6464 level,
+    believed only while packets flow and only within the sender's rate bound.
+
+  **One UDP port.** Pion's ICE UDP mux carries every connection on the SFU's one port. TURN's listeners are
+  M27's.
+
+  **Bounds**, each with a test that plays the hostile peer: participants per room, rooms per process,
+  connections per user per room, tracks per connection, slots per receiver, packets per second and bitrate
+  per sender, RTCP per peer, one data channel per peer, data-channel message size and rate, offer size and
+  candidates, the remote candidates ICE adds for addresses the offer never named, and the provision
+  timeout. **Containment**: the self-hosted SFU shares `norite-server`'s
+  process, so every goroutine the package starts recovers a panic and closes that one peer, and the offer
+  validator, the data-channel decoder and the rewrite path are fuzzed.
+
+  **A harness** in `backend/internal/voice/voicetest`, never in a release: a program hosting the SFU behind a
+  plain HTTP endpoint that calls `Provision`, and a client that sends an Ogg/Opus file and writes what it
+  receives. The same interface the tests call, so M33 removes nothing. M27 and M29 signal through it,
+  being before M33.
+
+  Done when: two test clients exchange real Opus through the SFU, over ICE, DTLS and SRTP, payload-identical
+  and continuous, from a committed Ogg/Opus fixture read with Pion's pure-Go `oggreader` (no cgo); a third
+  joining costs no renegotiation; a slot changing hands keeps sequence numbers and timestamps continuous
+  and the CSRC changes at exactly the new sender's first packet; an unprovisioned peer, another
+  fingerprint, an expired provision and a provision older than an eviction's cutoff are all refused; each
+  bound holds; and a manual pass between two VMs on one network segment, with no NAT, plays back audio a
+  person listened to. A committed benchmark gives packets per second per core and allocations per packet.
+
+  **Corrected at planning**, by reading this entry, §6, ADR 0012 and ADR 0023 against each other and the
+  code, then by `/code-review` on the plan:
+  - **ADR 0023 settles a forwarding model no milestone built**: slots, the data channel, client-driven
+    subscription, speaker-based selection and active speaker. M34's done-when consumed active-speaker
+    updates nothing produced, and the obvious reading of this entry, a track per participant forwarded to
+    every peer, is the design ADR 0023 rejects by name.
+  - **Admission had no shape before M33**, and two test clients admitted any other way would build a path
+    M33 must remove. The SFU's half is here; the backend's half (resolving `PermConnectVoice`, op 4) is
+    M33's.
+  - **Eviction and the control channel were unowned.** The SFU side is here, the callers are M33's, and
+    the mTLS transport is M116's.
+  - **The documents described a seam that does not exist.** No `MediaCoordinator` and no stub exist in
+    the code; op 4 is reserved and closed as an unknown opcode. `MediaCoordinator.AllocateSession` stays
+    the backend's seam, choosing an SFU and calling its `Provision`; it gains the offer and keeps
+    `supports_video`.
+  - **Nothing bounded what the SFU parses**, in a process every user of the instance depends on.
+  - **Admission keyed by user, one track per participant, and a slot map alone for attribution** were
+    each in the first plan, and each would have been a redesign at M105–M107 or wrong at every speaker
+    change.
+  - **"Real audio needs cgo" was false**: Pion reads and writes Ogg/Opus in pure Go, so the done-when is
+    real Opus rather than bytes shaped like it.
+  - **"A UDP range"** in §6, §17 and ADR 0012 is the SFU's one port, with TURN's left to M27.
 - **M27 — Embedded TURN plus STUN**: `pion/turn` embedded in the backend (server-side, not the daemon),
   serving both TURN relay and plain STUN binding requests. Done when: a client behind simulated NAT can
   establish a voice connection via the embedded TURN server alone.
+
+  **From M26:** the SFU has one UDP port and TURN's listeners are decided here, including whether TCP or
+  TLS is offered for networks that block UDP; §6's port sentence is completed here. Being before M33, the
+  NAT test signals through M26's harness in `backend/internal/voice/voicetest`.
 - **M28 — Voice-worker subprocess and IPC**: the daemon spawns the worker on-demand (via `os/exec`) when
   joining a voice channel, tears it down on leave; daemon↔worker control-plane IPC uses the child's
   inherited stdin/stdout pipes, framed with the same 4-byte-length-prefix-plus-JSON scheme used for the
@@ -1725,7 +1819,11 @@ of this section.
   tears it down, and the daemon detects a worker crash via the closed pipe.
 - **M29 — Opus audio pipeline**: `hraban/opus` (cgo) capture/encode/decode/playback in the voice-worker.
   Depends on M25's finding for how mic access is actually obtained. Done when: two voice-worker instances can
-  exchange intelligible audio through the SFU from M26.
+  exchange intelligible audio through the SFU from M26. Being before M33, they signal through M26's harness.
+  The worker attributes received audio by CSRC, as M26 sends it, and resets its decoder and FEC state when
+  a slot's CSRC changes. **What it decodes is a stranger's**: the SFU never reads a payload, so whatever
+  another participant sends reaches this decoder as they sent it. The worker's crash isolation (rule 11)
+  bounds the damage; the decode path is fuzzed here, with payloads that are not Opus.
 
   **From M25 ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)):**
   - **`hraban/opus` is a codec and captures nothing.** This milestone chooses the capture library
@@ -1745,7 +1843,8 @@ of this section.
 - **M31 — Adaptive bitrate and congestion control**: `pion/interceptor`'s REMB/TWCC feedback wired into
   `hraban/opus`'s runtime bitrate control, audio-only, no simulcast. Depends on M26, M29, and M30. Done when:
   a simulated packet-loss/bandwidth-constrained test shows the encoder's bitrate measurably drop and recover
-  in response, rather than staying fixed regardless of network conditions.
+  in response, rather than staying fixed regardless of network conditions. M26 terminates RTCP per hop, so
+  the feedback the encoder reads is the SFU's on the sender's hop, not a receiver's forwarded through it.
 - **M32 — Mic permission, real implementation**: built per M25's finding
   ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §1). There is no handoff: the worker opens the
   device itself and no client ever does. The worker reports the outcome of opening it, and the daemon
@@ -1771,19 +1870,24 @@ of this section.
 
   **Carried from M25, the author's decision: an Apple Developer ID.** An ad-hoc signed daemon is asked again
   after every new daemon build (run at M25), so without one "exactly once" holds per build, not per install.
-- **M33 — Voice signaling, real**: `VOICE_STATE_UPDATE`/`VOICE_SERVER_UPDATE` go from inert stub to real,
-  `MediaCoordinator` becomes `PionMediaCoordinator`, and the `supports_video: bool` capability field is added
-  to the voice-join payload now (the terminal clients always send `false`) even though nothing consumes it
-  until M105. Done
+- **M33 — Voice signaling, real**: op 4 (Voice State Update) and `VOICE_SERVER_UPDATE`, which do not
+  exist yet: op 4 is reserved and a client sending it is closed as an unknown opcode. `norite-server`
+  starts M26's SFU here. `MediaCoordinator` is built as `PionMediaCoordinator`, the backend's seam over
+  M26's control interface: it resolves `PermConnectVoice` against fresh data, mints the connection id and
+  the `issued` snowflake, and calls `Provision` with the client's offer, which op 4 carries under M26's
+  12 KiB bound. A kick, a ban and a lost `PermConnectVoice` call `Evict` with a cutoff, after the
+  transaction commits, and a deleted voice channel calls `CloseRoom` with one. The `supports_video: bool` capability field is added to the voice-join payload now
+  (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
-  end to end.
+  end to end, and a kick mid-call drops the connection.
 - **M34 — Voice control surface (command tree and daemon)**: join/leave/mute/deafen as verbs on the command
   tree, the daemon holding call state, and active-speaker plus per-participant local-mute and report exposed
   over the IPC protocol — everything a client needs to drive and display a call, with no client drawing it
   yet. The chords, the status-line indicator and the call UI belong to the TUI and arrive with it: bindings
   at M44, `4b`'s strip and `4a`'s full view at M54. Splitting it this way is ADR 0026's rule applied
   backwards — this milestone sits in Phase E, seven milestones before a terminal application exists, so a
-  done-when phrased as "control a voice session from the TUI" could not be checked when it is built. Done
+  done-when phrased as "control a voice session from the TUI" could not be checked when it is built. The
+  active speaker comes from M26's data channel. Done
   when: `norite voice join/leave/mute/deafen` fully control a session; a test client attached to the daemon
   receives active-speaker updates and can local-mute and report a participant independently of each other.
 - **M35 — Voice input mode**: voice-activity-detection is the default; push-to-talk is a true OS-wide
@@ -2290,6 +2394,12 @@ of this section.
   this is not delivery in rule 20's sense, but ownership makes them answerable for the guild. If it is
   refused, the refusal must be indistinguishable from the transfer's other refusals, for the reason every
   other block refusal here is.
+
+  **Voice needs a decision here too**: whether a blocked account's audio reaches the blocker in a shared
+  voice channel. Rule 20 names delivery and the gateway fan-out and says nothing about media. M26 left the
+  mechanism, `SetExclusion` on the SFU's control interface, a per-receiver set that wins over the client's
+  own pin; this milestone decides whether to fill it, and on a block made mid-call it must reach the SFU
+  as immediately as the gateway's block-set.
 - **M71 — Instance Admin tier, schema**: the boolean/flag-based tier (supports multiple admins per instance),
   sitting outside `roles.Resolve` entirely, with the last-admin-removal safety rail. Done when: granting or
   revoking the tier works, and removing the last remaining admin is blocked.
@@ -2939,8 +3049,10 @@ when a constraint the terminal imposed is lifted.
 
 - **M105 — GUI/web video connection**: a second, separate WebRTC connection to the SFU for the video track,
   owned directly by the GUI/web client (never the daemon), activating the `supports_video` flag from M33 and
-  the codec-agnostic track model from M26. Done when: a GUI client can open a video track alongside its
-  existing audio session with no daemon changes required.
+  the codec-agnostic track model from M26. M26 keys admission by connection, so this is a second
+  connection id for the same user, and its offer passes M26's validation once video's section bounds are
+  raised. Done when: a GUI client can open a video track alongside its existing audio session with no daemon
+  changes required.
 - **M106 — Screen/camera capture and selection UI**: GUI-side capture and source-selection interface. Done
   when: a user can choose and share a specific window/screen or camera source.
 - **M107 — SFU video track forwarding activation**: verify the already-track-kind-agnostic SFU from M26
@@ -2950,7 +3062,8 @@ when a constraint the terminal imposed is lifted.
   redesign, but did not implement it, and it is real remaining engineering work (`architecture.md` §17).
   Done when: multiple participants can see each other's video/screen-share simultaneously through the SFU,
   and a simulated poor-connection participant causes the SFU to drop to a lower layer for them without
-  degrading other participants' streams.
+  degrading other participants' streams. M26 terminates RTCP per hop and drops a receiver's NACK and PLI;
+  video answers them here, from the SFU's own buffer and by asking the sender for a keyframe.
 
 #### Phase O — Web SPA (later, third-priority client)
 
@@ -3094,6 +3207,17 @@ does not appear to disagree with them.
   Done when: two clients on different networks complete a call relayed by the in-cluster TURN/SFU, and the
   privileged namespace contains those pods and nothing else — the isolation being the reason the split
   exists rather than a tidier layout.
+
+  **The mTLS control channel is this milestone's** (ADR 0023): the transport carrying M26's control
+  interface from the backend to SFU pods in another namespace. On a self-hosted instance the SFU is in the
+  backend's process and the interface is a Go call. The out-of-process SFU also removes the residual M26
+  records, that a panic inside Pion's own goroutines ends `norite-server`.
+
+  **M26's cutoff reads two clocks here.** An eviction's cutoff is kept for the provision timeout on the
+  SFU's clock, and a provision is refused as stale by comparing its `issued` snowflake, minted on the
+  backend's clock, against the SFU's. In one process that is one clock. Across pods, a backend clock
+  ahead of the SFU's lets a provision issued before a kick outlive the cutoff that should refuse it, so
+  this milestone bounds the skew between them, or carries the backend's clock in the control message.
 - **M117 — `cert-manager` plus Ingress TLS**: disables the backend's built-in `certmagic` path for this
   deployment specifically (self-hosted instances keep it).
 

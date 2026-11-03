@@ -15,8 +15,8 @@ software.
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.work)
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
-[![Release](https://img.shields.io/badge/release-v0.1.0-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0)
-[![Milestone](https://img.shields.io/badge/milestone-M25%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Release](https://img.shields.io/badge/release-v0.1.2-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.2)
+[![Milestone](https://img.shields.io/badge/milestone-M26%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -39,8 +39,9 @@ software.
 Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invite.
 
 > [!NOTE]
-> **It is still early, and text only.** Voice, DMs, presence and the GUI are not built yet; the client
-> shows one channel at a time, in plain text; and no third party has reviewed the code. The full scope is
+> **It is still early, and text only.** Voice calls, DMs, presence and the GUI are not built yet: the server
+> half of a call exists since `M26`, but no client can join one until `M33`. The client shows one channel at a
+> time, in plain text, and no third party has reviewed the code. The full scope is
 > multi-year work — [Status](#status) says exactly what exists.
 
 ---
@@ -69,8 +70,10 @@ message's edit history, a guild's opt-in message recording, message tagging, the
 daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
 the settings file the clients share, a local port for scripts and bots, the daemon as a service you can
 stop, inspect and read the log of, and a client that keeps itself up to date, are done — `M0` through
-`M24`, which completes Phase D. Phase E, voice, has begun with `M25`: a finding rather than code, which
-settles on each OS who opens the microphone and how push-to-talk is held.**
+`M24`, which completes Phase D. Phase E, voice, has begun, and its first two milestones are done too:
+`M25`, a finding rather than code, which settles on each OS who opens the microphone and how push-to-talk is
+held, and `M26`, the server that carries a call's audio between its participants, which nothing starts until
+`M33` lets a client join a call.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -108,6 +111,7 @@ settles on each OS who opens the microphone and how push-to-talk is held.**
 | `M23` | The daemon as a service — `norite logs tail` reads its log, with `--follow`, whether or not it is running; `norite daemon status` says whether it is running, signed in and which version, however it was started; `norite daemon stop` lets it finish what it has begun; `norite daemon install --linger` keeps it up on a Linux machine you only reach over SSH; a crash is written beside the log and the next start says so; and `norite login` offers to install it. The Windows service was rebuilt, and first run on Windows at `M24` |
 | `M24` | A client that updates itself — once a day the daemon reads this project's list of releases, and installs a newer one only after verifying on your machine, against Sigstore and offline, that this project's release workflow signed it; it never moves to a version your instance would refuse; a release that does not stay up is undone by itself and never offered again; `norite update` says what is out and lets you install it now, ask first, or turn the check off; on Linux and Windows for an install the installers made, while macOS is told and not changed. On Windows the daemon now starts at logon by default, with no window |
 | `M25` | A finding, not code — run on Linux, Windows and macOS, it settles how voice will reach the microphone and hold a push-to-talk key: the voice process opens the microphone itself, so no client asks for it; push-to-talk is held by the daemon only during a call, by a different mechanism on each OS, none of which needs a permission; written down in [ADR 0034](docs/adr/0034-mic-permission-and-global-hotkey.md) |
+| `M26` | The server half of a call — the selective forwarding unit, on one UDP port, that carries each participant's audio to the others without decoding it: admitted only by the certificate in the offer the instance hands it, never a token; each listener receives on a fixed number of slots filled by who is speaking, or who they pinned, so a join or a leave costs no renegotiation; told who is in each slot and who is speaking; and bounded against a participant who sends too much. Nothing starts it yet: joining a voice channel arrives with `M33` |
 
 </details>
 
@@ -288,7 +292,8 @@ an instance you can host, and the source in front of you. The rest is what the p
 
 Where Discord is ahead, and will stay ahead for a long time: video and screen-share are deferred here,
 there are no mobile clients planned for v1, and there is no ecosystem and no user base. Today Norite does
-text in guild channels and nothing else: no voice yet, no DMs, no presence. Discord also end-to-end
+text in guild channels and nothing else: no voice calls yet (the server that will carry them is built,
+nothing joins it), no DMs, no presence. Discord also end-to-end
 encrypts every voice and video call by default; Norite's end-to-end encryption covers text DMs only.
 
 ---

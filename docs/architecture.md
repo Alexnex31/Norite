@@ -90,7 +90,8 @@ Locked-in decisions:
 │   │   ├── gateway/             # gateway.go, conn.go, session.go (resume buffer), index.go, fanout.go
 │   │   │                        #   (block-aware from M70); the wire format is backend/gatewayproto,
 │   │   │                        #   outside internal/ so the daemon can import it (M19)
-│   │   ├── voice/                # Pion SFU room/participant model, PionMediaCoordinator
+│   │   ├── voice/                # Pion SFU: rooms, connections, slots, the control interface (M26);
+│   │   │                        #   PionMediaCoordinator over it (M33)
 │   │   ├── turn/                 # embedded pion/turn server
 │   │   └── db/                   # sqlc-generated, one package, narrow interfaces consumed per-domain
 │   ├── migrations/               # golang-migrate .sql up/down, go:embed'd into the binary
@@ -952,8 +953,8 @@ WS endpoint `wss://<host>/gateway`, envelope `{ "op": <int>, "d": <object|null>,
 The **daemon**, not each attach client, is the actual gateway client — see §3.
 
 Op-codes: Server→Client `0` Dispatch, `7` Reconnect, `9` Invalid Session, `10` Hello, `11` Heartbeat ACK.
-Client→Server `1` Heartbeat, `2` Identify, `3` Presence Update, `4` Voice State Update (**now real**, wired
-to `PionMediaCoordinator`), `6` Resume, `8` Request Guild Members.
+Client→Server `1` Heartbeat, `2` Identify, `3` Presence Update, `4` Voice State Update (reserved: closed as
+an unknown opcode until M33 wires it to `PionMediaCoordinator`), `6` Resume, `8` Request Guild Members.
 
 **Auth transport**: `Identify` carries the daemon's Bearer access token (obtained via the token-based auth
 flow, §"Auth design" below) — never a cookie, since there is no browser. **`Hello` carries the backend's
@@ -1047,8 +1048,9 @@ guild-channel message/presence/`@mention` events, a blocked author's content is 
 target list entirely, at `gateway.withoutBlocked`, the stage M18 left empty for M70 to fill — never sent over the wire to the blocker's connection, and never merely hidden
 client-side. A block/unblock action updates the affected connection's cached set immediately.
 
-**Voice signaling**: `internal/voice.MediaCoordinator` is now `PionMediaCoordinator`, backed by the real SFU
-(§6). The voice-join payload carries `supports_video: bool` (the terminal clients always `false`).
+**Voice signaling** (M33): `internal/voice.MediaCoordinator` is built as `PionMediaCoordinator`, over the
+SFU's control interface from M26 (§6). The voice-join payload carries `supports_video: bool` (the terminal
+clients always `false`) and the client's SDP offer, under 12 KiB so op 4 fits the 16 KiB inbound frame.
 
 ### REST API
 
@@ -2245,11 +2247,30 @@ deferred but architected now so it's additive later. See [ADR 0012](adr/0012-voi
 **Media server**: a self-hosted, custom-built SFU on Pion (Go), not LiveKit, not a plain P2P mesh.
 
 ```go
-// internal/voice — room/participant model, codec/track-kind-agnostic RTP forwarding
+// internal/voice — the backend's seam (M33): chooses which SFU serves a session, then provisions it.
 type MediaCoordinator interface {
-    AllocateSession(ctx context.Context, guildID, channelID, userID snowflake.ID, supportsVideo bool) (VoiceServerInfo, error)
+    AllocateSession(ctx context.Context, guildID, channelID, userID snowflake.ID, supportsVideo bool, offer string) (VoiceServerInfo, error)
+}
+
+// internal/voice — the SFU's control interface (M26). A Go call on a self-hosted instance, where the SFU
+// shares the backend's process; carried over mTLS to SFU pods on the flagship (M116). A room is a voice
+// channel's id.
+type Control interface {
+    Provision(ctx context.Context, room, user, conn, issued snowflake.ID, offer string) (answer string, err error)
+    Evict(ctx context.Context, room, user, cutoff snowflake.ID) error
+    EvictConnection(ctx context.Context, conn snowflake.ID) error
+    SetExclusion(ctx context.Context, room, receiver snowflake.ID, excluded []snowflake.ID) error
+    CloseRoom(ctx context.Context, room, cutoff snowflake.ID) error
 }
 ```
+
+Admission is keyed by **connection**, not by user, so one user may hold two (a second machine; the GUI's
+separate video connection). `Evict` carries a cutoff: a provision issued before it and delivered after it
+is refused, which is M18's cutoff for a revocation racing a sign-in, applied to a kick racing a join.
+`CloseRoom` carries one for a channel deleted while a join is in flight, and `EvictConnection` refuses
+its connection's provision if that arrives after it.
+`SetExclusion` is a per-receiver set the server controls and the client cannot override (M70 decides
+whether blocks fill it).
 
 The track/participant model is kept codec/track-kind-agnostic (not hardcoded to one audio track per
 participant) so adding video is additive — necessary but **not sufficient**: simulcast/SVC layer-switching
@@ -2274,12 +2295,19 @@ identity too — which a bearer token would not give. Revocation mid-call (ban, 
 **push** from the backend over the same control channel, not an expiry.
 
 **Stream model**: streams are always per-sender and **never mixed** — the client mixes locally in the
-voice-worker. The client **drives subscription** over the connection's data channel: pin a participant, drop
-one (local mute becomes an unsubscribe that also saves bandwidth), or cap how many streams it accepts, which
-is what makes §4's bandwidth toggle meaningful for voice. Speaker-based selective forwarding is the default
+voice-worker. The SFU forwards **tracks**, each of a kind, never "the participant's track": a connection
+sends a bounded number of them, one audio track at M26, and video raises the bound (M105–M107). The client
+**drives subscription** over the connection's data channel: pin a participant, drop one (local mute becomes
+an unsubscribe that also saves bandwidth), or cap how many streams it accepts, which is what makes §4's
+bandwidth toggle meaningful for voice. Speaker-based selective forwarding is the default
 policy when no preference is expressed, not a fixed rule. Stream-to-participant mapping is signalled on the
 data channel over pre-allocated transceiver slots, so joins and leaves cost a message rather than an SDP
 renegotiation. This is what makes per-user volume, per-user jitter buffers and spatial audio possible.
+A slot keeps one SSRC towards its receiver; when its sender changes, the SFU rewrites sequence numbers and
+timestamps to stay continuous and puts the sender's source id in the packet's **CSRC**. The data channel
+and the media are separate transports with no order between them, so the slot map says who a source id
+is and the CSRC says which packets are theirs, exact to the packet. RTCP is terminated per hop, and header
+extensions other than the audio level are stripped on forward.
 
 **Active speaker**: the RFC 6464 audio-level header extension, readable by the SFU without touching the
 payload, drives both the indicator and selective forwarding. Levels are self-reported, so the SFU
@@ -2306,7 +2334,10 @@ dashboard.
 **TURN**: an embedded Go TURN server (`pion/turn`, also answering plain STUN), bundled into the backend —
 self-hosters don't run a separate `coturn`.
 
-**Voice deployment opt-out**: TURN/SFU need a reachable public IP and forwarded UDP range — a real burden
+**Ports**: the SFU carries every connection on **one UDP port**, through Pion's ICE UDP mux; TURN's
+listeners are M27's to decide.
+
+**Voice deployment opt-out**: TURN/SFU need a reachable public IP and forwarded UDP ports — a real burden
 many home self-hosters can't satisfy. An Instance Admin can disable voice entirely; the SFU/TURN never start,
 voice+text channel pairs degrade to text-only, and voice UI is hidden entirely in TUI/GUI (never grayed out).
 
@@ -2986,9 +3017,9 @@ during implementation, and must be documented plainly wherever the relevant subs
     on Windows (a service cannot hold one) and a session on Linux.
 - **Self-hosting simplicity and voice-in-v1 are in real, unreconciled tension.** Postgres-only self-hosting
   keeps the database story simple, but the custom SFU and embedded TURN server mean self-hosters must still
-  handle UDP port ranges and NAT/firewall traversal — a materially bigger operational burden than pure
-  text-only self-hosting. Voice is real v1 product functionality, but is a deployment-time opt-out
-  (Milestone M37) specifically because of this burden.
+  forward UDP ports (the SFU's one, and TURN's, M27) and handle NAT/firewall traversal — a materially
+  bigger operational burden than pure text-only self-hosting. Voice is real v1 product functionality, but
+  is a deployment-time opt-out (Milestone M37) specifically because of this burden.
 - **cgo is confined to the voice-worker binary.** The pure-Go, cgo-free constraint used everywhere else in the
   stack (daemon, CLI/TUI, GUI, backend) does not extend to the voice-worker: Opus (`hraban/opus`), RNNoise, and
   WebRTC's APM are all cgo bindings, because no mature pure-Go equivalents exist for production-grade audio
