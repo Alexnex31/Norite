@@ -2907,6 +2907,11 @@ And on TURN, from M27:
   with its call. Nothing links an allocation to a connection id, and nothing needs to. **One that binds a
   channel to anything but the SFU's addresses at its port ends too**: pion admits a binding on the IP
   alone and walks every binding for each packet relayed.
+- **The relay serves both address families when the SFU listens on every interface**: a client reaching
+  TURN over IPv6 asks for an IPv6 relay, Pion's included, and gets one on `::1`. With one family alone,
+  pion's `StrictAddressFamily` is set, so a client naming none gets IPv4. What the SFU announces counts
+  family by family, and a family nothing is announced in is every address of the host's, read every ten
+  seconds off the packet path.
 - **The relay's per-packet path allocates nothing**, both ways: it reads with `ReadFromUDPAddrPort` and
   reports a peer by a `net.Addr` made when the peer changes. `TestTheRelayAllocatesNothingPerPacket`
   holds it there, and `BenchmarkRelayRoundTrip` measures it.

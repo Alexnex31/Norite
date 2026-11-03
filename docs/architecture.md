@@ -2360,7 +2360,8 @@ default); TURN listens on one port over UDP and TCP (3478) and, with a certifica
 443 behind a layer-4 proxy). Relay sockets are on the host and need no forwarding. A machine behind a 1:1
 NAT or a forwarding router announces its public address through `[voice] public_addresses`. One address
 holds at most `relay_per_address` relays and TURN connections, 64 by default, raised for an organization
-behind one NAT. All of it is `[voice]`, and none of it is bound unless `enabled` is set (M27).
+behind one NAT. With the SFU on every interface, the default, the relay serves both address families, on
+`127.0.0.1` and `::1`, since a client reaching TURN over IPv6 asks for an IPv6 relay. All of it is `[voice]`, and none of it is bound unless `enabled` is set (M27).
 
 **Voice deployment opt-out**: TURN/SFU need a reachable public IP and forwarded UDP ports — a real burden
 many home self-hosters can't satisfy. An Instance Admin can disable voice entirely; the SFU/TURN never start,

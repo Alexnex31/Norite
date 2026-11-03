@@ -1804,8 +1804,9 @@ carries the condition that would reopen it.
 - **Why**: measured over IPv4: a 20-byte Binding request draws 40 bytes, a 28-byte Allocate draws a 68-byte
   challenge, 2 and 2.4 times. Over UDP the source can be forged, so TURN can reflect that factor onto
   somebody else. Every STUN server has the same exposure; what bounds it here is a rate on such replies,
-  20 a second to one address (an IPv6 /64 being one) and 2,000 in all (`turn.replies`), so a victim
-  receives at most 1.4 KB a second from one instance, and the nonces are stateless, so a flood keeps
+  20 a second to one address (an IPv6 /64 being one), or `relay_per_address` when that is higher, since
+  every client's first Allocate draws a challenge and an office behind one NAT raises it, and 2,000 in
+  all (`turn.replies`), so a victim receives at most 1.4 KB a second from one instance by default, and the nonces are stateless, so a flood keeps
   nothing. The total is charged only for a reply a destination's bound lets through, so one host costs
   it 20 a second however fast it sends; a forger with 2,000 sources a second still spends it, which is
   what a total is. pion's own log lines for such packets are sampled, ten a minute.

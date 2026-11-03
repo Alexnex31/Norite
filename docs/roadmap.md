@@ -1892,6 +1892,16 @@ of this section.
   - **The per-source bounds were fixed in code**, at about ten people behind one address.
   - A UDP allocation counted for a stream from the same address and port, and the harness read a variable
     in an order the spec leaves open.
+
+  **A second `/code-review`, after the security passes, found nine more**, every one fixed: the relay
+  served one address family while pion, and Pion's client, choose an allocation's family from how TURN
+  was reached, so a client over IPv6 was refused every allocation (it relays in both now, on the
+  default); public addresses in one family made the other family's announced addresses unknown;
+  unauthenticated replies stayed at twenty a second whatever `relay_per_address` said; the stop on an
+  address the host lacks never matched on Windows; the host's addresses were reread on a packet's path;
+  closing waited a fixed time rather than for the relays to fall quiet; a certificate reload held every
+  TLS handshake behind it; the harness advertised TLS it had not bound; and the README promised the
+  relay closes after ten minutes, which a refreshed allocation does not.
 - **M28 — Voice-worker subprocess and IPC**: the daemon spawns the worker on-demand (via `os/exec`) when
   joining a voice channel, tears it down on leave; daemon↔worker control-plane IPC uses the child's
   inherited stdin/stdout pipes, framed with the same 4-byte-length-prefix-plus-JSON scheme used for the
