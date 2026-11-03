@@ -1,6 +1,6 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
-go_modules := "backend cli gui daemon"
+go_modules := "backend cli gui daemon voiceworker"
 
 # Pinned so every machine and CI generate byte-identical code. Bump deliberately, then re-run
 # `just sqlc-generate` and commit the diff.
@@ -434,6 +434,7 @@ notices: build-local
     "$gen" cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" daemon  ./cmd/daemond bin/norite-daemon daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+    "$gen" voiceworker ./cmd/norite-voice bin/norite-voice voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt
 
 # Build every binary to ./bin/ with plain `go build`, at paths that do not vary by platform.
 #
@@ -457,6 +458,7 @@ build-local:
     build cli     norite        ./cmd/app
     build gui     norite-gui    ./cmd/gui
     build daemon  norite-daemon ./cmd/daemond
+    build voiceworker norite-voice ./cmd/norite-voice
 
 # Build every module with the workspace switched off.
 #
@@ -467,7 +469,7 @@ build-local:
 build-standalone:
     #!/usr/bin/env bash
     set -euo pipefail
-    for module in backend cli gui daemon; do
+    for module in backend cli gui daemon voiceworker; do
         echo "[$module] building without the workspace"
         (cd "$module" && GOWORK=off go build ./...)
     done

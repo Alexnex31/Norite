@@ -86,8 +86,9 @@ services:
     image: golang:1.26-alpine
     working_dir: /app/backend
     volumes:
-      # go.work is deliberately NOT mounted here: it lists cli/gui/daemon too, and Go auto-discovers any
-      # go.work file in a parent directory, so mounting it without also mounting those sibling modules made
+      # go.work is deliberately NOT mounted here: it lists cli/gui/daemon/voiceworker too, and Go
+      # auto-discovers any go.work file in a parent directory, so mounting it without also mounting those
+      # sibling modules made
       # `go run` fail immediately (cannot load module ../cli/../daemon/../gui). backend doesn't import any
       # of them, so it doesn't need workspace mode at all inside the container — go.mod alone is enough.
       - ../backend:/app/backend

@@ -49,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [backend, cli, gui, daemon]
+        module: [backend, cli, gui, daemon, voiceworker]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -72,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [backend, cli, gui, daemon]
+        module: [backend, cli, gui, daemon, voiceworker]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -187,7 +187,7 @@ jobs:
           set -euo pipefail
           out=contracts/dependency-licenses.txt
           tmp=$(mktemp)
-          for m in backend cli gui daemon; do
+          for m in backend cli gui daemon voiceworker; do
             (cd "$m" && GOWORK=off go run github.com/google/go-licenses/v2@"$GO_LICENSES_VERSION" report ./... \
               --ignore github.com/Alexnex31/Norite 2>/dev/null) \
               || { echo "::error::$m failed to report; refusing to write a partial inventory"; exit 1; }
@@ -248,10 +248,12 @@ jobs:
           (cd cli     && GOWORK=off go build -o ../bin/norite        ./cmd/app)
           (cd gui     && GOWORK=off go build -o ../bin/norite-gui    ./cmd/gui)
           (cd daemon  && GOWORK=off go build -o ../bin/norite-daemon ./cmd/daemond)
+          (cd voiceworker && GOWORK=off go build -o ../bin/norite-voice ./cmd/norite-voice)
           ./scripts/gen-third-party-notices.sh backend ./cmd/server  bin/norite-server backend/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh daemon  ./cmd/daemond bin/norite-daemon daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+          ./scripts/gen-third-party-notices.sh voiceworker ./cmd/norite-voice bin/norite-voice voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt
       - name: every hand-written Go file carries its SPDX header
         # Rule 24. Nothing else enforces it: the pass that added the headers was one-off, so what this
         # catches is the next file, written by somebody who has not read the rule — which is the only way
@@ -309,7 +311,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [backend, cli, gui, daemon]
+        module: [backend, cli, gui, daemon, voiceworker]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
