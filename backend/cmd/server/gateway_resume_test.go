@@ -69,6 +69,7 @@ func TestAResumedSessionLosesNothing(t *testing.T) {
 	url := serveGateway(t, f.api.handler)
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	owner := connected(t, url, f.ownerToken)
 	member, sessionID := identified(t, url, f.memberToken)
 
@@ -109,6 +110,7 @@ func TestASessionIDIsNotEnoughToResumeIt(t *testing.T) {
 	url := serveGateway(t, f.api.handler)
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	owner := connected(t, url, f.ownerToken)
 	member, sessionID := identified(t, url, f.memberToken)
 	_ = member.ws.CloseNow()
@@ -136,6 +138,7 @@ func TestASignedOutDeviceCannotResume(t *testing.T) {
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
 
+	settle(t, f, url)
 	laptop, sessionID := identified(t, url, f.ownerToken)
 	_ = laptop.ws.CloseNow()
 
@@ -155,6 +158,7 @@ func TestResumingPastWhatWasSentIsRefused(t *testing.T) {
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
 
+	settle(t, f, url)
 	member, sessionID := identified(t, url, f.memberToken)
 	_ = member.ws.CloseNow()
 
@@ -172,6 +176,7 @@ func TestAGapTheBufferCannotCoverIsNotResumable(t *testing.T) {
 	url, _ := customGateway(t, f, func(o *gateway.Options) { o.ResumeBuffer = 3 })
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	owner := connected(t, url, f.ownerToken)
 	member, sessionID := identified(t, url, f.memberToken)
 	_ = member.ws.CloseNow()
@@ -189,6 +194,7 @@ func TestASessionExpiresIfNotResumedInTime(t *testing.T) {
 	f := newGuildFixture(t)
 	url, _ := customGateway(t, f, func(o *gateway.Options) { o.ResumeWindow = 100 * time.Millisecond })
 
+	settle(t, f, url)
 	member, sessionID := identified(t, url, f.memberToken)
 	_ = member.ws.CloseNow()
 	time.Sleep(400 * time.Millisecond)
@@ -207,6 +213,7 @@ func TestResumingElsewhereClosesTheOldConnection(t *testing.T) {
 	url := serveGateway(t, f.api.handler)
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	old, sessionID := identified(t, url, f.memberToken)
 
 	fresh := dialGateway(t, url, nil)
@@ -231,5 +238,6 @@ func TestIdentifyingAgainSupersedesTheDevicesAbandonedSessions(t *testing.T) {
 		c, _ := identified(t, url, f.memberToken)
 		_ = c.ws.CloseNow()
 	}
+	settle(t, f, url)
 	identified(t, url, f.memberToken)
 }

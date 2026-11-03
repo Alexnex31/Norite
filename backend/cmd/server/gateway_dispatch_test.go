@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/backend/internal/dispatch"
+	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
 )
 
@@ -63,6 +66,35 @@ func connected(t *testing.T, url, token string) *gatewayClient {
 	return c
 }
 
+// settle waits until every event published so far about the fixture's guild has been fanned out, so a
+// connection opened afterwards receives none of them. Fan-out is asynchronous: an event committed before a
+// client connected can still reach it if its lane is behind, which a loaded CI runner made happen, and a
+// test expecting its own event next then reads the setup's. A guild's events take one lane in publish
+// order, so a sentinel published on the bus after them reaches a watcher only once they all have.
+func settle(t *testing.T, f *guildFixture, url string) {
+	t.Helper()
+	watcher := connected(t, url, f.ownerToken)
+	defer func() { _ = watcher.ws.CloseNow() }()
+	guild, err := snowflake.Parse(f.guildID)
+	require.NoError(t, err)
+	owner, err := snowflake.Parse(f.ownerID)
+	require.NoError(t, err)
+	// The payload names a guild nobody has, which no event of the setup's can.
+	marker := fmt.Sprintf("%d", guild+1)
+	msg, err := json.Marshal(dispatch.Event{
+		Type: "GUILD_PERMISSIONS_UPDATE", Audience: dispatch.Users, GuildID: guild,
+		Users: []snowflake.ID{owner}, Data: json.RawMessage(`{"guild_id":"` + marker + `"}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.api.bus.Publish(context.Background(), dispatch.Topic, msg))
+	for {
+		d := watcher.nextDispatch()
+		if d.t == "GUILD_PERMISSIONS_UPDATE" && d.field(t, "guild_id") == marker {
+			return
+		}
+	}
+}
+
 func createChannel(t *testing.T, f *guildFixture, body map[string]any) string {
 	t.Helper()
 	res := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/channels", f.guildID), body, withToken(f.ownerToken))
@@ -111,6 +143,7 @@ func TestGuildActivityIsDispatchedToItsMembers(t *testing.T) {
 	url := serveGateway(t, f.api.handler)
 	general := createChannel(t, f, map[string]any{"name": "general", "type": 0})
 
+	settle(t, f, url)
 	owner, member := connected(t, url, f.ownerToken), connected(t, url, f.memberToken)
 
 	id := send(t, f, f.memberToken, general, "hello")
@@ -148,6 +181,7 @@ func TestAHiddenChannelsEventsReachOnlyThoseWhoCanSeeIt(t *testing.T) {
 	staff := createChannel(t, f, map[string]any{"name": "staff", "type": 0})
 	denyView(t, f, staff, 0, f.everyoneID)
 
+	settle(t, f, url)
 	owner, member := connected(t, url, f.ownerToken), connected(t, url, f.memberToken)
 
 	send(t, f, f.ownerToken, staff, "staff only")
@@ -171,6 +205,7 @@ func TestANewChannelInALockedCategoryIsAnnouncedOnlyToThoseAdmitted(t *testing.T
 	category := createChannel(t, f, map[string]any{"name": "locked", "type": 4})
 	denyView(t, f, category, 1, f.memberID)
 
+	settle(t, f, url)
 	owner, member := connected(t, url, f.ownerToken), connected(t, url, f.memberToken)
 
 	inside := createChannel(t, f, map[string]any{"name": "inside", "type": 0, "parent_id": category})
@@ -186,6 +221,7 @@ func TestARemovedMemberHearsNothingMoreFromTheGuild(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
+	settle(t, f, url)
 	owner, member := connected(t, url, f.ownerToken), connected(t, url, f.memberToken)
 
 	res := f.api.call(http.MethodDelete, fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.memberID), nil,
@@ -211,6 +247,7 @@ func TestFanOutAsksTheDatabaseNotTheConnectionsMemory(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
+	settle(t, f, url)
 	owner, member := connected(t, url, f.ownerToken), connected(t, url, f.memberToken)
 
 	f.api.mustExec(t, `DELETE FROM guild_members WHERE guild_id = $1 AND user_id = $2`,
@@ -231,6 +268,7 @@ func TestANewGuildJoinsItsCreatorsConnection(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
+	settle(t, f, url)
 	stranger := connected(t, url, f.strangerToken)
 
 	res := f.api.call(http.MethodPost, "/api/v1/guilds", map[string]any{"name": "New"}, withToken(f.strangerToken))
@@ -249,6 +287,7 @@ func TestARefusedMutationDispatchesNothing(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
+	settle(t, f, url)
 	owner := connected(t, url, f.ownerToken)
 
 	res := f.api.call(http.MethodPatch, "/api/v1/guilds/"+f.guildID, map[string]any{"name": "Hijacked"},
@@ -265,6 +304,7 @@ func TestRoleAndPermissionChangesAreDispatched(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
+	settle(t, f, url)
 	member := connected(t, url, f.memberToken)
 
 	role := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/roles", f.guildID),
@@ -299,6 +339,7 @@ func TestAnEditDoesNotReachAMemberWhoCannotReadHistory(t *testing.T) {
 	listed := f.api.call(http.MethodGet, "/api/v1/channels/"+desk+"/messages", nil, withToken(f.memberToken))
 	require.Equal(t, http.StatusForbidden, listed.Code, "REST refuses the backlog: %s", listed)
 
+	settle(t, f, url)
 	member := connected(t, url, f.memberToken)
 	res = f.api.call(http.MethodPatch, "/api/v1/channels/"+desk+"/messages/"+old,
 		map[string]any{"content": "rewritten"}, withToken(f.ownerToken))
@@ -315,6 +356,7 @@ func TestAnOwnershipTransferTellsMembersTheirPermissionsChanged(t *testing.T) {
 	t.Parallel()
 	f := newGuildFixture(t)
 	url := serveGateway(t, f.api.handler)
+	settle(t, f, url)
 	owner, member := connected(t, url, f.ownerToken), connected(t, url, f.memberToken)
 
 	res := f.api.call(http.MethodPost, fmt.Sprintf("/api/v1/guilds/%s/owner", f.guildID),
@@ -337,6 +379,7 @@ func TestDeletingACategoryUpdatesTheChannelsItHeld(t *testing.T) {
 	open := createChannel(t, f, map[string]any{"name": "open", "type": 0, "parent_id": category})
 	hidden := createChannel(t, f, map[string]any{"name": "hidden", "type": 0, "parent_id": category})
 	denyView(t, f, hidden, 1, f.memberID)
+	settle(t, f, url)
 	member := connected(t, url, f.memberToken)
 
 	res := f.api.call(http.MethodDelete, "/api/v1/channels/"+category, nil, withToken(f.ownerToken))
