@@ -62,37 +62,44 @@ func TestTwoClientsExchangeRealOpus(t *testing.T) {
 	send(t, map[*voicetest.Client][][]byte{a.client: tone, b.client: tone}, voicetest.SendOptions{Level: voicetest.Loud})
 
 	for name, c := range map[string]*voicetest.Client{"a": a.client, "b": b.client} {
-		got := c.Received(c.SlotMids()[0])
-		if len(got) != len(tone) {
-			t.Fatalf("%s received %d packets, want %d", name, len(got), len(tone))
-		}
-		for i, p := range got {
-			if !bytes.Equal(p.Payload, tone[i]) {
-				t.Fatalf("%s: packet %d differs from what was sent", name, i)
-			}
-			if p.TS-got[0].TS != uint32(i)*voicetest.FrameSamples {
-				t.Fatalf("%s: packet %d at timestamp %d, want %d", name, i, p.TS-got[0].TS, i*voicetest.FrameSamples)
-			}
-			if len(p.CSRC) != 1 || p.CSRC[0] != got[0].CSRC[0] {
-				t.Fatalf("%s: packet %d names sources %v", name, i, p.CSRC)
-			}
-		}
-		assertContinuous(t, got)
-		if !got[0].Marker {
-			t.Fatalf("%s: the first packet does not mark the start of a talkspurt", name)
-		}
+		assertTone(t, name, c, tone)
+	}
+}
 
-		var file bytes.Buffer
-		if err := voicetest.WriteOgg(&file, got); err != nil {
-			t.Fatal(err)
+// assertTone holds what c's first slot received to the tone, sent once: every payload byte-identical and
+// in order, timestamps a frame apart, one source named throughout, and a valid Ogg file once written.
+func assertTone(t *testing.T, name string, c *voicetest.Client, tone [][]byte) {
+	t.Helper()
+	got := c.Received(c.SlotMids()[0])
+	if len(got) != len(tone) {
+		t.Fatalf("%s received %d packets, want %d", name, len(got), len(tone))
+	}
+	for i, p := range got {
+		if !bytes.Equal(p.Payload, tone[i]) {
+			t.Fatalf("%s: packet %d differs from what was sent", name, i)
 		}
-		back, err := voicetest.ReadOgg(&file)
-		if err != nil {
-			t.Fatalf("%s: what arrived is not a valid Ogg file: %v", name, err)
+		if p.TS-got[0].TS != uint32(i)*voicetest.FrameSamples {
+			t.Fatalf("%s: packet %d at timestamp %d, want %d", name, i, p.TS-got[0].TS, i*voicetest.FrameSamples)
 		}
-		if len(back) != len(tone) {
-			t.Fatalf("%s: the file holds %d packets, want %d", name, len(back), len(tone))
+		if len(p.CSRC) != 1 || p.CSRC[0] != got[0].CSRC[0] {
+			t.Fatalf("%s: packet %d names sources %v", name, i, p.CSRC)
 		}
+	}
+	assertContinuous(t, got)
+	if !got[0].Marker {
+		t.Fatalf("%s: the first packet does not mark the start of a talkspurt", name)
+	}
+
+	var file bytes.Buffer
+	if err := voicetest.WriteOgg(&file, got); err != nil {
+		t.Fatal(err)
+	}
+	back, err := voicetest.ReadOgg(&file)
+	if err != nil {
+		t.Fatalf("%s: what arrived is not a valid Ogg file: %v", name, err)
+	}
+	if len(back) != len(tone) {
+		t.Fatalf("%s: the file holds %d packets, want %d", name, len(back), len(tone))
 	}
 }
 
