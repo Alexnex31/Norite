@@ -5,6 +5,7 @@ package turn
 
 import (
 	"bytes"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -80,5 +81,32 @@ func TestARenewedCertificateIsServedWithoutARestart(t *testing.T) {
 
 	if _, err := CertificateFiles(filepath.Join(dir, "missing.pem"), filepath.Join(dir, "turn.key"), zerolog.Nop()); err == nil {
 		t.Fatal("a missing certificate started")
+	}
+}
+
+// TestAHandshakeDoesNotWaitOnAReload: the files are looked at by one handshake at a time, and the rest
+// serve the certificate they have. A reload from a slow disk held every handshake behind it.
+func TestAHandshakeDoesNotWaitOnAReload(t *testing.T) {
+	dir := t.TempDir()
+	writePair(t, dir, time.Now())
+	f := &certFiles{certFile: filepath.Join(dir, "turn.pem"), keyFile: filepath.Join(dir, "turn.key"), log: zerolog.Nop()}
+	if err := f.load(); err != nil {
+		t.Fatal(err)
+	}
+	// A reload under way, as far as any other handshake can tell.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	done := make(chan *tls.Certificate, 1)
+	go func() {
+		c, _ := f.get(nil)
+		done <- c
+	}()
+	select {
+	case c := <-done:
+		if c == nil {
+			t.Fatal("a handshake was served no certificate")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a handshake waited on another's reload")
 	}
 }

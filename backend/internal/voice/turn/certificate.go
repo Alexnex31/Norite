@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -33,26 +34,31 @@ type certFiles struct {
 	certFile, keyFile string
 	log               zerolog.Logger
 
+	// cert is what every handshake serves, read without a lock.
+	cert atomic.Pointer[tls.Certificate]
+
+	// mu is the one handshake looking at the files, taken by TryLock: a slow disk delays that handshake
+	// and no other, which go on serving the certificate they have.
 	mu      sync.Mutex
-	cert    *tls.Certificate
 	stamp   [2]time.Time
 	checked time.Time
 	warned  bool
 }
 
 func (f *certFiles) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if time.Since(f.checked) >= recheck {
-		f.checked = time.Now()
-		if stamp, err := f.stamps(); err == nil && stamp != f.stamp {
-			if err := f.loadLocked(); err != nil && !f.warned {
-				f.warned = true
-				f.log.Warn().Err(err).Msg("TURN's certificate changed and could not be read; keeping the last one")
+	if f.mu.TryLock() {
+		if time.Since(f.checked) >= recheck {
+			f.checked = time.Now()
+			if stamp, err := f.stamps(); err == nil && stamp != f.stamp {
+				if err := f.loadLocked(); err != nil && !f.warned {
+					f.warned = true
+					f.log.Warn().Err(err).Msg("TURN's certificate changed and could not be read; keeping the last one")
+				}
 			}
 		}
+		f.mu.Unlock()
 	}
-	return f.cert, nil
+	return f.cert.Load(), nil
 }
 
 func (f *certFiles) load() error {
@@ -71,7 +77,8 @@ func (f *certFiles) loadLocked() error {
 	if err != nil {
 		return fmt.Errorf("turn: the certificate: %w", err)
 	}
-	f.cert, f.stamp, f.warned = &cert, stamp, false
+	f.cert.Store(&cert)
+	f.stamp, f.warned = stamp, false
 	return nil
 }
 

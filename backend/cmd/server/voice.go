@@ -28,6 +28,8 @@ func startVoice(cfg config.Config, version string, logger zerolog.Logger) (*voic
 		TLSKey:          v.TLSKey,
 		Relay:           v.Relay,
 		SFU:             v.SFU,
+		OtherRelay:      v.OtherRelay,
+		OtherSFU:        v.OtherSFU,
 		RelayPorts:      v.RelayPorts,
 		RelayPerAddress: v.RelayPerAddress,
 		SigningKey:      []byte(cfg.JWTSecret),

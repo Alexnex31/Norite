@@ -149,7 +149,7 @@ func (s *SFU) reachable(ip net.IP) bool {
 	}
 	a = a.Unmap()
 	switch {
-	case s.opts.Relay.IsValid() && a == s.opts.Relay:
+	case slices.Contains(s.opts.Relays, a):
 		return true
 	case a.IsLoopback():
 		return s.opts.Loopback

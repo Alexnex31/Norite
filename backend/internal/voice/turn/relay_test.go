@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pion/stun/v4"
+	"github.com/pion/turn/v5"
 )
 
 // TestTheSFUIsReachedByTheAddressesItAnnounces: a client names the SFU by what it announced, a public
@@ -99,8 +100,10 @@ func TestTheSFUIsReachedByTheAddressesItAnnounces(t *testing.T) {
 	}
 }
 
-// TestAnSFUOnEveryInterfaceIsKnownByEachOfThem: with nothing announced, the SFU is listening on every
-// interface and announces each, so each of this host's addresses reaches it.
+// TestAnSFUOnEveryInterfaceIsKnownByEachOfThem: with nothing announced in the relay's family, the SFU is
+// listening on every interface and announces each, so each of this host's addresses reaches it. That
+// includes public addresses all of the other family, which Pion's rewrite leaves this family's alone for;
+// before /code-review found it, those made every address of the relay's family unknown.
 func TestAnSFUOnEveryInterfaceIsKnownByEachOfThem(t *testing.T) {
 	var host netip.Addr
 	ifaddrs, err := net.InterfaceAddrs()
@@ -118,17 +121,107 @@ func TestAnSFUOnEveryInterfaceIsKnownByEachOfThem(t *testing.T) {
 	if !host.IsValid() {
 		t.Skip("no IPv4 address here but loopback")
 	}
-	f := newFixture(t, nil)
-	relay, err := f.client(t, cred(1)).Allocate()
-	if err != nil {
-		t.Fatal(err)
+	for name, announced := range map[string][]netip.Addr{
+		"nothing announced":       nil,
+		"only the other family's": {netip.MustParseAddr("2001:db8::7")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, func(o *Options) { o.Announced = announced })
+			relay, err := f.client(t, cred(1)).Allocate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			to := net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, uint16(f.sfuAddr().(*net.UDPAddr).Port)))
+			if _, err := relay.WriteTo([]byte("to the SFU"), to); err != nil {
+				t.Fatalf("to %v: %v", to, err)
+			}
+			if got := received(t, f.sfu, time.Second); len(got) != 1 || string(got[0]) != "to the SFU" {
+				t.Fatalf("the SFU heard %q", got)
+			}
+		})
 	}
-	to := net.UDPAddrFromAddrPort(netip.AddrPortFrom(host, uint16(f.sfuAddr().(*net.UDPAddr).Port)))
-	if _, err := relay.WriteTo([]byte("to the SFU"), to); err != nil {
-		t.Fatalf("to %v: %v", to, err)
+}
+
+// TestAClientReachingTURNOverIPv6IsServed: pion gives an allocation that names no family the family of
+// the address the client reached TURN on, and pion's own client names IPv6 whenever its socket is IPv6.
+// An IPv4 relay alone refused both. Now a client naming no family gets the IPv4 relay, and a server
+// relaying in both families gives one naming IPv6 an IPv6 relay.
+func TestAClientReachingTURNOverIPv6IsServed(t *testing.T) {
+	if pc, err := net.ListenPacket("udp6", "[::1]:0"); err != nil {
+		t.Skip("no IPv6 loopback here:", err)
+	} else {
+		_ = pc.Close()
 	}
-	if got := received(t, f.sfu, time.Second); len(got) != 1 || string(got[0]) != "to the SFU" {
-		t.Fatalf("the SFU heard %q", got)
+	for name, c := range map[string]struct {
+		both   bool
+		family turn.RequestedAddressFamily
+		want4  bool
+	}{
+		"naming no family, IPv4 relay alone": {false, turn.RequestedAddressFamilyIPv4, true},
+		"naming IPv6, both families":         {true, turn.RequestedAddressFamilyIPv6, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			udp, err := net.ListenPacket("udp6", "[::1]:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sfu, err := net.ListenPacket("udp", ":0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = sfu.Close() }()
+			port := uint16(sfu.LocalAddr().(*net.UDPAddr).Port)
+			opts := Options{
+				UDP:    udp,
+				Secret: testSecret,
+				Relay:  netip.MustParseAddr("127.0.0.1"),
+				SFU:    netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port),
+			}
+			if c.both {
+				opts.OtherRelay = netip.IPv6Loopback()
+				opts.OtherSFU = netip.AddrPortFrom(netip.IPv6Loopback(), port)
+			}
+			s, err := New(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			conn, err := net.ListenPacket("udp6", "[::1]:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cr := cred(1)
+			client, err := turn.NewClient(&turn.ClientConfig{
+				STUNServerAddr: udp.LocalAddr().String(), TURNServerAddr: udp.LocalAddr().String(),
+				Conn: conn, Username: cr.Username, Password: cr.Password, Realm: Realm,
+				RequestedAddressFamily: c.family,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.Listen(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { client.Close(); _ = conn.Close() }()
+			relay, err := client.Allocate()
+			if err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if got4 := relay.LocalAddr().(*net.UDPAddr).IP.To4() != nil; got4 != c.want4 {
+				t.Fatalf("the relay is %v", relay.LocalAddr())
+			}
+			// And it reaches the SFU, in that family.
+			to := net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port))
+			if !c.want4 {
+				to = net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.IPv6Loopback(), port))
+			}
+			if _, err := relay.WriteTo([]byte("to the SFU"), to); err != nil {
+				t.Fatal(err)
+			}
+			if got := received(t, sfu, time.Second); len(got) != 1 || string(got[0]) != "to the SFU" {
+				t.Fatalf("the SFU heard %q", got)
+			}
+		})
 	}
 }
 

@@ -87,7 +87,7 @@ type relayed struct {
 func newRelayed(t *testing.T, tune func(*turn.Options)) relayed {
 	t.Helper()
 	loopback := netip.MustParseAddr("127.0.0.1")
-	s := newSFUWith(t, func(o *Options) { o.Relay = loopback })
+	s := newSFUWith(t, func(o *Options) { o.Relays = []netip.Addr{loopback} })
 	udp, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

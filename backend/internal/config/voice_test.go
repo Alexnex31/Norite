@@ -37,6 +37,23 @@ func TestVoiceDefaults(t *testing.T) {
 	assert.Equal(t, netip.MustParseAddrPort("127.0.0.1:3479"), v.SFU, "an SFU on every interface is reached on loopback")
 	assert.Empty(t, v.Public)
 	assert.Equal(t, 64, v.RelayPerAddress)
+	assert.Equal(t, netip.IPv6Loopback(), v.OtherRelay, "an SFU on every interface is reached on loopback in IPv6 too")
+	assert.Equal(t, netip.MustParseAddrPort("[::1]:3479"), v.OtherSFU)
+}
+
+// The IPv6 relay exists only where the SFU listens in both families and the relay is not configured.
+func TestTheOtherRelayIsOnlyForAnSFUOnEveryInterface(t *testing.T) {
+	for env, want := range map[[2]string]bool{
+		{":3479", ""}:         true,
+		{"[::]:3479", ""}:     true,
+		{"0.0.0.0:3479", ""}:  false,
+		{"10.0.0.5:3479", ""}: false,
+		{":3479", "10.0.0.5"}: false,
+	} {
+		v, err := loadVoice(t, map[string]string{"VOICE_MEDIA_LISTEN": env[0], "VOICE_RELAY_ADDRESS": env[1]})
+		require.NoError(t, err)
+		assert.Equal(t, want, v.OtherRelay.IsValid(), "media %q, relay %q", env[0], env[1])
+	}
 }
 
 func TestVoiceSettingsFollowTheMediaAddress(t *testing.T) {

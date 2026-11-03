@@ -79,6 +79,13 @@ func run(media, public, httpAddr string, loopback bool, turnAddr, turnTLS, cert,
 	if err != nil {
 		return err
 	}
+	// The URLs handed to clients carry these hosts, so an address on every interface names nothing a
+	// client can dial.
+	for name, addr := range map[string]string{"-turn": v.TURNListen, "-turn-tls": v.TURNTLSListen} {
+		if host, _, err := net.SplitHostPort(addr); addr != "" && (err != nil || host == "") {
+			return fmt.Errorf("%s names the address clients reach TURN at, host included", name)
+		}
+	}
 	// A fresh key per run: the harness has no instance, and a credential outliving the process it was
 	// minted by has nothing to reach.
 	signingKey := make([]byte, 32)
@@ -92,6 +99,8 @@ func run(media, public, httpAddr string, loopback bool, turnAddr, turnTLS, cert,
 		TLSKey:          v.TLSKey,
 		Relay:           v.Relay,
 		SFU:             v.SFU,
+		OtherRelay:      v.OtherRelay,
+		OtherSFU:        v.OtherSFU,
 		RelayPerAddress: v.RelayPerAddress,
 		SigningKey:      signingKey,
 		Loopback:        loopback,
@@ -103,9 +112,10 @@ func run(media, public, httpAddr string, loopback bool, turnAddr, turnTLS, cert,
 	}
 	defer func() { _ = stack.Close() }()
 	sfu := stack.SFU
-	urls := []string{"turn:" + turnAddr + "?transport=udp", "turn:" + turnAddr + "?transport=tcp"}
-	if turnTLS != "" {
-		urls = append(urls, "turns:"+turnTLS+"?transport=tcp")
+	// What clients are told is what was bound: TLS only with a certificate, as config.Voice decides.
+	urls := []string{"turn:" + v.TURNListen + "?transport=udp", "turn:" + v.TURNListen + "?transport=tcp"}
+	if v.TURNTLSListen != "" {
+		urls = append(urls, "turns:"+v.TURNTLSListen+"?transport=tcp")
 	}
 
 	ids, err := snowflake.NewGenerator(1)

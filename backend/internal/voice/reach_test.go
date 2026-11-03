@@ -85,7 +85,7 @@ func TestAnOfferClaimingLiteIsSentNothing(t *testing.T) {
 }
 
 func TestAClientsAddressIsOneAClientCanHave(t *testing.T) {
-	s := &SFU{opts: Options{Relay: netip.MustParseAddr("127.0.0.2")}}
+	s := &SFU{opts: Options{Relays: []netip.Addr{netip.MustParseAddr("127.0.0.2")}}}
 	for addr, want := range map[string]bool{
 		"203.0.113.7":            true,
 		"2001:db8::7":            true,

@@ -31,6 +31,9 @@ type Options struct {
 	Slots int
 	// Loopback admits loopback candidates, for a client and an SFU on one machine.
 	Loopback bool
+	// IPv6 gathers in IPv6 as well as IPv4, relayed candidates included: a TURN server named by an IPv6
+	// address is reached, and asked for an IPv6 relay, only then.
+	IPv6 bool
 	// Version is what the client's hello names; empty is "dev".
 	Version string
 	// NoHello leaves the hello unsent, for a test that sends something else first.
@@ -101,7 +104,11 @@ func New(opts Options) (*Client, error) {
 	}
 
 	se := webrtc.SettingEngine{}
-	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	networks := []webrtc.NetworkType{webrtc.NetworkTypeUDP4}
+	if opts.IPv6 {
+		networks = append(networks, webrtc.NetworkTypeUDP6)
+	}
+	se.SetNetworkTypes(networks)
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	se.SetIncludeLoopbackCandidate(opts.Loopback)
 	se.SetICETimeouts(3*time.Second, 6*time.Second, time.Second)

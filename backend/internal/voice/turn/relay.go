@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/pion/stun/v4"
@@ -66,19 +65,22 @@ func (r *relays) AllocatePacketConn(conf turn.AllocateListenerConfig) (_ net.Pac
 	if conf.UserID == "" {
 		return nil, nil, errNoUser
 	}
-	relay := r.s.opts.Relay
-	if (conf.Network == "udp4") != relay.Is4() {
+	f := r.s.v6
+	if conf.Network == "udp4" {
+		f = r.s.v4
+	}
+	if f == nil {
 		return nil, nil, errFamily
 	}
 	if !r.reserve(conf.UserID) {
 		return nil, nil, errFull
 	}
-	pc, err := r.bind(conf.Network, relay)
+	pc, err := r.bind(conf.Network, f.relay)
 	if err != nil {
 		r.release(conf.UserID)
 		return nil, nil, err
 	}
-	c := &relayConn{PacketConn: pc, s: r.s, user: conf.UserID, heard: r.s.now()}
+	c := &relayConn{PacketConn: pc, s: r.s, fam: f, user: conf.UserID, heard: r.s.now()}
 	c.udp, _ = pc.(*net.UDPConn)
 	c.mu.Lock()
 	c.idle = time.AfterFunc(r.s.lim.Idle, c.checkIdle)
@@ -105,25 +107,28 @@ func (r *relays) bind(network string, relay netip.Addr) (net.PacketConn, error) 
 		if err == nil {
 			return pc, nil
 		}
-		if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		if addressNotHere(err) {
 			return nil, err
 		}
 	}
 	return nil, fmt.Errorf("turn: every relay port from %d to %d is taken", lo, hi)
 }
 
-// probe binds one relay socket and closes it, so that a relay address this host does not have, or a range
-// with nothing free, is found when the server starts rather than by the first client to need it.
+// probe binds one relay socket in each family and closes it, so that a relay address this host does not
+// have, or a range with nothing free, is found when the server starts rather than by the first client to
+// need it.
 func (r *relays) probe() error {
-	network := "udp6"
-	if r.s.opts.Relay.Is4() {
-		network = "udp4"
+	for network, f := range map[string]*family{"udp4": r.s.v4, "udp6": r.s.v6} {
+		if f == nil {
+			continue
+		}
+		pc, err := r.bind(network, f.relay)
+		if err != nil {
+			return fmt.Errorf("turn: no relay socket on %v: %w", f.relay, err)
+		}
+		_ = pc.Close()
 	}
-	pc, err := r.bind(network, r.s.opts.Relay)
-	if err != nil {
-		return fmt.Errorf("turn: no relay socket on %v: %w", r.s.opts.Relay, err)
-	}
-	return pc.Close()
+	return nil
 }
 
 func (r *relays) reserve(user string) bool {
@@ -167,7 +172,9 @@ func (r *relays) release(user string) {
 // the one its request went to, which ICE checks; for anything else, the last the client sent data to.
 type relayConn struct {
 	net.PacketConn
-	s    *Server
+	s *Server
+	// fam is the family the relay is in, whose SFU address is the only one it reaches.
+	fam  *family
 	user string
 	// udp is PacketConn as what it is, read without the address the standard library allocates for each
 	// packet; nil only in a test that builds one by hand.
@@ -207,7 +214,7 @@ type peer struct {
 // address this socket ever sends to is the SFU's own.
 func (c *relayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	to, ok := c.s.sfuPeer(addr)
-	if !ok {
+	if !ok || c.s.familyOf(to.Addr()) != c.fam {
 		return len(p), nil
 	}
 	lim := c.s.lim
@@ -224,7 +231,7 @@ func (c *relayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if !ok {
 		return len(p), nil
 	}
-	return c.PacketConn.WriteTo(p, c.s.sfu)
+	return c.PacketConn.WriteTo(p, c.fam.sfuUDP)
 }
 
 // remember records where the client wrote p. Under mu.
@@ -251,7 +258,7 @@ func (c *relayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		if err != nil {
 			return n, nil, err
 		}
-		if netip.AddrPortFrom(from.Addr().Unmap(), from.Port()) != c.s.opts.SFU {
+		if netip.AddrPortFrom(from.Addr().Unmap(), from.Port()) != c.fam.sfu {
 			continue
 		}
 		c.mu.Lock()

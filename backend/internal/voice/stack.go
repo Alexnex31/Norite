@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -29,8 +30,12 @@ type StackOptions struct {
 	TLSKey        string
 
 	// Relay is where relay sockets are bound, SFU where they reach the SFU, and RelayPorts their range.
+	// OtherRelay and OtherSFU are the same in IPv6 when the SFU is reached on loopback in both families,
+	// used only if the media socket listens on both and this host can bind ::1.
 	Relay      netip.Addr
 	SFU        netip.AddrPort
+	OtherRelay netip.Addr
+	OtherSFU   netip.AddrPort
 	RelayPorts [2]uint16
 
 	// RelayPerAddress is how many allocations, and how many TCP and TLS connections, one address may
@@ -75,8 +80,15 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	}
 	closers = append(closers, media.Close)
 	// A port of zero is one the system chose, which only the socket knows.
+	mediaPort := media.LocalAddr().(*net.UDPAddr).AddrPort().Port()
 	if opts.SFU.Port() == 0 {
-		opts.SFU = netip.AddrPortFrom(opts.SFU.Addr(), media.LocalAddr().(*net.UDPAddr).AddrPort().Port())
+		opts.SFU = netip.AddrPortFrom(opts.SFU.Addr(), mediaPort)
+	}
+	if opts.OtherRelay.IsValid() && !dualStack(media) {
+		opts.OtherRelay, opts.OtherSFU = netip.Addr{}, netip.AddrPort{}
+	}
+	if opts.OtherSFU.IsValid() && opts.OtherSFU.Port() == 0 {
+		opts.OtherSFU = netip.AddrPortFrom(opts.OtherSFU.Addr(), mediaPort)
 	}
 	udp, err := net.ListenPacket("udp", opts.TURNListen)
 	if err != nil {
@@ -89,16 +101,8 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	}
 	closers = append(closers, tcp.Close)
 
-	// A client names the SFU by what it announces: its public addresses, or the address it binds, or with
-	// neither every address of the host's, which TURN reads for itself.
-	announced := opts.Public
-	if bound := media.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap(); len(announced) == 0 && !bound.IsUnspecified() {
-		announced = []netip.Addr{bound}
-	}
-	limits := turn.DefaultLimits()
-	if opts.RelayPerAddress > 0 {
-		limits.AllocationsPerSource, limits.StreamsPerSource = opts.RelayPerAddress, opts.RelayPerAddress
-	}
+	bound := media.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap()
+	limits := stackLimits(opts.RelayPerAddress)
 	topts := turn.Options{
 		UDP:        udp,
 		TCP:        tcp,
@@ -106,7 +110,9 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 		Relay:      opts.Relay,
 		RelayPorts: opts.RelayPorts,
 		SFU:        opts.SFU,
-		Announced:  announced,
+		OtherRelay: opts.OtherRelay,
+		OtherSFU:   opts.OtherSFU,
+		Announced:  announced(opts.Public, bound),
 		Limits:     limits,
 		Logger:     opts.Logger,
 	}
@@ -130,7 +136,7 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 		Conn:     media,
 		Loopback: opts.Loopback,
 		Public:   opts.Public,
-		Relay:    opts.Relay,
+		Relays:   relays(opts.Relay, opts.OtherRelay),
 		Version:  opts.Version,
 		Logger:   opts.Logger,
 	})
@@ -145,16 +151,68 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	return &Stack{SFU: sfu, TURN: srv, Secret: secret}, nil
 }
 
-// closeGrace is how long TURN stays up after the SFU has closed, while it holds an allocation: pion
-// relays what the SFU sent on a goroutine of its own, which a loaded machine may not have run yet.
-const closeGrace = 250 * time.Millisecond
+// announced is what a client names the SFU by: its public addresses, and the address it binds in a family
+// they do not cover, since Pion rewrites only the host candidates a public address is given for. Nothing
+// in a family, with the SFU on every interface, is each of the host's addresses, which TURN reads itself.
+func announced(public []netip.Addr, bound netip.Addr) []netip.Addr {
+	out := slices.Clone(public)
+	covered := slices.ContainsFunc(public, func(a netip.Addr) bool { return a.Is4() == bound.Is4() })
+	if !bound.IsUnspecified() && !covered {
+		out = append(out, bound)
+	}
+	return out
+}
+
+// dualStack is whether the media socket hears both families on loopback: bound to every IPv6 address,
+// which Go does with an empty host when the host has IPv6, and with ::1 there to be reached on.
+func dualStack(media net.PacketConn) bool {
+	if a := media.LocalAddr().(*net.UDPAddr).AddrPort().Addr(); a != netip.IPv6Unspecified() {
+		return false
+	}
+	probe, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		return false
+	}
+	_ = probe.Close()
+	return true
+}
+
+func relays(addrs ...netip.Addr) []netip.Addr {
+	var out []netip.Addr
+	for _, a := range addrs {
+		if a.IsValid() {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// stackLimits are TURN's, with perAddress for what one address holds. Replies to unauthenticated requests
+// follow it up: every client's first Allocate on each transport is answered with a challenge, so an
+// office behind one NAT, which is who raises it, would otherwise have them dropped at twenty a second.
+func stackLimits(perAddress int) turn.Limits {
+	limits := turn.DefaultLimits()
+	if perAddress > 0 {
+		limits.AllocationsPerSource, limits.StreamsPerSource = perAddress, perAddress
+		limits.RepliesPerSecond = max(limits.RepliesPerSecond, perAddress)
+	}
+	return limits
+}
+
+// closeQuiet and closeLimit bound how long TURN stays up after the SFU has closed, while it holds an
+// allocation: until the relays have heard nothing for closeQuiet, so that what the SFU sent on its way out
+// has been passed on, and closeLimit at most.
+const (
+	closeQuiet = 100 * time.Millisecond
+	closeLimit = time.Second
+)
 
 // Close stops the SFU, then TURN: what the SFU sends a relayed client as it closes the connection goes
 // through the relay, which must still be there to carry it.
 func (s *Stack) Close() error {
 	err := s.SFU.Close()
 	if s.TURN.AllocationCount() > 0 {
-		time.Sleep(closeGrace)
+		s.TURN.Drain(closeQuiet, closeLimit)
 	}
 	return errors.Join(err, s.TURN.Close())
 }

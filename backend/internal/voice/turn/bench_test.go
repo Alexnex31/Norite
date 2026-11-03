@@ -32,7 +32,7 @@ func newRelayPath(tb testing.TB) relayPath {
 		tb.Fatal(err)
 	}
 	tb.Cleanup(func() { _ = pc.Close() })
-	c := &relayConn{PacketConn: pc, s: f.s, heard: f.s.now()}
+	c := &relayConn{PacketConn: pc, s: f.s, fam: f.s.v4, heard: f.s.now()}
 	c.udp, _ = pc.(*net.UDPConn)
 	peer := net.UDPAddrFromAddrPort(netip.AddrPortFrom(public, uint16(f.sfuAddr().(*net.UDPAddr).Port)))
 	return relayPath{c: c, sfu: f.sfu.(*net.UDPConn), peer: peer, relay: pc.LocalAddr().(*net.UDPAddr).AddrPort()}

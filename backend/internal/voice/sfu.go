@@ -75,9 +75,9 @@ type Options struct {
 	// behind a 1:1 NAT or a port-forwarding router cannot be reached at an address it can see. Empty
 	// announces what is bound.
 	Public []netip.Addr
-	// Relay is the address TURN's relay sockets are bound on, admitted as a remote candidate whatever
-	// range it is in. Invalid when there is no relay.
-	Relay netip.Addr
+	// Relays are the addresses TURN's relay sockets are bound on, one a family, admitted as remote
+	// candidates whatever range they are in. Empty when there is no relay.
+	Relays []netip.Addr
 	// Version is the server's version, against which a data channel's hello is checked.
 	Version string
 	Limits  Limits

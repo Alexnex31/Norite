@@ -23,8 +23,13 @@ type VoiceSettings struct {
 	TLSCert       string
 	TLSKey        string
 	// Relay is where relay sockets are bound, and SFU the media address as the relay reaches it.
+	// OtherRelay and OtherSFU are the IPv6 pair when the SFU listens on every interface and the relay is
+	// not configured: it is reached on loopback in both families then, and a client reaching TURN over
+	// IPv6 asks for an IPv6 relay. The stack drops them on a host without IPv6.
 	Relay      netip.Addr
 	SFU        netip.AddrPort
+	OtherRelay netip.Addr
+	OtherSFU   netip.AddrPort
 	RelayPorts [2]uint16
 	// RelayPerAddress bounds what one address holds on TURN.
 	RelayPerAddress int
@@ -104,6 +109,11 @@ func (c Config) Voice() (VoiceSettings, error) {
 		return VoiceSettings{}, bad("VoiceRelayAddress", "must be in the media address's family")
 	}
 	v.SFU = netip.AddrPortFrom(sfu, media.Port())
+	// Every interface, as Go binds an empty host: both families. 0.0.0.0 is IPv4 alone.
+	if c.VoiceRelayAddress == "" && (!media.Addr().IsValid() || media.Addr() == netip.IPv6Unspecified()) {
+		v.OtherRelay = netip.IPv6Loopback()
+		v.OtherSFU = netip.AddrPortFrom(v.OtherRelay, media.Port())
+	}
 
 	if c.VoiceRelayPorts != "" {
 		lo, hi, ok := strings.Cut(c.VoiceRelayPorts, "-")

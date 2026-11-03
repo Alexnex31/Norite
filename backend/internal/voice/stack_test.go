@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -192,4 +193,76 @@ func TestAStackThatClosesSaysGoodbyeThroughTheRelay(t *testing.T) {
 		t.Fatal("the relayed client heard nothing when the stack closed")
 	}
 	t.Logf("the relayed client knew within %v", time.Since(start))
+}
+
+// TestTheStackTellsTURNWhatTheSFUAnnounces: Pion rewrites only the host candidates a public address is
+// given for, so a family the public addresses leave out is announced as bound.
+func TestTheStackTellsTURNWhatTheSFUAnnounces(t *testing.T) {
+	v4, v6 := netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("2001:db8::7")
+	bound, every := netip.MustParseAddr("10.0.0.5"), netip.IPv4Unspecified()
+	for name, c := range map[string]struct {
+		public []netip.Addr
+		bound  netip.Addr
+		want   []netip.Addr
+	}{
+		"public, both families":          {[]netip.Addr{v4, v6}, bound, []netip.Addr{v4, v6}},
+		"public in the other family":     {[]netip.Addr{v6}, bound, []netip.Addr{v6, bound}},
+		"public in the other, every one": {[]netip.Addr{v6}, every, []netip.Addr{v6}},
+		"none, bound":                    {nil, bound, []netip.Addr{bound}},
+		"none, every interface":          {nil, every, nil},
+	} {
+		if got := announced(c.public, c.bound); !slices.Equal(got, c.want) {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
+	}
+}
+
+// TestRepliesFollowWhatOneAddressMayHold: every client's first Allocate on a transport draws a
+// challenge, and an office raising relay_per_address had them dropped at twenty a second.
+func TestRepliesFollowWhatOneAddressMayHold(t *testing.T) {
+	if got := stackLimits(0).RepliesPerSecond; got != turn.DefaultLimits().RepliesPerSecond {
+		t.Fatalf("the default replies bound is %d", got)
+	}
+	if got := stackLimits(500); got.RepliesPerSecond != 500 || got.AllocationsPerSource != 500 || got.StreamsPerSource != 500 {
+		t.Fatalf("relay_per_address 500 gave %+v", got)
+	}
+}
+
+// TestAClientReachingTURNOverIPv6JoinsTheCall: a client whose network gives it IPv6 asks for an IPv6
+// relay, Pion's client included, and an SFU on every interface is reached on ::1 as well as 127.0.0.1.
+func TestAClientReachingTURNOverIPv6JoinsTheCall(t *testing.T) {
+	probe, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		t.Skip("no IPv6 loopback here:", err)
+	}
+	turnAddr := probe.LocalAddr().String()
+	_ = probe.Close()
+	opts := stackOptions(t)
+	opts.MediaListen = ":0"
+	opts.TURNListen = turnAddr
+	opts.TURNTLSListen, opts.TLSCert, opts.TLSKey = "", "", ""
+	opts.OtherRelay = netip.IPv6Loopback()
+	opts.OtherSFU = netip.AddrPortFrom(netip.IPv6Loopback(), 0)
+	st, err := StartStack(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	// The SFU admits the IPv6 relay as a remote candidate, as it does the IPv4 one, outside tests too:
+	// this test admits loopback anyway, so it would pass without.
+	if !slices.Contains(st.SFU.opts.Relays, netip.IPv6Loopback()) {
+		t.Fatalf("the SFU admits relays %v", st.SFU.opts.Relays)
+	}
+
+	user := ids.MustNext()
+	cred := turn.Mint(st.Secret, user, time.Now())
+	a := joinWith(t, st.SFU, 1, user, voicetest.Options{Slots: 1, RelayOnly: true, IPv6: true, ICEServers: []webrtc.ICEServer{{
+		URLs:     []string{"turn:" + turnAddr + "?transport=udp"},
+		Username: cred.Username, Credential: cred.Password,
+	}}})
+	b := join(t, st.SFU, 1, ids.MustNext(), 1)
+	tone := voicetest.TonePackets()[:50]
+	send(t, map[*voicetest.Client][][]byte{a.client: tone, b.client: tone}, voicetest.SendOptions{Level: voicetest.Loud})
+	assertTone(t, "the relayed client", a.client, tone)
+	assertTone(t, "the direct client", b.client, tone)
 }

@@ -224,8 +224,9 @@ relay_ports = "49152-65535"
 # How many relays one address may hold, and how many TCP and TLS connections to TURN: an IPv6 /64 counts as
 # one address. A client trying every transport takes up to three relays and two connections, so the
 # default of 64 is twenty-odd people at once behind one address. Raise it for an organization whose people
-# all reach this instance through one NAT, which is the network a relay exists for. At most 1024, which is
-# every relay the server holds.
+# all reach this instance through one NAT, which is the network a relay exists for. It also raises how many
+# unauthenticated answers TURN gives one address a second, from 20, since each client's first request on
+# each transport draws one. At most 1024, which is every relay the server holds.
 relay_per_address = 64
 
 [smtp]

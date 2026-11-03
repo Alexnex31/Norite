@@ -50,10 +50,17 @@ type Options struct {
 	// SFU is the SFU's media address as the relay reaches it: the only peer there is, and the only address
 	// a relay socket sends to.
 	SFU netip.AddrPort
+	// OtherRelay and OtherSFU are the same in the other address family, when the SFU listens on every
+	// interface and so is reached on loopback in both: a client reaching TURN over IPv6 asks for an IPv6
+	// relay, Pion's client included, and with one family alone it would be refused every allocation.
+	// Both unset for one family.
+	OtherRelay netip.Addr
+	OtherSFU   netip.AddrPort
 	// Announced are the addresses the SFU announces, at SFU's port, which are what a client names it by:
-	// its public addresses, or the one address it binds. Empty when it binds every interface, and then
-	// each address of this host's is one. A permission names one of these or SFU's own; the relay
-	// sends to SFU whichever it was.
+	// its public addresses, or the one address it binds. They count family by family, and in a family
+	// with none, because the SFU binds every interface or its public addresses are all of the other,
+	// each address of this host's is one. A permission names one of these or the family's SFU address;
+	// the relay sends to that SFU address whichever it was.
 	Announced []netip.Addr
 
 	Limits Limits
@@ -75,21 +82,57 @@ type Server struct {
 	streams   *streams
 	listeners []*streamListener
 	pion      *turn.Server
-	// sfu is opts.SFU as a relay socket writes to it.
-	sfu *net.UDPAddr
+	// v4 and v6 are what the relay serves in each family, nil for one it does not.
+	v4, v6 *family
 
-	// host is this host's addresses, read again at most every hostRecheck, when Announced is empty.
-	host atomic.Pointer[hostAddrs]
+	// host is this host's addresses, for a family nothing is announced in, read again every hostRecheck
+	// by a goroutine of its own, never on a packet's path.
+	host     atomic.Pointer[[]netip.Addr]
+	stop     chan struct{}
+	stopOnce sync.Once
 	// panicked is each place a panic has been logged from.
 	panicked sync.Map
 }
 
-type hostAddrs struct {
-	addrs []netip.Addr
-	at    time.Time
+const hostRecheck = 10 * time.Second
+
+// family is what the relay serves in one address family: where its sockets are bound, the SFU's media
+// address there, and what the SFU announces in it.
+type family struct {
+	relay     netip.Addr
+	sfu       netip.AddrPort
+	sfuUDP    *net.UDPAddr
+	announced []netip.Addr
 }
 
-const hostRecheck = 10 * time.Second
+// newFamily checks one family's relay and SFU address and builds it, nil when neither is set.
+func newFamily(relay netip.Addr, sfu netip.AddrPort, announced []netip.Addr) (*family, error) {
+	if !relay.IsValid() && !sfu.IsValid() {
+		return nil, nil
+	}
+	if !relay.IsValid() || !sfu.IsValid() {
+		return nil, errors.New("turn: the relay and the SFU need an address")
+	}
+	relay, sfu = relay.Unmap(), netip.AddrPortFrom(sfu.Addr().Unmap(), sfu.Port())
+	if relay.Is4() != sfu.Addr().Is4() {
+		return nil, errors.New("turn: the relay and the SFU are in different address families")
+	}
+	f := &family{relay: relay, sfu: sfu, sfuUDP: net.UDPAddrFromAddrPort(sfu)}
+	for _, a := range announced {
+		if a = a.Unmap(); a.Is4() == relay.Is4() {
+			f.announced = append(f.announced, a)
+		}
+	}
+	return f, nil
+}
+
+// familyOf is what the relay serves in a's family, nil when it serves none.
+func (s *Server) familyOf(a netip.Addr) *family {
+	if a.Unmap().Is4() {
+		return s.v4
+	}
+	return s.v6
+}
 
 // New starts a server.
 func New(opts Options) (*Server, error) {
@@ -105,14 +148,20 @@ func New(opts Options) (*Server, error) {
 	if !opts.Relay.IsValid() || !opts.SFU.IsValid() {
 		return nil, errors.New("turn: the relay and the SFU need an address")
 	}
-	if opts.Relay.Unmap().Is4() != opts.SFU.Addr().Unmap().Is4() {
-		return nil, errors.New("turn: the relay and the SFU are in different address families")
+	primary, err := newFamily(opts.Relay, opts.SFU, opts.Announced)
+	if err != nil {
+		return nil, err
+	}
+	other, err := newFamily(opts.OtherRelay, opts.OtherSFU, opts.Announced)
+	if err != nil {
+		return nil, err
+	}
+	if other != nil && other.relay.Is4() == primary.relay.Is4() {
+		return nil, errors.New("turn: the other relay is in the relay's own family")
 	}
 	if lo, hi := opts.RelayPorts[0], opts.RelayPorts[1]; (lo == 0) != (hi == 0) || lo > hi {
 		return nil, fmt.Errorf("turn: the relay port range %d-%d is not a range", lo, hi)
 	}
-	opts.Relay = opts.Relay.Unmap()
-	opts.SFU = netip.AddrPortFrom(opts.SFU.Addr().Unmap(), opts.SFU.Port())
 	if reflect.ValueOf(opts.Limits).IsZero() {
 		opts.Limits = DefaultLimits()
 	}
@@ -123,17 +172,21 @@ func New(opts Options) (*Server, error) {
 		opts.Now = time.Now
 	}
 
-	opts.Announced = slices.Clone(opts.Announced)
-	for i, a := range opts.Announced {
-		opts.Announced[i] = a.Unmap()
-	}
-
 	s := &Server{
 		opts: opts,
 		lim:  opts.Limits,
 		log:  opts.Logger.With().Str("subsystem", "turn").Logger(),
 		now:  opts.Now,
-		sfu:  net.UDPAddrFromAddrPort(opts.SFU),
+		stop: make(chan struct{}),
+	}
+	for _, f := range []*family{primary, other} {
+		switch {
+		case f == nil:
+		case f.relay.Is4():
+			s.v4 = f
+		default:
+			s.v6 = f
+		}
 	}
 	s.relays = &relays{s: s, perUser: map[string]int{}, byAddr: map[string]*relayConn{}}
 	s.sources = &sources{perSource: map[string]int{}, perAddr: map[string]int{}}
@@ -146,11 +199,20 @@ func New(opts Options) (*Server, error) {
 	if err := s.relays.probe(); err != nil {
 		return nil, err
 	}
+	if (s.v4 != nil && len(s.v4.announced) == 0) || (s.v6 != nil && len(s.v6.announced) == 0) {
+		s.readHost()
+		go s.watchHost()
+	}
 
 	config := turn.ServerConfig{
-		Realm:        Realm,
-		AuthHandler:  s.authenticate,
-		QuotaHandler: s.quota,
+		Realm: Realm,
+		// An allocation the client names no family for is in the family of the address it reached TURN
+		// on, by pion's default: a client reaching a dual-stack listener over IPv6 would be refused every
+		// allocation by an IPv4 relay alone. Strict is RFC 6156's default, IPv4, which is right whenever
+		// IPv4 is all the relay serves. Serving both, or IPv6 alone, pion's default is.
+		StrictAddressFamily: s.v6 == nil,
+		AuthHandler:         s.authenticate,
+		QuotaHandler:        s.quota,
 		// Sampled: pion logs some of what a stranger sends at error level, an unknown attribute on a
 		// Binding request for one, before anything here sees the request.
 		LoggerFactory: pionlog.Logs{Log: s.log.Sample(&zerolog.BurstSampler{Burst: pionLogBurst, Period: time.Minute})},
@@ -192,6 +254,7 @@ func New(opts Options) (*Server, error) {
 
 	srv, err := turn.NewServer(config)
 	if err != nil {
+		s.stopOnce.Do(func() { close(s.stop) })
 		for _, sl := range s.listeners {
 			_ = sl.Close()
 		}
@@ -207,9 +270,35 @@ const pionLogBurst = 10
 // Close stops the server: its listeners, every connection they accepted, and every allocation. pion ends
 // the allocations once each listener's loop has stopped, and leaves open the connections it accepted.
 func (s *Server) Close() error {
+	s.stopOnce.Do(func() { close(s.stop) })
 	err := s.pion.Close()
 	s.streams.close()
 	return err
+}
+
+// Drain waits until no relay has heard from the SFU for quiet, counting from the call, and returns after
+// limit whatever happens. pion relays each packet the SFU sent on a goroutine of its own, after the read
+// that records it, so a quiet stretch with the SFU closed is one in which everything it sent on its way
+// out has been read and passed on, unless that goroutine was held off for longer than quiet.
+func (s *Server) Drain(quiet, limit time.Duration) {
+	start := s.now()
+	for {
+		last := start
+		s.relays.mu.Lock()
+		for _, c := range s.relays.byAddr {
+			c.mu.Lock()
+			if c.heard.After(last) {
+				last = c.heard
+			}
+			c.mu.Unlock()
+		}
+		s.relays.mu.Unlock()
+		now := s.now()
+		if now.Sub(last) >= quiet || now.Sub(start) >= limit {
+			return
+		}
+		time.Sleep(quiet / 10)
+	}
 }
 
 // AllocationCount is how many allocations the server holds.
@@ -300,40 +389,53 @@ func (s *Server) sfuPeer(addr net.Addr) (netip.AddrPort, bool) {
 	}
 	ap := u.AddrPort()
 	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
-	return ap, ap.Port() == s.opts.SFU.Port() && s.known(ap.Addr())
+	f := s.familyOf(ap.Addr())
+	return ap, f != nil && ap.Port() == f.sfu.Port() && s.known(ap.Addr())
 }
 
-// known is whether a is an address the SFU is known by, in the relay's family.
+// known is whether a is an address the SFU is known by, in a family the relay serves.
 func (s *Server) known(a netip.Addr) bool {
+	a = a.Unmap()
+	f := s.familyOf(a)
 	switch {
-	case a.Is4() != s.opts.SFU.Addr().Is4():
+	case f == nil:
 		return false
-	case a == s.opts.SFU.Addr():
+	case a == f.sfu.Addr():
 		return true
-	case len(s.opts.Announced) > 0:
-		return slices.Contains(s.opts.Announced, a)
+	case len(f.announced) > 0:
+		return slices.Contains(f.announced, a)
 	}
-	return slices.Contains(s.hostAddrs(), a)
+	return slices.Contains(*s.host.Load(), a)
 }
 
-// hostAddrs is this host's addresses, read again when the last reading is older than hostRecheck: an SFU
-// on every interface announces each of them, as they are when a call starts.
-func (s *Server) hostAddrs() []netip.Addr {
-	if h := s.host.Load(); h != nil && s.now().Sub(h.at) < hostRecheck {
-		return h.addrs
-	}
-	h := &hostAddrs{at: s.now()}
+// readHost reads this host's addresses: an SFU on every interface announces each of them, as they are when
+// a call starts.
+func (s *Server) readHost() {
+	var addrs []netip.Addr
 	if ifaddrs, err := net.InterfaceAddrs(); err == nil {
 		for _, ia := range ifaddrs {
 			if n, ok := ia.(*net.IPNet); ok {
 				if a, ok := netip.AddrFromSlice(n.IP); ok {
-					h.addrs = append(h.addrs, a.Unmap())
+					addrs = append(addrs, a.Unmap())
 				}
 			}
 		}
 	}
-	s.host.Store(h)
-	return h.addrs
+	s.host.Store(&addrs)
+}
+
+func (s *Server) watchHost() {
+	defer s.contain("the host's addresses", nil)
+	t := time.NewTicker(hostRecheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+			s.readHost()
+		}
+	}
 }
 
 // contain is deferred in every callback this package gives pion. The self-hosted TURN server shares
