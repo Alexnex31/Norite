@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -144,8 +145,16 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	return &Stack{SFU: sfu, TURN: srv, Secret: secret}, nil
 }
 
+// closeGrace is how long TURN stays up after the SFU has closed, while it holds an allocation: pion
+// relays what the SFU sent on a goroutine of its own, which a loaded machine may not have run yet.
+const closeGrace = 250 * time.Millisecond
+
 // Close stops the SFU, then TURN: what the SFU sends a relayed client as it closes the connection goes
 // through the relay, which must still be there to carry it.
 func (s *Stack) Close() error {
-	return errors.Join(s.SFU.Close(), s.TURN.Close())
+	err := s.SFU.Close()
+	if s.TURN.AllocationCount() > 0 {
+		time.Sleep(closeGrace)
+	}
+	return errors.Join(err, s.TURN.Close())
 }
