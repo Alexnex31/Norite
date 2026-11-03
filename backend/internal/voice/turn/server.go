@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"reflect"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,8 +47,14 @@ type Options struct {
 	Relay      netip.Addr
 	RelayPorts [2]uint16
 
-	// SFU is the SFU's media address as the relay reaches it: the only peer there is.
+	// SFU is the SFU's media address as the relay reaches it: the only peer there is, and the only address
+	// a relay socket sends to.
 	SFU netip.AddrPort
+	// Announced are the addresses the SFU announces, at SFU's port, which are what a client names it by:
+	// its public addresses, or the one address it binds. Empty when it binds every interface, and then
+	// each address of this host's is one. A permission names one of these or SFU's own; the relay
+	// sends to SFU whichever it was.
+	Announced []netip.Addr
 
 	Limits Limits
 	Logger zerolog.Logger
@@ -62,14 +69,27 @@ type Server struct {
 	log  zerolog.Logger
 	now  func() time.Time
 
-	relays  *relays
-	sources *sources
-	replies *replies
-	streams []*streamListener
-	pion    *turn.Server
+	relays    *relays
+	sources   *sources
+	replies   *replies
+	streams   *streams
+	listeners []*streamListener
+	pion      *turn.Server
+	// sfu is opts.SFU as a relay socket writes to it.
+	sfu *net.UDPAddr
 
-	panicked sync.Once
+	// host is this host's addresses, read again at most every hostRecheck, when Announced is empty.
+	host atomic.Pointer[hostAddrs]
+	// panicked is each place a panic has been logged from.
+	panicked sync.Map
 }
+
+type hostAddrs struct {
+	addrs []netip.Addr
+	at    time.Time
+}
+
+const hostRecheck = 10 * time.Second
 
 // New starts a server.
 func New(opts Options) (*Server, error) {
@@ -103,31 +123,46 @@ func New(opts Options) (*Server, error) {
 		opts.Now = time.Now
 	}
 
+	opts.Announced = slices.Clone(opts.Announced)
+	for i, a := range opts.Announced {
+		opts.Announced[i] = a.Unmap()
+	}
+
 	s := &Server{
 		opts: opts,
 		lim:  opts.Limits,
 		log:  opts.Logger.With().Str("subsystem", "turn").Logger(),
 		now:  opts.Now,
+		sfu:  net.UDPAddrFromAddrPort(opts.SFU),
 	}
 	s.relays = &relays{s: s, perUser: map[string]int{}}
 	s.sources = &sources{perSource: map[string]int{}, perAddr: map[string]int{}}
+	s.streams = &streams{lim: s.lim, perSource: map[string]int{}, live: map[*streamConn]struct{}{}}
 	replies, err := newReplies(s.lim)
 	if err != nil {
 		return nil, err
 	}
 	s.replies = replies
+	if err := s.relays.probe(); err != nil {
+		return nil, err
+	}
 
 	config := turn.ServerConfig{
-		Realm:         Realm,
-		AuthHandler:   s.authenticate,
-		QuotaHandler:  s.quota,
-		LoggerFactory: pionlog.Logs{Log: s.log},
+		Realm:        Realm,
+		AuthHandler:  s.authenticate,
+		QuotaHandler: s.quota,
+		// Sampled: pion logs some of what a stranger sends at error level, an unknown attribute on a
+		// Binding request for one, before anything here sees the request.
+		LoggerFactory: pionlog.Logs{Log: s.log.Sample(&zerolog.BurstSampler{Burst: pionLogBurst, Period: time.Minute})},
 		EventHandler: turn.EventHandler{
-			OnAllocationCreated: func(src, _ net.Addr, _, _, _ string, _ net.Addr, _ int) {
-				s.sources.add(src)
+			OnAllocationCreated: func(src, dst net.Addr, _, _, _ string, _ net.Addr, _ int) {
+				defer s.contain("the allocation events", nil)
+				panicHook("the allocation events")
+				s.sources.add(src, dst)
 			},
-			OnAllocationDeleted: func(src, _ net.Addr, _, _, _ string) {
-				s.sources.remove(src)
+			OnAllocationDeleted: func(src, dst net.Addr, _, _, _ string) {
+				defer s.contain("the allocation events", nil)
+				s.sources.remove(src, dst)
 			},
 		},
 	}
@@ -146,7 +181,7 @@ func New(opts Options) (*Server, error) {
 			continue
 		}
 		sl := newStreamListener(s, l.ln, l.tls)
-		s.streams = append(s.streams, sl)
+		s.listeners = append(s.listeners, sl)
 		config.ListenerConfigs = append(config.ListenerConfigs, turn.ListenerConfig{
 			Listener:              sl,
 			RelayAddressGenerator: s.relays,
@@ -156,7 +191,7 @@ func New(opts Options) (*Server, error) {
 
 	srv, err := turn.NewServer(config)
 	if err != nil {
-		for _, sl := range s.streams {
+		for _, sl := range s.listeners {
 			_ = sl.Close()
 		}
 		return nil, fmt.Errorf("turn: %w", err)
@@ -165,9 +200,15 @@ func New(opts Options) (*Server, error) {
 	return s, nil
 }
 
-// Close stops the server: its listeners, and with them every allocation.
+// pionLogBurst is how many of pion's lines TURN logs a minute.
+const pionLogBurst = 10
+
+// Close stops the server: its listeners, every connection they accepted, and every allocation. pion ends
+// the allocations once each listener's loop has stopped, and leaves open the connections it accepted.
 func (s *Server) Close() error {
-	return s.pion.Close()
+	err := s.pion.Close()
+	s.streams.close()
+	return err
 }
 
 // AllocationCount is how many allocations the server holds.
@@ -229,12 +270,56 @@ func (s *Server) quota(_, _ string, src net.Addr) (ok bool) {
 	return s.sources.count(src) < s.lim.AllocationsPerSource
 }
 
-// permit is pion's permission handler: a permission or a channel names the SFU's address, or nothing.
-// pion asks with the IP alone, so the port is the relay socket's to hold (relay.go).
+// permit is pion's permission handler: a permission or a channel names an address of the SFU's, or
+// nothing. pion asks with the IP alone, so the port is the relay socket's to hold (relay.go).
 func (s *Server) permit(_ net.Addr, peer net.IP) (ok bool) {
 	defer s.contain("the permission", nil)
 	a, ok := netip.AddrFromSlice(peer)
-	return ok && a.Unmap() == s.opts.SFU.Addr()
+	return ok && s.known(a.Unmap())
+}
+
+// sfuPeer is addr as an address the client knows the SFU by, and whether it is one.
+func (s *Server) sfuPeer(addr net.Addr) (netip.AddrPort, bool) {
+	u, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return netip.AddrPort{}, false
+	}
+	ap := u.AddrPort()
+	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	return ap, ap.Port() == s.opts.SFU.Port() && s.known(ap.Addr())
+}
+
+// known is whether a is an address the SFU is known by, in the relay's family.
+func (s *Server) known(a netip.Addr) bool {
+	switch {
+	case a.Is4() != s.opts.SFU.Addr().Is4():
+		return false
+	case a == s.opts.SFU.Addr():
+		return true
+	case len(s.opts.Announced) > 0:
+		return slices.Contains(s.opts.Announced, a)
+	}
+	return slices.Contains(s.hostAddrs(), a)
+}
+
+// hostAddrs is this host's addresses, read again when the last reading is older than hostRecheck: an SFU
+// on every interface announces each of them, as they are when a call starts.
+func (s *Server) hostAddrs() []netip.Addr {
+	if h := s.host.Load(); h != nil && s.now().Sub(h.at) < hostRecheck {
+		return h.addrs
+	}
+	h := &hostAddrs{at: s.now()}
+	if ifaddrs, err := net.InterfaceAddrs(); err == nil {
+		for _, ia := range ifaddrs {
+			if n, ok := ia.(*net.IPNet); ok {
+				if a, ok := netip.AddrFromSlice(n.IP); ok {
+					h.addrs = append(h.addrs, a.Unmap())
+				}
+			}
+		}
+	}
+	s.host.Store(h)
+	return h.addrs
 }
 
 // isSFU is whether addr is the SFU's media address, IP and port.
@@ -249,8 +334,8 @@ func (s *Server) isSFU(addr net.Addr) bool {
 
 // contain is deferred in every callback this package gives pion. The self-hosted TURN server shares
 // norite-server's process, as the SFU does, and these parse a stranger's requests. A panic refuses the
-// request, through err when the callback returns one, and is logged once: one on a request's shape recurs
-// with every request.
+// request, through err when the callback returns one, and is logged once for each place it happens: one
+// on a request's shape recurs with every request, and a second bug elsewhere is a second line.
 func (s *Server) contain(where string, err *error) {
 	v := recover()
 	if v == nil {
@@ -259,14 +344,14 @@ func (s *Server) contain(where string, err *error) {
 	if err != nil {
 		*err = fmt.Errorf("turn: panicked in %s", where)
 	}
-	s.panicked.Do(func() {
+	if _, logged := s.panicked.LoadOrStore(where, true); !logged {
 		s.log.Error().Str("in", where).Str("panic", fmt.Sprint(v)).Bytes("stack", debug.Stack()).
 			Msg("TURN panicked; refusing the request")
-	})
+	}
 }
 
-// sources counts allocations by source address, an IPv6 /64 being one, and by exact address, which is
-// how a stream connection is known to have made one.
+// sources counts allocations by source address, an IPv6 /64 being one, and by connection: the client's
+// address and the server's, with the transport, which is how a stream connection is known to hold one.
 type sources struct {
 	mu        sync.Mutex
 	perSource map[string]int
@@ -289,27 +374,33 @@ func (c *sources) count(addr net.Addr) int {
 	return c.perSource[sourceKey(addr)]
 }
 
-func (c *sources) allocated(addr net.Addr) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.perAddr[addr.String()] > 0
+// connKey names one connection: a UDP client and a TCP one may share an address and a port, and so may
+// a TCP and a TLS one, to different ports of the server's.
+func connKey(src, dst net.Addr) string {
+	return src.Network() + " " + src.String() + " " + dst.String()
 }
 
-func (c *sources) add(addr net.Addr) {
+func (c *sources) allocated(src, dst net.Addr) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.perSource[sourceKey(addr)]++
-	c.perAddr[addr.String()]++
+	return c.perAddr[connKey(src, dst)] > 0
 }
 
-func (c *sources) remove(addr net.Addr) {
+func (c *sources) add(src, dst net.Addr) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	k := sourceKey(addr)
+	c.perSource[sourceKey(src)]++
+	c.perAddr[connKey(src, dst)]++
+}
+
+func (c *sources) remove(src, dst net.Addr) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := sourceKey(src)
 	if c.perSource[k]--; c.perSource[k] <= 0 {
 		delete(c.perSource, k)
 	}
-	a := addr.String()
+	a := connKey(src, dst)
 	if c.perAddr[a]--; c.perAddr[a] <= 0 {
 		delete(c.perAddr, a)
 	}

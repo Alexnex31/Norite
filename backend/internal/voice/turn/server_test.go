@@ -517,3 +517,91 @@ func TestAPanicRefusesTheRequestAndNothingElse(t *testing.T) {
 		})
 	}
 }
+
+// TestOneHostCannotSpendEverybodysReplies: the total is charged only for replies a destination's bound
+// lets through, so one host sending far past its bound costs the total its bound and no more.
+func TestOneHostCannotSpendEverybodysReplies(t *testing.T) {
+	f := newFixture(t, func(o *Options) {
+		o.Limits = DefaultLimits()
+		o.Limits.RepliesPerSecond = 5
+		o.Limits.RepliesTotalPerSecond = 10
+	})
+	flood, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = flood.Close() }()
+	msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	for range 40 {
+		if _, err := flood.WriteTo(msg.Raw, f.udp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := received(t, flood, 300*time.Millisecond); len(got) == 0 || len(got) > 2*5 {
+		t.Fatalf("the flooding host got %d replies", len(got))
+	}
+	// Another host, asked about as pion's reply to it would be.
+	if !f.s.replies.allow(&net.UDPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 9}) {
+		t.Fatal("another host gets no reply after one host sent 40 requests")
+	}
+}
+
+// TestPionsLogIsBounded sends Binding requests carrying an unknown comprehension-required attribute,
+// which pion logs at error level, quoting the source, before anything here sees them.
+func TestPionsLogIsBounded(t *testing.T) {
+	f := newFixture(t, nil)
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	unknown := stun.RawAttribute{Type: 0x7fff, Value: []byte{0, 0, 0, 0}}
+	for range 100 {
+		msg := stun.MustBuild(stun.TransactionID, stun.BindingRequest, unknown)
+		if _, err := conn.WriteTo(msg.Raw, f.udp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, time.Second, "pion logs the first", func() bool { return f.log.Len() > 0 })
+	time.Sleep(300 * time.Millisecond)
+	if n := strings.Count(f.log.String(), "\n"); n > pionLogBurst {
+		t.Fatalf("pion wrote %d lines for 100 packets, past its burst of %d", n, pionLogBurst)
+	}
+}
+
+// TestEachPlaceAPanicHappensIsLogged: one panic logged does not silence a second bug somewhere else.
+func TestEachPlaceAPanicHappensIsLogged(t *testing.T) {
+	f := newFixture(t, nil)
+	for _, where := range []string{"authentication", "the relay generator", "authentication"} {
+		hook := func(at string) {
+			if at == where {
+				panic("planted")
+			}
+		}
+		testPanic.Store(&hook)
+		if _, err := f.client(t, cred(1)).Allocate(); err == nil {
+			t.Fatal("allocated through a panic")
+		}
+	}
+	testPanic.Store(nil)
+	if n := strings.Count(f.log.String(), "TURN panicked"); n != 2 {
+		t.Fatalf("%d lines for panics in two places, want two:\n%s", n, f.log)
+	}
+}
+
+// TestAPanicInAnAllocationEventIsContained: pion calls the events on its own goroutine, where an
+// uncontained panic ends norite-server.
+func TestAPanicInAnAllocationEventIsContained(t *testing.T) {
+	f := newFixture(t, nil)
+	hook := func(at string) {
+		if at == "the allocation events" {
+			panic("planted")
+		}
+	}
+	testPanic.Store(&hook)
+	defer testPanic.Store(nil)
+	_, _ = f.client(t, cred(1)).Allocate()
+	eventually(t, time.Second, "the panic is logged", func() bool {
+		return strings.Contains(f.log.String(), "the allocation events")
+	})
+}

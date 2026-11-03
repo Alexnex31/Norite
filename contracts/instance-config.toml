@@ -221,6 +221,13 @@ relay_address = "127.0.0.1"
 # The ports relay sockets take, "low-high". Default empty, for any.
 relay_ports = "49152-65535"
 
+# How many relays one address may hold, and how many TCP and TLS connections to TURN: an IPv6 /64 counts as
+# one address. A client trying every transport takes up to three relays and two connections, so the
+# default of 64 is twenty-odd people at once behind one address. Raise it for an organization whose people
+# all reach this instance through one NAT, which is the network a relay exists for. At most 1024, which is
+# every relay the server holds.
+relay_per_address = 64
+
 [smtp]
 # Outbound email. Off by default and a deployment-time opt-out by design: an instance with no relay still
 # runs, and the features that need one — password reset today, matchmaking's email gate later — are simply

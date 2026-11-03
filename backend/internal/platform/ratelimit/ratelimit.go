@@ -167,6 +167,16 @@ func (l *Limiter) Allow(ctx context.Context, key string) (Result, error) {
 	return Result{Allowed: !res.Reached, Limit: res.Limit, Remaining: res.Remaining, Reset: res.Reset}, nil
 }
 
+// Peek is whether an attempt for key would be allowed, counting nothing: for a caller that must not
+// spend this limit on an attempt a second limit will refuse.
+func (l *Limiter) Peek(ctx context.Context, key string) (Result, error) {
+	res, err := l.instance.Peek(ctx, key)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Allowed: !res.Reached, Limit: res.Limit, Remaining: res.Remaining, Reset: res.Reset}, nil
+}
+
 // Middleware builds rate-limiting middleware over opts.Backend, keyed by ClientKey.
 //
 // This is a thin handler around limiter.Limiter rather than ulule/limiter's own stdlib middleware driver,

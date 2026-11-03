@@ -129,7 +129,8 @@ func TestAVoicePortInUseStopsTheStartBeforeMigrating(t *testing.T) {
 // TestVoiceOffBindsNothing: with [voice] off, the ports it names stay free.
 func TestVoiceOffBindsNothing(t *testing.T) {
 	media, turnAddr := freeVoicePort(t), freeVoicePort(t)
-	cfg := config.Config{VoiceMediaListen: media, VoiceTURNListen: turnAddr, VoiceTURNTLSListen: ":5349"}
+	cfg := config.Config{VoiceMediaListen: media, VoiceTURNListen: turnAddr, VoiceTURNTLSListen: ":5349",
+		VoiceRelayPerAddress: 64}
 	st, err := startVoice(cfg, "dev", zerolog.Nop())
 	require.NoError(t, err)
 	assert.Nil(t, st)

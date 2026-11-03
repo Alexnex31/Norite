@@ -46,13 +46,20 @@ func newReplies(lim Limits) (*replies, error) {
 
 // allow counts one unauthenticated reply to addr. A store error cannot happen in memory; if it did, the
 // reply is not sent, the opposite of HTTP's choice, since the cost of a missed reply is one retry.
+//
+// The total is charged only for a reply the destination's bound lets through, or one host sending fast
+// enough would spend everybody's replies on its own refused ones. It is looked at first all the same,
+// because each destination is a key the memory store holds, and a forged source is a new one with every
+// packet: past the total, no new key is made, so the store holds at most the total's worth a second.
 func (r *replies) allow(addr net.Addr) bool {
 	ctx := context.Background()
-	res, err := r.total.Allow(ctx, "all")
-	if err != nil || !res.Allowed {
+	if res, err := r.total.Peek(ctx, "all"); err != nil || !res.Allowed {
 		return false
 	}
-	res, err = r.perDestination.Allow(ctx, sourceKey(addr))
+	if res, err := r.perDestination.Allow(ctx, sourceKey(addr)); err != nil || !res.Allowed {
+		return false
+	}
+	res, err := r.total.Allow(ctx, "all")
 	return err == nil && res.Allowed
 }
 

@@ -4,14 +4,17 @@
 package turn
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
 	"net/netip"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/pion/stun/v4"
 	"github.com/pion/turn/v5"
 
 	"github.com/Alexnex31/Norite/backend/internal/voice/rate"
@@ -88,15 +91,33 @@ func (r *relays) bind(network string, relay netip.Addr) (net.PacketConn, error) 
 	}
 	span := int(hi) - int(lo) + 1
 	start := rand.IntN(span)
-	// A busy port is passed over, and the whole range at most once.
+	// A busy port is passed over, and the whole range at most once. An address this host does not have
+	// fails on every port alike, so it ends the walk at once.
 	for i := range span {
 		port := uint16(int(lo) + (start+i)%span)
 		pc, err := net.ListenPacket(network, netip.AddrPortFrom(relay, port).String())
 		if err == nil {
 			return pc, nil
 		}
+		if errors.Is(err, syscall.EADDRNOTAVAIL) {
+			return nil, err
+		}
 	}
 	return nil, fmt.Errorf("turn: every relay port from %d to %d is taken", lo, hi)
+}
+
+// probe binds one relay socket and closes it, so that a relay address this host does not have, or a range
+// with nothing free, is found when the server starts rather than by the first client to need it.
+func (r *relays) probe() error {
+	network := "udp6"
+	if r.s.opts.Relay.Is4() {
+		network = "udp4"
+	}
+	pc, err := r.bind(network, r.s.opts.Relay)
+	if err != nil {
+		return fmt.Errorf("turn: no relay socket on %v: %w", r.s.opts.Relay, err)
+	}
+	return pc.Close()
 }
 
 func (r *relays) reserve(user string) bool {
@@ -122,31 +143,53 @@ func (r *relays) release(user string) {
 // relayConn is one allocation's relay socket. pion writes what the client sends through it and reads
 // what comes back; closing it ends the allocation, since pion deletes an allocation whose relay socket
 // fails a read.
+//
+// The client names the SFU by an address the SFU announced, which is rarely the one the relay reaches it
+// at: a public address behind a 1:1 NAT is not on the host at all, and an SFU listening on every interface
+// announces each of them. So a write to any announced address goes to the SFU's media address, and what
+// the SFU sends back is reported as coming from the address the client wrote to: for a STUN response,
+// the one its request went to, which ICE checks; for anything else, the last the client sent data to.
 type relayConn struct {
 	net.PacketConn
 	s    *Server
 	user string
 
-	// mu guards the meter, heard and the idle timer. pion writes from the client's read loop and reads
-	// from its own, and the timer fires on a third.
+	// mu guards the meter, heard, the idle timer and the peers. pion writes from the client's read loop
+	// and reads from its own, and the timer fires on a third.
 	mu    sync.Mutex
 	meter rate.Meter
 	heard time.Time
 	idle  *time.Timer
+	// last is the address the client last wrote to, data the last it sent anything but STUN to, and
+	// checks the addresses its recent STUN requests went to.
+	last, data netip.AddrPort
+	checks     [32]check
+	next       int
 
 	once sync.Once
 }
 
-// WriteTo sends towards the SFU, and towards nothing else: a write to any other address arrives nowhere
-// and reports success, so pion has nothing to log for it. pion's permission handler has refused it
-// already; this is the check that holds whatever pion does, port included.
+// check is a STUN request the client sent through the relay, and the address it named.
+type check struct {
+	id   [stun.TransactionIDSize]byte
+	peer netip.AddrPort
+}
+
+// WriteTo sends towards the SFU, and towards nothing else: a write to an address that is not the SFU's
+// arrives nowhere and reports success, so pion has nothing to log for it. pion's permission handler has
+// refused it already; this is the check that holds whatever pion does, port included, and the only
+// address this socket ever sends to is the SFU's own.
 func (c *relayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	if !c.s.isSFU(addr) {
+	peer, ok := c.s.sfuPeer(addr)
+	if !ok {
 		return len(p), nil
 	}
 	lim := c.s.lim
 	c.mu.Lock()
 	ok, out := c.meter.Admit(c.s.now(), len(p), lim.RelayPacketsPerSecond, lim.RelayBitsPerSecond, lim.StrikesToClose)
+	if ok {
+		c.remember(p, peer)
+	}
 	c.mu.Unlock()
 	if out {
 		_ = c.Close()
@@ -155,7 +198,21 @@ func (c *relayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if !ok {
 		return len(p), nil
 	}
-	return c.PacketConn.WriteTo(p, addr)
+	return c.PacketConn.WriteTo(p, c.s.sfu)
+}
+
+// remember records where the client wrote p. Under mu.
+func (c *relayConn) remember(p []byte, peer netip.AddrPort) {
+	c.last = peer
+	id, class, ok := stunHeader(p)
+	if !ok {
+		c.data = peer
+		return
+	}
+	if class == stun.ClassRequest {
+		c.checks[c.next] = check{id: id, peer: peer}
+		c.next = (c.next + 1) % len(c.checks)
+	}
 }
 
 // ReadFrom passes on what the SFU sends and drops the rest: a socket on the SFU's host hears whatever
@@ -170,10 +227,44 @@ func (c *relayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			continue
 		}
 		c.mu.Lock()
-		c.heard = c.s.now()
+		peer := c.peerOf(p[:n])
+		if peer.IsValid() {
+			c.heard = c.s.now()
+		}
 		c.mu.Unlock()
-		return n, addr, nil
+		// The SFU is ICE-lite and sends nothing first, so before the client has written there is nobody
+		// to report it as.
+		if !peer.IsValid() {
+			continue
+		}
+		return n, net.UDPAddrFromAddrPort(peer), nil
 	}
+}
+
+// peerOf is the address the client knows a packet from the SFU by. Under mu.
+func (c *relayConn) peerOf(p []byte) netip.AddrPort {
+	if id, class, ok := stunHeader(p); ok && (class == stun.ClassSuccessResponse || class == stun.ClassErrorResponse) {
+		for _, ch := range c.checks {
+			if ch.peer.IsValid() && ch.id == id {
+				return ch.peer
+			}
+		}
+	}
+	if c.data.IsValid() {
+		return c.data
+	}
+	return c.last
+}
+
+// stunHeader is p's transaction id and class, when p is a STUN message.
+func stunHeader(p []byte) (id [stun.TransactionIDSize]byte, class stun.MessageClass, ok bool) {
+	if !stun.IsMessage(p) {
+		return id, 0, false
+	}
+	var t stun.MessageType
+	t.ReadValue(binary.BigEndian.Uint16(p[0:2]))
+	copy(id[:], p[8:8+stun.TransactionIDSize])
+	return id, t.Class, true
 }
 
 // checkIdle closes the relay when the SFU has sent nothing through it for Idle. A connection in a call

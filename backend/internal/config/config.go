@@ -226,6 +226,11 @@ type Config struct {
 	// the host, so the range matters only to a firewall that restricts local ports.
 	VoiceRelayPorts string
 
+	// VoiceRelayPerAddress is how many relays, and TCP and TLS connections to TURN, one address may hold.
+	// An organization whose firewall refuses UDP usually also sends everybody out through one address,
+	// which is the case for raising it.
+	VoiceRelayPerAddress int32
+
 	// PublicBaseURL is the origin users reach this instance on, e.g. "https://chat.example.com".
 	//
 	// The backend cannot derive this: behind a reverse proxy the Host header is whatever the proxy sends,
@@ -552,6 +557,10 @@ func Load(configPath string) (Config, error) {
 	cfg.VoiceTURNTLSKey = getEnvString("VOICE_TURN_TLS_KEY", fileString(file.Voice.TURNTLSKey, ""))
 	cfg.VoiceRelayAddress = getEnvString("VOICE_RELAY_ADDRESS", fileString(file.Voice.RelayAddress, ""))
 	cfg.VoiceRelayPorts = getEnvString("VOICE_RELAY_PORTS", fileString(file.Voice.RelayPorts, ""))
+	relayPerAddress, err := getEnvInt32("VOICE_RELAY_PER_ADDRESS",
+		fileInt32(file.Voice.RelayPerAddress, defaultVoiceRelayPerAddress))
+	collect(err)
+	cfg.VoiceRelayPerAddress = relayPerAddress
 
 	smtpEnabled, err := getEnvBool("SMTP_ENABLED", fileBool(file.SMTP.Enabled, false))
 	collect(err)
@@ -792,6 +801,8 @@ func fileKeyFor(field string) string {
 		return "[voice].relay_address"
 	case "VoiceRelayPorts":
 		return "[voice].relay_ports"
+	case "VoiceRelayPerAddress":
+		return "[voice].relay_per_address"
 	case "SMTPEnabled":
 		return "[smtp].enabled"
 	case "SMTPHost":
@@ -910,6 +921,8 @@ func envVarFor(field string) string {
 		return envPrefix + "VOICE_RELAY_ADDRESS"
 	case "VoiceRelayPorts":
 		return envPrefix + "VOICE_RELAY_PORTS"
+	case "VoiceRelayPerAddress":
+		return envPrefix + "VOICE_RELAY_PER_ADDRESS"
 	case "PublicBaseURL":
 		return envPrefix + "PUBLIC_BASE_URL"
 	case "SourceURL":

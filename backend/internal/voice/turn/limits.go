@@ -18,14 +18,16 @@ type Limits struct {
 	AllocationsPerUser   int
 	AllocationsPerSource int
 
-	// Streams is how many TCP and TLS connections the server holds in all, StreamsPerSource how many from
-	// one address. A connection that has made no allocation after AuthenticateWithin is closed, and one
-	// that has sent nothing for Idle is: a call sends ICE consent every few seconds and media far more
-	// often. HandshakeWithin bounds a TLS handshake.
+	// Streams is how many TCP and TLS connections the server holds in all, the two counted together, and
+	// StreamsPerSource how many from one address. A connection holding no allocation is closed within
+	// AuthenticateWithin, whether it never made one or the one it made has ended, and one that has sent
+	// nothing for Idle is: a call sends ICE consent every few seconds and media far more often.
+	// HandshakeWithin bounds a TLS handshake, and WriteWithin a write to a client that has stopped reading.
 	Streams            int
 	StreamsPerSource   int
 	AuthenticateWithin time.Duration
 	HandshakeWithin    time.Duration
+	WriteWithin        time.Duration
 
 	// Idle closes a relay the SFU has sent nothing through for that long: one no connection uses, or
 	// whose connection the SFU closed. Its allocation goes with it.
@@ -56,6 +58,7 @@ func DefaultLimits() Limits {
 		StreamsPerSource:      32,
 		AuthenticateWithin:    10 * time.Second,
 		HandshakeWithin:       5 * time.Second,
+		WriteWithin:           5 * time.Second,
 		Idle:                  30 * time.Second,
 		RelayPacketsPerSecond: 600,
 		RelayBitsPerSecond:    2_000_000,
@@ -75,7 +78,7 @@ func (l Limits) validate() error {
 			return errors.New("turn: a limit is zero or negative, which admits nobody")
 		}
 	}
-	for _, d := range []time.Duration{l.AuthenticateWithin, l.HandshakeWithin, l.Idle} {
+	for _, d := range []time.Duration{l.AuthenticateWithin, l.HandshakeWithin, l.WriteWithin, l.Idle} {
 		if d <= 0 {
 			return errors.New("turn: a deadline is zero or negative")
 		}

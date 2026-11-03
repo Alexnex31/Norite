@@ -20,18 +20,19 @@ func startVoice(cfg config.Config, version string, logger zerolog.Logger) (*voic
 		return nil, err
 	}
 	st, err := voice.StartStack(voice.StackOptions{
-		MediaListen:   v.MediaListen,
-		Public:        v.Public,
-		TURNListen:    v.TURNListen,
-		TURNTLSListen: v.TURNTLSListen,
-		TLSCert:       v.TLSCert,
-		TLSKey:        v.TLSKey,
-		Relay:         v.Relay,
-		SFU:           v.SFU,
-		RelayPorts:    v.RelayPorts,
-		SigningKey:    []byte(cfg.JWTSecret),
-		Version:       version,
-		Logger:        logger,
+		MediaListen:     v.MediaListen,
+		Public:          v.Public,
+		TURNListen:      v.TURNListen,
+		TURNTLSListen:   v.TURNTLSListen,
+		TLSCert:         v.TLSCert,
+		TLSKey:          v.TLSKey,
+		Relay:           v.Relay,
+		SFU:             v.SFU,
+		RelayPorts:      v.RelayPorts,
+		RelayPerAddress: v.RelayPerAddress,
+		SigningKey:      []byte(cfg.JWTSecret),
+		Version:         version,
+		Logger:          logger,
 	})
 	if err != nil {
 		return nil, err

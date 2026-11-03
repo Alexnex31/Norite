@@ -36,15 +36,17 @@ func TestVoiceDefaults(t *testing.T) {
 	assert.Equal(t, netip.MustParseAddr("127.0.0.1"), v.Relay)
 	assert.Equal(t, netip.MustParseAddrPort("127.0.0.1:3479"), v.SFU, "an SFU on every interface is reached on loopback")
 	assert.Empty(t, v.Public)
+	assert.Equal(t, 64, v.RelayPerAddress)
 }
 
 func TestVoiceSettingsFollowTheMediaAddress(t *testing.T) {
 	v, err := loadVoice(t, map[string]string{
-		"VOICE_MEDIA_LISTEN":     "10.0.0.5:4000",
-		"VOICE_PUBLIC_ADDRESSES": " 203.0.113.7 ,2001:db8::7",
-		"VOICE_TURN_TLS_CERT":    "/etc/norite/turn.pem",
-		"VOICE_TURN_TLS_KEY":     "/etc/norite/turn.key",
-		"VOICE_RELAY_PORTS":      "50000-50100",
+		"VOICE_MEDIA_LISTEN":      "10.0.0.5:4000",
+		"VOICE_PUBLIC_ADDRESSES":  " 203.0.113.7 ,2001:db8::7",
+		"VOICE_TURN_TLS_CERT":     "/etc/norite/turn.pem",
+		"VOICE_TURN_TLS_KEY":      "/etc/norite/turn.key",
+		"VOICE_RELAY_PORTS":       "50000-50100",
+		"VOICE_RELAY_PER_ADDRESS": "300",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, netip.MustParseAddr("10.0.0.5"), v.Relay)
@@ -52,6 +54,7 @@ func TestVoiceSettingsFollowTheMediaAddress(t *testing.T) {
 	assert.Equal(t, []netip.Addr{netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("2001:db8::7")}, v.Public)
 	assert.Equal(t, ":5349", v.TURNTLSListen)
 	assert.Equal(t, [2]uint16{50000, 50100}, v.RelayPorts)
+	assert.Equal(t, 300, v.RelayPerAddress)
 }
 
 // A mistake in [voice] is refused at startup whether or not voice is on, and names the setting.
@@ -73,6 +76,8 @@ func TestVoiceSettingsAreCheckedEvenWhenOff(t *testing.T) {
 		"a relay in another family": {map[string]string{"VOICE_MEDIA_LISTEN": "10.0.0.5:4000", "VOICE_RELAY_ADDRESS": "::1"}, "NORITE_VOICE_RELAY_ADDRESS"},
 		"a backwards range":         {map[string]string{"VOICE_RELAY_PORTS": "60000-50000"}, "NORITE_VOICE_RELAY_PORTS"},
 		"a range of one end":        {map[string]string{"VOICE_RELAY_PORTS": "50000"}, "NORITE_VOICE_RELAY_PORTS"},
+		"no relay per address":      {map[string]string{"VOICE_RELAY_PER_ADDRESS": "0"}, "NORITE_VOICE_RELAY_PER_ADDRESS"},
+		"more per address than all": {map[string]string{"VOICE_RELAY_PER_ADDRESS": "1025"}, "NORITE_VOICE_RELAY_PER_ADDRESS"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := loadVoice(t, c.env)

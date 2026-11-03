@@ -127,6 +127,7 @@ type fileConfig struct {
 		TURNTLSKey      *string `toml:"turn_tls_key"`
 		RelayAddress    *string `toml:"relay_address"`
 		RelayPorts      *string `toml:"relay_ports"`
+		RelayPerAddress *int32  `toml:"relay_per_address"`
 	} `toml:"voice"`
 
 	SMTP struct {

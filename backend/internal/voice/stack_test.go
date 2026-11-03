@@ -111,3 +111,85 @@ func TestAStackThatCannotStartLeavesNothingBound(t *testing.T) {
 	}
 	_ = pc.Close()
 }
+
+// TestARelayedClientReachesAnSFUByWhatItAnnounces is the relay as an instance runs it: the SFU announces
+// a public address the host does not have, or listens on every interface and announces each, and the
+// relay reaches it on the host all the same. Both clients are relayed, since the public address leads
+// nowhere. Before /code-review found it, the relay worked only where the SFU announced the one address it
+// was bound to, which is what every earlier test and the manual pass had configured.
+func TestARelayedClientReachesAnSFUByWhatItAnnounces(t *testing.T) {
+	for name, tune := range map[string]func(*StackOptions){
+		"a public address": func(o *StackOptions) {
+			o.Public = []netip.Addr{netip.MustParseAddr("192.0.2.10")}
+		},
+		"every interface": func(o *StackOptions) {
+			if !hasInterfaceAddress() {
+				t.Skip("no IPv4 address here but loopback")
+			}
+			o.MediaListen = "0.0.0.0:0"
+			o.Loopback = false
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := stackOptions(t)
+			tune(&opts)
+			st, err := StartStack(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			relayed := func() joined {
+				user := ids.MustNext()
+				cred := turn.Mint(st.Secret, user, time.Now())
+				return joinWith(t, st.SFU, 1, user, voicetest.Options{Slots: 1, RelayOnly: true, ICEServers: []webrtc.ICEServer{{
+					URLs:     []string{"turn:" + st.TURN.TCPAddr().String() + "?transport=tcp"},
+					Username: cred.Username, Credential: cred.Password,
+				}}})
+			}
+			a, b := relayed(), relayed()
+			tone := voicetest.TonePackets()[:50]
+			send(t, map[*voicetest.Client][][]byte{a.client: tone, b.client: tone}, voicetest.SendOptions{Level: voicetest.Loud})
+			assertTone(t, "the first", a.client, tone)
+			assertTone(t, "the second", b.client, tone)
+		})
+	}
+}
+
+func hasInterfaceAddress() bool {
+	ifaddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, ia := range ifaddrs {
+		if n, ok := ia.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAStackThatClosesSaysGoodbyeThroughTheRelay: the SFU's goodbye to a relayed client crosses the
+// relay, so the SFU closes first. TURN first, the client heard nothing and waited for ICE to give up.
+func TestAStackThatClosesSaysGoodbyeThroughTheRelay(t *testing.T) {
+	st, err := StartStack(stackOptions(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := ids.MustNext()
+	cred := turn.Mint(st.Secret, user, time.Now())
+	a := joinWith(t, st.SFU, 1, user, voicetest.Options{Slots: 1, RelayOnly: true, ICEServers: []webrtc.ICEServer{{
+		URLs:     []string{"turn:" + st.TURN.UDPAddr().String() + "?transport=udp"},
+		Username: cred.Username, Credential: cred.Password,
+	}}})
+	start := time.Now()
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-a.client.ChannelClosed():
+	case <-a.client.Failed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the relayed client heard nothing when the stack closed")
+	}
+	t.Logf("the relayed client knew within %v", time.Since(start))
+}

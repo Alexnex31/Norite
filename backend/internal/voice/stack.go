@@ -32,6 +32,10 @@ type StackOptions struct {
 	SFU        netip.AddrPort
 	RelayPorts [2]uint16
 
+	// RelayPerAddress is how many allocations, and how many TCP and TLS connections, one address may
+	// hold on TURN, an IPv6 /64 being one; zero for TURN's default.
+	RelayPerAddress int
+
 	// SigningKey is the instance's, which TURN's secret is derived from.
 	SigningKey []byte
 
@@ -84,6 +88,16 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	}
 	closers = append(closers, tcp.Close)
 
+	// A client names the SFU by what it announces: its public addresses, or the address it binds, or with
+	// neither every address of the host's, which TURN reads for itself.
+	announced := opts.Public
+	if bound := media.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap(); len(announced) == 0 && !bound.IsUnspecified() {
+		announced = []netip.Addr{bound}
+	}
+	limits := turn.DefaultLimits()
+	if opts.RelayPerAddress > 0 {
+		limits.AllocationsPerSource, limits.StreamsPerSource = opts.RelayPerAddress, opts.RelayPerAddress
+	}
 	topts := turn.Options{
 		UDP:        udp,
 		TCP:        tcp,
@@ -91,6 +105,8 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 		Relay:      opts.Relay,
 		RelayPorts: opts.RelayPorts,
 		SFU:        opts.SFU,
+		Announced:  announced,
+		Limits:     limits,
 		Logger:     opts.Logger,
 	}
 	if opts.TLSCert != "" {
@@ -128,7 +144,8 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	return &Stack{SFU: sfu, TURN: srv, Secret: secret}, nil
 }
 
-// Close stops TURN, then the SFU: a relay to an SFU that has gone has nothing left to carry.
+// Close stops the SFU, then TURN: what the SFU sends a relayed client as it closes the connection goes
+// through the relay, which must still be there to carry it.
 func (s *Stack) Close() error {
-	return errors.Join(s.TURN.Close(), s.SFU.Close())
+	return errors.Join(s.SFU.Close(), s.TURN.Close())
 }

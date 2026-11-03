@@ -42,13 +42,17 @@ type CredentialsResponse struct {
 // Provision posts an offer to a cmd/voice-sfu at base and returns its answer.
 func Provision(ctx context.Context, base string, req ProvisionRequest) (ProvisionResponse, error) {
 	var out ProvisionResponse
-	return out, post(ctx, base+"/provision", req, &out)
+	// Not "return out, post(...)": the spec does not order reading out against the call that fills it.
+	err := post(ctx, base+"/provision", req, &out)
+	return out, err
 }
 
 // Credentials asks a cmd/voice-sfu at base for a TURN credential.
 func Credentials(ctx context.Context, base string, req CredentialsRequest) (CredentialsResponse, error) {
 	var out CredentialsResponse
-	return out, post(ctx, base+"/credentials", req, &out)
+	// Not "return out, post(...)": the spec does not order reading out against the call that fills it.
+	err := post(ctx, base+"/credentials", req, &out)
+	return out, err
 }
 
 func post(ctx context.Context, url string, req, out any) error {

@@ -26,7 +26,16 @@ type VoiceSettings struct {
 	Relay      netip.Addr
 	SFU        netip.AddrPort
 	RelayPorts [2]uint16
+	// RelayPerAddress bounds what one address holds on TURN.
+	RelayPerAddress int
 }
+
+// defaultVoiceRelayPerAddress and maxVoiceRelayPerAddress bound [voice].relay_per_address; the maximum is
+// every allocation TURN holds.
+const (
+	defaultVoiceRelayPerAddress = 64
+	maxVoiceRelayPerAddress     = 1024
+)
 
 // Voice parses and checks the [voice] settings. They are checked whether or not voice is enabled, so a
 // mistake is found when the file is written rather than the day somebody turns voice on.
@@ -105,6 +114,10 @@ func (c Config) Voice() (VoiceSettings, error) {
 		}
 		v.RelayPorts = [2]uint16{uint16(l), uint16(h)}
 	}
+	if c.VoiceRelayPerAddress < 1 || c.VoiceRelayPerAddress > maxVoiceRelayPerAddress {
+		return VoiceSettings{}, bad("VoiceRelayPerAddress", "must be from 1 to %d", maxVoiceRelayPerAddress)
+	}
+	v.RelayPerAddress = int(c.VoiceRelayPerAddress)
 	return v, nil
 }
 
