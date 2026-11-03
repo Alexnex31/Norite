@@ -2343,7 +2343,9 @@ takes a certificate from two files, read again when they change, and 443 is wher
 network refusing UDP usually allows only 80 and 443 out (M27).
 - **It relays to the SFU and nothing else.** Relay sockets are bound on the SFU's host and send to its
   media address alone, IP and port; TCP relaying (RFC 6062) is refused. pion/turn's own permission check
-  asks of the peer's IP alone, so it is not the guard.
+  asks of the peer's IP alone, so it is not the guard. A client names the SFU by an address it announced,
+  public or one of its interfaces', and the relay sends to the media address whichever it named,
+  answering as that address: a STUN response as the one its request went to.
 - **Its credential is the TURN REST shape**, `expiry:user`, signed with a secret HKDF-derived from the
   instance signing key, and scoped to the account: the client gathers its relayed candidate before it
   makes the offer, so the credential precedes the connection id. Its expiry is asked of an Allocate alone,
@@ -2356,8 +2358,9 @@ network refusing UDP usually allows only 80 and 443 out (M27).
 **Ports**: the SFU carries every connection on **one UDP port**, through Pion's ICE UDP mux (3479 by
 default); TURN listens on one port over UDP and TCP (3478) and, with a certificate, one for TLS (5349, or
 443 behind a layer-4 proxy). Relay sockets are on the host and need no forwarding. A machine behind a 1:1
-NAT or a forwarding router announces its public address through `[voice] public_addresses`. All of it is
-`[voice]`, and none of it is bound unless `enabled` is set (M27).
+NAT or a forwarding router announces its public address through `[voice] public_addresses`. One address
+holds at most `relay_per_address` relays and TURN connections, 64 by default, raised for an organization
+behind one NAT. All of it is `[voice]`, and none of it is bound unless `enabled` is set (M27).
 
 **Voice deployment opt-out**: TURN/SFU need a reachable public IP and forwarded UDP ports — a real burden
 many home self-hosters can't satisfy. An Instance Admin can disable voice entirely; the SFU/TURN never start,

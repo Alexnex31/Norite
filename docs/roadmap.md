@@ -1820,8 +1820,9 @@ of this section.
 
   **The relay reaches the SFU and nothing else.** Its sockets are bound on the SFU's host, report the
   address they are bound to, and send to the SFU's media address alone, IP and port, whatever pion's
-  IP-only permission check admits. RFC 6062's TCP relaying is refused, being an open proxy by
-  construction.
+  IP-only permission check admits. A client names the SFU by what it announced, a public address or each
+  interface's, and the relay sends to the media address whichever it named, answering as that address.
+  RFC 6062's TCP relaying is refused, being an open proxy by construction.
 
   **Credentials** are the TURN REST shape, `expiry:user`, signed with a secret HKDF-derived from the
   instance signing key, so nothing new is configured. They are scoped to the account, not the connection:
@@ -1835,9 +1836,11 @@ of this section.
   loopback outside tests, and admits the relay's own. Its public addresses are configured.
 
   **Bounds**, each played by a test: allocations in total, per account and per source (IPv6 /64, through
-  `ratelimit.AddrKey`); relay packets and bits per allocation, with M26's strikes; TCP and TLS connections
-  in total and per source, with deadlines to authenticate and to finish a handshake; and replies to
-  unauthenticated requests, per destination and in total, since each is larger than its request.
+  `ratelimit.AddrKey`; `relay_per_address`, since an organization behind one NAT is many people at one
+  source); relay packets and bits per allocation, with M26's strikes; TCP and TLS connections in total and
+  per source, both listeners together, with deadlines to authenticate, to finish a handshake and to write;
+  and replies to unauthenticated requests, per destination and in total, since each is larger than its
+  request.
 
   **Configuration**: a `[voice]` section, `enabled` off by default until M33. `norite-server` binds the
   media, TURN and TLS ports before migrating when it is on, and none when it is off.
@@ -1845,6 +1848,7 @@ of this section.
   Done when:
   - a client offering only a relayed candidate, over UDP, TCP and TLS each, exchanges real Opus with a
     client reaching the SFU directly, every payload intact;
+  - a relayed client reaches an SFU announcing a public address, and one listening on every interface;
   - the relay reaches no other port of the SFU's host, no other host, and grants no TCP allocation;
   - an expired or forged credential starts no allocation, an allocation outlives its credential, and a
     refused credential writes nothing to the log;
@@ -1868,6 +1872,26 @@ of this section.
     first plan called non-amplifying.
   - **Nothing owned `[acme]`**: its setting said the milestone wiring certmagic would read it, and none
     does. M96 owns it now.
+
+  **Found by `/code-review` on the finished branch**, fifteen findings, every one fixed:
+  - **The relay worked only where the SFU announced the address it was bound to.** A permission had to
+    name the SFU's media address, and the SFU announces its public address, or each interface's when it
+    listens on all of them, the default. Every test and the manual pass had bound one address and
+    announced it.
+  - **One host could spend every client's unauthenticated replies**, the total being charged before the
+    destination's bound refused.
+  - **pion logs some of a stranger's packets at error level** before anything here sees them; its lines
+    are sampled.
+  - **A stream whose allocation ended stayed open**, the check being made once; **TCP and TLS were
+    bounded apart**, twice the bound; **a write to a client that stopped reading had no deadline**; and
+    **closing the server left accepted streams open**.
+  - **Closing TURN before the SFU** kept the SFU's goodbye from reaching a relayed client.
+  - **A relay address this host does not have started cleanly** and failed every allocation.
+  - **A panic was logged once per server**, not per place; **one in the stream listener's loop ended it**;
+    **the allocation events contained none**.
+  - **The per-source bounds were fixed in code**, at about ten people behind one address.
+  - A UDP allocation counted for a stream from the same address and port, and the harness read a variable
+    in an order the spec leaves open.
 - **M28 — Voice-worker subprocess and IPC**: the daemon spawns the worker on-demand (via `os/exec`) when
   joining a voice channel, tears it down on leave; daemon↔worker control-plane IPC uses the child's
   inherited stdin/stdout pipes, framed with the same 4-byte-length-prefix-plus-JSON scheme used for the

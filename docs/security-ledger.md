@@ -1806,7 +1806,9 @@ carries the condition that would reopen it.
   somebody else. Every STUN server has the same exposure; what bounds it here is a rate on such replies,
   20 a second to one address (an IPv6 /64 being one) and 2,000 in all (`turn.replies`), so a victim
   receives at most 1.4 KB a second from one instance, and the nonces are stateless, so a flood keeps
-  nothing.
+  nothing. The total is charged only for a reply a destination's bound lets through, so one host costs
+  it 20 a second however fast it sends; a forger with 2,000 sources a second still spends it, which is
+  what a total is. pion's own log lines for such packets are sampled, ten a minute.
 - **Reopens if**: a reply grows (a SOFTWARE attribute, a longer nonce), or the bound is raised past what
   an attacker could not get more cheaply elsewhere.
 
@@ -1819,7 +1821,8 @@ carries the condition that would reopen it.
   address alone, IP and port, and refuses TCP relaying (`turn.relays`). Anybody on the internet can send
   to that port already, and the SFU admits only an offer it was provisioned with, by its fingerprint. An
   allocation the SFU sends nothing through for 30 seconds closes, so one outlives its call by that much.
-  Allocations are bounded per account, per source and in all.
+  Allocations are bounded per account, per source (`relay_per_address`) and in all. A client names the
+  SFU by the addresses it announced, and the relay sends to the media address whichever it named.
 - **Reopens if**: the relay reaches anything but the SFU, or the credential ever authorizes something
   beyond the relay.
 

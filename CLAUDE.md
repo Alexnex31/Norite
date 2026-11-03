@@ -1378,6 +1378,22 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   and then TLS, both directions carried Opus that decodes, the SFU logged no warning, and the relay
   sockets were gone 30 seconds after the calls.
 
+  **`/code-review` then found the relay worked in exactly the configuration every test used, and in no
+  other.** A permission had to name the SFU's media address; the SFU announces its public address, or
+  with the default `media_listen = ":3479"` each interface's, and the relay refused both. The tests and
+  the VMs had all bound one address and announced it, so all were green. **A test chosen for convenience
+  tests the convenient configuration**: run the one the defaults produce, and the one the documentation
+  tells an operator to write. The fix translates rather than widens: whatever announced address a client
+  names, the relay sends to the media address, and a STUN answer goes back as the address its request
+  went to, matched by transaction.
+
+  The same review found fourteen more. The ones worth carrying: a bound charged before the bound that
+  refuses spends a shared budget on refused work (one host could silence every client's replies); a
+  check run once is not a lease (a stream outlived its allocation); two listeners counting apart double
+  their bound; and pion's Close stops listeners and nothing they accepted. It also found the per-source
+  bound fixed at about ten people behind one NAT, which is the very network a relay is for, and made it
+  `relay_per_address`.
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -2876,21 +2892,29 @@ And on TURN, from M27:
 - **The relay reaches the SFU's media address and nothing else**, IP and port, enforced by the relay
   socket's `WriteTo` and `ReadFrom` (`turn/relay.go`). pion/turn's permission check asks of the IP alone
   and is not the guard. TCP relaying (RFC 6062) stays refused; a new relay shape goes through the same
-  generator.
+  generator. **A client names the SFU by what it announced**, `turn.Options.Announced`, and the relay
+  sends to the media address whichever it named, answering as that address: a STUN response as the one
+  its request went to.
 - **No pion/turn default is trusted.** Its auth handler, permission handler, listeners and relay
   generator are all this package's; a new pion/turn option is read in its source before it is used.
 - **A credential is the account's, minted by `turn.Mint`, and reaches the client before its offer.**
   Expiry is asked of an Allocate alone; nothing else in a credential is time-bound. Nothing is logged per
-  request: a username is a stranger's text.
+  request: a username is a stranger's text, and pion's own lines are sampled, ten a minute.
 - **An allocation ends when the SFU stops sending through it** (`Limits.Idle`), which is also how it ends
   with its call. Nothing links an allocation to a connection id, and nothing needs to.
-- **Every callback given to pion defers `Server.contain`**, which refuses the request and logs once.
+- **Every callback given to pion defers `Server.contain`**, which refuses the request and logs once for
+  each place. A loop contains per iteration, or one panic ends it.
 - **Replies to unauthenticated requests are rate-limited** per destination and in all, in memory, since
   they are counted per packet. A reply that grows reopens the ledger's amplification entry.
 - **`[voice]` is checked whether or not it is on**, and `norite-server` binds its ports before migrating.
-  A new setting goes in `config.Voice`, which every error names by setting.
+  A new setting goes in `config.Voice`, which every error names by setting. The relay address is bound
+  once at start, so one this host does not have fails there.
+- **TURN's Close closes what pion's leaves**: the connections its listeners accepted. The SFU closes
+  before TURN, so its goodbye to a relayed client crosses the relay.
 - **Testing TURN**: `newFixture` in `turn/server_test.go` stands a socket in for the SFU, so a test sees
-  exactly what the relay delivers; pion's own client plays the peer. End to end, `newRelayed` in
+  exactly what the relay delivers; pion's own client plays the peer. Test the configuration the defaults
+  produce: an SFU on every interface, and one announcing a public address, are what
+  `TestARelayedClientReachesAnSFUByWhatItAnnounces` runs. End to end, `newRelayed` in
   `voice/relay_test.go` runs TURN beside a real SFU, and the voice package's `TestMain` trusts a
   certificate for 127.0.0.1 through `SSL_CERT_FILE`, since Pion verifies TURNS against the system's
   roots and nothing else.
