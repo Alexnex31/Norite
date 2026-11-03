@@ -1,0 +1,274 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package voiceworker
+
+import (
+	"bufio"
+	"context"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/Alexnex31/Norite/daemon/voiceipc"
+)
+
+// drain reads the worker's events until it is done, failing the test if that takes past d: a worker the
+// daemon should have killed and did not must fail here, not hang the suite.
+func drain(t *testing.T, w *Worker, d time.Duration) {
+	t.Helper()
+	go func() {
+		for range w.Events() {
+		}
+	}()
+	if err := within(d, w.Done()); err != nil {
+		w.Kill("the test gave up on it")
+		<-w.Done()
+		t.Fatalf("the worker was still running after %s", d)
+	}
+}
+
+func fast(t *testing.T) {
+	t.Helper()
+	h, l, e := helloWithin, leaveWithin, exitWithin
+	helloWithin, leaveWithin, exitWithin = 5*time.Second, 2*time.Second, 2*time.Second
+	t.Cleanup(func() { helloWithin, leaveWithin, exitWithin = h, l, e })
+}
+
+// joinStandin starts mode and walks it to ready.
+func joinStandin(t *testing.T, mode string, log *logBuffer) *Worker {
+	t.Helper()
+	var w *Worker
+	var err error
+	if log == nil {
+		w, err = Start(context.Background(), standinOptions(t, mode, nil))
+	} else {
+		w, err = Start(context.Background(), standinOptions(t, mode, log))
+	}
+	require.NoError(t, err)
+	t.Cleanup(func() { w.Kill("the test ended"); <-w.Done() })
+	require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}}))
+	ev := <-w.Events()
+	require.NotNil(t, ev.Offer)
+	require.NoError(t, w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n"}))
+	require.Equal(t, voiceipc.StateConnecting, (<-w.Events()).State.State)
+	require.Equal(t, voiceipc.StateReady, (<-w.Events()).State.State)
+	return w
+}
+
+func TestAWorkerJoinsAndLeavesCleanly(t *testing.T) {
+	fast(t)
+	w := joinStandin(t, "good", nil)
+	w.Leave()
+	require.NoError(t, within(time.Second, w.Done()))
+	require.Equal(t, Exit{Reason: "left"}, w.Exit())
+}
+
+// A crash is a pipe that closed without the worker saying so or being asked, or an exit that is not 0.
+func TestACrashIsSeenThroughTheClosedPipe(t *testing.T) {
+	fast(t)
+	cases := map[string]func(t *testing.T) *Worker{
+		"a panic": func(t *testing.T) *Worker {
+			w, err := Start(context.Background(), standinOptions(t, "panic", nil))
+			require.NoError(t, err)
+			require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}}))
+			return w
+		},
+		"a kill": func(t *testing.T) *Worker {
+			w := joinStandin(t, "good", nil)
+			p, err := os.FindProcess(w.PID())
+			require.NoError(t, err)
+			require.NoError(t, p.Kill())
+			return w
+		},
+		"an exit in a call": func(t *testing.T) *Worker { return joinStandin(t, "crashincall", nil) },
+		"an exit at once": func(t *testing.T) *Worker {
+			w, err := Start(context.Background(), standinOptions(t, "exit3", nil))
+			require.NoError(t, err)
+			return w
+		},
+	}
+	for name, start := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := start(t)
+			drain(t, w, 5*time.Second)
+			exit := w.Exit()
+			require.True(t, exit.Crashed, "%+v", exit)
+			require.Contains(t, exit.Reason, "stopped unexpectedly")
+		})
+	}
+}
+
+// A call that ends by itself is not a crash, and its reason arrives cleaned: it is the voice server's
+// words, carried by a worker that may be hostile.
+func TestACallThatEndsByItselfIsNotACrash(t *testing.T) {
+	fast(t)
+	w, err := Start(context.Background(), standinOptions(t, "dropcall", nil))
+	require.NoError(t, err)
+	require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}}))
+	<-w.Events()
+	require.NoError(t, w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n"}))
+	drain(t, w, 5*time.Second)
+	exit := w.Exit()
+	require.False(t, exit.Crashed)
+	require.Contains(t, exit.Reason, "the voice server closed the call")
+	require.NotContains(t, exit.Reason, "\x1b")
+}
+
+// Every way a worker can break the protocol kills it, and the daemon goes on.
+func TestAHostileWorkerIsKilled(t *testing.T) {
+	fast(t)
+	for _, mode := range []string{"oversized", "garbage", "unknownop", "daemonop", "badstate", "flood",
+		"printflood"} {
+		t.Run(mode, func(t *testing.T) {
+			w, err := Start(context.Background(), standinOptions(t, mode, nil))
+			require.NoError(t, err)
+			drain(t, w, 10*time.Second)
+			exit := w.Exit()
+			require.True(t, exit.Crashed, "%+v", exit)
+			require.NotContains(t, exit.Reason, "stopped unexpectedly", "killed by the daemon, not crashed by itself")
+		})
+	}
+}
+
+// A worker that does not say who it is, or is of another release, is never used.
+func TestAWorkerMustSayWhoItIs(t *testing.T) {
+	fast(t)
+	helloWithin = 200 * time.Millisecond
+	_, err := Start(context.Background(), standinOptions(t, "silent", nil))
+	require.ErrorIs(t, err, ErrStart)
+	require.Contains(t, err.Error(), "did not say who it is")
+
+	_, err = Start(context.Background(), standinOptions(t, "badversion", nil))
+	require.ErrorIs(t, err, ErrStart)
+	require.Contains(t, err.Error(), "9.0.0")
+	require.Contains(t, err.Error(), "0.4.0")
+}
+
+// A worker that ignores its leave and its closed pipe is killed after the bound, and one that closes its
+// pipe and stays is killed too.
+func TestAWorkerThatWillNotGoIsMadeTo(t *testing.T) {
+	fast(t)
+	w := joinStandin(t, "stubborn", nil)
+	start := time.Now()
+	w.Leave()
+	require.Less(t, time.Since(start), leaveWithin+2*time.Second)
+	require.True(t, w.Exit().Crashed, "a worker that had to be killed is reported so")
+
+	w, err := Start(context.Background(), standinOptions(t, "closepipe", nil))
+	require.NoError(t, err)
+	drain(t, w, exitWithin+2*time.Second)
+	require.True(t, w.Exit().Crashed)
+}
+
+// What the worker prints reaches the log as quoted fields, and never the protocol: a C library writing to
+// descriptor 1 mid-call changes nothing.
+func TestWhatTheWorkerPrintsIsLoggedNotRead(t *testing.T) {
+	fast(t)
+	log := &logBuffer{}
+	w := joinStandin(t, "noise", log)
+	w.Leave()
+	require.False(t, w.Exit().Crashed)
+	require.Eventually(t, func() bool {
+		for _, l := range log.workerLines() {
+			if strings.Contains(l, "hello not a frame") {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+// The worker is given the allow-list and nothing else of the daemon's environment.
+func TestTheWorkerDoesNotInheritTheDaemonsSecrets(t *testing.T) {
+	fast(t)
+	t.Setenv("NORITE_API_TOKEN", "nrt_fake_for_the_test")
+	t.Setenv("NORITE_PASSWORD", "fake-password-for-the-test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "fake-for-the-test")
+	t.Setenv("LC_ALL", "C.UTF-8")
+	log := &logBuffer{}
+	w := joinStandin(t, "env", log)
+	w.Leave()
+	var names []string
+	require.Eventually(t, func() bool {
+		names = nil
+		for _, l := range log.workerLines() {
+			if n, ok := strings.CutPrefix(l, "env "); ok {
+				names = append(names, n)
+			}
+		}
+		return len(names) > 0
+	}, 2*time.Second, 10*time.Millisecond)
+	require.NotContains(t, names, "NORITE_API_TOKEN")
+	require.NotContains(t, names, "NORITE_PASSWORD")
+	require.NotContains(t, names, "AWS_SECRET_ACCESS_KEY")
+	if runtime.GOOS != "windows" {
+		require.Contains(t, names, "LC_ALL")
+	}
+	require.Contains(t, names, standinVariable, "the test's own, appended after the list")
+}
+
+// On Linux the worker holds descriptors 0 to 4 and nothing else the daemon had open.
+func TestTheWorkerInheritsOnlyItsPipes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc")
+	}
+	fast(t)
+	held, err := os.Open(os.Args[0]) // something the daemon holds, which must not cross
+	require.NoError(t, err)
+	defer func() { _ = held.Close() }()
+	log := &logBuffer{}
+	w := joinStandin(t, "fds", log)
+	w.Leave()
+	var fds []string
+	require.Eventually(t, func() bool {
+		for _, l := range log.workerLines() {
+			if list, ok := strings.CutPrefix(l, "fds "); ok {
+				fds = strings.Fields(list)
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond)
+	var numbers []string
+	for _, fd := range fds {
+		n, target, _ := strings.Cut(fd, "=")
+		numbers = append(numbers, n)
+		require.NotEqual(t, held.Name(), target, "a file the daemon holds crossed to the worker")
+	}
+	require.Equal(t, []string{"0", "1", "2", "3", "4"}, numbers, "%v", fds)
+}
+
+// A daemon killed outright takes its worker with it: the worker sees its control pipe close, whoever
+// closed it.
+func TestAWorkerDoesNotOutliveItsDaemon(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("walked in the Windows VM")
+	}
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	parent := exec.Command(exe) //nolint:gosec // this test binary
+	parent.Env = append(os.Environ(), standinVariable+"=parent")
+	out, err := parent.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, parent.Start())
+	line, err := bufio.NewReader(out).ReadString('\n')
+	require.NoError(t, err)
+	pidText, ok := strings.CutPrefix(strings.TrimSpace(line), "worker ")
+	require.True(t, ok, "%q", line)
+	pid, err := strconv.Atoi(pidText)
+	require.NoError(t, err)
+	require.NoError(t, syscall.Kill(pid, 0), "the worker is running")
+
+	require.NoError(t, parent.Process.Signal(syscall.SIGKILL))
+	_ = parent.Wait()
+	require.Eventually(t, func() bool { return syscall.Kill(pid, 0) != nil }, 3*time.Second, 10*time.Millisecond,
+		"the worker outlived its daemon")
+}

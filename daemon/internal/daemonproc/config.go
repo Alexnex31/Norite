@@ -20,6 +20,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/configwatch"
 	"github.com/Alexnex31/Norite/daemon/internal/toggle"
 	"github.com/Alexnex31/Norite/daemon/internal/updater"
+	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
@@ -61,8 +62,8 @@ func watchConfig(ctx context.Context, sink localSink, log zerolog.Logger) {
 	}
 }
 
-// localRequests answers what clients ask of the daemon itself: the same-machine config toggle (M21), and
-// turning the port for scripts on and off (M22).
+// localRequests answers what clients ask of the daemon itself: the same-machine config toggle (M21),
+// turning the port for scripts on and off (M22), and joining and leaving voice calls (M28).
 //
 // It is built before the attach server, which needs it, and told about the server afterwards, which it
 // needs: a toggle that has moved is announced to every attached client like any other change to the config,
@@ -75,6 +76,8 @@ type localRequests struct {
 	automation *automationControl
 	// update answers the requests about the daemon updating itself (M24). Nil answers none.
 	update *updater.Updater
+	// voice answers the requests about voice calls (M28). Nil answers none.
+	voice *voiceworker.Voice
 	// stop ends the daemon's run, as a signal does (M23). Nil answers no stop request.
 	stop     func()
 	stopOnce sync.Once
@@ -118,6 +121,9 @@ func (l *localRequests) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	}
 	if l.update != nil && (req.Path == ipc.PathUpdate || strings.HasPrefix(req.Path, ipc.PathUpdate+"/")) {
 		return l.updateRequested(ctx, req)
+	}
+	if l.voice != nil && handlesVoice(req.Path) {
+		return l.voiceRequested(ctx, req)
 	}
 	if l.automation != nil && l.automation.handles(req.Path) {
 		return l.automation.Do(ctx, req)

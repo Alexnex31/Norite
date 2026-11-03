@@ -1301,6 +1301,12 @@ carries the condition that would reopen it.
   path and relays nothing. Neither is sent the number
   (`TestEnableAsksHowThePortStandsBeforeItSendsAPortNumber`). The condition above stands for anything
   more than that.
+- **Reopened at M28, and answered the same way**: `POST /@daemon/voice/join/{channel}` carries a channel
+  id. `norite voice join` sends `GET /@daemon/voice` first, and sends the id only to a daemon that answered
+  it and can join at all (`TestAnOlderDaemonIsNeverSentTheChannel`,
+  `TestAJoinThisDaemonCannotMakeIsRefusedBeforeTheChannelIsSent`). A channel id would tell the instance
+  little it does not know, since the channel is its own; the order is kept anyway, so the condition stays
+  one rule rather than a judgement per request.
 
 ### Which file wins a shared key at unsplit is decided by modification times anything can set
 - **Raised**: M21, while building the toggle; narrowed by `/code-review`

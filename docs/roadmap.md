@@ -2055,7 +2055,10 @@ of this section.
 - **M36 — Voice auto-rejoin**: the "last active voice channel" breadcrumb (the one exception to in-memory
   daemon state), the daemon respawns the worker and rejoins on crash/restart. The respawn is
   `daemon/internal/voiceworker`'s join (M28), and a worker that crashed is already reported as the call's
-  end with its reason. Done when: killing the daemon
+  end with its reason. **M28 found a rejoin can be refused**: the SFU counts a killed worker's connection
+  until ICE gives up on it, and holds two per user in a room (`ConnsPerUser`), so two crashes in quick
+  succession leave a third join refused for some seconds. This milestone decides whether M33's provision
+  replaces an account's oldest connection in the room or the rejoin waits. Done when: killing the daemon
   process mid-call results in automatic rejoin within a few seconds of restart.
 - **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to
   `norite instance init`, extending M2/M10), voice+text channels degrade to text-only,

@@ -37,6 +37,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/state"
 	"github.com/Alexnex31/Norite/daemon/internal/updater"
+	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/logfile"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -179,6 +180,9 @@ func Run(ctx context.Context, opts Options) error {
 	var local *localRequests
 	// stopRequested is that a stop request ended the run (M23), which like a signal means stay stopped.
 	var stopRequested atomic.Bool
+	// voice is the daemon's voice calls once the session exists (M28), which the updater asks before it
+	// restarts anything.
+	var voice atomic.Pointer[voiceworker.Voice]
 	update := updater.New(updater.Options{
 		Version: opts.Version, StateDir: stateDir, Executable: executable(), Program: program(), Log: log.With().Str("subsystem", "update").Logger(),
 		Instance: func() (string, bool) {
@@ -194,6 +198,10 @@ func Run(ctx context.Context, opts Options) error {
 				signedIn = standing != session.SignedOut
 			}
 			return version, signedIn
+		},
+		Busy: func() bool {
+			v := voice.Load()
+			return v != nil && v.Busy()
 		},
 		Restart: stopRun,
 		Changed: func() {
@@ -291,6 +299,23 @@ func Run(ctx context.Context, opts Options) error {
 				Log: part("gateway"), OnVersionRefused: update.Nudge,
 			})
 			gateway.Store(gw)
+			// Voice calls, each a worker of its own (M28). Signed in or not, the requests are answered; a
+			// join needs a sign-in, and until M33 a build for M26's harness.
+			signaler, unavailable := voiceworker.DefaultSignaler()
+			calls := voiceworker.NewVoice(voiceworker.VoiceOptions{
+				Program: voiceworker.ProgramBeside(executable()), Version: opts.Version,
+				Signaler: signaler, Unavailable: unavailable, Account: signedInAccount(src),
+				Log:     part("voice"),
+				Changed: func(ipc.VoiceStatus) { server.Local(ipc.EventVoice, json.RawMessage("{}")) },
+			})
+			voice.Store(calls)
+			local.voice = calls
+			// A call ends with the daemon, before the log and the lock are let go; its worker is reaped, and
+			// would go by itself anyway once its pipe closed.
+			components.Go(func() {
+				<-ctx.Done()
+				calls.Close()
+			})
 			components.Go(func() { gw.Run(ctx) })
 			components.Go(func() { server.Serve(ctx, listener) })
 			components.Go(func() { watchConfig(ctx, server, part("config")) })
