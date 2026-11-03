@@ -2907,6 +2907,9 @@ And on TURN, from M27:
   with its call. Nothing links an allocation to a connection id, and nothing needs to. **One that binds a
   channel to anything but the SFU's addresses at its port ends too**: pion admits a binding on the IP
   alone and walks every binding for each packet relayed.
+- **The relay's per-packet path allocates nothing**, both ways: it reads with `ReadFromUDPAddrPort` and
+  reports a peer by a `net.Addr` made when the peer changes. `TestTheRelayAllocatesNothingPerPacket`
+  holds it there, and `BenchmarkRelayRoundTrip` measures it.
 - **Every callback given to pion defers `Server.contain`**, which refuses the request and logs once for
   each place. A loop contains per iteration, or one panic ends it.
 - **Replies to unauthenticated requests are rate-limited** per destination and in all, in memory, since

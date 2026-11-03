@@ -79,6 +79,7 @@ func (r *relays) AllocatePacketConn(conf turn.AllocateListenerConfig) (_ net.Pac
 		return nil, nil, err
 	}
 	c := &relayConn{PacketConn: pc, s: r.s, user: conf.UserID, heard: r.s.now()}
+	c.udp, _ = pc.(*net.UDPConn)
 	c.mu.Lock()
 	c.idle = time.AfterFunc(r.s.lim.Idle, c.checkIdle)
 	c.mu.Unlock()
@@ -168,6 +169,9 @@ type relayConn struct {
 	net.PacketConn
 	s    *Server
 	user string
+	// udp is PacketConn as what it is, read without the address the standard library allocates for each
+	// packet; nil only in a test that builds one by hand.
+	udp *net.UDPConn
 
 	// mu guards the meter, heard, the idle timer and the peers. pion writes from the client's read loop
 	// and reads from its own, and the timer fires on a third.
@@ -177,7 +181,7 @@ type relayConn struct {
 	idle  *time.Timer
 	// last is the address the client last wrote to, data the last it sent anything but STUN to, and
 	// checks the addresses its recent STUN requests went to.
-	last, data netip.AddrPort
+	last, data peer
 	checks     [32]check
 	next       int
 
@@ -187,7 +191,14 @@ type relayConn struct {
 // check is a STUN request the client sent through the relay, and the address it named.
 type check struct {
 	id   [stun.TransactionIDSize]byte
-	peer netip.AddrPort
+	peer peer
+}
+
+// peer is an address the client wrote to, with the net.Addr ReadFrom reports it as, made once rather than
+// for every packet the SFU sends back.
+type peer struct {
+	ap   netip.AddrPort
+	addr net.Addr
 }
 
 // WriteTo sends towards the SFU, and towards nothing else: a write to an address that is not the SFU's
@@ -195,7 +206,7 @@ type check struct {
 // refused it already; this is the check that holds whatever pion does, port included, and the only
 // address this socket ever sends to is the SFU's own.
 func (c *relayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	peer, ok := c.s.sfuPeer(addr)
+	to, ok := c.s.sfuPeer(addr)
 	if !ok {
 		return len(p), nil
 	}
@@ -203,7 +214,7 @@ func (c *relayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	c.mu.Lock()
 	ok, out := c.meter.Admit(c.s.now(), len(p), lim.RelayPacketsPerSecond, lim.RelayBitsPerSecond, lim.StrikesToClose)
 	if ok {
-		c.remember(p, peer)
+		c.remember(p, to)
 	}
 	c.mu.Unlock()
 	if out {
@@ -217,15 +228,17 @@ func (c *relayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 // remember records where the client wrote p. Under mu.
-func (c *relayConn) remember(p []byte, peer netip.AddrPort) {
-	c.last = peer
+func (c *relayConn) remember(p []byte, to netip.AddrPort) {
+	if c.last.ap != to {
+		c.last = peer{ap: to, addr: net.UDPAddrFromAddrPort(to)}
+	}
 	id, class, ok := stunHeader(p)
 	if !ok {
-		c.data = peer
+		c.data = c.last
 		return
 	}
 	if class == stun.ClassRequest {
-		c.checks[c.next] = check{id: id, peer: peer}
+		c.checks[c.next] = check{id: id, peer: c.last}
 		c.next = (c.next + 1) % len(c.checks)
 	}
 }
@@ -234,38 +247,54 @@ func (c *relayConn) remember(p []byte, peer netip.AddrPort) {
 // else on that host, or beyond it, writes to its port.
 func (c *relayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	for {
-		n, addr, err := c.PacketConn.ReadFrom(p)
+		n, from, err := c.read(p)
 		if err != nil {
-			return n, addr, err
+			return n, nil, err
 		}
-		if !c.s.isSFU(addr) {
+		if netip.AddrPortFrom(from.Addr().Unmap(), from.Port()) != c.s.opts.SFU {
 			continue
 		}
 		c.mu.Lock()
-		peer := c.peerOf(p[:n])
-		if peer.IsValid() {
+		to := c.peerOf(p[:n])
+		if to.addr != nil {
 			c.heard = c.s.now()
 		}
 		c.mu.Unlock()
 		// The SFU is ICE-lite and sends nothing first, so before the client has written there is nobody
 		// to report it as.
-		if !peer.IsValid() {
+		if to.addr == nil {
 			continue
 		}
-		return n, net.UDPAddrFromAddrPort(peer), nil
+		return n, to.addr, nil
 	}
 }
 
+// read is one packet and where it came from, without an allocation when the socket is a UDP one.
+func (c *relayConn) read(p []byte) (int, netip.AddrPort, error) {
+	if c.udp != nil {
+		return c.udp.ReadFromUDPAddrPort(p)
+	}
+	n, addr, err := c.PacketConn.ReadFrom(p)
+	if err != nil {
+		return n, netip.AddrPort{}, err
+	}
+	u, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return n, netip.AddrPort{}, nil
+	}
+	return n, u.AddrPort(), nil
+}
+
 // peerOf is the address the client knows a packet from the SFU by. Under mu.
-func (c *relayConn) peerOf(p []byte) netip.AddrPort {
+func (c *relayConn) peerOf(p []byte) peer {
 	if id, class, ok := stunHeader(p); ok && (class == stun.ClassSuccessResponse || class == stun.ClassErrorResponse) {
 		for _, ch := range c.checks {
-			if ch.peer.IsValid() && ch.id == id {
+			if ch.peer.addr != nil && ch.id == id {
 				return ch.peer
 			}
 		}
 	}
-	if c.data.IsValid() {
+	if c.data.addr != nil {
 		return c.data
 	}
 	return c.last

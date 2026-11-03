@@ -336,16 +336,6 @@ func (s *Server) hostAddrs() []netip.Addr {
 	return h.addrs
 }
 
-// isSFU is whether addr is the SFU's media address, IP and port.
-func (s *Server) isSFU(addr net.Addr) bool {
-	u, ok := addr.(*net.UDPAddr)
-	if !ok {
-		return false
-	}
-	ap := u.AddrPort()
-	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()) == s.opts.SFU
-}
-
 // contain is deferred in every callback this package gives pion. The self-hosted TURN server shares
 // norite-server's process, as the SFU does, and these parse a stranger's requests. A panic refuses the
 // request, through err when the callback returns one, and is logged once for each place it happens: one

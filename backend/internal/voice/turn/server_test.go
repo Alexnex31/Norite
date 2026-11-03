@@ -52,7 +52,7 @@ func (b *syncBuffer) String() string {
 
 func (b *syncBuffer) Len() int { return len(b.String()) }
 
-func newFixture(t *testing.T, tune func(*Options)) fixture {
+func newFixture(t testing.TB, tune func(*Options)) fixture {
 	t.Helper()
 	sfu, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
