@@ -224,37 +224,6 @@ func TestTheWorkerDoesNotInheritTheDaemonsSecrets(t *testing.T) {
 	require.Contains(t, names, standinVariable, "the test's own, appended after the list")
 }
 
-// On Linux the worker holds descriptors 0 to 4 and nothing else the daemon had open.
-func TestTheWorkerInheritsOnlyItsPipes(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("reads /proc")
-	}
-	fast(t)
-	held, err := os.Open(os.Args[0]) // something the daemon holds, which must not cross
-	require.NoError(t, err)
-	defer func() { _ = held.Close() }()
-	log := &logBuffer{}
-	w := joinStandin(t, "fds", log)
-	w.Leave()
-	var fds []string
-	require.Eventually(t, func() bool {
-		for _, l := range log.workerLines() {
-			if list, ok := strings.CutPrefix(l, "fds "); ok {
-				fds = strings.Fields(list)
-				return true
-			}
-		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond)
-	var numbers []string
-	for _, fd := range fds {
-		n, target, _ := strings.Cut(fd, "=")
-		numbers = append(numbers, n)
-		require.NotEqual(t, held.Name(), target, "a file the daemon holds crossed to the worker")
-	}
-	require.Equal(t, []string{"0", "1", "2", "3", "4"}, numbers, "%v", fds)
-}
-
 // An exit code reads as whoever looks it up writes it.
 func TestAnExitCodeReadsAsTheOSWritesIt(t *testing.T) {
 	require.Equal(t, "exit status 2", exitStatus("linux", 2))

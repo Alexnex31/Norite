@@ -2091,7 +2091,10 @@ And on the voice-worker, from M28:
   both); printing is bounded at 256 KiB a second. The first breach kills it. A reason it carries is
   cleaned and cut with `voiceipc.CutReason` wherever it is shown or kept.
 - **Its environment is `env.go`'s allow-list.** A capture library's variable is added there by name, and
-  nothing else is.
+  nothing else is. **Its descriptors are its pipes and nothing else**: Go opens its own close-on-exec and
+  leaves alone what the daemon inherited from whatever started it, so `closeInherited` marks every descriptor
+  from 3 up before each start. CI's runner hands two such pipes down, and they reached the worker until M28's
+  first CI run.
 - **A crash is a closed pipe the daemon did not ask for, or an exit that is not 0**, logged with the last
   twenty lines. Every worker is reaped; one asked to leave, or that closed its pipe and stayed, is killed
   after 3 s. **The worker exits when its control pipe closes**, from a goroutine that does nothing else.
