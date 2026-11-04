@@ -306,9 +306,8 @@ func Run(ctx context.Context, opts Options) error {
 			})
 			voice.Store(calls)
 			local.voice = calls
-			// The gateway's sink ends the call with the sign-in, as it clears the state.
 			gw := gatewayclient.New(gatewayclient.Options{
-				Credentials: src, Sink: endingCalls{Sink: server, calls: calls}, Version: opts.Version,
+				Credentials: src, Sink: server, Version: opts.Version,
 				Log: part("gateway"), OnVersionRefused: update.Nudge,
 			})
 			gateway.Store(gw)

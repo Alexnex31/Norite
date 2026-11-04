@@ -6,6 +6,7 @@ package voiceworker
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,7 +40,7 @@ func standinVoice(t *testing.T, mode string, signaler Signaler) *Voice {
 	t.Helper()
 	o := standinOptions(t, mode, nil)
 	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: signaler, Env: o.Env,
-		Account: func() (string, error) { return "42", nil }, Log: zerolog.Nop()})
+		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.Nop()})
 	t.Cleanup(v.Close)
 	return v
 }
@@ -51,8 +52,11 @@ func TestAFailedJoinAnswersOnceItsWorkerIsGone(t *testing.T) {
 	srv := &refusingServer{}
 	v := standinVoice(t, "good", srv)
 	srv.v = v
-	_, err := v.Join(context.Background(), "1")
+	st, err := v.Join(context.Background(), "1")
 	require.ErrorContains(t, err, "room full")
+	// The status the answer carries is the failure's, so the two agree, and a retry finds nothing to leave.
+	require.Equal(t, ipc.VoiceIdle, st.State)
+	require.Contains(t, st.Reason, "room full")
 	w := srv.worker.Load()
 	require.NotNil(t, w, "the worker was never started")
 	select {
@@ -94,7 +98,9 @@ func TestAJoinWhoseAskerLeftWhileWaitingIsNotDone(t *testing.T) {
 	v.joinMu.Unlock()
 	select {
 	case err := <-answered:
-		require.ErrorIs(t, err, context.Canceled)
+		// Not "still under way", which the daemon answers a join that goes on without its asker.
+		var refused *Refusal
+		require.True(t, errors.As(err, &refused), "%v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the join did not answer")
 	}
@@ -105,7 +111,7 @@ func TestAJoinWhoseAskerLeftWhileWaitingIsNotDone(t *testing.T) {
 // The sign-in not read yet is not being signed out: the join says to ask again, not to log in.
 func TestAJoinBeforeTheSignInIsReadIsPending(t *testing.T) {
 	v := NewVoice(VoiceOptions{Signaler: &blockingServer{}, Log: zerolog.Nop(),
-		Account: func() (string, error) { return "", ErrSignInPending }})
+		Account: func() (SignIn, error) { return SignIn{}, ErrSignInPending }})
 	_, err := v.Join(context.Background(), "1")
 	var refused *Refusal
 	require.True(t, errors.As(err, &refused))
@@ -136,12 +142,14 @@ func (s *recordingServer) asked() []string {
 	return append([]string(nil), s.accounts...)
 }
 
-// A join that read the account and then waited behind another is not made once the sign-in has ended: the
-// end left the call there was then, which was not this one yet, and the join would go on as an account
-// nobody here is signed in as.
+// A join that read the sign-in and then waited behind another is not made once the sign-in has ended: it
+// would go on as an account nobody here is signed in as.
 func TestAJoinWaitingWhileTheSignInEndsIsNotMade(t *testing.T) {
 	srv := &recordingServer{}
-	v := standinVoice(t, "good", srv)
+	ended := make(chan struct{})
+	v := NewVoice(VoiceOptions{Signaler: srv, Log: zerolog.Nop(),
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Ended: ended}, nil }})
+	t.Cleanup(v.Close)
 	v.joinMu.Lock()
 	answered := make(chan error, 1)
 	go func() {
@@ -149,7 +157,7 @@ func TestAJoinWaitingWhileTheSignInEndsIsNotMade(t *testing.T) {
 		answered <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
-	v.SignInEnded()
+	close(ended)
 	v.joinMu.Unlock()
 	select {
 	case err := <-answered:
@@ -163,19 +171,46 @@ func TestAJoinWaitingWhileTheSignInEndsIsNotMade(t *testing.T) {
 	require.Equal(t, ipc.VoiceIdle, v.Status().State)
 }
 
-// The end of a sign-in ends the call joined under it.
+// The end of a sign-in ends the call joined under it, and says so.
 func TestTheEndOfTheSignInEndsTheCall(t *testing.T) {
+	ended := make(chan struct{})
+	v := NewVoice(VoiceOptions{Signaler: &blockingServer{}, Log: zerolog.Nop(),
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Ended: ended}, nil }})
+	t.Cleanup(v.Close)
+	go func() { _, _ = v.Join(context.Background(), "1") }()
+	require.Eventually(t, v.Busy, 5*time.Second, 5*time.Millisecond)
+	close(ended)
+	require.Eventually(t, func() bool { return !v.Busy() }, 5*time.Second, 5*time.Millisecond)
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the sign-in ended", Available: true}, v.Status())
+}
+
+// A leave while the worker is still starting is a leave: logged as the worker exiting, never as a crash.
+func TestALeaveWhileTheWorkerStartsIsNoCrash(t *testing.T) {
 	fast(t)
-	v := standinVoice(t, "good", &refusingServer{})
-	c := &call{channel: "1", cancel: func() {}, finished: make(chan struct{})}
-	close(c.finished)
-	v.mu.Lock()
-	v.current = c
-	v.status.State = ipc.VoiceInCall
-	v.mu.Unlock()
-	v.SignInEnded()
-	require.Eventually(t, func() bool { return !v.Busy() }, 5*time.Second, 10*time.Millisecond)
-	require.Equal(t, ipc.VoiceIdle, v.Status().State)
+	log := &logBuffer{}
+	o := standinOptions(t, "silent", nil)
+	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: &refusingServer{}, Env: o.Env,
+		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.New(log)})
+	t.Cleanup(v.Close)
+	answered := make(chan error, 1)
+	go func() {
+		_, err := v.Join(context.Background(), "1")
+		answered <- err
+	}()
+	require.Eventually(t, v.Busy, 5*time.Second, 5*time.Millisecond)
+	time.Sleep(300 * time.Millisecond) // inside Start, waiting for a HELLO that does not come
+	v.Leave()
+	select {
+	case err := <-answered:
+		require.ErrorContains(t, err, "left before it was up")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the join did not answer")
+	}
+	require.Eventually(t, func() bool { return strings.Contains(log.String(), "the voice worker exited") },
+		5*time.Second, 10*time.Millisecond, "%s", log.String())
+	require.NotContains(t, log.String(), "crashed")
+	require.NotContains(t, log.String(), `"level":"warn"`)
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, v.Status())
 }
 
 // The leave a sign-in's end starts is that call's: by the time it runs, a join under the next sign-in may
@@ -190,7 +225,51 @@ func TestTheEndOfASignInLeavesOnlyItsOwnCall(t *testing.T) {
 	v.current = next
 	v.status.State, v.status.Channel = ipc.VoiceInCall, "2"
 	v.mu.Unlock()
-	v.leave(ended)
+	v.leave(ended, "the sign-in ended")
 	require.True(t, v.Busy())
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "2", Available: true}, v.Status())
+}
+
+// routelessServer refuses the route at once, so a join fails before any worker is started.
+type routelessServer struct{}
+
+func (routelessServer) Route(context.Context, string) (Route, error) {
+	return Route{}, errors.New("the voice server refused: 503")
+}
+
+func (routelessServer) Join(context.Context, string, string, string) (string, error) {
+	return "", errors.New("unreachable")
+}
+
+// A failed join is over when it is answered: the status says why, and a retry that comes at once finds no
+// call of the failed one's to leave, which would write "left" over the reason. Staged rather than raced:
+// Changed, told the join is idle, waits to see whether the asker is answered meanwhile, which it can be only
+// if the answer went first.
+func TestAFailedJoinIsOverWhenItIsAnswered(t *testing.T) {
+	var answered, early atomic.Bool
+	idle := make(chan struct{})
+	v := NewVoice(VoiceOptions{Signaler: routelessServer{}, Log: zerolog.Nop(),
+		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+		Changed: func(st ipc.VoiceStatus) {
+			if st.State != ipc.VoiceIdle {
+				return
+			}
+			defer close(idle)
+			deadline := time.Now().Add(100 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				if answered.Load() {
+					early.Store(true)
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}})
+	st, err := v.Join(context.Background(), "1")
+	answered.Store(true)
+	require.Error(t, err)
+	require.NoError(t, within(5*time.Second, idle))
+	require.False(t, early.Load(), "the asker was answered before the join was over")
+	require.False(t, v.Busy())
+	require.Equal(t, ipc.VoiceIdle, st.State)
+	require.Contains(t, st.Reason, "503")
 }

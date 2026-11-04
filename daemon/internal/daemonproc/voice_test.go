@@ -7,7 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"sync/atomic"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -38,11 +38,11 @@ func voiceFixture(signaler voiceworker.Signaler, signedIn bool) *localRequests {
 	return &localRequests{log: zerolog.Nop(), voice: voiceworker.NewVoice(voiceworker.VoiceOptions{
 		Program: "/nonexistent/norite-voice", Version: "dev", Signaler: signaler,
 		Unavailable: "voice calls arrive in a later version of Norite",
-		Account: func() (string, error) {
+		Account: func() (voiceworker.SignIn, error) {
 			if !signedIn {
-				return "", voiceworker.ErrSignedOut
+				return voiceworker.SignIn{}, voiceworker.ErrSignedOut
 			}
-			return "42", nil
+			return voiceworker.SignIn{Account: "42"}, nil
 		},
 		Log: zerolog.Nop(),
 	})}
@@ -103,7 +103,7 @@ func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
 func TestAJoinBeforeTheSignInIsReadIsUnavailable(t *testing.T) {
 	l := &localRequests{log: zerolog.Nop(), voice: voiceworker.NewVoice(voiceworker.VoiceOptions{
 		Signaler: refusingSignaler{}, Log: zerolog.Nop(),
-		Account: func() (string, error) { return "", voiceworker.ErrSignInPending },
+		Account: func() (voiceworker.SignIn, error) { return voiceworker.SignIn{}, voiceworker.ErrSignInPending },
 	})}
 	resp := l.Do(context.Background(), ipc.Request{Method: http.MethodPost, Path: ipc.PathVoiceJoin("1")})
 	require.NotNil(t, resp.Error)
@@ -136,24 +136,43 @@ func (holdingSignaler) Join(context.Context, string, string, string) (string, er
 	return "", errRefusing
 }
 
-type countingSink struct{ ends atomic.Int32 }
+// A sign-in that ends takes its call with it (M19's rule), from the session itself: here no gateway
+// connection exists at all, as when the instance is unreachable, and a logout still ends the call, which the
+// gateway's own end of a sign-in did not until the next one.
+func TestASignInThatEndsEndsTheCallWithNoGateway(t *testing.T) {
+	instance := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/auth/refresh" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "eyJ.access", "refresh_token": "nrt_rotated", "token_type": "Bearer",
+			"expires_at": time.Now().Add(15 * time.Minute).Format(time.RFC3339Nano),
+		})
+	}))
+	t.Cleanup(instance.Close)
+	store, err := credentials.OpenLocalForTest(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, store.Save(credentials.Record{InstanceURL: instance.URL, UserID: "1", Username: "ada",
+		DeviceID: "dev_test", DeviceName: "laptop"}, "nrt_from_login"))
+	src := session.New(session.Options{Store: store, Log: zerolog.Nop()})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go src.Run(ctx)
+	require.Eventually(t, func() bool { st, _ := src.Status(); return st == session.Live }, 5*time.Second,
+		5*time.Millisecond)
 
-func (*countingSink) Begin(uint64)                     {}
-func (*countingSink) Dispatch(string, json.RawMessage) {}
-func (s *countingSink) End()                           { s.ends.Add(1) }
-
-// A sign-in that ends takes its call with it (M19's rule), as it takes the state.
-func TestASignInThatEndsEndsTheCall(t *testing.T) {
 	calls := voiceworker.NewVoice(voiceworker.VoiceOptions{Signaler: holdingSignaler{}, Log: zerolog.Nop(),
-		Account: func() (string, error) { return "42", nil }})
+		Account: signedInAccount(src)})
 	go func() { _, _ = calls.Join(context.Background(), "1") }()
 	require.Eventually(t, calls.Busy, 5*time.Second, 5*time.Millisecond)
 
-	inner := &countingSink{}
-	endingCalls{Sink: inner, calls: calls}.End()
-	require.EqualValues(t, 1, inner.ends.Load(), "the state is told first, as before")
+	require.NoError(t, store.Clear()) // `norite logout`
+	src.Reload()
 	require.Eventually(t, func() bool { return !calls.Busy() }, 5*time.Second, 5*time.Millisecond)
-	require.Equal(t, ipc.VoiceIdle, calls.Status().State)
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the sign-in ended", Available: true},
+		calls.Status())
 }
 
 // A session that has not read its store yet is pending, not signed out.

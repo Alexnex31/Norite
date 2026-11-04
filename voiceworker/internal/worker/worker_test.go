@@ -304,3 +304,13 @@ func TestALeaveWhileGatheringIsAnsweredAtOnce(t *testing.T) {
 		require.Less(t, time.Since(started), time.Second)
 	})
 }
+
+// A leave before the join is a leave: the daemon can be asked to leave between starting a worker and
+// sending its join, and the two writes race for the pipe.
+func TestALeaveBeforeTheJoinIsALeave(t *testing.T) {
+	d := start(t, newFakeCall(), Options{})
+	require.Equal(t, voiceipc.OpHello, d.next().Op)
+	d.send(voiceipc.OpLeave, voiceipc.Leave{})
+	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "left"}, d.state())
+	require.Equal(t, ExitOK, d.exit())
+}

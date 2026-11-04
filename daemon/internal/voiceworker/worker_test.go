@@ -361,3 +361,51 @@ func TestAWorkerIsStartedByPathOnly(t *testing.T) {
 		require.ErrorIs(t, err, ErrStart, "%q was started", program)
 	}
 }
+
+// The daemon's ends of a worker's pipes are closed once it is reaped, not left for the collector: every
+// call opens three.
+func TestAReapedWorkersPipesAreClosed(t *testing.T) {
+	fast(t)
+	w := joinStandin(t, "good", nil)
+	w.Leave()
+	_, err := w.fromWorker.Read(make([]byte, 1))
+	require.ErrorIs(t, err, os.ErrClosed)
+	_, err = w.output.Read(make([]byte, 1))
+	require.ErrorIs(t, err, os.ErrClosed)
+}
+
+// What a worker says in its HELLO is believed past no bound: neither the version it names nor a field
+// strict decoding quotes reaches the answer or the log whole.
+func TestAHelloOfAnyLengthIsQuotedWithinBounds(t *testing.T) {
+	fast(t)
+	for _, mode := range []string{"longversion", "longfield"} {
+		t.Run(mode, func(t *testing.T) {
+			log := &logBuffer{}
+			_, err := Start(context.Background(), standinOptions(t, mode, log))
+			require.Error(t, err)
+			if mode == "longversion" {
+				require.Less(t, len(err.Error()), 1024, "the answer quotes the whole version")
+			}
+			require.Eventually(t, func() bool { return strings.Contains(log.String(), "crashed") }, 5*time.Second,
+				10*time.Millisecond)
+			for _, line := range strings.Split(log.String(), "\n") {
+				require.Less(t, len(line), 2048, "a log line of %d bytes", len(line))
+			}
+		})
+	}
+}
+
+// A pipe something the worker started still holds open does not keep the daemon's readers for ever: they
+// are ended once the worker is reaped and its last words drained.
+func TestPipesAnHeirHoldsAreLetGo(t *testing.T) {
+	fast(t)
+	w, err := Start(context.Background(), standinOptions(t, "heir", nil))
+	require.NoError(t, err)
+	go func() {
+		for range w.Events() {
+		}
+	}()
+	require.NoError(t, within(5*time.Second, w.Done()))
+	require.NoError(t, within(3*time.Second, w.readDone), "the frame reader is still reading the heir's pipe")
+	require.NoError(t, within(3*time.Second, w.outDone), "the output reader is still reading the heir's pipe")
+}

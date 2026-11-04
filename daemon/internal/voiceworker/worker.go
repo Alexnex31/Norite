@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 
@@ -113,9 +114,11 @@ type Worker struct {
 	opts Options
 	log  zerolog.Logger
 	cmd  *exec.Cmd
-	// toWorker is the daemon's end of the control pipe, and fromWorker of the events pipe.
+	// toWorker is the daemon's end of the control pipe, fromWorker of the events pipe, and output of the
+	// worker's stdout and stderr. All three are closed once the worker is reaped.
 	toWorker   *os.File
 	fromWorker *os.File
+	output     *os.File
 	writeMu    sync.Mutex
 
 	events chan Event
@@ -193,7 +196,7 @@ func Start(ctx context.Context, opts Options) (*Worker, error) {
 	}
 
 	w := &Worker{
-		opts: opts, log: opts.Log, cmd: cmd, toWorker: ctlW, fromWorker: evR,
+		opts: opts, log: opts.Log, cmd: cmd, toWorker: ctlW, fromWorker: evR, output: outR,
 		events: make(chan Event, 8), exited: make(chan struct{}), done: make(chan struct{}),
 		lines: &ring{max: lastLines}, readDone: make(chan struct{}), outDone: make(chan struct{}),
 		leaveWithin: leaveWithin, exitWithin: exitWithin, sendWithin: sendWithin, drainWithin: drainWithin,
@@ -217,7 +220,11 @@ func Start(ctx context.Context, opts Options) (*Worker, error) {
 		<-w.done
 		return nil, fmt.Errorf("%w: it did not say who it is within %s", ErrStart, helloWithin)
 	case <-ctx.Done():
-		w.Kill("the join was abandoned")
+		// Left before it said who it is, by a leave or the sign-in's end: ended as asked, not crashed.
+		w.mu.Lock()
+		w.leaving = true
+		w.mu.Unlock()
+		_ = w.cmd.Process.Kill()
 		<-w.done
 		return nil, ctx.Err()
 	}
@@ -275,10 +282,13 @@ func (w *Worker) Leave() {
 }
 
 // Kill ends the worker now, recording why. Killing one that has exited does nothing.
+//
+// The reason is cut to what a STATE carries where it is recorded: it may quote what the worker sent, and
+// what a worker sends is believed past no bound, the daemon's log included.
 func (w *Worker) Kill(reason string) {
 	w.mu.Lock()
 	if w.broke == "" {
-		w.broke = reason
+		w.broke = voiceipc.CutReason(reason)
 	}
 	w.mu.Unlock()
 	_ = w.cmd.Process.Kill()
@@ -292,18 +302,26 @@ func (w *Worker) wait() {
 	// What the worker wrote last is read before it is judged: its ended state, which makes an exit clean,
 	// and a panic's trace, which goes with a crash. The pipes end once it has gone, unless something it
 	// started still holds them, which the bound is for.
-	drained := time.NewTimer(w.drainWithin)
+	// One bound for both: a timer's channel fires once, so the reader waited for second was not bounded at
+	// all, and a pipe an heir of the worker held kept Done, and every Leave, waiting until the heir exited.
+	drained := make(chan struct{})
+	bound := time.AfterFunc(w.drainWithin, func() { close(drained) })
 	for _, ch := range []chan struct{}{w.readDone, w.outDone} {
 		select {
 		case <-ch:
-		case <-drained.C:
+		case <-drained:
 		}
 	}
-	drained.Stop()
+	bound.Stop()
 
 	w.mu.Lock()
 	defer func() {
 		w.mu.Unlock()
+		// The daemon's ends of the worker's pipes, once nothing is judged from them. A reader something the
+		// worker started still holds open is ended by this, and the descriptors go now rather than when the
+		// collector finds them, one call's worth at a time.
+		_ = w.fromWorker.Close()
+		_ = w.output.Close()
 		close(w.done)
 	}()
 	code := -1
@@ -453,7 +471,7 @@ func (w *Worker) checkHello(f gatewayproto.Frame) error {
 	// a client and says which to upgrade, and here the two are one install, replaced together.
 	if c := gatewayproto.Check(w.opts.Version, lenient.Version); !c.Compatible {
 		return fmt.Errorf("the voice worker beside this daemon is version %s and the daemon %s; reinstall "+
-			"Norite so both are of one release", termsafe.Text(lenient.Version), w.opts.Version)
+			"Norite so both are of one release", termsafe.Text(truncate(lenient.Version, 64)), w.opts.Version)
 	}
 	var h voiceipc.Hello
 	if err := ipc.Decode(f, &h); err != nil {
@@ -484,4 +502,15 @@ func (w *Worker) decode(f gatewayproto.Frame) (Event, error) {
 		return Event{State: &s}, nil
 	}
 	return Event{}, broke(fmt.Sprintf("op %d, which a worker does not send after HELLO", f.Op))
+}
+
+// truncate cuts s to at most n bytes, on a character's boundary.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

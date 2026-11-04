@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -68,10 +70,20 @@ func (h Harness) Route(ctx context.Context, account string) (Route, error) {
 	return route, nil
 }
 
-// loopback is a harness on this machine, whose SFU announces loopback addresses.
+// loopback is a harness on this machine, whose SFU announces loopback addresses: its URL's host is a
+// loopback address or exactly localhost. A test of the URL's text took http://localhost.example.com for one,
+// which admits the loopback candidates of whatever that host answers.
 func (h Harness) loopback() bool {
-	return strings.Contains(h.URL, "://127.0.0.1") || strings.Contains(h.URL, "://[::1]") ||
-		strings.Contains(h.URL, "://localhost")
+	u, err := url.Parse(h.URL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
 }
 
 // Join provisions the call.

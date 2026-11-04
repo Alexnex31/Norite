@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -58,6 +59,10 @@ func standin(mode string) int {
 	if mode == "parent" {
 		return standinParent()
 	}
+	if mode == "linger" {
+		time.Sleep(10 * time.Second)
+		return 0
+	}
 	fds := listFDs() // before anything here opens one
 	fs := flag.NewFlagSet("standin", flag.ContinueOnError)
 	pipes := fs.String(voiceipc.PipesFlag, "", "")
@@ -85,6 +90,30 @@ func standin(mode string) int {
 		return 0
 	case "extrahello":
 		_ = ipc.WriteEncoded(out, []byte(`{"op":1,"d":{"version":"0.4.7","token":"x"},"s":null,"t":null}`))
+		time.Sleep(time.Minute)
+		return 0
+	case "heir":
+		// Leaves behind a process holding its events pipe and its output, as a library's helper might, and
+		// exits once it has said who it is.
+		exe, err := os.Executable()
+		if err != nil {
+			return 9
+		}
+		heir := exec.Command(exe) //nolint:gosec // this test binary
+		heir.Env = append(os.Environ(), standinVariable+"=linger")
+		heir.Stdout, heir.Stderr, heir.ExtraFiles = os.Stdout, os.Stderr, []*os.File{out}
+		if heir.Start() != nil {
+			return 9
+		}
+		send(voiceipc.OpHello, voiceipc.Hello{Version: version})
+		return 0
+	case "longversion":
+		// A version no release has, as long as a frame allows.
+		version = "1." + strings.Repeat("9", 60<<10)
+	case "longfield":
+		// A HELLO naming a field nobody declared, as long as a frame allows: strict decoding quotes it.
+		_ = ipc.WriteEncoded(out, []byte(`{"op":1,"d":{"version":"0.4.7","`+strings.Repeat("x", 60<<10)+
+			`":1},"s":null,"t":null}`))
 		time.Sleep(time.Minute)
 		return 0
 	case "fds":
@@ -244,6 +273,13 @@ func (l *logBuffer) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.buf.Write(p)
+}
+
+// String is the log as written.
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }
 
 // lines are the log's entries, decoded.

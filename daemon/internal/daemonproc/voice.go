@@ -10,41 +10,29 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Alexnex31/Norite/daemon/internal/gatewayclient"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
-// signedInAccount is the account a call is joined as: the session's. A daemon that has not read its
-// sign-in yet is pending, never signed out, or a join would send somebody to `norite login` over a good
-// sign-in (M22's automation.ErrSignInPending).
-func signedInAccount(src *session.Source) func() (string, error) {
-	return func() (string, error) {
+// signedInAccount is the sign-in a call is joined under: the session's account, and the session's own
+// signal that the sign-in is over. The session's and not the gateway connection's, which hears of a sign-out
+// only while connected: one made while the instance is unreachable ended nothing until the next sign-in, and
+// the call, whose voice server may be reachable all the same, went on as an account nobody was signed in as.
+// A daemon that has not read its sign-in yet is pending, never signed out, or a join would send somebody to
+// `norite login` over a good sign-in (M22's automation.ErrSignInPending).
+func signedInAccount(src *session.Source) func() (voiceworker.SignIn, error) {
+	return func() (voiceworker.SignIn, error) {
 		standing, account := src.Status()
 		switch {
 		case standing == session.SignedOut:
-			return "", voiceworker.ErrSignedOut
+			return voiceworker.SignIn{}, voiceworker.ErrSignedOut
 		case account.UserID == "":
-			return "", voiceworker.ErrSignInPending
+			return voiceworker.SignIn{}, voiceworker.ErrSignInPending
 		}
-		return account.UserID, nil
+		// Asked after the status: a sign-in that ended in between is a channel already closed.
+		return voiceworker.SignIn{Account: account.UserID, Ended: src.Ended(account.Generation)}, nil
 	}
-}
-
-// endingCalls is the gateway's sink with the daemon's voice calls behind it: a sign-in that ends takes its
-// call with it (M19's rule), as it takes the state. Signed out, revoked or replaced by another account's,
-// the call was joined as an account nobody here is signed in as any more. SignInEnded does not wait for the
-// worker, since End is called from the gateway's read loop, and it refuses a join still waiting on the
-// sign-in that ended.
-type endingCalls struct {
-	gatewayclient.Sink
-	calls *voiceworker.Voice
-}
-
-func (e endingCalls) End() {
-	e.Sink.End()
-	e.calls.SignInEnded()
 }
 
 // noVoice is the daemon's voice calls when the credential store could not be opened: answered, with the

@@ -230,6 +230,12 @@ func (r *run) gather(ctx context.Context, call Call) (string, int, bool) {
 func (r *run) awaitJoin(ctx context.Context) (voiceipc.Join, int, bool) {
 	select {
 	case f := <-r.frames:
+		// A leave may come first: the daemon can be asked to leave between starting the worker and sending
+		// its join, and the two writes then race for the pipe. Ended as asked, as at every later step.
+		var l voiceipc.Leave
+		if f.Op == voiceipc.OpLeave && ipc.Decode(f, &l) == nil {
+			return voiceipc.Join{}, r.end("left"), false
+		}
 		var j voiceipc.Join
 		if f.Op != voiceipc.OpJoin || ipc.Decode(f, &j) != nil || j.Check() != nil {
 			return j, r.violation(f), false

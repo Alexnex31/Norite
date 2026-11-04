@@ -25,9 +25,9 @@ type VoiceOptions struct {
 	// Signaler reaches the voice server; nil refuses every join, and Unavailable says why.
 	Signaler    Signaler
 	Unavailable string
-	// Account is the signed-in account's id, or ErrSignedOut, or ErrSignInPending while the daemon has not
-	// read its sign-in yet.
-	Account func() (string, error)
+	// Account is the sign-in a call is joined under, or ErrSignedOut, or ErrSignInPending while the daemon
+	// has not read its sign-in yet.
+	Account func() (SignIn, error)
 	// Changed is told the status each time it changes. It must not block.
 	Changed func(ipc.VoiceStatus)
 	Log     zerolog.Logger
@@ -61,9 +61,16 @@ type Voice struct {
 	status  ipc.VoiceStatus
 	current *call
 	closed  bool
-	// signIn counts the sign-ins that have ended (SignInEnded). A join reads it before the account and
-	// is not made if it has moved by the time the join becomes the call.
-	signIn uint64
+}
+
+// SignIn is the sign-in a call is joined under: the account, and a channel closed once that sign-in is
+// over, signed out, refused or replaced by another (session.Source.Ended). The call ends with it, M19's rule
+// that a sign-in that ends takes down everything standing on it. It is the session's, not the gateway
+// connection's: a sign-out while the instance is unreachable is still the end of the sign-in, and the voice
+// server may be reachable all the same.
+type SignIn struct {
+	Account string
+	Ended   <-chan struct{}
 }
 
 // call is one call's worker and the goroutine that owns it.
@@ -127,11 +134,7 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 	if v.opts.Signaler == nil {
 		return v.Status(), &Refusal{Msg: v.opts.Unavailable, Unavailable: true}
 	}
-	// Before the account: a sign-in that ends after this read is one the join notices below.
-	v.mu.Lock()
-	signIn := v.signIn
-	v.mu.Unlock()
-	account, err := v.opts.Account()
+	signIn, err := v.opts.Account()
 	switch {
 	case errors.Is(err, ErrSignInPending):
 		return v.Status(), &Refusal{Msg: "the daemon has not read its sign-in yet; ask again in a moment",
@@ -145,7 +148,7 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 	// A join waits here behind another for as long as that one takes. One whose asker has gone by then
 	// is not done: it would end the call the other join just made, for a channel nobody wants any more.
 	if ctx.Err() != nil {
-		return v.Status(), ctx.Err()
+		return v.Status(), &Refusal{Msg: "the join was given up before its turn came"}
 	}
 	v.Leave()
 
@@ -158,21 +161,22 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 		cancel()
 		return v.Status(), &Refusal{Msg: "the daemon is stopping"}
 	}
-	// The account was read before the join waited its turn. A sign-in that ended since left the call there
-	// was then, which this was not yet, so the join would go on as an account nobody here is signed in as.
-	// Checked under the lock SignInEnded takes: past this point the join is the call, and the next end
-	// leaves it.
-	if v.signIn != signIn {
+	// The sign-in was read before the join waited its turn, and may have ended since: the join would go on
+	// as an account nobody here is signed in as. Past this point the call watches it (endsWith).
+	select {
+	case <-signIn.Ended:
 		v.mu.Unlock()
 		cancel()
 		return v.Status(), &Refusal{Msg: "the sign-in changed while the join waited; join again", Pending: true}
+	default:
 	}
 	v.current = c
 	v.status.State, v.status.Channel, v.status.Reason = ipc.VoiceJoining, channel, ""
 	v.mu.Unlock()
 	v.publish()
 
-	go v.run(callCtx, c, account, result)
+	go v.endsWith(c, signIn.Ended)
+	go v.run(callCtx, c, signIn.Account, result)
 	select {
 	case err := <-result:
 		return v.Status(), err
@@ -188,11 +192,13 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	defer c.cancel()
 	log := v.opts.Log.With().Str("channel", c.channel).Logger()
 
-	joined := false
 	var w *Worker
 	// fail ends the join: the worker is reaped first, so that once the asker is answered and the status
 	// says idle, nothing of this call is still running. A retry otherwise started a second worker beside
 	// one still leaving, and a daemon stopping in between went on without it.
+	//
+	// The status is made idle before the asker is answered, so the answer and the status agree, and a retry
+	// that comes at once finds no call of this one's to leave, which would put "left" over the reason.
 	fail := func(failed bool, format string, args ...any) {
 		msg := reason(fmt.Sprintf(format, args...))
 		if w != nil {
@@ -202,9 +208,14 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 				w.Leave()
 			}
 		}
-		log.Warn().Str("reason", msg).Msg("the voice call could not be joined")
-		result <- &Refusal{Msg: msg, Failed: failed}
+		ev := log.Warn()
+		if ctx.Err() != nil {
+			// Left, by a leave, a join after it or the sign-in's end, which said so in the status: not a failure.
+			msg, failed, ev = "the call was left before it was up", false, log.Info()
+		}
+		ev.Str("reason", msg).Msg("the voice call could not be joined")
 		v.ended(c, msg)
+		result <- &Refusal{Msg: msg, Failed: failed}
 	}
 
 	routeCtx, cancelRoute := context.WithTimeout(ctx, routeWithin)
@@ -276,7 +287,6 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		return
 	}
 
-	joined = true
 	v.mu.Lock()
 	if v.current == c {
 		v.status.State = ipc.VoiceInCall
@@ -294,9 +304,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 	}
 	<-w.Done()
-	if joined {
-		v.ended(c, w.Exit().Reason)
-	}
+	v.ended(c, w.Exit().Reason)
 }
 
 // await waits for the event want accepts, the worker's end, the bound, or the call's cancellation. A
@@ -348,17 +356,12 @@ func (v *Voice) ended(c *call, why string) {
 	v.publish()
 }
 
-// SignInEnded ends the call joined under the sign-in that ended, and refuses a join that read that
-// sign-in and has not become the call yet (M19's rule: a sign-in that ends takes down everything standing
-// on it). It does not wait, since the gateway calls it from its read loop.
-func (v *Voice) SignInEnded() {
-	v.mu.Lock()
-	v.signIn++
-	c := v.current
-	v.mu.Unlock()
-	if c != nil {
-		// That call and no later one: a join under the next sign-in may be the call by the time this runs.
-		go v.leave(c)
+// endsWith ends c when its sign-in ends, unless c has finished first.
+func (v *Voice) endsWith(c *call, ended <-chan struct{}) {
+	select {
+	case <-ended:
+		v.leave(c, "the sign-in ended")
+	case <-c.finished:
 	}
 }
 
@@ -370,18 +373,18 @@ func (v *Voice) Leave() ipc.VoiceStatus {
 	if c == nil {
 		return v.Status()
 	}
-	return v.leave(c)
+	return v.leave(c, "left")
 }
 
-// leave ends c, if it is still the call.
-func (v *Voice) leave(c *call) ipc.VoiceStatus {
+// leave ends c, if it is still the call, giving why as the status's reason.
+func (v *Voice) leave(c *call, why string) ipc.VoiceStatus {
 	v.mu.Lock()
 	if v.current != c {
 		v.mu.Unlock()
 		return v.Status()
 	}
 	v.current = nil
-	v.status.State, v.status.Channel, v.status.Reason = ipc.VoiceIdle, "", "left"
+	v.status.State, v.status.Channel, v.status.Reason = ipc.VoiceIdle, "", why
 	w := c.worker
 	v.mu.Unlock()
 	v.publish()
