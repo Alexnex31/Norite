@@ -1934,8 +1934,15 @@ of this section.
   exchange intelligible audio through the SFU from M26. Being before M33, they signal through M26's harness.
   The worker attributes received audio by CSRC, as M26 sends it, and resets its decoder and FEC state when
   a slot's CSRC changes. **What it decodes is a stranger's**: the SFU never reads a payload, so whatever
-  another participant sends reaches this decoder as they sent it. The worker's crash isolation (rule 11)
-  bounds the damage; the decode path is fuzzed here, with payloads that are not Opus.
+  another participant sends reaches this decoder as they sent it. The decode path is fuzzed here, with
+  payloads that are not Opus. **Crash isolation (rule 11) bounds a crash, not an exploit** (M28's
+  `/security-sweep`): the worker runs as the account, so a decoder bug that runs code reaches what the
+  account reaches, the daemon's attach socket and the credential store included, and the pipe's bounds do
+  not stand in the way. This milestone decides, before it decodes anybody's audio, whether the OS confines
+  the worker (on Linux, Landlock and seccomp; on macOS a sandbox profile, which must leave TCC's
+  attribution to the daemon intact, ADR 0034; on Windows a restricted token or a lower integrity level,
+  which must still reach the audio service), or records the risk as accepted in the security ledger with
+  the condition that reopens it. Building the confinement may be a milestone of its own, inserted here.
 
   **From M25 ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)):**
   - **`hraban/opus` is a codec and captures nothing.** This milestone chooses the capture library
@@ -2013,7 +2020,18 @@ of this section.
   refusing to join. **M28's Windows pass found a join waiting about 8 s** for the offer's candidates, while
   Pion waited out a TURN allocation that could not succeed. A network that refuses UDP waits the same way
   for TURN over UDP to fail, so this milestone weighs trickle ICE: sending candidates as they come rather
-  than with the offer. The `supports_video: bool` capability field is added to the voice-join payload now
+  than with the offer. **From M28's `/security-sweep`, the worker's peer becomes the instance's here**,
+  and two bounds the SFU has against a hostile client the worker lacks against a hostile server:
+  - The ICE servers in the route are the instance's words, and the worker dials whatever host and port
+    they name, over TCP too, resolving a name when it dials. Bound them at connect time, as rule 18 does a
+    fetch: the worker's dialer refuses this host, its link and metadata addresses, which the remote
+    candidate filter M28 added (`session.reachable`) already refuses for the answer's candidates.
+  - Pion opens an SRTP read stream, with a buffer of its own, for every SSRC the SFU sends that was not
+    negotiated, and keeps it unread until the call ends: M26's finding in the SFU
+    (`backend/internal/voice/streams.go`), from the other side. The worker's buffer factory counts them
+    against its slots. The worker's memory is the machine's, though not the daemon's.
+
+  The `supports_video: bool` capability field is added to the voice-join payload now
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
   end to end, and a kick mid-call drops the connection.

@@ -1875,3 +1875,46 @@ carries the condition that would reopen it.
 - **Reopens if**: a credential's lifetime grows, it authorizes anything beyond the relay, or M33 ships
   without evicting on the end of a sign-in.
 
+
+## M28 — Voice-worker subprocess and IPC
+
+### The harness's signaler believes the URL it is given
+- **Raised**: M28, `/security-sweep`
+- **Verdict**: unreachable
+- **Why**: `voiceworker.Harness` decides that the SFU is on this machine by looking for `://127.0.0.1` in
+  its URL, and passes on the harness's TURN URLs after cutting their number, without checking what they
+  name. It is compiled only under `norite_voiceharness`, which no release build sets (a test in
+  `cmd/daemond` holds that), and its URL is `NORITE_VOICE_HARNESS`, which the person running the pass sets
+  in the daemon's own environment. A URL the worker refuses ends that call as a protocol error.
+- **Reopens if**: a release build compiles the harness in, or its URL comes from anywhere but the
+  environment of the person running the pass.
+
+### Any local client can start voice workers as fast as it can ask
+- **Raised**: M28, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `/@daemon/voice/join/{channel}` is the attach socket's, the account's own programs (rule 16),
+  and the port for scripts refuses every path under `/@daemon/` (`relay.ScriptTarget`). Joins are
+  serialized and each leaves the call before it, so there is one worker at a time, reaped before the next
+  starts. A program that can open the socket can already do anything the account can.
+- **Reopens if**: the port for scripts ever reaches a voice request, or calls stop being one at a time.
+
+### Killing a worker after it was reaped could signal a reused process id
+- **Raised**: M28, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: every kill goes through the worker's `os.Process`, and `Kill` after `Wait` returns
+  `os.ErrProcessDone` without signalling anything; on Linux Go holds a pidfd, so not even a race with the
+  reap reaches another process. Several bounds can fire after the worker exits (`Send`'s, `Leave`'s,
+  `read`'s), and each lands there.
+- **Reopens if**: the worker is ever signalled by its number, a process group or `taskkill`, rather than
+  through its `os.Process`.
+
+### The worker's pipes are marked inheritable on Windows
+- **Raised**: M28, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `pipes_windows.go` sets `HANDLE_FLAG_INHERIT` on the worker's two pipe ends, and a handle
+  marked so is inherited by any child created with inheritance on. Go starts every process with an explicit
+  handle list (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), so a process the daemon starts at the same moment, the
+  updater's successor or a `schtasks` call, inherits only its own. The daemon closes its copies of the
+  child's ends once the worker has started.
+- **Reopens if**: the daemon starts a process by anything but Go's `os/exec` or `syscall`: a C library, or
+  `ShellExecute`.

@@ -32,6 +32,12 @@ it.
   decoded, and the first violation kills it.
 - It is given no credential but the TURN one, which reaches the SFU's port and nothing else (ADR 0023).
 - Its environment is an allow-list, so nothing in the daemon's own reaches it.
+- **What this bounds is a worker that misbehaves on its pipe, and no more.** The worker runs as the account,
+  so one that was exploited reaches whatever the account reaches: the attach socket, which is this ADR's
+  first tier and lets it act as the account through the daemon, and the credential store. The pipe's bounds
+  keep a broken or confused worker from taking the daemon down. They do not confine an exploited one.
+  Whether the worker is confined by the OS is M29's decision, owed before it decodes anybody's audio
+  (`/security-sweep` at M28).
 
 **Integrated shell**: spawns the user's actual shell — the same trust boundary as a real terminal, with no
 extra sandboxing layer. It's not a new capability the user didn't already have; it's a convenience surface

@@ -15,6 +15,10 @@
 // at the first frame that breaks any of it. The worker holds no credential but the TURN one, which reaches
 // the SFU's port and nothing else (ADR 0023); no frame carries an access token.
 //
+// That keeps a broken worker from taking the daemon down through its pipe, and confines nothing: the worker
+// runs as the account, and one that was exploited reaches what the account reaches, the attach socket
+// included. Whether the OS confines it is M29's to decide (ADR 0017 as amended).
+//
 // The pipes are not stdin and stdout. From M29 the worker links C libraries, and a printf in one would land
 // mid-frame; on Windows, rerouting descriptor 1 afterwards does not move the C runtime's. So the worker is
 // started with two more (Pipes), its stdin is the null device, and whatever it prints goes to the daemon's

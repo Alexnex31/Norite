@@ -3000,9 +3000,11 @@ And on the voice-worker, from M28:
 - **A crash is a closed pipe the daemon did not ask for, or an exit that is not 0**, logged with the last
   twenty lines. Every worker is reaped; one asked to leave, or that closed its pipe and stayed, is killed
   after 3 s. **The worker exits when its control pipe closes**, from a goroutine that does nothing else.
-- **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater, and `Leave` returns
-  once the worker is reaped. The SFU is reached through a `Signaler`; until M33 the only one is M26's
-  harness, compiled in under `norite_voiceharness` alone, which no release build passes (a test holds both).
+- **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater, and `Leave` returns once
+  the worker is reaped. A sign-in's end reaches the calls through `SignInEnded`, which leaves the call joined
+  under it and refuses a join that read the ended sign-in and was still waiting its turn. The SFU is reached
+  through a `Signaler`; until M33 the only one is M26's harness, compiled in under `norite_voiceharness`
+  alone, which no release build passes (a test holds both).
 - **A join's path carries a channel id**, so a client asks `GET /@daemon/voice` first, M22's answer to
   the ledger's entry on the prefix.
 - **The worker ships beside the daemon and updates with it.** It has no release of its own. The updater
@@ -3010,6 +3012,10 @@ And on the voice-worker, from M28:
   removes the worker. A worker and a daemon of different versions are refused at the first frame.
 - **The worker offers at most `voiceproto.MaxCandidates` candidate lines, each once in the first
   section**, relays first, which is where Pion reads them and what the SFU admits.
+- **What the voice server answers is a stranger's too** (from M33 an instance's). The worker's ICE agent
+  takes up only the candidates `session.reachable` admits, never this host, its link or a metadata
+  address unless the join admits loopback, and at most `maxRemotes`. The pipe's bounds confine nothing: the
+  worker runs as the account, and whether the OS confines it is M29's decision.
 - **Testing the worker**: `standin_test.go` re-runs the package's test binary as a worker playing each
   hostile case; wait on a stand-in with `drain`, which fails rather than hangs. `e2e_test.go` builds
   `norite-voice` and M26's harness from the checkout and makes real calls. The worker's own loop is tested
