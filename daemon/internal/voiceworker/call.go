@@ -61,6 +61,9 @@ type Voice struct {
 	status  ipc.VoiceStatus
 	current *call
 	closed  bool
+	// signIn counts the sign-ins that have ended (SignInEnded). A join reads it before the account and
+	// is not made if it has moved by the time the join becomes the call.
+	signIn uint64
 }
 
 // call is one call's worker and the goroutine that owns it.
@@ -124,6 +127,10 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 	if v.opts.Signaler == nil {
 		return v.Status(), &Refusal{Msg: v.opts.Unavailable, Unavailable: true}
 	}
+	// Before the account: a sign-in that ends after this read is one the join notices below.
+	v.mu.Lock()
+	signIn := v.signIn
+	v.mu.Unlock()
 	account, err := v.opts.Account()
 	switch {
 	case errors.Is(err, ErrSignInPending):
@@ -150,6 +157,15 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 		v.mu.Unlock()
 		cancel()
 		return v.Status(), &Refusal{Msg: "the daemon is stopping"}
+	}
+	// The account was read before the join waited its turn. A sign-in that ended since left the call there
+	// was then, which this was not yet, so the join would go on as an account nobody here is signed in as.
+	// Checked under the lock SignInEnded takes: past this point the join is the call, and the next end
+	// leaves it.
+	if v.signIn != signIn {
+		v.mu.Unlock()
+		cancel()
+		return v.Status(), &Refusal{Msg: "the sign-in changed while the join waited; join again", Pending: true}
 	}
 	v.current = c
 	v.status.State, v.status.Channel, v.status.Reason = ipc.VoiceJoining, channel, ""
@@ -332,11 +348,35 @@ func (v *Voice) ended(c *call, why string) {
 	v.publish()
 }
 
+// SignInEnded ends the call joined under the sign-in that ended, and refuses a join that read that
+// sign-in and has not become the call yet (M19's rule: a sign-in that ends takes down everything standing
+// on it). It does not wait, since the gateway calls it from its read loop.
+func (v *Voice) SignInEnded() {
+	v.mu.Lock()
+	v.signIn++
+	c := v.current
+	v.mu.Unlock()
+	if c != nil {
+		// That call and no later one: a join under the next sign-in may be the call by the time this runs.
+		go v.leave(c)
+	}
+}
+
 // Leave ends the call, if there is one, and returns once its worker is reaped.
 func (v *Voice) Leave() ipc.VoiceStatus {
 	v.mu.Lock()
 	c := v.current
+	v.mu.Unlock()
 	if c == nil {
+		return v.Status()
+	}
+	return v.leave(c)
+}
+
+// leave ends c, if it is still the call.
+func (v *Voice) leave(c *call) ipc.VoiceStatus {
+	v.mu.Lock()
+	if v.current != c {
 		v.mu.Unlock()
 		return v.Status()
 	}

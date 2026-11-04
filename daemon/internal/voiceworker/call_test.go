@@ -6,6 +6,7 @@ package voiceworker
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -110,4 +111,86 @@ func TestAJoinBeforeTheSignInIsReadIsPending(t *testing.T) {
 	require.True(t, errors.As(err, &refused))
 	require.True(t, refused.Pending)
 	require.NotContains(t, refused.Msg, "norite login")
+}
+
+// recordingServer refuses every route, remembering the account each was asked for.
+type recordingServer struct {
+	mu       sync.Mutex
+	accounts []string
+}
+
+func (s *recordingServer) Route(_ context.Context, account string) (Route, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accounts = append(s.accounts, account)
+	return Route{}, errors.New("the voice server refused: 503")
+}
+
+func (s *recordingServer) Join(context.Context, string, string, string) (string, error) {
+	return "", errors.New("unreachable")
+}
+
+func (s *recordingServer) asked() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.accounts...)
+}
+
+// A join that read the account and then waited behind another is not made once the sign-in has ended: the
+// end left the call there was then, which was not this one yet, and the join would go on as an account
+// nobody here is signed in as.
+func TestAJoinWaitingWhileTheSignInEndsIsNotMade(t *testing.T) {
+	srv := &recordingServer{}
+	v := standinVoice(t, "good", srv)
+	v.joinMu.Lock()
+	answered := make(chan error, 1)
+	go func() {
+		_, err := v.Join(context.Background(), "2")
+		answered <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	v.SignInEnded()
+	v.joinMu.Unlock()
+	select {
+	case err := <-answered:
+		var refused *Refusal
+		require.True(t, errors.As(err, &refused), "%v", err)
+		require.True(t, refused.Pending, "%+v", refused)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the join did not answer")
+	}
+	require.Empty(t, srv.asked(), "the join went on as the account whose sign-in ended")
+	require.Equal(t, ipc.VoiceIdle, v.Status().State)
+}
+
+// The end of a sign-in ends the call joined under it.
+func TestTheEndOfTheSignInEndsTheCall(t *testing.T) {
+	fast(t)
+	v := standinVoice(t, "good", &refusingServer{})
+	c := &call{channel: "1", cancel: func() {}, finished: make(chan struct{})}
+	close(c.finished)
+	v.mu.Lock()
+	v.current = c
+	v.status.State = ipc.VoiceInCall
+	v.mu.Unlock()
+	v.SignInEnded()
+	require.Eventually(t, func() bool { return !v.Busy() }, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, ipc.VoiceIdle, v.Status().State)
+}
+
+// The leave a sign-in's end starts is that call's: by the time it runs, a join under the next sign-in may
+// be the call, and it is left alone.
+func TestTheEndOfASignInLeavesOnlyItsOwnCall(t *testing.T) {
+	v := standinVoice(t, "good", &refusingServer{})
+	ended := &call{channel: "1", cancel: func() {}, finished: make(chan struct{})}
+	close(ended.finished)
+	next := &call{channel: "2", cancel: func() {}, finished: make(chan struct{})}
+	close(next.finished)
+	v.mu.Lock()
+	v.current = next
+	v.status.State, v.status.Channel = ipc.VoiceInCall, "2"
+	v.mu.Unlock()
+	v.leave(ended)
+	require.True(t, v.Busy())
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "2", Available: true}, v.Status())
 }

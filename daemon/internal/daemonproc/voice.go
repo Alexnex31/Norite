@@ -34,8 +34,9 @@ func signedInAccount(src *session.Source) func() (string, error) {
 
 // endingCalls is the gateway's sink with the daemon's voice calls behind it: a sign-in that ends takes its
 // call with it (M19's rule), as it takes the state. Signed out, revoked or replaced by another account's,
-// the call was joined as an account nobody here is signed in as any more. The leave runs apart, since it
-// waits for the worker and End is called from the gateway's read loop.
+// the call was joined as an account nobody here is signed in as any more. SignInEnded does not wait for the
+// worker, since End is called from the gateway's read loop, and it refuses a join still waiting on the
+// sign-in that ended.
 type endingCalls struct {
 	gatewayclient.Sink
 	calls *voiceworker.Voice
@@ -43,7 +44,7 @@ type endingCalls struct {
 
 func (e endingCalls) End() {
 	e.Sink.End()
-	go e.calls.Leave()
+	e.calls.SignInEnded()
 }
 
 // noVoice is the daemon's voice calls when the credential store could not be opened: answered, with the

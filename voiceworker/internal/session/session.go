@@ -18,7 +18,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -90,6 +93,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6})
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	se.SetIncludeLoopbackCandidate(join.Loopback)
+	se.SetRemoteIPFilter((&remotes{loopback: join.Loopback}).admit)
 
 	servers := make([]webrtc.ICEServer, 0, len(join.ICEServers))
 	for _, s := range join.ICEServers {
@@ -238,4 +242,70 @@ func (s *Session) Close() {
 	case <-done:
 	case <-time.After(time.Second):
 	}
+}
+
+// The worker is a full ICE agent and the controlling one, so it sends connectivity checks to every
+// candidate the answer names, and the answer is the voice server's: from M33 an instance's, a stranger's
+// server (M19). Unfiltered, an answer naming this machine's loopback, its link or a cloud's metadata
+// service turns every client in a call into a sender of checks to that address, on the instance's
+// say-so; and with no count, an answer near its 64 KiB names hundreds, each checked up to seven times,
+// with a peer-reflexive candidate added for every further address a check arrives from. M27 found the
+// same in the SFU, from the other side (backend/internal/voice/streams.go). Found by /security-sweep.
+//
+// Private ranges stay: a self-hosted instance on a LAN is in one, which is what its clients reach.
+
+// maxRemotes is how many times the filter says yes: Pion asks about each signaled candidate twice, once as
+// the answer is applied and once as ICE starts, and once about each peer-reflexive one. An SFU announces a
+// candidate an address; voiceproto.MaxCandidates of them is more than any announces.
+const maxRemotes = 3 * voiceproto.MaxCandidates
+
+// metadata are cloud instance-metadata services: two sit in ranges the filter otherwise admits, AWS's
+// IPv6 address in fc00::/7 and Alibaba's in 100.64/10. The SFU's list, which the backend's internal
+// package keeps and this module cannot import.
+var metadata = []netip.Addr{
+	netip.MustParseAddr("169.254.169.254"),
+	netip.MustParseAddr("fd00:ec2::254"),
+	netip.MustParseAddr("100.100.100.200"),
+}
+
+// remotes is a call's remote IP filter. Pion calls it on ICE's own goroutines.
+type remotes struct {
+	loopback bool
+	mu       sync.Mutex
+	admitted int
+}
+
+// admit is whether a remote candidate's address is one a voice server can have, and the bound is not
+// spent.
+func (r *remotes) admit(ip net.IP) bool {
+	if !reachable(ip, r.loopback) {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.admitted >= maxRemotes {
+		return false
+	}
+	r.admitted++
+	return true
+}
+
+// reachable refuses what is never a voice server: an unspecified, multicast or broadcast address, this
+// host's link, a metadata service, and loopback unless the join admits it (M26's harness, and tests).
+func reachable(ip net.IP, loopback bool) bool {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	switch {
+	case a.IsLoopback():
+		return loopback
+	case a.IsUnspecified(), a.IsMulticast(), a.IsLinkLocalUnicast(), a.IsLinkLocalMulticast(),
+		a.IsInterfaceLocalMulticast():
+		return false
+	case a.Is4() && (a.As4()[0] == 0 || a == netip.AddrFrom4([4]byte{255, 255, 255, 255})):
+		return false
+	}
+	return !slices.Contains(metadata, a)
 }
