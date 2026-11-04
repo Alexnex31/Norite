@@ -101,8 +101,9 @@ func standin(mode string) int {
 		}
 		heir := exec.Command(exe) //nolint:gosec // this test binary
 		heir.Env = append(os.Environ(), standinVariable+"=linger")
-		heir.Stdout, heir.Stderr, heir.ExtraFiles = os.Stdout, os.Stderr, []*os.File{out}
-		if heir.Start() != nil {
+		heir.Stdout, heir.Stderr = os.Stdout, os.Stderr
+		// Its pipes as the daemon hands them over, which works on Windows too, where ExtraFiles does not.
+		if _, err := inherit(heir, in, out); err != nil || heir.Start() != nil {
 			return 9
 		}
 		send(voiceipc.OpHello, voiceipc.Hello{Version: version})
