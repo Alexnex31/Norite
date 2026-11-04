@@ -231,7 +231,8 @@ id is chosen at M35.
 - **M29** chooses the capture library. "`hraban/opus` capture" named a codec, which captures nothing.
   Whatever it chooses must open the device in the worker's own process, and its cgo means the worker's
   release builds cannot be cross-compiled from Linux for macOS the way every other binary is. That is
-  M28's or M29's release problem, recorded there.
+  M28's or M29's release problem, recorded there. M28 left it to M29, since the answer depends on what
+  is linked.
 - **M32** builds §1: the outcomes, their wording on each client, and a done-when per OS.
   - Linux: capture works, and the before-login case says so.
   - Windows: capture works; with the switch off, the client names the switch.

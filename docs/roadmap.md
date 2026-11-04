@@ -1902,18 +1902,47 @@ of this section.
   closing waited a fixed time rather than for the relays to fall quiet; a certificate reload held every
   TLS handshake behind it; the harness advertised TLS it had not bound; and the README promised the
   relay closes after ten minutes, which a refreshed allocation does not.
-- **M28 — Voice-worker subprocess and IPC**: the daemon spawns the worker on-demand (via `os/exec`) when
-  joining a voice channel, tears it down on leave; daemon↔worker control-plane IPC uses the child's
-  inherited stdin/stdout pipes, framed with the same 4-byte-length-prefix-plus-JSON scheme used for the
-  daemon↔CLI/TUI/GUI Unix socket (M20). Done when: joining voice spawns the worker, leaving voice cleanly
-  tears it down, and the daemon detects a worker crash via the closed pipe.
+- **M28 — Voice-worker subprocess and IPC**: the daemon spawns the worker on demand (via `os/exec`) when
+  joining a voice channel, and tears it down on leave. Daemon↔worker control-plane IPC uses pipes the
+  child inherits, framed with the 4-byte-length-prefix-plus-JSON scheme of the daemon↔CLI/TUI/GUI socket
+  (M20). Done when: joining voice spawns the worker, leaving voice cleanly tears it down, and the daemon
+  detects a worker crash via the closed pipe.
+
+  **Planning (2026-11-03) found the entry had no caller and a stdout a C library could write into.**
+  - Nothing could ask the daemon to join before op 4 (M33) and the verbs (M34), so this milestone takes
+    M34's join, leave and the call state's first shape.
+  - The worker connects to the SFU now. A WebRTC connection is pure Go, so it is built here, and M29 adds
+    the audio.
+  - Before M33 the daemon reaches the SFU through a `Signaler` seam, whose one implementation is M26's
+    harness. It is compiled in only under the `norite_voiceharness` build tag. Without it, a join is
+    refused before anything is spawned.
+  - **The protocol is on two pipes of its own, not stdin and stdout.** From M29 the worker links C
+    libraries, and a `printf` in one would land mid-frame. On Windows, rerouting descriptor 1 afterwards
+    does not move the C runtime's. `ExtraFiles` on Unix and `AdditionalInheritedHandles` on Windows hand
+    the child two more. Its stdin is the null device, and its stdout and stderr go to the daemon's log.
+  - **The worker is the daemon's least trusted peer.** From M29 it decodes a stranger's audio in C, so
+    every frame it sends is bounded, rated and strictly decoded, and the first violation kills it. A
+    third trust tier, beside ADR 0017's two.
+  - **It gets an allow-listed environment**, since a daemon started by hand holds its shell's.
+  - **It exits when its control pipe closes**, which every way the daemon ends produces. A worker left
+    behind would hold the microphone.
+  - **It has no release of its own.** `norite-voice` is in the client archive beside `norite-daemon`, it
+    goes wherever the daemon goes, and the daemon's updater stages, smoke-runs and installs it with the
+    other two.
 - **M29 — Opus audio pipeline**: `hraban/opus` (cgo) capture/encode/decode/playback in the voice-worker.
   Depends on M25's finding for how mic access is actually obtained. Done when: two voice-worker instances can
   exchange intelligible audio through the SFU from M26. Being before M33, they signal through M26's harness.
   The worker attributes received audio by CSRC, as M26 sends it, and resets its decoder and FEC state when
   a slot's CSRC changes. **What it decodes is a stranger's**: the SFU never reads a payload, so whatever
-  another participant sends reaches this decoder as they sent it. The worker's crash isolation (rule 11)
-  bounds the damage; the decode path is fuzzed here, with payloads that are not Opus.
+  another participant sends reaches this decoder as they sent it. The decode path is fuzzed here, with
+  payloads that are not Opus. **Crash isolation (rule 11) bounds a crash, not an exploit** (M28's
+  `/security-sweep`): the worker runs as the account, so a decoder bug that runs code reaches what the
+  account reaches, the daemon's attach socket and the credential store included, and the pipe's bounds do
+  not stand in the way. This milestone decides, before it decodes anybody's audio, whether the OS confines
+  the worker (on Linux, Landlock and seccomp; on macOS a sandbox profile, which must leave TCC's
+  attribution to the daemon intact, ADR 0034; on Windows a restricted token or a lower integrity level,
+  which must still reach the audio service), or records the risk as accepted in the security ledger with
+  the condition that reopens it. Building the confinement may be a milestone of its own, inserted here.
 
   **From M25 ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)):**
   - **`hraban/opus` is a codec and captures nothing.** This milestone chooses the capture library
@@ -1923,7 +1952,16 @@ of this section.
     each OS attributes the use to.
   - **The worker's cgo cannot be built where every other binary is.** The release cross-compiles all OSes
     on one Linux runner with `CGO_ENABLED=0`, and cgo for darwin does not cross-compile there without
-    Apple's SDK. How the worker is built for each OS is decided here or at M28.
+    Apple's SDK. How the worker is built for each OS is decided here. M28 left it because the answer
+    depends on what is linked. M28 builds the worker as a goreleaser build of its own, pure Go, so this
+    changes how one build is made, not where the program goes. Check first whether goreleaser OSS takes
+    binaries built on other runners.
+  - **From M28:**
+    - The worker already holds its WebRTC connection to the SFU, signalled by the daemon, and sends
+      nothing on its track. This milestone adds capture, encoding, decoding and playback.
+    - The worker's environment is an allow-list in `daemon/internal/voiceworker`. The capture library
+      chosen here adds what it needs to that list, and nothing else.
+    - A C library writing to stdout or stderr reaches the daemon's log and never the protocol.
 - **M30 — Audio DSP**: RNNoise (noise suppression) plus WebRTC's Audio Processing Module (AEC3 echo
   cancellation plus AGC2 — replacing `libspeexdsp`, ADR 0023), both cgo,
   contained entirely to the voice-worker binary, wired in this exact order: Mic Capture → AEC → RNNoise → AGC
@@ -1975,7 +2013,25 @@ of this section.
   sign-in** (from M27's `/security-sweep`): `revokeEverything` and the other four closes evict the
   sign-in's voice connections as they close its gateway ones, since the TURN credential it holds is a
   stateless HMAC no revocation reaches, valid ten minutes; and the credential is minted only for a live
-  sign-in (`RequireLiveSignIn`). The `supports_video: bool` capability field is added to the voice-join payload now
+  sign-in (`RequireLiveSignIn`). **From M28:** the daemon already joins through
+  `daemon/internal/voiceworker`'s `Signaler` (`Credentials`, then `Join` with the offer, returning the
+  answer), whose one implementation is M26's harness behind the `norite_voiceharness` tag. This milestone
+  writes the gateway's implementation and makes it the default, and a daemon built without the tag stops
+  refusing to join. **M28's Windows pass found a join waiting about 8 s** for the offer's candidates, while
+  Pion waited out a TURN allocation that could not succeed. A network that refuses UDP waits the same way
+  for TURN over UDP to fail, so this milestone weighs trickle ICE: sending candidates as they come rather
+  than with the offer. **From M28's `/security-sweep`, the worker's peer becomes the instance's here**,
+  and two bounds the SFU has against a hostile client the worker lacks against a hostile server:
+  - The ICE servers in the route are the instance's words, and the worker dials whatever host and port
+    they name, over TCP too, resolving a name when it dials. Bound them at connect time, as rule 18 does a
+    fetch: the worker's dialer refuses this host, its link and metadata addresses, which the remote
+    candidate filter M28 added (`session.reachable`) already refuses for the answer's candidates.
+  - Pion opens an SRTP read stream, with a buffer of its own, for every SSRC the SFU sends that was not
+    negotiated, and keeps it unread until the call ends: M26's finding in the SFU
+    (`backend/internal/voice/streams.go`), from the other side. The worker's buffer factory counts them
+    against its slots. The worker's memory is the machine's, though not the daemon's.
+
+  The `supports_video: bool` capability field is added to the voice-join payload now
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
   end to end, and a kick mid-call drops the connection.
@@ -1986,7 +2042,10 @@ of this section.
   at M44, `4b`'s strip and `4a`'s full view at M54. Splitting it this way is ADR 0026's rule applied
   backwards — this milestone sits in Phase E, seven milestones before a terminal application exists, so a
   done-when phrased as "control a voice session from the TUI" could not be checked when it is built. The
-  active speaker comes from M26's data channel. Done
+  active speaker comes from M26's data channel. **M28 took join and leave**: `norite voice join
+  <channel>`, `norite voice leave`, `/@daemon/voice` and its join and leave requests, and the
+  `DAEMON_VOICE` dispatch carrying the call's state. What is left here is mute and deafen, the active
+  speaker, local mute and report, and widening the call state to carry them. Done
   when: `norite voice join/leave/mute/deafen` fully control a session; a test client attached to the daemon
   receives active-speaker updates and can local-mute and report a participant independently of each other.
 - **M35 — Voice input mode**: voice-activity-detection is the default; push-to-talk is a true OS-wide
@@ -2015,7 +2074,12 @@ of this section.
   **What the terminal's own push-to-talk becomes** is settled here with M44. KEYMAP's `C-space (hold)`
   needs a key release, which a terminal sends only with the kitty keyboard protocol's event types.
 - **M36 — Voice auto-rejoin**: the "last active voice channel" breadcrumb (the one exception to in-memory
-  daemon state), the daemon respawns the worker and rejoins on crash/restart. Done when: killing the daemon
+  daemon state), the daemon respawns the worker and rejoins on crash/restart. The respawn is
+  `daemon/internal/voiceworker`'s join (M28), and a worker that crashed is already reported as the call's
+  end with its reason. **M28 found a rejoin can be refused**: the SFU counts a killed worker's connection
+  until ICE gives up on it, and holds two per user in a room (`ConnsPerUser`), so two crashes in quick
+  succession leave a third join refused for some seconds. This milestone decides whether M33's provision
+  replaces an account's oldest connection in the room or the rejoin waits. Done when: killing the daemon
   process mid-call results in automatic rejoin within a few seconds of restart.
 - **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to
   `norite instance init`, extending M2/M10), voice+text channels degrade to text-only,

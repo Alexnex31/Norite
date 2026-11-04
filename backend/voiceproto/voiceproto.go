@@ -21,6 +21,11 @@ package voiceproto
 // on an SDP's short lines, and 12 KiB leaves that and the frame's other fields room.
 const MaxOffer = 12 << 10
 
+// MaxCandidates is the most ICE candidate lines an offer may carry, counted across every media section (M26).
+// The SFU refuses an offer past it, and the voice-worker trims what it gathered to it (M28): a machine with
+// a few interfaces in both families, docker's bridges or a VPN among them, gathers more.
+const MaxCandidates = 16
+
 // Kinds of track. A connection's offer has its sending sections and its receiving slots counted per kind.
 const (
 	KindAudio = "audio"

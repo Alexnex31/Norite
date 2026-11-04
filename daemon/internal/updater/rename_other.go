@@ -10,3 +10,6 @@ import "os"
 // renameOver puts tmp where dst is. A rename replaces a running program's name and leaves the running
 // copy alone, which is the whole of what is needed here.
 func renameOver(tmp, dst string) error { return os.Rename(tmp, dst) }
+
+// removeProgram removes a program. Removing a name leaves a running copy alone here too.
+func removeProgram(path string) error { return os.Remove(path) }

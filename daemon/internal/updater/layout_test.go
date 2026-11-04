@@ -44,10 +44,14 @@ func TestTheReleaseLayoutIsWhatTheReleaseConfigurationPublishes(t *testing.T) {
 	if !strings.HasPrefix(formats, "formats: [tar.gz]") || !regexp.MustCompile(`goos: windows\s+formats: \[zip\]`).MatchString(stanza) {
 		t.Errorf("the client archive is not tar.gz with zip on Windows:\n%s%s", formats, stanza)
 	}
-	for _, binary := range []string{cliName, daemonName} {
+	for _, binary := range []string{cliName, daemonName, workerName} {
 		if !regexp.MustCompile(`(?m)^\s+binary: ` + binary + `$`).MatchString(config) {
 			t.Errorf(".goreleaser.yaml builds no binary named %s", binary)
 		}
+	}
+	// And the client archive holds all three builds: the worker has no release of its own (M28).
+	if !regexp.MustCompile(`(?m)^  - id: client\n    ids: \[cli, daemon, voice\]$`).MatchString(config) {
+		t.Errorf("the client archive does not hold the command, the daemon and the voice-worker")
 	}
 	if !strings.Contains(config, `name_template: "`+checksumsName+`"`) {
 		t.Errorf(".goreleaser.yaml's checksums are not named %s", checksumsName)

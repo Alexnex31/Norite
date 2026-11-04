@@ -31,6 +31,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/tui"
 	"github.com/Alexnex31/Norite/cli/internal/updatecmd"
 	"github.com/Alexnex31/Norite/cli/internal/verbs"
+	"github.com/Alexnex31/Norite/cli/internal/voicecmd"
 )
 
 // Version is the build's version string, overridden at link time by goreleaser.
@@ -143,6 +144,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			automationcmd.Command(automationcmd.Connector(verbs.Daemon(Version))),
 			logscmd.Command(),
 			updatecmd.Command(updatecmd.Connector(verbs.Daemon(Version))),
+			voicecmd.Command(voicecmd.Connector(verbs.Daemon(Version))),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

@@ -136,7 +136,7 @@ const linuxArchive = "norite_0.1.1_linux_amd64.tar.gz"
 
 func goodArchive(t *testing.T) []byte {
 	return tarGz(t, entry{name: "LICENSE", body: "terms"}, entry{name: "norite", body: "the cli"},
-		entry{name: "norite-daemon", body: "the daemon"}, entry{name: "README.md", body: "readme"})
+		entry{name: "norite-voice", body: "the worker"}, entry{name: "norite-daemon", body: "the daemon"}, entry{name: "README.md", body: "readme"})
 }
 
 // emptyStaging asserts a refused release left nothing behind.
@@ -151,7 +151,7 @@ func emptyStaging(t *testing.T, s *Stager) {
 	}
 }
 
-func TestStageLeavesTheTwoProgramsAndNothingElse(t *testing.T) {
+func TestStageLeavesTheThreeProgramsAndNothingElse(t *testing.T) {
 	h := newHost(t, "v0.1.1", linuxArchive, goodArchive(t))
 	s := stagerFor(t, h)
 	var verified struct {
@@ -169,7 +169,7 @@ func TestStageLeavesTheTwoProgramsAndNothingElse(t *testing.T) {
 	if verified.checksums != h.checksums || verified.bundle != "a bundle" || verified.tag != "v0.1.1" {
 		t.Errorf("verified %+v", verified)
 	}
-	for path, want := range map[string]string{staged.CLI: "the cli", staged.Daemon: "the daemon"} {
+	for path, want := range map[string]string{staged.CLI: "the cli", staged.Worker: "the worker", staged.Daemon: "the daemon"} {
 		got, err := os.ReadFile(path)
 		if err != nil || string(got) != want {
 			t.Errorf("%s holds %q (%v)", path, got, err)
@@ -179,13 +179,13 @@ func TestStageLeavesTheTwoProgramsAndNothingElse(t *testing.T) {
 		}
 	}
 	left, _ := os.ReadDir(filepath.Dir(staged.CLI))
-	if len(left) != 2 {
-		t.Errorf("the staging directory holds %d files, want the two programs", len(left))
+	if len(left) != 3 {
+		t.Errorf("the staging directory holds %d files, want the three programs", len(left))
 	}
 }
 
 func TestStageTakesAZipOnWindows(t *testing.T) {
-	archive := zipOf(t, entry{name: "norite.exe", body: "cli"}, entry{name: "norite-daemon.exe", body: "daemon"},
+	archive := zipOf(t, entry{name: "norite.exe", body: "cli"}, entry{name: "norite-voice.exe", body: "worker"}, entry{name: "norite-daemon.exe", body: "daemon"},
 		entry{name: "LICENSE", body: "terms"})
 	h := newHost(t, "v0.1.1", "norite_0.1.1_windows_arm64.zip", archive)
 	s := stagerFor(t, h)
@@ -233,16 +233,18 @@ func TestARefusedReleaseLeavesNothing(t *testing.T) {
 				delete(h.asked, "checksums.txt.sigstore.json")
 				h.bundle = strings.Repeat("x", maxBundle+1)
 			}},
+		{name: "no worker in the archive", says: "holds no norite-voice",
+			archive: tarGz(t, entry{name: "norite", body: "cli"}, entry{name: "norite-daemon", body: "d"})},
 		{name: "no daemon in the archive", says: "holds no norite-daemon",
 			archive: tarGz(t, entry{name: "norite", body: "cli"})},
 		{name: "the daemon under a directory is not the daemon", says: "holds no norite-daemon",
 			archive: tarGz(t, entry{name: "norite", body: "cli"}, entry{name: "bin/norite-daemon", body: "d"})},
 		{name: "a path that climbs is not a name", says: "holds no norite",
-			archive: tarGz(t, entry{name: "../norite", body: "cli"}, entry{name: "norite-daemon", body: "d"})},
+			archive: tarGz(t, entry{name: "../norite", body: "cli"}, entry{name: "norite-voice", body: "d"}, entry{name: "norite-daemon", body: "d"})},
 		{name: "a program twice", says: "twice",
-			archive: tarGz(t, entry{name: "norite", body: "a"}, entry{name: "norite", body: "b"}, entry{name: "norite-daemon", body: "d"})},
+			archive: tarGz(t, entry{name: "norite", body: "a"}, entry{name: "norite", body: "b"}, entry{name: "norite-voice", body: "d"}, entry{name: "norite-daemon", body: "d"})},
 		{name: "a link where a program should be", says: "not a regular file",
-			archive: tarGz(t, entry{name: "norite", body: "/bin/sh", symlink: true}, entry{name: "norite-daemon", body: "d"})},
+			archive: tarGz(t, entry{name: "norite", body: "/bin/sh", symlink: true}, entry{name: "norite-voice", body: "d"}, entry{name: "norite-daemon", body: "d"})},
 		{name: "not an archive", says: "unpacking", archive: []byte("plain text")},
 		{name: "the new daemon does not run", says: "did not run",
 			prepare: func(_ *host, s *Stager) {
@@ -286,7 +288,7 @@ func lower[T any](t *testing.T, v *T, to T) {
 func TestAnArchiveIsBoundedInWhatItUnpacks(t *testing.T) {
 	// One program larger than a program may be.
 	lower(t, &maxProgram, 8)
-	h := newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "norite", body: "123456789"}, entry{name: "norite-daemon", body: "d"}))
+	h := newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "norite", body: "123456789"}, entry{name: "norite-voice", body: "d"}, entry{name: "norite-daemon", body: "d"}))
 	s := stagerFor(t, h)
 	if _, err := s.Stage(t.Context(), mustTag(t, "v0.1.1")); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("an oversized program: %v", err)
@@ -297,7 +299,7 @@ func TestAnArchiveIsBoundedInWhatItUnpacks(t *testing.T) {
 	lower(t, &maxProgram, 1<<20)
 	lower(t, &maxUnpacked, 64<<10)
 	h = newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "padding", body: strings.Repeat("\x00", 256<<10)},
-		entry{name: "norite", body: "c"}, entry{name: "norite-daemon", body: "d"}))
+		entry{name: "norite", body: "c"}, entry{name: "norite-voice", body: "d"}, entry{name: "norite-daemon", body: "d"}))
 	s = stagerFor(t, h)
 	if _, err := s.Stage(t.Context(), mustTag(t, "v0.1.1")); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("an archive that unpacks past the bound: %v", err)
@@ -312,11 +314,27 @@ func TestTheStagedDaemonIsRunOnce(t *testing.T) {
 	}
 	t.Setenv("NORITE_TEST_LEAK", "from the running daemon")
 	script := "#!/bin/sh\n[ \"$1\" = -version ] || exit 9\n[ -z \"$NORITE_TEST_LEAK\" ] || exit 8\necho 0.1.1\n"
-	h := newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "norite", body: "c"}, entry{name: "norite-daemon", body: script}))
+	h := newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "norite", body: "c"}, entry{name: "norite-voice", body: script}, entry{name: "norite-daemon", body: script}))
 	s := stagerFor(t, h)
 	s.smoke = nil
 	if _, err := s.Stage(t.Context(), mustTag(t, "v0.1.1")); err != nil {
 		t.Fatalf("a daemon that reports its version: %v", err)
+	}
+
+	// The worker is run as the daemon is: one that does not start, or is of another version, is a release
+	// whose every call would fail, and it is refused before anything is installed.
+	good := "#!/bin/sh\necho 0.1.1\n"
+	for name, worker := range map[string]string{
+		"a worker that does not run":  "#!/bin/sh\nexit 3\n",
+		"a worker of another version": "#!/bin/sh\necho 0.1.0\n",
+	} {
+		h := newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "norite", body: "c"}, entry{name: "norite-voice", body: worker}, entry{name: "norite-daemon", body: good}))
+		s := stagerFor(t, h)
+		s.smoke = nil
+		if _, err := s.Stage(t.Context(), mustTag(t, "v0.1.1")); err == nil || !strings.Contains(err.Error(), "voice worker") {
+			t.Errorf("%s: %v", name, err)
+		}
+		emptyStaging(t, s)
 	}
 
 	// One that never answers is given up on, and one that prints without end is not held in memory.
@@ -326,7 +344,7 @@ func TestTheStagedDaemonIsRunOnce(t *testing.T) {
 		"prints forever": "#!/bin/sh\nwhile :; do echo 0.1.1; done\n",
 		"exits non-zero": "#!/bin/sh\necho 0.1.1\nexit 3\n",
 	} {
-		h := newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "norite", body: "c"}, entry{name: "norite-daemon", body: body}))
+		h := newHost(t, "v0.1.1", linuxArchive, tarGz(t, entry{name: "norite", body: "c"}, entry{name: "norite-voice", body: body}, entry{name: "norite-daemon", body: body}))
 		s := stagerFor(t, h)
 		s.smoke = nil
 		started := time.Now()

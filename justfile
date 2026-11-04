@@ -1,6 +1,6 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
-go_modules := "backend cli gui daemon"
+go_modules := "backend cli gui daemon voiceworker"
 
 # Pinned so every machine and CI generate byte-identical code. Bump deliberately, then re-run
 # `just sqlc-generate` and commit the diff.
@@ -326,16 +326,21 @@ release-dry-run:
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
     tar -xzf "$archive" -C "$tmp"
-    for f in norite norite-daemon LICENSE README.md THIRD-PARTY-NOTICES-norite.txt THIRD-PARTY-NOTICES-norite-daemon.txt; do
+    for f in norite norite-daemon norite-voice LICENSE README.md THIRD-PARTY-NOTICES-norite.txt \
+             THIRD-PARTY-NOTICES-norite-daemon.txt THIRD-PARTY-NOTICES-norite-voice.txt; do
         [[ -e "$tmp/$f" ]] || { echo "$archive is missing $f" >&2; exit 1; }
     done
+    # The daemon refuses a worker of another version at its first frame, and the updater before
+    # installing it, so the two are stamped alike or every call fails.
+    [[ "$("$tmp/norite-voice" -version)" == "$("$tmp/norite-daemon" -version)" ]] ||
+        { echo "norite-voice and norite-daemon report different versions" >&2; exit 1; }
     about=$("$tmp/norite" about --json)
     rev=$(sed -n 's/.*"revision": "\([^"]*\)".*/\1/p' <<<"$about")
     from=$(sed -n 's/.*"revision_from": "\([^"]*\)".*/\1/p' <<<"$about")
     [[ "$from" == stamped ]] || { echo "norite about: revision_from is '$from', not stamped" >&2; exit 1; }
     git cat-file -e "$rev^{commit}" || { echo "norite about: '$rev' is not a commit here" >&2; exit 1; }
     echo "norite about names $rev (stamped), a commit this repository holds"
-    # Each Linux package of the client carries both programs and the marker naming its manager, which is
+    # Each Linux package of the client carries its three programs and the marker naming its manager, which is
     # how its daemon names that manager's command instead of installing a release itself (ADR 0035 §4).
     # bsdtar reads a .deb, an .rpm and a pacman package alike; a .deb's files are one archive further in.
     # Each format spells a member's name differently (./usr, /usr, usr), so the name is taken from the
@@ -347,14 +352,14 @@ release-dry-run:
             *) files() { bsdtar "$1" -f "$pkg" "${@:2}"; }; want=pacman ;;
         esac
         list=$(files -t)
-        for f in usr/bin/norite usr/bin/norite-daemon usr/lib/norite/packaged-by; do
+        for f in usr/bin/norite usr/bin/norite-daemon usr/bin/norite-voice usr/lib/norite/packaged-by; do
             grep -qE "^\.?/?$f\$" <<<"$list" || { echo "$pkg is missing $f" >&2; exit 1; }
         done
         marker=$(grep -E '^\.?/?usr/lib/norite/packaged-by$' <<<"$list")
         said=$(files -xO "$marker" 2>/dev/null)
         [[ "$said" == "$want" ]] || { echo "$pkg says it was packaged by '$said', not $want" >&2; exit 1; }
     done
-    echo "each client package carries both programs and names its manager"
+    echo "each client package carries its three programs and names its manager"
 
 # Fail if any hand-written Go file is missing its two-line SPDX header (rule 24, ADR 0032).
 #
@@ -434,6 +439,7 @@ notices: build-local
     "$gen" cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt
     "$gen" daemon  ./cmd/daemond bin/norite-daemon daemon/internal/notices/THIRD-PARTY-NOTICES.txt
+    "$gen" voiceworker ./cmd/norite-voice bin/norite-voice voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt
 
 # Build every binary to ./bin/ with plain `go build`, at paths that do not vary by platform.
 #
@@ -457,6 +463,7 @@ build-local:
     build cli     norite        ./cmd/app
     build gui     norite-gui    ./cmd/gui
     build daemon  norite-daemon ./cmd/daemond
+    build voiceworker norite-voice ./cmd/norite-voice
 
 # Build every module with the workspace switched off.
 #
@@ -467,7 +474,7 @@ build-local:
 build-standalone:
     #!/usr/bin/env bash
     set -euo pipefail
-    for module in backend cli gui daemon; do
+    for module in backend cli gui daemon voiceworker; do
         echo "[$module] building without the workspace"
         (cd "$module" && GOWORK=off go build ./...)
     done

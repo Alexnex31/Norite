@@ -76,7 +76,10 @@ What to know about it:
 ## Getting the programs
 
 You need two programs, kept together in one folder: `norite.exe`, the command line and the client, and
-`norite-daemon.exe`, the background program it talks to. There are three ways to get them.
+`norite-daemon.exe`, the background program it talks to. A release's archive holds a third,
+`norite-voice.exe`, which the daemon starts for a voice call; keep it in the same folder. Voice calls
+arrive with a later release, so a build from source can leave it out for now. There are three ways to get
+them.
 
 ### From a release
 
@@ -336,7 +339,7 @@ Your account stays on the instance: deleting an account is not built yet (`M76a`
 | What you see | What to do |
 | --- | --- |
 | `norite.exe : The term 'norite.exe' is not recognized` | Run it as `.\norite.exe` from its folder, or add the folder to `PATH` as above. |
-| Windows says it protected your PC, or the file is blocked | `Unblock-File` on both programs, as above; or on the SmartScreen dialog, "More info", then "Run anyway". |
+| Windows says it protected your PC, or the file is blocked | `Unblock-File` on the programs, as above; or on the SmartScreen dialog, "More info", then "Run anyway". |
 | Microsoft Defender quarantines a file | Unsigned Go programs are sometimes flagged by mistake. Build from source if you would rather not trust a binary, and report it as an issue. |
 | `go: go.mod requires go >= 1.26.0` | Install Go 1.26 or newer from [go.dev/dl](https://go.dev/dl/). |
 | `go: cannot find main module` | The build command ran in the wrong folder: `cli` for `norite.exe`, `daemon` for `norite-daemon.exe`. |

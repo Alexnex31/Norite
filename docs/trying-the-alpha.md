@@ -31,13 +31,14 @@ things in ways that need you to start over.
 
 ## The pieces, and the words this guide uses
 
-There are three programs. Each archive in a release holds some of them.
+There are four programs. Each archive in a release holds some of them.
 
 | Program | Runs on | What it does |
 | --- | --- | --- |
 | `norite-server` | the server machine only | The instance itself. It keeps every account, guild and message in a Postgres database, and answers everybody's clients over HTTP. In the **server archive**. |
 | `norite` | every person's machine | The command line (`norite guild create`, `norite login`, …) and, when run with no arguments, the **terminal client** you talk in. In the **client archive**. |
 | `norite-daemon` | every person's machine | A small background program, one per OS account. It holds your sign-in and a live connection to the server, so the client can come and go without signing in again. `norite` talks to it, never to the server directly, once you are signed in. In the **client archive**, next to `norite`. |
+| `norite-voice` | every person's machine | The program the daemon starts for a voice call and stops when it ends, so a problem with audio never takes messaging with it. You never run it yourself. In the **client archive**, next to `norite-daemon`, which looks for it there. Voice calls arrive with a later release. |
 
 And the words:
 
@@ -120,7 +121,7 @@ checksums were signed by this repository's release workflow, and `sha256sum` pro
 them. `Verified OK` and an `OK` for each archive mean the files are genuine; anything else means do not
 run them.
 
-Unpack the client archive and **keep `norite` and `norite-daemon` in the same directory**, ideally one on
+Unpack the client archive and **keep `norite`, `norite-daemon` and `norite-voice` in the same directory**, ideally one on
 your `PATH` such as `~/.local/bin` or `/usr/local/bin`. Setting up the daemon later records where
 `norite-daemon` lives, so moving it afterwards means running that step again.
 

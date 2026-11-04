@@ -1,5 +1,6 @@
-# Builds, packages and signs a release: the server, and the client — `norite` and `norite-daemon`, which are
-# one install and ship as one archive. voiceworker/ joins once it exists (Phase E); frontend/ is never a
+# Builds, packages and signs a release: the server, and the client — `norite`, `norite-daemon` and since M28
+# `norite-voice`, the voice-worker the daemon starts for a call, which are one install and ship as one
+# archive. The worker has no release of its own: it goes wherever the daemon goes. frontend/ is never a
 # goreleaser artifact (it's embedded into the backend binary, or served by the later web SPA's own build, per
 # docs/architecture.md §1). norite-gui is not released until M78 builds the GUI: today it is a stub, and an
 # archive of it would be a download that does nothing.
@@ -76,6 +77,21 @@ builds:
     ldflags:
       - -s -w -X main.Version={{ .Version }}
 
+  # The voice-worker (M28): pure Go until M29 links Opus, which decides how this build is made for each OS
+  # (cgo does not cross-compile to darwin from this runner). Stamped as the daemon is, which checks the
+  # worker's version at its first frame and the updater's smoke run before installing it.
+  - id: voice
+    dir: voiceworker
+    main: ./cmd/norite-voice
+    binary: norite-voice
+    env:
+      - CGO_ENABLED=0
+      - GOWORK=off
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+
 # The server is one archive and the client another: `norite` cannot do anything without `norite-daemon` on
 # the same machine, so a tester downloading one file must get both. Each binary's THIRD-PARTY-NOTICES.txt
 # travels with it, named for it in the client archive, because the binaries link different dependency sets
@@ -98,7 +114,7 @@ archives:
         dst: THIRD-PARTY-NOTICES.txt
 
   - id: client
-    ids: [cli, daemon]
+    ids: [cli, daemon, voice]
     formats: [tar.gz]
     name_template: >-
       norite_{{ .Version }}_{{ .Os }}_{{ .Arch }}
@@ -112,6 +128,8 @@ archives:
         dst: THIRD-PARTY-NOTICES-norite.txt
       - src: daemon/internal/notices/THIRD-PARTY-NOTICES.txt
         dst: THIRD-PARTY-NOTICES-norite-daemon.txt
+      - src: voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: THIRD-PARTY-NOTICES-norite-voice.txt
 
 # The tag's source as a release asset, which the AUR's source packages build from and which is AGPL's
 # Corresponding Source in the plainest form. Named apart from both archive patterns, since install.sh and
@@ -135,12 +153,13 @@ source:
 # signature covers them. They are signed for apt, dnf and pacman by a separate repository's workflow
 # (Alexnex31/packages), which verifies that signature first; the GPG key never enters this repository.
 #
-# The installers in scripts/ and these definitions restate the same facts — the archive names, the two
-# programs, where the notices go — and change together (CLAUDE.md, on the installers).
+# The installers in scripts/ and these definitions restate the same facts — the archive names, the three
+# programs, where the notices go — and change together (CLAUDE.md, on the installers). norite-voice goes
+# where norite-daemon goes, since the daemon starts it from beside its own executable.
 nfpms:
   - id: client
     package_name: norite
-    ids: [cli, daemon]
+    ids: [cli, daemon, voice]
     vendor: Norite
     maintainer: "Alexnex31 <norite.chat@gmail.com>"
     homepage: "https://github.com/Alexnex31/Norite"
@@ -156,6 +175,8 @@ nfpms:
         dst: /usr/share/doc/norite/THIRD-PARTY-NOTICES-norite.txt
       - src: daemon/internal/notices/THIRD-PARTY-NOTICES.txt
         dst: /usr/share/doc/norite/THIRD-PARTY-NOTICES-norite-daemon.txt
+      - src: voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt
+        dst: /usr/share/doc/norite/THIRD-PARTY-NOTICES-norite-voice.txt
       # Debian and Fedora keep a package's licence beside its documentation; Arch keeps it apart.
       - src: LICENSE
         dst: /usr/share/doc/norite/LICENSE
@@ -240,10 +261,12 @@ aurs:
     package: |-
       install -Dm755 ./norite "${pkgdir}/usr/bin/norite"
       install -Dm755 ./norite-daemon "${pkgdir}/usr/bin/norite-daemon"
+      install -Dm755 ./norite-voice "${pkgdir}/usr/bin/norite-voice"
       install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
       install -Dm644 ./README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
       install -Dm644 ./THIRD-PARTY-NOTICES-norite.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite.txt"
       install -Dm644 ./THIRD-PARTY-NOTICES-norite-daemon.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-daemon.txt"
+      install -Dm644 ./THIRD-PARTY-NOTICES-norite-voice.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-voice.txt"
       install -d "${pkgdir}/usr/lib/norite"
       printf 'aur\n' >"${pkgdir}/usr/lib/norite/packaged-by"
 
@@ -289,19 +312,23 @@ aur_sources:
       export GOWORK=off GOFLAGS="-mod=readonly -modcacherw"
       (cd cli && go mod download)
       (cd daemon && go mod download)
+      (cd voiceworker && go mod download)
     build: |-
       cd "${srcdir}/norite-${pkgver}"
       export GOWORK=off CGO_ENABLED=0 GOFLAGS="-trimpath -mod=readonly -modcacherw"
       (cd cli && go build -o ../norite -ldflags "-s -w -X github.com/Alexnex31/Norite/cli/internal/cliapp.Version=${pkgver} -X github.com/Alexnex31/Norite/cli/internal/cliapp.Revision={{ .FullCommit }}" ./cmd/app)
       (cd daemon && go build -o ../norite-daemon -ldflags "-s -w -X main.Version=${pkgver}" ./cmd/daemond)
+      (cd voiceworker && go build -o ../norite-voice -ldflags "-s -w -X main.Version=${pkgver}" ./cmd/norite-voice)
     package: |-
       cd "${srcdir}/norite-${pkgver}"
       install -Dm755 ./norite "${pkgdir}/usr/bin/norite"
       install -Dm755 ./norite-daemon "${pkgdir}/usr/bin/norite-daemon"
+      install -Dm755 ./norite-voice "${pkgdir}/usr/bin/norite-voice"
       install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
       install -Dm644 ./README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
       install -Dm644 ./cli/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite.txt"
       install -Dm644 ./daemon/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-daemon.txt"
+      install -Dm644 ./voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-voice.txt"
       install -d "${pkgdir}/usr/lib/norite"
       printf 'aur\n' >"${pkgdir}/usr/lib/norite/packaged-by"
 
@@ -343,6 +370,8 @@ homebrew_casks:
     description: "A voice-and-text chat platform with a terminal client that is not second-class"
     homepage: "https://github.com/Alexnex31/Norite"
     ids: [client]
+    # norite-voice is not linked: nobody runs it, and the daemon finds it beside its own resolved path,
+    # in the cask's directory, where it is staged with the other two.
     binaries: [norite, norite-daemon]
     directory: Casks
     skip_upload: '{{ if and (isEnvSet "HOMEBREW_TAP_TOKEN") (not .Prerelease) }}false{{ else }}true{{ end }}'
@@ -362,6 +391,7 @@ homebrew_casks:
           if OS.mac?
             system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{staged_path}/norite"], must_succeed: false
             system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{staged_path}/norite-daemon"], must_succeed: false
+            system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{staged_path}/norite-voice"], must_succeed: false
           end
 
   - name: norite-server

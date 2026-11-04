@@ -69,7 +69,7 @@ func DefaultLimits() Limits {
 			voiceproto.KindAudio: {Send: 1, Slots: 16},
 			voiceproto.KindVideo: {Send: 0, Slots: 0},
 		},
-		MaxCandidates:    16,
+		MaxCandidates:    voiceproto.MaxCandidates,
 		ProvisionTimeout: 30 * time.Second,
 		// The answer's minptime=10 allows 10 ms frames, 100 a second; half again above that leaves room
 		// for a burst after a stall. The bit bound and the strikes, at twice this, are what catch a flood.

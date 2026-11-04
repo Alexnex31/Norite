@@ -1,13 +1,14 @@
 #!/bin/sh
 #
 # Install the Norite client for the current user, on macOS or Linux: `norite` (the command line and the
-# terminal client) and `norite-daemon` (the background program it talks to). It never asks for root.
+# terminal client), `norite-daemon` (the background program it talks to) and `norite-voice` (the program
+# the daemon starts for a voice call, beside itself). It never asks for root.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh
 #   curl -fsSL …/scripts/install.sh | sh -s -- --instance https://chat.example.com
 #   ./scripts/install.sh                      # in a checkout: builds from that source instead
 #
-# What it does, in order: gets the two programs (a release archive, checked, or a build of the checkout it
+# What it does, in order: gets the three programs (a release archive, checked, or a build of the checkout it
 # sits in), puts them in ~/.local/bin, registers the daemon with the service manager and starts it, then
 # offers to create an account or sign in. `--help` lists the switches for doing less.
 #
@@ -28,7 +29,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
     cat <<'EOF'
-Install the Norite client: norite and norite-daemon.
+Install the Norite client: norite, norite-daemon and norite-voice.
 
   install.sh [options]
 
@@ -141,6 +142,7 @@ build_source() {
     mkdir -p "$tmp/out"
     (cd "$checkout/cli" && CGO_ENABLED=0 GOWORK=off go build -trimpath -o "$tmp/out/norite" ./cmd/app)
     (cd "$checkout/daemon" && CGO_ENABLED=0 GOWORK=off go build -trimpath -o "$tmp/out/norite-daemon" ./cmd/daemond)
+    (cd "$checkout/voiceworker" && CGO_ENABLED=0 GOWORK=off go build -trimpath -o "$tmp/out/norite-voice" ./cmd/norite-voice)
     if [ "$with_server" = 1 ]; then
         (cd "$checkout/backend" && CGO_ENABLED=0 GOWORK=off go build -trimpath -o "$tmp/out/norite-server" ./cmd/server)
     fi
@@ -157,7 +159,7 @@ place() {
     mv -f "$bin_dir/.$1.new.$$" "$bin_dir/$1"
 }
 
-# leave_receipt records where the two programs were put, which is what lets the daemon install a later
+# leave_receipt records where the programs were put, which is what lets the daemon install a later
 # release itself (M24): it writes over the pair only in a directory an installer named.
 #
 # There is one receipt per account, for the install its daemon runs from. So it is written only when this
@@ -274,7 +276,7 @@ uninstall() {
     "$norite" logout >/dev/null 2>&1 || true
     "$norite" daemon uninstall >/dev/null 2>&1 || true
     "$norite" update receipt --forget --bin-dir "$bin_dir" >/dev/null 2>&1 || true
-    rm -f "$bin_dir/norite" "$bin_dir/norite-daemon"
+    rm -f "$bin_dir/norite" "$bin_dir/norite-daemon" "$bin_dir/norite-voice"
     say "Removed. The daemon's state directory is left in place; delete it for a clean slate:"
     case "$os" in
         darwin) say "  ~/Library/Application Support/Norite" ;;
@@ -350,11 +352,19 @@ main() {
     step "Installing into $bin_dir"
     mkdir -p "$bin_dir"
     place norite
+    # The worker before the daemon: a daemon finds its worker beside it, and one restarted below must find
+    # its own version's. A release from before M28 has none, and its daemon starts none, so one left from
+    # a newer install is removed rather than kept beside a daemon of another version.
+    if [ -f "$tmp/out/norite-voice" ]; then
+        place norite-voice
+    else
+        rm -f "$bin_dir/norite-voice"
+    fi
     place norite-daemon
     [ "$with_server" = 1 ] && place norite-server
     norite="$bin_dir/norite"
     "$norite" --help >/dev/null 2>&1 || die "$norite was installed but does not run on this machine"
-    say "norite, norite-daemon$([ "$with_server" = 1 ] && printf ', norite-server')"
+    say "norite$([ -f "$bin_dir/norite-voice" ] && printf ', norite-voice'), norite-daemon$([ "$with_server" = 1 ] && printf ', norite-server')"
     leave_receipt
 
     [ "$daemon" = 1 ] && setup_daemon

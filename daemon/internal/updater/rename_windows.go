@@ -37,3 +37,14 @@ func renameOver(tmp, dst string) error {
 	sweepOld(dst)
 	return nil
 }
+
+// removeProgram removes a program, or moves it out of the way when Windows will not remove it because it
+// is running: a worker of the crashed run may still be exiting when a rollback removes it. The copy set
+// aside goes at the next sweep, as one renameOver sets aside does.
+func removeProgram(path string) error {
+	err := os.Remove(path)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return os.Rename(path, path+oldSuffix+strconv.FormatInt(time.Now().UnixNano(), 36))
+}

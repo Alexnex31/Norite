@@ -100,7 +100,10 @@ func (h *releaseHost) publish(version, daemon string, signed bool) {
 	var archive bytes.Buffer
 	gz := gzip.NewWriter(&archive)
 	tw := tar.NewWriter(gz)
-	for name, body := range map[string][]byte{"norite": []byte("#!/bin/sh\necho " + version + "\n"), "norite-daemon": program} {
+	// The worker is a stand-in that reports its version, which is all the updater asks of it before
+	// installing it (M28).
+	stub := []byte("#!/bin/sh\necho " + version + "\n")
+	for name, body := range map[string][]byte{"norite": stub, "norite-voice": stub, "norite-daemon": program} {
 		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
 			h.t.Fatal(err)
 		}
@@ -346,6 +349,11 @@ func TestAnUpdateIsInstalledRefusedAndRolledBack(t *testing.T) {
 	}
 	if cli, _ := os.ReadFile(filepath.Join(binDir, "norite")); !strings.Contains(string(cli), "0.1.1") {
 		fail("after the rollback the installed command is %q", cli)
+	}
+	// 0.1.0 was installed with no worker, as an install from before M28 is; 0.1.1 brought one, and the
+	// rollback to 0.1.1 kept it.
+	if worker, _ := os.ReadFile(filepath.Join(binDir, "norite-voice")); !strings.Contains(string(worker), "0.1.1") {
+		fail("after the rollback the installed worker is %q", worker)
 	}
 	log := readLog()
 	for _, want := range []string{"the daemon's previous run crashed", "did not stay up after it was installed"} {

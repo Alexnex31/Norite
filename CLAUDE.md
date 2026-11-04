@@ -388,1012 +388,194 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 
 ## Milestone status
 
-**Phase B complete through M11a; Phase C complete through M17**, M13a built last and out of order;
-**Phase D complete through M24**; Phase E under way, M27 done. Full
-dependency-ordered roadmap (`M0` through `M125` plus suffixed insertions, phase-grouped, with Phase P — the
-flagship Kubernetes deployment — running as an explicitly parallel track) is in `docs/roadmap.md`.
-
-**A completed milestone's line says `done` and nothing about its tag.** Older entries below still carry
-`(tag mN)` and are left alone rather than rewritten, but nothing new adds one — and in particular nothing
-writes `(tag pending)`. That phrase was the shape being removed: it made every milestone leave a false
-statement behind for its successor's branch to correct, which is a chore that generated a commit per
-milestone and one more thing for a docs audit to catch. The tag is `git tag`'s to state and it is always
-the milestone number lowercased, so a copy here carries no information and only drifts.
-
-**`M<N>a` means "inserted after `M<N>`"**, a convention adopted at M11 so a milestone can be added at its
-dependency position without renumbering. Renumbering was the alternative and it invalidates every M-number
-reference across this file, `docs/architecture.md`, thirty-one ADRs and a good many code comments — while
-tags `m0`–`m11` go on meaning what they meant, so the two schemes would disagree anyway. Fourteen exist:
-`M11a` (two-factor authentication), `M13a` (guild ownership transfer), `M16a` (message edit history read
-surface), `M16b` (opt-in per-guild message audit), `M20a` (first usable client), `M37a` (Snap package),
-`M56a` (message reactions), `M62a` (guild info and per-guild preferences), `M67a`
-(registration anti-automation), `M72a` (guild discovery directory), `M72b` (its richer sorts, optional),
-`M76a` (self-service account export and deletion), `M78a` (Flatpak package) and `M93a` (instance
-announcements). `M72b` was the
-first `b`, which the convention already allowed — letters run `a`, `b`, `c` in insertion order after the
-same number.
-
-**A suffixed milestone can be retired, and its number is then never reused.** `M17a` (Phase C's
-command-tree verbs) was the first, folded into M20 on 2026-09-25 when its planning found the verbs could
-not authenticate before M20's socket exists. Retiring rather than renumbering is the convention's own
-argument applied in reverse: nothing else moves, and a reference to `M17a` in history still means what it
-meant. Reusing the letter would make that reference ambiguous.
-
-**This list said "seven" and omitted `M76a` until M15's planning**, because M14 inserted that milestone
-and did not come back here. A list enumerating its own members is one that drifts silently on the next
-insertion, so check it against the roadmap rather than trusting it:
-`grep -cE '^- \*\*M[0-9]+[a-z] — ' docs/roadmap.md`.
-
-**Releases follow Semantic Versioning, and a milestone tag is not a version.** `v0.1.0-alpha` is cut when
-M20a is done, `v0.1.0` at the end of Phase D, and the next MINOR at the end of each later feature phase
-through Phase O (`v0.12.0`). Phase P and M124–M125 move no version.
-
-- **PATCH releases** may be cut at any time.
-- **Other pre-releases are optional.** An alpha, beta or rc is the author's option at any milestone, and
-  no document assigns one to a future milestone.
-- **The version stays `0.x` until every milestone is done.** While MAJOR is 0, any MINOR may break
-  compatibility.
-- **`1.0.0` comes last**: a `v1.0.0-rc.N` stage for a full review and test, then `v1.0.0`, meaning "the
-  planned scope exists".
-- **Self-hosting is open from the first release**, without a support commitment before `1.0.0`, and
-  testers are not gated.
-- **The flagship stays closed to non-developer accounts** until the feature set is well advanced and
-  Phase P is ready.
-
-Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and nothing else of 0032.
-
-**Tag formats:**
-- **Release tags** are always three components: `v0.1.0-alpha`, never `v0.1-alpha`.
-- **Release automation fires on `v*` tags only.** `m<N>` stays the internal milestone marker, and a
-  commit that completes a phase carries both.
-- **Tagging is the author's step.** An agent never creates a `v*` tag or bumps a version.
-
-- **M0 — monorepo scaffolding**: done (tag `m0`).
-- **M1 — backend skeleton**: done (tag `m1`). `internal/config` (typed, env-bound, validated at startup),
-  `internal/platform/{logging,httpx,database,ratelimit}`, `internal/db` (sqlc-generated, pgx/v5),
-  `migrations/` (go:embed'd; `000001_init` is intentionally empty), and the `cmd/server` composition root.
-- **M2 — CLI skeleton and `norite instance init`**: done (tag `m2`). Scope was reshuffled with M3 (settled
-  2026-08-10): the `norite` command tree landed here, since the wizard needs it, and M3 is the daemon
-  lifecycle stub alone.
-- **M3 — daemon lifecycle stub**: done (tag `m3`). `daemon/internal/{daemonproc,paths}` (single-instance
-  flock, `RLIMIT_NOFILE` raise, lumberjack log, clean shutdown) and `cli/internal/daemonctl` (the
-  `norite daemon` command group over a systemd-user / launchd-agent / Windows-logon-task `Manager`).
-- **M4 — backend auth core**: done (tag `m4`). `internal/platform/snowflake` (IDs), `internal/platform/dbtest`
-  (the shared container harness every domain package's tests use), migration `000002_auth`, and
-  `internal/auth` — argon2id, HS256 access tokens, device-scoped refresh families, scoped `api_tokens`, the
-  Bearer middleware. Decisions recorded in ADR 0022; the voice-connection reasoning that settles the signing
-  algorithm is ADR 0023. First milestone merged with a merge commit rather than a squash, which is what
-  settled that as the default going forward — `main` carries its seven sub-commits directly.
-- **M5 — transactional email and password reset**: done (tag `m5`). `internal/mail` (a `wneessen/go-mail`
-  sender behind a bounded queue whose `Enqueue` cannot block), migration `000003_password_reset`, the
-  always-202 request and single-use confirm endpoints, and the server-rendered `/reset` page — this
-  codebase's first HTML surface, which is why `httpx.HTMLPage` exists. The same PR carried nine fixes from
-  a repo-wide review of already-merged M1/M2/M4 code.
-- **M6 — OAuth backend flow**: done (tag `m6`). `golang.org/x/oauth2` with PKCE for Google and GitHub,
-  migration `000004_oauth` (`oauth_identities`, plus `oauth_states` and `oauth_exchange_codes` — both
-  deliberate additions), the callback's server-rendered pages, and `auth.RunSweeper`, which expires the
-  short-lived rows M5 and M6 create because no milestone ever did. Decisions in ADR 0024: a provider is
-  trusted for one thing, nothing is written to `users` until a username is chosen, and a sign-in is bound
-  to the client that started it. Two review passes ran against the branch and everything they found was
-  fixed on it.
-- **M7 — CLI `norite login`, password plus keychain**: done (tag `m7`). `daemon/credentials` (the stored
-  session: a keyring-or-file secret, the non-secret record beside it, and this installation's device
-  identity in a third file), `cli/internal/login`, `cli/internal/termsafe`, and the daemon's startup
-  sign-in. Decisions in ADR 0025: the keyring where the machine has one and a `0600` file in the `0700`
-  state directory where it does not, chosen by *writing* a probe rather than reading one, and never
-  silently. The repository's first cross-module dependency (`cli` → `daemon`) starts here, because the
-  daemon owns what a stored credential is. Rule 19's sanitizer landed here too rather than at M43, since
-  this is the first command that prints a name a stranger's instance chose.
-- **M8 — CLI OAuth loopback flow**: done (tag `m8`). `cli/internal/login`'s loopback listener, browser
-  launcher and flow binding, plus the backend half M6 did not build: an optional `client_redirect_uri` at
-  `/authorize`, so the callback returns the exchange code to a listener instead of rendering it (migration
-  `000006`). Decisions in ADR 0027, which also corrects four documents that described the loopback port as
-  registered *with the provider* — a design requiring the client secret in the CLI binary. What is
-  registered is the instance's own callback, unchanged since M6.
-- **M9 — CLI headless device-code fallback**: done (tag `m9`). Migration `000007`, `internal/auth`'s
-  `device.go`/`devicetoken.go`/`devicepage.go`/`devicehttp.go`, the verification page at `/device`, and
-  `cli/internal/login`'s `headless.go` and `devicecode.go`. Decisions in ADR 0028: the completion page
-  offers providers and not only a password (which is what makes the milestone worth its size), approval is
-  a separate explicit step, and the user code is the one credential-shaped value stored in plaintext.
-- **M10 — `norite instance init` finish, and registration hardening**: done (tag `m10`). Migrations
-  `000008`–`000010`, `backend/operatortoken` (the first package outside `backend/internal`),
-  `internal/auth`'s `operator.go`/`instance.go`/`instancehttp.go`/`invites.go`/`verification.go`/
-  `verifypage.go`, `cli/internal/apiclient` (the transport extracted from `login`), and
-  `cli/internal/instanceadmin` (`norite instance bootstrap` and `norite instance invite`). Decisions in
-  ADR 0029, which also amends ADR 0024.
-- **M11 — Session revocation primitive**: done (tag `m11`). `internal/auth`'s `revoke.go` (the primitive)
-  and `sessions.go` (the account-facing view), migration `000012`, `POST /auth/logout/all`,
-  `GET`/`DELETE /users/@me/sessions`, the sessions sweep, and the daemon handing back the refresh token a
-  colliding login makes unkeepable. Decisions in ADR 0030.
-- **M11a — Two-factor authentication**: done (tag `m11a`). Migration `000014`, `pquerna/otp`, and in
-  `internal/auth`: `twofactor.go` (the `factorProof` primitive), `twofactorchallenge.go`, `totpsecret.go`,
-  five endpoints, plus edits to `devicetoken.go` (a third continuation type and
-  `deviceTokenNamesAnAccount`), `devicepage.go` (the factor step), `device.go` (`normalizeTypedCode`
-  extracted, now shared by user codes, invite codes and recovery codes), `service.go`
-  (`CompleteTwoFactorLogin`) and `http.go` (`writeTokenPairErr`, the `revocationCountsResponse` rename, and
-  `two_factor_enabled`/`recovery_codes_remaining` on the user response). Decisions in ADR 0031, which also
-  amends ADR 0014: device linking is authorized by the primary device, so whatever protects a sign-in
-  protects the E2E trust chain. Built here rather than later not because it was urgent — nothing was
-  exposed then, and the first release is M20a's — but because the five paths it threads through took M4
-  through M11 to get right, and each
-  carries an anti-enumeration property a factor prompt can undo silently.
-
-  The CLI half landed here too, after a review found the milestone had shipped a backend that made
-  `norite login` unusable on any account taking its advice: `apiclient.DoStatus`, and the code prompt in
-  `cli/internal/login`.
-- **M12 — Guilds/channels/roles schema plus CRUD**: done (tag `m12`). Migrations `000015`/`000016` (seven
-  tables), `internal/roles` (the permission bitfield and `Resolve`), `internal/guilds` (the service, the
-  `authorize` chokepoint, and fifteen REST routes), `backend/oapi-codegen.yaml` plus
-  `internal/apicontract` (the contract's Go types, committed with a staleness check), and M67a's
-  contract-shape reservation. Decisions are in the roadmap entry and in the migrations rather than in a new
-  ADR — nothing here contradicts ADR 0008, which is the test for whether one is owed.
-
-  **It took scope from two later milestones, and both entries were rewritten in the same PR.** Rule 2
-  needs `audit_log_entries` at the first guild-scoped mutation and the table was M14's; the table
-  references `guilds(id)`, so reordering was impossible and M12 creates it. Rule 1 needs `roles.Resolve`
-  and it was M13's; four of ADR 0008's six layers have data at M12, so what is built here is complete
-  rather than a placeholder. M13 keeps the overwrite endpoints and position hierarchy; M14 keeps the read
-  surface and the `changes` diffing.
-- **M13 — Permission overwrites, role hierarchy, and role assignment**: done (tag `m13`). Five endpoints —
-  the overwrite pair on `/channels/{id}/permissions/{id}`, the role-assignment pair, the bulk reorder —
-  plus `roles.Resolve` widened to a `Resolution` carrying standing, the channel listing filtered by
-  per-channel view permission, category overwrites copied at channel creation, and the hierarchy check on
-  every path that acts on a role or a person. Decisions are in the roadmap entry.
-
-  **It was larger than its entry, which said the opposite**, and the three reasons were found by reading
-  M12's code against the done-when rather than by reading the entry. Nothing wrote `guild_member_roles` —
-  no assignment endpoint existed anywhere in the repo or the roadmap — so every non-owner's standing was
-  permanently 0 and a hierarchy check would have shipped with its interesting branch unreachable.
-  `position` needed an atomic multi-row writer. And `CreateChannel` copied no category overwrites and
-  authorized at guild level, so a channel created inside a locked category was readable by everyone and
-  creatable by somebody that category denied — invisible at M12 because no overwrite could exist.
-
-  Two decisions outlive the milestone: a new role is created at the **bottom**, as Discord does; and
-  **assignment is escalation-checked**, a deliberate departure from Discord, where hierarchy alone gates
-  it.
-- **M13a — Guild ownership transfer**: done, after M17 rather than after M13 — it was skipped when
-  M14–M17 were built and found by planning what came next. `POST /guilds/{guild_id}/owner`, the
-  `guild.owner_transfer` verb, a locked guild row under every owner check (`RemoveMember`, `Delete`,
-  `Update`), and the owned-guild ceiling counted under a per-account advisory lock (slot 4). Decisions are
-  in the roadmap entry and in `docs/security-ledger.md`.
-
-  **A guard that is safe because a value never changes stops being safe the day something changes it.**
-  `RemoveMember` refused to remove the owner by reading `owner_id` unlocked, then deleting — correct for
-  every milestone since M12, because nothing wrote `owner_id` after creation. The transfer is that
-  write, and with it a kick could read the old owner and delete the member just made owner. It landed as
-  its own commit before the transfer, with a test that does not race: it holds the change open, waits for
-  Postgres to report the kick blocked, commits, and asserts the membership survived. **Whose kick matters**:
-  the first version used the old owner as the kicker, who loses the authority to kick when the change
-  commits and is refused before the owner check is asked — a test that passed for the wrong reason.
-
-  **Deletion is delegable and transfer is not, and the difference is escalation.** Deleting destroys;
-  transferring hands layer 2 to somebody, and a token able to do that hands it to its attacker. Same
-  line token minting draws. `RequireLiveSession` too, and testing it needed a *second* device:
-  `logout/all` spares the caller's own, which is M11's design and made the first test pass for nothing.
-
-  **The first owner check was one of four, and the review passes found the other three.** `Delete` and
-  `Update` took ownership from a resolution read unlocked, so a former owner could delete or rename a
-  guild transferred mid-request; both now decide from the locked row. And the ceiling was a
-  read-modify-write across *two* guilds: two transfers to one account, each locking only its own guild,
-  both counted the recipient below the limit and both committed. A lock on the row being changed does not
-  cover a count over rows it does not touch — hence slot 4, keyed per account, shared with `Create`.
-  When a value that never changed starts changing, enumerate every reader of it; the first one found is
-  not the list.
-
-  **Refuse on unlocked data, then lock.** The first draft let any member take the guild's exclusive lock
-  by posting a transfer they would be refused, and `FOR UPDATE` conflicts with the `FOR KEY SHARE` every
-  insert into a child table takes — so one refused request stalled the guild's writes. The transfer takes
-  `FOR NO KEY UPDATE`, which still orders kicks, deletes and renames behind it without blocking inserts.
-  `/security-sweep` then found `Delete` doing it again, introduced by the fix for `Delete` above: **a fix
-  that adds a lock is a new place for this bug**, and `TestARefusedCallerTakesNoLockOnTheGuild` walks
-  every refusal with the row held rather than trusting the next one to remember.
-
-  **A plan measured with literal values is not the plan pgx runs.** pgx caches prepared statements, and
-  after five executions Postgres may switch to a generic plan costed for an *average* guild. For
-  `guild_id = $1 AND user_id = ANY($2)` that plan used `guild_id` as the index condition and filtered the
-  rest, so in a guild of 13,659 role grants the member list scanned all of them to keep 319 — 3,382 µs a
-  call, and the endpoint fell from ~3,000 to ~600 requests a second. Every `EXPLAIN ANALYZE` anyone had
-  run used literals and got the good plan. The fix matches both key columns per member in a subquery, so
-  no plan can widen it, and `TestMemberRoleReadsCannotScanTheWholeGuild` explains the statements pgx
-  actually prepared under `plan_cache_mode = force_generic_plan` on a skewed fixture. M14's `COALESCE`
-  note is the same hazard; this is the first time it was live. **Skew is the ordinary shape of an
-  instance** — many small guilds and a few large ones — and the large ones are where rule 7's hot paths
-  matter.
-
-  **Every refusal the guild handler mapped had leaked its sentinel's text since M12**: `messageOf`
-  returned `StatusError.Error()`, which appends the wrapped error, so a client read "you cannot act on a
-  member above you: guilds: the target stands at or above the actor". Status and code were right, and
-  every test asserted those or a phrase with `Contains`, so none could see it; the manual pass found it by
-  reading a response. The transfer made it wrong rather than untidy — its ceiling refusal claimed *the
-  guild* was full. `TestRefusalsCarryOnlyTheirOwnMessage` asserts whole messages, because `Contains` is
-  what let it through.
-
-  **The optimization review measured end to end rather than per function**, and how is worth reusing: a
-  real server under HTTP load on pinned cores, a calibrated delay proxy for a networked database, and
-  paired A/B runs alternating every few seconds, because this machine's power limits moved throughput
-  20% across three identical runs. An A/A control first sets the noise floor (±1% median here). Three
-  further findings — batched authorization reads, a batched send, allocation-free id encoding — are
-  measured and left for their own branch, since they reach `guildauth` and the send path.
-
-- **M14 — Guild audit log**: done (tag `m14`). The read surface over the table M12 created and every
-  milestone since has written to: `GET /guilds/{guild_id}/audit-log` behind the new `PermViewAuditLog`
-  (bit 19), migrations `000017` and `000018`, `guilds/auditlog.go` and `guilds/auditdiff.go`, the
-  `changes` diff rewritten across all sixteen writers, and both route-surface tests derived from
-  `chi.Walk`. Decisions are in the roadmap entry and in `docs/security-ledger.md`.
-
-  **It opened by fixing a bug M13 tagged**, found by driving a real guild rather than by any of the four
-  review passes: a channel-scoped route gated on its own permission while the listing gated on
-  `PermViewChannel`, so a moderator could rename and delete a channel absent from their own sidebar.
-- **M15 — Core messaging CRUD**: done (tag `m15`). `backend/internal/messages` and four endpoints under
-  `/channels/{channel_id}/messages`, migration `000020` (`messages` and `message_edit_history`),
-  `PermReadMessageHistory` at bit 20, the `messages.read`/`messages.write` scopes, and
-  `backend/internal/guildauth` — the authorization chokepoint extracted from `guilds` so a second package
-  could reach it. Decisions are in the roadmap entry and in this block below.
-
-  **M14's tripwire did its job.** `TestNoAuditActionRecordsMessageContent` turned red on the first
-  `message.*` verb with its question attached, and the test that replaces it records both answers rather
-  than leaving them in a commit message. It still trips on any message verb other than `delete`.
-
-  Two scope decisions were taken at planning (2026-09-15) rather than left to be discovered, both from
-  reading `architecture.md`'s DDL against the roadmap. **`message_edit_history` is M15's**: it had sat in
-  the schema since it was written with no milestone owning it, the same gap M14 found with account
-  deletion and closed as M76a, and it belongs to the edit endpoint that writes it. M15 only *writes* it;
-  the reader is **M16a**, placed after guild reports because a moderator triaging one is the consumer, and
-  carrying the disclosure decision — edit history is not offered to everyone who can read the channel, or
-  editing a typo publishes it forever.
-
-  **The search machinery is not M15's**: the `content_search` generated column and both GIN indexes in
-  that same DDL block are M65's, and building them here would pull `pg_trgm` in ahead of any query
-  needing it. `is_e2e` *is* M15's, because it is what M65's column keys its exclusion off. Both splits are
-  annotated in the DDL, since that block is what somebody copies.
-
-  **Four review passes ran against the finished branch and every one of them found something**, which is
-  the part worth carrying forward rather than the fixes themselves. A security audit found `Update`
-  authorizing on the view bit alone — so a muted member could rewrite every message they had already
-  posted — and `Send` accepting any guild channel type, including categories. An optimization review found
-  `Send` holding the channel row lock for its whole transaction, serializing the product's highest-volume
-  write. A code review found six contract enum and response omissions, and an inert `MaxContentLength`.
-  The last audit found a regression the fix for that constant had introduced an hour earlier: a byte-based
-  length check against a rune-based validator, which would have refused any near-limit message in a
-  non-Latin script.
-
-  **The manual pass had already run and found none of them**, and neither had the tests. Each needed a
-  state no happy path constructs — a permission denied to somebody who already had messages, a channel
-  that is not a text channel, eight senders in one channel, a message written in Japanese. That is the
-  argument for the passes being separate skills with separate questions rather than one review.
-- **M16 — Guild-level reports**: done (tag `m16`). Migration `000021`, `backend/internal/reports`
-  (the second package to reach `guildauth`), four endpoints — `POST /reports` plus the three under
-  `/guilds/{guild_id}/reports` — the `reports.write`/`reports.moderate` scope pair, and the
-  `report.resolve`/`report.dismiss` audit verbs. Decisions are in the roadmap entry, in `000021`, and in
-  `docs/security-ledger.md`.
-
-  **The DDL could not answer the milestone's own done-when**, found by reading `architecture.md` §2
-  against the roadmap rather than by anything failing — the third time that has worked. `reports` had no
-  `guild_id`, so a per-guild queue meant joining through `messages` and `channels`: 6.593 ms and 3,617
-  buffers against 0.098 ms and 21, and broken outright for three of the four target types. §2 is
-  corrected and annotated per line.
-
-  **The first seed measured nothing and that is the transferable part.** It clustered one guild's reports
-  at the top of the id range, so every plan walked the primary key backwards and stopped immediately,
-  making every candidate index look unnecessary. Snowflakes are minted at filing time, so a guild's rows
-  are scattered through the range — a contiguous seed measures a table no instance has. It also coupled
-  the guild and status distributions to the same modulus, which handed the heavy guild every open report
-  and nobody else any. Check what a seed's conditions share before trusting a plan it produced.
-
-  **Two disclosure decisions, both in the ledger.** Reported content is readable by a
-  `PermManageMessages` holder regardless of whether they can currently view the channel — M14's
-  audit-log answer applied to content. And **the reporter is never named to a guild moderator**: absent
-  from the wire struct entirely rather than stripped per handler, because the reversible direction of a
-  one-way door is to withhold.
-
-  **Content is resolved at read time, never snapshotted**, which is what leaves M16a something to do: a
-  report on a message edited after it was filed shows the current text, and the prior versions are that
-  milestone's. The listing carries no content at all, so rule 13's exclusion has one place to be right
-  rather than two — and it lives in the SQL, as a join predicate rather than a `CASE`, both because rule
-  13 wants it inherited by the next reader and because an expression through a `LEFT JOIN` defeats sqlc's
-  nullability inference and generates a non-nullable `string` a NULL cannot scan into.
-
-  **Rule 2 asserted in both directions**: closing writes an entry, filing writes none, and the negative
-  had no home until it was a test.
-- **M16a — Message edit history read surface**: done (tag `m16a`). Migration `000022`,
-  `backend/internal/messages/history.go`, `GET /channels/{channel_id}/messages/{message_id}/history`, the
-  `messages.moderate` scope, and a third channel entry point in `guildauth`. Decisions are in the roadmap
-  entry, in `000022`, and in `docs/security-ledger.md`.
-
-  **The schema was right and three other things were not**, which is the variation worth noting after
-  M16: §2 already carried this route and its permission, so for once there was no DDL to correct.
-
-  **The index M15 shipped was measured for an ordering this milestone does not use** — `000020` quoted a
-  figure for "M16a's read" against `ORDER BY edited_at`, and M14 settled that a cursor is an id. That is
-  M16's optimization-review finding one milestone later, both being a measurement describing a query that
-  does not ship. `000022` replaces the index rather than adding one, and states plainly that the two
-  shapes are indistinguishable in time: what it buys is a plan with no sort node and an index the shipped
-  query actually uses, for 2% of insert cost and no regression to the cascade.
-
-  **There is no single-message `GET` in this API**, so the response carries the current version as well as
-  the prior ones. Without it a moderator reads every version a message used to have and has no route that
-  says what it says now.
-
-  **A default with no documented exit gets routed around.** `AuthorizeChannelIgnoringVisibility` lives in
-  `guildauth` rather than being open-coded here, because the alternative was `messages` reading a channel
-  row for the first time and re-deriving `guildOf`'s judgement that a DM answers 404 — a second copy of a
-  decision, which is the drift `termsafe`, `ChannelGuildText` and the audit verbs each had to be pinned
-  against. Keeping it in the chokepoint also keeps it greppable, and that grep is the complete list of
-  places visibility was skipped on purpose.
-
-  **Lifting a requirement and lifting a refusal are two changes that look like one.** The new entry point
-  stops *requiring* `PermViewChannel` and keeps the 403-to-404 downgrade, because dropping both would
-  answer 403 to a member who can neither see nor moderate a channel against 404 for an id naming nothing
-  — a probe for hidden channels in their own guild. Each half has its own assertion.
-
-  **The disclosure turned out wider than the decision it borrowed.** M16 bounds content by a report
-  existing; this route takes a bare message id, so a moderator denied view reads any message's current
-  text with nobody having reported anything. Found by `/code-review` against the finished branch,
-  accepted, and given its own ledger entry rather than left inheriting one that no longer fits — and
-  M16's entry is annotated where its "one route and not two" bound stopped being true.
-
-  **Rule 1 and read consistency are different properties and satisfying the first hid the second.** The
-  envelope and the version list were two statements on separate snapshots, so an edit landing between them
-  showed the displaced text as both the current version and the newest prior one. Reproduced 5 times out
-  of 5 — not a narrow window — and fixed with one `REPEATABLE READ` read-only snapshot. The comment that
-  justified skipping a transaction cited rule 1, which is about resolving permissions against fresh data
-  and says nothing about two reads agreeing.
-- **M16b — Opt-in per-guild message audit**: done. Migration `000023`,
-  `PermViewMessageAudit` at bit 21, the recording switch on `PATCH /guilds/{guild_id}`,
-  `backend/internal/messages/audit.go`, `GET /guilds/{guild_id}/message-audit`, and the `messages.audit`
-  scope. Decisions are in the roadmap entry, in `000023`, and in `docs/security-ledger.md`.
-
-  **The milestone's central question was specified nowhere and one document had already answered it.**
-  §2 settles the toggle's authority in the same clause as the route and says nothing about who may
-  *read*; the roadmap entry says nothing; screen `6e` tells every member their messages are "kept in a
-  log its moderators can read". Found by reading the three against each other, which is now four
-  milestones running.
-
-  **A new permission bit, because each bit it could have reused is wrong differently.**
-  `PermViewAuditLog` reads moderation metadata and its own ledger entry names "the log ever carries
-  message content" as the condition that reopens it — so reusing it satisfies that condition's letter
-  while doing what it names. `PermManageMessages` means "delete somebody else's message", and a guild
-  wanting spam removed has not decided that moderator reads its private channels. `PermManageGuild` is
-  the bit that flips the switch, so folding the read in would mean the only way to let somebody read the
-  log is to let them turn it off.
-
-  **The plan's writer design was measured and dropped, and the property it was buying was illusory.** One
-  statement with the opt-in as a join predicate costs 62–90% of the message insert in guilds that have
-  not opted in — all of them, until somebody does — against 9% for reading the boolean and branching. And
-  both shapes read the flag *after* the message is written, so neither makes "sent while recording"
-  well-defined; the race belongs to a switch that can be flipped mid-transaction. The flag stays a join
-  predicate on the insert that actually runs, which is what makes "no row exists for a guild whose flag
-  is false" structural rather than tested.
-
-  **Proved by removal in three legs, because one would have proved the wrong thing.** Removing the
-  statement guard leaves the off case passing, because the Go branch catches it first. Removing the Go
-  branch instead *also* leaves it passing — which is what shows the statement guard is load-bearing.
-  Removing both fails it, which is what shows the test can see the property at all.
-
-  **§2's DDL was missing an index worth 530x**: `actor_id` is a refusing foreign key with no index, the
-  fourth this project has found and the third it has paid for. 71.5 ms per account deletion against
-  0.135 ms.
-
-  **An Instance Admin may not start a guild's recording**, the first place layer 1 is narrower than layer
-  2. Answered the other way first and reversed on reversibility — lifting a refusal when M72 lands is
-  additive, withdrawing a capability operators rely on is not. The tier still reads any recording guild's
-  log, which is M16a's gap and unchanged.
-
-- **M17 — Message tagging**: done. Migration `000024`, `backend/internal/tags` (the third package to reach
-  `guildauth`), six routes under `/guilds/{id}/tags` and `/channels/{id}/messages/{id}/tags`, and the
-  `tags.read`/`tags.write` pair. Decisions are in the roadmap entry, in `000024`, and in
-  `docs/security-ledger.md`.
-
-  **The entry was four lines and the milestone was not**, which is M13's shape. §2 drew both tables and
-  **zero indexes** — six ship. A `guild_id` index was retired by measuring and then restored by measuring
-  again: the migration claimed the two partial unique indexes, having complementary predicates, cover
-  `guild_id` together, which Postgres never does for a query not naming `is_shared` — and the cascade from
-  `guilds` does not. 12,800 rows hid it; 600,000 showed a 56 ms sequential scan against 0.7 ms. It also
-  cited an ADR for the scope decision that was never written.
-
-  **The primary key hid the index that mattered.** `(tag_id, message_id)` serves no lookup on
-  `message_id`, which is both the cascade from `messages` and the only way to render a tagged message —
-  M12's `guild_member_roles.role_id` exactly, at 961.7 ms against 23.5 ms on 500 deletions.
-
-  **"Private" had to be defined, and the definition is a 404.** A private tag is invisible to everybody
-  else; refusing it on authority would give 403, and 403-versus-404 turns a list of snowflake ids into a
-  map of which private tags exist. Enforced on three paths — two in SQL, one in Go — and pinned by a test
-  that drives all three with the same actor.
-
-  **A guard held twice needs three runs to prove.** The cross-guild predicate and `loadInGuild`'s check
-  each catch the other's case, so removing either alone leaves the test green. Only removing both fails
-  it, and only removing the Go half shows the statement earns its place.
-
-  **The manual pass found what every test and the guild predicate had walked past**: the two write routes
-  authorized the route's channel and never checked the message was in it. Tagging a message in a hidden
-  channel through a visible one answered 204 against 404 for an id naming nothing, and removing a
-  moderator's tag from it answered 403 against 404 — which messages exist behind a hidden channel, and
-  what they have been labelled. `ForMessage` had M15's `loadInChannel` check; `Apply` and `Unapply` did
-  not, and no test sent a message through a route other than its own. Now `loadMessageInChannel` runs
-  first on all three, and `ApplyMessageTag` carries `m.channel_id` as well. **Guarding the statement alone
-  would not have closed it**: a refused insert falls through to the repeat detection, which finds
-  somebody else's row and reports success.
-
-  **A removal whose mutation breaks the statement proves nothing, even when it fails.** Deleting the
-  predicate outright dropped `$3`, and the test failed on Postgres refusing the parameter rather than on
-  the property; neutralizing it as `$3::bigint = $3::bigint` kept the statement valid and showed the Go
-  check covering it. M15's "fails to build" lesson, one layer down: the harness has to fail for the
-  reason under test.
-
-  **`/security-sweep` then found four authority rules looser than the milestone meant, each reproduced
-  live.** An Instance Admin passed the single-row visibility check while both listings filtered the tag,
-  so an operator could apply, remove and delete members' private tags they could never enumerate, with
-  nothing recording it — refused now, which leaves the tier exactly as far as a guild owner rather than
-  creating a second layer-1 exception. A muted member could not post and could still put a shared tag on
-  anybody's message; a shared tag now needs `PermSendMessages`, a private one does not. A shared tag's
-  creator kept the power to delete it and strip other people's applications after losing the moderation
-  bit; a shared tag is now the guild's, reachable only through the bit. And a moderator removing another
-  member's label wrote no audit entry while deleting that member's message wrote one — rule 2 says
-  "whoever performs it", so `tag.remove` and `tag.delete` exist, written only when the act reaches
-  somebody else's tagging. Every one of them passed the suite before it was fixed, because the moderator
-  in every test was also the tag's creator: **a test whose actors overlap cannot see the branch that tells
-  them apart.**
-
-  **`/optimization-review` found the milestone had built the batch read and exposed it one id at a
-  time**, so drawing a channel cost a request per message — 50 requests and 250 round trips for one page.
-  Every `Message` now carries `tags`, resolved for the page in one `= ANY`. It is **nullable**: an API
-  token without `tags.read` gets null, because `messages.read` reaching tags would widen a delegated
-  credential and an empty array would claim the message has none. The same review restored the
-  `guild_id` index the migration had argued away (above).
-
-  **A keybinding had reserved scope the roadmap never granted.** `C-c t` is global, and M74's timeout verb
-  was moved to `C-c C-t` because tag held it — for a feature with no screen, no client and one mention in
-  the whole roadmap. §16's hazard running backwards.
-
-- **M18 — Gateway protocol core**: done. `/gateway` with HELLO/IDENTIFY/READY, heartbeats, RESUME, DISPATCH
-  and Reconnect; `backend/gatewayproto` (the wire format and the ADR 0033 version check), `internal/gateway`,
-  `internal/dispatch`, `guildauth.Audience`, `roles.ResolveMany`, `database.AfterCommit`, the event bus and
-  rate-limit store on Redis as well as in process, and `gateway-events.schema.json` for every frame.
-  Decisions are in the roadmap entry, in `architecture.md` §2 and in `docs/security-ledger.md`.
-
-  **The design was corrected before it was built**, by reading `architecture.md` §2 against the roadmap,
-  the method that has now found something at five milestones running. RESUME carried no token, so a session
-  id from a log line resumed somebody else's stream. IDENTIFY took any unexpired token, which outlives its
-  session by fifteen minutes and a connection by nothing. READY carried every guild's channels, 12.5 MB at
-  the cap. And the permission cache M12 deferred here was declined: its invalidation would cross replicas
-  on an at-most-once bus, so a demotion would land eventually, which is the stale decision rule 1 refuses.
-
-  **Liveness belongs to the sign-in, not the device, and M11's own check had it wrong.** After a device
-  signed out and in again it was live, so a token stolen from the sign-in that ended passed: on the gateway
-  it opened a stream that never closed, and on REST `RequireLiveSession` let it mint an API token,
-  reproduced at 201. A sign-in is the device plus its family's `first_seen`, which rotation carries and a
-  new sign-in resets. Found by `/code-review` on the finished branch. M11 wrote "liveness is asked of the
-  device, never the row" to protect rotation, and the sentence was right about the row and wrong about the
-  device: **when a rule says what a check must not key on, ask separately what it must**.
-
-  **The revocation close had five paths, and the roadmap named one.** Logout, revoking a device, refresh
-  reuse and a sign-in superseding a device each end a sign-in without `revokeEverything`. All five queue the
-  close after commit and carry a cutoff snowflake, so a device that signs in again inside the delivery lag
-  is not closed by the revocation it outran; a heartbeat re-check bounds a close the bus dropped. M13a's
-  lesson for a value that starts changing applies to an event that starts mattering: enumerate every
-  writer, not the one somebody named.
-
-  **Two surfaces for one object must agree, and the contract says which is right.** `/security-review`
-  found the gateway sending guild objects, roles and members to a member REST refused them to — a member
-  whose only view is a welcome-channel overwrite, the configuration `ListChannels` already calls ordinary.
-  The contract said "requires membership"; REST said guild-level view. REST was the bug, and tightening the
-  gateway instead would have dropped the guild from that member's READY. The review passes found three more
-  in the other direction, each a gateway event reaching somebody REST would refuse: an edit to a member
-  without history, a guild deletion to an account mid-IDENTIFY, a deleted channel's message to the whole
-  guild.
-
-  **A done-when can be unmet while every test is green.** It asked for the gateway's tests to pass against
-  `redis` as well as `inproc`; the bus and the limiter each were, the gateway itself never ran over Redis,
-  and nothing failed because nothing looked. Found by reading the done-when clause by clause before marking
-  the milestone done. `TestTheGatewayWorksAcrossReplicasOverRedis` runs two replicas, and is proved by
-  taking the second off Redis.
-
-  **Measure what grows with something other than the audience.** Candidate lookup scanned every session
-  on the process (3.2 ms an event at 50,000, for a hundred recipients); the audience check ran one event at
-  a time for the whole process (a ceiling near 1,300 events a second); each frame re-encoded its payload
-  (6.1 µs against 1.5). An index, lanes keyed by guild and sized from the pool, and appending the encoded
-  bytes. The benchmarks are committed in `internal/gateway/bench_test.go`.
-
-  **A generic plan seen once is a plan to rule out, not to wait for.** The deleted-channel fix first read
-  overwrites with the guild in its `WHERE`, and on a database without fresh statistics the generic plan
-  walked the guild's channel index. With statistics the planner chose the primary key, so no test could make
-  it fail; the guild moved to a comparison in Go so no plan has the choice, M13a's shape.
-
-  **Gates in a chain need `&&`, not `;`.** A commit went in past a failed `contract-check` because the two
-  were joined with `;`, and was amended before push. CI would have caught it; the local gate exists so it
-  need not.
-
-- **M19 — Daemon as gateway client**: done. `daemon/internal/session` (the token source, refreshing ahead
-  of expiry on the server's clock, and the `fsnotify` credential watch), `daemon/internal/gatewayclient`,
-  `daemon/internal/state`, `daemon/internal/backoff`; `daemon/termsafe`, moved from the CLI;
-  `backend/apicontract`, moved out of `internal/`; and `daemon` → `backend`, the repository's third
-  cross-module edge. Decisions are in the roadmap entry and in `docs/security-ledger.md`.
-
-  **Planning found four claims wrong before anything was built**, by reading the store, the roadmap and
-  `architecture.md` against each other — six milestones running. The keyring deferral blamed the
-  `sync.Once` probe, which only chooses where a *new* secret goes; the daemon never saves, and was stranded
-  because `Load` was tried once. Refreshing ahead of expiry sat in M20's entry, and M19 cannot keep a
-  connection past fifteen minutes without it. Stream-decoding READY was required for a payload M18 had
-  already cut from 12.5 MB to 20 KB. And RESUME was said to rebuild the daemon's state after a restart,
-  which it cannot: the session id dies with the process.
-
-  **The instance is a stranger's server, and the first build trusted it to behave.** The state's limits held
-  only while the instance sent what a real server validates: a message was charged its content and not its
-  payload, and guild summaries were not budgeted at all. An instance served under a path lost the prefix,
-  so its access token went to the same host's `/gateway` — possibly another application. And a HELLO whose
-  heartbeat interval overflowed the `Duration` it became panicked a goroutine nothing recovered, so one
-  frame crash-looped the daemon; reproduced as a panic of the test binary itself. **The backend's own
-  validation is not the daemon's bound**: the daemon is a client of whatever URL somebody typed.
-  `/security-sweep` found the first two, `/code-review` the third — and the sweep, looking for exactly this
-  class, walked past it, which is the case for the passes asking separate questions.
-
-  **A sign-in that ends must take down everything standing on it.** After a logout the daemon kept the
-  account's guilds and messages, because only a fresh IDENTIFY cleared them and a signed-out daemon never
-  identifies; and a logout whose hand-back never reached the instance left the server no reason to close
-  the connection, so the daemon went on streaming an account nobody was signed in as. The connection now
-  follows the sign-in through `Ended(generation)`, closes itself, and tells the state to forget. Found by
-  `/code-review`; the end-to-end test's logout leg runs against a stand-in that does not serve the
-  hand-back, the one case where only the client can close.
-
-  **The manual pass found five things the tests and three review passes had not**, and every one was in
-  what a person reads rather than what the code decides: M18's server closing a heartbeat timeout as
-  "no IDENTIFY in time"; every gateway and state log line carrying `component` twice; a failed dial that
-  never said why; a login landing within ten seconds of a renewal stuck behind the refresh floor and
-  presenting the superseded token first; and a logout logged as "the renewed credential that the store
-  could not keep". **A schema-validating fake cannot see wording**: it checks every frame's shape and writes
-  its own close reasons, so the real server's sentences are only read against the real server.
-
-  **The harness lied once, in the fixture.** The proxy built to kill the network passed the backend's FIN
-  through while "dead", so the first silent-outage run measured a closed connection and the daemon's
-  heartbeat detection never ran. M16's seed lesson one layer out: before trusting what a stand-in
-  measured, check it fails the way the real thing does.
-
-- **M20 — Daemon↔client local IPC**: done. `daemon/ipc` (the attach socket's protocol and client half,
-  outside `internal/` for the CLI and the GUI), `daemon/internal/attach` (the server: peer check, bounded
-  fan-out, resync), `daemon/internal/relay`, `contracts/daemon-ipc.schema.json`; `cli/internal/verbs` (forty
-  verbs over M12–M17, folded in from M17a), `daemonclient`, `output` and `clierr`'s exit codes, and nine new
-  schemas in `contracts/cli-json/`; and `GET /users/@me/guilds`. Decisions are in the roadmap entry, in
-  `architecture.md` §3 and §4, and in `docs/security-ledger.md`.
-
-  **Planning corrected three documents before anything was built** — seven milestones running. §2 said
-  `norite login` would stop writing the store here, which would have broken a login with no daemon running;
-  §3 named a socket and never said where it lives, and its claim that only the owner could open it was false
-  on Windows, where a pipe's default DACL lets Everyone read it; §4 put the `--json` machinery at M48.
-
-  **A fake that answers only with what the contract declares finds what the author had in mind.** The verbs'
-  tests run against a fake daemon that validates every request and every scripted answer against
-  `openapi.yaml`, and writing it found the CLI decoding an instance's refusal from the top level rather than
-  its `error` envelope. The decoder's own unit test had used the shape its author imagined. M19's fixture
-  lesson, pointed at a decoder instead of a proxy.
-
-  **An exit code's meaning is everybody's, not the code that returns it.** Settling 3 as "unavailable" made
-  three older paths lie: urfave/cli's help command answers a mistyped subcommand with exit 3, a verb that
-  attached before checking its flags reported a typo as a stopped daemon, and a 429 read as a refusal.
-  `/code-review` found all three, and the fixes are structural — every group gets the root's refusal by a
-  walk of the tree, and a verb attaches on its first request rather than before its checks.
-
-  **A state the protocol cannot express is one a client guesses.** READY named an account or did not, so a
-  daemon still waiting for its keyring looked signed out, and the CLI told its user to log in again — which
-  would supersede a perfectly good sign-in. READY now carries `standing`. The same review found READY
-  pairing a new login's account with the old one's guild list, because nothing tied the two together.
-
-  **The hostile instance reaches attach clients too.** `/security-sweep` found a dispatch with no payload
-  turning the fan-out's spliced frame into invalid JSON, which disconnected every watching client on every
-  such frame. M19's lesson, one hop further out: what the daemon forwards is bounded against the instance,
-  not against a correct one.
-
-  **The manual pass, two accounts on two daemons, found one sentence**: a daemon killed under a verb
-  in flight printed one thing twice and did not say the request might have arrived anyway. Everything the
-  done-when names was walked by hand.
-
-- **M20a — First usable client, end to end**: done. Bare `norite` on a terminal opens `cli/internal/tui`:
-  home, with the account's guilds and channels and a two-step invite redeem, and one channel pane drawn
-  live. Guild invites in `guilds` (five routes, migration `000025`, `invite.create`/`invite.revoke`/
-  `member.join`, `GUILD_MEMBER_ADD`), `Message.author`, `cli/internal/ops` and `cli/internal/daemontest`,
-  `norite invite`, `norite register`, `norite about`, and the first release's pipeline. Decisions are in the
-  roadmap entry and in `docs/security-ledger.md`.
-
-  **Planning found a first client two people could not share** — eight milestones running. No route added a
-  guild member, and M20's manual pass had used psql; guild invites moved here from M57. Nothing could name
-  another account, so `Message` gained its author. The daemon's scrollback had no socket operation, so
-  history comes over the relay. And writing the README found the second person could only register with
-  curl, which `norite register` answers.
-
-  **Joining is a person's act, never a token's.** `/security-sweep` reproduced an API token holding
-  `guilds.write` redeeming an invite as its owner and then reading the guild's backlog: a delegated
-  credential choosing its owner's company. Redemption takes `RequireUserActor`, as an ownership transfer
-  does. A token may still create invites.
-
-  **Lock order was found twice by review, and both times staged rather than raced.** A redemption racing a
-  guild deletion deadlocked (the invite, then the guild through the membership's foreign key, against the
-  guild, then the cascade); it now locks the guild first. And `FOR KEY SHARE` let a join race an ownership
-  transfer and answer with the old owner; it is `FOR SHARE`. Each test holds the other transaction open and
-  waits for Postgres to report the block.
-
-  **A ceiling that follows another must be bounded with it.** The joined ceiling follows a raised owned one
-  up to `gatewayproto.MaxGuilds`, and the owned one accepted ten times that, so an instance could start
-  cleanly and refuse accounts at 1,000 without a word — pinned by a test as "capped there". Both now stop at
-  the wire's bound, and an explicit joined value below the owned one refuses to start.
-
-  **The client holds what a correct instance could send, not what this one sends.** `/security-sweep` found
-  home growing with every guild a hostile instance announced and the pane holding 500 messages of 4 MiB
-  each. M19's rule for the daemon applies to the client: home stops at `maxHomeGuilds` and `maxHomeRows`,
-  and a held message is cut to the instance's own validators.
-
-  **The manual pass found five things, every one in what a person sees.** A logout left the conversation on
-  screen; a guild with no visible channels made home say "no guilds yet"; the root's `--channel` was
-  inherited by every verb; the retry line's width cut off when it would retry; a dead pane kept an old
-  refusal. **A schema-checked fake cannot see a screen**, the M19 lesson about wording, one layer out.
-
-  **A frame lays out what it draws.** The optimization pass measured 59 ms a keystroke with a full pane of
-  long messages, from re-wrapping all 500 to draw thirty rows; laying out only the tail is 0.22 ms.
-
-  **The release had never run, and its dry run found it would not have built the commit it stamped.** A
-  `go work sync` hook rewrote two modules' `go.mod` during every release, and goreleaser built in workspace
-  mode while the notices are generated standalone. Both gone: every release build sets `GOWORK=off`.
-
-- **M21 — Config file**: done. `daemon/config` (the keys, the loader, edits by byte range, export and
-  import, the two clients' merge), `daemon/atomicfile`, `daemon/statefile` and its internal writer,
-  `daemon/internal/configwatch` and `daemon/internal/toggle`; `cli/internal/configcmd` (`norite config
-  path|get|set|unset|export|import|split|unsplit`) and `cli/internal/prompt`; the terminal client reading
-  `[tui.colors]` and `[shared] clock` and redrawing on `DAEMON_CONFIG_UPDATE`; `contracts/client-config.toml`
-  and `contracts/cli-json/config.schema.json`. Decisions are in the roadmap entry, in `architecture.md` §3
-  and in `docs/security-ledger.md`.
-
-  **Planning found the library did not do what three documents said** — nine milestones running. The
-  roadmap, `architecture.md` and ADR 0010 all named "`go-toml` v2 document-editing mode" as what keeps
-  comments on a write. v2 has none. An edit is a splice at the byte range `unstable.Parser` reports, and
-  the test compares whole files rather than checking that a comment is still there. Every setting the
-  documents gave as an example also belonged to a later milestone, so the file had no reader; two keys
-  are live here and the rest are listed in the contract so the format is settled.
-
-  **A bound is a measurement.** The size limit sat at 1 MiB until the sweep timed the decoder, which is
-  quadratic in one table's keys: ten seconds at the bound. It is 64 KiB, pinned by a test. The same shape
-  came back twice more: an import made one key at a time was cubic (two minutes at the bound, with the
-  lock held), and so was the first repair. Every batch of edits is now planned against one read.
-
-  **The toggle took three review rounds, and each found something in the last round's fix.** Split copies
-  `config.toml` into both clients' files, so each holds a stale copy of the other's section. Merging by key
-  let that copy bring back a setting its owner had removed. Taking each section from its own file fixed
-  that, but through the key table, which carries strings: a number in a client's own table was dropped
-  without a word. It is carried as the file wrote it now. **When a fix narrows a rule, ask what the
-  narrower rule still cannot say**, and make it say so in the output.
-
-  **A file is whatever is at the path.** A config that was a link to a pipe hung every command, the client
-  before its first frame, and the daemon's toggle with a lock held. A directory reached by two names was
-  two locks. Two files dated 1970 were taken for two missing ones. Each was found by a review asking what
-  else could be there, not by anything a correct setup produces.
-
-  **The gates caught two of my own tests.** One raced, passing the race detector on the run before its
-  commit and failing the next. One proved a lock by counting, which a lost update leaves right half the
-  time. And the daemon's tests had been creating `~/.config/norite` in the home of whoever ran them since
-  the watch was added; every test package that starts a daemon or a client now points its roots at a
-  temporary directory in `TestMain`.
-
-  **CI found two more, on its first run of the branch.** A limit of three seconds on a merge, which a
-  runner under the race detector missed by 40 ms; and a test from M19 that reproduces under load on
-  unchanged code, because a logout handed its token back before it stopped giving the credential out. The
-  first was the test's fault and the second the daemon's: for the length of that request it was signed in,
-  to every attached client, as an account that had logged out.
-
-  **The manual pass found one line of wording**, which after three review rounds is the result to expect
-  rather than to distrust. It is also where two consequences of the design were seen plainly: an unsplit
-  starts from the newer file, so the older file's comments are only in the copy set aside; and a table
-  whose last entry is removed keeps its header.
-
-- **M22 — Local bot-automation port**: done. `daemon/internal/automation` (the listener: two secrets,
-  token forwarding, bounds), `daemon/ipc`'s automation half (the frames, the file, the client), the
-  port's control in `daemon/internal/daemonproc`, `relay.Perform` shared by both tiers;
-  `norite token create|list|revoke` and `cli/internal/automationcmd` (`norite automation
-  enable|disable|status|run|request`); the instance writing `messages.type` 1 for what an API token
-  sends or edits; `AUTO` in the terminal client and in `norite message list`;
-  `contracts/daemon-automation.schema.json` and two schemas in `contracts/cli-json/`. Decisions are in the
-  roadmap entry, in `architecture.md` §3, in ADR 0017 as amended, and in `docs/security-ledger.md`.
-
-  **Planning found the done-when could not be met as written** — ten milestones running. The entry had
-  the daemon tag what goes through its port, which a script avoids by sending the same token straight to
-  the instance; the instance tags by how the request authenticated instead. Nobody could get a token:
-  the relay refused all of `/auth`, so minting one meant a second sign-in by hand. Two ADRs disagreed
-  about what the port speaks. And `gatewayproto` promised bots an event stream here that no entry built
-  and the gateway refuses.
-
-  **A token is a credential for the instance that minted it, and the daemon cannot tell which that
-  was.** The first build forwarded a script's token to whichever instance the daemon was signed in to, so
-  signing in to a second instance handed the first one's tokens to the second's operator, one request at
-  a time. Found by `/code-review`. The port is turned on for one instance, recorded with the switch, and
-  asked on every request.
-
-  **"Nothing was changed" has to be true.** A refused `enable` closed the working port before trying the
-  new one, then said nothing had changed, with every running script holding a secret that opened nothing.
-  A port on another number is bound beside the old one now. On the same number it must close first, and
-  the refusal says the secret is new. A message that describes the outcome is part of the outcome; write
-  it after the last step that can fail, from what happened.
-
-  **A badge made of text goes where no name can put it.** `AUTO` was drawn straight after the author,
-  and a display name of `Bob AUTO` on a typed message read the same once color was gone. It is the
-  header's last word in both front ends: a name is the account's, everything after it is the client's.
-
-  **Three review rounds found ten things each, and did not converge on their own.** The third still
-  found a badge a name could forge, and a sentence written while fixing the second that told scripts a
-  request was worth sending again when the instance might already have acted on it. Run the review again
-  after fixing what it found; a round's fixes are code nobody has reviewed.
-
-  **The manual pass found the verbs did not show the tag at all.** The terminal client drew it and
-  `norite message list` printed nothing, in text or `--json`: rule 15, missed because the tag arrived as
-  a client feature and the verbs' view was a list of fields nobody reread. When the instance starts
-  saying something new about an object, every view of that object is in scope, not the one being built.
-
-- **M23 — Daemon lifecycle polish**: done. `daemon/logfile` (where the log is, and its reader),
-  `norite logs tail`, `POST /@daemon/stop` and the stop, restart and uninstall that ask it first, the
-  crash file, `norite daemon status` over the socket with `--json`, `install --linger`, the offer
-  `norite login` ends with, the Windows task as an XML definition, and two schemas in
-  `contracts/cli-json/`. Decisions are in the roadmap entry, in `architecture.md` §3 and §4, in ADR 0010
-  as annotated, and in `docs/security-ledger.md`.
-
-  **Planning found the entry's first clause had been dead code since M3** — eleven milestones running.
-  The `RLIMIT_NOFILE` raise never raised anything: Go's runtime raises the soft limit to the hard one
-  before `main`. Measured, by starting a program under `ulimit -Sn 256` and reading 524287. It is removed
-  and not repaired, since a program that calls `Setrlimit` makes Go stop restoring the limit for its
-  children. The done-when's test could not have failed either; the one that replaces it lowers the *hard*
-  limit and fills every connection cap, and fails when a cap goes.
-
-  **A done-when clause that cannot fail is not a clause.** Ask of each one what would have to be broken
-  for it to go red, and break that.
-
-  **A stop is not a signal everywhere.** On Windows the service manager's stop is a kill, and a kill
-  between a refresh's answer and its write-back leaves a spent token on disk. Found by reading what
-  `schtasks /End` does against M19's rule that an answered refresh is always stored. The daemon stops
-  itself on request now, and the commands ask it before they ask the service manager.
-
-  **The command tests would have stopped the daemon of whoever ran them.** Once `norite daemon stop`
-  asked the socket, a test that replaced only the service manager reached the real one. `TestMain` makes
-  the real socket a panic. When a command gains a second way to act, every test that stubbed the first is
-  now running the second for real.
-
-  **Mutations that survive are findings about the tests.** Four did across the milestone, and three were
-  gaps: a field value drawn unquoted that nothing covered, a reader going away tested only among the
-  lines already there, a state word no case exercised. The fourth was a second layer of cleaning that
-  `%q` already made safe, kept and said to be unprovable.
-
-  **`/code-review` found ten things, and the worst undid the milestone's own reason.** To hide the
-  Windows console window the daemon let go of its console, and a program with no console is not told
-  about a logoff: it is killed, mid-refresh or not, on the commonest stop there is. Removed. The others
-  were a status that called a path no socket can have "running", a refusal that claimed twenty seconds of
-  waiting it had not done, a log tail that filled a short count from the wrong file, and an installer
-  that a quiet failure would have ended. **A fix for one platform's cosmetics is a change to how that
-  platform stops the program**; ask what the thing being removed was also carrying.
-
-  **The Windows half was written without a Windows machine**, and every place that describes it says so:
-  the entry, the guide, the commit, the code's own comments. `install.ps1` still registers the task only
-  when asked, because flipping a default on a path nobody has watched work is how a guide ends up wrong.
-
-  **The manual pass ended the author's desktop session.** To test "comes back after a reboot" a
-  privileged container was started with systemd as its init. A privileged container sees the host's
-  `/dev/tty1`; its systemd put a login prompt there, the real session was hung up one second later, and
-  logind killed every process in it. The pass was then run in an unprivileged QEMU guest, where it passed:
-  a real reboot, a login, and with lingering the daemon up four seconds after boot and 36 seconds before
-  anybody logged in. **A stand-in for a machine is not safe because it is small**; ask what it shares
-  with the machine it runs on.
-
-- **M24 — Client auto-update mechanism**: done. `daemon/internal/updater` (the listing, the choice, the
-  offline verifier on `sigstore-go` against an embedded trusted root, staging, the swap, the record and the
-  undoing), `daemon/installreceipt`, SemVer precedence in `gatewayproto`, the restart in
-  `daemon/cmd/daemond` (`exec` on Unix, a watched successor on Windows), `norite update
-  status|check|apply|mode|channel` in `cli/internal/updatecmd`, five requests under `/@daemon/update`, a
-  `DAEMON_UPDATE` dispatch, a line in `norite daemon status` and on the terminal client's home,
-  `contracts/cli-json/update.schema.json`, the `norite_testrelease` build tag, receipts from both
-  installers, `just trusted-root` and CI's staleness check of it, and hand-read licenses checked by hash.
-  Decisions are in the roadmap entry, in `architecture.md` §3, in ADR 0020 as amended, and in
-  `docs/security-ledger.md`.
-
-  **Planning found eleven things the entry could not build as written** — twelve milestones running.
-  There was no version-check endpoint and an instance cannot be one: the listing is GitHub's, a daily
-  third-party call ADR 0020 had not considered. `gatewayproto` could not order two versions. "Never
-  installs a version its instance would refuse" already existed, as the handshake's own `Check`. And the
-  done-when's crashing release could not be a real one, since one signed by the real workflow is public.
-
-  **A signature binds a version, and the listing is only a hint.** The certificate names
-  `release.yml@refs/tags/<tag>`, and the updater verifies against the candidate's own tag, so one release's
-  bundle cannot stand for another. The listing can withhold a release and never forge one (ledger).
-
-  **Seven `/code-review` rounds, and all but one found ten or more.** They did not converge on their own,
-  which is M22's lesson again: a round's fixes are code nobody has reviewed. The two worst both locked a
-  client out of its own instance: a daemon not yet heard from by its instance was treated as signed out and
-  moved a release candidate to the release that instance refused; and a release host's error text, one
-  redirect long enough, outgrew the record's bound and forgot the mode, the channel and every version rolled
-  back from. **What a stranger's server says is bounded where it is kept, not only where it is read.**
-
-  **The listing's bound was measured against the wrong thing.** 2 MiB looked generous against the test's
-  23-byte entries; one real release's entry is 32 KB, so from about the sixty-fifth release every check on
-  every install, the updater's own fix included, would have failed. Measure a bound against the live shape.
-
-  **The Windows pass ran in a VM, and found three things nothing else could.** The author's first try on
-  their own machine found the guide written for it hard to follow, so it moved to a Windows 11 VM:
-  unattended install, SSH, QEMU screenshots for what a person would see. `daemon status` said "started by
-  hand" for the task's own daemon on every Windows: `schtasks` translates its `Status:` line (French:
-  "Statut: En cours"), and in English the runner's cleaning turned the line's carriage return into
-  U+FFFD, which the tests' raw `\r\n` never went through. It now reads the state as a number from Task
-  Scheduler's COM interface; `Get-ScheduledTask` was tried first and WMI refuses it to a standard account
-  over SSH. `install.ps1` raced its own task and started a second daemon. **A test that feeds a parser raw
-  output has not tested what the runner hands it.**
-
-  **The console window is gone, and the console is not.** M23 kept the window because a program without a
-  console is killed at logoff. The task now runs the daemon in `conhost.exe --headless`; a sign-out and a
-  shutdown were both seen to stop it cleanly. The cost is written in `windows.go`: conhost exits 0
-  whatever the daemon did, so the task's restart-on-failure no longer sees a crash.
-  `norite daemon install --show-console` keeps the window, for testing.
-
-  **A test can pass for a reason other than the one it names.** `TestWindowsWaitsToBeAsked` held "nothing
-  installed unasked" on Windows, and its host served no Windows archive, so nothing could have been
-  installed whatever the default. Replaced by one that asserts the mode. Remove the guard and watch the
-  test fail, every time; this one would have stayed green.
-
-  **Linux was walked in a VM too**, against the real `v0.1.0-rc.1`: installed by itself in five seconds,
-  same PID, byte-identical to the published archive; rolled back under systemd from a release built to
-  crash; two reboots inside a trial counted against nothing.
-
-- **M25 — Mic-permission and global-hotkey spike**: done. A finding and no code: ADR 0034, the M25,
-  M29, M32 and M35 roadmap entries rewritten from it, `architecture.md` §6 and §17, ADR 0012 amended, and
-  a note under KEYMAP's push-to-talk row. The throwaway probes stay outside the repository, as the entry
-  asked.
-
-  **Planning found the design's hotkey half could not work on any OS's answer**, thirteen milestones
-  running. The library §6 and M35 named, `golang.design/x/hotkey`, keeps its Linux and macOS halves in
-  cgo files, and the release builds the daemon with `CGO_ENABLED=0`: a program using it compiles for
-  Windows and **fails to compile** for the other two. It is X11-only on Linux, and on macOS it needs
-  Accessibility where the documents said Input Monitoring. **Build a named library with the release's
-  flags before designing around it**; reading its README did not show any of this.
-
-  **Each OS answered, and no answer was the design's.**
-  - **The worker opens the microphone itself.** Linux asks nothing, but has no device before somebody logs
-    in. Windows names the worker's exe in one device-wide switch. macOS charges the worker to the daemon
-    that started it: the prompt reads "norite-daemon", and every new ad-hoc daemon build is asked again.
-  - **Push-to-talk is the daemon's, in pure Go, with no permission anywhere**: `RegisterHotKey`, the
-    Wayland `GlobalShortcuts` portal, an X11 grab, and Carbon on macOS through `purego`.
-  - **The key is held only during a call**, because on Windows and X11 a registered key is taken from
-    every other program.
-
-  **A probe that cannot tell two programs apart cannot say which one holds a grant.** The first macOS run
-  used one binary as both daemon and worker. It showed the child authorized, and could not show whose
-  authorization that was. A second run with two binaries showed it was the parent's, and that a new
-  worker build changes nothing while a new daemon build is asked again. **When the question is "which
-  program", the test needs two programs.**
-
-  **A stand-in device can be the real one.** To feed the Windows VM a tone, QEMU was pointed at a null
-  sink by name, and WirePlumber linked the VM's input to the author's real microphone instead. It was
-  caught at the first link check, before anything in the guest recorded. Every capture after that was
-  bracketed by a check. **Check where a virtual device is wired, not what it was asked to be wired to.**
-
-  **A setting's storage is not the setting.** Writing Windows's "deny desktop apps" registry value changed
-  nothing; turned off in Settings, the same value refused the device. A test that flips state behind the
-  OS's back can pass for the wrong reason, which is M14's removal lesson moved to the platform.
-
-  **The passes ran where M23 says they must**:
-  - Linux: the author's Hyprland session, asked first, with nothing left in its config; a Fedora KDE live
-    VM; Xvfb.
-  - Windows: a Windows 11 VM from the ordinary ISO, with SSH on loopback.
-  - macOS: the author's Mac, driven by a script that removed what it installed.
-
-- **M26 — Pion SFU core**: done. `backend/internal/voice` (the SFU, not started by `norite-server` until
-  M33: rooms, connections admitted by DTLS fingerprint, forwarding over pre-allocated slots, the data
-  channel, selection and the active speaker, bounds), `backend/voiceproto` (its wire format, outside
-  `internal/` for the voice-worker), `contracts/voice-datachannel.schema.json`, and `voicetest`'s client
-  and harness. Decisions are in the roadmap entry, in `architecture.md` §6, in ADR 0023 as amended, and in
-  `docs/security-ledger.md`.
-
-  **Planning found the milestone ADR 0023 describes was in no entry**: slots, the data channel,
-  subscription and the active speaker M34 consumes. The obvious reading of the entry, a track per
-  participant to every peer, is the design that ADR rejects. Then `/code-review` on the plan found
-  fifteen more, among them that admission keyed by user loses M105's second connection, and that a slot
-  map alone cannot say whose packet is whose: the data channel and the media have no order between them,
-  so every forwarded packet names its sender in its CSRC.
-
-  **A kick must not lose a race to the join it was meant to stop.** `Evict` carries a cutoff, M18's for a
-  revocation racing a sign-in, and a provision issued before it and delivered after it is refused; the
-  cutoff lapses exactly as such a provision turns stale, and a test pins that millisecond.
-  `/code-review` on the branch then found `CloseRoom` and `EvictConnection` with no such memory: a join
-  in flight reopened a deleted channel. **When one method of an interface needs a cutoff, ask which of
-  its siblings race the same way.**
-
-  **A stranger holding the session keys is a stranger.** `/security-sweep` found any admitted peer could
-  grow the server's memory without limit: every SSRC it invents gets an SRTP read stream with its own
-  buffer, which Pion keeps unread until the connection ends, and none of it reaches the per-track meter.
-  Found by reading Pion's and SRTP's source, not by a test; each connection now counts its streams
-  against its offer. The self-hosted SFU shares `norite-server`'s process, which is why every goroutine
-  and callback the package runs contains a panic, and why a contained panic must not leave a lock held,
-  which the review found it did.
-
-  **A guard measured against a wrapping number stops guarding at the wrap.** The check dropping a
-  packet from before a switch measured distance from the switch's first sequence number, and after
-  eleven minutes of one sender every packet looked older: eleven minutes of silence, then eleven of
-  sound. No test sent more than a few hundred packets through one slot; the one that now sends 70,000
-  takes a twentieth of a second.
-
-  **A level read on the wrong scale is a speaker for ever.** The first loudness summed every packet's
-  level above silence, so a microphone's noise floor sent without DTX was speaking, and 10 ms frames,
-  which the SFU's own answer invites, counted twice. A packet counts now only above a speech floor, and
-  for the time its timestamp covers.
-
-  **The test client lied once, in its sequence numbers.** Each send started at a random sequence number,
-  and SRTP's replay check read a jump past 2^15 as an old packet and dropped whole bursts at random. A
-  real sender's numbers continue. M19's fixture lesson again: check a stand-in fails the way the real
-  thing would.
-
-  **The manual pass ran in two unprivileged VMs on one QEMU stream link**, with no NAT between them and
-  SSH on loopback, and the media crossed it both ways as real Opus that decodes. It found Pion logging
-  four meaningless warnings on every ordinary connection; they are debug now. It also found the harness
-  could not be updated while it ran, so the first rerun tested the old binary: **check the hash of what a
-  pass runs.**
-
-  **A second `/code-review` on the finished branch found fifteen more**, M22's lesson again. The worst two
-  were each a fix's own blind spot: the selection's panic was contained only in the room's tick, so the
-  panic it survived came back on the next close, in a bare goroutine, and ended the process; and the
-  offer's candidate bound said nothing of the peer-reflexive ones ICE adds for every address that sends
-  an authenticated check, 105 from 100 ports, measured. A client that never said hello was never refused
-  for its version, and was forwarded all the same. **A bound on what the peer declares is not a bound on
-  what the peer can make the server hold.**
-
-- **M27 — Embedded TURN plus STUN**: done. `backend/internal/voice/turn` (TURN over UDP, TCP and TLS, and
-  STUN Binding, relaying to the SFU alone), `voice.StartStack`, the `[voice]` settings and `norite-server`
-  starting the stack under them, an ICE-lite SFU with a public address and a remote filter,
-  `ratelimit.AddrKey`, `voice/rate` and `voice/pionlog` extracted from M26, and the harness's
-  `/credentials`. Decisions are in the roadmap entry, in `architecture.md` §6, in ADRs 0012 and 0023 as
-  amended, and in `docs/security-ledger.md`.
-
-  **The done-when tested a relay nobody needed.** "A client behind simulated NAT via TURN alone" is met
-  by forcing a relay on a client that reaches this SFU without one: the SFU has an address the client can
-  reach, so any NAT, symmetric included, gets through. What needs a relay is a network that refuses UDP,
-  and the pass put the client behind a router dropping all of it. **Ask what failure a done-when's test
-  reproduces before building to it** — fifteen milestones running, planning found the entry was not the
-  milestone.
-
-  **A library's default is a decision somebody else made for a different deployment.** pion/turn's
-  permission handler admits every peer and sees only its IP; it relays over TCP to any port when asked
-  (RFC 6062); its own auth handler logs every refused username at error level, quoting it; its TCP
-  listener bounds nothing. Each was found by reading its source for this milestone, and each is replaced
-  rather than configured. The relay's guard is the socket's own `WriteTo`, which holds whatever pion asks.
-
-  **An identifier minted after the thing that needs it cannot scope it.** The first plan scoped the TURN
-  credential to the connection id; the client gathers its relayed candidate before the offer and the id
-  is minted when the offer arrives. It is the account's, and M33's entry carries the ordering.
-
-  **The fix that removes the sending beats the filter on where it goes.** M26's SFU sent checks to every
-  address an offer named, metadata address included; a filter would have had to know every bad address.
-  ICE-lite sends none, for 200 ms on a Pion client's join, measured. The filter stays as a second layer
-  and still needed two corrections a review found: "always refuse loopback" would have broken every test,
-  and "private ranges allowed" admitted AWS's and Alibaba's metadata addresses.
-
-  **A test passed for a reason other than its guard, twice.** The stream bound's test passed with the
-  bound removed because the deadline to allocate closed the connection anyway; it now looks before that
-  deadline. Closing the stack on stop passed without the close because a process's exit frees its ports;
-  the server now logs the stop and the test reads it. A first filter test failed with the filter in place,
-  having counted the offer's own candidates on the machine's private interfaces.
-
-  **`-race` found two timers assigned after they could fire**: `time.AfterFunc`'s result stored in a field
-  its own callback reads. Assign it under the lock the callback takes.
-
-  **The manual pass ran in four unprivileged VMs on QEMU stream links**: the SFU and TURN, a client on an
-  open network, a router masquerading the fourth and dropping every UDP packet it forwarded. Without the
-  relay the fourth could not connect, and the router counted the checks it dropped; through TURN over TCP
-  and then TLS, both directions carried Opus that decodes, the SFU logged no warning, and the relay
-  sockets were gone 30 seconds after the calls.
-
-  **`/code-review` then found the relay worked in exactly the configuration every test used, and in no
-  other.** A permission had to name the SFU's media address; the SFU announces its public address, or
-  with the default `media_listen = ":3479"` each interface's, and the relay refused both. The tests and
-  the VMs had all bound one address and announced it, so all were green. **A test chosen for convenience
-  tests the convenient configuration**: run the one the defaults produce, and the one the documentation
-  tells an operator to write. The fix translates rather than widens: whatever announced address a client
-  names, the relay sends to the media address, and a STUN answer goes back as the address its request
-  went to, matched by transaction. The VM pass ran again on the default, `:3479`, with the harness now
-  reading its addresses through `config.Voice`: through TURN over TCP and over TLS, Opus both ways.
-
-  The same review found fourteen more. The ones worth carrying: a bound charged before the bound that
-  refuses spends a shared budget on refused work (one host could silence every client's replies); a
-  check run once is not a lease (a stream outlived its allocation); two listeners counting apart double
-  their bound; and pion's Close stops listeners and nothing they accepted. It also found the per-source
-  bound fixed at about ten people behind one NAT, which is the very network a relay is for, and made it
-  `relay_per_address`.
+**Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
+**Phase E is under way, M28 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
+also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
+its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
+versions of these entries.
+
+**A completed milestone's line says `done` and nothing about its tag.** The tag is always the milestone number
+lowercased, and `git tag` states it. Never write `(tag pending)`.
+
+**`M<N>a` means "inserted after `M<N>`"**, so a milestone can go at its dependency position without
+renumbering every reference. Letters run `a`, `b`, `c` in insertion order. Fourteen exist: `M11a`, `M13a`,
+`M16a`, `M16b`, `M20a`, `M37a`, `M56a`, `M62a`, `M67a`, `M72a`, `M72b`, `M76a`, `M78a`, `M93a`. A list that
+names its own members drifts on the next insertion, so check it:
+`grep -cE '^- \*\*M[0-9]+[a-z] — ' docs/roadmap.md`. **A suffixed milestone can be retired and its
+number is never reused**: `M17a` was folded into M20.
+
+**Releases follow Semantic Versioning, and a milestone tag is not a version** (ADR 0033). `v0.1.0-alpha` at
+M20a, `v0.1.0` at the end of Phase D, the next MINOR at the end of each later feature phase through Phase O
+(`v0.12.0`); Phase P and M124–M125 move no version. PATCH releases may be cut at any time; other pre-releases
+are the author's option. The version stays `0.x` until every milestone is done, and while MAJOR is 0 any MINOR
+may break compatibility. `1.0.0` comes last, after a `v1.0.0-rc.N` stage. Self-hosting is open from the first
+release, without a support commitment before `1.0.0`; the flagship stays closed to non-developer accounts
+until Phase P is ready.
+
+**Tags**: release tags have three components (`v0.1.0-alpha`); release automation fires on `v*` only; `m<N>`
+is the milestone marker, and a commit completing a phase carries both. **Tagging is the author's step: an
+agent never creates a `v*` tag or bumps a version.**
+
+- **M0 — monorepo scaffolding**: done.
+- **M1 — backend skeleton**: done. Config, logging, httpx, database, rate limiting, sqlc, migrations,
+  `cmd/server`.
+- **M2 — CLI skeleton and `norite instance init`**: done. The `norite` command tree and the wizard.
+- **M3 — daemon lifecycle stub**: done. The single-instance lock, the log, `norite daemon` over systemd,
+  launchd and the Windows logon task.
+- **M4 — backend auth core**: done. Snowflakes, `dbtest`, argon2id, HS256 access tokens, device-scoped refresh
+  families, scoped API tokens (ADRs 0022, 0023). The first milestone merged with a merge commit.
+- **M5 — transactional email and password reset**: done. `internal/mail`'s non-blocking queue, the always-202
+  reset, the first HTML page.
+- **M6 — OAuth backend flow**: done. Google and GitHub with PKCE, the client-bound exchange code, the sweeper
+  (ADR 0024).
+- **M7 — `norite login`, password plus keychain**: done. `daemon/credentials`, the keyring-or-file store,
+  `termsafe` (ADR 0025).
+- **M8 — CLI OAuth loopback flow**: done. The loopback listener the instance redirects to (ADR 0027).
+- **M9 — headless device-code fallback**: done. The verification page, with providers and an explicit approval
+  step (ADR 0028).
+- **M10 — `norite instance init` finish, and registration hardening**: done. The operator token, bootstrap,
+  instance invites, verification mail, anti-enumeration registration (ADR 0029).
+- **M11 — session revocation primitive**: done. `revokeEverything`, `logout/all`, the sessions listing (ADR
+  0030).
+- **M11a — two-factor authentication**: done. TOTP and recovery codes behind the `factorProof` type, on every
+  sign-in path and the device page (ADR 0031).
+- **M12 — guilds, channels and roles**: done. Seven tables, `roles.Resolve`, the `authorize` chokepoint,
+  fifteen routes, `apicontract`; it took the audit table from M14 and `Resolve` from M13.
+- **M13 — overwrites, hierarchy, role assignment**: done. Standing in `Resolution`, assignment
+  escalation-checked, category overwrites copied at creation.
+- **M13a — guild ownership transfer**: done (built after M17). Every owner check decides from the locked guild
+  row; the owned-guild ceiling is counted under advisory slot 4.
+- **M14 — guild audit log**: done. The read surface, `PermViewAuditLog` (bit 19), `changes` diffs built in
+  every writer.
+- **M15 — core messaging**: done. `messages`, `guildauth` extracted, bit 20, rule 2 narrowed to administrative
+  mutations.
+- **M16 — guild reports**: done. `reports`, the reporter never named to a moderator.
+- **M16a — message edit history**: done. The history route, with the current version, in one snapshot.
+- **M16b — opt-in message audit**: done. `PermViewMessageAudit` (bit 21), the per-guild recording switch,
+  `message_audit_entries`.
+- **M17 — message tagging**: done. `tags`, private tags invisible as 404, tags carried on every `Message`.
+- **M18 — gateway protocol core**: done. HELLO/IDENTIFY/READY, heartbeats, RESUME, dispatch after commit,
+  audiences resolved at fan-out, Redis and in-process buses, revocation closes.
+- **M19 — daemon as gateway client**: done. The session source, refresh on the server's clock, the gateway
+  client, bounded state, the `daemon` → `backend` edge.
+- **M20 — daemon↔client local IPC**: done. The attach socket, the relay, forty verbs, `--json` schemas, exit
+  codes.
+- **M20a — first usable client**: done. The terminal client's home and channel pane, guild invites,
+  `norite register`, the first release pipeline.
+- **M21 — config file**: done. `daemon/config` with edits by byte range, the split toggle, `norite config`,
+  `DAEMON_CONFIG_UPDATE`.
+- **M22 — local bot-automation port**: done. The secret-protected port, API tokens forwarded to one instance,
+  `messages.type` written by the instance, `AUTO` in both front ends.
+- **M23 — daemon lifecycle polish**: done. `norite logs tail`, stop through the socket, the crash file,
+  `daemon status --json`, `--linger`, the Windows task as XML.
+- **M24 — client auto-update**: done. The signed-release updater (sigstore against an embedded trusted root),
+  staging, swap, trial and rollback, `norite update` (ADR 0020 as amended).
+- **M25 — mic-permission and global-hotkey spike**: done. A finding, no code: the worker opens the device
+  itself, push-to-talk is the daemon's in pure Go (ADR 0034).
+- **M26 — Pion SFU core**: done. `backend/internal/voice`: rooms, admission by DTLS fingerprint,
+  allocation-free forwarding over slots, the data channel, the active speaker, a bound for everything a peer
+  sends (ADR 0023 as amended).
+- **M27 — embedded TURN plus STUN**: done. `voice/turn` relaying to the SFU alone, an ICE-lite SFU with a
+  remote filter, `voice.StartStack` under `[voice]`.
+- **M28 — voice-worker subprocess and IPC**: done. `norite-voice` and its WebRTC connection (no audio until
+  M29), `daemon/voiceipc` on two dedicated pipes, the supervisor in `daemon/internal/voiceworker` with its
+  `Signaler` seam, `norite voice join|leave|status` (taken from M34), and the worker in every package and the
+  updater. Its `/security-sweep` found that the pipe's bounds do not confine an exploited worker, which runs
+  as the account, so M29 owes the decision on OS confinement. Its second `/code-review` found that a call must
+  end with the session's sign-in and not the gateway's, which a logout made offline never reached.
+
+## What keeps coming back
+
+The milestones' lessons, kept as rules once their stories were cut: each name says where it was learned, and
+that milestone's roadmap entry, commits and ledger entries hold the detail.
+
+**Before building**
+- **Planning finds that the entry is not the milestone.** Read the roadmap entry against `architecture.md`,
+  the ADRs, the screens and the code before building. Every milestone from M12 to M28 found something wrong or
+  missing that way, while every test was green.
+- **Read the done-when clause by clause before calling a milestone done**, and ask of each clause what would
+  have to break for it to go red (M18, M23). A clause that cannot fail is not a clause.
+- **Ask what failure a done-when's test reproduces before building to it** (M27): a relay forced on a client
+  that never needed one proved nothing.
+- **Build a named library with the release's flags before designing around it** (M25): read its source, not
+  its README. A library's default is a decision made for somebody else's deployment (M27).
+- **A deferral repeated from a comment is not evidence** (M7, M19): two of M7's three were closed by reading
+  the code they described.
+
+**Proving it**
+- **Prove a guard by removing it**: watch a named test fail, put it back, and check that the mutation landed.
+  A mutation that does not compile, matches nothing, breaks the statement around it, or passes for another
+  reason proves nothing (M14, M15, M17). Run mutations with `-count=1`, in a process group a timeout kills
+  whole (M28). A mutation that survives is a finding about the tests (M23).
+- **A guard held twice needs three runs to prove**: each alone, then both (M16b, M17).
+- **A test can pass for a reason other than its name**: a deadline that closes the connection anyway, actors
+  that overlap, a host that serves no archive (M17, M24, M27).
+- **A stand-in must fail the way the real thing does**: a proxy that forwards the FIN, sequence numbers that
+  jump, a seed whose ids cluster or whose distributions share a modulus (M16, M19, M26). A schema-checked fake
+  cannot see wording or a screen, and a test that feeds a parser raw output has not tested what the runner
+  hands it (M19, M20a, M24).
+- **Test the configuration the defaults produce** and the one the documentation tells an operator to write, on
+  a machine with more than one interface (M27, M28). Run `-race` and vet every new test file for every OS it
+  claims to run on (M27, M28).
+- **When the question is "which program", the test needs two programs** (M25). A setting's storage is not the
+  setting: change it the way a person does (M25).
+- **A race is staged, never raced**: hold one side with a hook, a gated bus or a held transaction, and wait
+  for the other to block. A race the test cannot provoke is pinned by asserting the property instead (M13a,
+  M15, M18).
+- **Assert whole messages, not `Contains`** (M13a): a sentinel's text leaked into every refusal while every
+  test passed. `TestRefusalsCarryOnlyTheirOwnMessage` holds it.
+- **A test that waits on a channel the guard was meant to close hangs instead of failing**: bound every wait a
+  removed guard could leave open (M28).
+- **Gates in a chain need `&&`, not `;`** (M18). Hold a cost by counting, not by a wall-clock limit (M21).
+
+**Designing it**
+- **When a value that never changed starts changing, enumerate every reader of it**; when an event starts
+  mattering, every writer (M13a, M18). When one method needs a cutoff or a lock, ask which of its siblings
+  race the same way (M26).
+- **Refuse on unlocked data, then lock**, and take the weakest lock that orders what must be ordered
+  (`FOR NO KEY UPDATE`, M13a). A fix that adds a lock is a new place for that bug.
+  `TestARefusedCallerTakesNoLockOnTheGuild` walks every refusal with the row held.
+- **Rule 1 and read consistency are different properties**: two reads that must agree share one
+  `REPEATABLE READ` read-only snapshot (M16a).
+- **Lifting a requirement and lifting a refusal are two changes** that look like one (M16a). A default with no
+  documented exit gets routed around, so give it one in the chokepoint, where a grep finds every use:
+  `AuthorizeChannelIgnoringVisibility` (M16a).
+- **When a rule says what a check must not key on, ask separately what it must** (M18).
+- **Two surfaces for one object must agree, and the contract says which is right** (M18).
+- **Whatever a stranger's server, a peer or a worker sends is bounded where it is kept**, not only where it is
+  read, and against a hostile sender (M19, M24). Measure a bound against the live shape (M24) and as a cost
+  (M21). A ceiling that follows another is bounded with it (M20a). A bound on what a peer declares is not a
+  bound on what it can make the server hold (M26).
+- **A guard measured against a wrapping number stops guarding at the wrap** (M26). A reason cut to a bound
+  must cut on a character boundary, or its encoding exceeds the bound (M28).
+- **An identifier minted after the thing that needs it cannot scope it** (M27). The fix that removes the
+  sending beats a filter on where it goes (M27).
+- **Assign a `time.AfterFunc` result under the lock its callback takes** (M27).
+- **`os/exec` gives a child the parent's whole environment by default** (M28).
+- **A fix for one platform's cosmetics is a change to how that platform stops the program** (M23).
+- **When a fix narrows a rule, ask what the narrower rule cannot say**, and make it say so in the output
+  (M21).
+- **Measure the off path before designing the on path** (M16b), what grows with something other than the
+  audience (M18), and plans under the generic plan pgx prepares, on skewed data (M13a,
+  `TestMemberRoleReadsCannotScanTheWholeGuild`).
+- **A message describes the outcome**: write it after the last step that can fail, from what happened, and
+  read every sentence a person will see against the real program (M19, M22, M28).
+- **Anything written for a platform nobody ran says so**, in the entry, the guide, the commit and the code
+  (M23).
+
+**Reviewing and testing by hand**
+- **Run the review again after fixing what it found**: a round's fixes are code nobody has reviewed (M22,
+  M24). `/code-review`, `/security-sweep` and `/optimization-review` ask different questions, and each found
+  what the others walked past (M15, M19).
+- **The manual pass finds what reads wrong**: wording and screens, which no review and no schema-checked fake
+  sees (M19, M20a, M22).
+- **A manual pass that needs an init system, a reboot, a login session or another OS runs in an unprivileged
+  VM**, or on a machine the author names, and only after asking. Never a privileged container: one ended the
+  author's desktop session at M23. Check the hash of what a pass runs (M26), and where a virtual device is
+  wired rather than what it was asked to be wired to (M25).
+
+## Conventions, by area
 
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
@@ -1436,57 +618,29 @@ re-derive:
   output. CI's `codegen` job fails if the committed output is stale.
 - **Logging**: `logging.FromContext(ctx)` inside handlers. The request logger deliberately omits query
   strings, headers, and bodies (rule 8) — don't add them back.
-- **Toolchain pinning**: `golangci-lint` (config in `.golangci.yml`) and `sqlc` are pinned to exact
-  versions in *two* places that must move together — `.github/workflows/ci.yml`'s `env:` block and the
-  justfile's variables. `just lint` warns when your local golangci-lint differs. Also note golangci-lint
-  must be built with Go >= the workspace's highest `go` directive (**1.26.0**, raised from 1.25.0 when a
-  `x/crypto` advisory's fix required it), which is why the lint action is v9/golangci-lint v2 rather than
-  the v6/v1 pair M0 started with. That is a *third* version that has to move with the other two, and it is
-  the one with no pin to read: the constraint is satisfied today because the pinned `v2.12.2` binary
-  happens to be built with go1.26.3, which `go version -m $(which golangci-lint)` will tell you and
-  nothing else will. **And a fourth, which this list did not name until M14 found it the hard way:
-  `docker/docker-compose.yml`'s `golang:` image.** It sat at 1.25 after the directive went to 1.26.0, so
-  `just dev` refused to build the backend at all — for however long it was between that raise and somebody
-  next starting the stack. CI never sees it, because CI does not run compose. **And a fifth, found at M14
-  the first time the licence gate was actually run: `go_licenses_version` / `GO_LICENSES_VERSION`.** It was
-  `go install …@latest` in CI and nothing at all locally, which looked safe and was safe only by accident —
-  go-licenses v2 moved to a `/v2` module path, so `@latest` on the bare path can never resolve past v1.6.0.
-  The accident is gone now that it points at `/v2`, which is actively released.
-  **`govulncheck` is deliberately not
-  pinned**, in CI or the justfile: what pinning buys the other two is that an upstream release cannot
-  surprise an unrelated PR, and here the surprise *is* the product — the job fails on a new advisory
-  fetched from the vulnerability database at run time, which pinning the binary would not prevent. That
-  reasoning was copied onto go-licenses and was wrong there: govulncheck answers from a database fetched at
-  run time, so its binary version does not decide the outcome, while go-licenses decides entirely from the
-  code in front of it — v1 reports the first licence in a `LICENSE` file and v2 reports every one, which is
-  a seven-row difference on today's tree and would be a missed copyleft block on tomorrow's.
-
-  **That argument is about its *version* and says nothing about the Go it was built with, which is the
-  sixth pin and bit at M16.** `govulncheck` is a source-processing tool like `golangci-lint`, so a binary
-  built with an older Go cannot parse a newer toolchain's standard library: with go1.27 installed and a
-  binary built by go1.26, every module failed with `file requires newer Go version go1.27` and
-  `just security-scan` exited non-zero having checked nothing. It is not a pin anybody can read — the
-  binary's own build version is the value, `go version -m $(which govulncheck)` is the only way to see it,
-  and `go install golang.org/x/vuln/cmd/govulncheck@latest` after a toolchain upgrade is the fix. CI never
-  sees this because it installs the binary fresh with the same Go it builds with. Note the failure is loud
-  in the right direction: it refused to run rather than reporting a clean scan it had not performed.
-
-  **And a seventh, from M20a: `goreleaser_version` / `GORELEASER_VERSION`**, in the justfile and in both
-  `ci.yml` and `release.yml`, with release.yml's `COSIGN_VERSION` and the cosign-installer tag beside it. It
-  was `latest`, which would have made an upstream release the first thing a tag tests, on the one run that
-  publishes. The justfile runs it through `go run`, like the generators below.
-- **Every generator is invoked as `go run …@{{version}}`** — `sqlc`, `oapi-codegen`, and since M14
-  `go-licenses` — rather than from a binary on `PATH`. Nothing has to be installed, and the pinned version
-  cannot be shadowed by whatever a distro package put in `/usr/bin`. That is not hypothetical: the
-  maintainer's machine had go-licenses v1.6.0 in `~/go/bin` and a packaged v2.0.1 in `/usr/bin`, with
-  `~/go/bin` on no shell's `PATH`, so `just license-inventory` silently produced a different inventory than
-  CI would — a diff that would have read as *a dependency's licence changed* rather than as a tool version.
-  `golangci-lint` stays a real binary because it is too slow under `go run`, which is why it is the one that
-  warns on a mismatch instead.
-- **CI runs five jobs**: `lint`, `test`, `codegen`, `security` and `build`. `security` is `govulncheck`
-  per module, the same command `just security-scan` runs, and it is blocking. It exists from M11; before
-  that `architecture.md` claimed it did while `ci.yml` had four jobs and no `govulncheck` anywhere — the
-  one piece of drift found where a security control was believed to be running and was not.
+- **Toolchain pinning: seven versions move together, and two of them have no pin to read.**
+  - `golangci-lint` (config in `.golangci.yml`) and `sqlc`: exact versions in `ci.yml`'s `env:` block and in
+    the justfile. `just lint` warns when the local golangci-lint differs.
+  - `goreleaser`: in the justfile, `ci.yml` and `release.yml`, with `release.yml`'s `COSIGN_VERSION` and the
+    cosign-installer tag beside it. Never `latest`, or an upstream release is first tested by the run that
+    publishes.
+  - `go-licenses`: `go_licenses_version` / `GO_LICENSES_VERSION`, at its `/v2` module path. It decides from
+    the code in front of it (v1 reports one licence per `LICENSE` file, v2 every one), so its version changes
+    the result.
+  - `docker/docker-compose.yml`'s `golang:` image must keep up with the workspace's highest `go` directive
+    (**1.26.0**), or `just dev` cannot build the backend. CI never runs compose, so nothing else notices.
+  - **The Go a source-processing tool was built with** must be at least the toolchain's. `golangci-lint` and
+    `govulncheck` built by an older Go cannot parse a newer standard library, and fail every module.
+    `go version -m $(which golangci-lint)` is the only way to read it.
+  - **`govulncheck` is deliberately unpinned**: it answers from a database fetched at run time, so a new
+    advisory failing an unrelated PR is the product, and pinning the binary would not prevent it. After a
+    toolchain upgrade, reinstall it with `go install golang.org/x/vuln/cmd/govulncheck@latest`.
+- **Every generator is invoked as `go run …@{{version}}`** (`sqlc`, `oapi-codegen`, `go-licenses`,
+  `goreleaser`), never from a binary on `PATH`, which a distro package can shadow with another version: that
+  once made `just license-inventory` produce a different inventory from CI's. `golangci-lint` stays a real
+  binary because it is too slow under `go run`, which is why it is the one that warns on a mismatch.
+- **CI runs five jobs**: `lint`, `test`, `codegen`, `security` and `build`. `security` is `govulncheck` per
+  module, the command `just security-scan` runs, and it is blocking.
 
 And on the CLI side, from M2:
 
@@ -1833,25 +987,10 @@ And on the client-auth side, from M7:
   impossible over SSH on any machine that once logged in at its desktop; staying silent would hide a live
   token from the only person who can deal with it. The CLI prints it, the daemon logs it.
 
-Three things this milestone deliberately left for the milestone that could do them properly — **one of
-which turned out not to need deferring at all**. All are written into the roadmap entry that inherits
-them, because a deferral recorded only here is one that milestone never reads:
-
-- ~~**A dropped refresh token cannot be revoked yet.**~~ **Closed at M11**, and the claim was wrong twice
-  over: `POST /auth/logout` had revoked exactly one session by presenting its refresh token since M4, and
-  the daemon holds the HTTP client to call it with at the very line that dropped the token. No primitive
-  and no gateway connection were needed. Left here rather than deleted because the reasoning is the
-  cautionary part — a deferral repeated from a code comment into a roadmap entry, believed twice, and only
-  disproved by somebody reading what `/auth/logout` actually does.
-- ~~**A daemon started before its keyring unlocks never reaches it.**~~ **Closed at M19**, by retrying the
-  read — and the cause was `Load` being tried once, not the probe being cached. This bullet blamed the
-  `sync.Once` probe until M19's planning read the store: the probe only chooses where `Save` puts a *new*
-  secret, the daemon never saves, and its reads go to the backend the record names, which every record has
-  carried since M7. The same shape as the dropped-token bullet above: a deferral repeated from a comment
-  and believed until somebody read the code it described.
-- ~~**`termsafe` lives in the CLI module and the daemon cannot import it.**~~ **Closed at M19**, by moving
-  it to `daemon/termsafe` rather than copying it — the daemon fetches names of its own from that milestone,
-  and two copies of a sanitizer drift.
+Three things M7 deferred are closed: revoking a dropped refresh token (M11, which `POST /auth/logout` had
+done since M4), a daemon started before its keyring unlocks (M19, by retrying the read), and `termsafe` in
+the daemon (M19, moved rather than copied). Two of the three deferrals were wrong about their cause, and were
+believed from a comment until somebody read the code.
 
 And on the device-code side, from M9 (decisions in ADR 0028):
 
@@ -2547,7 +1686,7 @@ And on the daemon as gateway client, from M19:
   lossless.
 - **A sub-logger adds `subsystem`, never `component`.** The base logger sets `component=daemon`, and
   zerolog appends a field rather than replacing it.
-- **The `daemon` → `backend` edge reaches types only**: `gatewayproto` and `apicontract`. Keep both free of
+- **The `daemon` → `backend` edge reaches types only**: `gatewayproto`, `apicontract` and, since M28, `voiceproto`. Keep both free of
   anything that decides, or the daemon starts depending on the server's judgement rather than its wire.
 - **Testing the session**: `fakeClock` with `advanceUntil`, which steps rather than jumps because `Run`
   arms timers between steps; `settle` before counting refreshes; `waitingWithin` to hold `Run` inside a
@@ -2602,9 +1741,11 @@ And on the attach socket and the relayed verbs, from M20:
 
 And on guild invites and the first client, from M20a:
 
-- **An invite code travels in a body, never a path**, on all three routes that take one (ADR 0029's
-  reasoning: a path is in every log line). Unknown, malformed, expired, revoked and used up are one 404.
-  Codes are M10's format, from `auth.NewInviteCode`.
+- **An invite code travels in a body, never a path**, on all three routes that take one (ADR 0029's reasoning:
+  a path is in every log line). Unknown, malformed, expired, revoked and used up are one 404. Codes are M10's
+  format, from `auth.NewInviteCode`. **Joining is a person's act, never a token's**: redemption takes
+  `RequireUserActor`, as an ownership transfer does, since a delegated credential choosing its owner's company
+  is an escalation. A token may still create invites.
 - **Redemption's order is the lock order**: the account's slot-4 advisory lock, the guild `FOR SHARE`,
   then membership, the joined ceiling and a single-statement spend with every guard in its `WHERE`. A
   member redeeming again spends nothing and writes nothing. Anything new that locks a guild and an invite
@@ -2760,13 +1901,13 @@ And on the daemon's lifecycle and its log, from M23:
 - **`norite daemon status`: 0 means a daemon is running, however it was started.** It asks the service
   manager and the socket. A daemon started by hand is running and not installed, and anything that offers
   to install must treat it as running.
-- **On Windows the daemon keeps its console, and since M24 the console has no window.** A console
-  program is told about a logoff and a shutdown through the console, and Go turns each into the SIGTERM
-  the daemon stops on. Letting go of the console (`FreeConsole`) was built and removed at M23: without one
-  the daemon is killed where it stands at every logoff. The task runs it in `conhost.exe --headless`,
-  which keeps the console and shows nothing, seen to stop it cleanly at a sign-out and a shutdown; the
-  updater's successor gets a hidden console of its own. conhost exits 0 whatever its program did, which
-  is why the updater watches the successor itself.
+- **On Windows the daemon keeps its console, and since M24 the console has no window.** A console program is
+  told about a logoff and a shutdown through the console, and Go turns each into the SIGTERM the daemon stops
+  on. Letting go of the console (`FreeConsole`) was built and removed at M23: without one the daemon is killed
+  where it stands at every logoff. The task runs it in `conhost.exe --headless`, which keeps the console and
+  shows nothing, seen to stop it cleanly at a sign-out and a shutdown; the updater's successor gets a hidden
+  console of its own. conhost exits 0 whatever its program did, which is why the updater watches the successor
+  itself. `norite daemon install --show-console` keeps the window, for testing.
 - **A daemon is running when something answered, never when a connection could not be made.** A dial
   that fails for any reason but "nothing is listening" says so as a problem and reports no daemon.
 - **Every "it has not stopped" has waited.** `askToStop` waits for the process the daemon named, or for
@@ -2791,7 +1932,7 @@ And on the updater, from M24:
 
 - **Nothing the listing says is believed until a signature says it too.** The bundle is verified offline
   against `daemon/internal/updater/trusted_root.json` and the identity for the candidate's own tag; then
-  the archive's SHA-256; then two programs by exact name. Any failure fails closed and the version running
+  the archive's SHA-256; then three programs by exact name (the voice-worker since M28). Any failure fails closed and the version running
   stays. No flag, file or environment variable changes the root or the identity in a release build.
 - **The trusted root ages.** `just trusted-root` regenerates it through TUF, and CI fails when the
   committed copy is behind Sigstore's, like govulncheck, on a PR that changed nothing. Read its diff: it
@@ -2837,7 +1978,7 @@ And on packages, from the `package-managers` branch (ADR 0035):
 - **The package definitions restate a release too.** `.goreleaser.yaml`'s nFPM packages, casks, Scoop and
   winget manifests and AUR packages name the same archives, programs and notice paths as `install.sh` and
   `install.ps1`; a change to one changes the others in the same commit. `just release-dry-run` checks
-  each client package holds both programs and its marker.
+  each client package holds its three programs and its marker.
 - **A package installs files and starts nothing.** `norite login` offers the service (M23). No package
   script reaches a user's service manager: removal says what to run.
 - **A packaged install is its package manager's to update.** The daemon checks and names the command.
@@ -2934,6 +2075,50 @@ And on TURN, from M27:
   `voice/relay_test.go` runs TURN beside a real SFU, and the voice package's `TestMain` trusts a
   certificate for 127.0.0.1 through `SSL_CERT_FILE`, since Pion verifies TURNS against the system's
   roots and nothing else.
+
+And on the voice-worker, from M28:
+
+- **The worker is the daemon's direct child, started by its path beside the daemon's resolved executable**
+  (`voiceworker.ProgramBeside`), never through a shell, `launchctl` or `open`: on macOS TCC charges its
+  microphone to its parent (ADR 0034). On Windows it shares the daemon's console and is never given one of
+  its own, which would show a window.
+- **The protocol is `daemon/voiceipc` on two pipes of its own**, the attach socket's framing, and
+  `contracts/voice-worker.schema.json`. Never stdin or stdout: the worker's stdin is the null device, and
+  its stdout and stderr are one pipe read into the daemon's log, each line cut, cleaned and quoted as one
+  field. A field added to a frame is a MINOR change.
+- **Everything from the worker is a stranger's.** Frames are bounded (64 KiB, 50 a second), decoded
+  strictly and checked (`Check` on each payload, held to the contract by a test refusing each case through
+  both); printing is bounded at 256 KiB a second. The first breach kills it. A reason it carries is
+  cleaned and cut with `voiceipc.CutReason` wherever it is shown or kept.
+- **Its environment is `env.go`'s allow-list.** A capture library's variable is added there by name, and
+  nothing else is. **Its descriptors are its pipes and nothing else**: Go opens its own close-on-exec and
+  leaves alone what the daemon inherited from whatever started it, so `closeInherited` marks every descriptor
+  from 3 up before each start. CI's runner hands two such pipes down, and they reached the worker until M28's
+  first CI run.
+- **A crash is a closed pipe the daemon did not ask for, or an exit that is not 0**, logged with the last
+  twenty lines. Every worker is reaped; one asked to leave, or that closed its pipe and stayed, is killed
+  after 3 s. **The worker exits when its control pipe closes**, from a goroutine that does nothing else.
+- **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater, and `Leave` returns once
+  the worker is reaped. Each call ends with the sign-in it was joined under, through the session's own `Ended`
+  channel and never the gateway connection's end, which a sign-out made while the instance is unreachable does
+  not reach; a join that read a sign-in since ended is refused. The SFU is reached through a `Signaler`; until
+  M33 the only one is M26's harness, compiled in under `norite_voiceharness` alone, which no release build
+  passes (a test holds both).
+- **A join's path carries a channel id**, so a client asks `GET /@daemon/voice` first, M22's answer to
+  the ledger's entry on the prefix.
+- **The worker ships beside the daemon and updates with it.** It has no release of its own. The updater
+  stages and smoke-runs three programs; an install from before M28 has none to keep, and undoing to it
+  removes the worker. A worker and a daemon of different versions are refused at the first frame.
+- **The worker offers at most `voiceproto.MaxCandidates` candidate lines, each once in the first
+  section**, relays first, which is where Pion reads them and what the SFU admits.
+- **What the voice server answers is a stranger's too** (from M33 an instance's). The worker's ICE agent
+  takes up only the candidates `session.reachable` admits, never this host, its link or a metadata
+  address unless the join admits loopback, and at most `maxRemotes`. The pipe's bounds confine nothing: the
+  worker runs as the account, and whether the OS confines it is M29's decision.
+- **Testing the worker**: `standin_test.go` re-runs the package's test binary as a worker playing each
+  hostile case; wait on a stand-in with `drain`, which fails rather than hangs. `e2e_test.go` builds
+  `norite-voice` and M26's harness from the checkout and makes real calls. The worker's own loop is tested
+  against a fake `Call` over in-memory pipes, every frame held to the contract.
 
 ## Project-specific skills
 
