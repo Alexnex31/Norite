@@ -236,16 +236,27 @@ function Install-Norite {
             Expand-Archive -Path $zip -DestinationPath $out -Force
         }
 
-        foreach ($name in 'norite.exe', 'norite-voice.exe', 'norite-daemon.exe') {
+        foreach ($name in 'norite.exe', 'norite-daemon.exe') {
             if (-not (Test-Path (Join-Path $out $name))) { throw "$name is missing from what was fetched" }
+        }
+        # A release from before M28 has no voice-worker, and its daemon starts none: one left from a newer
+        # install is removed rather than kept beside a daemon of another version.
+        $programs = @('norite.exe', 'norite-voice.exe', 'norite-daemon.exe'); $dropWorker = $false
+        if (-not (Test-Path (Join-Path $out 'norite-voice.exe'))) {
+            $programs = @('norite.exe', 'norite-daemon.exe')
+            $dropWorker = $true
         }
 
         Step "Installing into $BinDir"
         New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
         Stop-Daemon
+        if ($dropWorker -and (Test-Path $worker)) {
+            try { Remove-Item -Force $worker }
+            catch { Move-Item -Force $worker ($worker + '.old-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)) }
+        }
         # The worker before the daemon, which finds it beside itself. A worker still running a call when the
         # daemon was stopped is renamed out of the way like any running program, and exits as its pipe closes.
-        foreach ($name in 'norite.exe', 'norite-voice.exe', 'norite-daemon.exe') {
+        foreach ($name in $programs) {
             $target = Join-Path $BinDir $name
             # A program still running cannot be overwritten, but it can be renamed out of the way.
             if (Test-Path $target) {
@@ -256,7 +267,7 @@ function Install-Norite {
             if ($onWindows) { Unblock-File -Path $target -ErrorAction SilentlyContinue }
         }
         Get-ChildItem -Path $BinDir -Filter '*.old-*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        Say 'norite.exe, norite-voice.exe, norite-daemon.exe'
+        Say ($programs -join ', ')
     }
     finally {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp

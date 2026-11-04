@@ -353,13 +353,18 @@ main() {
     mkdir -p "$bin_dir"
     place norite
     # The worker before the daemon: a daemon finds its worker beside it, and one restarted below must find
-    # its own version's.
-    place norite-voice
+    # its own version's. A release from before M28 has none, and its daemon starts none, so one left from
+    # a newer install is removed rather than kept beside a daemon of another version.
+    if [ -f "$tmp/out/norite-voice" ]; then
+        place norite-voice
+    else
+        rm -f "$bin_dir/norite-voice"
+    fi
     place norite-daemon
     [ "$with_server" = 1 ] && place norite-server
     norite="$bin_dir/norite"
     "$norite" --help >/dev/null 2>&1 || die "$norite was installed but does not run on this machine"
-    say "norite, norite-voice, norite-daemon$([ "$with_server" = 1 ] && printf ', norite-server')"
+    say "norite$([ -f "$bin_dir/norite-voice" ] && printf ', norite-voice'), norite-daemon$([ "$with_server" = 1 ] && printf ', norite-server')"
     leave_receipt
 
     [ "$daemon" = 1 ] && setup_daemon

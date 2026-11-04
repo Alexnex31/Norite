@@ -285,7 +285,7 @@ func (in *Installer) restore() error {
 	for _, name := range in.programs() {
 		kept := filepath.Join(in.previousDir(), name)
 		if _, err := os.Lstat(kept); errors.Is(err, fs.ErrNotExist) && in.mayBeAbsent(name) {
-			if err := os.Remove(filepath.Join(in.BinDir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := removeProgram(filepath.Join(in.BinDir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("removing %s: %w", name, err)
 			}
 			continue
