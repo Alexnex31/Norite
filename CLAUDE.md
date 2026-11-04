@@ -1395,6 +1395,52 @@ Recorded in ADR 0033, which supersedes ADR 0032's single-release posture and not
   bound fixed at about ten people behind one NAT, which is the very network a relay is for, and made it
   `relay_per_address`.
 
+- **M28 — Voice-worker subprocess and IPC**: done. `voiceworker/` and its program `norite-voice` (the
+  worker's WebRTC connection to the SFU, no audio until M29), `daemon/voiceipc` and
+  `contracts/voice-worker.schema.json` (the pipe's protocol), `daemon/internal/voiceworker` (spawning,
+  bounding and ending the worker, and the `Signaler` seam), `norite voice join|leave|status` with
+  `/@daemon/voice` and `DAEMON_VOICE`, taken from M34, and the worker in the client archive, the packages,
+  the installers and the updater. Decisions are in the roadmap entry, in `architecture.md` §3 and §6, in
+  ADR 0017 as amended, and in `docs/security-ledger.md`.
+
+  **The entry had no caller, and a protocol on a stdout a C library would share.** Nothing could ask the
+  daemon to join before op 4 (M33) and the verbs (M34), so the join and the call state came here, signalled
+  through M26's harness behind the `norite_voiceharness` tag. And from M29 a `printf` in libopus would land
+  mid-frame: rerouting descriptor 1 does not move the C runtime's on Windows, so the protocol has two pipes
+  of its own (`ExtraFiles`, `AdditionalInheritedHandles`). Sixteen milestones running, planning found the
+  entry was not the milestone.
+
+  **Trust runs the other way on this pipe.** The worker is the daemon's own child and the peer it trusts
+  least, since from M29 it decodes a stranger's audio in C. Every frame is bounded, rated and strictly
+  decoded, and the first breach kills it. Removing the environment's allow-list handed a stand-in
+  `NORITE_API_TOKEN`, `NORITE_PASSWORD` and the session's own tokens: **`os/exec` gives a child everything
+  by default, and the parent's environment is whatever its shell held.**
+
+  **Driving the real program found what the stand-ins could not.** The worker's offer had twenty candidate
+  lines against the SFU's sixteen: ten candidates over wlan, tailscale, docker and loopback, which Pion
+  writes twice. M27's tests gathered IPv4 alone on a quiet interface, so any machine with a VPN would have
+  been refused. **A test chosen for convenience tests the convenient machine**, M27's lesson one layer in.
+  The same run found what M36 needs: the SFU counts a killed worker's connection until ICE gives up on it.
+
+  **A reason cut to its bound could exceed it.** Cutting 256 bytes through a character makes JSON write
+  U+FFFD, three bytes, so the daemon would have killed the worker for the length of its own error message.
+  `voiceipc.CutReason` cuts on a boundary.
+
+  **A test that waits on a channel the guard was meant to close hangs instead of failing.** The first flood
+  test ranged over the worker's events, so with the rate check removed it never returned, and the mutation
+  script, reading through pipes a stand-in grandchild still held, hung with it. Bound every wait a removed
+  guard could leave open, and run mutations with `-count=1` in a process group a timeout kills whole.
+
+  **The manual pass ran on this machine and in a Windows 11 VM**, the real path from `norite voice join` to
+  the SFU. On Linux: the worker was the daemon's direct child, holding `/dev/null`, its log pipe and its two
+  pipes; its environment held none of the secrets set in the daemon's; a killed worker was named in the
+  status while messaging went on; a killed daemon's worker was gone 33 ms later. It found two sentences
+  wrong, both fixed. In the VM, from the logon task: the worker sat under `conhost --headless` and the
+  daemon with no window, its pipes inherited handles; it was gone 147 ms after the daemon was killed; a
+  sign-out ended the call cleanly. **Cross-compiling the tests for the VM found they did not compile for
+  Windows at all**, `syscall.Kill` in a file CI only ever builds for Linux: vet a new test file for every
+  OS it claims to run on. And a killed worker's code read 4294967295 where Windows writes 0xFFFFFFFF.
+
 What exists on the backend today, and the conventions the next milestone should follow rather than
 re-derive:
 
@@ -2934,6 +2980,40 @@ And on TURN, from M27:
   `voice/relay_test.go` runs TURN beside a real SFU, and the voice package's `TestMain` trusts a
   certificate for 127.0.0.1 through `SSL_CERT_FILE`, since Pion verifies TURNS against the system's
   roots and nothing else.
+
+And on the voice-worker, from M28:
+
+- **The worker is the daemon's direct child, started by its path beside the daemon's resolved executable**
+  (`voiceworker.ProgramBeside`), never through a shell, `launchctl` or `open`: on macOS TCC charges its
+  microphone to its parent (ADR 0034). On Windows it shares the daemon's console and is never given one of
+  its own, which would show a window.
+- **The protocol is `daemon/voiceipc` on two pipes of its own**, the attach socket's framing, and
+  `contracts/voice-worker.schema.json`. Never stdin or stdout: the worker's stdin is the null device, and
+  its stdout and stderr are one pipe read into the daemon's log, each line cut, cleaned and quoted as one
+  field. A field added to a frame is a MINOR change.
+- **Everything from the worker is a stranger's.** Frames are bounded (64 KiB, 50 a second), decoded
+  strictly and checked (`Check` on each payload, held to the contract by a test refusing each case through
+  both); printing is bounded at 256 KiB a second. The first breach kills it. A reason it carries is
+  cleaned and cut with `voiceipc.CutReason` wherever it is shown or kept.
+- **Its environment is `env.go`'s allow-list.** A capture library's variable is added there by name, and
+  nothing else is.
+- **A crash is a closed pipe the daemon did not ask for, or an exit that is not 0**, logged with the last
+  twenty lines. Every worker is reaped; one asked to leave, or that closed its pipe and stayed, is killed
+  after 3 s. **The worker exits when its control pipe closes**, from a goroutine that does nothing else.
+- **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater, and `Leave` returns
+  once the worker is reaped. The SFU is reached through a `Signaler`; until M33 the only one is M26's
+  harness, compiled in under `norite_voiceharness` alone, which no release build passes (a test holds both).
+- **A join's path carries a channel id**, so a client asks `GET /@daemon/voice` first, M22's answer to
+  the ledger's entry on the prefix.
+- **The worker ships beside the daemon and updates with it.** It has no release of its own. The updater
+  stages and smoke-runs three programs; an install from before M28 has none to keep, and undoing to it
+  removes the worker. A worker and a daemon of different versions are refused at the first frame.
+- **The worker offers at most `voiceproto.MaxCandidates` candidate lines, each once in the first
+  section**, relays first, which is where Pion reads them and what the SFU admits.
+- **Testing the worker**: `standin_test.go` re-runs the package's test binary as a worker playing each
+  hostile case; wait on a stand-in with `drain`, which fails rather than hangs. `e2e_test.go` builds
+  `norite-voice` and M26's harness from the checkout and makes real calls. The worker's own loop is tested
+  against a fake `Call` over in-memory pipes, every frame held to the contract.
 
 ## Project-specific skills
 

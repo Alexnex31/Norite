@@ -2010,7 +2010,10 @@ of this section.
   `daemon/internal/voiceworker`'s `Signaler` (`Credentials`, then `Join` with the offer, returning the
   answer), whose one implementation is M26's harness behind the `norite_voiceharness` tag. This milestone
   writes the gateway's implementation and makes it the default, and a daemon built without the tag stops
-  refusing to join. The `supports_video: bool` capability field is added to the voice-join payload now
+  refusing to join. **M28's Windows pass found a join waiting about 8 s** for the offer's candidates, while
+  Pion waited out a TURN allocation that could not succeed. A network that refuses UDP waits the same way
+  for TURN over UDP to fail, so this milestone weighs trickle ICE: sending candidates as they come rather
+  than with the offer. The `supports_video: bool` capability field is added to the voice-join payload now
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
   end to end, and a kick mid-call drops the connection.
