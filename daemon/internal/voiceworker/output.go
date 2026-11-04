@@ -53,7 +53,10 @@ func (w *Worker) readOutput(f *os.File) {
 			_, _ = io.Copy(io.Discard, br)
 			return
 		}
-		if l.size > 0 || err == nil {
+		// An empty line is charged and nothing else: it says nothing, and a flood of them cost the daemon a
+		// log entry, a cleaned string and a slot in the ring apiece, about 30 ms of CPU and 10 MB of garbage
+		// for each second of the bound.
+		if len(l.kept) > 0 {
 			text := termsafe.Text(string(l.kept))
 			w.lines.add(text)
 			tick()
@@ -91,12 +94,15 @@ func readLine(br *bufio.Reader, charge func(int) bool) (line, error) {
 		if !charge(len(chunk)) {
 			return l, errOverBudget
 		}
-		if room := maxLine - len(l.kept); room > 0 {
+		if err == nil {
+			// The line's end is dropped before anything is copied, so an empty line copies nothing.
+			chunk = trimNewline(chunk)
+		}
+		if room := maxLine - len(l.kept); room > 0 && len(chunk) > 0 {
 			l.kept = append(l.kept, chunk[:min(room, len(chunk))]...)
 		}
 		switch {
 		case err == nil:
-			l.kept = trimNewline(l.kept)
 			return l, nil
 		case errors.Is(err, bufio.ErrBufferFull):
 			continue
@@ -113,24 +119,31 @@ func trimNewline(b []byte) []byte {
 	return b
 }
 
-// ring keeps the last max lines.
+// ring keeps the last max lines, in a fixed buffer: adding one moves nothing and allocates nothing.
 type ring struct {
 	mu    sync.Mutex
 	max   int
 	lines []string
+	next  int
+	full  bool
 }
 
 func (r *ring) add(s string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.lines) == r.max {
-		r.lines = r.lines[1:]
+	if r.lines == nil {
+		r.lines = make([]string, r.max)
 	}
-	r.lines = append(r.lines, s)
+	r.lines[r.next] = s
+	r.next = (r.next + 1) % r.max
+	r.full = r.full || r.next == 0
 }
 
 func (r *ring) all() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.lines...)
+	if !r.full {
+		return append([]string(nil), r.lines[:r.next]...)
+	}
+	return append(append([]string(nil), r.lines[r.next:]...), r.lines[:r.next]...)
 }

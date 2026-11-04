@@ -318,7 +318,7 @@ func TestAnEndSaidLastIsNeverACrash(t *testing.T) {
 func TestPrintingIsBoundedInLogEntriesToo(t *testing.T) {
 	fast(t)
 	log := &logBuffer{}
-	w, err := Start(context.Background(), standinOptions(t, "blanklines", log))
+	w, err := Start(context.Background(), standinOptions(t, "shortlines", log))
 	require.NoError(t, err)
 	w.Leave()
 	entries, warned := 0, false
@@ -330,7 +330,7 @@ func TestPrintingIsBoundedInLogEntriesToo(t *testing.T) {
 			warned = true
 		}
 	}
-	require.LessOrEqual(t, entries, 4*linesPerSecond, "20,000 empty lines made %d entries", entries)
+	require.LessOrEqual(t, entries, 4*linesPerSecond, "20,000 short lines made %d entries", entries)
 	require.True(t, warned, "the lines not logged were not counted")
 }
 

@@ -137,10 +137,10 @@ func standin(mode string) int {
 			}
 		}
 		time.Sleep(time.Minute)
-	case "blanklines":
-		// Under the byte bound, and a log entry each.
+	case "shortlines":
+		// Under the byte bound, and a log entry each. Empty lines make none.
 		for range 20000 {
-			_, _ = os.Stdout.WriteString("\n")
+			_, _ = os.Stdout.WriteString("x\n")
 		}
 	case "closepipe":
 		// Closes its pipe and stays: the daemon must not wait on it for ever.
