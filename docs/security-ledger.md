@@ -1881,9 +1881,10 @@ carries the condition that would reopen it.
 ### The harness's signaler believes the URL it is given
 - **Raised**: M28, `/security-sweep`
 - **Verdict**: unreachable
-- **Why**: `voiceworker.Harness` decides that the SFU is on this machine by looking for `://127.0.0.1` in
-  its URL, and passes on the harness's TURN URLs after cutting their number, without checking what they
-  name. It is compiled only under `norite_voiceharness`, which no release build sets (a test in
+- **Why**: `voiceworker.Harness` passes on the harness's TURN URLs after cutting their number, without
+  checking what they name. (Whether the SFU is on this machine, which admits loopback candidates, was a
+  test of the URL's text, and `/code-review` found `http://localhost.example.com` passing it: it reads the
+  URL's host now.) It is compiled only under `norite_voiceharness`, which no release build sets (a test in
   `cmd/daemond` holds that), and its URL is `NORITE_VOICE_HARNESS`, which the person running the pass sets
   in the daemon's own environment. A URL the worker refuses ends that call as a protocol error.
 - **Reopens if**: a release build compiles the harness in, or its URL comes from anywhere but the

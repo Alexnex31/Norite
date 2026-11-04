@@ -3001,10 +3001,11 @@ And on the voice-worker, from M28:
   twenty lines. Every worker is reaped; one asked to leave, or that closed its pipe and stayed, is killed
   after 3 s. **The worker exits when its control pipe closes**, from a goroutine that does nothing else.
 - **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater, and `Leave` returns once
-  the worker is reaped. A sign-in's end reaches the calls through `SignInEnded`, which leaves the call joined
-  under it and refuses a join that read the ended sign-in and was still waiting its turn. The SFU is reached
-  through a `Signaler`; until M33 the only one is M26's harness, compiled in under `norite_voiceharness`
-  alone, which no release build passes (a test holds both).
+  the worker is reaped. Each call ends with the sign-in it was joined under, through the session's own `Ended`
+  channel and never the gateway connection's end, which a sign-out made while the instance is unreachable does
+  not reach; a join that read a sign-in since ended is refused. The SFU is reached through a `Signaler`; until
+  M33 the only one is M26's harness, compiled in under `norite_voiceharness` alone, which no release build
+  passes (a test holds both).
 - **A join's path carries a channel id**, so a client asks `GET /@daemon/voice` first, M22's answer to
   the ledger's entry on the prefix.
 - **The worker ships beside the daemon and updates with it.** It has no release of its own. The updater
