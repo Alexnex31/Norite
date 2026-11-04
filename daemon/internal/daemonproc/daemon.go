@@ -258,6 +258,7 @@ func Run(ctx context.Context, opts Options) error {
 			log.Error().Err(err).Msg("the credential store could not be opened")
 			// With no store there is no sign-in, so the port can be turned off and asked about, and not on.
 			local.automation = newAutomation(ctx, stateDir, storeless{}, opts.Version, part("automation"))
+			local.voice = noVoice(opts.Version)
 			server := attach.New(attach.Options{
 				Session: storeless{}, State: st, Relay: storeless{}, Version: opts.Version, Log: part("attach"),
 				Local: local,
@@ -294,11 +295,6 @@ func Run(ctx context.Context, opts Options) error {
 				Local: local,
 			})
 			local.bind(server)
-			gw := gatewayclient.New(gatewayclient.Options{
-				Credentials: src, Sink: server, Version: opts.Version,
-				Log: part("gateway"), OnVersionRefused: update.Nudge,
-			})
-			gateway.Store(gw)
 			// Voice calls, each a worker of its own (M28). Signed in or not, the requests are answered; a
 			// join needs a sign-in, and until M33 a build for M26's harness.
 			signaler, unavailable := voiceworker.DefaultSignaler()
@@ -310,6 +306,12 @@ func Run(ctx context.Context, opts Options) error {
 			})
 			voice.Store(calls)
 			local.voice = calls
+			// The gateway's sink ends the call with the sign-in, as it clears the state.
+			gw := gatewayclient.New(gatewayclient.Options{
+				Credentials: src, Sink: endingCalls{Sink: server, calls: calls}, Version: opts.Version,
+				Log: part("gateway"), OnVersionRefused: update.Nudge,
+			})
+			gateway.Store(gw)
 			// A call ends with the daemon, before the log and the lock are let go; its worker is reaped, and
 			// would go by itself anyway once its pipe closed.
 			components.Go(func() {

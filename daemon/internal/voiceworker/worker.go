@@ -18,6 +18,7 @@ package voiceworker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,7 +41,13 @@ import (
 const Program = "norite-voice"
 
 // ProgramBeside is the worker's path for a daemon whose resolved executable is daemon.
+//
+// A daemon that does not know its own path gets "", which Start refuses: a bare name would be looked up on
+// PATH and run whatever program of that name came first.
 func ProgramBeside(daemon string) string {
+	if daemon == "" {
+		return ""
+	}
 	name := Program
 	if runtime.GOOS == "windows" {
 		name += ".exe"
@@ -56,6 +63,15 @@ var (
 	// long one whose pipe closed by itself has.
 	leaveWithin = 3 * time.Second
 	exitWithin  = 3 * time.Second
+	// sendWithin is how long one frame to the worker may take to write. A worker that stops reading its
+	// pipe would otherwise hold the write, and every later Send and Leave behind it, for ever.
+	sendWithin = 3 * time.Second
+	// drainWithin is how long, once the worker has exited, its pipes are read for what it wrote last: its
+	// ended state and a panic's trace, which must count before how it ended is decided.
+	drainWithin = time.Second
+	// readHook runs before each frame after HELLO is handled. Tests only: it stages a reader slower than
+	// the reaper, which is the order that once took a clean end for a crash.
+	readHook func()
 )
 
 const (
@@ -68,6 +84,8 @@ const (
 	// maxLine is how much of one printed line is kept, and lastLines how many are kept to explain a crash.
 	maxLine   = 512
 	lastLines = 20
+	// linesPerSecond bounds the log entries a worker's printing makes; outputPerSecond bounds its bytes.
+	linesPerSecond = 50
 )
 
 // Options configures a worker.
@@ -103,9 +121,12 @@ type Worker struct {
 	events chan Event
 	exited chan struct{}
 	done   chan struct{}
+	// readDone and outDone are closed when the frame reader and the output reader have returned.
+	readDone, outDone chan struct{}
 
-	// leaveWithin and exitWithin are the package's bounds as they were at Start.
-	leaveWithin, exitWithin time.Duration
+	// The package's bounds as they were at Start.
+	leaveWithin, exitWithin, sendWithin, drainWithin time.Duration
+	readHook                                         func()
 
 	mu      sync.Mutex
 	leaving bool
@@ -130,6 +151,12 @@ var ErrStart = errors.New("the voice worker could not be started")
 
 // Start starts a worker and waits for its HELLO, whose version must be compatible with the daemon's.
 func Start(ctx context.Context, opts Options) (*Worker, error) {
+	// Only a path: a bare name would be looked up on PATH, and run whichever program of that name came
+	// first rather than the one shipped beside this daemon.
+	if !filepath.IsAbs(opts.Program) {
+		return nil, fmt.Errorf("%w: the daemon does not know where it is installed, so where its voice "+
+			"worker is", ErrStart)
+	}
 	ctlR, ctlW, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrStart, err)
@@ -168,13 +195,14 @@ func Start(ctx context.Context, opts Options) (*Worker, error) {
 	w := &Worker{
 		opts: opts, log: opts.Log, cmd: cmd, toWorker: ctlW, fromWorker: evR,
 		events: make(chan Event, 8), exited: make(chan struct{}), done: make(chan struct{}),
-		lines: &ring{max: lastLines}, leaveWithin: leaveWithin, exitWithin: exitWithin,
+		lines: &ring{max: lastLines}, readDone: make(chan struct{}), outDone: make(chan struct{}),
+		leaveWithin: leaveWithin, exitWithin: exitWithin, sendWithin: sendWithin, drainWithin: drainWithin,
+		readHook: readHook,
 	}
 	go w.readOutput(outR)
-	go w.wait()
-
 	hello := make(chan error, 1)
 	go w.read(hello)
+	go w.wait()
 	timer := time.NewTimer(helloWithin)
 	defer timer.Stop()
 	select {
@@ -202,10 +230,14 @@ func closeAll(files ...*os.File) {
 	}
 }
 
-// Send writes one frame to the worker.
+// Send writes one frame to the worker. A write that has not finished within sendWithin kills the worker,
+// which ends the write: a worker that stops reading must not hold the daemon's side, nor the Leave behind
+// it, and a pipe's buffer is a few kilobytes on Windows, under one answer.
 func (w *Worker) Send(op gatewayproto.Opcode, v any) error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
+	stuck := time.AfterFunc(w.sendWithin, func() { w.Kill("the voice worker stopped reading its pipe") })
+	defer stuck.Stop()
 	return voiceipc.Write(w.toWorker, op, v)
 }
 
@@ -232,18 +264,14 @@ func (w *Worker) Leave() {
 	w.mu.Lock()
 	w.leaving = true
 	w.mu.Unlock()
+	// The bound is armed before anything is written, so a write held by a worker that stopped reading is
+	// inside it rather than ahead of it.
+	late := time.AfterFunc(w.leaveWithin, func() { w.Kill("the voice worker did not leave in time") })
+	defer late.Stop()
 	_ = w.Send(voiceipc.OpLeave, voiceipc.Leave{})
-	w.writeMu.Lock()
+	// Closed outside writeMu: a close beside a write in flight ends that write, which is the point.
 	_ = w.toWorker.Close()
-	w.writeMu.Unlock()
-	timer := time.NewTimer(w.leaveWithin)
-	defer timer.Stop()
-	select {
-	case <-w.done:
-	case <-timer.C:
-		w.Kill("the voice worker did not leave in time")
-		<-w.done
-	}
+	<-w.done
 }
 
 // Kill ends the worker now, recording why. Killing one that has exited does nothing.
@@ -260,9 +288,18 @@ func (w *Worker) Kill(reason string) {
 func (w *Worker) wait() {
 	err := w.cmd.Wait()
 	close(w.exited)
-	w.writeMu.Lock()
 	_ = w.toWorker.Close()
-	w.writeMu.Unlock()
+	// What the worker wrote last is read before it is judged: its ended state, which makes an exit clean,
+	// and a panic's trace, which goes with a crash. The pipes end once it has gone, unless something it
+	// started still holds them, which the bound is for.
+	drained := time.NewTimer(w.drainWithin)
+	for _, ch := range []chan struct{}{w.readDone, w.outDone} {
+		select {
+		case <-ch:
+		case <-drained.C:
+		}
+	}
+	drained.Stop()
 
 	w.mu.Lock()
 	defer func() {
@@ -318,6 +355,7 @@ func exitStatus(goos string, code int) string {
 // breaks anything kills the worker. When the pipe ends without that, the worker is given exitWithin to
 // exit by itself, and is killed after it: a closed pipe is a worker that is going, or one to make go.
 func (w *Worker) read(hello chan<- error) {
+	defer close(w.readDone)
 	defer close(w.events)
 	r := &reader{w: w}
 	f, err := r.next()
@@ -328,6 +366,9 @@ func (w *Worker) read(hello chan<- error) {
 	if err != nil {
 		return
 	}
+	// Once the worker has exited nobody may be reading events any more, and the frames still in the pipe
+	// are read anyway, so an ended state written last is recorded rather than lost behind a full channel.
+	unheard := false
 	for {
 		f, err := r.next()
 		if err != nil {
@@ -342,6 +383,9 @@ func (w *Worker) read(hello chan<- error) {
 			}
 			return
 		}
+		if w.readHook != nil {
+			w.readHook()
+		}
 		ev, err := w.decode(f)
 		if err != nil {
 			w.Kill(err.Error())
@@ -352,10 +396,13 @@ func (w *Worker) read(hello chan<- error) {
 			w.ended = ev.State
 			w.mu.Unlock()
 		}
+		if unheard {
+			continue
+		}
 		select {
 		case w.events <- ev:
 		case <-w.exited:
-			return
+			unheard = true
 		}
 	}
 }
@@ -390,15 +437,27 @@ func broke(what string) error {
 }
 
 func (w *Worker) checkHello(f gatewayproto.Frame) error {
-	var h voiceipc.Hello
-	if f.Op != voiceipc.OpHello || ipc.Decode(f, &h) != nil {
+	if f.Op != voiceipc.OpHello {
 		return broke(fmt.Sprintf("op %d where HELLO was owed", f.Op))
+	}
+	// The version is read leniently first and the rest strictly after, as on the attach socket: a worker
+	// of a newer MINOR may say more in its HELLO, and must be told it is of another release, not that it
+	// broke the protocol.
+	var lenient struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(f.D, &lenient); err != nil || lenient.Version == "" {
+		return broke("a HELLO naming no version")
 	}
 	// The attach socket's rule, the daemon as the server. Its reason is not quoted: it speaks of a server and
 	// a client and says which to upgrade, and here the two are one install, replaced together.
-	if c := gatewayproto.Check(w.opts.Version, h.Version); !c.Compatible {
+	if c := gatewayproto.Check(w.opts.Version, lenient.Version); !c.Compatible {
 		return fmt.Errorf("the voice worker beside this daemon is version %s and the daemon %s; reinstall "+
-			"Norite so both are of one release", termsafe.Text(h.Version), w.opts.Version)
+			"Norite so both are of one release", termsafe.Text(lenient.Version), w.opts.Version)
+	}
+	var h voiceipc.Hello
+	if err := ipc.Decode(f, &h); err != nil {
+		return broke(err.Error())
 	}
 	return nil
 }

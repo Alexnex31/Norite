@@ -135,7 +135,7 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	seen := &statuses{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
-		Account: func() (string, bool) { return "42", true },
+		Account: func() (string, error) { return "42", nil },
 		Changed: seen.add, Log: zerolog.New(io.Discard),
 	})
 	t.Cleanup(v.Close)

@@ -5,6 +5,7 @@ package voiceworker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -24,8 +25,9 @@ type VoiceOptions struct {
 	// Signaler reaches the voice server; nil refuses every join, and Unavailable says why.
 	Signaler    Signaler
 	Unavailable string
-	// Account is the signed-in account's id, and whether there is one.
-	Account func() (string, bool)
+	// Account is the signed-in account's id, or ErrSignedOut, or ErrSignInPending while the daemon has not
+	// read its sign-in yet.
+	Account func() (string, error)
 	// Changed is told the status each time it changes. It must not block.
 	Changed func(ipc.VoiceStatus)
 	Log     zerolog.Logger
@@ -95,11 +97,21 @@ func (v *Voice) Busy() bool {
 	return v.current != nil
 }
 
+// The answers Account gives besides an id.
+var (
+	ErrSignedOut = errors.New("signed out")
+	// ErrSignInPending is a daemon that has not read its sign-in yet: a keyring not yet unlocked, a store
+	// not yet read. Not being signed out, which would send somebody to `norite login` over a good sign-in
+	// (M22's automation.ErrSignInPending).
+	ErrSignInPending = errors.New("the sign-in is not read yet")
+)
+
 // Refusal is a join that was not done, and why, for a person. Unavailable is one that could not be on this
-// daemon at all.
+// daemon at all; Pending one that may be asked again in a moment.
 type Refusal struct {
 	Msg         string
 	Unavailable bool
+	Pending     bool
 	// Failed is a join that was tried and did not work: the worker or the voice server failed. Otherwise
 	// the daemon understood and did not do it.
 	Failed bool
@@ -112,13 +124,22 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 	if v.opts.Signaler == nil {
 		return v.Status(), &Refusal{Msg: v.opts.Unavailable, Unavailable: true}
 	}
-	account, ok := v.opts.Account()
-	if !ok {
+	account, err := v.opts.Account()
+	switch {
+	case errors.Is(err, ErrSignInPending):
+		return v.Status(), &Refusal{Msg: "the daemon has not read its sign-in yet; ask again in a moment",
+			Pending: true}
+	case err != nil:
 		return v.Status(), &Refusal{Msg: "nobody is signed in to this daemon; sign in with `norite login`"}
 	}
 
 	v.joinMu.Lock()
 	defer v.joinMu.Unlock()
+	// A join waits here behind another for as long as that one takes. One whose asker has gone by then
+	// is not done: it would end the call the other join just made, for a channel nobody wants any more.
+	if ctx.Err() != nil {
+		return v.Status(), ctx.Err()
+	}
 	v.Leave()
 
 	callCtx, cancel := context.WithCancel(context.Background())
@@ -152,8 +173,19 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	log := v.opts.Log.With().Str("channel", c.channel).Logger()
 
 	joined := false
+	var w *Worker
+	// fail ends the join: the worker is reaped first, so that once the asker is answered and the status
+	// says idle, nothing of this call is still running. A retry otherwise started a second worker beside
+	// one still leaving, and a daemon stopping in between went on without it.
 	fail := func(failed bool, format string, args ...any) {
 		msg := reason(fmt.Sprintf(format, args...))
+		if w != nil {
+			select {
+			case <-w.Done():
+			default:
+				w.Leave()
+			}
+		}
 		log.Warn().Str("reason", msg).Msg("the voice call could not be joined")
 		result <- &Refusal{Msg: msg, Failed: failed}
 		v.ended(c, msg)
@@ -167,9 +199,10 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		return
 	}
 
-	w, err := Start(ctx, Options{Program: v.opts.Program, Version: v.opts.Version, Log: log,
+	w, err = Start(ctx, Options{Program: v.opts.Program, Version: v.opts.Version, Log: log,
 		Args: v.opts.Args, Env: v.opts.Env})
 	if err != nil {
+		w = nil
 		fail(true, "%v", err)
 		return
 	}

@@ -16,49 +16,81 @@ import (
 
 // readOutput reads what the worker prints, stdout and stderr together, into the daemon's log: Pion's
 // warnings, a panic's trace, and from M29 whatever a C library writes. Each line is cut to maxLine, cleaned
-// and logged as one quoted field, and the last lastLines are kept to go with a crash. A worker printing past
-// outputPerSecond is killed: reading it costs the daemon what writing it costs the worker.
+// and logged as one quoted field, and the last lastLines are kept to go with a crash.
+//
+// Two bounds, because bytes and log entries cost differently. Bytes are counted as they are read, a line
+// with no end included, and a worker past outputPerSecond is killed: reading it costs the daemon what
+// writing it costs the worker. Log entries are bounded apart, at linesPerSecond: an empty line is one byte
+// read and a whole entry written, so a worker printing newlines would otherwise rotate the daemon's log
+// away within the byte bound. The lines past it are kept for a crash and counted, and the count is logged.
 func (w *Worker) readOutput(f *os.File) {
+	defer close(w.outDone)
 	defer func() { _ = f.Close() }()
 	br := bufio.NewReaderSize(f, maxLine)
 	var (
-		window time.Time
-		spent  int
+		window  time.Time
+		spent   int
+		logged  int
+		dropped int
 	)
+	tick := func() {
+		if now := time.Now(); now.Sub(window) >= time.Second {
+			if dropped > 0 {
+				w.log.Warn().Int("lines", dropped).Msg("voice worker lines past the rate, not logged")
+			}
+			window, spent, logged, dropped = now, 0, 0, 0
+		}
+	}
+	charge := func(n int) bool {
+		tick()
+		spent += n
+		return spent <= outputPerSecond
+	}
 	for {
-		line, err := readLine(br)
-		if line.size > 0 || err == nil {
-			if now := time.Now(); now.Sub(window) >= time.Second {
-				window, spent = now, 0
-			}
-			spent += line.size
-			if spent > outputPerSecond {
-				w.Kill("the voice worker printed more than the daemon reads")
-				_, _ = io.Copy(io.Discard, br)
-				return
-			}
-			text := termsafe.Text(string(line.kept))
+		l, err := readLine(br, charge)
+		if errors.Is(err, errOverBudget) {
+			w.Kill("the voice worker printed more than the daemon reads")
+			_, _ = io.Copy(io.Discard, br)
+			return
+		}
+		if l.size > 0 || err == nil {
+			text := termsafe.Text(string(l.kept))
 			w.lines.add(text)
-			w.log.Info().Str("line", text).Msg("voice worker")
+			tick()
+			if logged < linesPerSecond {
+				logged++
+				w.log.Info().Str("line", text).Msg("voice worker")
+			} else {
+				dropped++
+			}
 		}
 		if err != nil {
+			if dropped > 0 {
+				w.log.Warn().Int("lines", dropped).Msg("voice worker lines past the rate, not logged")
+			}
 			return
 		}
 	}
 }
+
+// errOverBudget is output past outputPerSecond.
+var errOverBudget = errors.New("past the output bound")
 
 type line struct {
 	kept []byte
 	size int
 }
 
-// readLine reads one line, keeping its first maxLine bytes and counting the rest. A line that never ends
-// is read to the end of the pipe, which is bounded by the rate above.
-func readLine(br *bufio.Reader) (line, error) {
+// readLine reads one line, keeping its first maxLine bytes, and charges every chunk it reads as it reads
+// it: a line that never ends is stopped by the bound rather than read for ever.
+func readLine(br *bufio.Reader, charge func(int) bool) (line, error) {
 	var l line
 	for {
 		chunk, err := br.ReadSlice('\n')
 		l.size += len(chunk)
+		if !charge(len(chunk)) {
+			return l, errOverBudget
+		}
 		if room := maxLine - len(l.kept); room > 0 {
 			l.kept = append(l.kept, chunk[:min(room, len(chunk))]...)
 		}

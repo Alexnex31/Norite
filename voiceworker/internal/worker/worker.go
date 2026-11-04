@@ -137,11 +137,9 @@ func (r *run) loop(ctx context.Context) int {
 	}
 	r.call = call
 
-	gatherCtx, cancel := context.WithTimeout(ctx, r.opts.Gather)
-	offer, err := call.Offer(gatherCtx)
-	cancel()
-	if err != nil {
-		return r.end(fmt.Sprintf("gathering candidates failed: %v", err))
+	offer, code, ok := r.gather(ctx, call)
+	if !ok {
+		return code
 	}
 	if err := voiceipc.Write(r.out, voiceipc.OpOffer, voiceipc.Offer{SDP: offer}); err != nil {
 		return ExitOK
@@ -188,6 +186,44 @@ func (r *run) loop(ctx context.Context) int {
 		case <-ctx.Done():
 			return r.end("the worker was stopped")
 		}
+	}
+}
+
+// gather makes the offer while still hearing the daemon: gathering can take seconds (M28's pass on Windows
+// saw about eight, Pion waiting out a TURN allocation that could not succeed), and a leave or a closed
+// pipe in that time is answered at once, not after it. The daemon kills a worker that has not left
+// within three seconds, and an ordinary leave must not read as a crash.
+func (r *run) gather(ctx context.Context, call Call) (string, int, bool) {
+	gatherCtx, cancel := context.WithTimeout(ctx, r.opts.Gather)
+	defer cancel()
+	type result struct {
+		sdp string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		sdp, err := call.Offer(gatherCtx)
+		done <- result{sdp, err}
+	}()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			return "", r.end(fmt.Sprintf("gathering candidates failed: %v", res.err)), false
+		}
+		return res.sdp, 0, true
+	case f := <-r.frames:
+		cancel()
+		var l voiceipc.Leave
+		if f.Op != voiceipc.OpLeave || ipc.Decode(f, &l) != nil {
+			return "", r.violation(f), false
+		}
+		r.closeCall()
+		return "", r.end("left"), false
+	case err := <-r.gone:
+		cancel()
+		return "", r.daemonGone(err), false
+	case <-ctx.Done():
+		return "", r.end("the worker was stopped"), false
 	}
 }
 

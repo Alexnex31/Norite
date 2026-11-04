@@ -29,16 +29,24 @@ type fakeCall struct {
 	closed   chan struct{}
 	// stuck makes Close block for ever, as a library stuck in C would.
 	stuck bool
+	// slowGather makes Offer wait for its context, as a gather waiting out an unreachable TURN does.
+	slowGather bool
 }
 
 func newFakeCall() *fakeCall {
 	return &fakeCall{ready: make(chan struct{}), ended: make(chan string, 1), closed: make(chan struct{})}
 }
 
-func (c *fakeCall) Offer(context.Context) (string, error) { return "v=0\r\noffer\r\n", c.offerErr }
-func (c *fakeCall) Accept(string) error                   { return nil }
-func (c *fakeCall) Ready() <-chan struct{}                { return c.ready }
-func (c *fakeCall) Ended() <-chan string                  { return c.ended }
+func (c *fakeCall) Offer(ctx context.Context) (string, error) {
+	if c.slowGather {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return "v=0\r\noffer\r\n", c.offerErr
+}
+func (c *fakeCall) Accept(string) error    { return nil }
+func (c *fakeCall) Ready() <-chan struct{} { return c.ready }
+func (c *fakeCall) Ended() <-chan string   { return c.ended }
 func (c *fakeCall) Close() {
 	close(c.closed)
 	if c.stuck {
@@ -267,4 +275,32 @@ func TestAFrameOutOfOrderIsRefused(t *testing.T) {
 			require.Equal(t, ExitProtocol, d.exit())
 		})
 	}
+}
+
+// A leave or a closed pipe while gathering is answered at once, not when the gather ends: the daemon kills
+// a worker that has not left within three seconds, and a gather can take longer.
+func TestALeaveWhileGatheringIsAnsweredAtOnce(t *testing.T) {
+	t.Run("a leave", func(t *testing.T) {
+		call := newFakeCall()
+		call.slowGather = true
+		d := start(t, call, Options{Gather: time.Minute})
+		require.Equal(t, voiceipc.OpHello, d.next().Op)
+		d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+		started := time.Now()
+		d.send(voiceipc.OpLeave, voiceipc.Leave{})
+		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "left"}, d.state())
+		require.Equal(t, ExitOK, d.exit())
+		require.Less(t, time.Since(started), time.Second)
+	})
+	t.Run("a closed pipe", func(t *testing.T) {
+		call := newFakeCall()
+		call.slowGather = true
+		d := start(t, call, Options{Gather: time.Minute})
+		require.Equal(t, voiceipc.OpHello, d.next().Op)
+		d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+		started := time.Now()
+		require.NoError(t, d.toW.Close())
+		require.Equal(t, ExitOK, d.exit())
+		require.Less(t, time.Since(started), time.Second)
+	})
 }

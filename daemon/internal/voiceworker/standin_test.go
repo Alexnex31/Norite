@@ -78,6 +78,15 @@ func standin(mode string) int {
 		return 0
 	case "badversion":
 		version = "9.0.0"
+	case "newerhello":
+		// A newer MINOR whose HELLO says more, as a MINOR change may.
+		_ = ipc.WriteEncoded(out, []byte(`{"op":1,"d":{"version":"0.5.0","capabilities":["video"]},"s":null,"t":null}`))
+		time.Sleep(time.Minute)
+		return 0
+	case "extrahello":
+		_ = ipc.WriteEncoded(out, []byte(`{"op":1,"d":{"version":"0.4.7","token":"x"},"s":null,"t":null}`))
+		time.Sleep(time.Minute)
+		return 0
 	case "fds":
 		fmt.Println("fds " + strings.Join(fds, " "))
 	case "env":
@@ -116,6 +125,23 @@ func standin(mode string) int {
 		}
 	case "exit3":
 		return 3
+	case "deaf":
+		// Says who it is, then never reads its control pipe again.
+		time.Sleep(time.Minute)
+		return 0
+	case "nonewline":
+		chunk := strings.Repeat("x", 64<<10)
+		for range 1 << 12 {
+			if _, err := os.Stderr.WriteString(chunk); err != nil {
+				break
+			}
+		}
+		time.Sleep(time.Minute)
+	case "blanklines":
+		// Under the byte bound, and a log entry each.
+		for range 20000 {
+			_, _ = os.Stdout.WriteString("\n")
+		}
 	case "closepipe":
 		// Closes its pipe and stays: the daemon must not wait on it for ever.
 		_ = out.Close()

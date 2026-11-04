@@ -13,12 +13,12 @@ package voicecmd
 import (
 	"context"
 	"errors"
-	"strconv"
 
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
@@ -89,7 +89,7 @@ func run(connect Connector, takesChannel bool,
 			return clierr.Usage("norite voice %s takes no arguments", cmd.Name)
 		case takesChannel && cmd.Args().Len() != 1:
 			return clierr.Usage("norite voice %s takes one channel id", cmd.Name)
-		case takesChannel && !isID(cmd.Args().First()):
+		case takesChannel && !ops.IsID(cmd.Args().First()):
 			return clierr.Usage("%q is not a channel id", output.Clean(cmd.Args().First()))
 		}
 		if connect == nil {
@@ -106,15 +106,6 @@ func run(connect Connector, takesChannel bool,
 		}
 		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), view{st})
 	}
-}
-
-// isID is an id as the instance writes one: digits, within a uint64.
-func isID(s string) bool {
-	if s == "" || len(s) > 20 {
-		return false
-	}
-	_, err := strconv.ParseUint(s, 10, 64)
-	return err == nil
 }
 
 // view is a VoiceStatus as these commands print it (contracts/cli-json/voice.schema.json).

@@ -10,21 +10,47 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Alexnex31/Norite/daemon/internal/gatewayclient"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
-// signedInAccount is the account a call is joined as: the session's, once it names one and is not signed
-// out.
-func signedInAccount(src *session.Source) func() (string, bool) {
-	return func() (string, bool) {
+// signedInAccount is the account a call is joined as: the session's. A daemon that has not read its
+// sign-in yet is pending, never signed out, or a join would send somebody to `norite login` over a good
+// sign-in (M22's automation.ErrSignInPending).
+func signedInAccount(src *session.Source) func() (string, error) {
+	return func() (string, error) {
 		standing, account := src.Status()
-		if standing == session.SignedOut || account.UserID == "" {
-			return "", false
+		switch {
+		case standing == session.SignedOut:
+			return "", voiceworker.ErrSignedOut
+		case account.UserID == "":
+			return "", voiceworker.ErrSignInPending
 		}
-		return account.UserID, true
+		return account.UserID, nil
 	}
+}
+
+// endingCalls is the gateway's sink with the daemon's voice calls behind it: a sign-in that ends takes its
+// call with it (M19's rule), as it takes the state. Signed out, revoked or replaced by another account's,
+// the call was joined as an account nobody here is signed in as any more. The leave runs apart, since it
+// waits for the worker and End is called from the gateway's read loop.
+type endingCalls struct {
+	gatewayclient.Sink
+	calls *voiceworker.Voice
+}
+
+func (e endingCalls) End() {
+	e.Sink.End()
+	go e.calls.Leave()
+}
+
+// noVoice is the daemon's voice calls when the credential store could not be opened: answered, with the
+// reason, rather than refused as a request this daemon does not know.
+func noVoice(version string) *voiceworker.Voice {
+	return voiceworker.NewVoice(voiceworker.VoiceOptions{Version: version,
+		Unavailable: "the daemon could not open its credential store; its log says why"})
 }
 
 // handlesVoice is whether path is one of the requests about voice calls.
@@ -56,6 +82,8 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 	}
 	var refused *voiceworker.Refusal
 	switch {
+	case errors.As(err, &refused) && refused.Pending:
+		return ipc.Failure(ipc.RelayUnreachable, refused.Msg)
 	case errors.As(err, &refused) && refused.Failed:
 		return ipc.Failure(ipc.RelayFailed, refused.Msg)
 	case errors.As(err, &refused):

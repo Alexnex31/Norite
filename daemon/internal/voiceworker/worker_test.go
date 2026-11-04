@@ -6,6 +6,7 @@ package voiceworker
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -33,9 +34,9 @@ func drain(t *testing.T, w *Worker, d time.Duration) {
 
 func fast(t *testing.T) {
 	t.Helper()
-	h, l, e := helloWithin, leaveWithin, exitWithin
+	h, l, e, sw := helloWithin, leaveWithin, exitWithin, sendWithin
 	helloWithin, leaveWithin, exitWithin = 5*time.Second, 2*time.Second, 2*time.Second
-	t.Cleanup(func() { helloWithin, leaveWithin, exitWithin = h, l, e })
+	t.Cleanup(func() { helloWithin, leaveWithin, exitWithin, sendWithin = h, l, e, sw })
 }
 
 // joinStandin starts mode and walks it to ready.
@@ -122,7 +123,7 @@ func TestACallThatEndsByItselfIsNotACrash(t *testing.T) {
 func TestAHostileWorkerIsKilled(t *testing.T) {
 	fast(t)
 	for _, mode := range []string{"oversized", "garbage", "unknownop", "daemonop", "badstate", "flood",
-		"printflood"} {
+		"printflood", "nonewline"} {
 		t.Run(mode, func(t *testing.T) {
 			w, err := Start(context.Background(), standinOptions(t, mode, nil))
 			require.NoError(t, err)
@@ -141,6 +142,17 @@ func TestAWorkerMustSayWhoItIs(t *testing.T) {
 	_, err := Start(context.Background(), standinOptions(t, "silent", nil))
 	require.ErrorIs(t, err, ErrStart)
 	require.Contains(t, err.Error(), "did not say who it is")
+
+	// One of this release saying more than its HELLO declares broke the protocol.
+	_, err = Start(context.Background(), standinOptions(t, "extrahello", nil))
+	require.ErrorIs(t, err, ErrStart)
+	require.Contains(t, err.Error(), "broke the protocol")
+
+	// A newer MINOR saying more in its HELLO is told it is of another release, not that it broke anything.
+	_, err = Start(context.Background(), standinOptions(t, "newerhello", nil))
+	require.ErrorIs(t, err, ErrStart)
+	require.Contains(t, err.Error(), "reinstall Norite")
+	require.NotContains(t, err.Error(), "broke the protocol")
 
 	_, err = Start(context.Background(), standinOptions(t, "badversion", nil))
 	require.ErrorIs(t, err, ErrStart)
@@ -249,4 +261,103 @@ func TestAnExitCodeReadsAsTheOSWritesIt(t *testing.T) {
 	require.Equal(t, "exit status 2", exitStatus("windows", 2))
 	require.Equal(t, "exit status 0xFFFFFFFF", exitStatus("windows", 4294967295))
 	require.Equal(t, "exit status 0xC0000005", exitStatus("windows", 0xC0000005))
+}
+
+// A worker that stops reading its pipe cannot hold the daemon's writes: the write is bounded, and the
+// worker killed, so the Leave and the stop behind it go on.
+func TestAWorkerThatStopsReadingCannotHoldTheDaemon(t *testing.T) {
+	fast(t)
+	sendWithin = 300 * time.Millisecond
+	w, err := Start(context.Background(), standinOptions(t, "deaf", nil))
+	require.NoError(t, err)
+	big := voiceipc.Answer{SDP: strings.Repeat("a", 60<<10)}
+	failed := make(chan error, 1)
+	go func() {
+		for {
+			if err := w.Send(voiceipc.OpAnswer, big); err != nil {
+				failed <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-failed:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a write to a worker that does not read was not bounded")
+	}
+	left := make(chan struct{})
+	go func() { w.Leave(); close(left) }()
+	require.NoError(t, within(5*time.Second, left), "Leave waited on a held write")
+	require.True(t, w.Exit().Crashed)
+	require.Contains(t, w.Exit().Reason, "stopped reading")
+}
+
+// A worker that says how its call ended and exits at once is never taken for a crash, however the
+// goroutines that read it and reap it are ordered.
+func TestAnEndSaidLastIsNeverACrash(t *testing.T) {
+	fast(t)
+	// Every frame is read late, so the worker has exited, and been reaped, before its last one is read.
+	readHook = func() { time.Sleep(200 * time.Millisecond) }
+	t.Cleanup(func() { readHook = nil })
+	for range 3 {
+		w, err := Start(context.Background(), standinOptions(t, "dropcall", nil))
+		require.NoError(t, err)
+		require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}}))
+		<-w.Events()
+		require.NoError(t, w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n"}))
+		// Nobody reads the events from here: the reader must still record the end.
+		require.NoError(t, within(5*time.Second, w.Done()))
+		require.False(t, w.Exit().Crashed, "%+v", w.Exit())
+		require.Contains(t, w.Exit().Reason, "the voice server closed the call")
+	}
+}
+
+// Empty lines cost a byte each and a log entry each: the entries are bounded apart, and what is dropped is
+// counted.
+func TestPrintingIsBoundedInLogEntriesToo(t *testing.T) {
+	fast(t)
+	log := &logBuffer{}
+	w, err := Start(context.Background(), standinOptions(t, "blanklines", log))
+	require.NoError(t, err)
+	w.Leave()
+	entries, warned := 0, false
+	for _, m := range log.lines() {
+		switch m["message"] {
+		case "voice worker":
+			entries++
+		case "voice worker lines past the rate, not logged":
+			warned = true
+		}
+	}
+	require.LessOrEqual(t, entries, 4*linesPerSecond, "20,000 empty lines made %d entries", entries)
+	require.True(t, warned, "the lines not logged were not counted")
+}
+
+// A daemon that does not know its own path does not look its worker up on PATH. A working worker named
+// norite-voice is put first on PATH, so only the guard stands between it and being run.
+func TestAWorkerIsStartedByPathOnly(t *testing.T) {
+	fast(t)
+	require.Empty(t, ProgramBeside(""))
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	name := Program
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	body, err := os.ReadFile(exe) //nolint:gosec // this test binary
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), body, 0o755)) //nolint:gosec // a stand-in program
+	t.Setenv("PATH", dir)
+	for _, program := range []string{"", Program, "./" + Program} {
+		o := standinOptions(t, "good", nil)
+		o.Program = program
+		w, err := Start(context.Background(), o)
+		if err == nil {
+			w.Kill("the test ended")
+			<-w.Done()
+		}
+		require.ErrorIs(t, err, ErrStart, "%q was started", program)
+	}
 }
