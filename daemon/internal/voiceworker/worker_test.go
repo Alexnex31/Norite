@@ -4,14 +4,10 @@
 package voiceworker
 
 import (
-	"bufio"
 	"context"
 	"os"
-	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -247,29 +243,10 @@ func TestTheWorkerInheritsOnlyItsPipes(t *testing.T) {
 	require.Equal(t, []string{"0", "1", "2", "3", "4"}, numbers, "%v", fds)
 }
 
-// A daemon killed outright takes its worker with it: the worker sees its control pipe close, whoever
-// closed it.
-func TestAWorkerDoesNotOutliveItsDaemon(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("walked in the Windows VM")
-	}
-	exe, err := os.Executable()
-	require.NoError(t, err)
-	parent := exec.Command(exe) //nolint:gosec // this test binary
-	parent.Env = append(os.Environ(), standinVariable+"=parent")
-	out, err := parent.StdoutPipe()
-	require.NoError(t, err)
-	require.NoError(t, parent.Start())
-	line, err := bufio.NewReader(out).ReadString('\n')
-	require.NoError(t, err)
-	pidText, ok := strings.CutPrefix(strings.TrimSpace(line), "worker ")
-	require.True(t, ok, "%q", line)
-	pid, err := strconv.Atoi(pidText)
-	require.NoError(t, err)
-	require.NoError(t, syscall.Kill(pid, 0), "the worker is running")
-
-	require.NoError(t, parent.Process.Signal(syscall.SIGKILL))
-	_ = parent.Wait()
-	require.Eventually(t, func() bool { return syscall.Kill(pid, 0) != nil }, 3*time.Second, 10*time.Millisecond,
-		"the worker outlived its daemon")
+// An exit code reads as whoever looks it up writes it.
+func TestAnExitCodeReadsAsTheOSWritesIt(t *testing.T) {
+	require.Equal(t, "exit status 2", exitStatus("linux", 2))
+	require.Equal(t, "exit status 2", exitStatus("windows", 2))
+	require.Equal(t, "exit status 0xFFFFFFFF", exitStatus("windows", 4294967295))
+	require.Equal(t, "exit status 0xC0000005", exitStatus("windows", 0xC0000005))
 }

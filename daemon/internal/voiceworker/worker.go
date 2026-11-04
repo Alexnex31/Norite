@@ -299,9 +299,19 @@ func (w *Worker) wait() {
 func status(err error, code int) string {
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && code >= 0 {
-		return fmt.Sprintf("exit status %d", code)
+		return exitStatus(runtime.GOOS, code)
 	}
 	return termsafe.Text(err.Error())
+}
+
+// exitStatus words an exit code. On Windows a code past 255 is an NTSTATUS or a -1, read as unsigned, and
+// both are written in hexadecimal by everyone who looks them up: a killed worker was "exit status
+// 4294967295" in M28's pass on Windows, where it is 0xFFFFFFFF, and an access violation is 0xC0000005.
+func exitStatus(goos string, code int) string {
+	if goos == "windows" && code > 0xFF {
+		return fmt.Sprintf("exit status 0x%08X", uint32(code))
+	}
+	return fmt.Sprintf("exit status %d", code)
 }
 
 // read reads the worker's frames: HELLO first, reported on hello, then the rest onto events. A frame that
