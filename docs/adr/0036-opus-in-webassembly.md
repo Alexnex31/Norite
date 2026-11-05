@@ -47,7 +47,9 @@ with `CGO_ENABLED=0`, like every other binary.**
   - Its only window on the process is its own linear memory, capped with `WithMemoryLimitPages`.
 - **One instance per encoder and per decoder.** A decoder that traps is discarded, and that source's next
   packet starts a fresh one. A trap never ends the call, and one stream's bytes never reach another
-  stream's decoder state.
+  stream's decoder state. That holds in time too: when a slot changes sender, its decoder is a new
+  instance, not the old one asked to reset. An instance the previous sender took over could ignore the
+  request and speak for the next sender (M29's `/security-sweep`).
 - **The module is compiled once per worker start, while ICE runs, and never cached on disk.** A cache
   would be compiled native code that the account can write, and the worker would load it.
 - **A call into an instance cannot be interrupted.**

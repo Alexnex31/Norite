@@ -69,7 +69,7 @@ type instance struct {
 	mod                                    api.Module
 	mem                                    api.Memory
 	newEncoder, setBitrate, encode, newDec api.Function
-	decode, reset                          api.Function
+	decode                                 api.Function
 	pcm, pkt                               uint32
 	state                                  uint32
 	stack                                  [8]uint64
@@ -84,7 +84,7 @@ func (c *wasmCodec) instantiate(ctx context.Context) (*instance, error) {
 	}
 	in := &instance{mod: mod, mem: mod.Memory()}
 	fns := map[string]*api.Function{"shim_encoder": &in.newEncoder, "shim_set_bitrate": &in.setBitrate,
-		"shim_encode": &in.encode, "shim_decoder": &in.newDec, "shim_decode": &in.decode, "shim_reset": &in.reset}
+		"shim_encode": &in.encode, "shim_decoder": &in.newDec, "shim_decode": &in.decode}
 	for name, f := range fns {
 		if *f = mod.ExportedFunction(name); *f == nil {
 			_ = mod.Close(ctx)
@@ -342,18 +342,14 @@ func (d *wasmDecoder) Recover(ctx context.Context, packet []byte, pcm []int16) (
 	return d.run(ctx, len(packet), FrameSamples, len(packet) > 0, pcm)
 }
 
+// Reset starts a fresh instance rather than asking the old one to forget. A reset means the slot has a new
+// sender, and an instance a previous sender's packets took over through a libopus bug would ignore the
+// request and go on making the audio the new sender is heard to say. Starting one costs about 0.1 ms, once
+// per change of sender (the security ledger, M29).
 func (d *wasmDecoder) Reset(ctx context.Context) error {
-	if d.in == nil {
-		return d.start(ctx)
-	}
-	r, err := d.in.call(ctx, d.in.reset, uint64(d.in.state))
-	if err != nil {
-		return d.replace(ctx, err)
-	}
-	if r != 0 {
-		return codeError("resetting", r)
-	}
-	return nil
+	d.in.close(ctx)
+	d.in = nil
+	return d.start(ctx)
 }
 
 func (d *wasmDecoder) Close() error {

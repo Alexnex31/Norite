@@ -297,3 +297,35 @@ func TestEncoderOptionsAreChecked(t *testing.T) {
 		})
 	}
 }
+
+// A reset is a new sender in the slot, and it gets an instance of its own: one the previous sender took over
+// through a libopus bug would otherwise ignore a reset asked of it, and speak for the next sender.
+func TestAResetDecoderIsANewInstance(t *testing.T) {
+	ctx := context.Background()
+	c, err := New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close(ctx) }()
+	_, packets := roundTrip(t, c, tone(440, 8000, 0, FrameSamples*3))
+	d, err := c.NewDecoder(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	dec := d.(*wasmDecoder)
+	before := dec.in
+	if err := d.Reset(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if dec.in == before {
+		t.Fatal("the reset decoder runs in the instance it had")
+	}
+	if !before.mod.IsClosed() {
+		t.Error("the previous sender's instance is still open")
+	}
+	pcm := make([]int16, MaxDecodeSamples)
+	if n, err := d.Decode(ctx, packets[1], pcm); err != nil || n != FrameSamples {
+		t.Fatalf("after the reset: %d, %v", n, err)
+	}
+}

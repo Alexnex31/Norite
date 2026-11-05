@@ -176,3 +176,25 @@ func speechLike(seconds int, seed uint64, f0 float64) []int16 {
 	}
 	return out
 }
+
+// BenchmarkReset is a slot changing sender: a new instance. A voice server that changed a slot's sender on
+// every frame would make three slots pay this 150 times a second (the security ledger, M29).
+func BenchmarkReset(b *testing.B) {
+	ctx := context.Background()
+	c, err := New(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = c.Close(ctx) }()
+	d, err := c.NewDecoder(ctx)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	b.ReportAllocs()
+	for range b.N {
+		if err := d.Reset(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

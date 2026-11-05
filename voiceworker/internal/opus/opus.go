@@ -83,7 +83,8 @@ type Decoder interface {
 	// Recover writes the lost frame before packet from packet's in-band FEC, or conceals it when packet
 	// carries none. packet itself is decoded by the next call to Decode.
 	Recover(ctx context.Context, packet []byte, pcm []int16) (int, error)
-	// Reset forgets everything decoded so far, for a new sender in the same slot.
+	// Reset forgets everything decoded so far, for a new sender in the same slot. Under WebAssembly it is a
+	// new instance, so nothing of the previous sender's can survive into the next one's audio.
 	Reset(ctx context.Context) error
 	Close() error
 }
