@@ -105,14 +105,15 @@ func TestASenderThatStopsIsConcealedThenSilent(t *testing.T) {
 	check(t, play(b, 2), "p12 p13")
 }
 
-// A packet after its turn is dropped, and makes the next start wait one frame more.
+// A packet after its turn is dropped, and deepens the buffer by a frame: a frame concealed now, and a
+// frame more for the next start to wait.
 func TestALatePacketIsDroppedAndDeepensTheBuffer(t *testing.T) {
 	b := New()
 	push(b, 7, 10, 1000)
 	push(b, 7, 12, 1000+2*FrameSamples)
 	check(t, play(b, 2), "p10 r12")
 	push(b, 7, 11, 1000+FrameSamples)
-	check(t, play(b, 1), "p12")
+	check(t, play(b, 2), "c p12")
 	if s := b.Stats(); s.Late != 1 {
 		t.Errorf("stats %+v", s)
 	}
@@ -269,4 +270,19 @@ func TestABurstIsPlayedWhole(t *testing.T) {
 		push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
 	}
 	check(t, play(b, 5), "p10 p11 p12 p13 p14")
+}
+
+// A late packet in the middle of speech deepens the buffer there and then: one frame is concealed and the
+// rest plays a frame later, so the next packet as late as that one is in time.
+func TestALatePacketDeepensTheBufferAtOnce(t *testing.T) {
+	b := New()
+	for i := range 3 {
+		push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
+	}
+	check(t, play(b, 1), "p10")
+	push(b, 7, 9, 1000-FrameSamples) // after its turn
+	check(t, play(b, 3), "c p11 p12")
+	if b.Target() != MinDelay+1 {
+		t.Errorf("target %d", b.Target())
+	}
 }

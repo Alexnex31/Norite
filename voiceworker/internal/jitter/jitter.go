@@ -151,10 +151,20 @@ func (b *Buffer) Push(sender uint32, seq uint16, ts uint32, payload []byte, now 
 	}
 }
 
-// late grows the target: a packet that came after its turn is one a deeper buffer would have played.
+// late grows the target: a packet that came after its turn is one a deeper buffer would have played. While
+// playing, the buffer deepens at once rather than at the next talk-spurt, which in a long sentence may be
+// many seconds off: the timeline steps back a frame, so one frame is concealed and every packet after has
+// a frame more to arrive in. M29's manual pass, 5% loss and 20 ± 10 ms of jitter, counted 86 late packets
+// in nine seconds of speech before this.
 func (b *Buffer) late(now time.Time) {
-	b.target = min(b.target+1, MaxDelay)
 	b.lastLate = now
+	if b.target >= MaxDelay {
+		return
+	}
+	b.target++
+	if b.started {
+		b.next -= FrameSamples
+	}
 }
 
 func (b *Buffer) clear() {
