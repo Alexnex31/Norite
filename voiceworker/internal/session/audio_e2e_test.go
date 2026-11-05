@@ -1,0 +1,494 @@
+// SPDX-FileCopyrightText: 2026 Alexandre Duffez
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package session
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net"
+	"net/http"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Alexnex31/Norite/daemon/voiceipc"
+	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/audio/audiotest"
+	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
+)
+
+// M29's done-when, in process: sessions with the test device's microphone and speakers, connected through
+// M26's SFU and signaled through its harness, built from this checkout as the daemon's end-to-end test
+// builds it. What one says, the other hears, and the test reads it off the far end's speakers.
+
+type harness struct {
+	url string
+	mu  sync.Mutex
+	log strings.Builder
+}
+
+func freePort(t *testing.T, network string) int {
+	t.Helper()
+	if network == "udp" {
+		c, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = c.Close() }()
+		return c.LocalAddr().(*net.UDPAddr).Port
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+func startHarness(t *testing.T) *harness {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "voice-sfu")
+	build := exec.Command("go", "build", "-o", bin, "./internal/voice/voicetest/cmd/voice-sfu") //nolint:gosec // fixed
+	build.Dir = filepath.Join("..", "..", "..", "backend")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the harness: %v\n%s", err, out)
+	}
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t, "tcp"))
+	cmd := exec.Command(bin, "-loopback", //nolint:gosec // the harness just built
+		"-media", fmt.Sprintf("127.0.0.1:%d", freePort(t, "udp")),
+		"-turn", fmt.Sprintf("127.0.0.1:%d", freePort(t, "tcp")),
+		"-http", httpAddr)
+	out, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{url: "http://" + httpAddr}
+	go func() {
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			h.mu.Lock()
+			h.log.WriteString(sc.Text() + "\n")
+			h.mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var creds struct{}
+		if h.post("/credentials", map[string]string{"user": "1"}, &creds) == nil {
+			return h
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the harness did not come up")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (h *harness) post(path string, in, out any) error {
+	body, _ := json.Marshal(in)
+	res, err := http.Post(h.url+path, "application/json", bytes.NewReader(body)) //nolint:noctx // a test's harness
+	if err != nil {
+		return err
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("%s: %d %s", path, res.StatusCode, b)
+	}
+	return json.NewDecoder(res.Body).Decode(out)
+}
+
+// shared compiles the module once for the package's calls; each session still has its own instances.
+var shared = struct {
+	once  sync.Once
+	codec opus.Codec
+	err   error
+}{}
+
+func sharedCodec(context.Context) (opus.Codec, error) {
+	shared.once.Do(func() { shared.codec, shared.err = opus.New(context.Background()) })
+	return keepOpen{shared.codec}, shared.err
+}
+
+// keepOpen is the shared codec, which one session's end must not close under the others.
+type keepOpen struct{ opus.Codec }
+
+func (keepOpen) Close(context.Context) error { return nil }
+
+// join connects a session to room as user, with dev for its microphone and speakers.
+func (h *harness) join(t *testing.T, room, user string, dev audio.Device, opts Options) *Session {
+	t.Helper()
+	var creds struct {
+		Username string   `json:"username"`
+		Password string   `json:"password"`
+		URLs     []string `json:"urls"`
+	}
+	if err := h.post("/credentials", map[string]string{"user": user}, &creds); err != nil {
+		t.Fatal(err)
+	}
+	j := voiceipc.Join{Loopback: true}
+	if len(creds.URLs) > 0 {
+		j.ICEServers = []voiceipc.ICEServer{{URLs: creds.URLs, Username: creds.Username, Credential: creds.Password}}
+	}
+	opts.Version, opts.Device, opts.Codec = "dev", dev, sharedCodec
+	if opts.Log == nil {
+		opts.Log = io.Discard
+	}
+	s, err := New(j, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	offer, err := s.Offer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ans struct {
+		Answer string `json:"answer"`
+	}
+	if err := h.post("/provision", map[string]string{"room": room, "user": user, "offer": offer}, &ans); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Accept(ans.Answer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.Ready():
+	case reason := <-s.Ended():
+		t.Fatalf("%s's call ended: %s", user, reason)
+	case <-ctx.Done():
+		t.Fatalf("%s's call was not ready", user)
+	}
+	return s
+}
+
+// tonePower is the share of pcm's energy in audiotest.Tone at hz: near 1 for the tone, near 0 for anything
+// else. The tone's loudness rises and falls three times a second, which puts a quarter of its energy in
+// sidebands 3 Hz either side, so those count too.
+func tonePower(pcm []int16, hz float64) float64 {
+	var total, at float64
+	for _, v := range pcm {
+		total += float64(v) * float64(v)
+	}
+	for _, f := range []float64{hz - 3, hz, hz + 3} {
+		var re, im float64
+		for i, v := range pcm {
+			ph := 2 * math.Pi * f * float64(i) / audio.SampleRate
+			re += float64(v) * math.Cos(ph)
+			im += float64(v) * math.Sin(ph)
+		}
+		at += 2 * (re*re + im*im) / float64(len(pcm))
+	}
+	if total == 0 {
+		return 0
+	}
+	return at / total
+}
+
+// envelopeMatch is how well what was heard follows audiotest.Envelope: the best correlation of the two,
+// in 10 ms blocks, over the delays a call can add, and the delay it was best at.
+func envelopeMatch(heard []int16) (float64, time.Duration) {
+	const block = audio.SampleRate / 100
+	var got []float64
+	for i := 0; i+block <= len(heard); i += block {
+		var sum float64
+		for _, v := range heard[i : i+block] {
+			sum += float64(v) * float64(v)
+		}
+		got = append(got, math.Sqrt(sum/block))
+	}
+	best, at := -1.0, 0
+	for lag := 0; lag < 100 && lag < len(got)/2; lag++ {
+		var want []float64
+		for i := range got {
+			want = append(want, audiotest.Envelope((i-lag)*block+block/2))
+		}
+		if c := correlation(got, want); c > best {
+			best, at = c, lag
+		}
+	}
+	return best, time.Duration(at) * 10 * time.Millisecond
+}
+
+func correlation(a, b []float64) float64 {
+	var ma, mb float64
+	for i := range a {
+		ma, mb = ma+a[i], mb+b[i]
+	}
+	ma, mb = ma/float64(len(a)), mb/float64(len(b))
+	var ab, aa, bb float64
+	for i := range a {
+		x, y := a[i]-ma, b[i]-mb
+		ab, aa, bb = ab+x*y, aa+x*x, bb+y*y
+	}
+	if aa == 0 || bb == 0 {
+		return 0
+	}
+	return ab / math.Sqrt(aa*bb)
+}
+
+// steady is what the speakers played from the first frame with sound in it plus a settling second.
+func steady(t *testing.T, dev *audiotest.Device, want time.Duration) []int16 {
+	t.Helper()
+	deadline := time.Now().Add(want + 10*time.Second)
+	for {
+		heard, _ := dev.Heard()
+		first := -1
+		for i, v := range heard {
+			if v > 500 || v < -500 {
+				first = i
+				break
+			}
+		}
+		if first >= 0 {
+			from := first + audio.SampleRate
+			if len(heard) >= from+int(want.Seconds()*audio.SampleRate) {
+				return heard[from : from+int(want.Seconds()*audio.SampleRate)]
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the speakers played %d samples, sound from %d", len(heard), first)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func checkHeard(t *testing.T, who string, heard []int16, hz, minMatch float64) {
+	t.Helper()
+	if p := tonePower(heard, hz); p < 0.9 {
+		t.Errorf("%s: %.2f of what was heard is the %v Hz tone", who, p, hz)
+	}
+	m, delay := envelopeMatch(heard)
+	if m < minMatch {
+		t.Errorf("%s: what was heard follows the speaker's loudness at %.3f (best at a delay of %v), want %.2f",
+			who, m, delay, minMatch)
+	}
+	t.Logf("%s: tone %.3f, envelope %.3f", who, tonePower(heard, hz), m)
+}
+
+func TestTwoCallsHearEachOther(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	a := &audiotest.Device{Source: audiotest.Tone(440, 8000)}
+	b := &audiotest.Device{Source: audiotest.Tone(660, 8000)}
+	h.join(t, "1", "1", a, Options{})
+	sb := h.join(t, "1", "2", b, Options{})
+	checkHeard(t, "the second caller", steady(t, b, 2*time.Second), 440, 0.9)
+	checkHeard(t, "the first caller", steady(t, a, 2*time.Second), 660, 0.9)
+	// Every packet the first caller sent carried its audio level, which the SFU re-encodes on forward and
+	// reads for who is speaking.
+	var levels int64
+	for _, sl := range mediaOf(sb).slots {
+		levels += sl.levels.Load()
+	}
+	if levels < 100 {
+		t.Errorf("%d packets arrived with an audio level", levels)
+	}
+}
+
+func mediaOf(s *Session) *media {
+	s.mediaMu.Lock()
+	defer s.mediaMu.Unlock()
+	return s.media
+}
+
+// gate is a Source that plays a tone only between two frame numbers.
+func gate(from, to int, src func(int, []int16)) func(int, []int16) {
+	return func(i int, f []int16) {
+		if i < from || i >= to {
+			clear(f)
+			return
+		}
+		src(i, f)
+	}
+}
+
+// Four people speak into three slots. When one stops and the fourth starts, the SFU gives the fourth a
+// slot one of the others had: the listener's decoder for that slot is reset before it decodes the
+// newcomer, who is heard.
+func TestASlotThatChangesSenderResetsItsDecoder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	listener := &audiotest.Device{}
+	sl := h.join(t, "1", "9", listener, Options{})
+	for i, hz := range []float64{300, 500, 700} {
+		end := 1 << 30
+		if i == 2 {
+			end = 150 // three seconds, then silence
+		}
+		h.join(t, "1", fmt.Sprint(i+1), &audiotest.Device{Source: gate(0, end, audiotest.Tone(hz, 6000))}, Options{})
+	}
+	h.join(t, "1", "4", &audiotest.Device{Source: gate(200, 1<<30, audiotest.Tone(1100, 6000))}, Options{})
+	time.Sleep(8 * time.Second)
+	m := mediaOf(sl)
+	m.mu.Lock()
+	var resets, senders int
+	for _, s := range m.slots {
+		resets += s.resets
+		senders += s.buf.Stats().Senders
+	}
+	m.mu.Unlock()
+	if senders < 4 || resets < 4 {
+		t.Errorf("the slots carried %d senders and reset %d times, want 4 of each", senders, resets)
+	}
+	heard, _ := listener.Heard()
+	if p := tonePower(heard[len(heard)-2*audio.SampleRate:], 1100); p < 0.15 {
+		t.Errorf("the newcomer is %.2f of the last two seconds", p)
+	}
+}
+
+// The same through TURN, both callers relayed, and with 5% of the first caller's packets lost on the way:
+// FEC and concealment carry it.
+func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	var mu sync.Mutex
+	n := 0
+	lossy := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		return n%20 == 7 // 5%, spread out: each loss has a next packet to recover it from
+	}
+	a := &audiotest.Device{Source: audiotest.Tone(440, 8000)}
+	b := &audiotest.Device{}
+	h.join(t, "1", "1", a, Options{RelayOnly: true, Lossy: lossy})
+	sb := h.join(t, "1", "2", b, Options{RelayOnly: true})
+	checkHeard(t, "the far end", steady(t, b, 2*time.Second), 440, 0.8)
+	sb.mediaMu.Lock()
+	m := sb.media
+	sb.mediaMu.Unlock()
+	var recovered int
+	for _, sl := range m.slots {
+		recovered += sl.buf.Stats().Recovered
+	}
+	if recovered == 0 {
+		t.Error("no lost frame was recovered from FEC")
+	}
+}
+
+// clicks is a microphone that is silent but for a click every period: a 5 ms burst, loud. It notes when
+// each click was captured, which is when its frame left the device.
+type clicks struct {
+	period int // in frames
+	mu     sync.Mutex
+	sent   []time.Time
+}
+
+func (c *clicks) source(i int, f []int16) {
+	clear(f)
+	if i%c.period != c.period/2 {
+		return
+	}
+	for k := range audio.SampleRate / 200 {
+		f[k] = int16(20000 * math.Sin(2*math.Pi*1000*float64(k)/audio.SampleRate))
+	}
+	c.mu.Lock()
+	c.sent = append(c.sent, time.Now())
+	c.mu.Unlock()
+}
+
+// onsets are when each sound after a silence was played: the frame's time plus the sample's place in it.
+func onsets(heard []int16, at []time.Time) []time.Time {
+	var out []time.Time
+	quiet := audio.SampleRate // samples since the last loud one
+	for i, v := range heard {
+		if v > 4000 || v < -4000 {
+			if quiet > audio.SampleRate/5 {
+				f := i / audio.FrameSamples
+				out = append(out, at[f].Add(time.Duration(i%audio.FrameSamples)*time.Second/audio.SampleRate))
+			}
+			quiet = 0
+		} else {
+			quiet++
+		}
+	}
+	return out
+}
+
+// latencyBudget is mouth to ear on loopback, through the SFU, from the frame a click was captured in to
+// the moment the far device played it: the encoder's lookahead, the jitter buffer filling to its two
+// frames, and where the playing clock's tick falls. It leaves out what a real device buffers on either
+// side, which the manual pass measures through PipeWire. Measured at 38 to 40 ms when this was written,
+// and 42 to 63 with one packet in ten lost (63 being a click whose packet was lost and recovered from the
+// next one's FEC, a frame later); the budget is twice that, for a loaded CI runner's timers.
+const latencyBudget = 80 * time.Millisecond
+
+func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	for _, tc := range []struct {
+		name   string
+		lossy  bool
+		budget time.Duration
+	}{{"loopback", false, latencyBudget}, {"with loss", true, latencyBudget + 40*time.Millisecond}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := startHarness(t)
+			c := &clicks{period: 25}
+			var lossy func() bool
+			if tc.lossy {
+				n := 0
+				var mu sync.Mutex
+				lossy = func() bool { mu.Lock(); defer mu.Unlock(); n++; return n%10 == 3 }
+			}
+			a := &audiotest.Device{Source: c.source}
+			b := &audiotest.Device{}
+			h.join(t, "1", "1", a, Options{Lossy: lossy})
+			h.join(t, "1", "2", b, Options{})
+			time.Sleep(6 * time.Second)
+			heard, at := b.Heard()
+			got := onsets(heard, at)
+			c.mu.Lock()
+			sent := append([]time.Time(nil), c.sent...)
+			c.mu.Unlock()
+			var delays []time.Duration
+			for _, g := range got {
+				// The click it is: the latest sent before it was heard.
+				var from time.Time
+				for _, s := range sent {
+					if s.Before(g) {
+						from = s
+					}
+				}
+				if !from.IsZero() {
+					delays = append(delays, g.Sub(from))
+				}
+			}
+			if len(delays) < 5 {
+				t.Fatalf("%d clicks heard of %d sent", len(delays), len(sent))
+			}
+			delays = delays[1:] // the first is the call settling
+			worst := time.Duration(0)
+			for _, d := range delays {
+				worst = max(worst, d)
+			}
+			t.Logf("%d clicks, mouth to ear %v, worst %v", len(delays), delays, worst)
+			if worst > tc.budget {
+				t.Errorf("mouth to ear reached %v, past the %v budget", worst, tc.budget)
+			}
+		})
+	}
+}

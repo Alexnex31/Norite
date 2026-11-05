@@ -131,6 +131,10 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 		t.Skip("builds norite-voice and M26's harness, and makes real calls")
 	}
 	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program)
+	// The worker opens the system's microphone and speakers from M29. A test must not open the
+	// developer's: on Linux it is pointed at a PulseAudio server that does not exist, and the call goes on
+	// without audio, as it does where a device cannot open (internal/session).
+	t.Setenv("PULSE_SERVER", "unix:"+filepath.Join(t.TempDir(), "no-server"))
 	h := startHarness(t)
 	seen := &statuses{}
 	v := NewVoice(VoiceOptions{

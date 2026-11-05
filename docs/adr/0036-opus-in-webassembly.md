@@ -50,6 +50,13 @@ with `CGO_ENABLED=0`, like every other binary.**
   stream's decoder state.
 - **The module is compiled once per worker start, while ICE runs, and never cached on disk.** A cache
   would be compiled native code that the account can write, and the worker would load it.
+- **A call into an instance cannot be interrupted.**
+  - wazero's `WithCloseOnContextDone` checks for cancellation in every loop and call, and it measured five
+    times the cost of a frame: 2.9 ms against 0.59.
+  - A decoder that never returns is bounded by the session instead. A watchdog ends the call, and the
+    worker with it, when a decode outlasts its bound.
+  - libopus's work per packet is bounded by the format, so only a bug reaches the watchdog. What a
+    sender gains by finding one is ending the call it is in.
 - **The `.wasm` is built reproducibly, committed, and embedded.**
   - It is built by wasi-sdk, pinned by version and hash, from the xiph tarball checked against its
     `SHA256SUMS`.

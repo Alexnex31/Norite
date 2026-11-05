@@ -1944,4 +1944,7 @@ carries the condition that would reopen it.
     switch);
   - M30 runs the APM, or any DSP that reads the decoded far end, natively;
   - the module is given a host module that reaches the filesystem, the network or the process;
-  - the compiled module is cached on disk, where the account could write the code the worker loads.
+  - the compiled module is cached on disk, where the account could write the code the worker loads;
+  - the watchdog that ends a call on a decode that never returns is removed. Without
+    `WithCloseOnContextDone`, which costs five times a frame, it is the only bound on a decoder that
+    loops.

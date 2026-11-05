@@ -8,7 +8,7 @@
 // contracts/voice-datachannel.schema.json rather than shared: the SFU's tests run that client in process,
 // and the backend cannot import a client module, which may take copyleft (rule 22).
 //
-// From M28 to M29 it sends nothing on its track and drops what it receives. M29 adds the audio.
+// From M29 it carries the call's audio (media.go), once the SFU says ready.
 //
 // Its DTLS certificate is Pion's, made for each peer connection and never kept, so every call has its own
 // keypair (ADR 0023): nothing a worker held outlives its call.
@@ -23,6 +23,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/ice/v4"
@@ -32,6 +33,8 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
+	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
 
 // Slots is how many audio slots the worker receives on. M26's SFU admits up to 16; three speakers at
@@ -42,8 +45,19 @@ const Slots = 3
 type Options struct {
 	// Version is what the data channel's hello names.
 	Version string
-	// Log receives Pion's own lines at warning and above. Pion's default writes to stdout.
+	// Log receives Pion's own lines at warning and above, and the session's. Pion's default writes to
+	// stdout.
 	Log io.Writer
+	// Device is the microphone and speakers. Nil carries no audio, and drops what the slots receive.
+	Device audio.Device
+	// Codec makes the call's codec, opus.New unless set. It starts compiling as the session is made, so
+	// that its ~100 ms run while ICE connects.
+	Codec func(context.Context) (opus.Codec, error)
+	// Lossy, when set, is asked before each packet is sent and drops it on true: a test's loss.
+	Lossy func() bool
+	// RelayOnly gathers relayed candidates alone, so the call crosses TURN: a test's network that refuses
+	// UDP to the SFU.
+	RelayOnly bool
 }
 
 // Session is one call's connection.
@@ -55,10 +69,31 @@ type Session struct {
 	ended    chan string
 	endOnce  sync.Once
 	readyOne sync.Once
+
+	track  *webrtc.TrackLocalStaticRTP
+	sender *webrtc.RTPSender
+	level  atomic.Uint32 // the audio level's extension id, once negotiated; zero before
+
+	codecDone chan struct{}
+	codec     opus.Codec
+	codecErr  error
+
+	mediaMu       sync.Mutex
+	media         *media
+	mediaStarting bool
+	closing       bool
+	pending       []remote
 }
 
-// opus is the codec both ends register, the SFU's own.
-var opus = webrtc.RTPCodecCapability{
+// remote is a slot's track and the receiver it arrived on, whose parameters say which id the audio level
+// came under.
+type remote struct {
+	tr  *webrtc.TrackRemote
+	rcv *webrtc.RTPReceiver
+}
+
+// opusCapability is the codec both ends register, the SFU's own.
+var opusCapability = webrtc.RTPCodecCapability{
 	MimeType:    webrtc.MimeTypeOpus,
 	ClockRate:   voiceproto.ClockRateAudio,
 	Channels:    2,
@@ -70,12 +105,12 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	if opts.Log == nil {
 		opts.Log = os.Stderr
 	}
-	media := &webrtc.MediaEngine{}
-	if err := media.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: opus, PayloadType: 111},
+	engine := &webrtc.MediaEngine{}
+	if err := engine.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: opusCapability, PayloadType: 111},
 		webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
-	if err := media.RegisterHeaderExtension(
+	if err := engine.RegisterHeaderExtension(
 		webrtc.RTPHeaderExtensionCapability{URI: voiceproto.AudioLevelURI}, webrtc.RTPCodecTypeAudio,
 	); err != nil {
 		return nil, err
@@ -99,14 +134,31 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	for _, s := range join.ICEServers {
 		servers = append(servers, webrtc.ICEServer{URLs: s.URLs, Username: s.Username, Credential: s.Credential})
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(media), webrtc.WithInterceptorRegistry(reg),
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(reg),
 		webrtc.WithSettingEngine(se))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: servers})
+	cfg := webrtc.Configuration{ICEServers: servers}
+	if opts.RelayOnly {
+		cfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	pc, err := api.NewPeerConnection(cfg)
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{opts: opts, pc: pc, ready: make(chan struct{}), ended: make(chan string, 1)}
-	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) { go drain(tr) })
+	s := &Session{opts: opts, pc: pc, ready: make(chan struct{}), ended: make(chan string, 1),
+		codecDone: make(chan struct{})}
+	if opts.Device != nil {
+		mk := opts.Codec
+		if mk == nil {
+			mk = opus.New
+		}
+		go func() {
+			defer close(s.codecDone)
+			s.codec, s.codecErr = mk(context.Background())
+		}()
+	} else {
+		close(s.codecDone)
+	}
+	pc.OnTrack(func(tr *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) { s.trackArrived(remote{tr, rcv}) })
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
 		case webrtc.PeerConnectionStateFailed:
@@ -118,7 +170,84 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	return s, nil
 }
 
-// drain reads a slot's packets and drops them, so they do not pile up in Pion's buffers. M29 decodes them.
+// trackArrived is a slot's first packet. Before the audio has started it waits, a slot's worth at most.
+func (s *Session) trackArrived(tr remote) {
+	s.mediaMu.Lock()
+	defer s.mediaMu.Unlock()
+	switch {
+	case s.media != nil:
+		go s.media.attach(tr)
+	case s.opts.Device == nil || s.closing || len(s.pending) >= Slots:
+		go drain(tr.tr)
+	default:
+		s.pending = append(s.pending, tr)
+	}
+}
+
+// adopt makes m the call's audio, unless the call closed while it started, and gives it the slots that
+// arrived first.
+func (s *Session) adopt(m *media) bool {
+	s.mediaMu.Lock()
+	defer s.mediaMu.Unlock()
+	if s.closing {
+		return false
+	}
+	s.media = m
+	for _, tr := range s.pending {
+		go m.attach(tr)
+	}
+	s.pending = nil
+	return true
+}
+
+func (s *Session) slotCount() int { return Slots }
+
+// runMedia starts the audio once the SFU has said ready.
+func (s *Session) runMedia() {
+	s.mediaMu.Lock()
+	if s.closing {
+		s.mediaMu.Unlock()
+		return
+	}
+	s.mediaStarting = true
+	s.mediaMu.Unlock()
+	if err := s.startMedia(context.Background()); err != nil {
+		s.end(voiceipc.CutReason("the call's audio could not start: " + err.Error()))
+	}
+}
+
+func (s *Session) awaitCodec(ctx context.Context) (opus.Codec, error) {
+	select {
+	case <-s.codecDone:
+		if s.codecErr != nil {
+			return nil, s.codecErr
+		}
+		return s.codec, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// levelID is the audio level's extension id as negotiated, read from the sender once the answer is in.
+func (s *Session) levelID() uint8 {
+	if id := s.level.Load(); id != 0 {
+		return uint8(id) //nolint:gosec // an extension id, at most 255
+	}
+	for _, e := range s.sender.GetParameters().HeaderExtensions {
+		if e.URI == voiceproto.AudioLevelURI && e.ID > 0 && e.ID < 256 {
+			s.level.Store(uint32(e.ID)) //nolint:gosec // checked above
+			return uint8(e.ID)          //nolint:gosec // checked above
+		}
+	}
+	return 0
+}
+
+func (s *Session) logf(format string, args ...any) {
+	_, _ = fmt.Fprintf(s.opts.Log, "norite-voice: "+format+"\n", args...)
+}
+
+// drain reads a slot's packets and drops them, so they do not pile up in Pion's buffers: a session with
+// no audio, or a slot past the mix's.
 func drain(tr *webrtc.TrackRemote) {
 	buf := make([]byte, 1500)
 	for {
@@ -135,7 +264,7 @@ func (s *Session) end(reason string) {
 
 // Offer adds the call's sections and returns the offer, every candidate gathered.
 func (s *Session) Offer(ctx context.Context) (string, error) {
-	track, err := webrtc.NewTrackLocalStaticRTP(opus, "audio", "norite-voice")
+	track, err := webrtc.NewTrackLocalStaticRTP(opusCapability, "audio", "norite-voice")
 	if err != nil {
 		return "", err
 	}
@@ -145,6 +274,7 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	s.track, s.sender = track, tr.Sender()
 	go drainRTCP(tr.Sender())
 	for range Slots {
 		if _, err := s.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
@@ -208,7 +338,12 @@ func (s *Session) message(b []byte) {
 	}
 	switch op {
 	case voiceproto.OpReady:
-		s.readyOne.Do(func() { close(s.ready) })
+		s.readyOne.Do(func() {
+			close(s.ready)
+			if s.opts.Device != nil {
+				go s.runMedia()
+			}
+		})
 	case voiceproto.OpRefused:
 		var m voiceproto.Refused
 		if voiceproto.Decode(b, &m) != nil {
@@ -233,6 +368,21 @@ func (s *Session) Ended() <-chan string { return s.ended }
 // Close closes the peer connection. The SFU sees the data channel and DTLS close at once rather than
 // waiting out ICE's timeout.
 func (s *Session) Close() {
+	s.mediaMu.Lock()
+	s.closing = true
+	m, starting := s.media, s.mediaStarting
+	s.mediaMu.Unlock()
+	if m != nil {
+		m.close()
+	} else if !starting {
+		// The codec compiled for a call that never got as far as its audio.
+		go func() {
+			<-s.codecDone
+			if s.codec != nil {
+				_ = s.codec.Close(context.Background())
+			}
+		}()
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
