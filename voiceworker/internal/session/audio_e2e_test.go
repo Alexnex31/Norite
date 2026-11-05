@@ -400,9 +400,12 @@ func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
 // buffer that started from one of those updates and played everything 440 ms late (M29's manual pass).
 type clicks struct {
 	period int // in frames
-	mu     sync.Mutex
-	sent   []time.Time
-	noise  uint32
+	// at is the click's first sample's place in its frame. A device hands over a frame once its last
+	// sample is captured, so the click was captured (FrameSamples - at) samples before its frame is.
+	at    int
+	mu    sync.Mutex
+	sent  []time.Time
+	noise uint32
 }
 
 func (c *clicks) source(i int, f []int16) {
@@ -414,10 +417,10 @@ func (c *clicks) source(i int, f []int16) {
 		return
 	}
 	for k := range audio.SampleRate / 200 {
-		f[k] = int16(20000 * math.Sin(2*math.Pi*1000*float64(k)/audio.SampleRate))
+		f[c.at+k] = int16(20000 * math.Sin(2*math.Pi*1000*float64(k)/audio.SampleRate))
 	}
 	c.mu.Lock()
-	c.sent = append(c.sent, time.Now())
+	c.sent = append(c.sent, time.Now().Add(-time.Duration(audio.FrameSamples-c.at)*time.Second/audio.SampleRate))
 	c.mu.Unlock()
 }
 
@@ -439,13 +442,18 @@ func onsets(heard []int16, at []time.Time) []time.Time {
 	return out
 }
 
-// latencyBudget is mouth to ear on loopback, through the SFU, from the frame a click was captured in to
-// the moment the far device played it: the encoder's lookahead, the jitter buffer filling to its two
-// frames, and where the playing clock's tick falls. It leaves out what a real device buffers on either
-// side, which the manual pass measures through PipeWire. Measured at 38 to 40 ms when this was written,
-// and 42 to 63 with one packet in ten lost (63 being a click whose packet was lost and recovered from the
-// next one's FEC, a frame later); the budget is twice that, for a loaded CI runner's timers.
-const latencyBudget = 80 * time.Millisecond
+// latencyBudget is mouth to ear on loopback, through the SFU, from the moment a click's sample was captured
+// to the moment the far device was handed it. It covers waiting for the click's frame to fill, the
+// encoder's 6.5 ms lookahead, the jitter buffer waiting for a second packet, and where the playing clock's
+// tick falls. It leaves out each device's own buffer, about 21 ms each way through PipeWire, which M29's
+// manual pass measured separately.
+//
+// Measured at 59 to 65 ms when this was written, and 57 to 78 with one packet in ten lost. The test first
+// stamped a click when its whole frame was handed over and put it at the frame's start, which left out the
+// frame's 20 ms of filling and measured 38 to 44 ms. The pass found that gap as unexplained latency
+// between two VMs: about 112 ms each way, of which 42 is the two devices and the rest is this. The budget
+// leaves room for a loaded CI runner's timers.
+const latencyBudget = 110 * time.Millisecond
 
 func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 	if testing.Short() {
@@ -458,7 +466,9 @@ func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 	}{{"loopback", false, latencyBudget}, {"with loss", true, latencyBudget + 40*time.Millisecond}} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := startHarness(t)
-			c := &clicks{period: 75} // a click every 1.5 s: each one a new talk-spurt after DTX
+			// A click every 1.5 s, each one a new talk-spurt after DTX, falling where a real one would: inside
+			// its frame, not at its start.
+			c := &clicks{period: 75, at: 706}
 			var lossy func() bool
 			if tc.lossy {
 				n := 0
