@@ -248,18 +248,13 @@ jobs:
             exit 1
           fi
       - name: third-party notices
-        # Regenerated from the built binaries, not the module graph: the linker is the only authority on
-        # what actually ships, and `./...` would sweep in testcontainers and its Docker set — test-only
+        # Regenerated from binaries the script builds for every release target, not the module graph: the
+        # linker is the only authority on what actually ships, and `./...` would sweep in testcontainers
+        # and its Docker set — test-only
         # code that is never distributed and must not appear in a notice describing a shipped binary.
         # Committed for the reason the inventory is, and checked here so a new dependency cannot merge
         # without its attribution.
         run: |
-          mkdir -p bin
-          (cd backend && GOWORK=off go build -o ../bin/norite-server ./cmd/server)
-          (cd cli     && GOWORK=off go build -o ../bin/norite        ./cmd/app)
-          (cd gui     && GOWORK=off go build -o ../bin/norite-gui    ./cmd/gui)
-          (cd daemon  && GOWORK=off go build -o ../bin/norite-daemon ./cmd/daemond)
-          (cd voiceworker && GOWORK=off go build -o ../bin/norite-voice ./cmd/norite-voice)
           ./scripts/gen-third-party-notices.sh backend ./cmd/server  bin/norite-server backend/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt

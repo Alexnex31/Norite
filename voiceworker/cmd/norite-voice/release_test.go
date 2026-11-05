@@ -52,6 +52,11 @@ func TestTheReleasedWorkerHoldsNoTestDeviceAndNoNativeCodec(t *testing.T) {
 	if fs := strings.Fields(string(got)); !slices.Contains(fs, "device.go") || slices.Contains(fs, "device_noaudio.go") {
 		t.Errorf("the released worker is built from %v", fs)
 	}
+	// And the worker with no devices still builds: CI runs Linux, where the end-to-end test uses the release's
+	// worker, so nothing else there compiles device_noaudio.go.
+	if out, err := exec.Command("go", "vet", "-tags", "norite_noaudio", ".").CombinedOutput(); err != nil {
+		t.Errorf("the worker with no devices does not build: %v\n%s", err, out)
+	}
 	root := filepath.Join("..", "..", "..")
 	for _, name := range []string{".goreleaser.yaml", "justfile", filepath.Join("scripts", "install.sh"),
 		filepath.Join("scripts", "install.ps1"), filepath.Join(".github", "workflows", "release.yml"),

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/daemon/ipc"
@@ -145,7 +146,7 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program, flags...)
 	h := startHarness(t)
 	seen := &statuses{}
-	logged := &syncBuffer{}
+	logged := &logBuffer{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
 		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
@@ -161,10 +162,16 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
 	if runtime.GOOS == "linux" {
-		// The audio started as far as the devices, which failed, and the call stayed up.
-		require.Eventually(t, func() bool { return strings.Contains(logged.String(), "could not be opened") },
-			10*time.Second, 20*time.Millisecond, "the worker's audio never started: %s", logged.String())
-		require.Equal(t, ipc.VoiceInCall, v.Status().State)
+		// The audio started as far as the devices, which failed, and the call stayed up. The worker's log and
+		// its control pipe are separate pipes, so a failure ending the call might reach the daemon after the
+		// line: the state is held for a while, not read once.
+		started := assert.Eventually(t, func() bool { return strings.Contains(logged.String(), "could not be opened") },
+			10*time.Second, 20*time.Millisecond)
+		if !started {
+			t.Fatalf("the worker's audio never started:\n%s", logged.String())
+		}
+		require.Never(t, func() bool { return v.Status().State != ipc.VoiceInCall }, 500*time.Millisecond,
+			20*time.Millisecond, "a device that could not open ended the call")
 	}
 
 	st = v.Leave()
@@ -194,22 +201,4 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "1004", st.Channel)
 	require.Equal(t, ipc.VoiceInCall, st.State)
-}
-
-// syncBuffer is a log the worker's output goroutine writes while the test reads.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  strings.Builder
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
 }

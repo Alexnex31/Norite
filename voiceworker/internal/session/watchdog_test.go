@@ -215,7 +215,6 @@ func (b blocking) Close() error { <-b.release; return nil }
 // Leaving a call whose decoder is stuck still returns, in time for the connection's goodbye.
 func TestClosingIsBoundedWhateverIsStuck(t *testing.T) {
 	release := make(chan struct{})
-	defer close(release)
 	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}, playback: blocking{release}, capture: blocking{release}}
 	m.sent.Add(1) // a sender stuck in an encode
@@ -227,9 +226,18 @@ func TestClosingIsBoundedWhateverIsStuck(t *testing.T) {
 	case <-time.After(closeWithin + 200*time.Millisecond):
 		t.Error("closing waited past its bound") // bounded, so a removed bound fails rather than hangs
 	}
-	// Unstick everything, so close's own goroutine finishes rather than outliving the test.
+	// Unstick everything, and wait for close's own goroutine to finish rather than outlive the test: it
+	// closes the codec last, which keepOpen makes visible as closed.
+	close(release)
 	m.sent.Done()
 	m.mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	for !m.closedFlag() {
+		if time.Now().After(deadline) {
+			t.Fatal("close's goroutine did not finish once everything was released")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // A slot that changes sender plays nothing more of the previous one's, even what their last packet decoded
@@ -306,3 +314,52 @@ func (long) Decode(_ context.Context, p []byte, pcm []int16) (int, error) {
 }
 func (long) Reset(context.Context) error                         { return nil }
 func (long) Conceal(_ context.Context, pcm []int16) (int, error) { clear(pcm[:960]); return 960, nil }
+
+func (m *media) closedFlag() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
+}
+
+// slowClose is a device whose Close waits until released, as a late device's would on a stuck callback,
+// and says when it has started.
+type slowClose struct {
+	started, release chan struct{}
+}
+
+func (s slowClose) Close() error { close(s.started); <-s.release; return nil }
+
+type lateDevice struct {
+	entered, hold chan struct{}
+	dev           slowClose
+}
+
+func (d *lateDevice) Play(context.Context, func([]int16)) (io.Closer, error) {
+	close(d.entered)
+	<-d.hold
+	return d.dev, nil
+}
+func (d *lateDevice) Capture(context.Context, func([]int16)) (io.Closer, error) {
+	return nil, errors.New("no microphone")
+}
+
+// A device that finishes opening after the leave closes itself without holding the lock close takes first:
+// its Close may wait on a stuck callback, and close must not wait with it.
+func TestALateDeviceClosesItselfOutsideTheLock(t *testing.T) {
+	m := &media{s: &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}, stop: make(chan struct{}),
+		base: time.Now(), codec: keepOpen{}}
+	d := &lateDevice{entered: make(chan struct{}), hold: make(chan struct{}),
+		dev: slowClose{started: make(chan struct{}), release: make(chan struct{})}}
+	defer close(d.dev.release)
+	done := make(chan struct{})
+	go func() { m.openDevices(context.Background(), d); close(done) }()
+	within(t, d.entered, "Play was not called")
+	m.close()
+	close(d.hold)
+	within(t, d.dev.started, "the late device did not close itself")
+	// Its Close has started and is waiting: devMu must be free for close to take.
+	if !m.devMu.TryLock() {
+		t.Fatal("the late device closes while holding devMu")
+	}
+	m.devMu.Unlock()
+}

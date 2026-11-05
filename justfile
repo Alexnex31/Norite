@@ -444,8 +444,9 @@ spdx-check:
 # never distributed and must not appear in a notice claiming to describe a shipped binary.
 #
 # The files live under each module's internal/notices/ because `//go:embed` cannot reach outside the package
-# directory, and cli and daemon both embed theirs. Depends on build-local: the generator reads the binaries.
-notices: build-local
+# directory, and cli and daemon both embed theirs. The generator builds what it reads itself, for every
+# release target (.goreleaser.yaml), and reads nothing built here, so this needs no build first.
+notices:
     #!/usr/bin/env bash
     set -euo pipefail
     gen={{justfile_directory()}}/scripts/gen-third-party-notices.sh
