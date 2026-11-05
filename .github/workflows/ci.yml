@@ -160,6 +160,17 @@ jobs:
             git --no-pager diff -- backend/apicontract
             exit 1
           fi
+      # The voice-worker's Opus module is committed so a plain `go build` needs no C toolchain (ADR 0036),
+      # and rebuilt here from the pinned libopus and wasi-sdk, both checked by hash, so the bytes the worker
+      # runs are the build of the source they claim to be.
+      - name: opus.wasm
+        run: ./scripts/build-opus-wasm.sh
+      - name: fail if the committed opus.wasm is not the pinned build's
+        run: |
+          if ! git diff --quiet -- voiceworker/internal/opus/opus.wasm; then
+            echo "::error::voiceworker/internal/opus/opus.wasm is not the pinned build's — run 'just opus-wasm' and commit the result"
+            exit 1
+          fi
       # The dependency-license inventory is committed for the same reason the sqlc output is: a change to
       # the set of licenses this project ships under should arrive in a diff somebody reads, rather than
       # being a thing anyone could have checked. Regenerated here and compared, so adding a dependency
