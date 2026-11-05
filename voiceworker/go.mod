@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/Alexnex31/Norite/backend v0.0.0
 	github.com/Alexnex31/Norite/daemon v0.0.0
+	github.com/jfreymuth/pulse v0.1.3
 	github.com/pion/ice/v4 v4.4.8
 	github.com/pion/interceptor v0.1.51
 	github.com/pion/logging v0.2.4
