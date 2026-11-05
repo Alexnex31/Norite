@@ -145,9 +145,10 @@ Locked-in decisions:
 │   ├── internal/voiceworker/     # spawns, supervises and ends the worker; the Signaler seam (M28)
 │   ├── e2e/                       # keystore (modernc.org/sqlite), ratchet, single-writer goroutine, FTS5
 │   └── go.mod
-├── voiceworker/                  # norite-voice: a separate binary, the only place cgo is allowed (M29)
+├── voiceworker/                  # norite-voice: a separate binary, the only place cgo is permitted
 │   ├── internal/session/         # the worker's WebRTC connection to the SFU (M28)
-│   ├── audio/                    # hraban/opus, RNNoise, WebRTC APM (AEC3) — capture/encode/DSP
+│   ├── audio/                    # capture and playback in pure Go, one backend per OS (M29)
+│   ├── opus/                     # libopus in WebAssembly under wazero, a cgo twin behind a tag (M29)
 │   └── go.mod
 ├── frontend/                     # React + TS SPA — the later, tertiary web client (Phase O)
 │   ├── src/{app,features,gateway,api,stores,components}/
@@ -2347,9 +2348,12 @@ cross-checks against observed packet flow — Opus DTX means a silent participan
 
 **DSP pipeline, strict non-negotiable order**: **Mic Capture → AEC → RNNoise → AGC → Opus Encode**. RNNoise
 before AEC would non-linearly distort the mic signal and break AEC's linear echo-correlation assumption,
-producing a feedback loop instead of cancelling it. Opus, RNNoise, and WebRTC's Audio Processing Module
-(AEC3 for echo cancellation, AGC2 — replacing `libspeexdsp`, ADR 0023) are all cgo bindings, contained
-entirely to the `voiceworker/` binary — the only place cgo is allowed anywhere in the stack. AEC3 rather
+producing a feedback loop instead of cancelling it. Opus runs in WebAssembly under wazero, in the worker:
+libopus compiled to `wasm32-wasip1` and run with no host module and a memory cap, each decoder its own
+instance. The worker is built without cgo, like every other binary
+([ADR 0036](adr/0036-opus-in-webassembly.md), M29). RNNoise and WebRTC's Audio Processing Module (AEC3 for
+echo cancellation, AGC2 — replacing `libspeexdsp`, ADR 0023) live in the worker too, and M30 decides whether
+in WASM or native; the worker is the only place cgo is permitted anywhere in the stack. AEC3 rather
 than speexdsp because the echo canceller is the single most audible determinant of call quality, and
 double-talk handling is where the older component falls behind what users expect.
 
@@ -2359,7 +2363,7 @@ mouth-to-ear latency is dominated by the network leg, so a user far from the SFU
 conversation that no codec or DSP work compensates for. `MediaCoordinator.AllocateSession` chooses which SFU
 serves a session, so **proximity routing is a seam already in place**; v1 runs a single region deliberately.
 
-**Adaptive bitrate**: `pion/interceptor`'s REMB/TWCC feedback drives `hraban/opus`'s runtime bitrate control,
+**Adaptive bitrate**: `pion/interceptor`'s REMB/TWCC feedback drives the encoder's runtime bitrate control,
 audio-only, no simulcast — the Prometheus voice/SFU metrics (§15) feed this loop directly, not just a
 dashboard.
 
@@ -3076,11 +3080,13 @@ during implementation, and must be documented plainly wherever the relevant subs
   open ports (the SFU's UDP one, TURN's on UDP and TCP, and TLS's) and announce a public address from
   behind NAT (M27) — a materially bigger operational burden than pure text-only self-hosting. Voice is real v1 product functionality, but
   is a deployment-time opt-out (Milestone M37) specifically because of this burden.
-- **cgo is confined to the voice-worker binary.** The pure-Go, cgo-free constraint used everywhere else in the
-  stack (daemon, CLI/TUI, GUI, backend) does not extend to the voice-worker: Opus (`hraban/opus`), RNNoise, and
-  WebRTC's APM are all cgo bindings, because no mature pure-Go equivalents exist for production-grade audio
-  codec/DSP work. This exception is contained entirely to the isolated, opt-out-gated voice-worker binary; the
-  daemon, CLI/TUI, and GUI stay pure Go and cross-compile cleanly regardless.
+- **cgo is permitted in the voice-worker binary alone, and unused there since M29.** No mature pure-Go
+  equivalent exists for production-grade audio codec and DSP work, which is why the exception exists. Opus
+  runs as libopus compiled to WebAssembly, so the worker cross-compiles with everything else and the one C
+  library reading strangers' bytes can reach nothing but its own memory
+  ([ADR 0036](adr/0036-opus-in-webassembly.md)). The price is measured: 2.6× native per frame, 3% of a core
+  for one encode and three decodes, about a millisecond of latency. M30 decides the DSP the same way; a
+  native component there would bring back a cgo release build for darwin and the confinement question.
 - **E2E encryption carries compounding, not merely additive, cryptographic risk.** The feature depends on
   two independent custom protocol surfaces: the device-linking protocol (fully custom, no off-the-shelf
   equivalent) and the correct integration of the `go.mau.fi/libsignal` library into this project's own

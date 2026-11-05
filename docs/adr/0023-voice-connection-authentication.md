@@ -6,6 +6,10 @@ canceller changes (see below). Fills in the part [ADR 0006](0006-voice-deferred-
 left open: what `VoiceServerInfo` contains. Depends on [ADR 0010](0010-client-daemon.md) for the voice-worker's
 isolation, and is the reasoning [ADR 0022](0022-access-token-signing-and-scope-model.md) rests on.
 
+**Amended by [ADR 0036](0036-opus-in-webassembly.md)** (M29): the voice-worker is no longer "the cgo one".
+Opus runs in WebAssembly, so the bytes strangers send are decoded inside wazero rather than by native code.
+AEC3 still lands in the worker, where cgo remains permitted; whether it runs native is M30's decision.
+
 **Amended at M26 (2026-11-02)** in two places, neither changing what authenticates a connection:
 - **The whole SDP offer travels**, not the fingerprint and ufrag alone, and the SFU answers with a whole
   SDP answer. Both ends building SDP from parameters is more custom code and less of Pion's own handling;

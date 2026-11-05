@@ -1919,3 +1919,29 @@ carries the condition that would reopen it.
   child's ends once the worker has started.
 - **Reopens if**: the daemon starts a process by anything but Go's `os/exec` or `syscall`: a C library, or
   `ShellExecute`.
+
+## M29 — Opus audio pipeline
+
+### The OS confines nothing the voice-worker does
+- **Raised**: M28, `/security-sweep`; decided at M29's planning.
+- **Verdict**: accepted risk
+- **Why**: the worker runs as the account. Code that ran in it would reach what the account reaches: the
+  attach socket and the credential store. What reads bytes other people chose is:
+  - Go, the RTP and the jitter buffer, which is memory-safe;
+  - the Opus decoder, which is libopus compiled to WebAssembly under wazero's compiler
+    ([ADR 0036](adr/0036-opus-in-webassembly.md)).
+
+  The module imports nothing and is instantiated with no host module, its memory is capped, and each
+  decoder is an instance of its own. So a libopus bug reaches that instance's linear memory and nothing
+  else. What is left is a bug in wazero's compiler or runtime, which is a smaller surface than libopus,
+  written in Go, and not the one strangers' bytes are shaped for.
+
+  Confining the process (Landlock and seccomp, a macOS profile that keeps TCC's attribution to the daemon,
+  a restricted token on Windows) is three mechanisms, two of them hard to test from one machine. They
+  would protect against that remainder alone.
+- **Reopens if**:
+  - C or C++ in the worker reads bytes from the network outside wazero, as a native Opus would (ADR 0036's
+    switch);
+  - M30 runs the APM, or any DSP that reads the decoded far end, natively;
+  - the module is given a host module that reaches the filesystem, the network or the process;
+  - the compiled module is cached on disk, where the account could write the code the worker loads.

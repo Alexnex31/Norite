@@ -1929,7 +1929,9 @@ of this section.
   - **It has no release of its own.** `norite-voice` is in the client archive beside `norite-daemon`, it
     goes wherever the daemon goes, and the daemon's updater stages, smoke-runs and installs it with the
     other two.
-- **M29 — Opus audio pipeline**: `hraban/opus` (cgo) capture/encode/decode/playback in the voice-worker.
+- **M29 — Opus audio pipeline**: capture, encode, decode and playback in the voice-worker, with Opus in
+  WebAssembly and no cgo ([ADR 0036](adr/0036-opus-in-webassembly.md)); the entry named `hraban/opus` (cgo)
+  until planning.
   Depends on M25's finding for how mic access is actually obtained. Done when: two voice-worker instances can
   exchange intelligible audio through the SFU from M26. Being before M33, they signal through M26's harness.
   The worker attributes received audio by CSRC, as M26 sends it, and resets its decoder and FEC state when
@@ -1962,14 +1964,77 @@ of this section.
     - The worker's environment is an allow-list in `daemon/internal/voiceworker`. The capture library
       chosen here adds what it needs to that list, and nothing else.
     - A C library writing to stdout or stderr reaches the daemon's log and never the protocol.
+
+  **Planned at M29 (ADR 0036):**
+  - **Opus is libopus 1.6.1 compiled to `wasm32-wasip1` and run under wazero**, and the worker is built
+    with `CGO_ENABLED=0` like every other binary.
+    - This answers the release question above: nothing about the release changes.
+    - It answers the confinement question for the one piece of C that reads strangers' bytes:
+      - the module imports nothing and runs with no host module;
+      - its memory is capped;
+      - each decoder is its own instance, and a trap discards that instance alone.
+    - The `.wasm` is built by a pinned wasi-sdk, committed, embedded, and rebuilt by CI, which fails on a
+      different hash. libopus goes in the notices by hand.
+  - **Measured before deciding**, on one performance core of a Core Ultra 7 258V, with the same source and
+    flags on both sides. The work is 1 encode (64 kbps, complexity 10, FEC, DTX), 3 decodes and a mix per
+    20 ms frame.
+    - Native: 229 µs at p50 and 270 at p99.
+    - WASM with SIMD128: 599 and 678, which is 3.0% of a core against a threshold of 5%.
+    - At a call's cadence, WASM adds 0.9 ms at p50 and 1.4 ms at p99 of latency.
+    - Compiling the module takes 97 ms, once per call, overlapped with ICE and never cached on disk.
+  - **Native stays within reach.**
+    - A cgo implementation of the same interface, built from the same shim, sits behind a build tag no
+      release passes.
+    - The tests run against both implementations.
+    - ADR 0036 states the measurement that would switch the default.
+  - **Capture is pure Go, one backend per OS:**
+    - the PulseAudio protocol on Linux, which PipeWire serves through `pipewire-pulse`;
+    - WASAPI on Windows;
+    - AudioQueue through `purego` on macOS.
+
+    The test device lives behind a build tag that no release passes, and a test holds `.goreleaser.yaml`
+    to that.
+  - **Confinement is recorded, not built.** The ledger says the worker runs as the account and the OS
+    confines nothing. It reopens:
+    - if C or C++ reads network bytes outside wazero;
+    - if a native APM arrives (M30);
+    - if the module is given a host module that reaches the system;
+    - if the compiled module is cached on disk.
+  - **Done when, in addition:**
+    - **Audio:**
+      - Tones cross both ways with an envelope correlation of at least 0.9.
+      - The same holds relayed through M27's TURN.
+      - With 5% loss injected, it holds at 0.8 or more.
+    - **What is sent:** every packet carries the RFC 6464 audio level.
+    - **Native against WASM** is measured again on the finished pipeline, in µs per frame at p50 and p99,
+      with the start cost and the memory.
+    - **Latency:** an automated test measures mouth to ear. The test source emits a click, and the far
+      side's test sink stamps when it plays it, on one monotonic clock: on loopback, then with loss and
+      jitter, against a budget set from the first run.
+    - **The manual pass:**
+      - On Linux, this machine against a VM, `pw-link -l` before and after each capture, with latency
+        measured through real PipeWire buffers.
+      - Windows in M24's VM.
+      - macOS on the author's Mac.
 - **M30 — Audio DSP**: RNNoise (noise suppression) plus WebRTC's Audio Processing Module (AEC3 echo
-  cancellation plus AGC2 — replacing `libspeexdsp`, ADR 0023), both cgo,
-  contained entirely to the voice-worker binary, wired in this exact order: Mic Capture → AEC → RNNoise → AGC
+  cancellation plus AGC2 — replacing `libspeexdsp`, ADR 0023), contained entirely to the voice-worker
+  binary, wired in this exact order: Mic Capture → AEC → RNNoise → AGC
   → Opus Encode. Done when: a recorded test with background noise/echo shows measurable suppression versus the
   unprocessed pipeline from M29, and a two-party echo test confirms AEC correctly cancels far-end audio (i.e.
   it runs on the linear signal, before RNNoise's non-linear processing touches it).
+
+  **From M29 ([ADR 0036](adr/0036-opus-in-webassembly.md)):**
+  - **The worker has no cgo**, since Opus runs in WebAssembly, and the release cross-compiles it with the
+    rest. Where the DSP runs is this milestone's decision, and it is spiked before it is designed:
+    - RNNoise is C, and compiles to WASM the way libopus did.
+    - The APM is C++ with abseil.
+  - **Measure each in WASM against native**, as M29 did, before choosing.
+  - **A native component brings back what ADR 0036 avoided:**
+    - the release problem, which is building cgo for darwin from a Linux runner;
+    - the ledger's confinement entry, which names a native APM as its reopening condition.
 - **M31 — Adaptive bitrate and congestion control**: `pion/interceptor`'s REMB/TWCC feedback wired into
-  `hraban/opus`'s runtime bitrate control, audio-only, no simulcast. Depends on M26, M29, and M30. Done when:
+  the encoder's runtime bitrate control (M29's shim; `hraban/opus` until M29), audio-only, no simulcast.
+  Depends on M26, M29, and M30. Done when:
   a simulated packet-loss/bandwidth-constrained test shows the encoder's bitrate measurably drop and recover
   in response, rather than staying fixed regardless of network conditions. M26 terminates RTCP per hop, so
   the feedback the encoder reads is the SFU's on the sender's hop, not a receiver's forwarded through it.

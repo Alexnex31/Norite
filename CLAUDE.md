@@ -85,8 +85,9 @@ highest-value surfaces.
 **Daemon**: Go, `wazero` (WASM plugin sandbox, pure Go/no cgo), `zalando/go-keyring`, `fsnotify`,
 `gofrs/flock`, `modernc.org/sqlite` (E2E keystore, pure Go/no cgo).
 
-**Voice-worker**: Go, `pion/webrtc` + `pion/interceptor`, `hraban/opus`/RNNoise/WebRTC APM (AEC3, cgo —
-the *only* binary in the stack where cgo is allowed; AEC3 replaces `libspeexdsp` per ADR 0023).
+**Voice-worker**: Go, `pion/webrtc` + `pion/interceptor`, libopus compiled to WebAssembly under `wazero`
+(ADR 0036, no cgo), pure-Go capture per OS, RNNoise/WebRTC APM (AEC3, M30; AEC3 replaces `libspeexdsp` per
+ADR 0023). The *only* binary in the stack where cgo is permitted, and since M29 it uses none.
 
 **Web SPA** (later, tertiary client): React, TypeScript, Vite, TanStack Query, Zustand, Zod, Tailwind +
 shadcn/ui, `react-hook-form`, Vitest + Playwright.

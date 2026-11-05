@@ -374,8 +374,9 @@ memory control.
 **Daemon** — Go; `wazero` for the WASM plugin sandbox, `zalando/go-keyring` for credential storage,
 `pelletier/go-toml` v2 for the shared config file.
 
-**Voice-worker** — Go, with cgo confined to this one binary: `hraban/opus`, RNNoise, and WebRTC's Audio
-Processing Module. The only place cgo is allowed anywhere in the stack.
+**Voice-worker** — Go, without cgo: libopus compiled to WebAssembly and run under `wazero`, and capture in
+pure Go on each OS. RNNoise and WebRTC's Audio Processing Module come at M30. It is the one binary where cgo
+is permitted, and since M29 it uses none.
 
 **Web SPA** (later) — React, TypeScript, Vite, TanStack Query, Zustand, Tailwind and shadcn/ui.
 
