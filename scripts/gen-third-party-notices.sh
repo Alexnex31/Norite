@@ -33,11 +33,29 @@ first_party="github.com/Alexnex31/Norite"
 # caller, and a default here would be a fourth place the pin could drift from. It is exported by
 # `just notices` and set at the workflow level in CI.
 : "${GO_LICENSES_VERSION:?set it, or run this through \`just notices\` which does — it must match the pin in the justfile and ci.yml}"
-ids=$(cd "$repo/$module_dir" \
-        && GOWORK=off go run "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION" report "$main_pkg" \
-             --ignore "$first_party" 2>/dev/null \
-        | awk -F, 'NF>=3 {print $1, $NF}') \
-  || { echo "gen-notices: $module_dir: go-licenses report failed; refusing to write a partial file" >&2; exit 1; }
+#
+# One file ships inside every OS's build of a program, so it covers what each of them links: the binary
+# given, built for this machine, and the program built again for the other two OSes a release targets,
+# with cgo off as a release has it. A module only one OS links (purego in the macOS voice-worker, M29)
+# is otherwise missing from the file the macOS build carries. go-licenses is built once and asked per OS.
+others=(darwin windows)
+xdir=$(mktemp -d)
+GOBIN="$xdir" GOWORK=off go install "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION"
+ids=""
+for goos in "$(go env GOOS)" "${others[@]}"; do
+    got=$(cd "$repo/$module_dir" \
+            && GOOS=$goos GOWORK=off "$xdir/go-licenses" report "$main_pkg" --ignore "$first_party" 2>/dev/null \
+            | awk -F, 'NF>=3 {print $1, $NF}') \
+      || { echo "gen-notices: $module_dir: go-licenses report for $goos failed; refusing to write a partial file" >&2; exit 1; }
+    ids+="$got"$'\n'
+done
+ids=$(printf '%s' "$ids" | LC_ALL=C sort -u)
+binaries=("$repo/$binary")
+for goos in "${others[@]}"; do
+    (cd "$repo/$module_dir" && GOOS=$goos GOARCH=amd64 CGO_ENABLED=0 GOWORK=off go build -o "$xdir/$goos" "$main_pkg") \
+      || { echo "gen-notices: $module_dir: building for $goos failed" >&2; exit 1; }
+    binaries+=("$xdir/$goos")
+done
 
 # A module go-licenses cannot classify is reported Unknown, which is no identifier. Those read by hand
 # (contracts/license-overrides.txt) are named from that list, first, so the longest-prefix join below finds
@@ -56,7 +74,7 @@ find_file() {
     return 1
 }
 
-tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT
+tmp=$(mktemp) && trap 'rm -rf "$tmp" "$xdir"' EXIT
 
 count=0
 while read -r mod ver; do
@@ -99,7 +117,7 @@ while read -r mod ver; do
         printf '\n\n'
     } >> "$tmp"
     count=$((count + 1))
-done < <(go version -m "$repo/$binary" | awk '$1 == "dep" { print $2, $3 }' | LC_ALL=C sort)
+done < <(for b in "${binaries[@]}"; do go version -m "$b"; done | awk '$1 == "dep" { print $2, $3 }' | LC_ALL=C sort -u)
 
 # What the linker cannot report: C compiled into a Go module's own files, libopus in the voice-worker's
 # WebAssembly module since M29 (ADR 0036). Each is a directory under the module's internal/notices/embedded/
