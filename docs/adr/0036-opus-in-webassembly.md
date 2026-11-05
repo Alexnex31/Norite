@@ -93,11 +93,27 @@ Intel Core Ultra 7 258V, pinned to one performance core.
 - **Memory:** the process holds 9.5 MB more resident memory.
 - **Threshold:** the one set before measuring was 5% of one core, so B passes.
 
+**Measured again on the finished pipeline (M29).** Two callers speaking through M26's SFU, measured by the
+process's CPU time, codec, Pion and SRTP together, at a call's cadence:
+
+| | WebAssembly | native |
+|---|---|---|
+| per caller, share of one core | 8.6–8.9% | 4.1–4.3% |
+
+- This is twice the codec's own 3%, because between frames the core drops its clock. A profile puts 85%
+  of the WebAssembly call in wazero's compiled code.
+- Complexity 8 encodes exactly as 10 does, and 6 brings the call to 7.3%.
+- In the module, wazero 1.12 measured 584 µs per frame against the spike's 599 µs.
+
 ### When to switch to native
 On the least capable machine supported, the worker switches to native if either measurement passes its
 bound:
-- the whole frame passes 10% of one core;
+- the whole frame passes 10% of one core, measured as above for the codec alone, unpaced (`BenchmarkFrame`);
 - the latency added at call cadence passes 5 ms at p99.
+
+A whole call's share of a core is not that measurement. It includes Pion, and the clock the core runs at
+between frames. It is reported beside the threshold (`TestWhatACallCosts`) and does not trigger the switch
+on its own.
 
 Before switching, the cheaper lever is the encoder's complexity: the encoder is 80% of the frame.
 Switching brings back what this record avoids:
