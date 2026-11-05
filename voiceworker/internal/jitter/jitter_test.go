@@ -52,6 +52,7 @@ func check(t *testing.T, got, want string) {
 
 func TestPacketsPlayInOrderOnceTheTargetIsBuffered(t *testing.T) {
 	b := New()
+	b.target = 2 // a buffer deepened by lateness, which waits for two
 	push(b, 7, 10, 1000)
 	check(t, play(b, 1), ".")
 	push(b, 7, 12, 1000+2*FrameSamples) // arrives before 11
@@ -95,6 +96,7 @@ func TestADTXGapIsConcealedNotRecovered(t *testing.T) {
 
 func TestASenderThatStopsIsConcealedThenSilent(t *testing.T) {
 	b := New()
+	b.target = 2 // a buffer deepened by lateness, which waits for two
 	push(b, 7, 10, 1000)
 	push(b, 7, 11, 1000+FrameSamples)
 	check(t, play(b, 10), "p10 p11 c c c c c . . .")
@@ -253,6 +255,7 @@ func TestAPayloadIsNotOverwrittenByTheNextPush(t *testing.T) {
 // pass, between two virtual machines).
 func TestAStaleComfortNoisePacketDoesNotDelayTheStart(t *testing.T) {
 	b := New()
+	b.target = 2                         // a buffer deepened by lateness, which waits for two
 	b.Push(7, 1, 1000, []byte("p1"), t0) // comfort noise
 	check(t, play(b, 3), ". . .")
 	later := t0.Add(400 * time.Millisecond)
@@ -284,5 +287,32 @@ func TestALatePacketDeepensTheBufferAtOnce(t *testing.T) {
 	check(t, play(b, 3), "c p11 p12")
 	if b.Target() != MinDelay+1 {
 		t.Errorf("target %d", b.Target())
+	}
+}
+
+// At its least deep the buffer waits for nothing: a packet plays at the first frame after it arrives. That
+// is 20 ms less mouth to ear than waiting for a second; the buffer deepens once lateness shows it must.
+func TestAtItsLeastTheBufferPlaysTheFirstPacketAtOnce(t *testing.T) {
+	b := New()
+	if b.Target() != 1 {
+		t.Fatalf("a new buffer waits for %d frames", b.Target())
+	}
+	push(b, 7, 10, 1000)
+	check(t, play(b, 1), "p10")
+}
+
+// At one frame deep a lost packet can only be concealed: the packet carrying its FEC has not arrived when it
+// is due. The first loss deepens the buffer to two frames, and the next one is recovered.
+func TestAFirstLossDeepensTheBufferForFEC(t *testing.T) {
+	b := New()
+	push(b, 7, 10, 1000)
+	check(t, play(b, 2), "p10 c") // 11 is lost, and nothing after it has arrived
+	push(b, 7, 12, 1000+2*FrameSamples)
+	check(t, play(b, 2), "c p12") // concealed once more, to hold a frame from now on
+	push(b, 7, 13, 1000+3*FrameSamples)
+	push(b, 7, 15, 1000+5*FrameSamples) // 14 lost, 15 already here
+	check(t, play(b, 3), "p13 r15 p15")
+	if b.Target() != fecDelay {
+		t.Errorf("target %d after a loss", b.Target())
 	}
 }

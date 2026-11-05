@@ -25,8 +25,10 @@ const (
 	// maxAhead is how far ahead of what is playing a packet may claim to be before the buffer starts over
 	// from it: a sender whose clock leapt, or one lying.
 	maxAhead = 50 * FrameSamples
-	// MinDelay and MaxDelay bound the target, in frames, of what is buffered before playing starts.
-	MinDelay = 2
+	// MinDelay and MaxDelay bound the target, in frames, of what is buffered before playing starts. One
+	// frame means a packet plays as soon as it has arrived: on a clean network that is 20 ms of mouth to ear
+	// saved against two, and on one that jitters the buffer deepens at the first late packet (late).
+	MinDelay = 1
 	MaxDelay = 10
 	// concealFrames is how long a sender that stopped is concealed before the slot falls silent and waits
 	// to buffer again: 100 ms, past which concealment is a drone and not a voice.
@@ -35,6 +37,10 @@ const (
 	shrinkAfter = 10 * time.Second
 	// frameDuration is a frame's length in time, the unit a packet's freshness is judged in.
 	frameDuration = 20 * time.Millisecond
+	// fecDelay is the depth at which in-band FEC can work: a lost frame is recovered from the packet after
+	// it, which must have arrived by the time the lost one is due. A buffer at MinDelay deepens to it at the
+	// first loss it conceals, and comes back after shrinkAfter without another.
+	fecDelay = 2
 )
 
 // Kind is what to play for the next stretch of audio.
@@ -95,6 +101,8 @@ type Buffer struct {
 
 	target   int
 	lastLate time.Time
+	// lastArrival is the newest packet's arrival, Next's clock for timing a deepening it decides.
+	lastArrival time.Time
 	// out is what Next hands the decoder, copied out of the ring under the lock. Only Next writes it.
 	out   [MaxPacket]byte
 	stats Stats
@@ -142,6 +150,7 @@ func (b *Buffer) Push(sender uint32, seq uint16, ts uint32, payload []byte, now 
 		return // a duplicate, or older than what holds the place
 	}
 	e.used, e.seq, e.ts, e.at, e.n = true, seq, ts, now, copy(e.payload[:], payload)
+	b.lastArrival = now
 	if b.lastLate.IsZero() {
 		b.lastLate = now
 	}
@@ -269,6 +278,17 @@ func (b *Buffer) Next() Step {
 		}
 	}
 	if e := b.earliest(b.next, true); e != nil && e.ts == b.next {
+		if e.seq != b.lastSeq+1 && b.target < fecDelay {
+			// A packet before this one was lost and concealed, where its FEC in this packet would have
+			// recovered it had the buffer held this packet a frame earlier. So it holds one from now on:
+			// this frame is concealed too, and the packet plays next, a frame deeper.
+			b.target = fecDelay
+			b.lastLate = b.lastArrival
+			b.next -= FrameSamples
+			b.lastSeq = e.seq - 1
+			b.stats.Concealed++
+			return Step{Kind: Conceal, Reset: reset}
+		}
 		e.used = false
 		b.lastSeq, b.missing = e.seq, 0
 		return Step{Kind: Play, Payload: b.copyOut(e), Reset: reset}

@@ -443,17 +443,18 @@ func onsets(heard []int16, at []time.Time) []time.Time {
 }
 
 // latencyBudget is mouth to ear on loopback, through the SFU, from the moment a click's sample was captured
-// to the moment the far device was handed it. It covers waiting for the click's frame to fill, the
-// encoder's 6.5 ms lookahead, the jitter buffer waiting for a second packet, and where the playing clock's
-// tick falls. It leaves out each device's own buffer, about 21 ms each way through PipeWire, which M29's
-// manual pass measured separately.
+// to the moment the far device was handed it. It covers the click's frame filling, the encoder's 6.5 ms
+// lookahead, and where the playing clock's tick falls. The jitter buffer waits for one frame, so on a clean
+// network there is no second packet to wait for. It leaves out each device's own buffer, about 21 ms each
+// way through PipeWire, which M29's manual pass measured separately.
 //
-// Measured at 59 to 65 ms when this was written, and 57 to 78 with one packet in ten lost. The test first
-// stamped a click when its whole frame was handed over and put it at the frame's start, which left out the
-// frame's 20 ms of filling and measured 38 to 44 ms. The pass found that gap as unexplained latency
-// between two VMs: about 112 ms each way, of which 42 is the two devices and the rest is this. The budget
-// leaves room for a loaded CI runner's timers.
-const latencyBudget = 110 * time.Millisecond
+// Measured at 38 to 44 ms with the buffer one frame deep, against 59 to 65 at two. With one packet in ten
+// lost it measured 56 to 76, since the first loss deepens the buffer to two frames for FEC. The test first
+// stamped a click when its whole frame was handed over, with the click at the frame's start. That left out
+// the frame's 20 ms of filling, and it measured 38 to 44 ms at two frames deep. The pass found the gap as
+// unexplained latency between two VMs: about 112 ms each way, of which 42 ms is the two devices and the
+// rest is this. The budget leaves room for a loaded CI runner's timers.
+const latencyBudget = 90 * time.Millisecond
 
 func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 	if testing.Short() {
