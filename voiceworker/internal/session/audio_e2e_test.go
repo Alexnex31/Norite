@@ -144,7 +144,10 @@ func (h *harness) join(t *testing.T, room, user string, dev audio.Device, opts O
 	if len(creds.URLs) > 0 {
 		j.ICEServers = []voiceipc.ICEServer{{URLs: creds.URLs, Username: creds.Username, Credential: creds.Password}}
 	}
-	opts.Version, opts.Device, opts.Codec = "dev", dev, sharedCodec
+	opts.Version, opts.Device = "dev", dev
+	if opts.Codec == nil {
+		opts.Codec = sharedCodec
+	}
 	if opts.Log == nil {
 		opts.Log = io.Discard
 	}
