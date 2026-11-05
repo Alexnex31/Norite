@@ -1961,7 +1961,9 @@ carries the condition that would reopen it.
   One more thing a server controls is a slot's sender, and each change starts a new decoder instance:
   142 µs and 1.1 MB (`BenchmarkReset`). Changes between two frames collapse into one reset, so the worst
   is three slots changing on every frame. That is 150 instances a second: 2% of a core, and about 170 MB a
-  second for the garbage collector.
+  second for the garbage collector. They start on the speakers' thread, inside the mix: 0.45 ms of every
+  20 ms frame at worst, which leaves the frame's deadline far off. Preparing a spare instance off that
+  thread was considered and not built, for a cost no ordinary call pays (M29's second `/code-review`).
 - **Reopens if**: decoding moves to arrival, the ring grows with what arrives, the per-packet work stops
   being bounded by one packet, or a reset stops being collapsed to one per frame.
 

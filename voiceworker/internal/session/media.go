@@ -36,6 +36,9 @@ const (
 	stuckDecode = time.Second
 	// captureQueue is how many captured frames wait for the encoder before the oldest is dropped.
 	captureQueue = 4
+	// closeWithin bounds closing the audio, so the connection's goodbye still fits in the worker's 2 s
+	// after it: half a second here, then GracefulClose's one.
+	closeWithin = 500 * time.Millisecond
 )
 
 type media struct {
@@ -53,6 +56,7 @@ type media struct {
 	mu       sync.Mutex
 	closed   bool
 	slots    []*slot
+	attachMu sync.Mutex
 	attached int
 
 	devMu             sync.Mutex
@@ -74,8 +78,9 @@ type slot struct {
 	errs int
 	// resets counts the decoder's resets, one per sender the slot changed to; levels the packets that
 	// arrived with an audio level.
-	resets int
-	levels atomic.Int64
+	resets  int
+	senders int // the jitter buffer's count of senders when pcm was last filled
+	levels  atomic.Int64
 }
 
 // startMedia starts both directions. A codec that cannot start ends the call, since it is a bug and no
@@ -112,21 +117,35 @@ func (s *Session) startMedia(ctx context.Context) error {
 	return nil
 }
 
-// openDevices opens the speakers and the microphone under devMu, which close takes before it reads them:
-// a leave landing while they open waits for them and closes them, and one that came first leaves nothing
-// to open. So a microphone is never left open after the call it was opened for.
+// openDevices opens the speakers and the microphone, and keeps each only if the call has not closed
+// meanwhile. close stops the call before it reads them under devMu, and a device opened after that sees
+// the stop and closes itself here. So a microphone is never left open after its call, and a leave never
+// waits on a driver that is slow to open.
 func (m *media) openDevices(ctx context.Context, dev audio.Device) {
-	m.devMu.Lock()
-	defer m.devMu.Unlock()
+	keep := func(c io.Closer, at *io.Closer) {
+		m.devMu.Lock()
+		defer m.devMu.Unlock()
+		if m.stopped() {
+			_ = c.Close()
+			return
+		}
+		*at = c
+	}
 	if m.stopped() {
 		return
 	}
-	var err error
-	if m.playback, err = dev.Play(ctx, m.fill); err != nil {
+	if p, err := dev.Play(ctx, m.fill); err != nil {
 		m.s.logf("the speakers could not be opened, so nothing will be heard: %v", err)
+	} else {
+		keep(p, &m.playback)
 	}
-	if m.capture, err = dev.Capture(ctx, m.captured); err != nil {
+	if m.stopped() {
+		return
+	}
+	if c, err := dev.Capture(ctx, m.captured); err != nil {
 		m.s.logf("the microphone could not be opened, so nothing will be sent: %v", err)
+	} else {
+		keep(c, &m.capture)
 	}
 }
 
@@ -142,13 +161,14 @@ func (m *media) stopped() bool {
 // attach gives a slot's track the next slot of the mix, and drains one past them, which an SFU offering
 // more slots than were asked for would send.
 func (m *media) attach(tr remote) {
-	m.mu.Lock()
+	// Not under mu, which a stuck decode holds: a track arriving then would wait for ever, unread.
+	m.attachMu.Lock()
 	var sl *slot
 	if m.attached < len(m.slots) {
 		sl = m.slots[m.attached]
 		m.attached++
 	}
-	m.mu.Unlock()
+	m.attachMu.Unlock()
 	if sl == nil {
 		drain(tr.tr)
 		return
@@ -279,6 +299,11 @@ func (m *media) fill(out []int16) {
 
 // next decodes until the slot holds a frame.
 func (m *media) next(sl *slot) {
+	// What the previous sender's last packet decoded to and has not played yet is theirs, not the new
+	// sender's: a 120 ms packet leaves 100 ms behind.
+	if g := sl.buf.Senders(); g != sl.senders {
+		sl.senders, sl.pcm = g, sl.pcm[:0]
+	}
 	for len(sl.pcm) < audio.FrameSamples {
 		st := sl.buf.Next()
 		ctx := context.Background()
@@ -362,31 +387,31 @@ func (m *media) close() {
 		return
 	}
 	m.devMu.Lock()
-	for _, c := range []io.Closer{m.capture, m.playback} {
-		if c != nil {
-			_ = c.Close()
-		}
-	}
+	devices := []io.Closer{m.capture, m.playback}
+	m.capture, m.playback = nil, nil
 	m.devMu.Unlock()
-	// The sender may be inside an encode that never returns, which the watchdog has ended the call for.
-	sent := make(chan struct{})
-	go func() { m.sent.Wait(); close(sent) }()
-	select {
-	case <-sent:
-	case <-time.After(stuckDecode):
-		return // the codec is left to the worker's exit, which follows
-	}
-	locked := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		// WASAPI's and AudioQueue's Close wait for a callback in progress, and a mix stuck in a decode is
+		// one. So is a sender stuck in an encode. Everything here waits on something a stuck call could
+		// hold, which is why the whole of it is bounded below rather than each step.
+		for _, c := range devices {
+			if c != nil {
+				_ = c.Close()
+			}
+		}
+		m.sent.Wait()
 		m.mu.Lock()
 		m.closed = true
 		m.mu.Unlock()
-		close(locked)
+		_ = m.codec.Close(context.Background())
 	}()
 	select {
-	case <-locked:
-		_ = m.codec.Close(context.Background())
-	case <-time.After(stuckDecode):
+	case <-done:
+	case <-time.After(closeWithin):
+		// Left to the worker's exit, which follows the call's end. The bound leaves the connection's own
+		// close room for its goodbye inside the worker's two seconds (cmd/norite-voice).
 	}
 }
 

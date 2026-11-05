@@ -45,7 +45,8 @@ GOBIN="$xdir" GOWORK=off go install "github.com/google/go-licenses/v2@$GO_LICENS
 ids=""
 for goos in "${targets[@]}"; do
     got=$(cd "$repo/$module_dir" \
-            && GOOS=$goos GOWORK=off "$xdir/go-licenses" report "$main_pkg" --ignore "$first_party" 2>/dev/null \
+            && GOOS=$goos GOARCH=amd64 CGO_ENABLED=0 GOWORK=off "$xdir/go-licenses" report "$main_pkg" \
+               --ignore "$first_party" 2>/dev/null \
             | awk -F, 'NF>=3 {print $1, $NF}') \
       || { echo "gen-notices: $module_dir: go-licenses report for $goos failed; refusing to write a partial file" >&2; exit 1; }
     ids+="$got"$'\n'

@@ -276,6 +276,13 @@ func (b *Buffer) Stats() Stats {
 	return b.stats
 }
 
+// Senders is how many senders the slot has carried: it changes the moment a new one's packet arrives.
+func (b *Buffer) Senders() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stats.Senders
+}
+
 // Target is the delay, in frames, the buffer waits for before it starts playing.
 func (b *Buffer) Target() int {
 	b.mu.Lock()

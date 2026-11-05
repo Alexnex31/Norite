@@ -190,7 +190,70 @@ func TestAMicrophoneIsNeverLeftOpenAfterTheCall(t *testing.T) {
 	<-closed
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.opened != 2 || d.closed != 2 {
+	if d.opened == 0 || d.opened != d.closed {
 		t.Errorf("opened %d devices and closed %d", d.opened, d.closed)
 	}
 }
+
+// blocking is a device whose Close waits on a callback in progress, as WASAPI's and AudioQueue's do, and
+// the callback is a mix stuck in a decode.
+type blocking struct{ release chan struct{} }
+
+func (b blocking) Close() error { <-b.release; return nil }
+
+// Leaving a call whose decoder is stuck still returns, in time for the connection's goodbye.
+func TestClosingIsBoundedWhateverIsStuck(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+		codec: keepOpen{}, playback: blocking{release}, capture: blocking{release}}
+	m.sent.Add(1) // a sender stuck in an encode
+	m.mu.Lock()   // and a mix stuck in a decode
+	closed := make(chan struct{})
+	go func() { m.close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(closeWithin + 200*time.Millisecond):
+		t.Error("closing waited past its bound") // bounded, so a removed bound fails rather than hangs
+	}
+}
+
+// A slot that changes sender plays nothing more of the previous one's, even what their last packet decoded
+// to and had not played yet.
+func TestANewSenderHearsNothingOfThePrevious(t *testing.T) {
+	buf := jitter.New()
+	sl := &slot{buf: buf, dec: long{}, pcm: make([]int16, 0, opus.MaxDecodeSamples+audio.FrameSamples),
+		tmp: make([]int16, opus.MaxDecodeSamples)}
+	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+		slots: []*slot{sl}}
+	now := time.Now()
+	for i := range jitter.MinDelay {
+		buf.Push(7, uint16(i), uint32(i*opus.MaxDecodeSamples), []byte{1}, now)
+	}
+	out := make([]int16, audio.FrameSamples)
+	m.fill(out) // the previous sender's 120 ms packet: 20 ms played, 100 ms left over
+	if out[0] != 1 {
+		t.Fatalf("the first sender was not heard: %d", out[0])
+	}
+	for i := range jitter.MinDelay {
+		buf.Push(9, uint16(10+i), uint32(10_000+i*jitter.FrameSamples), []byte{2}, now)
+	}
+	m.fill(out)
+	for i, v := range out {
+		if v == 1 {
+			t.Fatalf("sample %d after the change is the previous sender's", i)
+		}
+	}
+}
+
+// long decodes every packet to 120 ms of its first byte.
+type long struct{ opus.Decoder }
+
+func (long) Decode(_ context.Context, p []byte, pcm []int16) (int, error) {
+	for i := range opus.MaxDecodeSamples {
+		pcm[i] = int16(p[0])
+	}
+	return opus.MaxDecodeSamples, nil
+}
+func (long) Reset(context.Context) error                         { return nil }
+func (long) Conceal(_ context.Context, pcm []int16) (int, error) { clear(pcm[:960]); return 960, nil }

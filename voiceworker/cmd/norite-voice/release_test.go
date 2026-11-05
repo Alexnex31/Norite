@@ -12,11 +12,11 @@ import (
 	"testing"
 )
 
-// The worker a release ships carries the WebAssembly codec and the system's devices, and neither of the
-// two things that exist for tests (ADR 0036): the test device, which plays a tone instead of the
-// microphone, and the native codec, which links libopus through cgo. The first is held off by nothing
-// in the program importing it; the second by its build tag, which nothing that builds a release passes,
-// and by cgo, which a release build has off.
+// The worker a release ships carries the WebAssembly codec and the system's devices, and none of the three
+// things that exist for tests (ADR 0036): the test device, which plays a tone instead of the microphone;
+// the native codec, which links libopus through cgo; and a worker with no devices at all. The first is held
+// off by nothing in the program importing it, the others by build tags nothing that builds a release
+// passes, and the native codec by cgo too, which a release build has off.
 func TestTheReleasedWorkerHoldsNoTestDeviceAndNoNativeCodec(t *testing.T) {
 	cmd := exec.Command("go", "list", "-deps", ".")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
@@ -48,8 +48,10 @@ func TestTheReleasedWorkerHoldsNoTestDeviceAndNoNativeCodec(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if bytes.Contains(body, []byte("norite_opusnative")) {
-			t.Errorf("%s names the norite_opusnative tag", name)
+		for _, tag := range []string{"norite_opusnative", "norite_noaudio"} {
+			if bytes.Contains(body, []byte(tag)) {
+				t.Errorf("%s names the %s tag", name, tag)
+			}
 		}
 	}
 }

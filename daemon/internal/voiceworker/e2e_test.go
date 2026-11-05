@@ -29,13 +29,13 @@ import (
 // through M27's harness, with TURN beside it; leaving ends it; killing it is seen. Both programs are built
 // from this checkout.
 
-func buildProgram(t *testing.T, moduleDir, pkg, name string) string {
+func buildProgram(t *testing.T, moduleDir, pkg, name string, flags ...string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	out := filepath.Join(t.TempDir(), name)
-	cmd := exec.Command("go", "build", "-o", out, pkg) //nolint:gosec // fixed arguments
+	cmd := exec.Command("go", append(append([]string{"build"}, flags...), "-o", out, pkg)...) //nolint:gosec // fixed arguments
 	cmd.Dir = moduleDir
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building %s: %v\n%s", pkg, err, b)
@@ -131,15 +131,11 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 		t.Skip("builds norite-voice and M26's harness, and makes real calls")
 	}
 	// The worker opens the system's microphone and speakers from M29, and a test must not open the
-	// developer's. On Linux it is pointed at a PulseAudio server that does not exist, and the call goes on
-	// without audio, as it does where a device cannot open (internal/session). WASAPI and AudioQueue have no
-	// such switch, so elsewhere the test does not run: on a Mac it would prompt for the microphone, and on
-	// Windows record it. CI runs it on Linux; voiceworker's own tests carry calls on a test device.
-	if runtime.GOOS != "linux" {
-		t.Skip("would open this machine's microphone: the worker's devices can be kept away on Linux alone")
-	}
-	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program)
-	t.Setenv("PULSE_SERVER", "unix:"+filepath.Join(t.TempDir(), "no-server"))
+	// developer's: on a Mac it would prompt, on Windows and Linux record. norite_noaudio builds a worker
+	// with no devices, which carries the call without audio, so this runs on every OS. voiceworker's own
+	// tests carry audio, on a test device.
+	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program,
+		"-tags", "norite_noaudio")
 	h := startHarness(t)
 	seen := &statuses{}
 	v := NewVoice(VoiceOptions{
