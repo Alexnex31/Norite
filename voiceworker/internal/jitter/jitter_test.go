@@ -53,7 +53,7 @@ func check(t *testing.T, got, want string) {
 func TestPacketsPlayInOrderOnceTheTargetIsBuffered(t *testing.T) {
 	b := New()
 	push(b, 7, 10, 1000)
-	check(t, play(b, 1), "!.")
+	check(t, play(b, 1), ".")
 	push(b, 7, 12, 1000+2*FrameSamples) // arrives before 11
 	push(b, 7, 11, 1000+FrameSamples)
 	check(t, play(b, 4), "p10 p11 p12 c")
@@ -66,7 +66,7 @@ func TestALostFrameIsRecoveredFromTheNextPacketsFEC(t *testing.T) {
 			push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
 		}
 	}
-	check(t, play(b, 6), "!p10 p11 r13 p13 p14 p15")
+	check(t, play(b, 6), "p10 p11 r13 p13 p14 p15")
 	if s := b.Stats(); s.Recovered != 1 || s.Concealed != 0 {
 		t.Errorf("stats %+v", s)
 	}
@@ -77,7 +77,7 @@ func TestTwoLostFramesAreConcealedThenRecovered(t *testing.T) {
 	for _, i := range []int{0, 1, 4, 5} {
 		push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
 	}
-	check(t, play(b, 6), "!p10 p11 c r14 p14 p15")
+	check(t, play(b, 6), "p10 p11 c r14 p14 p15")
 }
 
 // DTX: the sender sends nothing for a stretch, so the timestamp jumps while the sequence does not. That is
@@ -87,7 +87,7 @@ func TestADTXGapIsConcealedNotRecovered(t *testing.T) {
 	push(b, 7, 10, 1000)
 	push(b, 7, 11, 1000+FrameSamples)
 	push(b, 7, 12, 1000+4*FrameSamples)
-	check(t, play(b, 5), "!p10 p11 c c p12")
+	check(t, play(b, 5), "p10 p11 c c p12")
 	if s := b.Stats(); s.Concealed != 0 || s.Recovered != 0 {
 		t.Errorf("a DTX gap was counted as loss: %+v", s)
 	}
@@ -97,7 +97,7 @@ func TestASenderThatStopsIsConcealedThenSilent(t *testing.T) {
 	b := New()
 	push(b, 7, 10, 1000)
 	push(b, 7, 11, 1000+FrameSamples)
-	check(t, play(b, 10), "!p10 p11 c c c c c . . .")
+	check(t, play(b, 10), "p10 p11 c c c c c . . .")
 	// It buffers again before playing again.
 	push(b, 7, 12, 1000+20*FrameSamples)
 	check(t, play(b, 1), ".")
@@ -110,7 +110,7 @@ func TestALatePacketIsDroppedAndDeepensTheBuffer(t *testing.T) {
 	b := New()
 	push(b, 7, 10, 1000)
 	push(b, 7, 12, 1000+2*FrameSamples)
-	check(t, play(b, 2), "!p10 r12")
+	check(t, play(b, 2), "p10 r12")
 	push(b, 7, 11, 1000+FrameSamples)
 	check(t, play(b, 1), "p12")
 	if s := b.Stats(); s.Late != 1 {
@@ -127,13 +127,13 @@ func TestALatePacketIsDroppedAndDeepensTheBuffer(t *testing.T) {
 }
 
 // When the slot changes sender the decoder is told to reset, before anything of the new sender's decodes,
-// and nothing of the old sender's plays after.
+// and nothing of the old sender's plays after. Its first sender asks for no reset: that decoder is new.
 func TestANewSenderResetsTheDecoder(t *testing.T) {
 	b := New()
 	push(b, 7, 10, 1000)
 	push(b, 7, 11, 1000+FrameSamples)
 	push(b, 7, 12, 1000+2*FrameSamples)
-	check(t, play(b, 1), "!p10")
+	check(t, play(b, 1), "p10")
 	// The SFU keeps the slot's sequence going, and the new sender's audio starts after the old one's.
 	push(b, 9, 13, 1000+3*FrameSamples)
 	push(b, 9, 14, 1000+4*FrameSamples)
@@ -147,7 +147,7 @@ func TestCountersWrap(t *testing.T) {
 			push(b, 7, uint16(65533+i), uint32(0xffffffff-2*FrameSamples+uint32(i*FrameSamples)))
 		}
 	}
-	check(t, play(b, 6), "!p65533 p65534 p65535 r1 p1 p2")
+	check(t, play(b, 6), "p65533 p65534 p65535 r1 p1 p2")
 }
 
 func TestOversizedAndFarAheadPacketsAreRefused(t *testing.T) {
@@ -158,7 +158,7 @@ func TestOversizedAndFarAheadPacketsAreRefused(t *testing.T) {
 	}
 	push(b, 7, 10, 1000)
 	push(b, 7, 11, 1000+FrameSamples)
-	check(t, play(b, 1), "!p10")
+	check(t, play(b, 1), "p10")
 	// A packet claiming to be minutes ahead starts the buffer over from it rather than holding a place.
 	push(b, 7, 12, 1000+10_000*FrameSamples)
 	if s := b.Stats(); s.Resyncs != 1 {
@@ -175,7 +175,7 @@ func TestAPacketBetweenFramesDoesNotLinger(t *testing.T) {
 	push(b, 7, 10, 1000)
 	push(b, 7, 11, 1000+FrameSamples)
 	push(b, 7, 13, 1000+2*FrameSamples+500)
-	check(t, play(b, 4), "!p10 p11 c c")
+	check(t, play(b, 4), "p10 p11 c c")
 	if n := b.buffered(); n != 0 {
 		t.Errorf("%d packets still held", n)
 	}
@@ -215,8 +215,10 @@ func FuzzSlot(f *testing.F) {
 				payload = make([]byte, n) // refused before the buffer looks at its sender
 			} else {
 				if !started || who != sender {
-					// A new sender: nothing the previous one sent may play from here on.
-					pushed, sender, started, resetOwed = map[string]bool{}, who, true, true
+					// A new sender: nothing the previous one sent may play from here on, and a change (not
+					// the first) owes the decoder a reset.
+					pushed, sender, resetOwed = map[string]bool{}, who, started
+					started = true
 				}
 				pushed[string(payload)] = true
 			}
@@ -227,4 +229,20 @@ func FuzzSlot(f *testing.F) {
 			ops = ops[8:]
 		}
 	})
+}
+
+// What Next hands the decoder is the buffer's own copy: the slot's goroutine may push into the same place
+// in the ring while the decoder reads it, a new sender clearing the ring or a burst wrapping round to it.
+func TestAPayloadIsNotOverwrittenByTheNextPush(t *testing.T) {
+	b := New()
+	push(b, 7, 10, 1000)
+	push(b, 7, 11, 1000+FrameSamples)
+	s := b.Next()
+	if s.Kind != Play || string(s.Payload) != "p10" {
+		t.Fatalf("played %v %q", s.Kind, s.Payload)
+	}
+	b.Push(7, 10+capacity, 1000+capacity*FrameSamples, []byte("XXX"), t0) // the same place in the ring
+	if string(s.Payload) != "p10" {
+		t.Errorf("the payload being decoded became %q", s.Payload)
+	}
 }

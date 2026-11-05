@@ -34,15 +34,16 @@ first_party="github.com/Alexnex31/Norite"
 # `just notices` and set at the workflow level in CI.
 : "${GO_LICENSES_VERSION:?set it, or run this through \`just notices\` which does — it must match the pin in the justfile and ci.yml}"
 #
-# One file ships inside every OS's build of a program, so it covers what each of them links: the binary
-# given, built for this machine, and the program built again for the other two OSes a release targets,
-# with cgo off as a release has it. A module only one OS links (purego in the macOS voice-worker, M29)
-# is otherwise missing from the file the macOS build carries. go-licenses is built once and asked per OS.
-others=(darwin windows)
+# One file ships inside every OS's build of a program, so it covers what each of them links: the program
+# built for each OS a release targets, with cgo off as a release has it, whatever OS this runs on. A
+# module only one OS links (purego in the macOS voice-worker, M29; pulse in the Linux one) is otherwise
+# missing from the file another OS's build carries, or from the one generated on another machine.
+# go-licenses is built once and asked per OS.
+targets=(linux darwin windows)
 xdir=$(mktemp -d)
 GOBIN="$xdir" GOWORK=off go install "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION"
 ids=""
-for goos in "$(go env GOOS)" "${others[@]}"; do
+for goos in "${targets[@]}"; do
     got=$(cd "$repo/$module_dir" \
             && GOOS=$goos GOWORK=off "$xdir/go-licenses" report "$main_pkg" --ignore "$first_party" 2>/dev/null \
             | awk -F, 'NF>=3 {print $1, $NF}') \
@@ -50,8 +51,9 @@ for goos in "$(go env GOOS)" "${others[@]}"; do
     ids+="$got"$'\n'
 done
 ids=$(printf '%s' "$ids" | LC_ALL=C sort -u)
+# The binary given is still read: it is the one this machine ships, built by `just build-local`.
 binaries=("$repo/$binary")
-for goos in "${others[@]}"; do
+for goos in "${targets[@]}"; do
     (cd "$repo/$module_dir" && GOOS=$goos GOARCH=amd64 CGO_ENABLED=0 GOWORK=off go build -o "$xdir/$goos" "$main_pkg") \
       || { echo "gen-notices: $module_dir: building for $goos failed" >&2; exit 1; }
     binaries+=("$xdir/$goos")

@@ -130,10 +130,15 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds norite-voice and M26's harness, and makes real calls")
 	}
+	// The worker opens the system's microphone and speakers from M29, and a test must not open the
+	// developer's. On Linux it is pointed at a PulseAudio server that does not exist, and the call goes on
+	// without audio, as it does where a device cannot open (internal/session). WASAPI and AudioQueue have no
+	// such switch, so elsewhere the test does not run: on a Mac it would prompt for the microphone, and on
+	// Windows record it. CI runs it on Linux; voiceworker's own tests carry calls on a test device.
+	if runtime.GOOS != "linux" {
+		t.Skip("would open this machine's microphone: the worker's devices can be kept away on Linux alone")
+	}
 	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program)
-	// The worker opens the system's microphone and speakers from M29. A test must not open the
-	// developer's: on Linux it is pointed at a PulseAudio server that does not exist, and the call goes on
-	// without audio, as it does where a device cannot open (internal/session).
 	t.Setenv("PULSE_SERVER", "unix:"+filepath.Join(t.TempDir(), "no-server"))
 	h := startHarness(t)
 	seen := &statuses{}

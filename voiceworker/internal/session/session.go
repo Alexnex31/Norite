@@ -235,12 +235,17 @@ func (s *Session) resolveLevel() {
 	if s.sender == nil {
 		return
 	}
-	for _, e := range s.sender.GetParameters().HeaderExtensions {
+	s.level.Store(uint32(audioLevelID(s.sender.GetParameters().HeaderExtensions)))
+}
+
+// audioLevelID is the id RFC 6464's audio level was negotiated under, zero if it was not.
+func audioLevelID(exts []webrtc.RTPHeaderExtensionParameter) uint8 {
+	for _, e := range exts {
 		if e.URI == voiceproto.AudioLevelURI && e.ID > 0 && e.ID < 256 {
-			s.level.Store(uint32(e.ID)) //nolint:gosec // checked above
-			return
+			return uint8(e.ID) //nolint:gosec // checked above
 		}
 	}
+	return 0
 }
 
 // levelID is the audio level's extension id as negotiated, zero if the answer left it out.

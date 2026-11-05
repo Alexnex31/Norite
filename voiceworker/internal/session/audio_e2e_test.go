@@ -326,7 +326,7 @@ func gate(from, to int, src func(int, []int16)) func(int, []int16) {
 
 // Four people speak into three slots. When one stops and the fourth starts, the SFU gives the fourth a
 // slot one of the others had: the listener's decoder for that slot is reset before it decodes the
-// newcomer, who is heard.
+// newcomer, who is heard. Under WebAssembly the reset is a new instance (internal/opus).
 func TestASlotThatChangesSenderResetsItsDecoder(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds M26's harness and makes real calls")
@@ -351,8 +351,9 @@ func TestASlotThatChangesSenderResetsItsDecoder(t *testing.T) {
 		senders += s.buf.Stats().Senders
 	}
 	m.mu.Unlock()
-	if senders < 4 || resets < 4 {
-		t.Errorf("the slots carried %d senders and reset %d times, want 4 of each", senders, resets)
+	// Three slots' first senders need no reset; the fourth sender, taking a slot over, does.
+	if senders < 4 || resets < 1 || resets != senders-len(m.slots) {
+		t.Errorf("the slots carried %d senders and reset %d times, want 4 and 1", senders, resets)
 	}
 	heard, _ := listener.Heard()
 	if p := tonePower(heard[len(heard)-2*audio.SampleRate:], 1100); p < 0.15 {

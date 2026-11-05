@@ -15,7 +15,6 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 
-	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
 	"github.com/Alexnex31/Norite/voiceworker/internal/jitter"
@@ -56,10 +55,15 @@ type media struct {
 	slots    []*slot
 	attached int
 
+	devMu             sync.Mutex
 	capture, playback io.Closer
-	// decoding is when the decode in progress started, in Unix nanoseconds, or zero.
-	decoding atomic.Int64
-	mix      [audio.FrameSamples]int32
+	stopOnce          sync.Once
+	// decoding and encoding are when the call into the codec in progress started, as nanoseconds past
+	// base plus one, or zero. Measured from base so the watchdog runs on the monotonic clock: a wall
+	// clock stepped by NTP or a resume would end a healthy call, or never end a stuck one.
+	base               time.Time
+	decoding, encoding atomic.Int64
+	mix                [audio.FrameSamples]int32
 }
 
 type slot struct {
@@ -83,7 +87,7 @@ func (s *Session) startMedia(ctx context.Context) error {
 		return err
 	}
 	m := &media{s: s, codec: codec, track: s.track, lossy: s.opts.Lossy,
-		frames: make(chan []int16, captureQueue), stop: make(chan struct{})}
+		frames: make(chan []int16, captureQueue), stop: make(chan struct{}), base: time.Now()}
 	if m.enc, err = codec.NewEncoder(ctx, opus.DefaultEncoderOptions()); err != nil {
 		_ = codec.Close(ctx)
 		return err
@@ -104,13 +108,35 @@ func (s *Session) startMedia(ctx context.Context) error {
 		m.close() // the call closed while the codec compiled
 		return nil
 	}
-	if m.playback, err = s.opts.Device.Play(ctx, m.fill); err != nil {
-		s.logf("the speakers could not be opened, so nothing will be heard: %v", err)
-	}
-	if m.capture, err = s.opts.Device.Capture(ctx, m.captured); err != nil {
-		s.logf("the microphone could not be opened, so nothing will be sent: %v", err)
-	}
+	m.openDevices(ctx, s.opts.Device)
 	return nil
+}
+
+// openDevices opens the speakers and the microphone under devMu, which close takes before it reads them:
+// a leave landing while they open waits for them and closes them, and one that came first leaves nothing
+// to open. So a microphone is never left open after the call it was opened for.
+func (m *media) openDevices(ctx context.Context, dev audio.Device) {
+	m.devMu.Lock()
+	defer m.devMu.Unlock()
+	if m.stopped() {
+		return
+	}
+	var err error
+	if m.playback, err = dev.Play(ctx, m.fill); err != nil {
+		m.s.logf("the speakers could not be opened, so nothing will be heard: %v", err)
+	}
+	if m.capture, err = dev.Capture(ctx, m.captured); err != nil {
+		m.s.logf("the microphone could not be opened, so nothing will be sent: %v", err)
+	}
+}
+
+func (m *media) stopped() bool {
+	select {
+	case <-m.stop:
+		return true
+	default:
+		return false
+	}
 }
 
 // attach gives a slot's track the next slot of the mix, and drains one past them, which an SFU offering
@@ -127,13 +153,7 @@ func (m *media) attach(tr remote) {
 		drain(tr.tr)
 		return
 	}
-	var level uint8
-	for _, e := range tr.rcv.GetParameters().HeaderExtensions {
-		if e.URI == voiceproto.AudioLevelURI && e.ID > 0 && e.ID < 256 {
-			level = uint8(e.ID) //nolint:gosec // checked above
-		}
-	}
-	m.receive(tr.tr, level, sl)
+	m.receive(tr.tr, audioLevelID(tr.rcv.GetParameters().HeaderExtensions), sl)
 }
 
 // captured hands a frame to the encoder without ever waiting on it: the device's goroutine must not
@@ -172,7 +192,8 @@ func (m *media) send() {
 			return
 		case pcm = <-m.frames:
 		}
-		n, err := m.enc.Encode(pcm, out)
+		var n int
+		err := m.clocked(&m.encoding, func() (e error) { n, e = m.enc.Encode(pcm, out); return })
 		if err != nil {
 			m.s.end(voiceipc.CutReason("the microphone's audio could not be encoded: " + err.Error()))
 			return
@@ -283,7 +304,8 @@ func (m *media) next(sl *slot) {
 			// A packet that does not decode costs that packet: it is concealed, and a decoder that trapped
 			// was replaced already (internal/opus).
 			sl.errs++
-			if errors.Is(err, opus.ErrReplaced) || m.timed(func() (e error) { n, e = sl.dec.Conceal(ctx, sl.tmp); return }) != nil {
+			if errors.Is(err, opus.ErrReplaced) ||
+				m.timed(func() (e error) { n, e = sl.dec.Conceal(ctx, sl.tmp); return }) != nil || n <= 0 {
 				n = audio.FrameSamples
 				clear(sl.tmp[:n])
 			}
@@ -294,10 +316,19 @@ func (m *media) next(sl *slot) {
 }
 
 // timed runs one call into a decoder under the watchdog's eye.
-func (m *media) timed(f func() error) error {
-	m.decoding.Store(time.Now().UnixNano())
-	defer m.decoding.Store(0)
+func (m *media) timed(f func() error) error { return m.clocked(&m.decoding, f) }
+
+// clocked runs one call into the codec, noting when it started in at for the watchdog.
+func (m *media) clocked(at *atomic.Int64, f func() error) error {
+	at.Store(int64(time.Since(m.base)) + 1)
+	defer at.Store(0)
 	return f()
+}
+
+// stuck is whether the call noted in at has run past stuckDecode.
+func (m *media) stuck(at *atomic.Int64) bool {
+	since := at.Load()
+	return since != 0 && time.Since(m.base)-time.Duration(since-1) > stuckDecode
 }
 
 // watch ends the call when a decode has run past stuckDecode.
@@ -310,8 +341,12 @@ func (m *media) watch() {
 		case <-m.stop:
 			return
 		case <-t.C:
-			if since := m.decoding.Load(); since != 0 && time.Since(time.Unix(0, since)) > stuckDecode {
+			if m.stuck(&m.decoding) {
 				m.s.end("an audio decoder stopped responding, so the call was ended")
+				return
+			}
+			if m.stuck(&m.encoding) {
+				m.s.end("the audio encoder stopped responding, so the call was ended")
 				return
 			}
 		}
@@ -321,18 +356,26 @@ func (m *media) watch() {
 // close stops both directions and closes the codec. A decode that never returns holds mu; the codec is
 // then left to the worker's exit, which follows the call's end.
 func (m *media) close() {
-	select {
-	case <-m.stop:
+	first := false
+	m.stopOnce.Do(func() { close(m.stop); first = true })
+	if !first {
 		return
-	default:
-		close(m.stop)
 	}
+	m.devMu.Lock()
 	for _, c := range []io.Closer{m.capture, m.playback} {
 		if c != nil {
 			_ = c.Close()
 		}
 	}
-	m.sent.Wait()
+	m.devMu.Unlock()
+	// The sender may be inside an encode that never returns, which the watchdog has ended the call for.
+	sent := make(chan struct{})
+	go func() { m.sent.Wait(); close(sent) }()
+	select {
+	case <-sent:
+	case <-time.After(stuckDecode):
+		return // the codec is left to the worker's exit, which follows
+	}
 	locked := make(chan struct{})
 	go func() {
 		m.mu.Lock()

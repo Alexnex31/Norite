@@ -50,12 +50,13 @@ const (
 	Conceal
 )
 
-// Step is what Next decided. Payload is only valid until the next call into the buffer.
+// Step is what Next decided. Payload is the buffer's own copy, valid until the next call to Next: Push
+// may overwrite the packet's place in the ring the moment Next returns, from another goroutine.
 type Step struct {
 	Kind    Kind
 	Payload []byte
 	// Reset is set on the first step after the slot changed sender: the decoder holds the previous one's
-	// state, and must forget it before decoding anything.
+	// state, and must forget it before decoding anything. A slot's first sender asks for none.
 	Reset bool
 }
 
@@ -91,7 +92,9 @@ type Buffer struct {
 
 	target   int
 	lastLate time.Time
-	stats    Stats
+	// out is what Next hands the decoder, copied out of the ring under the lock. Only Next writes it.
+	out   [MaxPacket]byte
+	stats Stats
 	// pending is the duration Next handed out and Done has not yet confirmed.
 	pending bool
 }
@@ -108,8 +111,10 @@ func (b *Buffer) Push(sender uint32, seq uint16, ts uint32, payload []byte, now 
 		return
 	}
 	if !b.haveSender || sender != b.sender {
+		// The first sender's decoder is a fresh one already; only a change asks for another.
+		b.reset = b.haveSender
 		b.clear()
-		b.sender, b.haveSender, b.reset = sender, true, true
+		b.sender, b.haveSender = sender, true
 		b.stats.Senders++
 	}
 	if b.started {
@@ -221,7 +226,7 @@ func (b *Buffer) Next() Step {
 	if e := b.earliest(b.next, true); e != nil && e.ts == b.next {
 		e.used = false
 		b.lastSeq, b.missing = e.seq, 0
-		return Step{Kind: Play, Payload: e.payload[:e.n], Reset: reset}
+		return Step{Kind: Play, Payload: b.copyOut(e), Reset: reset}
 	} else if e != nil {
 		b.missing = 0
 		if e.seq == b.lastSeq+1 {
@@ -233,7 +238,7 @@ func (b *Buffer) Next() Step {
 			b.stats.Concealed--
 			b.stats.Recovered++
 			b.lastSeq = e.seq - 1
-			return Step{Kind: Recover, Payload: e.payload[:e.n], Reset: reset}
+			return Step{Kind: Recover, Payload: b.copyOut(e), Reset: reset}
 		}
 		return Step{Kind: Conceal, Reset: reset}
 	}
@@ -244,6 +249,10 @@ func (b *Buffer) Next() Step {
 	}
 	b.stats.Concealed++
 	return Step{Kind: Conceal, Reset: reset}
+}
+
+func (b *Buffer) copyOut(e *entry) []byte {
+	return b.out[:copy(b.out[:], e.payload[:e.n])]
 }
 
 // Done moves the timeline on by what the step played. A step of Silence needs none.
