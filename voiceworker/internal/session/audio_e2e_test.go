@@ -393,16 +393,23 @@ func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
 	}
 }
 
-// clicks is a microphone that is silent but for a click every period: a 5 ms burst, loud. It notes when
-// each click was captured, which is when its frame left the device.
+// clicks is a microphone that is quiet but for a click every period: a 5 ms burst, loud. It notes when
+// each click was captured, which is when its frame left the device. Quiet is not digital silence: a real
+// microphone, and PipeWire's dither on a virtual one, leave a sample or two of noise, which keeps Opus's
+// DTX sending a comfort-noise update every 400 ms or so. Digital silence sends none, and hid a jitter
+// buffer that started from one of those updates and played everything 440 ms late (M29's manual pass).
 type clicks struct {
 	period int // in frames
 	mu     sync.Mutex
 	sent   []time.Time
+	noise  uint32
 }
 
 func (c *clicks) source(i int, f []int16) {
-	clear(f)
+	for k := range f {
+		c.noise = c.noise*1664525 + 1013904223
+		f[k] = int16(c.noise>>30) - 1 // -1, 0, 1 or 2
+	}
 	if i%c.period != c.period/2 {
 		return
 	}
@@ -451,7 +458,7 @@ func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 	}{{"loopback", false, latencyBudget}, {"with loss", true, latencyBudget + 40*time.Millisecond}} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := startHarness(t)
-			c := &clicks{period: 25}
+			c := &clicks{period: 75} // a click every 1.5 s: each one a new talk-spurt after DTX
 			var lossy func() bool
 			if tc.lossy {
 				n := 0
@@ -462,7 +469,7 @@ func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 			b := &audiotest.Device{}
 			h.join(t, "1", "1", a, Options{Lossy: lossy})
 			h.join(t, "1", "2", b, Options{})
-			time.Sleep(6 * time.Second)
+			time.Sleep(9 * time.Second)
 			heard, at := b.Heard()
 			got := onsets(heard, at)
 			c.mu.Lock()

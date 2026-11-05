@@ -397,6 +397,15 @@ func (m *media) close() {
 	devices := []io.Closer{m.capture, m.playback}
 	m.capture, m.playback = nil, nil
 	m.devMu.Unlock()
+	// What each slot's jitter buffer refused or covered for, once per call: the daemon's log is where a
+	// call that sounded late or broken is looked into. Counts and a target only, nothing of the audio.
+	for i, sl := range m.slots {
+		if st := sl.buf.Stats(); st.Senders > 0 {
+			m.s.logf("slot %d: %d senders, delay %d frames, %d late, %d concealed, %d recovered, %d oversize, "+
+				"%d resyncs", i, st.Senders, sl.buf.Target(), st.Late, st.Concealed, st.Recovered, st.Oversize,
+				st.Resyncs)
+		}
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

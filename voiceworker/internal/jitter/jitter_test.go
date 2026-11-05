@@ -246,3 +246,27 @@ func TestAPayloadIsNotOverwrittenByTheNextPush(t *testing.T) {
 		t.Errorf("the payload being decoded became %q", s.Payload)
 	}
 }
+
+// In DTX a sender's comfort-noise update arrives alone every 400 ms or so. When speech resumes, playing
+// starts from the speech, not from the old update, or everything after it plays 400 ms late (M29's manual
+// pass, between two virtual machines).
+func TestAStaleComfortNoisePacketDoesNotDelayTheStart(t *testing.T) {
+	b := New()
+	b.Push(7, 1, 1000, []byte("p1"), t0) // comfort noise
+	check(t, play(b, 3), ". . .")
+	later := t0.Add(400 * time.Millisecond)
+	b.Push(7, 2, 1000+20*FrameSamples, []byte("p2"), later) // 400 ms later, speech
+	check(t, play(b, 1), ".")
+	b.Push(7, 3, 1000+21*FrameSamples, []byte("p3"), later.Add(20*time.Millisecond))
+	check(t, play(b, 3), "p2 p3 c")
+}
+
+// A burst the network delivered at once is all fresh: nothing of it is skipped to save latency, which would
+// cut the start of somebody's sentence.
+func TestABurstIsPlayedWhole(t *testing.T) {
+	b := New()
+	for i := range 5 {
+		push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
+	}
+	check(t, play(b, 5), "p10 p11 p12 p13 p14")
+}

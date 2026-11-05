@@ -33,6 +33,8 @@ const (
 	concealFrames = 5
 	// shrinkAfter is how long without a late packet before the target delay comes down a frame.
 	shrinkAfter = 10 * time.Second
+	// frameDuration is a frame's length in time, the unit a packet's freshness is judged in.
+	frameDuration = 20 * time.Millisecond
 )
 
 // Kind is what to play for the next stretch of audio.
@@ -62,6 +64,7 @@ type Step struct {
 
 type entry struct {
 	used    bool
+	at      time.Time // when it arrived
 	seq     uint16
 	ts      uint32
 	n       int
@@ -138,7 +141,7 @@ func (b *Buffer) Push(sender uint32, seq uint16, ts uint32, payload []byte, now 
 	if e.used && int16(seq-e.seq) <= 0 { //nolint:gosec // signed difference
 		return // a duplicate, or older than what holds the place
 	}
-	e.used, e.seq, e.ts, e.n = true, seq, ts, copy(e.payload[:], payload)
+	e.used, e.seq, e.ts, e.at, e.n = true, seq, ts, now, copy(e.payload[:], payload)
 	if b.lastLate.IsZero() {
 		b.lastLate = now
 	}
@@ -189,6 +192,39 @@ func (b *Buffer) earliest(from uint32, at bool) *entry {
 	return best
 }
 
+// fresh is where playing starts: the earliest of the packets that arrived within the target delay of the
+// newest arrival, when there are enough of them, and nil otherwise. Counting every packet held would start
+// on a stale one: in DTX a sender's comfort-noise update arrives alone every 400 ms or so, and starting from
+// it when speech resumes plays everything after it that much late, for as long as the speech lasts (M29's
+// manual pass measured 440 ms of it). Staleness is judged by arrival, not by timestamp, so a burst the
+// network delivered at once is all fresh and none of it is skipped. Older packets are dropped once playing
+// starts.
+func (b *Buffer) fresh() *entry {
+	var newest time.Time
+	for i := range b.ring {
+		if e := &b.ring[i]; e.used && e.at.After(newest) {
+			newest = e.at
+		}
+	}
+	window := time.Duration(b.target+1) * frameDuration
+	var first *entry
+	n := 0
+	for i := range b.ring {
+		e := &b.ring[i]
+		if !e.used || newest.Sub(e.at) > window {
+			continue
+		}
+		n++
+		if first == nil || int32(e.ts-first.ts) < 0 { //nolint:gosec // signed difference
+			first = e
+		}
+	}
+	if n < b.target {
+		return nil
+	}
+	return first
+}
+
 func (b *Buffer) buffered() int {
 	n := 0
 	for i := range b.ring {
@@ -208,12 +244,11 @@ func (b *Buffer) Next() Step {
 	b.reset = false
 	b.pending = true
 	if !b.started {
-		if b.buffered() < b.target {
+		first := b.fresh()
+		if first == nil {
 			b.pending = false
 			return Step{Kind: Silence, Reset: reset}
 		}
-		first, _ := b.any()
-		first = b.earliest(first.ts-maxAhead, true)
 		b.started, b.next, b.lastSeq, b.missing = true, first.ts, first.seq-1, 0
 	}
 	// A packet the timeline has passed will never play: one whose timestamp fell between frames, or
