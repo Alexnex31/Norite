@@ -228,18 +228,24 @@ func (s *Session) awaitCodec(ctx context.Context) (opus.Codec, error) {
 	}
 }
 
-// levelID is the audio level's extension id as negotiated, read from the sender once the answer is in.
-func (s *Session) levelID() uint8 {
-	if id := s.level.Load(); id != 0 {
-		return uint8(id) //nolint:gosec // an extension id, at most 255
+// resolveLevel reads the audio level's extension id from the sender once the answer is in, so a frame
+// never asks Pion for it: GetParameters builds the sender's parameters afresh under a lock, and an answer
+// that left the extension out would otherwise have had every frame ask again.
+func (s *Session) resolveLevel() {
+	if s.sender == nil {
+		return
 	}
 	for _, e := range s.sender.GetParameters().HeaderExtensions {
 		if e.URI == voiceproto.AudioLevelURI && e.ID > 0 && e.ID < 256 {
 			s.level.Store(uint32(e.ID)) //nolint:gosec // checked above
-			return uint8(e.ID)          //nolint:gosec // checked above
+			return
 		}
 	}
-	return 0
+}
+
+// levelID is the audio level's extension id as negotiated, zero if the answer left it out.
+func (s *Session) levelID() uint8 {
+	return uint8(s.level.Load()) //nolint:gosec // an extension id, at most 255
 }
 
 func (s *Session) logf(format string, args ...any) {
@@ -356,7 +362,11 @@ func (s *Session) message(b []byte) {
 
 // Accept applies the SFU's answer, which starts ICE.
 func (s *Session) Accept(sdp string) error {
-	return s.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdp})
+	if err := s.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdp}); err != nil {
+		return err
+	}
+	s.resolveLevel()
+	return nil
 }
 
 // Ready is closed once the SFU has said ready, which it does only once connected.
