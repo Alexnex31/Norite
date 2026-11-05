@@ -34,30 +34,35 @@ first_party="github.com/Alexnex31/Norite"
 # `just notices` and set at the workflow level in CI.
 : "${GO_LICENSES_VERSION:?set it, or run this through \`just notices\` which does — it must match the pin in the justfile and ci.yml}"
 #
-# One file ships inside every OS's build of a program, so it covers what each of them links: the program
-# built for each OS a release targets, with cgo off as a release has it, whatever OS this runs on. A
-# module only one OS links (purego in the macOS voice-worker, M29; pulse in the Linux one) is otherwise
-# missing from the file another OS's build carries, or from the one generated on another machine.
-# go-licenses is built once and asked per OS.
+# One file ships inside every build of a program, so it covers what each of them links: the program built
+# for each OS and architecture a release targets (.goreleaser.yaml), with cgo off as a release has it,
+# whatever machine this runs on. A module only one target links (purego in the macOS voice-worker, M29;
+# pulse in the Linux one) is otherwise missing from the file another target carries, or from the one
+# generated on another machine. go-licenses is built once and asked per target. The binary given by the
+# caller names the file; the module set is the release targets' alone, never this machine's build.
 targets=(linux darwin windows)
+arches=(amd64 arm64)
 xdir=$(mktemp -d)
 GOBIN="$xdir" GOWORK=off go install "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION"
 ids=""
 for goos in "${targets[@]}"; do
+  for goarch in "${arches[@]}"; do
     got=$(cd "$repo/$module_dir" \
-            && GOOS=$goos GOARCH=amd64 CGO_ENABLED=0 GOWORK=off "$xdir/go-licenses" report "$main_pkg" \
+            && GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 GOWORK=off "$xdir/go-licenses" report "$main_pkg" \
                --ignore "$first_party" 2>/dev/null \
             | awk -F, 'NF>=3 {print $1, $NF}') \
-      || { echo "gen-notices: $module_dir: go-licenses report for $goos failed; refusing to write a partial file" >&2; exit 1; }
+      || { echo "gen-notices: $module_dir: go-licenses report for $goos/$goarch failed; refusing to write a partial file" >&2; exit 1; }
     ids+="$got"$'\n'
+  done
 done
 ids=$(printf '%s' "$ids" | LC_ALL=C sort -u)
-# The binary given is still read: it is the one this machine ships, built by `just build-local`.
-binaries=("$repo/$binary")
+binaries=()
 for goos in "${targets[@]}"; do
-    (cd "$repo/$module_dir" && GOOS=$goos GOARCH=amd64 CGO_ENABLED=0 GOWORK=off go build -o "$xdir/$goos" "$main_pkg") \
-      || { echo "gen-notices: $module_dir: building for $goos failed" >&2; exit 1; }
-    binaries+=("$xdir/$goos")
+  for goarch in "${arches[@]}"; do
+    (cd "$repo/$module_dir" && GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 GOWORK=off go build -o "$xdir/$goos-$goarch" "$main_pkg") \
+      || { echo "gen-notices: $module_dir: building for $goos/$goarch failed" >&2; exit 1; }
+    binaries+=("$xdir/$goos-$goarch")
+  done
 done
 
 # A module go-licenses cannot classify is reported Unknown, which is no identifier. Those read by hand

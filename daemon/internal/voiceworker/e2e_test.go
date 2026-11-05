@@ -131,17 +131,25 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 		t.Skip("builds norite-voice and M26's harness, and makes real calls")
 	}
 	// The worker opens the system's microphone and speakers from M29, and a test must not open the
-	// developer's: on a Mac it would prompt, on Windows and Linux record. norite_noaudio builds a worker
-	// with no devices, which carries the call without audio, so this runs on every OS. voiceworker's own
-	// tests carry audio, on a test device.
-	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program,
-		"-tags", "norite_noaudio")
+	// developer's: on a Mac it would prompt, on Windows and Linux record. On Linux the release's worker
+	// runs, pointed at a PulseAudio server that does not exist: its codec compiles and its devices fail
+	// to open, which must leave the call up. WASAPI and AudioQueue have no such switch, so elsewhere the
+	// worker is built with norite_noaudio, which carries the call with no devices at all. voiceworker's
+	// own tests carry audio, on a test device.
+	var flags []string
+	if runtime.GOOS == "linux" {
+		t.Setenv("PULSE_SERVER", "unix:"+filepath.Join(t.TempDir(), "no-server"))
+	} else {
+		flags = []string{"-tags", "norite_noaudio"}
+	}
+	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program, flags...)
 	h := startHarness(t)
 	seen := &statuses{}
+	logged := &syncBuffer{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
 		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
-		Changed: seen.add, Log: zerolog.New(io.Discard),
+		Changed: seen.add, Log: zerolog.New(logged),
 	})
 	t.Cleanup(v.Close)
 
@@ -152,6 +160,12 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "1001", Available: true}, st)
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
+	if runtime.GOOS == "linux" {
+		// The audio started as far as the devices, which failed, and the call stayed up.
+		require.Eventually(t, func() bool { return strings.Contains(logged.String(), "could not be opened") },
+			10*time.Second, 20*time.Millisecond, "the worker's audio never started: %s", logged.String())
+		require.Equal(t, ipc.VoiceInCall, v.Status().State)
+	}
 
 	st = v.Leave()
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, st)
@@ -180,4 +194,22 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "1004", st.Channel)
 	require.Equal(t, ipc.VoiceInCall, st.State)
+}
+
+// syncBuffer is a log the worker's output goroutine writes while the test reads.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

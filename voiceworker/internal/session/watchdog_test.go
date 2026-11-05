@@ -143,7 +143,7 @@ func TestTheWatchdogRunsOnTheMonotonicClock(t *testing.T) {
 type devices struct {
 	mu             sync.Mutex
 	opened, closed int
-	hold           chan struct{}
+	hold, entered  chan struct{}
 }
 
 type closer struct{ d *devices }
@@ -159,14 +159,16 @@ func (d *devices) open() (io.Closer, error) {
 
 func (d *devices) Play(context.Context, func([]int16)) (io.Closer, error) {
 	if d.hold != nil {
+		close(d.entered)
 		<-d.hold
 	}
 	return d.open()
 }
 func (d *devices) Capture(context.Context, func([]int16)) (io.Closer, error) { return d.open() }
 
-// A leave that lands while the devices open closes them once they have; one that came first leaves them
-// unopened. Neither leaves a microphone open after its call.
+// A leave that comes before the devices open leaves them unopened. One that lands while a device opens
+// does not wait for it, and the device, once open, sees the leave and closes itself. Staged, not raced:
+// Play is held until close has returned.
 func TestAMicrophoneIsNeverLeftOpenAfterTheCall(t *testing.T) {
 	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}}
@@ -179,19 +181,28 @@ func TestAMicrophoneIsNeverLeftOpenAfterTheCall(t *testing.T) {
 
 	m = &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}}
-	d = &devices{hold: make(chan struct{})}
+	d = &devices{hold: make(chan struct{}), entered: make(chan struct{})}
 	done := make(chan struct{})
 	go func() { m.openDevices(context.Background(), d); close(done) }()
+	within(t, d.entered, "Play was not called")
 	closed := make(chan struct{})
-	go func() { time.Sleep(50 * time.Millisecond); m.close(); close(closed) }()
-	time.Sleep(100 * time.Millisecond)
+	go func() { m.close(); close(closed) }()
+	within(t, closed, "close waited on a device still opening")
 	close(d.hold)
-	<-done
-	<-closed
+	within(t, done, "the devices did not finish opening")
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.opened == 0 || d.opened != d.closed {
-		t.Errorf("opened %d devices and closed %d", d.opened, d.closed)
+	if d.opened != 1 || d.closed != 1 || m.playback != nil || m.capture != nil {
+		t.Errorf("opened %d, closed %d, kept %v and %v", d.opened, d.closed, m.playback, m.capture)
+	}
+}
+
+func within(t *testing.T, c <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-c:
+	case <-time.After(2 * time.Second):
+		t.Fatal(what)
 	}
 }
 
@@ -216,6 +227,9 @@ func TestClosingIsBoundedWhateverIsStuck(t *testing.T) {
 	case <-time.After(closeWithin + 200*time.Millisecond):
 		t.Error("closing waited past its bound") // bounded, so a removed bound fails rather than hangs
 	}
+	// Unstick everything, so close's own goroutine finishes rather than outliving the test.
+	m.sent.Done()
+	m.mu.Unlock()
 }
 
 // A slot that changes sender plays nothing more of the previous one's, even what their last packet decoded
@@ -244,6 +258,41 @@ func TestANewSenderHearsNothingOfThePrevious(t *testing.T) {
 			t.Fatalf("sample %d after the change is the previous sender's", i)
 		}
 	}
+}
+
+// The same with a leftover shorter than a frame, which the mix tops up from the next step: the step that
+// carries the reset must drop it, not play it ahead of the new sender's first samples.
+func TestANewSenderHearsNothingOfThePreviousShortTail(t *testing.T) {
+	buf := jitter.New()
+	sl := &slot{buf: buf, dec: thirty{}, pcm: make([]int16, 0, opus.MaxDecodeSamples+audio.FrameSamples),
+		tmp: make([]int16, opus.MaxDecodeSamples)}
+	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+		slots: []*slot{sl}}
+	now := time.Now()
+	for i := range jitter.MinDelay {
+		buf.Push(7, uint16(i), uint32(i*1440), []byte{1}, now)
+	}
+	out := make([]int16, audio.FrameSamples)
+	m.fill(out) // 30 ms decoded, 20 played, 10 left over
+	for i := range jitter.MinDelay {
+		buf.Push(9, uint16(10+i), uint32(10_000+i*1440), []byte{2}, now)
+	}
+	m.fill(out)
+	for i, v := range out {
+		if v == 1 {
+			t.Fatalf("sample %d after the change is the previous sender's", i)
+		}
+	}
+}
+
+// thirty decodes every packet to 30 ms of its first byte.
+type thirty struct{ long }
+
+func (thirty) Decode(_ context.Context, p []byte, pcm []int16) (int, error) {
+	for i := range 1440 {
+		pcm[i] = int16(p[0])
+	}
+	return 1440, nil
 }
 
 // long decodes every packet to 120 ms of its first byte.

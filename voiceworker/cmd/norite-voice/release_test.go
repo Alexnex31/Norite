@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,17 @@ func TestTheReleasedWorkerHoldsNoTestDeviceAndNoNativeCodec(t *testing.T) {
 	}
 	if has(mod + "audio/audiotest") {
 		t.Error("the released worker imports the test device")
+	}
+	// A worker with no devices imports audio too, for the type, so the imports cannot tell it apart: which
+	// file the build takes can.
+	files := exec.Command("go", "list", "-f", "{{join .GoFiles \" \"}}", ".")
+	files.Env = cmd.Env
+	got, err := files.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs := strings.Fields(string(got)); !slices.Contains(fs, "device.go") || slices.Contains(fs, "device_noaudio.go") {
+		t.Errorf("the released worker is built from %v", fs)
 	}
 	root := filepath.Join("..", "..", "..")
 	for _, name := range []string{".goreleaser.yaml", "justfile", filepath.Join("scripts", "install.sh"),

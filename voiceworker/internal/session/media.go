@@ -78,9 +78,8 @@ type slot struct {
 	errs int
 	// resets counts the decoder's resets, one per sender the slot changed to; levels the packets that
 	// arrived with an audio level.
-	resets  int
-	senders int // the jitter buffer's count of senders when pcm was last filled
-	levels  atomic.Int64
+	resets int
+	levels atomic.Int64
 }
 
 // startMedia starts both directions. A codec that cannot start ends the call, since it is a bug and no
@@ -119,17 +118,22 @@ func (s *Session) startMedia(ctx context.Context) error {
 
 // openDevices opens the speakers and the microphone, and keeps each only if the call has not closed
 // meanwhile. close stops the call before it reads them under devMu, and a device opened after that sees
-// the stop and closes itself here. So a microphone is never left open after its call, and a leave never
-// waits on a driver that is slow to open.
+// the stop and closes itself here. So no device is opened for a call already left, and a leave never
+// waits on a driver that is slow to open. A device whose Close outruns close's bound is closed by the
+// worker's exit, which follows its call, and the daemon reports the call left once the worker is reaped.
 func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 	keep := func(c io.Closer, at *io.Closer) {
 		m.devMu.Lock()
-		defer m.devMu.Unlock()
-		if m.stopped() {
-			_ = c.Close()
-			return
+		late := m.stopped()
+		if !late {
+			*at = c
 		}
-		*at = c
+		m.devMu.Unlock()
+		// Closed outside devMu: a device's Close can wait on a callback a stuck decode holds, and close
+		// takes devMu before anything it bounds.
+		if late {
+			_ = c.Close()
+		}
 	}
 	if m.stopped() {
 		return
@@ -300,14 +304,17 @@ func (m *media) fill(out []int16) {
 // next decodes until the slot holds a frame.
 func (m *media) next(sl *slot) {
 	// What the previous sender's last packet decoded to and has not played yet is theirs, not the new
-	// sender's: a 120 ms packet leaves 100 ms behind.
-	if g := sl.buf.Senders(); g != sl.senders {
-		sl.senders, sl.pcm = g, sl.pcm[:0]
+	// sender's: a 120 ms packet leaves 100 ms behind. It is dropped when a change is pending, and again on
+	// the step that carries the reset, which the jitter buffer sets under the same lock as the change: a
+	// packet of the new sender's arriving between the two is decoded after the drop, never before it.
+	if sl.buf.ResetPending() {
+		sl.pcm = sl.pcm[:0]
 	}
 	for len(sl.pcm) < audio.FrameSamples {
 		st := sl.buf.Next()
 		ctx := context.Background()
 		if st.Reset {
+			sl.pcm = sl.pcm[:0]
 			sl.resets++
 			_ = m.timed(func() error { return sl.dec.Reset(ctx) })
 		}

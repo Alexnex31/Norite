@@ -276,11 +276,12 @@ func (b *Buffer) Stats() Stats {
 	return b.stats
 }
 
-// Senders is how many senders the slot has carried: it changes the moment a new one's packet arrives.
-func (b *Buffer) Senders() int {
+// ResetPending is whether the slot has changed sender since the last step: the next step will carry
+// Reset. It does not consume it.
+func (b *Buffer) ResetPending() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.stats.Senders
+	return b.reset
 }
 
 // Target is the delay, in frames, the buffer waits for before it starts playing.
