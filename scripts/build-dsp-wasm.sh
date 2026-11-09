@@ -49,6 +49,13 @@ if [[ ${1:-} == --scalar ]]; then
 	scalar=1
 	shift
 fi
+# Anything else is refused, rather than read as a path: "output --scalar" would otherwise build the SIMD
+# module where the scalar one was asked for, and the test comparing the two would pass on a module
+# compared with itself.
+if (( $# > 1 )) || [[ ${1:-} == -* ]]; then
+	echo "usage: build-dsp-wasm.sh [--scalar] [output]" >&2
+	exit 2
+fi
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=${1:-$repo/voiceworker/internal/dsp/dsp.wasm}
 csrc=$repo/voiceworker/internal/dsp/csrc
@@ -175,13 +182,13 @@ compile "$csrc/shim.cc" "${cxx[@]}" "${webrtc[@]}" -I"$apm/webrtc/modules/audio_
 compile "$csrc/wasi_stubs.c" -std=c11
 wait
 
-# A reactor: no main, and _initialize runs the constructors. The stack is 1 MiB, which AEC3's filters
-# need; memory starts where the link puts it, and the module declares 16 MiB at most, which the worker
-# caps too (internal/dsp). The objects are linked in sorted order, so the bytes do not depend on the
-# order the jobs finished in.
+# A reactor: no main, and _initialize runs the constructors. The stack is 1 MiB, as the spike gave AEC3;
+# memory starts where the link puts it, and the module declares 8 MiB at most, twice what a chain holds
+# once it has run, which the worker caps too (internal/dsp). The objects are linked in sorted order, so
+# the bytes do not depend on the order the jobs finished in.
 mapfile -t sorted < <(printf '%s\n' "${objs[@]}" | LC_ALL=C sort)
 "$clang"++ "${common[@]}" -mexec-model=reactor -Wl,--strip-all -Wl,--gc-sections \
-	-Wl,-z,stack-size=1048576 -Wl,--max-memory=16777216 \
+	-Wl,-z,stack-size=1048576 -Wl,--max-memory=8388608 \
 	"${sorted[@]}" -o "$work/dsp.wasm"
 mv "$work/dsp.wasm" "$out"
 echo "build-dsp-wasm: $(sha256sum "$out" | cut -c1-64)  $out" >&2

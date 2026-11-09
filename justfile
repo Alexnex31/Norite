@@ -188,6 +188,17 @@ dsp-wasm-check: dsp-wasm
     fi
     echo "dsp.wasm is the pinned build's"
 
+# Build dsp.wasm's plain-C twin, and require the committed module, whose RNNoise runs SIMD kernels, to
+# compute exactly what it does. CI runs the same.
+dsp-simd-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    {{justfile_directory()}}/scripts/build-dsp-wasm.sh --scalar "$tmp/dsp-scalar.wasm"
+    cd {{justfile_directory()}}/voiceworker
+    NORITE_DSP_SCALAR_WASM="$tmp/dsp-scalar.wasm" go test ./internal/dsp/ -count=1 -run '^TestSIMDAgreesWithPlainC$'
+
 # pnpm audit and Trivy join once frontend/ and a Dockerfile exist.
 
 # Run govulncheck and the dependency-license check across every Go module.

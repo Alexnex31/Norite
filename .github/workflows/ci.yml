@@ -199,6 +199,13 @@ jobs:
             echo "::error::voiceworker/internal/dsp/dsp.wasm is not the pinned build's — run 'just dsp-wasm' and commit the result"
             exit 1
           fi
+      # RNNoise's SIMD kernels must compute what its plain C computes, bit for bit. That is a property of the
+      # module, checked where the module is built: the plain-C twin is built here and never committed.
+      - name: dsp.wasm's SIMD against plain C
+        run: |
+          ./scripts/build-dsp-wasm.sh --scalar "$RUNNER_TEMP/dsp-scalar.wasm"
+          cd voiceworker
+          NORITE_DSP_SCALAR_WASM="$RUNNER_TEMP/dsp-scalar.wasm" go test ./internal/dsp/ -count=1 -run '^TestSIMDAgreesWithPlainC$' -v
       # The dependency-license inventory is committed for the same reason the sqlc output is: a change to
       # the set of licenses this project ships under should arrive in a diff somebody reads, rather than
       # being a thing anyone could have checked. Regenerated here and compared, so adding a dependency
