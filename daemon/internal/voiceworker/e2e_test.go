@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/daemon/ipc"
@@ -29,13 +30,13 @@ import (
 // through M27's harness, with TURN beside it; leaving ends it; killing it is seen. Both programs are built
 // from this checkout.
 
-func buildProgram(t *testing.T, moduleDir, pkg, name string) string {
+func buildProgram(t *testing.T, moduleDir, pkg, name string, flags ...string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	out := filepath.Join(t.TempDir(), name)
-	cmd := exec.Command("go", "build", "-o", out, pkg) //nolint:gosec // fixed arguments
+	cmd := exec.Command("go", append(append([]string{"build"}, flags...), "-o", out, pkg)...) //nolint:gosec // fixed arguments
 	cmd.Dir = moduleDir
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building %s: %v\n%s", pkg, err, b)
@@ -130,13 +131,26 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds norite-voice and M26's harness, and makes real calls")
 	}
-	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program)
+	// The worker opens the system's microphone and speakers from M29, and a test must not open the
+	// developer's: on a Mac it would prompt, on Windows and Linux record. On Linux the release's worker
+	// runs, pointed at a PulseAudio server that does not exist: its codec compiles and its devices fail
+	// to open, which must leave the call up. WASAPI and AudioQueue have no such switch, so elsewhere the
+	// worker is built with norite_noaudio, which carries the call with no devices at all. voiceworker's
+	// own tests carry audio, on a test device.
+	var flags []string
+	if runtime.GOOS == "linux" {
+		t.Setenv("PULSE_SERVER", "unix:"+filepath.Join(t.TempDir(), "no-server"))
+	} else {
+		flags = []string{"-tags", "norite_noaudio"}
+	}
+	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program, flags...)
 	h := startHarness(t)
 	seen := &statuses{}
+	logged := &logBuffer{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
 		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
-		Changed: seen.add, Log: zerolog.New(io.Discard),
+		Changed: seen.add, Log: zerolog.New(logged),
 	})
 	t.Cleanup(v.Close)
 
@@ -147,6 +161,18 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "1001", Available: true}, st)
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
+	if runtime.GOOS == "linux" {
+		// The audio started as far as the devices, which failed, and the call stayed up. The worker's log and
+		// its control pipe are separate pipes, so a failure ending the call might reach the daemon after the
+		// line: the state is held for a while, not read once.
+		started := assert.Eventually(t, func() bool { return strings.Contains(logged.String(), "could not be opened") },
+			10*time.Second, 20*time.Millisecond)
+		if !started {
+			t.Fatalf("the worker's audio never started:\n%s", logged.String())
+		}
+		require.Never(t, func() bool { return v.Status().State != ipc.VoiceInCall }, 500*time.Millisecond,
+			20*time.Millisecond, "a device that could not open ended the call")
+	}
 
 	st = v.Leave()
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, st)

@@ -155,6 +155,23 @@ contract-check: contract-generate
     fi
     echo "contract types are up to date"
 
+# Build the voice-worker's Opus module, voiceworker/internal/opus/opus.wasm, from libopus and the pinned
+# wasi-sdk, both checked by hash (ADR 0036). Commit the result. The module is committed so that a plain
+# `go build` needs no C toolchain, and opus-wasm-check is what keeps it the build of what it claims to be.
+opus-wasm:
+    {{justfile_directory()}}/scripts/build-opus-wasm.sh
+
+# Fail if the committed module is not what the pinned build produces. Run it after opus-wasm has written
+# over the file, so it is the bytes that are compared, not the dates.
+opus-wasm-check: opus-wasm
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git diff --quiet -- voiceworker/internal/opus/opus.wasm; then
+        echo "voiceworker/internal/opus/opus.wasm is not what the pinned build produces — run 'just opus-wasm' and commit the result" >&2
+        exit 1
+    fi
+    echo "opus.wasm is the pinned build's"
+
 # pnpm audit and Trivy join once frontend/ and a Dockerfile exist.
 
 # Run govulncheck and the dependency-license check across every Go module.
@@ -427,8 +444,9 @@ spdx-check:
 # never distributed and must not appear in a notice claiming to describe a shipped binary.
 #
 # The files live under each module's internal/notices/ because `//go:embed` cannot reach outside the package
-# directory, and cli and daemon both embed theirs. Depends on build-local: the generator reads the binaries.
-notices: build-local
+# directory, and cli and daemon both embed theirs. The generator builds what it reads itself, for every
+# release target (.goreleaser.yaml), and reads nothing built here, so this needs no build first.
+notices:
     #!/usr/bin/env bash
     set -euo pipefail
     gen={{justfile_directory()}}/scripts/gen-third-party-notices.sh

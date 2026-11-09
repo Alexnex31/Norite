@@ -10,8 +10,10 @@ hotkey: there is no handoff, and the hotkey is the daemon's by a different mecha
 M26 (2026-11-02)** in one place: the SFU carries every connection on one UDP port through Pion's ICE UDP
 mux, so "a forwarded UDP range" below is that one port plus TURN's, which M27 decides. **Amended at M27
 (2026-11-03)**: TURN's are one port on UDP and TCP and, with a certificate, one for TLS, and its relay
-sockets stay on the host, so nothing past those is forwarded (`architecture.md` §6). Everything else
-below stands, including the DSP chain order.
+sockets stay on the host, so nothing past those is forwarded (`architecture.md` §6). **Amended by
+[ADR 0036](0036-opus-in-webassembly.md)** (M29): Opus runs in WebAssembly and the worker has no cgo, so "all
+cgo" below no longer holds for the codec; the DSP's is M30's to decide. Everything else below stands,
+including the DSP chain order.
 
 ## Context
 ADR 0006 deferred all real voice/video media to an undetermined later phase. The revised project scope makes

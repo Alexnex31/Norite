@@ -12,12 +12,16 @@
 # none of those. (The two tools also count slightly differently — go-licenses reports the import path it
 # resolved a license at, so its per-binary figure is 30 paths for the same 29 modules.)
 #
-# The module set comes from `go version -m` on the built binary rather than from the module graph, because
+# The module set comes from `go version -m` on the binaries built for every release target, rather than
+# from the module graph, because
 # the linker is the only authority on what was retained. The SPDX identifier comes from `go-licenses
 # report`, joined by longest prefix: go-licenses reports the import path it resolved a license at
 # (golang.org/x/sys/unix) where `go version -m` reports the module (golang.org/x/sys).
 #
 # Usage: gen-third-party-notices.sh <module-dir> <main-pkg> <binary> <output>
+#
+# <binary> names the program in the file's first line, and only its base name is used: the script builds
+# what it reads itself, for every release target, and reads nothing built on this machine.
 set -euo pipefail
 
 module_dir=$1; main_pkg=$2; binary=$3; out=$4
@@ -28,16 +32,47 @@ first_party="github.com/Alexnex31/Norite"
 
 # go-licenses' identifiers, one "importpath license" pair per line.
 #
-# The version is required rather than defaulted, and go-licenses is run through `go run` rather than taken
-# from PATH — the same decision the justfile and CI make, for the same reason: this script is the third
+# The version is required rather than defaulted, and go-licenses is built from that version here rather than
+# taken from PATH — the same decision the justfile and CI make, for the same reason: this script is the third
 # caller, and a default here would be a fourth place the pin could drift from. It is exported by
 # `just notices` and set at the workflow level in CI.
 : "${GO_LICENSES_VERSION:?set it, or run this through \`just notices\` which does — it must match the pin in the justfile and ci.yml}"
-ids=$(cd "$repo/$module_dir" \
-        && GOWORK=off go run "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION" report "$main_pkg" \
-             --ignore "$first_party" 2>/dev/null \
-        | awk -F, 'NF>=3 {print $1, $NF}') \
-  || { echo "gen-notices: $module_dir: go-licenses report failed; refusing to write a partial file" >&2; exit 1; }
+#
+# One file ships inside every build of a program, so it covers what each of them links: the program built
+# for each OS and architecture a release targets, with cgo off as a release has it, whatever machine this
+# runs on. A module only one target links (purego in the macOS voice-worker, M29; pulse in the Linux one)
+# is otherwise missing from the file another target carries, or from the one generated on another
+# machine. The targets are read from .goreleaser.yaml, whose builds must all list the same, so the two
+# cannot drift. Identifiers are asked of go-licenses once per OS: a module only one architecture links
+# would have none, and the join below then refuses to write the file rather than write it short.
+goos=$(grep -E '^\s+goos: \[' "$repo/.goreleaser.yaml" | LC_ALL=C sort -u)
+goarch=$(grep -E '^\s+goarch: \[' "$repo/.goreleaser.yaml" | LC_ALL=C sort -u)
+if [ "$(wc -l <<<"$goos")" -ne 1 ] || [ "$(wc -l <<<"$goarch")" -ne 1 ] || [ -z "$goos" ] || [ -z "$goarch" ]; then
+    echo "gen-notices: .goreleaser.yaml's builds do not all list one set of goos and goarch" >&2
+    exit 1
+fi
+read -ra targets <<<"$(sed 's/.*\[\(.*\)\].*/\1/; s/,/ /g' <<<"$goos")"
+read -ra arches <<<"$(sed 's/.*\[\(.*\)\].*/\1/; s/,/ /g' <<<"$goarch")"
+xdir=$(mktemp -d)
+GOBIN="$xdir" GOWORK=off go install "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION"
+# Every report and build is independent, so they run at once; each one's failure is still checked.
+pids=()
+for os in "${targets[@]}"; do
+    (cd "$repo/$module_dir" \
+        && GOOS=$os GOARCH=amd64 CGO_ENABLED=0 GOWORK=off "$xdir/go-licenses" report "$main_pkg" \
+           --ignore "$first_party" 2>/dev/null > "$xdir/ids-$os") &
+    pids+=($!)
+    for arch in "${arches[@]}"; do
+        (cd "$repo/$module_dir" && GOOS=$os GOARCH=$arch CGO_ENABLED=0 GOWORK=off \
+            go build -o "$xdir/bin-$os-$arch" "$main_pkg") &
+        pids+=($!)
+    done
+done
+for pid in "${pids[@]}"; do
+    wait "$pid" || { echo "gen-notices: $module_dir: a go-licenses report or a release build failed; refusing to write a partial file" >&2; exit 1; }
+done
+ids=$(cat "$xdir"/ids-* | awk -F, 'NF>=3 {print $1, $NF}' | LC_ALL=C sort -u)
+binaries=("$xdir"/bin-*)
 
 # A module go-licenses cannot classify is reported Unknown, which is no identifier. Those read by hand
 # (contracts/license-overrides.txt) are named from that list, first, so the longest-prefix join below finds
@@ -56,7 +91,7 @@ find_file() {
     return 1
 }
 
-tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT
+tmp=$(mktemp) && trap 'rm -rf "$tmp" "$xdir"' EXIT
 
 count=0
 while read -r mod ver; do
@@ -99,17 +134,40 @@ while read -r mod ver; do
         printf '\n\n'
     } >> "$tmp"
     count=$((count + 1))
-done < <(go version -m "$repo/$binary" | awk '$1 == "dep" { print $2, $3 }' | LC_ALL=C sort)
+done < <(for b in "${binaries[@]}"; do go version -m "$b"; done | awk '$1 == "dep" { print $2, $3 }' | LC_ALL=C sort -u)
+
+# What the linker cannot report: C compiled into a Go module's own files, libopus in the voice-worker's
+# WebAssembly module since M29 (ADR 0036). Each is a directory under the module's internal/notices/embedded/
+# holding its name and version, its SPDX identifier, and its licence text verbatim, which the component's
+# own build checks against the source it compiled (scripts/build-opus-wasm.sh).
+embedded=0
+for dir in "$repo/$module_dir"/internal/notices/embedded/*/; do
+    [ -d "$dir" ] || continue
+    {
+        printf '================================================================================\n'
+        printf '%s (compiled into this binary)\n' "$(cat "$dir/name")"
+        printf 'SPDX-License-Identifier: %s\n' "$(cat "$dir/license")"
+        printf '================================================================================\n\n'
+        cat "$dir/COPYING"
+        printf '\n\n'
+    } >> "$tmp"
+    embedded=$((embedded + 1))
+done
 
 {
     printf 'THIRD-PARTY NOTICES for %s\n' "$(basename "$binary")"
     printf '\n'
     printf 'Norite itself is licensed AGPL-3.0-or-later; see the LICENSE file at the repository root.\n'
-    printf 'This file covers the third-party modules linked into this binary, and nothing else. It is\n'
-    printf 'generated by `just notices` from `go version -m` on the built binary — the linker is the only\n'
-    printf 'authority on what actually ships. Do not edit it by hand; CI regenerates it and fails on a diff.\n'
+    printf 'This file covers the third-party code in this binary, and nothing else. It is generated by\n'
+    printf '`just notices` from `go version -m` on the built binary — the linker is the only authority on\n'
+    printf 'what actually ships — and from what the binary compiles from C, which no Go tool can see. Do\n'
+    printf 'not edit it by hand; CI regenerates it and fails on a diff.\n'
     printf '\n'
-    printf '%d third-party modules.\n' "$count"
+    if [ "$embedded" -gt 0 ]; then
+        printf '%d third-party modules, and C libraries compiled in from source: %d.\n' "$count" "$embedded"
+    else
+        printf '%d third-party modules.\n' "$count"
+    fi
     printf '\n\n'
     cat "$tmp"
 } > "$repo/$out"

@@ -1919,3 +1919,78 @@ carries the condition that would reopen it.
   child's ends once the worker has started.
 - **Reopens if**: the daemon starts a process by anything but Go's `os/exec` or `syscall`: a C library, or
   `ShellExecute`.
+
+## M29 — Opus audio pipeline
+
+### The OS confines nothing the voice-worker does
+- **Raised**: M28, `/security-sweep`; decided at M29's planning.
+- **Verdict**: accepted risk
+- **Why**: the worker runs as the account. Code that ran in it would reach what the account reaches: the
+  attach socket and the credential store. What reads bytes other people chose is:
+  - Go, the RTP and the jitter buffer, which is memory-safe;
+  - the Opus decoder, which is libopus compiled to WebAssembly under wazero's compiler
+    ([ADR 0036](adr/0036-opus-in-webassembly.md)).
+
+  The module imports nothing and is instantiated with no host module, its memory is capped, and each
+  decoder is an instance of its own. So a libopus bug reaches that instance's linear memory and nothing
+  else. What is left is a bug in wazero's compiler or runtime, which is a smaller surface than libopus,
+  written in Go, and not the one strangers' bytes are shaped for.
+
+  Confining the process (Landlock and seccomp, a macOS profile that keeps TCC's attribution to the daemon,
+  a restricted token on Windows) is three mechanisms, two of them hard to test from one machine. They
+  would protect against that remainder alone.
+- **Reopens if**:
+  - C or C++ in the worker reads bytes from the network outside wazero, as a native Opus would (ADR 0036's
+    switch);
+  - M30 runs the APM, or any DSP that reads the decoded far end, natively;
+  - the module is given a host module that reaches the filesystem, the network or the process;
+  - the compiled module is cached on disk, where the account could write the code the worker loads;
+  - the watchdog that ends a call on a decode that never returns is removed. Without
+    `WithCloseOnContextDone`, which costs five times a frame, it is the only bound on a decoder that
+    loops.
+
+### What the voice server sends is read as fast as it arrives
+- **Raised**: M29, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: each slot's goroutine reads what Pion delivers. That is a 1,500-byte read, an RTP parse and
+  a copy into the jitter buffer's fixed ring of 64. The ring's own scans are 64 entries. Decoding is paced
+  by the speakers asking for audio, never by arrival, so a voice server flooding a slot costs the worker
+  that per-packet work and no decode. A server or network that floods UDP at a client costs it that much
+  with or without Norite. From M33 the voice server is an instance's.
+
+  One more thing a server controls is a slot's sender, and each change starts a new decoder instance:
+  142 µs and 1.1 MB (`BenchmarkReset`). Changes between two frames collapse into one reset, so the worst
+  is three slots changing on every frame. That is 150 instances a second: 2% of a core, and about 170 MB a
+  second for the garbage collector. They start on the speakers' thread, inside the mix: 0.45 ms of every
+  20 ms frame at worst, which leaves the frame's deadline far off. Preparing a spare instance off that
+  thread was considered and not built, for a cost no ordinary call pays (M29's second `/code-review`).
+- **Reopens if**: decoding moves to arrival, the ring grows with what arrives, the per-packet work stops
+  being bounded by one packet, or a reset stops being collapsed to one per frame.
+
+### The PulseAudio client believes the server it talks to
+- **Raised**: M29, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `jfreymuth/pulse` parses the server's messages without bounding them against a hostile one, and
+  its own documentation warns that a closed client may panic. The server is the one PULSE_SERVER or
+  $XDG_RUNTIME_DIR names, which the account's own session sets and the daemon passes on. Whoever controls
+  it already hears the microphone. A panic there is a worker crash, which ends the call (rule 11).
+- **Reopens if**: the worker ever connects to an audio server an instance, a JOIN or anything but the
+  account's own environment names.
+
+### `session.Options` has a packet-dropping hook and a relay-only switch
+- **Raised**: M29, `/security-sweep`
+- **Verdict**: unreachable
+- **Why**: `Lossy` drops outgoing packets and `RelayOnly` forces TURN. Both exist for the end-to-end tests.
+  `cmd/norite-voice` sets neither, and nothing in a JOIN or the pipe protocol maps onto them, so no daemon,
+  client or instance can set them.
+- **Reopens if**: a JOIN field, a flag or an environment variable reaches either.
+
+### An instance a sender took over still makes that sender's audio
+- **Raised**: M29, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: a libopus bug exploited inside a slot's instance controls what that instance returns. That is
+  audio attributed to the sender who sent the exploit, which they could have sent as audio anyway. The host
+  bounds what it reads to the samples it asked for. The instance is discarded when the slot changes sender
+  (`wasmDecoder.Reset` starts a new one, and a test holds that), so it cannot speak for the next sender.
+- **Reopens if**: a decoder instance is shared between senders, or reused across a change of sender.
+

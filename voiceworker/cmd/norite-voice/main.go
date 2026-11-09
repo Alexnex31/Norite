@@ -68,7 +68,7 @@ func main() {
 		Version: Version,
 		Close:   closeGrace,
 		Dial: func(join voiceipc.Join) (worker.Call, error) {
-			return session.New(join, session.Options{Version: Version, Log: os.Stderr})
+			return session.New(join, session.Options{Version: Version, Log: os.Stderr, Device: device()})
 		},
 		// The daemon has gone, by a leave or by its own end. Whatever the loop is doing, the worker is gone
 		// shortly after: the loop closes the call and returns first when it can.

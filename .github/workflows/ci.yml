@@ -124,6 +124,24 @@ jobs:
           fi
           echo "no libsignal in the server binary"
 
+  # The voice-worker runs libopus as WebAssembly that wazero compiles to the host's own instructions, so its
+  # codec is only as correct as the compiler for that architecture. Releases ship arm64 builds for every OS,
+  # and M29's macOS pass found wazero's arm64 compiler mistranslating the encoder, which every amd64 test
+  # had passed. internal/opus compares the compiler against the interpreter byte for byte; here that runs on
+  # arm64 too, with the rest of the worker's tests.
+  test-arm64:
+    name: test (voiceworker, arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - name: go test
+        working-directory: voiceworker
+        run: go test ./... -race -count=1
+
   codegen:
     name: codegen is up to date
     runs-on: ubuntu-latest
@@ -158,6 +176,17 @@ jobs:
           if ! git diff --quiet -- backend/apicontract; then
             echo "::error::backend/apicontract is out of date — run 'just contract-generate' and commit the result"
             git --no-pager diff -- backend/apicontract
+            exit 1
+          fi
+      # The voice-worker's Opus module is committed so a plain `go build` needs no C toolchain (ADR 0036),
+      # and rebuilt here from the pinned libopus and wasi-sdk, both checked by hash, so the bytes the worker
+      # runs are the build of the source they claim to be.
+      - name: opus.wasm
+        run: ./scripts/build-opus-wasm.sh
+      - name: fail if the committed opus.wasm is not the pinned build's
+        run: |
+          if ! git diff --quiet -- voiceworker/internal/opus/opus.wasm; then
+            echo "::error::voiceworker/internal/opus/opus.wasm is not the pinned build's — run 'just opus-wasm' and commit the result"
             exit 1
           fi
       # The dependency-license inventory is committed for the same reason the sqlc output is: a change to
@@ -237,18 +266,13 @@ jobs:
             exit 1
           fi
       - name: third-party notices
-        # Regenerated from the built binaries, not the module graph: the linker is the only authority on
-        # what actually ships, and `./...` would sweep in testcontainers and its Docker set — test-only
+        # Regenerated from binaries the script builds for every release target, not the module graph: the
+        # linker is the only authority on what actually ships, and `./...` would sweep in testcontainers
+        # and its Docker set — test-only
         # code that is never distributed and must not appear in a notice describing a shipped binary.
         # Committed for the reason the inventory is, and checked here so a new dependency cannot merge
         # without its attribution.
         run: |
-          mkdir -p bin
-          (cd backend && GOWORK=off go build -o ../bin/norite-server ./cmd/server)
-          (cd cli     && GOWORK=off go build -o ../bin/norite        ./cmd/app)
-          (cd gui     && GOWORK=off go build -o ../bin/norite-gui    ./cmd/gui)
-          (cd daemon  && GOWORK=off go build -o ../bin/norite-daemon ./cmd/daemond)
-          (cd voiceworker && GOWORK=off go build -o ../bin/norite-voice ./cmd/norite-voice)
           ./scripts/gen-third-party-notices.sh backend ./cmd/server  bin/norite-server backend/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh cli     ./cmd/app     bin/norite        cli/internal/notices/THIRD-PARTY-NOTICES.txt
           ./scripts/gen-third-party-notices.sh gui     ./cmd/gui     bin/norite-gui    gui/internal/notices/THIRD-PARTY-NOTICES.txt

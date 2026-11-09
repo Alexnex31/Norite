@@ -4,7 +4,9 @@
 Accepted at M25 (2026-10). **Amends [ADR 0012](0012-voice-in-v1.md)** in one place: its consequence that
 the mic-permission handoff and the daemon's global hotkey are "unverified per-OS behavior until a
 dedicated throwaway spike" is answered here. The answers choose the shapes of M29 (capture), M32 (the
-permission) and M35 (push-to-talk), and `architecture.md` §6 and §17 now point here.
+permission) and M35 (push-to-talk), and `architecture.md` §6 and §17 now point here. **Amended by
+[ADR 0036](0036-opus-in-webassembly.md)** (M29) in one consequence: capture is pure Go on each OS, so the
+worker cross-compiles like every other binary, and the release problem named below does not arise.
 
 Each answer says how it was found: **run** (a program was run and its output read) or **read** (from a
 library's source, or a vendor's documentation or forum). The throwaway programs are not in the repository,
