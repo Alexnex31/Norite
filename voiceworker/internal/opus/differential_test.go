@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/tetratelabs/wazero"
+
+	"github.com/Alexnex31/Norite/voiceworker/internal/audio/audiotest"
 )
 
 // wazero's compiler must run the module exactly as its interpreter does. libopus is deterministic, so the
@@ -53,7 +55,7 @@ func TestTheCompilerAgreesWithTheInterpreter(t *testing.T) {
 		sweep[i] = int16(9000 * math.Sin(2*math.Pi*f*float64(i)/second))
 	}
 	signals := map[string][]int16{
-		"speech": speechLike(1, 7, 140), "noise": noise, "quiet": quiet, "sweep": sweep,
+		"speech": audiotest.SpeechLike(1, 7, 140), "noise": noise, "quiet": quiet, "sweep": sweep,
 		"loud": tone(440, 32000, 0, second),
 	}
 	for name, signal := range signals {
