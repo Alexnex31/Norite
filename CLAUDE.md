@@ -390,7 +390,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M28 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M29 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -485,6 +485,13 @@ agent never creates a `v*` tag or bumps a version.**
   updater. Its `/security-sweep` found that the pipe's bounds do not confine an exploited worker, which runs
   as the account, so M29 owes the decision on OS confinement. Its second `/code-review` found that a call must
   end with the session's sign-in and not the gateway's, which a logout made offline never reached.
+- **M29 — Opus audio pipeline**: done. libopus in WebAssembly under wazero with no cgo (ADR 0036), capture
+  in pure Go on each OS, a jitter buffer per slot, the mix, the RFC 6464 level. Confinement is recorded in
+  the ledger, not built. Its manual pass found two things:
+  - every talk-spurt started on a stale comfort-noise packet;
+  - wazero's arm64 compiler mistranslated the encoder. This is fixed upstream but not released. A `-Os`
+    build of that one file works around it, a differential test holds the compiler to the interpreter,
+    and CI's `test-arm64` runs both.
 
 ## What keeps coming back
 
@@ -493,7 +500,7 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 
 **Before building**
 - **Planning finds that the entry is not the milestone.** Read the roadmap entry against `architecture.md`,
-  the ADRs, the screens and the code before building. Every milestone from M12 to M28 found something wrong or
+  the ADRs, the screens and the code before building. Every milestone from M12 to M29 found something wrong or
   missing that way, while every test was green.
 - **Read the done-when clause by clause before calling a milestone done**, and ask of each clause what would
   have to break for it to go red (M18, M23). A clause that cannot fail is not a clause.
@@ -511,7 +518,11 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   whole (M28). A mutation that survives is a finding about the tests (M23).
 - **A guard held twice needs three runs to prove**: each alone, then both (M16b, M17).
 - **A test can pass for a reason other than its name**: a deadline that closes the connection anyway, actors
-  that overlap, a host that serves no archive (M17, M24, M27).
+  that overlap, a host that serves no archive (M17, M24, M27), a benchmark whose every call failed (M29).
+- **A test's silence is not a device's** (M29). Digital silence hid the comfort noise that real quiet
+  makes DTX send, and every talk-spurt played 440 ms late. Feed a test the signal the device delivers.
+- **Code compiled for the host is only as right as the compiler for each architecture** (M29). Hold it to
+  a reference byte for byte, on every architecture a release ships.
 - **A stand-in must fail the way the real thing does**: a proxy that forwards the FIN, sequence numbers that
   jump, a seed whose ids cluster or whose distributions share a modulus (M16, M19, M26). A schema-checked fake
   cannot see wording or a screen, and a test that feeds a parser raw output has not tested what the runner
@@ -529,6 +540,8 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 - **A test that waits on a channel the guard was meant to close hangs instead of failing**: bound every wait a
   removed guard could leave open (M28).
 - **Gates in a chain need `&&`, not `;`** (M18). Hold a cost by counting, not by a wall-clock limit (M21).
+- **A job inserted among another job's steps takes the rest of them** (M29). YAML says nothing, and the
+  steps it took stopped running where they belonged. Read a workflow's job list back after editing it.
 
 **Designing it**
 - **When a value that never changed starts changing, enumerate every reader of it**; when an event starts
@@ -2122,6 +2135,77 @@ And on the voice-worker, from M28:
   hostile case; wait on a stand-in with `drain`, which fails rather than hangs. `e2e_test.go` builds
   `norite-voice` and M26's harness from the checkout and makes real calls. The worker's own loop is tested
   against a fake `Call` over in-memory pipes, every frame held to the contract.
+
+And on the audio pipeline, from M29 (ADR 0036):
+
+- **Opus is `voiceworker/internal/opus`'s `Codec`.**
+  - Its default is libopus 1.6.1 in WebAssembly under wazero.
+  - The native twin is cgo, from the same `shim.c`, behind `norite_opusnative`. No release passes that
+    tag, and the tests run against both.
+  - Switching the default is ADR 0036's measurement, `BenchmarkFrame` unpaced, and nothing else.
+- **`opus.wasm` is a build of what it claims to be.**
+  - `scripts/build-opus-wasm.sh` builds it from wasi-sdk 34 and the libopus tarball, both pinned by hash.
+  - It is committed. CI rebuilds it and fails on a different byte; locally that is `just opus-wasm` and
+    `just opus-wasm-check`.
+  - It imports nothing and runs with no host module, capped at 64 pages. A test holds both.
+  - A change to its flags is a change to what every caller runs.
+- **One instance per encoder and per decoder.**
+  - A trap discards that instance alone.
+  - A slot's new sender gets a new instance, never a reset of the old one, which a sender that took the
+    instance over could ignore.
+  - The compiled module is never cached on disk, since a cache would be native code the account writes
+    (ledger).
+- **A call into an instance cannot be interrupted.**
+  - `WithCloseOnContextDone` cost five times a frame.
+  - What bounds a stuck decode or encode is the session's watchdog, on the monotonic clock: past
+    `stuckDecode` it ends the call.
+- **wazero's compiler is held to its interpreter, byte for byte**, by
+  `TestTheCompilerAgreesWithTheInterpreter`, on amd64 and on `test-arm64`.
+  - `silk/NSQ_del_dec.c` is built at `-Os` until a wazero release carries its #2508.
+  - Anything else compiled to WASM gets the same test.
+- **The frame is 20 ms of 48 kHz mono s16 everywhere.** `TestTheFrameIsOneSizeEverywhere` pins the
+  constants three packages repeat.
+- **The device clock drives both directions**: `Device.Capture(ctx, frame)` and `Device.Play(ctx, fill)`.
+  - Each OS has a pure-Go backend: PulseAudio on Linux, WASAPI over COM through `syscall`, and
+    AudioQueue through `purego`.
+  - A backend nobody has run says so (M23).
+  - A capture library's variable goes in the worker's environment allow-list by name, as `PULSE_COOKIE`
+    did.
+- **No test opens the developer's devices.**
+  - The tests use `audiotest`'s device.
+  - The daemon's end-to-end test points Linux at no PulseAudio server and uses `norite_noaudio`
+    elsewhere.
+  - `release_test.go` holds every release to passing neither tag.
+- **A device is not the call; the codec is.**
+  - A device that fails to open is logged, and the call goes on.
+  - A codec failure ends the call.
+  - Close is bounded at `closeWithin` as a whole.
+  - Devices open outside `devMu`. One opened after close closes itself, outside the lock.
+- **The jitter buffer is bounded and answers to the sender**, and `FuzzSlot` plays it.
+  - It is a fixed ring of 64. Every sequence and timestamp comparison is a signed difference, so it holds
+    across the wrap.
+  - A payload is copied out under the lock.
+  - It starts from packets that arrived within the target delay of the newest, which skips a stale DTX
+    update.
+  - Its delay:
+    - it starts at `MinDelay`, one frame;
+    - it deepens to `fecDelay` on its first concealed loss, which FEC needs;
+    - it deepens at once on a late packet;
+    - it shrinks after `shrinkAfter` without one;
+    - it is capped at `MaxDelay`.
+  - It resets only on a change of sender.
+- **What is sent:**
+  - every packet carries the RFC 6464 audio level, whose id is read once from the answer;
+  - a DTX packet of two bytes or fewer is not sent.
+- **The notices are each OS's.** `gen-third-party-notices.sh` reads the release targets from
+  `.goreleaser.yaml`. It builds each with cgo off, takes the union, and adds the C components in
+  `internal/notices/embedded/`. A C library compiled into a module goes there by hand (rule 22).
+- **Latency has a budget**: 38–44 ms mouth to ear in process. `TestMouthToEarStaysWithinItsBudget` fails
+  past 90 ms, and past 130 with loss and jitter. A change on the path, M30's DSP included, is read against it.
+  - Its clicks are stamped at their own sample, inside their frame, never at the frame.
+  - Its quiet is dithered.
+- **Measuring**: `BenchmarkFrame`, `BenchmarkStart` and `BenchmarkReset` in `internal/opus`, and
+  `NORITE_MEASURE=1` for what a whole call costs. Pin the run to one core.
 
 ## Project-specific skills
 

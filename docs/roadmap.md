@@ -2016,6 +2016,56 @@ of this section.
         measured through real PipeWire buffers.
       - Windows in M24's VM.
       - macOS on the author's Mac.
+
+  **Built as planned, and each done-when measured.**
+  - **Two calls hear each other**: tone 1.000 and envelope 1.000 in process. Relayed through TURN with 5%
+    loss, 0.998 and 0.997.
+  - **A new sender gets a new decoder instance**, not a reset of the old one (from `/security-sweep`).
+  - **Every packet carries its audio level.**
+  - **The codec costs, per 20 ms frame and per caller:**
+
+    | | Codec, unpaced | Whole call, at its cadence | Module compile |
+    | --- | --- | --- | --- |
+    | WASM | 584 µs, 2.9% of one core | 8.6–8.9% | 97 ms |
+    | Native | 259 µs | 4.1–4.3% | — |
+
+    ADR 0036's switch threshold reads the first column.
+  - **Mouth to ear is 38–44 ms in process.** The test fails past 90 ms, and past 130 with loss and
+    jitter.
+
+  **The manual pass found what no test had:**
+  - **Every talk-spurt played 440 ms late.** A real microphone's quiet is not digital silence, so DTX
+    sends comfort noise, and the jitter buffer started on a stale update. Playing now starts from what
+    arrived within the target delay of the newest packet.
+  - **Jitter during a sentence was not absorbed** until the next silence. The buffer now deepens at once.
+  - **The latency test counted too little**, stamping a click at its frame rather than its sample.
+  - **On the Mac, a call was silent: wazero's arm64 compiler mistranslated the encoder.** The cause is
+    wazero's, fixed by its #2508 after v1.12.0 and not yet released. Meanwhile:
+    - the one file is built at `-Os`;
+    - `TestTheCompilerAgreesWithTheInterpreter` holds the compiler's bytes to the interpreter's;
+    - CI gained `test-arm64`.
+  - **Measured one way, device buffers included:**
+
+    | Setting | One way |
+    | --- | --- |
+    | Under a VM's PipeWire rules | about 104 ms |
+    | Under bare-metal rules | 50–58 ms |
+
+    The one-frame jitter buffer was adopted. 10 ms device buffers were measured worse and rejected.
+
+  **Four `/code-review` rounds raised 36 findings.** 33 were fixed. One was accepted in the ledger, one was
+  declined, and one was already fixed. Among them:
+  - **A leave could hang or leave the microphone open**: on a stuck decode or encode, or on a device that
+    opened late. Close is bounded at 500 ms as a whole.
+  - **The jitter buffer handed the decoder a slice of its own ring.**
+  - **The watchdog compared on the wall clock.**
+  - **A previous sender's tail was played as the next sender's.**
+  - **The notices described this machine's build** rather than each OS's. They now read the release
+    targets from `.goreleaser.yaml`.
+  - **M28's end-to-end test reached the developer's devices** off Linux.
+
+  `/optimization-review` found the audio level's id asked of Pion on every frame. `/security-sweep` found
+  the decoder reset above, and put four entries in the ledger. **Confinement is recorded, not built.**
 - **M30 — Audio DSP**: RNNoise (noise suppression) plus WebRTC's Audio Processing Module (AEC3 echo
   cancellation plus AGC2 — replacing `libspeexdsp`, ADR 0023), contained entirely to the voice-worker
   binary, wired in this exact order: Mic Capture → AEC → RNNoise → AGC
@@ -2032,12 +2082,26 @@ of this section.
   - **A native component brings back what ADR 0036 avoided:**
     - the release problem, which is building cgo for darwin from a Linux runner;
     - the ledger's confinement entry, which names a native APM as its reopening condition.
+  - **A module in WASM is only as correct as wazero's compiler on each architecture**, which M29 found
+    wrong on arm64. Any module this milestone adds gets the codec's differential test, compiler against
+    interpreter, byte for byte, and runs on `test-arm64`.
+  - **When a wazero release carries its #2508**, the worker moves to it and `NSQ_del_dec.c` loses its `-Os`
+    (ADR 0036). Whichever milestone is open then does it.
+  - **The DSP adds latency to a path measured at 38–44 ms in process.** The e2e test's 90 ms budget holds
+    the sum.
 - **M31 — Adaptive bitrate and congestion control**: `pion/interceptor`'s REMB/TWCC feedback wired into
   the encoder's runtime bitrate control (M29's shim; `hraban/opus` until M29), audio-only, no simulcast.
   Depends on M26, M29, and M30. Done when:
   a simulated packet-loss/bandwidth-constrained test shows the encoder's bitrate measurably drop and recover
   in response, rather than staying fixed regardless of network conditions. M26 terminates RTCP per hop, so
   the feedback the encoder reads is the SFU's on the sender's hop, not a receiver's forwarded through it.
+
+  **From M29:**
+  - **10 ms frames would save about 10 ms each way**, at twice the packets. M29 measured 10 ms *device*
+    buffers alone and rejected them: two device blocks per 20 ms frame make packets leave unevenly, and
+    the jitter buffer paid 20 ms for the 10 saved. Frame size is weighed here, with the bitrate.
+  - **Complexity is the cheaper CPU lever.** Complexity 6 brought a call from 8.6% to 7.3% of a core,
+    while 8 changed nothing (ADR 0036).
 - **M32 — Mic permission, real implementation**: built per M25's finding
   ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §1). There is no handoff: the worker opens the
   device itself and no client ever does. The worker reports the outcome of opening it, and the daemon

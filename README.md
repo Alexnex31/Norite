@@ -16,7 +16,7 @@ software.
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
 [![Release](https://img.shields.io/badge/release-v0.1.2-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.2)
-[![Milestone](https://img.shields.io/badge/milestone-M28%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M29%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -40,8 +40,8 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 
 > [!NOTE]
 > **It is still early, and text only.** Voice calls, DMs, presence and the GUI are not built yet: the server
-> half of a call exists since `M26`, and its relay since `M27`, but no client can join one until `M33`. The client shows one channel at a
-> time, in plain text, and no third party has reviewed the code. The full scope is
+> half of a call exists since `M26`, its relay since `M27`, and the call's audio on your machine since `M29`,
+> but no client can join one until `M33`. The client shows one channel at a time, in plain text, and no third party has reviewed the code. The full scope is
 > multi-year work — [Status](#status) says exactly what exists.
 
 ---
@@ -70,11 +70,12 @@ message's edit history, a guild's opt-in message recording, message tagging, the
 daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
 the settings file the clients share, a local port for scripts and bots, the daemon as a service you can
 stop, inspect and read the log of, and a client that keeps itself up to date, are done — `M0` through
-`M24`, which completes Phase D. Phase E, voice, has begun, and its first four milestones are done too:
+`M24`, which completes Phase D. Phase E, voice, has begun, and its first five milestones are done too:
 `M25`, a finding rather than code, which settles on each OS who opens the microphone and how push-to-talk is
 held; `M26`, the server that carries a call's audio between its participants; `M27`, the relay that
-lets a participant whose network refuses UDP reach it; and `M28`, the separate program on your machine that
-holds a call, which the daemon starts and stops. The instance can start the server and the relay, off by
+lets a participant whose network refuses UDP reach it; `M28`, the separate program on your machine that
+holds a call, which the daemon starts and stops; and `M29`, the call's audio in that program, from your
+microphone to the others' speakers on Linux, Windows and macOS. The instance can start the server and the relay, off by
 default, and none of it is used until `M33` lets a client join a call.**
 
 <details>
@@ -116,6 +117,7 @@ default, and none of it is used until `M33` lets a client join a call.**
 | `M26` | The server half of a call — the selective forwarding unit, on one UDP port, that carries each participant's audio to the others without decoding it: admitted only by the certificate in the offer the instance hands it, never a token; each listener receives on a fixed number of slots filled by who is speaking, or who they pinned, so a join or a leave costs no renegotiation; told who is in each slot and who is speaking; and bounded against a participant who sends too much. Nothing starts it yet: joining a voice channel arrives with `M33` |
 | `M27` | The relay for a call — TURN built into the server, over UDP, TCP and TLS, for a participant whose network will not let audio through to the call directly, as on many office, hotel and school networks; it relays to the call's server and to nothing else, with sign-ins that can start a relay for ten minutes, which then lasts as long as its call; the instance starts the call server and the relay itself under a new `[voice]` setting, off until `M33` gives a client a way to join; and every amount a stranger could make it hold or send is bounded |
 | `M28` | The program that holds a call — `norite-voice`, which the daemon starts when you join a voice channel and stops when you leave, so a problem with audio can only end the call and never your messages; it connects to the call's server itself, is given nothing of your sign-in and none of the daemon's environment, and goes away with the daemon however that ends; `norite voice join`, `leave` and `status`; it ships beside the daemon and updates with it. Joining a real call arrives with `M33`, and its audio with `M29` |
+| `M29` | A call's audio — the voice program captures your microphone and plays the others on Linux, Windows and macOS, with nothing to install and no C compiled into it: the Opus codec runs in WebAssembly, so a malformed packet from another participant is held inside the one decoder it reaches, by wazero's sandbox; a short buffer per speaker smooths a bumpy network, recovers a lost packet from the next one when it can, and adds about a frame of delay when the network is clean; about 40 ms from one microphone to the other speakers, before the devices' own buffers. Joining a real call still arrives with `M33`, and noise suppression and echo cancellation with `M30` |
 
 </details>
 

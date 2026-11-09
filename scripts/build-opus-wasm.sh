@@ -90,7 +90,9 @@ objs=()
 # Found by M29's macOS pass and reproduced under qemu-aarch64. -O0, -O1 and -Os all avoid it, and -O3
 # does not; the encoder's other files are unaffected. internal/opus's differential test runs every path
 # of the codec through the compiler and the interpreter and requires the same bytes, on each architecture
-# CI runs, which is what makes this a workaround rather than a hope.
+# CI runs, which is what makes this a workaround rather than a hope. wazero's #2508 fixes the cause on its
+# main branch, after v1.12.0; once a release carries it, the worker moves to that release and this goes
+# (ADR 0036).
 for f in $files; do
 	o=$work/obj/$(tr / _ <<<"$f").o
 	extra=()

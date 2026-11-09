@@ -153,6 +153,16 @@ Switching brings back what this record avoids:
   - **CI runs the voice-worker's tests on an arm64 runner** as well, since every OS's release has an
     arm64 build and the amd64 suite could not have seen this.
   - The interpreter is no fallback: it takes about 30 ms to encode a 20 ms frame.
+  - **The cause is wazero's, and it is fixed there but not released.** wazero
+    [#2508](https://github.com/tetratelabs/wazero/pull/2508), merged on 2026-06-22 as `89079b9`, keeps an
+    `i32.rem` result from being overwritten under register pressure on arm64. The function computes its
+    ring-buffer indices with `%` and takes 26 parameters. Run under `qemu-aarch64`, the `-O2` module traps
+    at `89079b9`'s parent and passes at `89079b9` and at `main` (2026-10-19). v1.12.0 is still the latest
+    release.
+  - **The workaround goes when a release carries the fix**: `voiceworker/go.mod` moves to it, the `-Os`
+    leaves the build script, and the differential test and the arm64 job say whether that was right. The
+    worker does not take a pseudo-version of `main` meanwhile, which would ship a compiler no release has
+    fixed in place.
 
 ## Alternatives rejected
 - **cgo throughout, as the entry said** (`hraban/opus`, miniaudio through `malgo`). It is faster, and
