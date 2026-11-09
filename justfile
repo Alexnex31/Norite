@@ -59,13 +59,18 @@ dev:
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    # The voice-worker's tests of wazero's compiler against its interpreter run after the rest and without
+    # -race, as CI runs them: the detector makes the DSP's eighteen times slower and can find nothing in
+    # one goroutine, and beside the other packages they starve the timing-sensitive call tests (M30).
+    differential='^TestTheCompilerAgreesWithTheInterpreter$'
     pids=()
     for m in {{go_modules}}; do
-        (cd "$m" && go test ./... -race 2>&1 | sed "s/^/[$m] /") &
+        (cd "$m" && go test ./... -race -skip "$differential" 2>&1 | sed "s/^/[$m] /") &
         pids+=($!)
     done
     fail=0
     for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    (cd voiceworker && go test ./... -run "$differential" 2>&1 | sed "s/^/[voiceworker] /") || fail=1
     exit $fail
 
 # Fast inner-loop variant of `test`. Not a substitute for it before pushing.

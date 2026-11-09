@@ -83,9 +83,18 @@ jobs:
           cache-dependency-path: "**/go.sum"
       # The backend's integration tests start a real Postgres via testcontainers. ubuntu-latest runners
       # ship a working Docker daemon, so no extra service container or setup step is needed.
+      # The voice-worker's two differential tests, its codec's and its DSP's, run each module through
+      # wazero's interpreter, and are a step of their own after this one (M30). Under -race the DSP's took
+      # 345 s against 19 s without, since the detector instruments every step the interpreter takes, and it
+      # runs on one goroutine, where there is no race to find. Run beside the other packages, they also
+      # starved M29's timing-sensitive call tests of CPU, which is what made one of those flake.
       - name: go test
         working-directory: ${{ matrix.module }}
-        run: go test ./... -race -count=1
+        run: go test ./... -race -count=1 -skip '^TestTheCompilerAgreesWithTheInterpreter$'
+      - name: wazero's compiler against its interpreter
+        if: matrix.module == 'voiceworker'
+        working-directory: voiceworker
+        run: go test ./... -count=1 -run '^TestTheCompilerAgreesWithTheInterpreter$'
 
       # go.work resolves cross-module imports from the checkout, so a module whose own go.mod and go.sum
       # are missing an entry still builds here. That was harmless while the four modules were independent
@@ -140,7 +149,11 @@ jobs:
           cache-dependency-path: "**/go.sum"
       - name: go test
         working-directory: voiceworker
-        run: go test ./... -race -count=1
+        run: go test ./... -race -count=1 -skip '^TestTheCompilerAgreesWithTheInterpreter$'
+      # The test this job exists for, apart for the reasons the test job gives.
+      - name: wazero's compiler against its interpreter
+        working-directory: voiceworker
+        run: go test ./... -count=1 -run '^TestTheCompilerAgreesWithTheInterpreter$'
 
   codegen:
     name: codegen is up to date
