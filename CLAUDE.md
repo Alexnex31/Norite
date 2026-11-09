@@ -221,7 +221,10 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just dev` — run the full local stack (docker-compose: postgres, valkey, backend w/ air; frontend w/ vite
   joins at Phase O)
 - `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
-  differs from CI is not a gate. **Needs a running container runtime**: the backend's integration tests
+  differs from CI is not a gate. Since M30, three of the voice-worker's tests run after the rest without it,
+  in CI too: the two differential tests, which the detector slows eighteenfold through wazero's
+  interpreter, and the latency budget, which times the program the detector slows. **Needs a running
+  container runtime**: the backend's integration tests
   start a real Postgres via `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race detector is
   reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
 - `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
@@ -2200,8 +2203,10 @@ And on the audio pipeline, from M29 (ADR 0036):
 - **The notices are each OS's.** `gen-third-party-notices.sh` reads the release targets from
   `.goreleaser.yaml`. It builds each with cgo off, takes the union, and adds the C components in
   `internal/notices/embedded/`. A C library compiled into a module goes there by hand (rule 22).
-- **Latency has a budget**: 38–44 ms mouth to ear in process. `TestMouthToEarStaysWithinItsBudget` fails
-  past 90 ms, and past 130 with loss and jitter. A change on the path, M30's DSP included, is read against it.
+- **Latency has a budget**: 38–44 ms mouth to ear in process at M29, 69–71 ms with M30's DSP, whose 28.9 ms
+  is `dsp.Delay`. `TestMouthToEarStaysWithinItsBudget` fails past 120 ms, and past 160 with loss and
+  jitter: M30 raised it from 90 by the DSP's delay, and runs it without `-race`. A change on the path is
+  read against it.
   - Its clicks are stamped at their own sample, inside their frame, never at the frame.
   - Its quiet is dithered.
 - **Measuring**: `BenchmarkFrame`, `BenchmarkStart` and `BenchmarkReset` in `internal/opus`, and
