@@ -479,9 +479,11 @@ func onsets(heard []int16, at []time.Time) []time.Time {
 // rest is this. The budget leaves room for a loaded CI runner's timers.
 //
 // From M30 the speaking caller's DSP is on, as every call's is, and adds 28.9 ms (dsp.Delay): measured at
-// 69 to 71 ms, and 83 to 104 with the loss. The budget held the sum, as the roadmap asked, with 19 ms to
-// spare where it had 46.
-const latencyBudget = 90 * time.Millisecond
+// 69 to 71 ms, and 83 to 104 with the loss. Under -race on a loaded machine it reached 87.5 ms against
+// what was then a 90 ms budget, so the budget rose by the DSP's delay, to keep the room M29 left for a
+// loaded runner, and the test runs without -race, which slows the program it times (the author's call at
+// M30). Run under -race, a timing test measures the race detector.
+const latencyBudget = 120 * time.Millisecond
 
 func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 	if testing.Short() {
