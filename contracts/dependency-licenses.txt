@@ -86,11 +86,11 @@ github.com/jackc/pgservicefile,https://github.com/jackc/pgservicefile/blob/5a60c
 github.com/jackc/pgx/v5,https://github.com/jackc/pgx/blob/v5.10.0/LICENSE,MIT
 github.com/jackc/puddle/v2,https://github.com/jackc/puddle/blob/v2.2.2/LICENSE,MIT
 github.com/jfreymuth/pulse,https://github.com/jfreymuth/pulse/blob/v0.1.3/LICENSE,MIT
-github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.18.7/LICENSE,Apache-2.0
-github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.18.7/LICENSE,BSD-3-Clause
-github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.18.7/LICENSE,MIT
-github.com/klauspost/compress/internal/snapref,https://github.com/klauspost/compress/blob/v1.18.7/internal/snapref/LICENSE,BSD-3-Clause
-github.com/klauspost/compress/zstd/internal/xxhash,https://github.com/klauspost/compress/blob/v1.18.7/zstd/internal/xxhash/LICENSE.txt,MIT
+github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.20.2/LICENSE,Apache-2.0
+github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.20.2/LICENSE,BSD-3-Clause
+github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.20.2/LICENSE,MIT
+github.com/klauspost/compress/internal/snapref,https://github.com/klauspost/compress/blob/v1.20.2/internal/snapref/LICENSE,BSD-3-Clause
+github.com/klauspost/compress/zstd/internal/xxhash,https://github.com/klauspost/compress/blob/v1.20.2/zstd/internal/xxhash/LICENSE.txt,MIT
 github.com/leodido/go-urn,https://github.com/leodido/go-urn/blob/v1.4.0/LICENSE,MIT
 github.com/lucasb-eyer/go-colorful,https://github.com/lucasb-eyer/go-colorful/blob/v1.4.1/LICENSE,MIT
 github.com/magiconair/properties,https://github.com/magiconair/properties/blob/v1.8.10/LICENSE.md,BSD-2-Clause
