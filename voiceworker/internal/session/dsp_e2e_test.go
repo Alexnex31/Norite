@@ -29,6 +29,19 @@ func loop(pcm []int16, gain float64) func(int, []int16) {
 	}
 }
 
+// speaksAfter is a microphone that says nothing, its noise floor aside, until after has passed, and then
+// says pcm at half its level.
+func speaksAfter(after time.Duration, pcm []int16) func(int, []int16) {
+	at := time.Now().Add(after)
+	return func(i int, f []int16) {
+		if time.Now().Before(at) {
+			clear(f)
+			return
+		}
+		loop(pcm, 0.5)(i, f)
+	}
+}
+
 // echoRoom is the second caller's room: a 300 ms tail would cost the test device two transforms of 32,768
 // points a frame, so the tail here is half that, which internal/dsp's tests do not need to spare.
 func echoRoom() audiotest.Room { return audiotest.Room{Delay: 0.030, Gain: 0.3, RT60: 0.15, Seed: 1} }
@@ -53,8 +66,9 @@ func power(x []int16, from, to float64) float64 {
 
 // TestTheFarEndIsNotHeardBackThroughTheRoom is the two-party echo test. Measured: unprocessed, the first
 // caller hears themselves 2 dB below what the second's speakers played; with echo cancellation alone, or
-// with the whole chain, 68 to 72 dB below, which is nothing. The second caller says nothing, so what comes
-// back is echo and nothing else.
+// with the whole chain, 62 to 64 dB below, which is the second microphone's noise floor. The second caller
+// says nothing for 10 s, so what comes back then is echo and nothing else, and then speaks for 2 s, which
+// the first must hear: canceled well, the echo is next to nothing, and so is a call that carries nothing.
 func TestTheFarEndIsNotHeardBackThroughTheRoom(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds M26's harness and makes real calls")
@@ -75,10 +89,20 @@ func TestTheFarEndIsNotHeardBackThroughTheRoom(t *testing.T) {
 			a := &audiotest.Device{Source: loop(voice, 1)}
 			b := &audiotest.Echoing{Room: echoRoom()}
 			h.join(t, room, "1", a, Options{})
+			b.Source = speaksAfter(10*time.Second, recordings.Near())
 			h.join(t, room, "2", b, Options{Processing: c.s})
 			time.Sleep(12 * time.Second)
-			back := heardBack(a, b, 0)
-			t.Logf("the first caller hears themselves %.1f dB below what the second played", -back)
+			back := heardBack(a, b, 2.5)
+			ha, _ := a.Heard()
+			speech := 10 * math.Log10(power(ha, 1.5, 0)/(32768*32768))
+			t.Logf("the first caller hears themselves %.1f dB below what the second played, and the second at "+
+				"%.1f dBFS", -back, speech)
+			if math.IsNaN(back) || math.IsInf(back, 0) {
+				t.Fatalf("the echo measured %v: a side heard nothing at all", back)
+			}
+			if speech < -45 {
+				t.Fatalf("the second caller is heard at %.1f dBFS: is their sender still sending?", speech)
+			}
 			if c.atLeast == 0 {
 				// Unprocessed, the echo must be loud, or the cases below prove nothing.
 				if back < -10 {
@@ -95,7 +119,7 @@ func TestTheFarEndIsNotHeardBackThroughTheRoom(t *testing.T) {
 
 // TestEchoStaysCanceledWhenTheSenderFallsBehind starves the second caller's sender: every 25th frame it
 // stops for 30 to 110 ms, so frames queue past captureQueue and the encoder skips some. Measured over the
-// 6 s before the second caller speaks: the echo 57 dB below what was played. With M29's queue, which
+// 6 s before the second caller speaks: the echo 57 to 60 dB below what was played. With M29's queue, which
 // dropped the oldest frame before the DSP, it was 13 dB: AEC3 pairs reference and microphone by order,
 // and every lost frame shifted the pairing. Echo cancellation alone, since RNNoise after it would remove a
 // residue the test means to see.
@@ -124,17 +148,9 @@ func TestEchoStaysCanceledWhenTheSenderFallsBehind(t *testing.T) {
 	a := &audiotest.Device{Source: loop(recordings.Far(), 1)}
 	b := &audiotest.Echoing{Room: echoRoom()}
 	h.join(t, "1", "1", a, Options{})
-	speaks := time.Now().Add(10 * time.Second)
-	near := recordings.Near()
-	b.Source = func(i int, f []int16) {
-		if time.Now().Before(speaks) {
-			clear(f)
-			return
-		}
-		loop(near, 0.5)(i, f)
-	}
+	b.Source = speaksAfter(10*time.Second, recordings.Near())
 	sb := h.join(t, "1", "2", b, Options{Processing: dsp.Settings{EchoCancellation: true}, stall: stall})
-	time.Sleep(time.Until(speaks) + 2*time.Second)
+	time.Sleep(12 * time.Second)
 	back := heardBack(a, b, 2.5)
 	m := mediaOf(sb)
 	ha, _ := a.Heard()

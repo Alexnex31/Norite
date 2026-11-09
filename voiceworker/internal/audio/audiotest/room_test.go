@@ -66,3 +66,47 @@ func TestARoomsResponseIsShapedAsAsked(t *testing.T) {
 		t.Fatalf("the tail falls %.1f dB over RT60, not about 60", fall)
 	}
 }
+
+// Each frame played lands one frame after the one before it in what the microphone records, whichever
+// clock ticked first. It used to land wherever the microphone was reading, so two frames could fall in one
+// place, or leave a 20 ms gap, when the two clocks swapped order (/code-review, M30).
+func TestAnEchoLandsAFrameAfterTheLastWhateverTheOrder(t *testing.T) {
+	e := &Echoing{Room: Room{Delay: 0.001, Gain: 1, RT60: 0.001, Seed: 1}}
+	e.setup()
+	// A room of one path, 48 samples long, so each click comes back as one click.
+	clear(e.h)
+	e.h[48] = 1
+	fft(e.h, false)
+	x := make([]complex128, e.n)
+	n := audio.FrameSamples
+	click := func(at int) []int16 { f := make([]int16, n); f[at] = 10000; return f }
+	var mic []int16
+	take := func() { buf := make([]int16, n); e.record(make([]int16, n), buf); mic = append(mic, buf...) }
+	// Two 20 ms clocks tick once each per frame, in whichever order they slip into: each pair below is one
+	// frame of each, played first or recorded first.
+	pairs := []string{"pc", "cp", "pc", "pc", "cp", "cp", "pc"}
+	for _, pair := range pairs {
+		for _, step := range pair {
+			if step == 'p' {
+				e.played(click(100), x)
+			} else {
+				take()
+			}
+		}
+	}
+	take() // the last frame's echo
+	var peaks []int
+	for i, v := range mic {
+		if v > 2000 {
+			peaks = append(peaks, i)
+		}
+	}
+	if len(peaks) != len(pairs) {
+		t.Fatalf("%d clicks came back, at %v, not %d", len(peaks), peaks, len(pairs))
+	}
+	for i := 1; i < len(peaks); i++ {
+		if d := peaks[i] - peaks[i-1]; d != n {
+			t.Errorf("clicks %d and %d came back %d samples apart, not %d", i-1, i, d, n)
+		}
+	}
+}

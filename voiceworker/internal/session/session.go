@@ -31,7 +31,6 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/logging"
 	"github.com/pion/webrtc/v4"
-	"github.com/tetratelabs/wazero"
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
@@ -172,7 +171,6 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		if mkDSP == nil {
 			mkDSP = dsp.New
 		}
-		warmWazero()
 		go func() {
 			defer close(s.codecDone)
 			s.codec, s.codecErr = mk(context.Background())
@@ -242,16 +240,6 @@ func (s *Session) runMedia() {
 		s.end(voiceipc.CutReason("the call's audio could not start: " + err.Error()))
 	}
 }
-
-// warmWazero makes one wazero runtime before the session makes two at once. wazero v1.12.0 caches its own
-// version in a package variable the first time a compiling runtime is made, with no lock
-// (internal/version.GetWazeroVersion), so the codec's and the DSP's runtimes, made on two goroutines, race
-// on it: -race found it the first time both compiled together. Making one first, here, fills the cache
-// before anything runs concurrently; the compiles themselves still overlap.
-var warmWazero = sync.OnceFunc(func() {
-	ctx := context.Background()
-	_ = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig()).Close(ctx)
-})
 
 // awaitDSP returns the compiled DSP. Its failure is not the call's: the caller goes on without it.
 func (s *Session) awaitDSP(ctx context.Context) (dsp.Module, error) {

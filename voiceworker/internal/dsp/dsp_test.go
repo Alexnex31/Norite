@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -89,12 +90,19 @@ func every() []Settings {
 	return all
 }
 
+// shared is the module compiled once for the package's tests: a compile costs 0.2 s, and 1.5 s under -race,
+// and every chain is an instance of its own, so sharing it costs no test its isolation.
+var shared = struct {
+	once sync.Once
+	mod  Module
+	err  error
+}{}
+
 func newModule(t testing.TB) Module {
 	t.Helper()
-	m, err := New(context.Background())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = m.Close(context.Background()) })
-	return m
+	shared.once.Do(func() { shared.mod, shared.err = New(context.Background()) })
+	require.NoError(t, shared.err)
+	return shared.mod
 }
 
 func newChain(t testing.TB, m Module, s Settings) Chain {

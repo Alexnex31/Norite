@@ -450,23 +450,18 @@ func TestAFailedDSPLeavesTheCallUnprocessed(t *testing.T) {
 	for i := range frame {
 		frame[i] = int16(i)
 	}
-	for range 2 {
+	// The first frame is the one the chain fails on, having cleared it as a half-finished call could: it
+	// goes as it was captured. The others go with no chain at all.
+	for i := range 3 {
 		m.frames <- append([]int16(nil), frame...)
 		select {
-		case <-enc.got:
+		case got := <-enc.got:
+			if !slices.Equal(got, frame) {
+				t.Errorf("frame %d was changed on its way to the encoder by a DSP that failed", i)
+			}
 		case <-time.After(time.Second):
 			t.Fatal("the frame did not reach the encoder")
 		}
-	}
-	// The second frame went through with no chain at all.
-	m.frames <- append([]int16(nil), frame...)
-	select {
-	case got := <-enc.got:
-		if !slices.Equal(got, frame) {
-			t.Error("after the DSP failed, a frame was still changed on its way to the encoder")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("the frame did not reach the encoder")
 	}
 	close(m.stop)
 	m.sent.Wait()
@@ -494,4 +489,130 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// slowChain takes longer than real time over every chunk: a machine too slow for the DSP.
+type slowChain struct{ dsp.Chain }
+
+func (slowChain) Render([]int16) error { return nil }
+func (slowChain) Close() error         { return nil }
+func (slowChain) Capture([]int16) (float32, error) {
+	time.Sleep(13 * time.Millisecond) // two chunks a frame: 26 ms of work every 20 ms
+	return 1, nil
+}
+
+// A sender whose DSP cannot keep up keeps its queue full, so every frame it takes has others waiting
+// behind it. It still sends: the encoder skips a frame, never two in a row, and the caller is choppy where
+// skipping every frame would make them mute with nothing to say why.
+func TestASenderTooSlowForTheDSPStillSends(t *testing.T) {
+	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}
+	enc := keeping{got: make(chan []int16, 100)}
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, captureBacklog), base: time.Now(),
+		chain: slowChain{}, enc: enc, codec: keepOpen{}}
+	m.sent.Add(1)
+	go m.send()
+	tick := time.NewTicker(audio.FrameSamples * time.Second / audio.SampleRate)
+	for range 75 { // a second and a half of microphone
+		<-tick.C
+		m.captured(make([]int16, audio.FrameSamples))
+	}
+	tick.Stop()
+	close(m.stop)
+	m.sent.Wait()
+	encoded := len(enc.got)
+	t.Logf("%d frames encoded, %d skipped, %d dropped", encoded, m.skipped.Load(), m.dropped.Load())
+	if m.skipped.Load() == 0 {
+		t.Fatal("the sender never fell behind, so this tested nothing")
+	}
+	if encoded < 15 {
+		t.Errorf("an overloaded sender encoded %d frames in a second and a half", encoded)
+	}
+}
+
+// marking is a chain that marks every frame it processes, and markingModule makes it.
+type marking struct{ dsp.Chain }
+
+func (marking) Render([]int16) error { return nil }
+func (marking) Close() error         { return nil }
+func (marking) Capture(pcm []int16) (float32, error) {
+	pcm[0] = 12345
+	return 1, nil
+}
+
+type markingModule struct{ dsp.Module }
+
+func (markingModule) NewChain(context.Context, dsp.Settings) (dsp.Chain, error) {
+	return marking{}, nil
+}
+func (markingModule) Close(context.Context) error { return nil }
+
+// The DSP compiles in about 200 ms, twice the codec, and a call does not wait for it: frames go out
+// unprocessed until it is ready, and processed from then on.
+func TestTheCallDoesNotWaitForTheDSP(t *testing.T) {
+	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}, dspDone: make(chan struct{})}
+	enc := keeping{got: make(chan []int16, 4)}
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, captureBacklog), base: time.Now(),
+		enc: enc, codec: keepOpen{}}
+	m.sent.Add(1)
+	go m.send()
+	ready := false
+	defer func() {
+		// Bounded: a sender that waits for the DSP would otherwise hold this test for ever, rather than
+		// fail it (CLAUDE.md, M28).
+		close(m.stop)
+		if !ready {
+			close(s.dspDone)
+		}
+		m.sent.Wait()
+	}()
+	next := func() []int16 {
+		m.frames <- make([]int16, audio.FrameSamples)
+		select {
+		case got := <-enc.got:
+			return got
+		case <-time.After(time.Second):
+			t.Fatal("the frame did not reach the encoder")
+			return nil
+		}
+	}
+	if next()[0] != 0 {
+		t.Fatal("a frame was processed before the DSP had compiled")
+	}
+	s.dsp = markingModule{}
+	close(s.dspDone)
+	ready = true
+	if next()[0] != 12345 {
+		t.Error("the DSP, once compiled, was not taken up")
+	}
+}
+
+// counting is a chain that counts the reference frames it is handed.
+type counting struct {
+	dsp.Chain
+	renders *int
+}
+
+func (c counting) Render([]int16) error           { *c.renders++; return nil }
+func (counting) Capture([]int16) (float32, error) { return 1, nil }
+func (counting) Close() error                     { return nil }
+
+// With echo cancellation off nothing reads the reference, so send does not walk the ring for it: held by
+// counting rather than timing (CLAUDE.md, M21). With it on, every frame played is handed over.
+func TestTheReferenceIsReadOnlyForEchoCancellation(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		renders := 0
+		m := &media{s: &Session{opts: Options{Log: io.Discard, Processing: dsp.Settings{EchoCancellation: on}}},
+			chain: counting{renders: &renders}}
+		for range 10 {
+			m.ref.put(make([]int16, audio.FrameSamples))
+			m.process(make([]int16, audio.FrameSamples))
+		}
+		want := 0
+		if on {
+			want = 10 * audio.FrameSamples / dsp.ChunkSamples
+		}
+		if renders != want {
+			t.Errorf("echo cancellation %v: %d chunks of reference rendered, want %d", on, renders, want)
+		}
+	}
 }

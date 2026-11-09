@@ -96,9 +96,3 @@ EXPORT(dsp_ns) float dsp_ns(Chain *c, int16_t *buf) {
 EXPORT(dsp_agc) int dsp_agc(Chain *c, int16_t *buf) {
 	return c->agc->ProcessStream(buf, kStream, kStream, buf);
 }
-
-// dsp_erle is AEC3's echo return loss enhancement in dB, or -1 while it has none.
-EXPORT(dsp_erle) float dsp_erle(Chain *c) {
-	webrtc::AudioProcessingStats s = c->aec->GetStatistics();
-	return s.echo_return_loss_enhancement ? (float)*s.echo_return_loss_enhancement : -1.f;
-}

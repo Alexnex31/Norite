@@ -42,7 +42,8 @@ func (r Room) Response() []float64 {
 	rng := rand.New(rand.NewPCG(r.Seed, 0x5eed)) //nolint:gosec // a deterministic test signal
 	const fs = audio.SampleRate
 	d := int(r.Delay * fs)
-	h := make([]float64, d+int(r.RT60*fs)+1)
+	// Long enough for the reflections, however short the tail.
+	h := make([]float64, d+int(max(r.RT60, 0.03)*fs)+1)
 	h[d] = r.Gain
 	for range 6 {
 		at := d + int((0.002+0.023*rng.Float64())*fs)

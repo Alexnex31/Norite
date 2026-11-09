@@ -12,6 +12,8 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+
+	"github.com/Alexnex31/Norite/voiceworker/internal/wasmrt"
 )
 
 // module is RNNoise, WebRTC's audio processing module, abseil and the shim in csrc/, built by
@@ -41,6 +43,7 @@ func New(ctx context.Context) (Module, error) {
 // newWASM is New on a runtime and a module of the caller's choosing: the tests run the module through
 // wazero's interpreter as well, and compare it with the build whose RNNoise has no SIMD.
 func newWASM(ctx context.Context, cfg wazero.RuntimeConfig, wasm []byte) (Module, error) {
+	wasmrt.Warm() // wazero races on its version cache otherwise (internal/wasmrt)
 	rt := wazero.NewRuntimeWithConfig(ctx, cfg.WithMemoryLimitPages(MemoryPages))
 	cm, err := rt.CompileModule(ctx, wasm)
 	if err == nil {
@@ -78,20 +81,19 @@ const (
 var order = [3]step{stepAEC, stepNS, stepAGC}
 
 type wasmChain struct {
-	s      Settings
-	order  [3]step
-	mod    api.Module
-	mem    api.Memory
-	state  uint32
-	buf    uint32 // the chunk every call works on
-	spare  uint32 // RNNoise's copy of it, when its output is discarded
-	fns    map[string]api.Function
-	stack  [4]uint64
-	bytes  [2 * ChunkSamples]byte
-	broken bool
+	s     Settings
+	order [3]step
+	mod   api.Module
+	mem   api.Memory
+	state uint32
+	buf   uint32 // the chunk every call works on
+	spare uint32 // RNNoise's copy of it, when its output is discarded
+	// The exports, looked up once.
+	render, aec, rnnoise, agc api.Function
+	stack                     [4]uint64
+	bytes                     [2 * ChunkSamples]byte
+	broken                    bool
 }
-
-var exports = []string{"dsp_alloc", "dsp_new", "dsp_render", "dsp_aec", "dsp_ns", "dsp_agc", "dsp_erle"}
 
 func (m *wasmModule) NewChain(ctx context.Context, s Settings) (Chain, error) {
 	// Anonymous, so any number can run at once; _initialize runs the C++ constructors.
@@ -100,28 +102,28 @@ func (m *wasmModule) NewChain(ctx context.Context, s Settings) (Chain, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dsp: starting an instance: %w", err)
 	}
-	c := &wasmChain{s: s, order: order, mod: mod, mem: mod.Memory(), fns: map[string]api.Function{}}
-	for _, name := range exports {
-		f := mod.ExportedFunction(name)
-		if f == nil {
+	c := &wasmChain{s: s, order: order, mod: mod, mem: mod.Memory()}
+	var alloc, create api.Function
+	for name, f := range map[string]*api.Function{"dsp_alloc": &alloc, "dsp_new": &create, "dsp_render": &c.render,
+		"dsp_aec": &c.aec, "dsp_ns": &c.rnnoise, "dsp_agc": &c.agc} {
+		if *f = mod.ExportedFunction(name); *f == nil {
 			_ = mod.Close(ctx)
 			return nil, fmt.Errorf("dsp: the module exports no %s", name)
 		}
-		c.fns[name] = f
 	}
 	if c.mem == nil {
 		_ = mod.Close(ctx)
 		return nil, errors.New("dsp: the module exports no memory")
 	}
 	for _, at := range []*uint32{&c.buf, &c.spare} {
-		p, err := c.call("dsp_alloc", 2*ChunkSamples)
+		p, err := c.call(alloc, 2*ChunkSamples)
 		if err != nil || p == 0 {
 			_ = mod.Close(ctx)
 			return nil, errors.New("dsp: an instance could not allocate its buffers")
 		}
 		*at = uint32(p)
 	}
-	st, err := c.call("dsp_new")
+	st, err := c.call(create)
 	if err != nil || st == 0 {
 		_ = mod.Close(ctx)
 		return nil, errors.New("dsp: the chain could not be created")
@@ -131,24 +133,24 @@ func (m *wasmModule) NewChain(ctx context.Context, s Settings) (Chain, error) {
 }
 
 // call runs an export with args and returns its one result's bits.
-func (c *wasmChain) call(name string, args ...uint64) (uint64, error) {
+func (c *wasmChain) call(f api.Function, args ...uint64) (uint64, error) {
 	copy(c.stack[:], args)
-	if err := c.fns[name].CallWithStack(context.Background(), c.stack[:]); err != nil {
+	if err := f.CallWithStack(context.Background(), c.stack[:]); err != nil {
 		c.broken = true
-		return 0, fmt.Errorf("dsp: %s: %w", name, err)
+		return 0, fmt.Errorf("dsp: %s: %w", f.Definition().ExportNames()[0], err)
 	}
 	return c.stack[0], nil
 }
 
 // code runs an export returning the APM's error code.
-func (c *wasmChain) code(name string, at uint32) error {
-	r, err := c.call(name, uint64(c.state), uint64(at))
+func (c *wasmChain) code(f api.Function, at uint32) error {
+	r, err := c.call(f, uint64(c.state), uint64(at))
 	if err != nil {
 		return err
 	}
 	if code := int32(uint32(r)); code != 0 { //nolint:gosec // an i32 result, carried in a uint64
 		c.broken = true
-		return apmError(name, code)
+		return apmError(f.Definition().ExportNames()[0], code)
 	}
 	return nil
 }
@@ -187,7 +189,7 @@ func (c *wasmChain) Render(ref []int16) error {
 	if err := c.put(c.buf, ref); err != nil {
 		return err
 	}
-	return c.code("dsp_render", c.buf)
+	return c.code(c.render, c.buf)
 }
 
 func (c *wasmChain) Capture(pcm []int16) (float32, error) {
@@ -205,9 +207,9 @@ func (c *wasmChain) Capture(pcm []int16) (float32, error) {
 		var err error
 		switch {
 		case st == stepAEC && c.s.EchoCancellation:
-			err = c.code("dsp_aec", c.buf)
+			err = c.code(c.aec, c.buf)
 		case st == stepAGC && c.s.AutoGain:
-			err = c.code("dsp_agc", c.buf)
+			err = c.code(c.agc, c.buf)
 		case st == stepNS:
 			voice, err = c.ns()
 		}
@@ -229,7 +231,7 @@ func (c *wasmChain) ns() (float32, error) {
 		}
 		at = c.spare
 	}
-	r, err := c.call("dsp_ns", uint64(c.state), uint64(at))
+	r, err := c.call(c.rnnoise, uint64(c.state), uint64(at))
 	if err != nil {
 		return 0, err
 	}

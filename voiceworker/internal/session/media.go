@@ -52,7 +52,10 @@ const (
 	stuckDecode = time.Second
 	// captureQueue is how far behind the microphone the encoder may fall: a frame with this many others
 	// waiting behind it is processed and not encoded, which bounds what is sent to 80 ms behind. M29 dropped
-	// the oldest frame from the queue instead, which the DSP cannot afford (above).
+	// the oldest frame from the queue instead, which the DSP cannot afford (above). Never two frames in a
+	// row: a sender whose DSP alone takes longer than real time keeps the queue full, and would otherwise
+	// skip every frame and send nothing. Half its frames go instead, which is choppy rather than mute, as
+	// M29's overloaded sender was.
 	captureQueue = 4
 	// captureBacklog is how many captured frames wait for send before the oldest is dropped after all: as
 	// much as the reference ring holds, past which the reference is lost anyway.
@@ -78,14 +81,16 @@ type media struct {
 	stop   chan struct{}
 	sent   sync.WaitGroup
 
-	// The DSP. chain is send's alone, and nil once it has failed, or when it could not start: the call then
-	// goes on with its audio unprocessed. ref is what the mix played; rendered is how much of it send has
-	// handed the chain, and started whether send has processed a frame yet.
+	// The DSP, all of it send's but ref. send takes the module up once it has compiled (taken), and makes
+	// the chain then; until it has, and once the chain has failed or if it could not start, the call goes on
+	// with its audio unprocessed. ref is what the mix played; rendered is how much of it send has handed the
+	// chain; raw is the frame as captured, put back when the chain fails partway through it.
 	module   dsp.Module
 	chain    dsp.Chain
+	taken    bool
 	ref      refRing
 	rendered uint64
-	started  bool
+	raw      [audio.FrameSamples]int16
 	overruns atomic.Int64
 	// skipped counts the frames send processed and did not encode for being behind, dropped those the
 	// queue lost before send took them.
@@ -137,14 +142,10 @@ func (s *Session) startMedia(ctx context.Context) error {
 		}()
 		return err
 	}
+	// The DSP is not awaited: it compiles in about 200 ms, twice the codec, and send takes it up when it is
+	// ready, so it never holds back a call's first words.
 	m := &media{s: s, codec: codec, track: s.track, lossy: s.opts.Lossy,
 		frames: make(chan []int16, captureBacklog), stop: make(chan struct{}), base: time.Now()}
-	// The DSP is not the call: one that will not start is logged, and the call goes on unprocessed.
-	if m.module, err = s.awaitDSP(ctx); err != nil {
-		s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", err)
-	} else if m.chain, err = m.module.NewChain(ctx, s.opts.Processing); err != nil {
-		s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", err)
-	}
 	if m.enc, err = codec.NewEncoder(ctx, opus.DefaultEncoderOptions()); err != nil {
 		m.closeDSP()
 		_ = codec.Close(ctx)
@@ -262,7 +263,7 @@ func (m *media) send() {
 	defer m.sent.Done()
 	var seq uint16
 	var ts uint32
-	talking := false
+	talking, skipped := false, false
 	out := make([]byte, opus.MaxPacket)
 	for {
 		var pcm []int16
@@ -275,12 +276,14 @@ func (m *media) send() {
 			m.s.opts.stall()
 		}
 		voice := m.process(pcm)
-		if len(m.frames) >= captureQueue {
+		if len(m.frames) >= captureQueue && !skipped {
 			// Behind: this frame has been through the DSP, which keeps it in step, and is not sent. As for
 			// a frame M29 dropped, nothing of it reaches the track: no packet and no timestamp.
+			skipped = true
 			m.skipped.Add(1)
 			continue
 		}
+		skipped = false
 		var n int
 		err := m.clocked(&m.encoding, func() (e error) { n, e = m.enc.Encode(pcm, out); return })
 		if err != nil {
@@ -321,21 +324,24 @@ func (m *media) send() {
 // Starting it again would hand them the same lever on every frame. A call that never returns is the
 // watchdog's.
 func (m *media) process(pcm []int16) bool {
+	m.takeDSP()
 	if m.chain == nil {
 		return true
 	}
+	copy(m.raw[:], pcm)
 	var voice float32
 	err := m.clocked(&m.processing, func() error {
-		// The first frame starts the reference at what is playing now. Since AEC3 pairs the two by count,
-		// starting at the ring's oldest frame would make it estimate up to 320 ms of delay that is not
-		// there, on top of the devices' own.
-		if !m.started {
-			m.rendered, m.started = m.ref.count(), true
+		played := m.ref.count()
+		if !m.s.opts.Processing.EchoCancellation {
+			m.rendered = played // nothing reads the reference
+		} else if behind := played - m.rendered; behind > refFrames {
+			m.overruns.Add(int64(behind - refFrames)) //nolint:gosec // at most the frames played
+			m.rendered = played - refFrames
 		}
 		var ref [audio.FrameSamples]int16
-		for played := m.ref.count(); m.rendered < played; m.rendered++ {
+		for ; m.rendered < played; m.rendered++ {
 			if !m.ref.get(m.rendered, ref[:]) {
-				m.overruns.Add(1) // written over while send was behind
+				m.overruns.Add(1) // written over between the count and the copy
 				continue
 			}
 			for h := 0; h < audio.FrameSamples; h += dsp.ChunkSamples {
@@ -358,9 +364,38 @@ func (m *media) process(pcm []int16) bool {
 			err.Error()))
 		_ = m.chain.Close()
 		m.chain = nil
+		// A failure on the frame's second half leaves its first processed: half delayed and gained, half
+		// not, which would click. The frame goes as it was captured.
+		copy(pcm, m.raw[:])
 		return true
 	}
 	return voice >= voiceProbability
+}
+
+// takeDSP makes the chain once the module has compiled, without waiting for it. The reference starts at
+// what is playing then: AEC3 pairs the two directions by count, so starting further back would make it
+// estimate a delay that is not there, on top of the devices' own.
+func (m *media) takeDSP() {
+	if m.taken || m.s.dspDone == nil {
+		return
+	}
+	select {
+	case <-m.s.dspDone:
+	default:
+		return
+	}
+	m.taken = true
+	m.module = m.s.dsp
+	if m.s.dspErr != nil {
+		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", m.s.dspErr)
+		return
+	}
+	c, err := m.module.NewChain(context.Background(), m.s.opts.Processing)
+	if err != nil {
+		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", err)
+		return
+	}
+	m.chain, m.rendered = c, m.ref.count()
 }
 
 // Level is RFC 6464's audio level of a frame: its power in -dBov, 0 the loudest and 127 silence.
@@ -601,7 +636,8 @@ func (m *media) close() {
 	}
 }
 
-// closeDSP closes the chain and the module, once send has stopped or never started.
+// closeDSP closes the chain and the module, once send has stopped or never started. A module send never
+// took up is closed when it has compiled, which the call no longer waits for.
 func (m *media) closeDSP() {
 	if m.chain != nil {
 		_ = m.chain.Close()
@@ -610,6 +646,15 @@ func (m *media) closeDSP() {
 	if m.module != nil {
 		_ = m.module.Close(context.Background())
 		m.module = nil
+	}
+	if !m.taken && m.s.dspDone != nil {
+		m.taken = true
+		go func() {
+			<-m.s.dspDone
+			if m.s.dsp != nil {
+				_ = m.s.dsp.Close(context.Background())
+			}
+		}()
 	}
 }
 
