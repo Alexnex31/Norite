@@ -40,7 +40,13 @@ func New(ctx context.Context) (Codec, error) {
 	// times the cost of a frame (2.9 ms against 0.59). So a call into an instance cannot be interrupted, and
 	// what bounds a decoder that never returns is the session's watchdog, which ends the call, and the
 	// worker with it.
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(MemoryPages))
+	return newWASM(ctx, wazero.NewRuntimeConfig())
+}
+
+// newWASM is New on a runtime of the caller's choosing: the differential test runs the module through
+// wazero's interpreter as well, as the reference its compiler must agree with.
+func newWASM(ctx context.Context, cfg wazero.RuntimeConfig) (Codec, error) {
+	rt := wazero.NewRuntimeWithConfig(ctx, cfg.WithMemoryLimitPages(MemoryPages))
 	cm, err := rt.CompileModule(ctx, module)
 	if err == nil {
 		err = importsNothing(cm)

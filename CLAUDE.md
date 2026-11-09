@@ -640,8 +640,10 @@ re-derive:
   `goreleaser`), never from a binary on `PATH`, which a distro package can shadow with another version: that
   once made `just license-inventory` produce a different inventory from CI's. `golangci-lint` stays a real
   binary because it is too slow under `go run`, which is why it is the one that warns on a mismatch.
-- **CI runs five jobs**: `lint`, `test`, `codegen`, `security` and `build`. `security` is `govulncheck` per
-  module, the command `just security-scan` runs, and it is blocking.
+- **CI runs six jobs**: `lint`, `test`, `test-arm64`, `codegen`, `security` and `build`. `security` is
+  `govulncheck` per module, the command `just security-scan` runs, and it is blocking. `test-arm64` runs the
+  voice-worker's tests on an arm64 runner, because its codec is WebAssembly compiled to the host's
+  instructions and is only as correct as wazero's compiler for that architecture (M29).
 
 And on the CLI side, from M2:
 

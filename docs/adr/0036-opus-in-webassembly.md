@@ -139,6 +139,20 @@ Switching brings back what this record avoids:
     would still bring back the release problem, and the ledger entry names it.
 - **M31 drives the encoder's bitrate through the shim**, not through `hraban/opus`.
 - **The cgo permission in CLAUDE.md stays** for M30. It is unused while the worker has none.
+- **The codec is only as correct as wazero's compiler for each architecture**, and M29's macOS pass found
+  one wrong.
+  - On arm64, wazero v1.12.0 mistranslated libopus's `silk_noise_shape_quantizer_del_dec` built at
+    `-O2`. Every encode at complexity 5 or more trapped from the second frame on, and the call carried no
+    audio. It was the same on macOS and on Linux, the latter under `qemu-aarch64`.
+  - Its interpreter ran the module correctly, as did its amd64 compiler. No Go version from 1.25 to 1.27,
+    no SIMD and no bulk memory changed the outcome; the file's optimization level did.
+  - **`silk/NSQ_del_dec.c` is built at `-Os`**, which avoids it (`scripts/build-opus-wasm.sh`).
+  - Because a mistranslation need not trap, **`TestTheCompilerAgreesWithTheInterpreter`** runs every codec
+    path through both engines and requires the same bytes. With the old module it failed on arm64; with
+    the new one it passes.
+  - **CI runs the voice-worker's tests on an arm64 runner** as well, since every OS's release has an
+    arm64 build and the amd64 suite could not have seen this.
+  - The interpreter is no fallback: it takes about 30 ms to encode a 20 ms frame.
 
 ## Alternatives rejected
 - **cgo throughout, as the entry said** (`hraban/opus`, miniaudio through `malgo`). It is faster, and

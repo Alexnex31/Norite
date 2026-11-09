@@ -84,9 +84,18 @@ cflags=(--target=wasm32-wasip1 --sysroot="$sysroot" -O2 -g0 -msimd128
 	-Wno-everything)
 mkdir "$work/obj"
 objs=()
+# silk/NSQ_del_dec.c is built for size. At -O2, wazero v1.12.0's arm64 compiler mistranslates its
+# silk_noise_shape_quantizer_del_dec: from the second frame on, every encode at complexity 5 or more traps
+# with an out-of-bounds access. Its interpreter, and its amd64 compiler, run the same module correctly.
+# Found by M29's macOS pass and reproduced under qemu-aarch64. -O0, -O1 and -Os all avoid it, and -O3
+# does not; the encoder's other files are unaffected. internal/opus's differential test runs every path
+# of the codec through the compiler and the interpreter and requires the same bytes, on each architecture
+# CI runs, which is what makes this a workaround rather than a hope.
 for f in $files; do
 	o=$work/obj/$(tr / _ <<<"$f").o
-	"$clang" "${cflags[@]}" -c "$src/$f" -o "$o" &
+	extra=()
+	[[ $f == silk/NSQ_del_dec.c ]] && extra=(-Os)
+	"$clang" "${cflags[@]}" "${extra[@]}" -c "$src/$f" -o "$o" &
 	objs+=("$o")
 	while (( $(jobs -r | wc -l) >= $(nproc) )); do wait -n; done
 done

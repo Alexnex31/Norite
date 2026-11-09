@@ -87,6 +87,24 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go test ./... -race -count=1
 
+  # The voice-worker runs libopus as WebAssembly that wazero compiles to the host's own instructions, so its
+  # codec is only as correct as the compiler for that architecture. Releases ship arm64 builds for every OS,
+  # and M29's macOS pass found wazero's arm64 compiler mistranslating the encoder, which every amd64 test
+  # had passed. internal/opus compares the compiler against the interpreter byte for byte; here that runs on
+  # arm64 too, with the rest of the worker's tests.
+  test-arm64:
+    name: test (voiceworker, arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - name: go test
+        working-directory: voiceworker
+        run: go test ./... -race -count=1
+
       # go.work resolves cross-module imports from the checkout, so a module whose own go.mod and go.sum
       # are missing an entry still builds here. That was harmless while the four modules were independent
       # and stopped being so at M7, when cli began requiring daemon: a dependency added to daemon is
