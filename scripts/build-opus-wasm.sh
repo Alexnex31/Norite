@@ -64,6 +64,14 @@ else
 	clang=$work/$wasi_sdk/bin/clang
 	sysroot=$work/$wasi_sdk/share/wasi-sysroot
 fi
+# The libc linked in carries notices too (rule 22), checked against the licences of the libc this wasi-sdk
+# was built from. With another toolchain, development only (above), the notice is still checked against
+# those, and that toolchain's own libc is not.
+if [[ -z ${OPUS_WASM_CLANG:-} ]]; then
+	"$repo/scripts/wasi-libc-notice.sh" "$work/$wasi_sdk"
+else
+	"$repo/scripts/wasi-libc-notice.sh"
+fi
 
 # list <mk file> <variable>: the files a make variable names, one per line.
 list() {

@@ -22,9 +22,9 @@
 # is never committed: internal/dsp's tests compare it with dsp.wasm byte for byte when
 # NORITE_DSP_SCALAR_WASM names it, which is how the SIMD port is held to being the same function.
 #
-# DSP_WASM_CLANG and DSP_WASM_SYSROOT build with another clang and wasi-libc instead of fetching wasi-sdk,
-# for development only: the bytes differ from the pinned toolchain's, so CI's check fails on what they
-# produce.
+# DSP_WASM_CLANG, DSP_WASM_CLANGXX and DSP_WASM_SYSROOT build with another clang, clang++ and wasi-libc
+# instead of fetching wasi-sdk, for development only: the bytes differ from the pinned toolchain's, so CI's
+# check fails on what they produce.
 set -euo pipefail
 
 rnnoise_version=0.2
@@ -107,6 +107,7 @@ notice abseil "Abseil $abseil_version" "$abseil/LICENSE"
 
 if [[ -n ${DSP_WASM_CLANG:-} ]]; then
 	clang=$DSP_WASM_CLANG
+	clangxx=${DSP_WASM_CLANGXX:?set it beside DSP_WASM_CLANG: the C++ driver, which links libc++}
 	sysroot=${DSP_WASM_SYSROOT:?set it beside DSP_WASM_CLANG}
 	echo "build-dsp-wasm: building with $clang, which is not the pinned toolchain" >&2
 else
@@ -115,7 +116,16 @@ else
 	fetch "$wasi_sdk_url" "$wasi_sdk_sha256" "$wasi_sdk.tar.gz"
 	tar -xzf "$cache/$wasi_sdk.tar.gz" -C "$work"
 	clang=$work/$wasi_sdk/bin/clang
+	clangxx=$work/$wasi_sdk/bin/clang++
 	sysroot=$work/$wasi_sdk/share/wasi-sysroot
+fi
+# The libc linked in carries notices too (rule 22), checked against the licences of the libc this wasi-sdk
+# was built from. With another toolchain, development only (above), the notice is still checked against
+# those, and that toolchain's own libc is not.
+if [[ -z ${DSP_WASM_CLANG:-} ]]; then
+	"$repo/scripts/wasi-libc-notice.sh" "$work/$wasi_sdk"
+else
+	"$repo/scripts/wasi-libc-notice.sh"
 fi
 
 # -ffile-prefix-map keeps the temporary directory's name out of the output. The defines are what the meson
@@ -187,7 +197,7 @@ wait
 # once it has run, which the worker caps too (internal/dsp). The objects are linked in sorted order, so
 # the bytes do not depend on the order the jobs finished in.
 mapfile -t sorted < <(printf '%s\n' "${objs[@]}" | LC_ALL=C sort)
-"$clang"++ "${common[@]}" -mexec-model=reactor -Wl,--strip-all -Wl,--gc-sections \
+"$clangxx" "${common[@]}" -mexec-model=reactor -Wl,--strip-all -Wl,--gc-sections \
 	-Wl,-z,stack-size=1048576 -Wl,--max-memory=8388608 \
 	"${sorted[@]}" -o "$work/dsp.wasm"
 mv "$work/dsp.wasm" "$out"
