@@ -1,0 +1,34 @@
+--- a/webrtc/rtc_base/system/arch.h
++++ b/webrtc/rtc_base/system/arch.h
+@@ -86,7 +86,7 @@
+ #elif defined(__pnacl__)
+ #define WEBRTC_ARCH_32_BITS
+ #define WEBRTC_ARCH_LITTLE_ENDIAN
+-#elif defined(__EMSCRIPTEN__)
++#elif defined(__EMSCRIPTEN__) || defined(__wasm32__)
+ #define WEBRTC_ARCH_32_BITS
+ #define WEBRTC_ARCH_LITTLE_ENDIAN
+ #else
+--- a/webrtc/rtc_base/platform_thread_types.cc
++++ b/webrtc/rtc_base/platform_thread_types.cc
+@@ -58,7 +58,7 @@
+   return _lwp_self();
+ #elif defined(__OpenBSD__) // WEBRTC_BSD
+   return getthrid();
+-#elif defined(__EMSCRIPTEN__)
++#elif defined(__EMSCRIPTEN__) || defined(__wasi__)
+   return static_cast<PlatformThreadId>(pthread_self());
+ #else
+   // Default implementation for nacl and solaris.
+--- a/webrtc/rtc_base/platform_thread.cc
++++ b/webrtc/rtc_base/platform_thread.cc
+@@ -42,7 +42,8 @@
+   return SetThreadPriority(GetCurrentThread(),
+                            Win32PriorityFromThreadPriority(priority)) != FALSE;
+ #elif defined(__native_client__) || defined(WEBRTC_FUCHSIA) || \
+-    (defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__))
++    (defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)) || \
++    defined(__wasi__)
+   // Setting thread priorities is not supported in NaCl, Fuchsia or Emscripten
+   // without pthreads.
+   return true;

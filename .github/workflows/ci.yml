@@ -189,6 +189,16 @@ jobs:
             echo "::error::voiceworker/internal/opus/opus.wasm is not the pinned build's — run 'just opus-wasm' and commit the result"
             exit 1
           fi
+      # The DSP module likewise (M30): RNNoise, WebRTC's audio processing module and abseil, each pinned by
+      # hash with the same wasi-sdk.
+      - name: dsp.wasm
+        run: ./scripts/build-dsp-wasm.sh
+      - name: fail if the committed dsp.wasm is not the pinned build's
+        run: |
+          if ! git diff --quiet -- voiceworker/internal/dsp/dsp.wasm; then
+            echo "::error::voiceworker/internal/dsp/dsp.wasm is not the pinned build's — run 'just dsp-wasm' and commit the result"
+            exit 1
+          fi
       # The dependency-license inventory is committed for the same reason the sqlc output is: a change to
       # the set of licenses this project ships under should arrive in a diff somebody reads, rather than
       # being a thing anyone could have checked. Regenerated here and compared, so adding a dependency

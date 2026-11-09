@@ -172,6 +172,22 @@ opus-wasm-check: opus-wasm
     fi
     echo "opus.wasm is the pinned build's"
 
+# Build the voice-worker's DSP module, voiceworker/internal/dsp/dsp.wasm, from RNNoise, WebRTC's audio
+# processing module, abseil and the pinned wasi-sdk, each checked by hash (M30, ADR 0036). Commit the
+# result, which is committed for the reason opus.wasm is.
+dsp-wasm:
+    {{justfile_directory()}}/scripts/build-dsp-wasm.sh
+
+# Fail if the committed module is not what the pinned build produces, as opus-wasm-check does.
+dsp-wasm-check: dsp-wasm
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git diff --quiet -- voiceworker/internal/dsp/dsp.wasm; then
+        echo "voiceworker/internal/dsp/dsp.wasm is not what the pinned build produces — run 'just dsp-wasm' and commit the result" >&2
+        exit 1
+    fi
+    echo "dsp.wasm is the pinned build's"
+
 # pnpm audit and Trivy join once frontend/ and a Dockerfile exist.
 
 # Run govulncheck and the dependency-license check across every Go module.
