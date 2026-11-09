@@ -7,12 +7,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/jitter"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
@@ -362,4 +364,134 @@ func TestALateDeviceClosesItselfOutsideTheLock(t *testing.T) {
 		t.Fatal("the late device closes while holding devMu")
 	}
 	m.devMu.Unlock()
+}
+
+// stuckChain is a DSP whose Capture never returns until released.
+type stuckChain struct {
+	dsp.Chain
+	release chan struct{}
+}
+
+func (stuckChain) Render([]int16) error { return nil }
+func (stuckChain) Close() error         { return nil }
+func (c stuckChain) Capture([]int16) (float32, error) {
+	<-c.release
+	return 0, errors.New("stuck")
+}
+
+// A call into the DSP cannot be interrupted either, and its reference is a stranger's audio, so one that
+// never returns ends the call as a stuck codec does: nothing else frees the core (ADR 0036).
+func TestAProcessingThatNeverReturnsEndsTheCall(t *testing.T) {
+	// A log, because the release at the test's end lets the stuck call fail, and the sender logs it.
+	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}
+	release := make(chan struct{})
+	defer close(release)
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, 1), base: time.Now(),
+		chain: stuckChain{release: release}, enc: keeping{got: make(chan []int16, 8)}, codec: keepOpen{}}
+	m.sent.Add(2)
+	go m.watch()
+	go m.send()
+	m.frames <- make([]int16, audio.FrameSamples)
+	select {
+	case reason := <-s.ended:
+		if reason != "the audio processing stopped responding, so the call was ended" {
+			t.Errorf("the call ended with %q", reason)
+		}
+	case <-time.After(3 * stuckDecode):
+		t.Fatal("the call did not end")
+	}
+	closed := make(chan struct{})
+	go func() { m.close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(3 * stuckDecode):
+		t.Fatal("closing waited on the stuck processing")
+	}
+}
+
+// failingChain fails every call, as a chain a trap broke does.
+type failingChain struct {
+	dsp.Chain
+	closed *bool
+}
+
+func (failingChain) Render([]int16) error { return dsp.ErrBroken }
+func (failingChain) Capture(pcm []int16) (float32, error) {
+	clear(pcm) // what a half-finished call could leave behind
+	return 0, dsp.ErrBroken
+}
+func (c failingChain) Close() error { *c.closed = true; return nil }
+
+// keeping is an encoder that keeps what it is given, and sends nothing.
+type keeping struct {
+	opus.Encoder
+	got chan []int16
+}
+
+func (e keeping) Encode(pcm []int16, _ []byte) (int, error) {
+	e.got <- append([]int16(nil), pcm...)
+	return 0, nil
+}
+
+// A DSP that fails is dropped for the rest of the call, and the call goes on with its audio unprocessed:
+// the reference is a stranger's audio, and a failure it can cause must not be a way to end other people's
+// calls (M30's plan, D1). One line in the log says so.
+func TestAFailedDSPLeavesTheCallUnprocessed(t *testing.T) {
+	var log strings.Builder
+	var logMu sync.Mutex
+	s := &Session{ended: make(chan string, 1), opts: Options{Log: lockedWriter{&logMu, &log}}}
+	closed := false
+	enc := keeping{got: make(chan []int16, 4)}
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, 4), base: time.Now(),
+		chain: failingChain{closed: &closed}, enc: enc, codec: keepOpen{}}
+	m.sent.Add(1)
+	go m.send()
+	frame := make([]int16, audio.FrameSamples)
+	for i := range frame {
+		frame[i] = int16(i)
+	}
+	for range 2 {
+		m.frames <- append([]int16(nil), frame...)
+		select {
+		case <-enc.got:
+		case <-time.After(time.Second):
+			t.Fatal("the frame did not reach the encoder")
+		}
+	}
+	// The second frame went through with no chain at all.
+	m.frames <- append([]int16(nil), frame...)
+	select {
+	case got := <-enc.got:
+		if !slices.Equal(got, frame) {
+			t.Error("after the DSP failed, a frame was still changed on its way to the encoder")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the frame did not reach the encoder")
+	}
+	close(m.stop)
+	m.sent.Wait()
+	select {
+	case reason := <-s.ended:
+		t.Fatalf("the call ended: %s", reason)
+	default:
+	}
+	if !closed || m.chain != nil {
+		t.Error("the failed chain was kept")
+	}
+	logMu.Lock()
+	defer logMu.Unlock()
+	if strings.Count(log.String(), "the audio processing failed, so the rest of the call goes unprocessed") != 1 {
+		t.Errorf("the log says %q", log.String())
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }

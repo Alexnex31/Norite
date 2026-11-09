@@ -8,7 +8,8 @@
 // contracts/voice-datachannel.schema.json rather than shared: the SFU's tests run that client in process,
 // and the backend cannot import a client module, which may take copyleft (rule 22).
 //
-// From M29 it carries the call's audio (media.go), once the SFU says ready.
+// From M29 it carries the call's audio (media.go), once the SFU says ready, and from M30 processes what
+// the microphone records before it is sent: echo canceled, noise suppressed, gain set (internal/dsp).
 //
 // Its DTLS certificate is Pion's, made for each peer connection and never kept, so every call has its own
 // keypair (ADR 0023): nothing a worker held outlives its call.
@@ -30,10 +31,12 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/logging"
 	"github.com/pion/webrtc/v4"
+	"github.com/tetratelabs/wazero"
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
 
@@ -53,11 +56,22 @@ type Options struct {
 	// Codec makes the call's codec, opus.New unless set. It starts compiling as the session is made, so
 	// that its ~100 ms run while ICE connects.
 	Codec func(context.Context) (opus.Codec, error)
+	// Processing says which of the DSP's three components process the microphone. Its zero value turns
+	// all three off, and RNNoise still runs then, for the voice probability the audio level's V flag
+	// follows (M30). The worker sets it from the join.
+	Processing dsp.Settings
+	// DSP makes the call's audio processing, dsp.New unless set. It compiles beside the codec, in about
+	// 180 ms, while ICE connects.
+	DSP func(context.Context) (dsp.Module, error)
 	// Lossy, when set, is asked before each packet is sent and drops it on true: a test's loss.
 	Lossy func() bool
 	// RelayOnly gathers relayed candidates alone, so the call crosses TURN: a test's network that refuses
 	// UDP to the SFU.
 	RelayOnly bool
+
+	// stall, when set, is called by the sender before each captured frame: a test's busy machine, which
+	// leaves the encoder behind the microphone.
+	stall func()
 }
 
 // Session is one call's connection.
@@ -77,6 +91,9 @@ type Session struct {
 	codecDone chan struct{}
 	codec     opus.Codec
 	codecErr  error
+	dspDone   chan struct{}
+	dsp       dsp.Module
+	dspErr    error
 
 	mediaMu       sync.Mutex
 	media         *media
@@ -145,18 +162,28 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		return nil, err
 	}
 	s := &Session{opts: opts, pc: pc, ready: make(chan struct{}), ended: make(chan string, 1),
-		codecDone: make(chan struct{})}
+		codecDone: make(chan struct{}), dspDone: make(chan struct{})}
 	if opts.Device != nil {
 		mk := opts.Codec
 		if mk == nil {
 			mk = opus.New
 		}
+		mkDSP := opts.DSP
+		if mkDSP == nil {
+			mkDSP = dsp.New
+		}
+		warmWazero()
 		go func() {
 			defer close(s.codecDone)
 			s.codec, s.codecErr = mk(context.Background())
 		}()
+		go func() {
+			defer close(s.dspDone)
+			s.dsp, s.dspErr = mkDSP(context.Background())
+		}()
 	} else {
 		close(s.codecDone)
+		close(s.dspDone)
 	}
 	pc.OnTrack(func(tr *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) { s.trackArrived(remote{tr, rcv}) })
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
@@ -213,6 +240,26 @@ func (s *Session) runMedia() {
 	s.mediaMu.Unlock()
 	if err := s.startMedia(context.Background()); err != nil {
 		s.end(voiceipc.CutReason("the call's audio could not start: " + err.Error()))
+	}
+}
+
+// warmWazero makes one wazero runtime before the session makes two at once. wazero v1.12.0 caches its own
+// version in a package variable the first time a compiling runtime is made, with no lock
+// (internal/version.GetWazeroVersion), so the codec's and the DSP's runtimes, made on two goroutines, race
+// on it: -race found it the first time both compiled together. Making one first, here, fills the cache
+// before anything runs concurrently; the compiles themselves still overlap.
+var warmWazero = sync.OnceFunc(func() {
+	ctx := context.Background()
+	_ = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig()).Close(ctx)
+})
+
+// awaitDSP returns the compiled DSP. Its failure is not the call's: the caller goes on without it.
+func (s *Session) awaitDSP(ctx context.Context) (dsp.Module, error) {
+	select {
+	case <-s.dspDone:
+		return s.dsp, s.dspErr
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -390,11 +437,15 @@ func (s *Session) Close() {
 	if m != nil {
 		m.close()
 	} else if !starting {
-		// The codec compiled for a call that never got as far as its audio.
+		// The codec and the DSP compiled for a call that never got as far as its audio.
 		go func() {
 			<-s.codecDone
 			if s.codec != nil {
 				_ = s.codec.Close(context.Background())
+			}
+			<-s.dspDone
+			if s.dsp != nil {
+				_ = s.dsp.Close(context.Background())
 			}
 		}()
 	}

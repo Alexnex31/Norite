@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
+	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/notices"
 	"github.com/Alexnex31/Norite/voiceworker/internal/session"
 	"github.com/Alexnex31/Norite/voiceworker/internal/worker"
@@ -68,7 +69,10 @@ func main() {
 		Version: Version,
 		Close:   closeGrace,
 		Dial: func(join voiceipc.Join) (worker.Call, error) {
-			return session.New(join, session.Options{Version: Version, Log: os.Stderr, Device: device()})
+			// Every component on, as M30 decided by default; the join's own settings arrive with the
+			// daemon's (M30's plan, step 5).
+			return session.New(join, session.Options{Version: Version, Log: os.Stderr, Device: device(),
+				Processing: dsp.AllOn()})
 		},
 		// The daemon has gone, by a leave or by its own end. Whatever the loop is doing, the worker is gone
 		// shortly after: the loop closes the call and returns first when it can.
