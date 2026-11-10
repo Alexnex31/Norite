@@ -42,6 +42,11 @@ webrtc::AudioProcessing *apm(bool aec) {
 	c.gain_controller1.enabled = false;
 	c.gain_controller2.enabled = !aec;
 	c.gain_controller2.adaptive_digital.enabled = !aec;
+	// From no gain, where AGC2 starts at 15 dB: with nobody speaking, what reaches it is the echo canceller's
+	// residue, which it then raised by those 15 dB from the first frame. M30's manual pass measured the
+	// whole chain leaving 17 to 21 dB of echo where AEC and RNNoise left 92; a quiet speaker is raised as
+	// far either way, at 6 dB a second (internal/dsp's TestAGC2StartsFromNoGain).
+	c.gain_controller2.adaptive_digital.initial_gain_db = 0;
 	// It would set the OS microphone's volume, which the worker never touches.
 	c.gain_controller2.input_volume_controller.enabled = false;
 	rtc::scoped_refptr<webrtc::AudioProcessing> p = webrtc::AudioProcessingBuilder().Create();

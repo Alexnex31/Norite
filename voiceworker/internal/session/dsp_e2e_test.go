@@ -189,6 +189,10 @@ func TestEchoStaysCanceledWhenTheSenderFallsBehind(t *testing.T) {
 // TestTheAudioLevelFollowsTheProcessedSignal reads RFC 6464's audio level and V flag where the SFU
 // delivers them, on the far end's slot. The level is computed on the frame as sent, so a quiet speaker
 // AGC2 raises reads louder; V follows RNNoise's voice probability, so speech sets it and rain does not.
+//
+// The rain is sent with the DSP off. With it on, RNNoise takes the rain to next to nothing and DTX then
+// sends a packet or two a second, too few to say anything about V; until AGC2 started from no gain, its
+// 15 dB raised RNNoise's residue enough to be sent. Off, RNNoise still runs for V, which this holds.
 func TestTheAudioLevelFollowsTheProcessedSignal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds M26's harness and makes real calls")
@@ -227,7 +231,7 @@ func TestTheAudioLevelFollowsTheProcessedSignal(t *testing.T) {
 	if gained.voiced < 0.7 {
 		t.Errorf("only %.2f of a speaker's packets were sent as a voice", gained.voiced)
 	}
-	rain := listen("3", loop(recordings.Noise(), 0.4), dsp.AllOn())
+	rain := listen("3", loop(recordings.Noise(), 0.4), dsp.Settings{})
 	t.Logf("rain: voiced %.2f", rain.voiced)
 	if rain.voiced > 0.1 {
 		t.Errorf("%.2f of rain's packets were sent as a voice", rain.voiced)

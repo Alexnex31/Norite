@@ -5,6 +5,7 @@ package dsp
 
 import (
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -128,6 +129,59 @@ func TestEchoIsCanceledBeforeRNNoise(t *testing.T) {
 		require.LessOrEqual(t, ratio, -25.0, "room %d: too much echo is left under double-talk", seed)
 		require.GreaterOrEqual(t, gn, 0.2, "room %d: the near end is suppressed under double-talk", seed)
 	}
+}
+
+// wandering is the far end's echo through a room whose delay jumps by up to 5 ms every 1.5 s, over a noise
+// floor of a sample or two: what M30's manual pass found PipeWire's loopback doing, and what makes the echo
+// canceller leak for a moment at each jump.
+func wandering(far []int16) []int16 {
+	echo := audiotest.LivingRoom(1).Echo(far)
+	rng := rand.New(rand.NewPCG(7, 7)) //nolint:gosec // a deterministic test signal
+	shifts := []int{0, 96, 192, 48, 144, 0, 240, 96}
+	mic := make([]int16, len(far))
+	for i := range mic {
+		v := 0.0
+		if j := i - shifts[(i/(SampleRate*3/2))%len(shifts)]; j >= 0 {
+			v = echo[j]
+		}
+		mic[i] = sample(v + 2*rng.NormFloat64())
+	}
+	return mic
+}
+
+// TestAGC2StartsFromNoGain: with nobody speaking, what reaches AGC2 is the echo canceller's residue, and
+// AGC2 started at its default 15 dB of gain and raised that residue by as much from the first frame. M30's
+// manual pass measured the whole chain leaving the echo 17 to 21 dB below what was played, where AEC and
+// RNNoise left it 92 dB below; from no gain, 59 to 81. Measured here, in a room whose delay wanders: the
+// whole chain removes 8.8 dB of echo from 15 dB of gain and 23.8 from none, against 23.9 for AEC and
+// RNNoise alone, and a quiet speaker is raised 22.3 and 22.4 dB.
+func TestAGC2StartsFromNoGain(t *testing.T) {
+	far, near := recordings.Far(), recordings.Near()
+	mic := wandering(far)
+	micF := make([]float64, len(mic))
+	for i, v := range mic {
+		micF[i] = float64(v)
+	}
+	m := newModule(t)
+	removed := func(s Settings) float64 {
+		out, _ := process(t, newChain(t, m, s), far, mic, delayOf(s))
+		from := 3 * SampleRate
+		return db(energy(micF, from, len(out)) / energy(out, from, len(out)))
+	}
+	all, aecNS := removed(AllOn()), removed(Settings{EchoCancellation: true, NoiseSuppression: true})
+	quiet := make([]int16, len(near))
+	quietF := make([]float64, len(near))
+	for i, v := range near {
+		quiet[i] = sample(0.05 * float64(v))
+		quietF[i] = float64(quiet[i])
+	}
+	out, _ := process(t, newChain(t, m, Settings{AutoGain: true}), nil, quiet, 0)
+	from := 6 * SampleRate
+	raised := db(energy(out, from, len(out)) / energy(quietF, from, len(out)))
+	t.Logf("echo removed %.1f dB with everything on, %.1f with AEC and RNNoise; a quiet speaker raised %.1f dB",
+		all, aecNS, raised)
+	require.GreaterOrEqual(t, all, aecNS-3, "AGC2 raises what the echo canceller leaves")
+	require.GreaterOrEqual(t, raised, 15.0, "AGC2 no longer raises a quiet speaker")
 }
 
 // TestNoiseIsSuppressedAndSpeechKept is the roadmap's "measurable suppression" for noise: a man reading
