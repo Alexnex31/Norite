@@ -189,7 +189,7 @@ func TestWhatTheFileGotWrongAboutVoiceIsSaid(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}, body)
 	assert.Equal(t, []string{
-		`config.toml: shared.voice.auto_gain: must be one of "on" or "off"; so voice.auto_gain is on`,
+		`config.toml: shared.voice.auto_gain: must be one of "on" or "off"; so automatic gain is on`,
 		"config.toml: shared.voice.echo_cancelation: not a key this version of Norite knows; it changes nothing",
 		"config.toml: tui.voice: not a key this version of Norite knows; it changes nothing",
 	}, warnings)
@@ -212,7 +212,7 @@ func TestABadSwitchSaysWhatApplies(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, body.EchoCancellation)
 	assert.Equal(t, []string{`config.toml: tui.voice.echo_cancellation: must be one of "on" or "off"; ` +
-		"so voice.echo_cancellation is off"}, warnings)
+		"so echo cancellation is off"}, warnings)
 }
 
 // Problems past the bound the config keeps are counted, and one may be a switch's, so the join says so.
@@ -228,7 +228,7 @@ func TestProblemsPastTheBoundAreSaidToMayConcernVoice(t *testing.T) {
 	_, warnings, err := settingsOf(cfg, "config.toml")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"config.toml: 3 more problems, not listed, may concern the voice settings; " +
-		"`norite config get voice.auto_gain` and its siblings say what applies"}, warnings)
+		"`norite config get` says what applies"}, warnings)
 }
 
 func TestAFailedJoinSaysWhy(t *testing.T) {

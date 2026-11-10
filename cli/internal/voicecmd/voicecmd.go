@@ -35,8 +35,12 @@ type Connector func(ctx context.Context) (daemonclient.Caller, func(), error)
 // file got wrong about it. FileSettings is the real one.
 type Settings func() (ipc.VoiceJoin, []string, error)
 
-// voiceKeys are the switches a join reads.
-var voiceKeys = []string{config.KeyVoiceEchoCancellation, config.KeyVoiceNoiseSuppression, config.KeyVoiceAutoGain}
+// voiceKeys are the switches a join reads, and how a warning names each.
+var voiceKeys = []struct{ key, words string }{
+	{config.KeyVoiceEchoCancellation, "echo cancellation"},
+	{config.KeyVoiceNoiseSuppression, "noise suppression"},
+	{config.KeyVoiceAutoGain, "automatic gain"},
+}
 
 // FileSettings reads the user's config.toml as the terminal client does, since the command tree is the one
 // M-x runs there (ADR 0026): [shared], then [tui], or config.tui.toml while the toggle has split them. A
@@ -70,8 +74,8 @@ func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error
 			// the switch, off included.
 			outcome := "it changes nothing"
 			for _, k := range voiceKeys {
-				if w.Key == string(section)+"."+k {
-					outcome = fmt.Sprintf("so %s is %s", k, onOff(cfg.On(k)))
+				if w.Key == string(section)+"."+k.key {
+					outcome = fmt.Sprintf("so %s is %s", k.words, onOff(cfg.On(k.key)))
 				}
 			}
 			warnings = append(warnings, fmt.Sprintf("%s: %s; %s", termsafe.Text(file), w.String(), outcome))
@@ -80,8 +84,7 @@ func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error
 	// The file's problems past the bound are counted and not kept, and one of them may be a switch's.
 	if cfg.MoreWarnings > 0 {
 		warnings = append(warnings, fmt.Sprintf("%s: %d more problems, not listed, may concern the voice settings; "+
-			"`norite config get voice.auto_gain` and its siblings say what applies", termsafe.Text(file),
-			cfg.MoreWarnings))
+			"`norite config get` says what applies", termsafe.Text(file), cfg.MoreWarnings))
 	}
 	return ipc.VoiceJoin{
 		EchoCancellation: cfg.On(config.KeyVoiceEchoCancellation),
@@ -113,8 +116,10 @@ func Command(connect Connector, settings Settings) *cli.Command {
 				Usage:     "Join a voice channel",
 				ArgsUsage: "CHANNEL_ID",
 				Description: "The call's audio processing is read from config.toml as the call is joined:\n" +
-					"voice.echo_cancellation, voice.noise_suppression and voice.auto_gain, each \"on\" or\n" +
-					"\"off\", all on by default. A change applies at the next join.",
+					"shared.voice.echo_cancellation, shared.voice.noise_suppression and\n" +
+					"shared.voice.auto_gain, each \"on\" or \"off\" and all on by default, set with\n" +
+					"`norite config set shared.voice.auto_gain off` for instance. A change applies at the\n" +
+					"next join.",
 				Action: run(connect, true, readSettings, join),
 			},
 			{
