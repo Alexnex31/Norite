@@ -66,10 +66,12 @@ func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error
 			if w.Key != voice && !strings.HasPrefix(w.Key, voice+".") {
 				continue
 			}
+			// What applies, rather than what a bad value would leave on its own: the other section may set
+			// the switch, off included.
 			outcome := "it changes nothing"
 			for _, k := range voiceKeys {
 				if w.Key == string(section)+"."+k {
-					outcome = "it stays on"
+					outcome = fmt.Sprintf("so %s is %s", k, onOff(cfg.On(k)))
 				}
 			}
 			warnings = append(warnings, fmt.Sprintf("%s: %s; %s", termsafe.Text(file), w.String(), outcome))
@@ -223,8 +225,10 @@ func (v view) Text(t *output.Text) {
 		}
 	}
 	if p := v.Processing; p != nil && v.State != ipc.VoiceIdle {
-		t.Line("Echo cancellation %s, noise suppression %s, automatic gain %s.", onOff(p.EchoCancellation),
-			onOff(p.NoiseSuppression), onOff(p.AutoGain))
+		// What the join asked for. The worker logs, and does not report, a DSP that could not start or was
+		// dropped, so this says what was asked rather than what runs.
+		t.Line("Joined with echo cancellation %s, noise suppression %s, automatic gain %s.",
+			onOff(p.EchoCancellation), onOff(p.NoiseSuppression), onOff(p.AutoGain))
 	}
 	if !v.Available {
 		t.Line("This daemon cannot join voice calls: %s.", output.Clean(v.Unavailable))

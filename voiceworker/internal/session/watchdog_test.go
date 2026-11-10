@@ -820,3 +820,77 @@ func TestASkippedFrameLeavesAGapInTheTimestamps(t *testing.T) {
 		t.Errorf("sequence numbers %v, want them to run on", track.seq)
 	}
 }
+
+// A backlog from before the DSP was taken up is not the DSP's: a sender that fell behind while the module
+// compiled takes it up and keeps it, rather than dropping it at its first frame for 25 it never processed
+// (M30 /code-review).
+func TestADSPTakenUpBehindIsNotBlamedForTheBacklog(t *testing.T) {
+	var mu sync.Mutex
+	var logged bytes.Buffer
+	s := &Session{ended: make(chan string, 1), dspDone: make(chan struct{}),
+		opts: Options{Log: lockedWriter{&mu, &logged}}}
+	n := 0
+	// send is slow for its first 40 frames, with no DSP yet, and then the module is ready and send keeps up.
+	s.opts.stall = func() {
+		n++
+		switch {
+		case n < 40:
+			time.Sleep(30 * time.Millisecond)
+		case n == 40:
+			s.dsp = markingModule{}
+			close(s.dspDone)
+		}
+	}
+	enc := keeping{got: make(chan []int16, 100)}
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
+		enc: enc, codec: keepOpen{}}
+	m.sent.Add(1)
+	go m.send()
+	tick := time.NewTicker(audio.FrameSamples * time.Second / audio.SampleRate)
+	for range 75 {
+		<-tick.C
+		m.captured(make([]int16, audio.FrameSamples))
+	}
+	tick.Stop()
+	time.Sleep(50 * time.Millisecond)
+	close(m.stop)
+	m.sent.Wait()
+	mu.Lock()
+	said := logged.String()
+	mu.Unlock()
+	if strings.Contains(said, "slower than real time") {
+		t.Errorf("the DSP was blamed for a backlog from before it was taken up:\n%s", said)
+	}
+	var last []int16
+	for len(enc.got) > 0 {
+		last = <-enc.got
+	}
+	if m.chain == nil || last == nil || last[0] != 12345 {
+		t.Error("the call's last frame went unprocessed")
+	}
+}
+
+// Once the call has no chain for good, the speakers stop writing a reference nobody will read: after a
+// chain that failed, and when the module never started.
+func TestNoChainForGoodStopsTheReference(t *testing.T) {
+	closed := false
+	m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: true}},
+		chain: failingChain{closed: &closed}, taken: true}
+	frame := make([]int16, audio.FrameSamples)
+	m.fill(frame)
+	m.process(frame, m.ref.count())
+	m.fill(frame)
+	if !closed || m.ref.count() != 1 {
+		t.Errorf("after the chain failed: closed %v, %d frames of reference written, want 1", closed, m.ref.count())
+	}
+
+	s := &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: true},
+		dspDone: make(chan struct{}), dspErr: errors.New("no module")}
+	close(s.dspDone)
+	m = &media{s: s}
+	m.process(frame, m.ref.count())
+	m.fill(frame)
+	if m.ref.count() != 0 {
+		t.Errorf("with no module: %d frames of reference written, want none", m.ref.count())
+	}
+}

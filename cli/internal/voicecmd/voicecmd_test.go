@@ -189,7 +189,7 @@ func TestWhatTheFileGotWrongAboutVoiceIsSaid(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}, body)
 	assert.Equal(t, []string{
-		`config.toml: shared.voice.auto_gain: must be one of "on" or "off"; it stays on`,
+		`config.toml: shared.voice.auto_gain: must be one of "on" or "off"; so voice.auto_gain is on`,
 		"config.toml: shared.voice.echo_cancelation: not a key this version of Norite knows; it changes nothing",
 		"config.toml: tui.voice: not a key this version of Norite knows; it changes nothing",
 	}, warnings)
@@ -201,6 +201,18 @@ func TestWhatTheFileGotWrongAboutVoiceIsSaid(t *testing.T) {
 	for _, w := range warnings {
 		assert.Contains(t, r.out, w+"\n")
 	}
+}
+
+// A bad value in one section says what applies, which the other section may have set: off, here.
+func TestABadSwitchSaysWhatApplies(t *testing.T) {
+	cfg, err := config.Parse([]byte("[shared.voice]\necho_cancellation = \"off\"\n"+
+		"[tui.voice]\necho_cancellation = \"of\"\n"), config.TUI)
+	require.NoError(t, err)
+	body, warnings, err := settingsOf(cfg, "config.toml")
+	require.NoError(t, err)
+	assert.False(t, body.EchoCancellation)
+	assert.Equal(t, []string{`config.toml: tui.voice.echo_cancellation: must be one of "on" or "off"; ` +
+		"so voice.echo_cancellation is off"}, warnings)
 }
 
 // Problems past the bound the config keeps are counted, and one may be a switch's, so the join says so.
@@ -247,8 +259,8 @@ func TestTheTextSaysHowTheCallStands(t *testing.T) {
 		{ipc.VoiceStatus{State: ipc.VoiceJoining, Channel: "42", Available: true}, []string{"Joining voice channel 42."}, nil},
 		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
 			Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}},
-			[]string{"In a voice call in channel 42.\nEcho cancellation on, noise suppression off, automatic gain on.\n"}, nil},
-		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true}, nil, []string{"Echo cancellation"}},
+			[]string{"In a voice call in channel 42.\nJoined with echo cancellation on, noise suppression off, automatic gain on.\n"}, nil},
+		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true}, nil, []string{"Joined with"}},
 		{ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, []string{"Not in a voice call."}, []string{"ended"}},
 		{ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the voice server closed the call\x1b[2J", Available: true},
 			[]string{"The last call ended: the voice server closed the call"}, []string{"\x1b"}},

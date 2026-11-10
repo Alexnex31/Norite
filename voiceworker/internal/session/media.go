@@ -104,6 +104,8 @@ type media struct {
 	rendered uint64
 	raw      [audio.FrameSamples]int16
 	overruns atomic.Int64
+	// noRef is set once the call will have no chain, so the speakers stop writing a reference nobody reads.
+	noRef atomic.Bool
 	// skipped counts the frames send processed and did not encode for being behind, dropped those the
 	// queue lost before send took them.
 	skipped, dropped atomic.Int64
@@ -119,12 +121,12 @@ type media struct {
 	devMu             sync.Mutex
 	capture, playback io.Closer
 	stopOnce          sync.Once
-	// decoding and encoding are when the call into the codec in progress started, as nanoseconds past
-	// base plus one, or zero. Measured from base so the watchdog runs on the monotonic clock: a wall
+	// decoding, encoding and dspCall are when the call into the codec or the DSP in progress started, as
+	// nanoseconds past base plus one, or zero. Measured from base so the watchdog runs on the monotonic clock: a wall
 	// clock stepped by NTP or a resume would end a healthy call, or never end a stuck one.
-	base                           time.Time
-	decoding, encoding, processing atomic.Int64
-	mix                            [audio.FrameSamples]int32
+	base                        time.Time
+	decoding, encoding, dspCall atomic.Int64
+	mix                         [audio.FrameSamples]int32
 }
 
 type slot struct {
@@ -302,15 +304,18 @@ func (m *media) send() {
 			m.s.opts.stall()
 		}
 		voice := m.process(pcm, f.played)
-		if len(m.frames) < captureQueue {
+		// Read once, so that the DSP's judgment and the skip below agree on this frame.
+		waiting := len(m.frames)
+		// Counted only while a chain runs: a backlog from before the DSP was taken up is not the DSP's.
+		if waiting < captureQueue || m.chain == nil {
 			behind = 0
-		} else if behind++; behind >= slowDSP && m.chain != nil {
+		} else if behind++; behind >= slowDSP {
 			m.s.logf("the audio processing is slower than real time on this machine, so the rest of the call " +
 				"goes unprocessed")
 			m.dropChain()
 			behind = 0
 		}
-		if len(m.frames) >= captureQueue && !skipped {
+		if waiting >= captureQueue && !skipped {
 			// Behind: this frame has been through the DSP, which keeps it in step, and is not sent: no
 			// packet, and a gap in the timestamps the far end hears as silence.
 			skipped = true
@@ -363,7 +368,7 @@ func (m *media) process(pcm []int16, stamp uint64) bool {
 	}
 	copy(m.raw[:], pcm)
 	var voice float32
-	err := m.clocked(&m.processing, func() error {
+	err := m.clocked(&m.dspCall, func() error {
 		played := stamp
 		if !m.s.processing.EchoCancellation {
 			m.rendered = played // nothing reads the reference
@@ -408,6 +413,7 @@ func (m *media) process(pcm []int16, stamp uint64) bool {
 func (m *media) dropChain() {
 	_ = m.chain.Close()
 	m.chain = nil
+	m.noRef.Store(true)
 }
 
 // takeDSP makes the chain once the module has compiled, without waiting for it. The reference starts at
@@ -426,17 +432,19 @@ func (m *media) takeDSP(stamp uint64) {
 	m.module = m.s.dsp
 	if m.s.dspErr != nil {
 		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", m.s.dspErr)
+		m.noRef.Store(true)
 		return
 	}
 	// Making the chain runs the module's own C++ constructors and dsp_new in WebAssembly, so the watchdog
 	// bounds it as it bounds every call into the instance (M30 /code-review).
 	var c dsp.Chain
-	err := m.clocked(&m.processing, func() (e error) {
+	err := m.clocked(&m.dspCall, func() (e error) {
 		c, e = m.module.NewChain(context.Background(), m.s.processing)
 		return
 	})
 	if err != nil {
 		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", err)
+		m.noRef.Store(true)
 		return
 	}
 	m.chain, m.rendered = c, stamp
@@ -501,8 +509,9 @@ func (m *media) fill(out []int16) {
 	for i, v := range m.mix {
 		out[i] = int16(max(math.MinInt16, min(math.MaxInt16, v)))
 	}
-	// Nothing reads the reference with echo cancellation off, so the speakers' callback is spared the copy.
-	if m.s.processing.EchoCancellation {
+	// Nothing reads the reference with echo cancellation off, or once the call has no chain for good, so
+	// the speakers' callback is spared the copy.
+	if m.s.processing.EchoCancellation && !m.noRef.Load() {
 		m.ref.put(out)
 	}
 }
@@ -621,7 +630,7 @@ func (m *media) watch() {
 				m.s.end("the audio encoder stopped responding, so the call was ended")
 				return
 			}
-			if m.stuck(&m.processing) {
+			if m.stuck(&m.dspCall) {
 				m.s.end("the audio processing stopped responding, so the call was ended")
 				return
 			}
