@@ -386,6 +386,9 @@ Your account stays on the instance: deleting an account is not built yet (`M76a`
 
 | What you see | What to do |
 | --- | --- |
+| `sh` is not recognized, after a line ending in `\| sh` | That was the macOS and Linux line, or `install.ps1` piped into `sh`, which Windows does not have. In PowerShell, run `irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 \| iex` ([the quick way](#the-quick-way-the-installer)). |
+| `curl -fsSL …` fails with an `Invoke-WebRequest` error | In Windows PowerShell 5, `curl` is another name for `Invoke-WebRequest`, which takes none of those options. Use the `irm` line above. |
+| `irm` is not recognized | That window is cmd, not PowerShell. Open PowerShell (a PowerShell tab in Windows Terminal) and run the line there. |
 | `norite.exe : The term 'norite.exe' is not recognized` | Run it as `.\norite.exe` from its folder, or add the folder to `PATH` as above. |
 | Windows says it protected your PC, or the file is blocked | `Unblock-File` on the programs, as above; or on the SmartScreen dialog, "More info", then "Run anyway". |
 | Microsoft Defender quarantines a file | Unsigned Go programs are sometimes flagged by mistake. Build from source if you would rather not trust a binary, and report it as an issue. |

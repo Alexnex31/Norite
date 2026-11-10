@@ -78,10 +78,20 @@ which is the whole of [Part 3](#part-3--everybody-else-one-link):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh
+# or, with an invite link:
 curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh -s -- --invite 'INVITE-LINK'
 ```
 
-On Windows, it is `install.ps1`; see [Trying the alpha on Windows](trying-the-alpha-on-windows.md).
+**On Windows** it is `install.ps1`, which is PowerShell: type these into a PowerShell window, not cmd, and
+never pipe either script into `sh`, which Windows does not have.
+
+```powershell
+irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex
+# or, with an invite link:
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Invite 'INVITE-LINK'
+```
+
+[Trying the alpha on Windows](trying-the-alpha-on-windows.md) is the rest of it there.
 
 **On the server machine**, Linux with systemd, this sets up the instance. It replaces
 [Part 1](#part-1--the-server), apart from making the address reach the machine, which is the section
@@ -422,8 +432,14 @@ On macOS or Linux:
 curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh -s -- --invite 'INVITE-LINK'
 ```
 
-On Windows, [Trying the alpha on Windows](trying-the-alpha-on-windows.md) has the PowerShell line. With
-Norite installed already, by a package manager or otherwise:
+On Windows, in PowerShell rather than cmd ([Trying the alpha on Windows](trying-the-alpha-on-windows.md)
+has the rest):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Invite 'INVITE-LINK'
+```
+
+With Norite installed already, by a package manager or otherwise:
 
 ```sh
 norite setup 'INVITE-LINK'

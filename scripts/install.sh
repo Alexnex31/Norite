@@ -289,6 +289,11 @@ main() {
     case "$(uname -s)" in
         Linux)  os=linux ;;
         Darwin) os=darwin ;;
+        # Git Bash, MSYS2 and Cygwin: a Windows machine, where the line to run is PowerShell's, given whole
+        # because adapting this one (install.ps1 | sh) is the mistake people make.
+        MINGW* | MSYS* | CYGWIN*)
+            die "this script is for macOS and Linux. On Windows, in PowerShell rather than this shell, run:
+  irm https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1 | iex" ;;
         *)      die "this script is for macOS and Linux. On Windows, use scripts/install.ps1" ;;
     esac
     case "$(uname -m)" in
