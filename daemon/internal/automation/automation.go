@@ -60,7 +60,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -171,17 +170,6 @@ type Server struct {
 // link.
 func Clean(stateDir string) {
 	_ = os.Remove(ipc.AutomationFilePath(stateDir))
-}
-
-// SameInstance reports whether two instance URLs name one instance: scheme, host and path prefix.
-func SameInstance(a, b string) bool {
-	ua, errA := url.Parse(a)
-	ub, errB := url.Parse(b)
-	if errA != nil || errB != nil || ua.Host == "" || ub.Host == "" {
-		return false
-	}
-	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host) &&
-		strings.TrimRight(ua.Path, "/") == strings.TrimRight(ub.Path, "/")
 }
 
 // validInstance reports whether s is an instance URL this package can compare: it parses and names a host.
@@ -529,7 +517,7 @@ func (s *Server) do(ctx context.Context, req ipc.Request, token string) ipc.Resp
 		return ipc.Failure(ipc.RelayNotSignedIn, ErrSignedOut.Error())
 	}
 	// Asked on every request, not once per connection: a sign-in can change under an open one.
-	if !SameInstance(instanceURL, s.enabledFor) {
+	if !ipc.SameInstance(instanceURL, s.enabledFor) {
 		return ipc.Failure(ipc.RelayRefused, "the automation port was turned on for another instance than the one "+
 			"the daemon is signed in to now, and a token is not sent to an instance it was not made on; "+
 			"run `norite automation enable` to use the port with this one")

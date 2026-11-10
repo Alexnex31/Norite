@@ -1879,7 +1879,7 @@ And on the automation port and what a token writes, from M22:
   is closed, or timed out after five seconds. A wrong secret gets one code and one sentence. Connections
   waiting to present it are counted apart from scripts being served.
 - **Only a value shaped like an API token is forwarded** (`ipc.LooksLikeAPIToken`), and only to the
-  instance the port was turned on for, compared on every request with `automation.SameInstance`.
+  instance the port was turned on for, compared on every request with `ipc.SameInstance`.
 - **A script's paths are `relay.ScriptTarget`'s**: the relay's rules with none of its exceptions. An
   exception added to the relay does not reach the port unless somebody adds it there.
 - **The rate is charged last**, after every check that costs nothing, so a refused request spends none of

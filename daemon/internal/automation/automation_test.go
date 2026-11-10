@@ -739,22 +739,6 @@ func TestATokenIsNotSentToAnInstanceThePortWasNotEnabledFor(t *testing.T) {
 	assert.Len(t, f.seen(), 1)
 }
 
-func TestWhichURLsNameOneInstance(t *testing.T) {
-	assert.True(t, SameInstance("https://chat.example", "https://chat.example/"))
-	assert.True(t, SameInstance("https://Chat.Example/norite", "https://chat.example/norite/"))
-	for _, pair := range [][2]string{
-		{"https://chat.example", "http://chat.example"},
-		{"https://chat.example", "https://chat.example:8443"},
-		{"https://chat.example", "https://chat.example.evil.test"},
-		{"https://chat.example/a", "https://chat.example/b"},
-		{"https://chat.example", ""},
-		{"", ""},
-		{"chat.example", "chat.example"},
-	} {
-		assert.False(t, SameInstance(pair[0], pair[1]), "%q and %q", pair[0], pair[1])
-	}
-}
-
 // TestARequestWhoseIDCouldNotBeEchoedIsNotPerformed: the id goes back in the answer, so one the contract
 // forbids would make the answer a frame the contract forbids. Refused before the instance is asked.
 func TestARequestWhoseIDCouldNotBeEchoedIsNotPerformed(t *testing.T) {
