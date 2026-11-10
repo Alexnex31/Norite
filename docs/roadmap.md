@@ -1289,7 +1289,7 @@ of this section.
 
   **Why it exists at all.** The roadmap is ordered by architectural layer, and until this entry the first
   point at which anybody could read a message in a real interface was M43 — with Phase E's thirteen voice
-  milestones, a custom SFU and a cgo DSP chain, built entirely before it. The highest-variance work in the
+  milestones, a custom SFU and a DSP chain, built entirely before it. The highest-variance work in the
   plan was scheduled before any loop that could tell whether it was worth the cost, and `M25` is openly a
   time-boxed spike to find out whether the phase is feasible at all. Under a layered plan partial
   completion demonstrates nothing; this milestone is what makes partial completion a working, narrow
@@ -2087,8 +2087,31 @@ of this section.
     interpreter, byte for byte, and runs on `test-arm64`.
   - **When a wazero release carries its #2508**, the worker moves to it and `NSQ_del_dec.c` loses its `-Os`
     (ADR 0036). Whichever milestone is open then does it.
-  - **The DSP adds latency to a path measured at 38–44 ms in process.** The e2e test's 90 ms budget holds
-    the sum.
+  - **The DSP adds latency to a path measured at 38–44 ms in process.** The e2e test's budget is weighed
+    against the sum.
+
+  **What M30 found and decided** ([ADR 0036](adr/0036-opus-in-webassembly.md) as amended):
+  - **Both run in WebAssembly, in one module that imports nothing**, and the worker still has no cgo. The
+    threshold set before measuring was 10% of one core, unpaced; the chain costs 5.05%, after a SIMD128
+    port of RNNoise's kernels that is bit-exact against its plain C and held to it in CI.
+  - **The order lives in Go**: the APM's own chain has no place for RNNoise between AEC3 and AGC2, so the
+    module exports each component and the worker calls them in the entry's order. A test fails when two
+    are swapped: far end alone, AEC first removes 42–45 dB, the other order 21–29.
+  - **The DSP adds 28.9 ms**, RNNoise 20 of it. Mouth to ear in process is 69–73 ms, so the budget went
+    from 90 ms to 120 ms, and 160 ms with loss, and its test runs without `-race` beside the two
+    differential tests, which the race detector slows eighteenfold.
+  - **Nothing may be dropped before the DSP**, since AEC3 pairs the two directions by count: M29's
+    drop-oldest queue left 13 dB of echo canceled under a starved sender. The encoder skips instead, and
+    each captured frame is stamped with what had been played, so a sender behind never renders ahead,
+    which AEC3 answers by resetting.
+  - **What fails drops the DSP for the call and does not end it**, because the reference is a stranger's
+    audio: a trap, an error, and a DSP too slow for real time. A call that never returns ends the call,
+    as for the codec.
+  - **The settings are three `client-config.toml` keys**, on by default, carried in the join's body (the
+    ledger's prefix entry, reopened at M30) and the worker's `Join`. `VoiceStatus` says what the join
+    asked.
+  - **The audio level is computed after AGC2, and V follows RNNoise's voice probability**, which runs
+    whatever the settings.
 - **M31 — Adaptive bitrate and congestion control**: `pion/interceptor`'s REMB/TWCC feedback wired into
   the encoder's runtime bitrate control (M29's shim; `hraban/opus` until M29), audio-only, no simulcast.
   Depends on M26, M29, and M30. Done when:
@@ -2177,9 +2200,20 @@ of this section.
   speaker, local mute and report, and widening the call state to carry them. Done
   when: `norite voice join/leave/mute/deafen` fully control a session; a test client attached to the daemon
   receives active-speaker updates and can local-mute and report a participant independently of each other.
-- **M35 — Voice input mode**: voice-activity-detection is the default; push-to-talk is a true OS-wide
-  global hotkey registered by the daemon, per M25's finding
-  ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §2–§5):
+
+  **From M30:**
+  - **Mute keeps the DSP running and stops only the sending**, or AEC3 loses its convergence and the first
+    words after unmuting echo. **Deafen makes the mix play silence**, which is then the reference, so
+    nothing stale is cancelled.
+  - **The DSP's settings get their verbs here**; M30 built the keys, the join's body and the worker's
+    field.
+  - **The call state should say what the DSP is doing, not only what was asked.** `VoiceStatus.processing`
+    is the join's request; a DSP that could not start, or was dropped for a failure or for being too slow,
+    is in the worker's log alone.
+- **M35 — Voice input mode**: voice-activity-detection is the default (from M30: RNNoise's voice
+  probability, which runs whatever the settings and sets the audio level's V flag at 0.5, with no
+  hysteresis yet); push-to-talk is a true OS-wide global hotkey registered by the daemon, per M25's
+  finding ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §2–§5):
   - **Pure Go, per OS:**
     - Windows: `RegisterHotKey`;
     - Linux Wayland: the `GlobalShortcuts` portal (`godbus/dbus`);

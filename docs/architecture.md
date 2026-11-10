@@ -2352,8 +2352,13 @@ producing a feedback loop instead of cancelling it. Opus runs in WebAssembly und
 libopus compiled to `wasm32-wasip1` and run with no host module and a memory cap, each decoder its own
 instance. The worker is built without cgo, like every other binary
 ([ADR 0036](adr/0036-opus-in-webassembly.md), M29). RNNoise and WebRTC's Audio Processing Module (AEC3 for
-echo cancellation, AGC2 — replacing `libspeexdsp`, ADR 0023) live in the worker too, and M30 decides whether
-in WASM or native; the worker is the only place cgo is permitted anywhere in the stack. AEC3 rather
+echo cancellation, AGC2 — replacing `libspeexdsp`, ADR 0023) run in WebAssembly too, in one module with
+nothing imported, an instance per call: the components are exported one by one and the order is the
+worker's, in Go, since the APM's own chain has no place for RNNoise between its echo canceller and its gain
+(ADR 0036 as amended, M30). The DSP runs on the sender's goroutine, fed what the speakers played through a
+ring, and adds 28.9 ms; a failure drops it for the rest of the call rather than ending the call, because
+the reference it reads is a stranger's audio. The worker is still the only place cgo is permitted anywhere
+in the stack, and uses none. AEC3 rather
 than speexdsp because the echo canceller is the single most audible determinant of call quality, and
 double-talk handling is where the older component falls behind what users expect.
 
@@ -3085,8 +3090,9 @@ during implementation, and must be documented plainly wherever the relevant subs
   runs as libopus compiled to WebAssembly, so the worker cross-compiles with everything else and the one C
   library reading strangers' bytes can reach nothing but its own memory
   ([ADR 0036](adr/0036-opus-in-webassembly.md)). The price is measured: 2.6× native per frame, 3% of a core
-  for one encode and three decodes, about a millisecond of latency. M30 decides the DSP the same way; a
-  native component there would bring back a cgo release build for darwin and the confinement question.
+  for one encode and three decodes, about a millisecond of latency. M30 decided the DSP the same way: the
+  chain costs 5% of a core unpaced, half the threshold set before measuring, against about 1.3% native, and a
+  native APM would have brought back a cgo release build for darwin and the confinement question.
 - **E2E encryption carries compounding, not merely additive, cryptographic risk.** The feature depends on
   two independent custom protocol surfaces: the device-linking protocol (fully custom, no off-the-shelf
   equivalent) and the correct integration of the `go.mau.fi/libsignal` library into this project's own
