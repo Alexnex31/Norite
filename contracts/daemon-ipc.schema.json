@@ -680,7 +680,7 @@
     },
     "VoiceJoin": {
       "type": "object",
-      "description": "The body of POST /@daemon/voice/join/{channel} (M30): which of the call's audio processing runs on the microphone, as the client read its config.toml (voice.echo_cancellation, voice.noise_suppression and voice.auto_gain). Decoded strictly: all three named, nothing else. No body, or null, is all three on. Sent only after GET /@daemon/voice answered, as the channel id is (docs/security-ledger.md). Turning noise suppression off discards RNNoise's output and keeps its voice probability, which the audio level's V flag follows.",
+      "description": "The body of POST /@daemon/voice/join/{channel} (M30): which of the call's audio processing runs on the microphone, as the client read its config.toml (voice.echo_cancellation, voice.noise_suppression and voice.auto_gain). Decoded strictly: all three named, nothing else. No body, or null, is all three on. Sent only after GET /@daemon/voice answered, as the channel id is (docs/security-ledger.md). Trust tier (rule 16): the attach socket's alone, as for every request under /@daemon/voice; the port for scripts serves nothing under /@daemon/ (relay.ScriptTarget refuses the path), so a body sent there reaches nothing. Turning noise suppression off discards RNNoise's output and keeps its voice probability, which the audio level's V flag follows.",
       "required": ["echo_cancellation", "noise_suppression", "auto_gain"],
       "additionalProperties": false,
       "properties": {
