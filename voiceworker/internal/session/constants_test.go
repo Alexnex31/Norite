@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/jitter"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
@@ -22,6 +23,11 @@ func TestTheFrameIsOneSizeEverywhere(t *testing.T) {
 	}
 	if audio.SampleRate != opus.SampleRate {
 		t.Errorf("the devices run at %d Hz and the codec at %d", audio.SampleRate, opus.SampleRate)
+	}
+	// The DSP works in chunks of 10 ms, and process walks a frame in them (M30).
+	if dsp.SampleRate != audio.SampleRate || audio.FrameSamples%dsp.ChunkSamples != 0 {
+		t.Errorf("the DSP runs at %d Hz in chunks of %d samples, and a frame is %d samples at %d Hz",
+			dsp.SampleRate, dsp.ChunkSamples, audio.FrameSamples, audio.SampleRate)
 	}
 	if jitter.MaxPacket != opus.MaxPacket {
 		t.Errorf("the jitter buffer keeps packets of %d bytes and the codec takes %d", jitter.MaxPacket, opus.MaxPacket)
