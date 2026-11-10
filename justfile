@@ -554,9 +554,13 @@ build-local:
 # step is left out: that is `norite setup`. Run it again after pulling to replace the build; arguments go to
 # the script (`just install --bin-dir DIR`, `--no-daemon`), and `./scripts/install.sh --uninstall` undoes
 # it. On Windows, scripts/install.ps1 does the same from a checkout.
+#
+# The arguments reach the script as they were given, through "$@": `{{args}}` would join them with spaces
+# and let the shell split them again, so `--bin-dir "My Tools"` became two.
 [doc("Build this checkout's client and install it, so that `norite setup` is all that is left.")]
+[positional-arguments]
 install *args:
-    ./scripts/install.sh --from-source --no-account {{args}}
+    ./scripts/install.sh --from-source --no-account "$@"
     @echo
     @echo "Next: norite setup, with the invite link if you were sent one."
 
@@ -569,9 +573,12 @@ install *args:
 # machine on; `just install-server --url http://192.168.1.20:8080 --docker-postgres` is the usual one. Run it
 # again after pulling: it replaces the programs, restarts the service, and keeps the configuration and the
 # database. To talk from this machine as well, `just install` and `norite setup` after it.
+#
+# The arguments reach the script as they were given, as `just install`'s do.
 [doc("Build this checkout's server and set an instance up on this machine with it (--url URL the first time).")]
+[positional-arguments]
 install-server *args:
-    ./scripts/install-server.sh --from-source {{args}}
+    ./scripts/install-server.sh --from-source "$@"
 
 # Build every module with the workspace switched off.
 #

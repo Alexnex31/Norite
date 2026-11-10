@@ -478,7 +478,7 @@ var deviceEntryTemplate = template.Must(template.New("device-entry").Parse(`<!do
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in to a device</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Sign in to a device</h1>
@@ -503,7 +503,7 @@ var deviceSignInTemplate = template.Must(template.New("device-signin").Parse(`<!
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in to a device</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Sign in</h1>
@@ -536,7 +536,7 @@ var deviceFactorTemplate = template.Must(template.New("device-factor").Parse(`<!
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Two-factor code</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Two-factor code</h1>
@@ -561,7 +561,7 @@ var deviceApproveTemplate = template.Must(template.New("device-approve").Parse(`
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Approve this device?</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Approve this device?</h1>
@@ -592,7 +592,7 @@ var deviceApprovedTemplate = template.Must(template.New("device-approved").Parse
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Device approved</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Device approved</h1>
@@ -618,7 +618,7 @@ var deviceRevokedTemplate = template.Must(template.New("device-revoked").Parse(`
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Device stopped</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>That device has been stopped</h1>
@@ -637,7 +637,7 @@ var deviceTooLateTemplate = template.Must(template.New("device-too-late").Parse(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>That device already signed in</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>That device has already signed in</h1>
@@ -656,7 +656,7 @@ var deviceDeniedTemplate = template.Must(template.New("device-denied").Parse(`<!
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Device denied</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Nothing was signed in</h1>

@@ -481,11 +481,14 @@ func allowedMethods(mux *chi.Mux, path string) string {
 	return strings.Join(allowed, ", ")
 }
 
-// releaseTag is the tag a release of version was published under, or "" when version is not a release's,
-// as a build from a checkout reports "dev".
+// releaseTag is the tag a release of version was published under, or "" when version is not a release's:
+// "dev" from a checkout, and a snapshot or a build carrying metadata, which no tag names and an installer
+// pinned to would fail to find (easier-setup's second /code-review). The tag is built from the parsed
+// version, so one reported with its "v" already is not given a second.
 func releaseTag(version string) string {
-	if _, err := gatewayproto.ParseVersion(version); err != nil {
+	v, err := gatewayproto.ParseVersion(version)
+	if err != nil || strings.Contains(version, "+") || strings.Contains(strings.ToUpper(v.Pre), "SNAPSHOT") {
 		return ""
 	}
-	return "v" + version
+	return "v" + v.String()
 }

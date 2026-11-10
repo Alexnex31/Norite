@@ -35,9 +35,6 @@ import (
 // already has the token, and with it could simply submit the form themselves. No ambient credential
 // participates, which is the same reason the rest of this API needs no CSRF middleware (rule 4).
 
-// pageStyle is the stylesheet every server-rendered page shares, httpx.PageStyle.
-const pageStyle = httpx.PageStyle
-
 // resetPageData is everything the templates render. Deliberately tiny, and deliberately containing no
 // user-controlled text: nothing about the account is echoed, so there is nothing on this page to escape.
 type resetPageData struct {
@@ -57,7 +54,7 @@ var resetPageTemplate = template.Must(template.New("reset").Parse(`<!doctype htm
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reset your Norite password</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Choose a new password</h1>
@@ -83,7 +80,7 @@ var resetDoneTemplate = template.Must(template.New("reset-done").Parse(`<!doctyp
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Password changed</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Your password has been changed</h1>

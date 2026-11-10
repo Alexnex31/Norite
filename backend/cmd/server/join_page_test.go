@@ -122,9 +122,14 @@ func TestTheJoinPageAnswersHeadAndATrailingSlash(t *testing.T) {
 // A build that is not a release pins nothing.
 func TestTheJoinPagePinsTheInstancesRelease(t *testing.T) {
 	assert.Equal(t, "v0.1.2", releaseTag("0.1.2"))
+	assert.Equal(t, "v0.1.2", releaseTag("v0.1.2"), "one v, whichever way the version is reported")
 	assert.Equal(t, "v0.1.0-alpha", releaseTag("0.1.0-alpha"))
-	assert.Empty(t, releaseTag("dev"))
-	assert.Empty(t, releaseTag(""))
+	assert.Equal(t, "v0.1.0-rc.1", releaseTag("0.1.0-rc.1"))
+	// What no tag names: a checkout, a snapshot (goreleaser's default name for one), a build with metadata.
+	for _, unpublished := range []string{"dev", "", "0.1.3-SNAPSHOT-abc1234", "0.1.3-snapshot", "0.1.0+dirty",
+		"0.1.0-rc.1+abc"} {
+		assert.Empty(t, releaseTag(unpublished), unpublished)
+	}
 
 	versioned := func(version string) string {
 		t.Helper()

@@ -61,7 +61,7 @@ minor version, or another pre-release, cannot connect to it.</p>
 browser's address bar or in the message it came in, with everything after the <code>#</code>. It creates
 your account or signs you in, and joins the guild.</p>
 <p class="note">The part of the link after <code>#</code> is the invite code. Your browser kept it: this
-instance was not sent it, and cannot tell who opened this page.</p>
+instance was not sent it.</p>
 </body>
 </html>
 `))
