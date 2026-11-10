@@ -429,8 +429,11 @@ func resolveInstanceURL(flag string, previous credentials.Record) (string, error
 }
 
 // loadPrevious reads the stored record, treating "nothing stored yet" as an empty one.
-func (r *Runner) loadPrevious() (credentials.Record, error) {
-	record, err := r.Store.LoadRecord()
+func (r *Runner) loadPrevious() (credentials.Record, error) { return loadPrevious(r.Store) }
+
+// loadPrevious reads store's record, treating "nothing stored yet" as an empty one.
+func loadPrevious(store *credentials.Store) (credentials.Record, error) {
+	record, err := store.LoadRecord()
 	switch {
 	case err == nil:
 		return record, nil

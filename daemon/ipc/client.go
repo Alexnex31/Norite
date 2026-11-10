@@ -79,6 +79,28 @@ type Result struct {
 	Status int
 	// Body is the instance's JSON body, or nil when it sent none.
 	Body json.RawMessage
+	// InstanceURL is the instance that answered, as the daemon's sign-in names it, or "" from a daemon older
+	// than the field.
+	InstanceURL string
+}
+
+type instanceKey struct{}
+
+// ForInstance returns ctx carrying instanceURL as the instance a request made with it is meant for, which Do
+// sends as Request.InstanceURL: the daemon then sends the request there or nowhere. An empty instanceURL
+// names none.
+//
+// A value on the context rather than a parameter, because what carries it to Do is every caller of a
+// request — ops, daemonclient.Call, the fakes the tests attach to — and the instance belongs to the request
+// being made, not to any of them.
+func ForInstance(ctx context.Context, instanceURL string) context.Context {
+	return context.WithValue(ctx, instanceKey{}, instanceURL)
+}
+
+// InstanceFor is the instance ctx says a request is meant for, or "".
+func InstanceFor(ctx context.Context) string {
+	s, _ := ctx.Value(instanceKey{}).(string)
+	return s
 }
 
 // eventBuffer is how many dispatches the client holds for a consumer that has not taken them yet. Past it
@@ -283,7 +305,8 @@ func (c *Client) Close() error {
 //
 // body is sent as JSON, nil for none. Whatever status the instance answered with is a Result rather than an
 // error: a 404 is an answer, and what it means is the caller's to decide. A *RelayError is the daemon
-// declining or failing to ask; a *CloseError or ErrClosed, the connection ending first.
+// declining or failing to ask; a *CloseError or ErrClosed, the connection ending first. An instance ctx
+// carries (ForInstance) goes with the request.
 func (c *Client) Do(ctx context.Context, method, path string, body any) (Result, error) {
 	var raw json.RawMessage
 	if body != nil {
@@ -311,7 +334,8 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (Result,
 		c.mu.Unlock()
 	}
 
-	frame, err := Encode(OpRequest, Request{ID: id, Method: method, Path: path, Body: raw})
+	frame, err := Encode(OpRequest, Request{ID: id, Method: method, Path: path, Body: raw,
+		InstanceURL: InstanceFor(ctx)})
 	if err != nil {
 		forget()
 		return Result{}, err
@@ -354,7 +378,7 @@ func resultOf(id string, resp Response) (Result, error) {
 	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
 		body = nil
 	}
-	return Result{Status: *resp.Status, Body: body}, nil
+	return Result{Status: *resp.Status, Body: body, InstanceURL: resp.InstanceURL}, nil
 }
 
 // write sends one frame, bounded by ctx's deadline. A local socket blocks a write only when the daemon has

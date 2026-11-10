@@ -454,13 +454,9 @@ func (m Model) homeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.setStatus("not attached to the daemon yet", true)
 				return m, nil
 			}
-			// A link for another instance, or one the daemon has not named its instance for yet, is refused
-			// here and nothing is sent: a code is a way into a guild on the instance that issued it.
-			signedIn := ""
-			if m.account != nil {
-				signedIn = m.account.InstanceURL
-			}
-			code, err := ops.CodeFor(typed, signedIn)
+			// A link's code goes only to the instance it names: the daemon refuses one for another, and
+			// sends nothing, since a code is a way into a guild on the instance that issued it.
+			inv, err := ops.ParseInvite(typed)
 			if err != nil {
 				m.setStatus(termsafe.Text(err.Error()), true)
 				return m, nil
@@ -469,7 +465,7 @@ func (m Model) homeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if h.preview != nil && h.preview.code == typed {
 				return m, func() tea.Msg {
 					g, err := call(s, func(ctx context.Context, s Session) (apicontract.Guild, error) {
-						return ops.JoinInvite(ctx, s, code)
+						return ops.JoinInvite(ctx, s, inv)
 					})
 					return joinedMsg{guild: g, err: err}
 				}
@@ -477,7 +473,7 @@ func (m Model) homeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.setStatus("looking up that invite", false)
 			return m, func() tea.Msg {
 				p, err := call(s, func(ctx context.Context, s Session) (apicontract.GuildInvitePreview, error) {
-					return ops.PreviewInvite(ctx, s, code)
+					return ops.PreviewInvite(ctx, s, inv)
 				})
 				return previewMsg{code: typed, preview: p, err: err}
 			}

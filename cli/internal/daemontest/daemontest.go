@@ -272,6 +272,8 @@ type Daemon struct {
 	local   map[string]json.RawMessage // by path, the daemon's own requests
 	calls   []Request
 	clients []*Client
+	// signedIn, when set, is the instance the fake's relay is signed in to at each request, "" for none.
+	signedIn func() string
 }
 
 // New builds a fake daemon for one test. Its clients are closed when the test ends.
@@ -294,6 +296,32 @@ func (d *Daemon) Requests() []Request {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]Request(nil), d.calls...)
+}
+
+// SignInFrom makes the fake answer every request as a daemon signed in to the instance signedIn returns at
+// that moment, "" being signed out, whatever the READY a client attached with said: a real daemon's sign-in
+// changes under an attachment, and one still starting names no account in READY and answers as signed in a
+// moment later. Without it, a request through a client is answered as signed in to the instance its READY
+// named, and one made on the Daemon itself as signed in to none.
+//
+// The instance is what a request naming one (ipc.ForInstance) is checked against, as the relay checks it,
+// and what every answer says answered.
+func (d *Daemon) SignInFrom(signedIn func() string) *Daemon {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.signedIn = signedIn
+	return d
+}
+
+// instanceFor is the instance a request is answered as signed in to: SignInFrom's, or else attached's.
+func (d *Daemon) instanceFor(attached string) string {
+	d.mu.Lock()
+	signedIn := d.signedIn
+	d.mu.Unlock()
+	if signedIn != nil {
+		return signedIn()
+	}
+	return attached
 }
 
 // OK, Created and NoContent are the answers most tests script.
@@ -398,7 +426,11 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (ipc.Res
 		return ipc.Result{}, c.Err()
 	default:
 	}
-	return c.d.Do(ctx, method, path, body)
+	attached := ""
+	if c.ready.Account != nil {
+		attached = c.ready.Account.InstanceURL
+	}
+	return c.d.do(ctx, c.d.instanceFor(attached), method, path, body)
 }
 
 // Ready is what the daemon said when the client attached.
@@ -443,8 +475,25 @@ func (d *Daemon) OnLocal(path string, body any) *Daemon {
 	return d
 }
 
-func (d *Daemon) Do(_ context.Context, method, rawPath string, body any) (ipc.Result, error) {
+// Do performs a relayed request on the fake itself, as signed in to SignInFrom's instance or to none.
+func (d *Daemon) Do(ctx context.Context, method, rawPath string, body any) (ipc.Result, error) {
+	return d.do(ctx, d.instanceFor(""), method, rawPath, body)
+}
+
+func (d *Daemon) do(ctx context.Context, instance, method, rawPath string, body any) (ipc.Result, error) {
 	t := d.t
+	named := ipc.InstanceFor(ctx)
+	if named != "" && strings.HasPrefix(rawPath, ipc.LocalPathPrefix) {
+		return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "a request to the daemon itself names no instance"}
+	}
+	if named != "" && instance == "" {
+		// Recorded nowhere, as nothing was sent.
+		return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayNotSignedIn, Message: "the daemon is not signed in; run `norite login`"}
+	}
+	if named != "" && !ipc.SameInstance(named, instance) {
+		return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayOtherInstance, Message: "that is for " + named +
+			", and this machine is signed in to " + instance + ", so nothing was sent"}
+	}
 	if strings.HasPrefix(rawPath, ipc.LocalPathPrefix) {
 		d.mu.Lock()
 		raw, ok := d.local[rawPath]
@@ -527,7 +576,7 @@ func (d *Daemon) Do(_ context.Context, method, rawPath string, body any) (ipc.Re
 		// What the instance does next: MESSAGE_CREATE to everybody watching, the sender included.
 		d.Dispatch("MESSAGE_CREATE", respBody)
 	}
-	return ipc.Result{Status: status, Body: respBody}, nil
+	return ipc.Result{Status: status, Body: respBody, InstanceURL: instance}, nil
 }
 
 // ---------- contracts/cli-json ----------

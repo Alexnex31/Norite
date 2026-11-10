@@ -228,6 +228,9 @@ func (c *conn) handle(req ipc.Request) {
 		switch {
 		case !strings.HasPrefix(req.Path, ipc.LocalPathPrefix):
 			resp = c.srv.relay.Do(c.ctx, req)
+		case req.InstanceURL != "":
+			// The daemon's own requests are about this machine, which no instance names.
+			resp = ipc.Failure(ipc.RelayBadRequest, "a request to the daemon itself names no instance")
 		case c.srv.local != nil:
 			// The daemon's own, and never the relay's: it is not sent to the instance, and does not wait on a
 			// sign-in.

@@ -470,9 +470,10 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var req ipc.Request
-		if err := ipc.Decode(f, &req); err != nil || !requestID.MatchString(req.ID) {
+		if err := ipc.Decode(f, &req); err != nil || !requestID.MatchString(req.ID) || req.InstanceURL != "" {
 			// Before anything is asked of the instance: the id is echoed, and a request whose answer
-			// could not be a valid frame is not performed.
+			// could not be a valid frame is not performed. The attach socket's instance_url is not a field
+			// of this port's frame, which names its one instance when it is turned on.
 			s.closeWith(conn, ipc.CloseDecodeError, "a request that is not valid")
 			return
 		}

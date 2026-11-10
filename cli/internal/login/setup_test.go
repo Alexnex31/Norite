@@ -167,14 +167,21 @@ type setupRun struct {
 	daemon  *daemontest.Daemon
 }
 
-// newSetupRun wires a Setup to f, a temp store, a fake service and a fake daemon whose READY names f once a
-// sign-in is stored, as the real daemon does a moment after one.
+// newSetupRun wires a Setup to f, a temp store, a fake service and a fake daemon signed in to whatever the
+// store holds, at each request as at each attach, as the real daemon is a moment after a sign-in is stored.
 func newSetupRun(t *testing.T, f *setupInstance, opts SetupOptions, lines, secrets []string) *setupRun {
 	t.Helper()
 	store, err := credentials.OpenLocalForTest(t.TempDir())
 	require.NoError(t, err)
 	run := &setupRun{store: store, out: &bytes.Buffer{}, lines: &script{answers: lines},
 		secrets: &script{answers: secrets}, service: &fakeService{state: DaemonAbsent}, daemon: daemontest.New(t)}
+	run.daemon.SignInFrom(func() string {
+		if rec, err := store.LoadRecord(); err == nil {
+			return rec.InstanceURL
+		}
+		return ""
+	}).On("getCurrentUser", daemontest.OK(apicontract.User{Id: "123", Username: "ada", DisplayName: "ada",
+		Email: "ada@example.com", CreatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}))
 	run.setup = &Setup{
 		Options: opts, Store: store, Out: run.out, ReadLine: run.lines.read, ReadSecret: run.secrets.read,
 		Interactive: true, Hostname: func() (string, error) { return "ada-laptop", nil },
@@ -357,7 +364,7 @@ func TestASignInRefusedAfterRegisteringIsTriedAgain(t *testing.T) {
 		[]string{"", "ada", "ada@example.com", "", "", ""}, []string{"a correct passphrase", "a correct passphrase"})
 	err := stuck.setup.Run(context.Background())
 	require.EqualError(t, err, "the instance still refuses the sign-in. If it emailed you a link, open the newest "+
-		"one, then sign in with `norite login --instance "+g.server.URL+" --email ada@example.com`; if that "+
+		"one, then sign in with `norite login --instance '"+g.server.URL+"' --email 'ada@example.com'`; if that "+
 		"address already had an account, the same command signs in with its own password")
 	_, logins, _ = g.seen()
 	assert.Len(t, logins, signInAttempts)
@@ -396,12 +403,9 @@ func TestTheGuildIsJoinedOnlyOnceTheDaemonNamesTheLinksInstance(t *testing.T) {
 	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, nil, nil)
 	seed(t, run.store, f.server.URL, "ada")
 	run.service.state = DaemonRunning
-	run.setup.Connect = func(context.Context) (daemonclient.Caller, func(), error) {
-		return run.daemon.Attach(ipc.Ready{Standing: ipc.StandingSignedIn, Guilds: []ipc.GuildSummary{},
-			Account: &ipc.Account{InstanceURL: "https://other.example", UserID: "9", Username: "eve"}}, false), func() {}, nil
-	}
+	run.daemon.SignInFrom(func() string { return "https://other.example" })
 	require.NoError(t, run.setup.Run(context.Background()))
-	assert.Empty(t, run.daemon.Requests())
+	assert.Empty(t, run.daemon.Requests(), "nothing reached the instance the daemon is signed in to")
 	assert.Contains(t, run.out.String(), "the daemon did not take the sign-in up within 200ms; `norite daemon status` "+
 		"says where it stands. Join it once the daemon runs: `norite invite join '"+f.server.URL+"/join#BCDFGHJKMNPQRSTV'`.")
 }
@@ -516,12 +520,11 @@ func TestAStoredSignInTheDaemonCallsSignedOutIsSignedInAgain(t *testing.T) {
 	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, NoDaemon: true}, []string{"ada@example.com"},
 		[]string{"a correct passphrase"})
 	seed(t, run.store, f.server.URL, "ada")
-	run.setup.Connect = func(context.Context) (daemonclient.Caller, func(), error) {
-		return run.daemon.Attach(ipc.Ready{Standing: ipc.StandingSignedOut, Guilds: []ipc.GuildSummary{}}, false),
-			func() {}, nil
-	}
+	run.daemon.SignInFrom(func() string { return "" })
 	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
-	assert.Contains(t, run.out.String(), "the daemon says the instance no longer accepts it. Signing in again.")
+	assert.Contains(t, run.out.String(), "the daemon says the instance no longer accepts it. Signing in again.\n"+
+		"If @ada signs in through Google or GitHub, press Ctrl-C and run `norite setup --provider google` or "+
+		"`--provider github` instead.\n")
 	_, logins, _ := f.seen()
 	assert.Len(t, logins, 1)
 	assert.NotContains(t, run.out.String(), "Signed in as @ada already.")
@@ -627,4 +630,115 @@ func TestAPreviewSaysWhatInviteShowSays(t *testing.T) {
 	p.ExpiresAt, p.Guild.Description = &at, &description
 	assert.Equal(t, "The invite leads to Tea Room, #general, invited by Alice (@alice), and expires 2026-10-11 12:26."+
 		"\n  a quiet \ufffd[2Jroom", describePreview(p))
+}
+
+// TestAStoredSignInIsCheckedOnceTheDaemonIsUp: the daemon is what can say whether the instance still accepts
+// a stored sign-in, so it comes up first, and one it calls signed out is signed in again rather than reported
+// as done. With no daemon at all, nothing is claimed either way.
+func TestAStoredSignInIsCheckedOnceTheDaemonIsUp(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL}, []string{"", "ada@example.com"},
+		[]string{"a correct passphrase"})
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonStopped
+	run.daemon.SignInFrom(func() string { return "" })
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Equal(t, 1, run.service.starts)
+	assert.Equal(t, "Start it? [Y/n] ", strings.TrimPrefix(run.lines.asked[0], "The daemon is installed and not running. "))
+	assert.Contains(t, run.out.String(), "the daemon says the instance no longer accepts it. Signing in again.")
+	_, logins, _ := f.seen()
+	assert.Len(t, logins, 1)
+
+	g := newSetupInstance(t)
+	down := newSetupRun(t, g, SetupOptions{Instance: g.server.URL}, []string{"n"}, nil)
+	seed(t, down.store, g.server.URL, "ada")
+	down.service.state = DaemonStopped
+	require.NoError(t, down.setup.Run(context.Background()), down.out.String())
+	assert.Contains(t, down.out.String(), "Signed in as @ada, as far as this machine knows: the daemon is not "+
+		"running, so whether the instance still accepts it is not known.")
+	assert.NotContains(t, down.out.String(), "Signed in as @ada already.")
+	_, logins, _ = g.seen()
+	assert.Empty(t, logins)
+}
+
+// TestADaemonLeftAloneIsAskedOnceAndNotWaitedFor: with --no-daemon nothing is starting one, so a socket
+// nobody answers is said at once rather than waited on.
+func TestADaemonLeftAloneIsAskedOnceAndNotWaitedFor(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV", NoDaemon: true}, nil, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.setup.waitFor = time.Minute
+	attaches := 0
+	run.setup.Connect = func(context.Context) (daemonclient.Caller, func(), error) {
+		attaches++
+		return nil, nil, clierr.Unavailable("the daemon is not running")
+	}
+	start := time.Now()
+	require.NoError(t, run.setup.Run(context.Background()))
+	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Equal(t, 2, attaches, "once for the stored sign-in, once for the guild")
+	assert.Contains(t, run.out.String(), "no daemon answered (the daemon is not running). Join it once the daemon "+
+		"runs: `norite invite join '"+f.server.URL+"/join#BCDFGHJKMNPQRSTV'`.")
+}
+
+// TestTheJoinWaitsOnOneAttachment: a daemon that has not yet read the sign-in setup stored answers that it
+// is signed out, on this machine, and is asked again on the same attachment until it has.
+func TestTheJoinWaitsOnOneAttachment(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV", NoDaemon: true},
+		[]string{"", "y", "ada@example.com", ""}, []string{"a correct passphrase"})
+	run.setup.waitFor = 10 * time.Second
+	asked := 0
+	run.daemon.SignInFrom(func() string {
+		asked++
+		if asked < 5 {
+			return ""
+		}
+		return f.server.URL
+	}).On("previewInvite", daemontest.OK(preview("Tea Room"))).
+		On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
+	attaches := 0
+	connect := run.setup.Connect
+	run.setup.Connect = func(ctx context.Context) (daemonclient.Caller, func(), error) {
+		attaches++
+		return connect(ctx)
+	}
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Equal(t, 1, attaches)
+	assert.GreaterOrEqual(t, asked, 5)
+	assert.Len(t, requestsTo(run.daemon, "redeemInvite"), 1)
+}
+
+// TestAMistypedProviderIsRefusedFirst: as `norite login` refuses it, before anything is asked.
+func TestAMistypedProviderIsRefusedFirst(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, Provider: "gihtub"}, nil, nil)
+	err := run.setup.Run(context.Background())
+	var usage *clierr.UsageError
+	require.ErrorAs(t, err, &usage)
+	assert.Contains(t, err.Error(), `unknown sign-in provider "gihtub"`)
+	assert.Empty(t, run.lines.asked)
+	_, _, requests := f.seen()
+	assert.Zero(t, requests)
+}
+
+// TestACommandToPasteIsQuoted: an address and an email go into a command a person pastes, quoted so that a
+// shell reads neither, a quote inside included.
+func TestACommandToPasteIsQuoted(t *testing.T) {
+	assert.Equal(t, `'http://[fd00::1]:8080'`, shellQuote("http://[fd00::1]:8080"))
+	assert.Equal(t, `'it'\''s'`, shellQuote("it's"))
+}
+
+// TestABareCodeGoesOnlyToTheInstanceSetUpFor: a code given without its link names no instance, and is for
+// the one setup was run for. A daemon still signed in elsewhere is never sent it.
+func TestABareCodeGoesOnlyToTheInstanceSetUpFor(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, Invite: "BCDFGHJKMNPQRSTV"}, nil, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonRunning
+	run.daemon.SignInFrom(func() string { return "https://other.example" }).
+		On("previewInvite", daemontest.OK(preview("Tea Room")))
+	require.NoError(t, run.setup.Run(context.Background()))
+	assert.Empty(t, run.daemon.Requests())
+	assert.Contains(t, run.out.String(), "the daemon did not take the sign-in up within 200ms")
 }

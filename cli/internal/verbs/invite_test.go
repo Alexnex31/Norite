@@ -122,8 +122,9 @@ func TestAHugeDayCountIsRefusedNotWrapped(t *testing.T) {
 	}
 }
 
-// runVerbSignedIn runs argv as runVerb does, attached as a client is, to a daemon whose READY names instance
-// (or no account, for ""): the verbs read the instance an invite link is checked against from it.
+// runVerbSignedIn runs argv as runVerb does, attached as a client is, to a daemon whose READY names instance,
+// or no account for "" as a daemon still starting does. The fake answers as signed in to the instance READY
+// named, unless SignInFrom says otherwise.
 func runVerbSignedIn(t *testing.T, f *fakeDaemon, instance string, argv ...string) ran {
 	t.Helper()
 	ready := ipc.Ready{Standing: ipc.StandingStarting, Guilds: []ipc.GuildSummary{}}
@@ -145,7 +146,7 @@ func runVerbSignedIn(t *testing.T, f *fakeDaemon, instance string, argv ...strin
 	return ran{out: out.String(), err: err}
 }
 
-// TestAnInviteCarriesItsLink: the link is the instance the daemon named, /join, and the code after '#', in
+// TestAnInviteCarriesItsLink: the link is the instance that answered, /join, and the code after '#', in
 // text and in JSON, for a new invite and for every listed one.
 func TestAnInviteCarriesItsLink(t *testing.T) {
 	const link = "https://chat.example.com/join#BCDFGHJKMNPQRSTV"
@@ -173,7 +174,18 @@ func TestAnInviteCarriesItsLink(t *testing.T) {
 	require.Len(t, listed, 1)
 	assert.Equal(t, link, listed[0]["link"])
 
-	// No instance named, no link: null in JSON, nothing in text.
+	// The instance that answered, though the daemon was still starting when the verb attached and its READY
+	// named none: the link does not depend on when the verb ran.
+	starting := newFake(t).SignInFrom(func() string { return "https://chat.example.com" }).
+		On("createChannelInvite", created(apiInvite("90", "BCDFGHJKMNPQRSTV")))
+	early := runVerbSignedIn(t, starting, "", "--json", "invite", "create", "20")
+	require.NoError(t, early.err)
+	var earlyBack map[string]any
+	require.NoError(t, json.Unmarshal([]byte(early.out), &earlyBack))
+	assert.Equal(t, link, earlyBack["link"])
+
+	// No instance said, no link: null in JSON, nothing in text. Only a daemon older than the answer saying
+	// which instance answered gives that.
 	none := runVerb(t, f, "", "--json", "invite", "create", "20")
 	require.NoError(t, none.err)
 	var bare map[string]any
@@ -220,15 +232,27 @@ func TestALinkSendsItsCodeOnlyToItsOwnInstance(t *testing.T) {
 			"https://other.example/join#BCDFGHJKMNPQRSTV")
 		var usage *clierr.UsageError
 		require.ErrorAs(t, r.err, &usage, verb)
-		assert.Equal(t, "invite "+verb+": that invite is for https://other.example, and this machine is "+
-			"signed in to https://chat.example.com", r.err.Error())
+		assert.Equal(t, "invite "+verb+": that is for https://other.example, and this machine is signed in to "+
+			"https://chat.example.com, so nothing was sent", r.err.Error())
 		assert.Empty(t, g.Requests(), verb)
 
+		// Signed out: exit 3, and the way on is a sign-in.
 		h := newFake(t)
 		r = runVerbSignedIn(t, h, "", "invite", verb, "https://chat.example.com/join#BCDFGHJKMNPQRSTV")
 		var unavailable *clierr.UnavailableError
 		require.ErrorAs(t, r.err, &unavailable, verb)
+		assert.Contains(t, r.err.Error(), "norite login", verb)
 		assert.Empty(t, h.Requests(), verb)
+
+		// Still starting when the verb attached, and signed in to the link's instance by the time the request
+		// is sent: the link is that instance's, and the code goes.
+		k := newFake(t).SignInFrom(func() string { return "https://chat.example.com" }).
+			On("previewInvite", ok(apiPreview("BCDFGHJKMNPQRSTV", "Guild"))).
+			On("redeemInvite", ok(apiGuild("10", "Guild"))).
+			On("revokeInvite", noContent())
+		require.NoError(t, runVerbSignedIn(t, k, "", "invite", verb,
+			"https://chat.example.com/join#BCDFGHJKMNPQRSTV").err, verb)
+		assert.Len(t, k.Requests(), 1, verb)
 	}
 }
 

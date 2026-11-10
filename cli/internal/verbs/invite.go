@@ -5,7 +5,6 @@ package verbs
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -95,10 +94,11 @@ func inviteCommand(connect Connector) *cli.Command {
 					body.ExpiresInSeconds = &seconds
 				}
 				var inv apicontract.GuildInvite
-				if err := e.do(ctx, http.MethodPost, "/channels/"+cmd.Args().Get(0)+"/invites", body, &inv); err != nil {
+				instance, err := e.doFrom(ctx, http.MethodPost, "/channels/"+cmd.Args().Get(0)+"/invites", body, &inv)
+				if err != nil {
 					return nil, err
 				}
-				return inviteFrom(inv, ops.SignedInTo(e.call)), nil
+				return inviteFrom(inv, instance), nil
 			},
 		},
 		spec{
@@ -106,12 +106,13 @@ func inviteCommand(connect Connector) *cli.Command {
 			description: "Needs the manage-guild permission, and leaves out invites into channels you cannot see.",
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
 				var list []apicontract.GuildInvite
-				if err := e.do(ctx, http.MethodGet, "/guilds/"+cmd.Args().Get(0)+"/invites", nil, &list); err != nil {
+				instance, err := e.doFrom(ctx, http.MethodGet, "/guilds/"+cmd.Args().Get(0)+"/invites", nil, &list)
+				if err != nil {
 					return nil, err
 				}
 				out := inviteList{}
 				for _, inv := range list {
-					out = append(out, inviteFrom(inv, ops.SignedInTo(e.call)))
+					out = append(out, inviteFrom(inv, instance))
 				}
 				return out, nil
 			},
@@ -119,12 +120,12 @@ func inviteCommand(connect Connector) *cli.Command {
 		spec{
 			name: "show", usage: "See where an invite leads before you use it", ids: []string{codeArg},
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
+				inv, err := inviteArg(cmd)
+				if err != nil {
+					return nil, err
+				}
 				p, err := with(ctx, e, func(c daemonclient.Caller) (apicontract.GuildInvitePreview, error) {
-					code, err := inviteCode(c, cmd.Args().Get(0))
-					if err != nil {
-						return apicontract.GuildInvitePreview{}, err
-					}
-					return ops.PreviewInvite(ctx, c, code)
+					return ops.PreviewInvite(ctx, c, inv)
 				})
 				if err != nil {
 					return nil, err
@@ -136,12 +137,12 @@ func inviteCommand(connect Connector) *cli.Command {
 			name: "join", usage: "Join the guild an invite leads to", ids: []string{codeArg},
 			description: "Joining a guild you are already in changes nothing and spends no use of the invite.",
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
+				inv, err := inviteArg(cmd)
+				if err != nil {
+					return nil, err
+				}
 				g, err := with(ctx, e, func(c daemonclient.Caller) (apicontract.Guild, error) {
-					code, err := inviteCode(c, cmd.Args().Get(0))
-					if err != nil {
-						return apicontract.Guild{}, err
-					}
-					return ops.JoinInvite(ctx, c, code)
+					return ops.JoinInvite(ctx, c, inv)
 				})
 				if err != nil {
 					return nil, err
@@ -154,36 +155,30 @@ func inviteCommand(connect Connector) *cli.Command {
 			description: "Your own invites, or any invite with the manage-guild permission. Not asked about: " +
 				"revoking takes a way in away, and an invite is replaced by creating another.",
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
-				c, err := e.attached(ctx)
+				inv, err := inviteArg(cmd)
 				if err != nil {
 					return nil, err
 				}
-				code, err := inviteCode(c, cmd.Args().Get(0))
-				if err != nil {
+				if _, err := with(ctx, e, func(c daemonclient.Caller) (struct{}, error) {
+					return struct{}{}, ops.RevokeInvite(ctx, c, inv)
+				}); err != nil {
 					return nil, err
 				}
-				if err := e.do(ctx, http.MethodPost, "/invites/revoke",
-					apicontract.GuildInviteCodeRequest{Code: code}, nil); err != nil {
-					return nil, err
-				}
-				return revokedInvite{Revoked: code}, nil
+				return revokedInvite{Revoked: inv.Code}, nil
 			},
 		},
 	)
 }
 
-// inviteCode is the code to send for raw, a link or a code, once attached to c: a link for another instance
-// than the daemon's is a usage error, and one the daemon cannot be asked about yet is exit 3, as a daemon
-// still starting is. checkArgs has already refused what is neither.
-func inviteCode(c daemonclient.Caller, raw string) (string, error) {
-	code, err := ops.CodeFor(raw, ops.SignedInTo(c))
-	switch {
-	case errors.Is(err, ops.ErrInstanceUnknown):
-		return "", clierr.Unavailable("%s", err)
-	case err != nil:
-		return "", clierr.Usage("%s", err)
+// inviteArg is the invite the command was given, a link or a code. checkArgs has already refused what is
+// neither. A link's code goes only to the instance it names, which the daemon checks when it sends it: one
+// for another instance is a usage error, exit 2, with nothing sent.
+func inviteArg(cmd *cli.Command) (ops.Invite, error) {
+	inv, err := ops.ParseInvite(cmd.Args().Get(0))
+	if err != nil {
+		return ops.Invite{}, clierr.Usage("%s", err)
 	}
-	return code, nil
+	return inv, nil
 }
 
 // ---------- views ----------
@@ -199,7 +194,7 @@ type inviteView struct {
 	Uses      int        `json:"uses"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
-	// Link is the invite link for the instance the daemon named, or nil when it named none.
+	// Link is the invite link on the instance that answered, or nil from a daemon that does not say which.
 	Link *string `json:"link"`
 }
 

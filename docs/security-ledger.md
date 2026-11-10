@@ -2090,14 +2090,15 @@ carries the condition that would reopen it.
 
 ### The sign-in can change between a verb's attach and its request
 - **Raised**: easier-setup, `/security-sweep`
-- **Verdict**: not a vulnerability
-- **Why**: `ops.CodeFor` compares a link with the instance the daemon named in its READY, and a verb's
-  attachment asks for no events, so it is not closed when the daemon signs in elsewhere. A `norite login`
-  in another terminal landing between the two sends the code to the new instance. Only the account's own
-  programs reach the attach socket (OS permissions, rule 16), so whoever moved the sign-in is the person
-  sending the code.
-- **Reopens if**: invite redemption becomes reachable from the automation port or another tier below the
-  account's own programs, or the attach socket stops being OS-permission-protected.
+- **Verdict**: superseded
+- **Why**: the client compared a link with the instance the daemon named in its READY, so a `norite login`
+  in another terminal landing between the attach and the request sent the code to the new instance. The
+  second `/code-review` moved the check into the relay (`ipc.Request.instance_url`), which compares the
+  link's instance with the credential it is about to send the request with, so a sign-in that changed
+  after the attach is the one checked.
+- **Reopens if**: anything sends an invite's code without naming its instance in the request, or the
+  relay sends a request with another credential than the one it checked, as a retry after a 401 would if
+  it stopped requiring the same instance and generation.
 
 ### The invite page tells strangers which commands to run
 - **Raised**: easier-setup, `/security-sweep`

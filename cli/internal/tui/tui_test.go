@@ -298,7 +298,7 @@ func TestALinkJoinsOnlyOnItsOwnInstance(t *testing.T) {
 	c.shows("NO GUILDS YET")
 	c.typeText("https://other.example/join#BCDFGHJKMNPQRSTV")
 	c.press("enter")
-	c.shows("that invite is for https://other.example, and this machine is signed in to https://chat.example")
+	c.shows("that is for https://other.example, and this machine is signed in to https://chat.example")
 	for _, r := range d.Requests() {
 		assert.NotContains(t, []string{"previewInvite", "redeemInvite"}, r.Op, "nothing is sent for another instance")
 	}

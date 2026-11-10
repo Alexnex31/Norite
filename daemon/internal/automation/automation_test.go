@@ -578,6 +578,13 @@ func TestWhatClosesAnIdentifiedConnection(t *testing.T) {
 	extra.send(ipc.OpRequest, map[string]any{"id": "1", "method": "GET", "path": "/users/@me", "body": nil, "token": "nat_other"})
 	assert.Equal(t, ipc.CloseDecodeError, extra.closed().Code)
 
+	// The attach socket's instance_url is a field of ipc.Request and not of this port's frame (easier-setup).
+	named := f.raw()
+	named.identify(f)
+	named.send(ipc.OpRequest, map[string]any{"id": "1", "method": "GET", "path": "/users/@me", "body": nil,
+		"instance_url": "https://chat.example"})
+	assert.Equal(t, ipc.CloseDecodeError, named.closed().Code)
+
 	big := f.raw()
 	big.identify(f)
 	_, err := big.conn.Write([]byte{0x7f, 0xff, 0xff, 0xff})

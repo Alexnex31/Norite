@@ -187,3 +187,65 @@ func TestALocalRequestWithNothingToAnswerItIsRefusedNotRelayed(t *testing.T) {
 	assert.Equal(t, ipc.RelayBadRequest, re.Code)
 	assert.False(t, relayed.Load())
 }
+
+// A request to the daemon itself names no instance: it is about this machine. One that does is refused,
+// and neither the daemon's own handler nor the relay is asked. A relayed one carries its instance to the
+// relay as sent, through frames the contract accepts in both directions (rawClient checks them).
+func TestOnlyARelayedRequestNamesAnInstance(t *testing.T) {
+	var mu sync.Mutex
+	var relayed []ipc.Request
+	relay := relayFunc(func(_ context.Context, req ipc.Request) ipc.Response {
+		mu.Lock()
+		relayed = append(relayed, req)
+		mu.Unlock()
+		status := 200
+		return ipc.Response{Status: &status, Body: json.RawMessage(`{}`), InstanceURL: "https://chat.example"}
+	})
+	var asked atomic.Bool
+	local := localFunc(func(context.Context, ipc.Request) ipc.Response {
+		asked.Store(true)
+		status := 200
+		return ipc.Response{Status: &status, Body: json.RawMessage(`{}`)}
+	})
+	ts := newTestServer(t, relay, func(s *Server) { s.local = local })
+
+	raw := ts.raw(t)
+	raw.identify("dev", false)
+	raw.expect(gatewayproto.OpDispatch)
+	raw.send(ipc.OpRequest, ipc.Request{ID: "a", Method: "GET", Path: ipc.PathConfig,
+		InstanceURL: "https://chat.example"})
+	var resp ipc.Response
+	require.NoError(t, json.Unmarshal(raw.expect(ipc.OpResponse).D, &resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, ipc.RelayBadRequest, resp.Error.Code)
+	assert.False(t, asked.Load())
+
+	raw.send(ipc.OpRequest, ipc.Request{ID: "b", Method: "POST", Path: "/invites/preview",
+		Body: json.RawMessage(`{"code":"X"}`), InstanceURL: "https://chat.example"})
+	require.NoError(t, json.Unmarshal(raw.expect(ipc.OpResponse).D, &resp))
+	assert.Equal(t, "https://chat.example", resp.InstanceURL)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, relayed, 1)
+	assert.Equal(t, "https://chat.example", relayed[0].InstanceURL)
+}
+
+// The client sends the instance its context names (ipc.ForInstance) and hands back the one that answered.
+func TestTheClientCarriesTheInstanceBothWays(t *testing.T) {
+	named := make(chan string, 2)
+	relay := relayFunc(func(_ context.Context, req ipc.Request) ipc.Response {
+		named <- req.InstanceURL
+		status := 200
+		return ipc.Response{Status: &status, Body: json.RawMessage(`{}`), InstanceURL: "https://chat.example"}
+	})
+	c := newTestServer(t, relay).attach(t, false)
+
+	res, err := c.Do(ipc.ForInstance(context.Background(), "https://chat.example"), "GET", "/guilds/1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "https://chat.example", <-named)
+	assert.Equal(t, "https://chat.example", res.InstanceURL)
+
+	_, err = c.Do(context.Background(), "GET", "/guilds/1", nil)
+	require.NoError(t, err)
+	assert.Empty(t, <-named, "a request whose context names none names none")
+}

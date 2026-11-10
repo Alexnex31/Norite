@@ -11,6 +11,7 @@
 //   - it answered 4xx: clierr.RefusedError, exit 4 — except 401, which is the daemon's credential failing
 //     after the relay's retry, and 429, a throttle, which are both unavailable;
 //   - the daemon is not running, not signed in, or cannot reach the instance: clierr.UnavailableError, exit 3;
+//   - the request named another instance than the daemon's (ipc.ForInstance): clierr.UsageError, exit 2;
 //   - anything else, a 5xx included: an ordinary error, exit 1.
 package daemonclient
 
@@ -90,34 +91,42 @@ const attachTimeout = 10 * time.Second
 // not on a slow instance the relay is already timing out (M20 /code-review). A variable for the tests.
 var callTimeout = 2 * time.Minute
 
-// Call performs one request and decodes a 2xx answer's body into out, which may be nil to ignore it.
+// Call performs one request and decodes a 2xx answer's body into out, which may be nil to ignore it. A
+// context made by ipc.ForInstance sends the request to that instance or nowhere.
 func Call(ctx context.Context, c Caller, method, path string, body, out any) error {
+	_, err := CallFrom(ctx, c, method, path, body, out)
+	return err
+}
+
+// CallFrom is Call, and says which instance answered: the daemon's sign-in when it performed the request,
+// which READY may not have named yet, or "" from a daemon older than the answer saying so (easier-setup).
+func CallFrom(ctx context.Context, c Caller, method, path string, body, out any) (instanceURL string, err error) {
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	res, err := c.Do(callCtx, method, path, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return clierr.Unavailable("the daemon did not answer within %s; the request may or may not have "+
+			return "", clierr.Unavailable("the daemon did not answer within %s; the request may or may not have "+
 				"reached the instance", callTimeout)
 		}
-		return fromRelay(err)
+		return "", fromRelay(err)
 	}
 
 	if res.Status < 200 || res.Status >= 300 {
-		return Refusal(res.Status, res.Body, "the instance refused the daemon's credential; run `norite login` again")
+		return "", Refusal(res.Status, res.Body, "the instance refused the daemon's credential; run `norite login` again")
 	}
 	if out == nil {
-		return nil
+		return res.InstanceURL, nil
 	}
 	// No body where one was owed: not success, whatever the status says. A proxy answering 200 with HTML
 	// arrives here, its body dropped by the relay as not JSON, and must not decode into an empty object.
 	if res.Body == nil || string(bytes.TrimSpace(res.Body)) == "null" {
-		return fmt.Errorf("the instance answered HTTP %d with no usable body", res.Status)
+		return "", fmt.Errorf("the instance answered HTTP %d with no usable body", res.Status)
 	}
 	if err := json.Unmarshal(res.Body, out); err != nil {
-		return fmt.Errorf("the instance's answer does not decode: %w", err)
+		return "", fmt.Errorf("the instance's answer does not decode: %w", err)
 	}
-	return nil
+	return res.InstanceURL, nil
 }
 
 // Refusal is the error for an instance's answer that is not a 2xx, and with it the exit code: 401 and 429
@@ -215,6 +224,10 @@ func fromRelay(err error) error {
 		switch re.Code {
 		case ipc.RelayNotSignedIn, ipc.RelayUnreachable:
 			return clierr.Unavailable("%s", termsafe.Text(re.Message))
+		case ipc.RelayOtherInstance:
+			// What was asked belongs to another instance than this machine's, an invite link's code most
+			// often: a usage problem, nothing was sent, and the daemon's sentence names both.
+			return clierr.Usage("%s", termsafe.Text(re.Message))
 		}
 		return fmt.Errorf("the daemon would not relay the request: %s", termsafe.Text(re.Message))
 	}

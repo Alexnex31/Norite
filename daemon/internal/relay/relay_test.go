@@ -250,6 +250,8 @@ type fakeCreds struct {
 	rejected []string
 	onReject func(*fakeCreds)
 	noAnswer bool
+	// signingIn, when set, holds CurrentUnlessSignedOut until it is closed, as a daemon still starting does.
+	signingIn chan struct{}
 }
 
 func (f *fakeCreds) Status() (session.Standing, session.Account) {
@@ -259,6 +261,16 @@ func (f *fakeCreds) Status() (session.Standing, session.Account) {
 }
 
 func (f *fakeCreds) CurrentUnlessSignedOut(ctx context.Context) (session.Credential, error) {
+	f.mu.Lock()
+	signingIn := f.signingIn
+	f.mu.Unlock()
+	if signingIn != nil {
+		select {
+		case <-signingIn:
+		case <-ctx.Done():
+			return session.Credential{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	noAnswer, cred, standing := f.noAnswer, f.cred, f.standing
 	f.mu.Unlock()
@@ -457,6 +469,94 @@ func TestAnAnswerTooLargeIsRefused(t *testing.T) {
 	resp := do(r, "GET", "/guilds/1", "")
 	require.NotNil(t, resp.Error)
 	assert.Equal(t, ipc.RelayTooLarge, resp.Error.Code)
+}
+
+// TestARequestNamingAnInstanceGoesThereOrNowhere: an invite link's code is sent only to the instance the
+// link names (easier-setup). The same instance written another way is that instance; another is refused,
+// naming both, with nothing sent. Every answer names the instance that gave it.
+func TestARequestNamingAnInstanceGoesThereOrNowhere(t *testing.T) {
+	srv, requests := instance(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
+	r := newRelay(live(srv.URL+"/norite", "eyJ.access.1", 1), srv)
+
+	for _, named := range []string{"", srv.URL + "/norite", strings.ToUpper(srv.URL[:4]) + srv.URL[4:] + "/norite/"} {
+		req := ipc.Request{ID: "1", Method: "POST", Path: "/invites/preview", Body: json.RawMessage(`{"code":"X"}`),
+			InstanceURL: named}
+		resp := r.Do(context.Background(), req)
+		require.Nil(t, resp.Error, named)
+		assert.Equal(t, srv.URL+"/norite", resp.InstanceURL, "the answer names the instance that gave it")
+	}
+	require.Len(t, requests(), 3)
+
+	for _, other := range []string{"https://other.example", srv.URL, srv.URL + "/elsewhere"} {
+		resp := r.Do(context.Background(), ipc.Request{ID: "1", Method: "POST", Path: "/invites/redeem",
+			Body: json.RawMessage(`{"code":"X"}`), InstanceURL: other})
+		require.NotNil(t, resp.Error, other)
+		assert.Equal(t, ipc.RelayOtherInstance, resp.Error.Code, other)
+		assert.Equal(t, "that is for "+other+", and this machine is signed in to "+srv.URL+"/norite, so nothing "+
+			"was sent", resp.Error.Message)
+		assert.Empty(t, resp.InstanceURL)
+	}
+	assert.Len(t, requests(), 3, "nothing reached the instance for a request naming another")
+
+	resp := r.Do(context.Background(), ipc.Request{ID: "1", Method: "GET", Path: "/guilds/1",
+		InstanceURL: "https://" + strings.Repeat("a", ipc.MaxInstanceURL)})
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, ipc.RelayBadRequest, resp.Error.Code)
+}
+
+// TestTheInstanceIsCheckedAgainstTheSignInTheRequestIsSentAs: a daemon still starting is waited for, as for
+// any request, and the instance is checked against the sign-in it then has. Checking a READY taken before
+// would refuse a good link for a daemon that had not named its instance yet, and pass one for an instance
+// the daemon was no longer signed in to.
+func TestTheInstanceIsCheckedAgainstTheSignInTheRequestIsSentAs(t *testing.T) {
+	srv, requests := instance(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
+	for _, tc := range []struct {
+		signedInTo string
+		want       string
+	}{
+		{srv.URL, ""},
+		{"https://other.example", ipc.RelayOtherInstance},
+	} {
+		creds := &fakeCreds{standing: session.Starting, signingIn: make(chan struct{})}
+		r := newRelay(creds, srv)
+		answered := make(chan ipc.Response, 1)
+		go func() {
+			answered <- r.Do(context.Background(), ipc.Request{ID: "1", Method: "POST", Path: "/invites/preview",
+				Body: json.RawMessage(`{"code":"X"}`), InstanceURL: srv.URL})
+		}()
+		select {
+		case <-answered:
+			t.Fatal("answered before the daemon had a sign-in to check against")
+		case <-time.After(50 * time.Millisecond):
+		}
+		creds.mu.Lock()
+		creds.standing = session.Live
+		creds.cred = session.Credential{InstanceURL: tc.signedInTo, UserID: "1", AccessToken: "eyJ.a", Generation: 1}
+		creds.mu.Unlock()
+		close(creds.signingIn)
+
+		var resp ipc.Response
+		select {
+		case resp = <-answered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the request was not answered once the daemon signed in")
+		}
+		if tc.want == "" {
+			require.Nil(t, resp.Error)
+			assert.Equal(t, srv.URL, resp.InstanceURL)
+		} else {
+			require.NotNil(t, resp.Error)
+			assert.Equal(t, tc.want, resp.Error.Code)
+		}
+	}
+	assert.Len(t, requests(), 1)
+
+	// Signed out is said as signed out, whatever the request names: the way on is `norite login`.
+	out := &fakeCreds{standing: session.SignedOut}
+	resp := New(Options{Credentials: out, Log: zerolog.Nop()}).Do(context.Background(),
+		ipc.Request{ID: "1", Method: "GET", Path: "/guilds/1", InstanceURL: srv.URL})
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, ipc.RelayNotSignedIn, resp.Error.Code)
 }
 
 func TestAnUnreachableInstanceSaysSoWithoutTheToken(t *testing.T) {

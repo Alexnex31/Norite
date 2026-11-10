@@ -172,7 +172,7 @@ func checkArgs(cmd *cli.Command) error {
 			// Read as ops reads a link or a code, and not shaped further: the instance answers any code it did
 			// not issue with one 404, and a second judgement here would be one that drifts. The code goes into
 			// a request body, never a path (ADR 0029). Whether a link's instance is the one signed in to is
-			// asked once attached, of the daemon (inviteCode).
+			// the daemon's to say, when it sends the request (ops.Invite.Context).
 			if _, err := ops.ParseInvite(a); err != nil {
 				return clierr.Usage("%q: %s", output.Clean(a), err)
 			}

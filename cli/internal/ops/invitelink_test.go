@@ -4,13 +4,18 @@
 package ops_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Alexnex31/Norite/backend/apicontract"
+	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/daemontest"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
+	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
 func TestALinkReadsBackAsTheInstanceAndTheCode(t *testing.T) {
@@ -94,21 +99,6 @@ func TestALinkNamingAnUnusableInstanceIsRefused(t *testing.T) {
 	}
 }
 
-func TestALinkForAnotherInstanceIsRefusedNamingBoth(t *testing.T) {
-	inv, err := ops.ParseInvite("https://other.example/join#PGTQRBXGTCDFFWBH")
-	require.NoError(t, err)
-	err = inv.For("https://chat.example.com")
-	require.Error(t, err)
-	assert.Equal(t, "that invite is for https://other.example, and this machine is signed in to "+
-		"https://chat.example.com", err.Error())
-
-	same, err := ops.ParseInvite("https://Chat.Example.com/join#PGTQRBXGTCDFFWBH")
-	require.NoError(t, err)
-	assert.NoError(t, same.For("https://chat.example.com/"))
-	// A bare code names no instance, and is taken to be for the one signed in to.
-	assert.NoError(t, ops.Invite{Code: "PGTQRBXGTCDFFWBH"}.For("https://chat.example.com"))
-}
-
 func TestALinkToThisMachineAloneIsToldApart(t *testing.T) {
 	for _, local := range []string{
 		"http://localhost:8080", "http://LOCALHOST", "http://norite.localhost", "http://127.0.0.1:8080",
@@ -125,23 +115,63 @@ func TestALinkToThisMachineAloneIsToldApart(t *testing.T) {
 	}
 }
 
+func invitePreview() apicontract.GuildInvitePreview {
+	p := apicontract.GuildInvitePreview{Code: "PGTQRBXGTCDFFWBH"}
+	p.Guild.Id, p.Guild.Name, p.Channel.Id = "10", "Guild", "20"
+	return p
+}
+
+// TestACodeIsSentOnlyToTheInstanceItsLinkNames: a link's code goes to the instance the link names, however
+// that is written, and a link for another is refused by the daemon with nothing sent, naming both. A bare
+// code names none and goes to whichever the daemon is signed in to.
 func TestACodeIsSentOnlyToTheInstanceItsLinkNames(t *testing.T) {
-	code, err := ops.CodeFor("https://chat.example.com/join#PGTQRBXGTCDFFWBH", "https://chat.example.com")
+	d := daemontest.New(t).On("previewInvite", daemontest.OK(invitePreview())).
+		SignInFrom(func() string { return "https://chat.example.com" })
+	ctx := context.Background()
+	for _, raw := range []string{"https://chat.example.com/join#PGTQRBXGTCDFFWBH",
+		"https://Chat.Example.com:443/join#PGTQRBXGTCDFFWBH", " PGTQ-RBXG "} {
+		inv, err := ops.ParseInvite(raw)
+		require.NoError(t, err, raw)
+		_, err = ops.PreviewInvite(ctx, d, inv)
+		require.NoError(t, err, raw)
+	}
+	require.Len(t, d.Requests(), 3)
+
+	inv, err := ops.ParseInvite("https://other.example/join#PGTQRBXGTCDFFWBH")
 	require.NoError(t, err)
-	assert.Equal(t, "PGTQRBXGTCDFFWBH", code)
+	for _, send := range []func() error{
+		func() error { _, err := ops.PreviewInvite(ctx, d, inv); return err },
+		func() error { _, err := ops.JoinInvite(ctx, d, inv); return err },
+		func() error { return ops.RevokeInvite(ctx, d, inv) },
+	} {
+		err := send()
+		var usage *clierr.UsageError
+		require.ErrorAs(t, err, &usage)
+		assert.EqualError(t, err, "that is for https://other.example, and this machine is signed in to "+
+			"https://chat.example.com, so nothing was sent")
+	}
+	assert.Len(t, d.Requests(), 3, "nothing was sent for the link to another instance")
+}
 
-	code, err = ops.CodeFor(" PGTQ-RBXG ", "")
-	require.NoError(t, err, "a bare code names no instance, so there is nothing to check")
-	assert.Equal(t, "PGTQ-RBXG", code)
+// TestALinkWaitsForADaemonStillStarting: the daemon decides whether a link is for its instance, when it is
+// about to send the code, so a READY that names no instance yet is no refusal. A client attached while the
+// daemon was starting sends the link's code once the daemon has signed in there.
+func TestALinkWaitsForADaemonStillStarting(t *testing.T) {
+	d := daemontest.New(t).On("previewInvite", daemontest.OK(invitePreview())).
+		SignInFrom(func() string { return "https://chat.example.com" })
+	c := d.Attach(ipc.Ready{Standing: ipc.StandingStarting, Guilds: []ipc.GuildSummary{}}, false)
+	inv, err := ops.ParseInvite("https://chat.example.com/join#PGTQRBXGTCDFFWBH")
+	require.NoError(t, err)
+	_, err = ops.PreviewInvite(context.Background(), c, inv)
+	require.NoError(t, err)
+	assert.Len(t, d.Requests(), 1)
 
-	_, err = ops.CodeFor("https://other.example/join#PGTQRBXGTCDFFWBH", "https://chat.example.com")
-	assert.EqualError(t, err, "that invite is for https://other.example, and this machine is signed in to "+
-		"https://chat.example.com")
-
-	// Not yet known is not the same instance: the code would go wherever the daemon then reaches.
-	_, err = ops.CodeFor("https://chat.example.com/join#PGTQRBXGTCDFFWBH", "")
-	assert.EqualError(t, err, "the daemon has not said which instance it is signed in to yet, so that link "+
-		"cannot be checked against it; try again in a moment")
+	// Signed out, it says so, and the way on is a sign-in, not a moment's wait.
+	out := daemontest.New(t).SignInFrom(func() string { return "" })
+	_, err = ops.PreviewInvite(context.Background(), out, inv)
+	var unavailable *clierr.UnavailableError
+	require.ErrorAs(t, err, &unavailable)
+	assert.EqualError(t, err, "the daemon is not signed in; run `norite login`")
 }
 
 func TestAnInvitePastItsBoundIsRefused(t *testing.T) {

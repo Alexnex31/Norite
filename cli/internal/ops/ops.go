@@ -148,21 +148,28 @@ func SendMessage(
 	return out, err
 }
 
-// PreviewInvite says where a code leads. The code goes in the body, never a path (ADR 0029).
-func PreviewInvite(ctx context.Context, c daemonclient.Caller, code string) (apicontract.GuildInvitePreview, error) {
+// PreviewInvite says where an invite leads. The code goes in the body, never a path (ADR 0029), and only to
+// the instance its link names (Invite.Context).
+func PreviewInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.GuildInvitePreview, error) {
 	var out apicontract.GuildInvitePreview
-	err := daemonclient.Call(ctx, c, http.MethodPost, "/invites/preview",
-		apicontract.GuildInviteCodeRequest{Code: code}, &out)
+	err := daemonclient.Call(inv.Context(ctx), c, http.MethodPost, "/invites/preview",
+		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out)
 	return out, err
 }
 
-// JoinInvite joins the guild a code leads to and returns it. Joining one the account is already in changes
-// nothing and spends no use.
-func JoinInvite(ctx context.Context, c daemonclient.Caller, code string) (apicontract.Guild, error) {
+// JoinInvite joins the guild an invite leads to and returns it. Joining one the account is already in
+// changes nothing and spends no use.
+func JoinInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.Guild, error) {
 	var out apicontract.Guild
-	err := daemonclient.Call(ctx, c, http.MethodPost, "/invites/redeem",
-		apicontract.GuildInviteCodeRequest{Code: code}, &out)
+	err := daemonclient.Call(inv.Context(ctx), c, http.MethodPost, "/invites/redeem",
+		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out)
 	return out, err
+}
+
+// RevokeInvite deletes an invite so it stops working.
+func RevokeInvite(ctx context.Context, c daemonclient.Caller, inv Invite) error {
+	return daemonclient.Call(inv.Context(ctx), c, http.MethodPost, "/invites/revoke",
+		apicontract.GuildInviteCodeRequest{Code: inv.Code}, nil)
 }
 
 // InstanceMeta is the instance's AGPL section 13 offer: its license, and where its running version's source

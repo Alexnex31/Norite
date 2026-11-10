@@ -4,6 +4,7 @@
 package ops
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -13,10 +14,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 	"github.com/Alexnex31/Norite/daemon/ipc"
-	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // The invite link (easier-setup): the instance's address, JoinPath, and a guild invite code after '#', as in
@@ -42,12 +41,6 @@ const MaxInvite = 512
 
 // errNotAnInvite is the one refusal for something that is neither a link nor a code.
 var errNotAnInvite = errors.New("that is not an invite: paste the code, or the whole link it came in")
-
-// ErrInstanceUnknown refuses a link while the daemon names no instance yet. Sending the code anyway would
-// send it to whichever instance the daemon then reaches, and a code is a way into a guild on the instance
-// that issued it, which another instance's operator has no business holding.
-var ErrInstanceUnknown = errors.New("the daemon has not said which instance it is signed in to yet, so that " +
-	"link cannot be checked against it; try again in a moment")
 
 // Invite is what somebody was handed: a guild invite code, and the instance its link names.
 type Invite struct {
@@ -145,51 +138,19 @@ func typedCode(s string) bool {
 	return true
 }
 
-// For refuses an invite whose link names another instance than signedIn, the one this machine is signed in
-// to. Redeeming it there would look the code up on the wrong instance and answer that it is unknown. A bare
-// code names no instance and is taken to be for signedIn.
-func (i Invite) For(signedIn string) error {
-	if i.Instance == "" || ipc.SameInstance(i.Instance, signedIn) {
-		return nil
+// Context is ctx sending what is made with it to the instance the invite's link names, or nowhere: the
+// daemon checks that instance against the sign-in it would send the request as, at the moment it would send
+// it, and answers ipc.RelayOtherInstance, having sent nothing, when they differ. A bare code names no
+// instance and is sent to whichever the daemon is signed in to.
+//
+// The daemon checks rather than the client, against the READY it attached with, because that READY names no
+// instance while the daemon is starting, which refused a good link with advice that retrying would not
+// help, and because a sign-in can change after it (easier-setup's second /code-review).
+func (i Invite) Context(ctx context.Context) context.Context {
+	if i.Instance == "" {
+		return ctx
 	}
-	return fmt.Errorf("that invite is for %s, and this machine is signed in to %s",
-		termsafe.Text(i.Instance), termsafe.Text(signedIn))
-}
-
-// CodeFor reads raw, a link or a code, and returns the code to send to signedIn, the instance this machine is
-// signed in to, or "" when that is not known yet. A link for another instance, or one that cannot be checked
-// yet, is refused before anything is sent.
-func CodeFor(raw, signedIn string) (string, error) {
-	inv, err := ParseInvite(raw)
-	if err != nil {
-		return "", err
-	}
-	if inv.Instance != "" && signedIn == "" {
-		return "", ErrInstanceUnknown
-	}
-	if err := inv.For(signedIn); err != nil {
-		return "", err
-	}
-	return inv.Code, nil
-}
-
-// SignedInTo is the instance the daemon behind c named when it was attached to, or "" when it named no
-// account, or c is not an attachment that says.
-func SignedInTo(c daemonclient.Caller) string {
-	ready, ok := ReadyOf(c)
-	if !ok || ready.Account == nil {
-		return ""
-	}
-	return ready.Account.InstanceURL
-}
-
-// ReadyOf is the READY the daemon behind c answered its attach with, when c is an attachment that keeps it.
-func ReadyOf(c daemonclient.Caller) (ipc.Ready, bool) {
-	r, ok := c.(interface{ Ready() ipc.Ready })
-	if !ok {
-		return ipc.Ready{}, false
-	}
-	return r.Ready(), true
+	return ipc.ForInstance(ctx, i.Instance)
 }
 
 // LocalOnly reports whether instanceURL names this machine or its link alone: localhost, a loopback, a

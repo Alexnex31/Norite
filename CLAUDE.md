@@ -2282,21 +2282,29 @@ And on the audio DSP, from M30 (ADR 0036 as amended):
 And on the first run, from the `easier-setup` branch:
 
 - **The first run is `norite setup`**, in `cli/internal/login` beside the commands it runs: register,
-  login, the daemon, then the invite's guild. It calls those flows rather than copies of them, and a step
-  already done is said and skipped. `install.sh` and `install.ps1` run it for their account step, and a
+  login, the daemon, then the invite's guild, with the daemon first when a sign-in is already stored, since
+  it is what can say whether the instance still takes it. It calls those flows rather than copies of them,
+  and a step already done is said and skipped. `install.sh` and `install.ps1` run it for their account step, and a
   package's note names it. A new first-run question goes in it, never back into a script.
 - **An invite link is the instance's address, `/join`, and the guild invite code after `#`.** The code is
   a fragment because a browser never sends one, so a link opened in a browser keeps it out of every log.
-  `norite invite create` and `list` print it, from the instance the daemon named; one naming this machine
-  alone is printed with a warning.
+  `norite invite create` and `list` print it, on the instance that answered (`Response.instance_url`,
+  `daemonclient.CallFrom`), never READY's, which names none while the daemon starts; one naming this
+  machine alone is printed with a warning.
 - **A link is read in one place, `ops.ParseInvite`**, which refuses whatever a link does not need: a
   query, a path not ending at `/join`, a dot segment, a username, and before the `#` any character an
   address is not written with (`linkChar`), since its instance is printed back unquoted in commands to
   paste and `url.Parse` takes `$(…)` in a host. Its instance goes through `ParseInstanceURL`.
-- **A code is sent only to the instance its link names.** `ops.CodeFor` checks the link against the
-  instance the daemon is signed in to, and refuses it, sending nothing, when they differ or the daemon
-  names none yet. The verbs, the client's box and `setup` all go through it. Instances are compared by
-  `ipc.SameInstance`, the one comparison, which the automation port uses too.
+- **A code is sent only to the instance its link names, and the daemon checks it.** The request names the
+  instance (`ipc.Request.instance_url`, put there by `ipc.ForInstance` on the context, which
+  `ops.Invite.Context` does for `PreviewInvite`, `JoinInvite` and `RevokeInvite`), and the relay compares
+  it with the credential it is about to send, after waiting for a daemon still starting, answering
+  `other_instance` with nothing sent when they differ. A client checking against READY refused good links
+  while the daemon started and could not see a sign-in that changed after it. A bare code in `setup` names
+  the instance set up for. Instances are compared by `ipc.SameInstance`, the one comparison, which the
+  automation port uses too: scheme, host without case or a final dot, the port a connection uses (`:443`
+  is none), and path. Both new frame fields are MINOR changes (M20), so the release carrying them is a
+  MINOR one.
 - **A link's instance is confirmed before anything is sent there**, since it decides where a password
   goes. Signing a machine in to another instance than the one stored is asked, default no.
 - **A guild invite never creates an account on an `invite` instance.** The two codes stay apart, and
@@ -2305,17 +2313,20 @@ And on the first run, from the `easier-setup` branch:
 - **A sign-in straight after registering waits for Enter.** One refused on an unconfirmed account mails a
   new link and spends the one registration sent (M10), so trying at once kills the link the person is
   about to open. After a refusal the account exists, so the way on is `norite login`, never `setup` again.
-- **A stored record is not a sign-in the instance accepts.** `setup` asks the daemon, and one that says
-  it is signed out is signed in again. Where the join goes is the socket's answer, never the service
-  manager's.
+- **A stored record is not a sign-in the instance accepts.** `setup` asks the daemon, by a relayed
+  `GET /users/@me` naming the instance, and one that says it is signed out is signed in again; with no
+  daemon to ask it claims nothing either way. Where the join goes is the socket's answer, never the service
+  manager's. The join waits on one attachment, asking again while the daemon answers signed out or signed
+  in elsewhere, both answered without leaving the machine. With `--no-daemon` the socket is asked once.
 - **`GET /join` reads nothing from the request.** It says how to install and run `norite setup`, names the
   instance by `public_base_url` alone, and is mounted unconditionally, with HEAD and `/join/` beside it.
   Its installer commands pin the instance's own release (`releaseTag(meta.Version)`): the newest release
   is otherwise what they install, and before 1.0 an instance refuses another MINOR. Every page shares
   `httpx.PageStyle`.
 - **Testing setup**: `setupInstance` in `setup_test.go` registers and signs in over loopback, and its
-  `Connect` attaches to `daemontest`'s daemon with a READY naming whatever the store holds, as the real
-  daemon reports a moment after a sign-in.
+  `Connect` attaches to `daemontest`'s daemon, which `SignInFrom` makes answer each request as signed in to
+  whatever the store holds then, as the real daemon is a moment after a sign-in, checking a named instance
+  as the relay does. The package's `TestMain` clears `NORITE_INSTANCE` and `NORITE_PASSWORD`.
 
 ## Project-specific skills
 
