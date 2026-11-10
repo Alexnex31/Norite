@@ -107,6 +107,13 @@ type Runner struct {
 	// prints the command to run instead.
 	Daemon Daemon
 
+	// Set by `norite setup`, which runs a sign-in as one of its steps: password is the one just chosen at
+	// registration, so it is not asked again; warned says the plain-HTTP warning has been given; and
+	// skipDaemon leaves the daemon to setup's own step, which asks with the other default.
+	password   string
+	warned     bool
+	skipDaemon bool
+
 	// newClient builds the API client. Indirected for tests; production leaves it nil.
 	newClient func(baseURL string) *client
 	// openBrowser launches the sign-in URL. Indirected for tests; production leaves it nil.
@@ -249,7 +256,7 @@ func (r *Runner) prepare() (session, error) {
 	// Said before anything is typed or any browser opens, never after: the point of a warning is to let
 	// someone stop. It covers both methods deliberately — an OAuth sign-in has no password to expose, and
 	// the exchange code and the token pair cross the same cleartext hop.
-	if apiclient.LooksLikeHTTP(instanceURL) {
+	if apiclient.LooksLikeHTTP(instanceURL) && !r.warned {
 		r.printf("Warning: %s is plain HTTP, so everything this sends — including your credentials —\n"+
 			"crosses the network unencrypted.\n", instanceURL)
 	}
@@ -385,7 +392,9 @@ func (r *Runner) finish(ctx context.Context, s session, pair tokenPair, fallback
 		r.printf("Signed in on %s.\n", s.instanceURL)
 	}
 	r.printf("This device is %q; its credential is stored in %s.\n", s.deviceName, r.Store.SecretLocation())
-	r.daemonAfterSignIn(ctx)
+	if !r.skipDaemon {
+		r.daemonAfterSignIn(ctx)
+	}
 	return nil
 }
 
@@ -456,6 +465,9 @@ func (r *Runner) resolveEmail() (string, error) {
 }
 
 func (r *Runner) resolvePassword() (string, error) {
+	if r.password != "" {
+		return r.password, nil
+	}
 	// The environment first, so a scripted run never depends on a terminal being present.
 	if password := os.Getenv(passwordEnvVar); password != "" {
 		return password, nil

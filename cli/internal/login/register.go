@@ -53,6 +53,9 @@ type Registrar struct {
 	ReadSecret  func(prompt string) (string, error)
 	Interactive bool
 
+	// warned is set by `norite setup`, which has already said the instance is plain HTTP.
+	warned bool
+
 	// newClient builds the API client. Indirected for tests; production leaves it nil.
 	newClient func(baseURL string) *client
 }
@@ -71,55 +74,84 @@ type registrationAccepted struct {
 
 // Run registers the account and says what comes next.
 func (r *Registrar) Run(ctx context.Context) error {
-	instanceURL, err := resolveInstanceURL(r.Options.Instance, r.Previous)
+	reg, err := r.collect()
 	if err != nil {
 		return err
 	}
-	// Before anything is typed, as `norite login` warns: the point is to let somebody stop.
-	if apiclient.LooksLikeHTTP(instanceURL) {
+	message, err := r.submit(ctx, reg, r.Options.InviteCode)
+	if errors.Is(err, errInviteRequired) {
+		// The one refusal worth rewording: the instance's own sentence cannot know which flag this client
+		// takes the code in, or that the instance's operator is who makes one.
+		return errors.New("this instance takes new accounts by invite: pass --invite-code CODE, " +
+			"which its administrator makes with `norite instance invite create`")
+	}
+	if err != nil {
+		return err
+	}
+	r.printf("%s\n", message)
+	r.printf("\nSign in with:\n  norite login --instance %s --email %s\n", reg.instanceURL, termsafe.Text(reg.email))
+	return nil
+}
+
+// registration is one registration's answers, asked once and sent as many times as it takes: `norite setup`
+// sends them again with the instance's invite code when the instance asks for one.
+type registration struct {
+	instanceURL, username, email, password string
+}
+
+// collect works out the instance and asks for the account.
+func (r *Registrar) collect() (registration, error) {
+	instanceURL, err := resolveInstanceURL(r.Options.Instance, r.Previous)
+	if err != nil {
+		return registration{}, err
+	}
+	// Before anything is typed, as `norite login` warns: the point is to let somebody stop. Not again when
+	// `norite setup` has said it already.
+	if apiclient.LooksLikeHTTP(instanceURL) && !r.warned {
 		r.printf("Warning: %s is plain HTTP, so the password you choose crosses the network unencrypted.\n",
 			instanceURL)
 	}
 
 	username, err := r.ask(r.Options.Username, "Username: ", "--username")
 	if err != nil {
-		return err
+		return registration{}, err
 	}
 	email, err := r.ask(r.Options.Email, "Email: ", "--email")
 	if err != nil {
-		return err
+		return registration{}, err
 	}
 	password, err := r.newPassword()
 	if err != nil {
-		return err
+		return registration{}, err
 	}
+	return registration{instanceURL: instanceURL, username: username, email: email, password: password}, nil
+}
 
+// errInviteRequired is the instance's invite_required: registration on it takes an instance invite code.
+var errInviteRequired = errors.New("this instance takes new accounts by invite")
+
+// submit sends reg, with inviteCode if any, and returns the instance's sentence, sanitized. It says either
+// to check the mail or that the account is ready (the instance has no mail relay to verify an address with).
+// It is a stranger's text, so it passes termsafe (rule 19), and it is printed as given rather than branched
+// on: the contract says it is prose, not a signal.
+func (r *Registrar) submit(ctx context.Context, reg registration, inviteCode string) (string, error) {
 	var accepted registrationAccepted
-	api := r.client(instanceURL)
-	_, err = api.DoStatus(ctx, http.MethodPost, "/api/v1/auth/register", "", registerRequest{
-		Username:    username,
-		Email:       email,
-		Password:    password,
-		DisplayName: strings.TrimSpace(r.Options.DisplayName),
-		InviteCode:  strings.TrimSpace(r.Options.InviteCode),
-	}, &accepted)
+	_, err := r.client(reg.instanceURL).DoStatus(ctx, http.MethodPost, "/api/v1/auth/register", "",
+		registerRequest{
+			Username:    reg.username,
+			Email:       reg.email,
+			Password:    reg.password,
+			DisplayName: strings.TrimSpace(r.Options.DisplayName),
+			InviteCode:  strings.TrimSpace(inviteCode),
+		}, &accepted)
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "invite_required" {
-			// The one refusal worth rewording: the instance's own sentence cannot know which flag this
-			// client takes the code in, or that the instance's operator is who makes one.
-			return errors.New("this instance takes new accounts by invite: pass --invite-code CODE, " +
-				"which its administrator makes with `norite instance invite create`")
+			return "", errInviteRequired
 		}
-		return err
+		return "", err
 	}
-
-	// The instance's sentence, which says either to check the mail or that the account is ready (it has no
-	// mail relay to verify an address with). It is a stranger's text, so it passes termsafe (rule 19), and it
-	// is printed as given rather than branched on: the contract says it is prose, not a signal.
-	r.printf("%s\n", termsafe.Text(accepted.Message))
-	r.printf("\nSign in with:\n  norite login --instance %s --email %s\n", instanceURL, termsafe.Text(email))
-	return nil
+	return termsafe.Text(accepted.Message), nil
 }
 
 // ask returns a flag's value, or asks for it, or says which flag would have answered.
