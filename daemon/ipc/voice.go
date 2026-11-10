@@ -4,6 +4,10 @@
 package ipc
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -42,6 +46,69 @@ func VoiceJoinChannel(path string) (string, bool) {
 	return ch, true
 }
 
+// VoiceJoin is the body of a PathVoiceJoin request (M30): which of the DSP's components process the
+// microphone, as the client's config.toml says. A join with no body has every component on.
+//
+// It travels only to a daemon that has answered PathVoice, for the reason the channel id does: a daemon
+// older than these requests would relay the body to its instance with the path (the ledger's entry on the
+// prefix, reopened at M30 for this body). voiceipc.Join carries it on to the worker.
+type VoiceJoin struct {
+	EchoCancellation bool `json:"echo_cancellation"`
+	NoiseSuppression bool `json:"noise_suppression"`
+	AutoGain         bool `json:"auto_gain"`
+}
+
+// VoiceAllOn is every component on: a join with no body, and what a client with no settings sends.
+func VoiceAllOn() VoiceJoin {
+	return VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}
+}
+
+// DecodeVoiceJoin reads a PathVoiceJoin request's body. No body, or null, is every component on. Anything
+// else is an object naming the three switches exactly, each once, each a boolean, and nothing after it: a
+// switch left out would otherwise read as off, which is not what a client that forgot it meant.
+//
+// It walks the tokens rather than decoding into a struct, because encoding/json matches a key in any case,
+// keeps the last of two with one name, and stops before a stray ] or } after the object, and the contract's
+// VoiceJoin refuses all three (M30 /code-review).
+func DecodeVoiceJoin(body json.RawMessage) (VoiceJoin, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return VoiceAllOn(), nil
+	}
+	bad := errors.New("the join's settings must be an object naming echo_cancellation, noise_suppression and " +
+		"auto_gain, each once and true or false, and nothing else")
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return VoiceJoin{}, bad
+	}
+	var out VoiceJoin
+	fields := map[string]*bool{"echo_cancellation": &out.EchoCancellation,
+		"noise_suppression": &out.NoiseSuppression, "auto_gain": &out.AutoGain}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		key, isKey := tok.(string)
+		field, known := fields[key]
+		if err != nil || !isKey || !known || seen[key] {
+			return VoiceJoin{}, bad
+		}
+		seen[key] = true
+		tok, err = dec.Token()
+		value, isBool := tok.(bool)
+		if err != nil || !isBool {
+			return VoiceJoin{}, bad
+		}
+		*field = value
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') || len(seen) != len(fields) {
+		return VoiceJoin{}, bad
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return VoiceJoin{}, bad
+	}
+	return out, nil
+}
+
 // EventVoice tells a watching client that what PathVoice answers has changed: a join began, a call came up,
 // or one ended. It carries an empty object, and the client asks, as for EventUpdate.
 const EventVoice = LocalEventPrefix + "VOICE"
@@ -67,4 +134,7 @@ type VoiceStatus struct {
 	// cannot. Before M33 only a build for M26's harness can.
 	Available   bool   `json:"available"`
 	Unavailable string `json:"unavailable"`
+	// Processing is the call's audio processing as its join asked (M30), while there is a call; nil when
+	// there is none.
+	Processing *VoiceJoin `json:"processing"`
 }

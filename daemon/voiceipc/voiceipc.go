@@ -77,6 +77,11 @@ type Join struct {
 	ICEServers []ICEServer `json:"ice_servers"`
 	// Loopback admits loopback candidates, for an SFU on this machine: M26's harness, and tests.
 	Loopback bool `json:"loopback"`
+	// Processing is which of the DSP's components process the microphone (M30), as the join request
+	// carried it from the client's config.toml. All off still runs RNNoise, for the voice probability the
+	// audio level's V flag follows. The worker converts it to its own dsp.Settings, which has the same
+	// fields, so a field added to one and not the other does not compile.
+	Processing ipc.VoiceJoin `json:"processing"`
 }
 
 // ICEServer is one TURN server, as WebRTC names it.

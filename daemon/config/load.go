@@ -105,6 +105,13 @@ func (c *Config) Clock() string {
 	return s
 }
 
+// On is whether a switch such as KeyVoiceAutoGain is on. A value the file got wrong is a Warning and leaves
+// the default, so this is never asked of anything but On or Off.
+func (c *Config) On(key string) bool {
+	s, _ := c.values[key].(string)
+	return s == On
+}
+
 // Color returns the color for a role key such as KeyColorAccent.
 func (c *Config) Color(key string) Color {
 	col, _ := c.values[key].(Color)

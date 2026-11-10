@@ -64,6 +64,13 @@ const (
 	KeyColorBright = "colors.bright"
 	Clock24h       = "24h"
 	Clock12h       = "12h"
+
+	// A call's audio processing (M30), each On or Off, read by `norite voice join`.
+	KeyVoiceEchoCancellation = "voice.echo_cancellation"
+	KeyVoiceNoiseSuppression = "voice.noise_suppression"
+	KeyVoiceAutoGain         = "voice.auto_gain"
+	On                       = "on"
+	Off                      = "off"
 )
 
 var keys = []Key{
@@ -74,6 +81,13 @@ var keys = []Key{
 	{Name: KeyColorDanger, Section: TUI, Kind: KindColor, Default: "1", Portable: true, Consumer: "M21", Live: true},
 	{Name: KeyColorDim, Section: TUI, Kind: KindColor, Default: "8", Portable: true, Consumer: "M21", Live: true},
 	{Name: KeyColorBright, Section: TUI, Kind: KindColor, Default: "15", Portable: true, Consumer: "M21", Live: true},
+
+	{Name: KeyVoiceEchoCancellation, Section: Shared, Kind: KindEnum, Values: []string{On, Off}, Default: On,
+		Portable: true, Consumer: "M30", Live: true},
+	{Name: KeyVoiceNoiseSuppression, Section: Shared, Kind: KindEnum, Values: []string{On, Off}, Default: On,
+		Portable: true, Consumer: "M30", Live: true},
+	{Name: KeyVoiceAutoGain, Section: Shared, Kind: KindEnum, Values: []string{On, Off}, Default: On,
+		Portable: true, Consumer: "M30", Live: true},
 
 	// Reserved: the format is settled, and nothing reads these until the milestone named.
 	{Name: "theme", Section: TUI, Kind: KindString, Portable: true, Consumer: "M45"},

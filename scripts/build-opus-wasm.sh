@@ -64,6 +64,14 @@ else
 	clang=$work/$wasi_sdk/bin/clang
 	sysroot=$work/$wasi_sdk/share/wasi-sysroot
 fi
+# The libc linked in carries notices too (rule 22), checked against the licences of the libc this wasi-sdk
+# was built from. With another toolchain, development only (above), the notice is still checked against
+# those, and that toolchain's own libc is not.
+if [[ -z ${OPUS_WASM_CLANG:-} ]]; then
+	"$repo/scripts/wasi-libc-notice.sh" "$work/$wasi_sdk"
+else
+	"$repo/scripts/wasi-libc-notice.sh"
+fi
 
 # list <mk file> <variable>: the files a make variable names, one per line.
 list() {
@@ -97,11 +105,13 @@ for f in $files; do
 	o=$work/obj/$(tr / _ <<<"$f").o
 	extra=()
 	[[ $f == silk/NSQ_del_dec.c ]] && extra=(-Os)
-	"$clang" "${cflags[@]}" "${extra[@]}" -c "$src/$f" -o "$o" &
+	# A failed compile leaves a mark: a bare wait returns 0 whatever its jobs did (M30 /code-review).
+	{ "$clang" "${cflags[@]}" "${extra[@]}" -c "$src/$f" -o "$o" || : >"$work/failed"; } &
 	objs+=("$o")
 	while (( $(jobs -r | wc -l) >= $(nproc) )); do wait -n; done
 done
 wait
+[[ ! -e $work/failed ]] || { echo "build-opus-wasm: a compile failed; its error is above" >&2; exit 1; }
 "$clang" "${cflags[@]}" -c "$repo/voiceworker/internal/opus/shim.c" -o "$work/obj/shim.o"
 
 # A reactor: no main, and _initialize runs the constructors. Memory starts at 1 MiB, of which the stack is

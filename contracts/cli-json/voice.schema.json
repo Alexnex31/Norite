@@ -8,10 +8,21 @@
     "status": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state", "channel", "reason", "available", "unavailable"],
+      "required": [
+        "state",
+        "channel",
+        "reason",
+        "available",
+        "unavailable",
+        "processing"
+      ],
       "properties": {
         "state": {
-          "enum": ["idle", "joining", "in_call"],
+          "enum": [
+            "idle",
+            "joining",
+            "in_call"
+          ],
           "description": "idle: no call. joining: a join under way, which another client may have asked for. in_call: connected to the voice server, which has said ready."
         },
         "channel": {
@@ -31,6 +42,34 @@
         "unavailable": {
           "type": "string",
           "description": "Why not, when `available` is false. Empty otherwise."
+        },
+        "processing": {
+          "description": "The call's audio processing as its join asked, from config.toml's voice keys (M30), while there is a call; null when there is none.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "echo_cancellation",
+                "noise_suppression",
+                "auto_gain"
+              ],
+              "properties": {
+                "echo_cancellation": {
+                  "type": "boolean"
+                },
+                "noise_suppression": {
+                  "type": "boolean"
+                },
+                "auto_gain": {
+                  "type": "boolean"
+                }
+              }
+            }
+          ]
         }
       }
     }

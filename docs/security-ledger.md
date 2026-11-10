@@ -1307,6 +1307,12 @@ carries the condition that would reopen it.
   `TestAJoinThisDaemonCannotMakeIsRefusedBeforeTheChannelIsSent`). A channel id would tell the instance
   little it does not know, since the channel is its own; the order is kept anyway, so the condition stays
   one rule rather than a judgement per request.
+- **Reopened at M30, and answered the same way**: the same join carries a body, the first request to the
+  daemon that does: three booleans saying which of the call's audio processing is on, read from the
+  client's `config.toml`. It goes in the same request as the channel, which is sent only to a daemon that
+  answered `GET /@daemon/voice` (`TestTheSettingsAreSentOnlyWithTheChannel`). What an older daemon would
+  have delivered is whether this account cancels echo, suppresses noise and adjusts its gain, which says
+  less than the channel beside it.
 
 ### Which file wins a shared key at unsplit is decided by modification times anything can set
 - **Raised**: M21, while building the toggle; narrowed by `/code-review`
@@ -1948,6 +1954,11 @@ carries the condition that would reopen it.
   - the watchdog that ends a call on a decode that never returns is removed. Without
     `WithCloseOnContextDone`, which costs five times a frame, it is the only bound on a decoder that
     loops.
+- **Checked at M30, and still closed.** The DSP reads the decoded far end, which is other people's
+  audio, and it runs in WebAssembly as the codec does: one `dsp.wasm` that imports nothing, with no host
+  module, an 8 MiB cap, never cached on disk, and every call into it, its construction included, bounded
+  by the same watchdog (`dspCall`). No native twin exists (ADR 0036 as amended). The conditions above
+  apply to it word for word.
 
 ### What the voice server sends is read as fast as it arrives
 - **Raised**: M29, `/security-sweep`
@@ -1993,4 +2004,61 @@ carries the condition that would reopen it.
   bounds what it reads to the samples it asked for. The instance is discarded when the slot changes sender
   (`wasmDecoder.Reset` starts a new one, and a test holds that), so it cannot speak for the next sender.
 - **Reopens if**: a decoder instance is shared between senders, or reused across a change of sender.
+
+## M30 — Audio DSP
+
+### A stranger's audio can switch off a caller's DSP, or end their call
+- **Raised**: M30, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: the echo canceller's reference is the mix of everybody else's decoded audio. A call into the
+  chain that fails or traps drops the chain for the rest of the call, and the caller then sends their
+  microphone unprocessed (`media.process`). An input that made a call never return would end the call
+  through the watchdog, as a stuck decode does. Dropping rather than ending was the design's choice
+  (M30's D1): ending would let anybody who found such an input end everybody's call, and starting the
+  chain again would hand them the same lever on every frame. What the attacker gains is echo or noise in
+  one call they are already in.
+
+  A DSP too slow for real time is dropped as well (`slowDSP`). The DSP's work per frame does not depend on
+  what the audio says, and what a voice server can make the worker do per packet is bounded (M29's entry
+  above). So making a caller's machine that slow means loading it from outside.
+- **Reopens if**:
+  - a dropped DSP is started again within a call;
+  - the DSP's cost per frame comes to depend on its input;
+  - the worker reports the DSP's state to other participants, which would make the switch visible to
+    the one who threw it.
+
+### One DSP instance reads everybody's audio and writes the caller's
+- **Raised**: M30, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: unlike decoders, which are an instance per sender (M29), the DSP is one instance per call. It
+  takes the mix of every participant as its reference, and the caller's microphone as its input, and
+  what it writes is what the caller sends.
+
+  A memory bug in AEC3 or RNNoise that a participant's audio could drive would therefore let them shape
+  what the caller sends: audio attributed to somebody else, in that call. Two things stand in the way.
+  First, what reaches the DSP from a participant is int16 samples their packets decoded to, through
+  libopus in its own instance and a clipped mix, with nothing parsed. Second, the instance reaches its
+  own linear memory alone. The caller's microphone is in that memory, but every participant already hears
+  it.
+
+  An instance per participant is not possible: AEC3 cancels the sum of what the speakers played, which is
+  one signal.
+- **Reopens if**:
+  - the DSP reads anything but samples, such as a packet, a header, or a value a sender chooses directly;
+  - its instance is kept across calls;
+  - it gains a host module.
+
+### RNNoise's tarball is pinned by a digest nobody publishes
+- **Raised**: M30, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: neither xiph nor GitHub publishes a digest for RNNoise 0.2's release tarball. So
+  `scripts/build-dsp-wasm.sh` pins the one taken at M30's spike, and the module built from it is
+  committed and rebuilt byte for byte in CI. A tarball swapped before that spike would be pinned as it
+  was.
+
+  The source was read where the build uses it: `vec.h`, the kernels `vec_wasm.h` mirrors, and the
+  denoiser's entry points. wasi-sdk, the APM (whose digest matches freedesktop's) and abseil are each
+  checked against a published digest.
+- **Reopens if**: xiph publishes a digest or a signature for the release, which the script then checks,
+  or RNNoise moves to a version whose tarball is pinned the same way.
 

@@ -75,8 +75,9 @@ type SignIn struct {
 
 // call is one call's worker and the goroutine that owns it.
 type call struct {
-	channel string
-	cancel  context.CancelFunc
+	channel    string
+	processing ipc.VoiceJoin
+	cancel     context.CancelFunc
 	// worker is set under Voice.mu once started.
 	worker *Worker
 	// finished is closed when the call's goroutine has returned and its worker is reaped.
@@ -129,8 +130,9 @@ type Refusal struct {
 
 func (r *Refusal) Error() string { return r.Msg }
 
-// Join joins channel, ending any call first, and returns once the call is up or has failed.
-func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, error) {
+// Join joins channel, ending any call first, and returns once the call is up or has failed. The worker
+// processes the microphone as processing says.
+func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJoin) (ipc.VoiceStatus, error) {
 	if v.opts.Signaler == nil {
 		return v.Status(), &Refusal{Msg: v.opts.Unavailable, Unavailable: true}
 	}
@@ -153,7 +155,7 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 	v.Leave()
 
 	callCtx, cancel := context.WithCancel(context.Background())
-	c := &call{channel: channel, cancel: cancel, finished: make(chan struct{})}
+	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{})}
 	result := make(chan error, 1)
 	v.mu.Lock()
 	if v.closed {
@@ -171,7 +173,8 @@ func (v *Voice) Join(ctx context.Context, channel string) (ipc.VoiceStatus, erro
 	default:
 	}
 	v.current = c
-	v.status.State, v.status.Channel, v.status.Reason = ipc.VoiceJoining, channel, ""
+	asked := processing
+	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceJoining, channel, "", &asked
 	v.mu.Unlock()
 	v.publish()
 
@@ -245,7 +248,8 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 	}()
 
-	if err := w.Send(voiceipc.OpJoin, voiceipc.Join{ICEServers: orEmpty(route.ICEServers), Loopback: route.Loopback}); err != nil {
+	join := voiceipc.Join{ICEServers: orEmpty(route.ICEServers), Loopback: route.Loopback, Processing: c.processing}
+	if err := w.Send(voiceipc.OpJoin, join); err != nil {
 		<-w.Done()
 		fail(true, "%s", w.Exit().Reason)
 		return
@@ -351,7 +355,7 @@ func (v *Voice) ended(c *call, why string) {
 		return
 	}
 	v.current = nil
-	v.status.State, v.status.Channel, v.status.Reason = ipc.VoiceIdle, "", reason(why)
+	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", reason(why), nil
 	v.mu.Unlock()
 	v.publish()
 }
@@ -384,7 +388,7 @@ func (v *Voice) leave(c *call, why string) ipc.VoiceStatus {
 		return v.Status()
 	}
 	v.current = nil
-	v.status.State, v.status.Channel, v.status.Reason = ipc.VoiceIdle, "", why
+	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", why, nil
 	w := c.worker
 	v.mu.Unlock()
 	v.publish()

@@ -12,6 +12,8 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+
+	"github.com/Alexnex31/Norite/voiceworker/internal/wasmrt"
 )
 
 // module is libopus and shim.c, built by scripts/build-opus-wasm.sh, which CI runs again and compares.
@@ -46,6 +48,7 @@ func New(ctx context.Context) (Codec, error) {
 // newWASM is New on a runtime of the caller's choosing: the differential test runs the module through
 // wazero's interpreter as well, as the reference its compiler must agree with.
 func newWASM(ctx context.Context, cfg wazero.RuntimeConfig) (Codec, error) {
+	wasmrt.Warm() // wazero races on its version cache otherwise (internal/wasmrt)
 	rt := wazero.NewRuntimeWithConfig(ctx, cfg.WithMemoryLimitPages(MemoryPages))
 	cm, err := rt.CompileModule(ctx, module)
 	if err == nil {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio/audiotest"
+	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
 
@@ -39,8 +40,9 @@ func TestWhatACallCosts(t *testing.T) {
 		r := string(rune('0' + room))
 		a := &audiotest.Device{Source: audiotest.Tone(440, 8000)}
 		b := &audiotest.Device{Source: audiotest.Tone(660, 8000)}
-		sa := h.join(t, r, "1", a, Options{Codec: mk})
-		sb := h.join(t, r, "2", b, Options{Codec: mk})
+		// The DSP on, as every call has it from M30: what a call costs is the codec and the chain.
+		sa := h.joinWith(t, r, "1", a, dsp.AllOn(), Options{Codec: mk})
+		sb := h.joinWith(t, r, "2", b, dsp.AllOn(), Options{Codec: mk})
 		time.Sleep(2 * time.Second) // settled
 		before, wall := cpu(), time.Now()
 		time.Sleep(10 * time.Second)

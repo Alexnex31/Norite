@@ -9,6 +9,9 @@ Accepted at M29 (2026-11). **Amends [ADR 0012](0012-voice-in-v1.md)**,
 - **ADR 0034**'s first consequence said the capture library's cgo stops the worker cross-compiling. The
   capture library chosen here has no cgo.
 
+**Amended at M30 (2026-11)**: the audio DSP, RNNoise with WebRTC's APM, runs in WebAssembly too, in one
+module, for the same reasons; [The DSP (M30)](#the-dsp-m30) below records it. The worker still has no cgo.
+
 `architecture.md` §6 and §16 point here.
 
 ## Context
@@ -174,3 +177,176 @@ Switching brings back what this record avoids:
   - The ports found at M29 decode only part of the format, and none encodes.
   - A libopus transpiled to Go (by ccgo, as `modernc.org/sqlite` is) keeps C's memory model behind
     `unsafe`, so it would confine nothing.
+
+## The DSP (M30)
+
+### Context
+- **M30's entry** wires RNNoise and WebRTC's Audio Processing Module, AEC3 and AGC2, in a fixed order:
+  capture → AEC → RNNoise → AGC → encode. ADR 0036 left their place to M30.
+- **A native APM would bring back what this record avoids.** It would bring back the release problem.
+  It would also reopen the ledger's confinement entry, since the APM reads the decoded far end, which is
+  a stranger's audio.
+- **Decided by the author before anything was measured** (2026-11-09):
+  - the threshold: 10% of one core per caller, unpaced, for RNNoise and the APM together, measured as
+    `BenchmarkFrame` measures Opus;
+  - if the APM would not build for WebAssembly, a reduced AEC in WebAssembly, and not a native APM.
+
+### Decision
+**One `dsp.wasm` holds RNNoise 0.2, webrtc-audio-processing 2.1 with abseil 20240722.0, a C++ shim and
+`wasi_stubs.c`. It runs under wazero in the worker, one instance per call.**
+
+- **The build** is `scripts/build-dsp-wasm.sh`:
+  - wasi-sdk 34 and the three tarballs, each pinned by hash;
+  - no meson;
+  - the 203 source files the shim reaches, computed as a closure and committed beside the script;
+  - three one-line patches, which treat wasi as the code already treats Emscripten without threads.
+
+  The module is committed and embedded. CI rebuilds it and fails on a different byte (`just dsp-wasm`,
+  `just dsp-wasm-check`).
+- **It imports nothing**, like libopus's module.
+  - wasi-libc keeps all its `__wasi_*` wrappers in one object, so one reference pulls in every import.
+    `wasi_stubs.c` therefore defines all 22 that libc references before `--gc-sections`:
+    - a clock that never moves;
+    - writes that go nowhere;
+    - exit as a trap.
+  - The spike's output with the stubs was byte-identical to the one reading the real clock over 20 s.
+  - The memory cap is 8 MiB, the module's own declared limit and the worker's.
+- **RNNoise has a WebAssembly SIMD port**, `vec_wasm.h`. It is bit-exact against the plain-C path by
+  construction:
+  - per lane, the same operations in the same order;
+  - no FMA;
+  - standard SIMD128 only, never relaxed-simd.
+
+  CI's codegen job builds the plain-C module and holds the two byte for byte (`just dsp-simd-check`).
+  Offering the file to xiph is the author's step.
+- **The components are exported one by one, and the order is the worker's, in Go**, held by a test that
+  fails when two of them are swapped. The APM's own chain has no place for RNNoise between its echo
+  canceller and its gain, so the instance holds two `AudioProcessing` objects:
+  - one for AEC3 and its high-pass filter;
+  - one for AGC2's adaptive digital gain, never the OS microphone's volume, **starting from no gain**.
+    Its default 15 dB raised the echo canceller's residue while nobody spoke (the manual pass, below).
+
+  AEC3's stream delay is never set, so it starts from its default and estimates.
+- **The DSP runs in `send`**, the one goroutine that enters the instance.
+  - **The reference:** the mix writes what the speakers played into a ring. Each captured frame is
+    stamped with the ring's count, and `send` renders up to the stamp before the frame.
+  - **The stamp is what keeps a sender running behind from rendering ahead.** AEC3 resets its delay
+    estimate when unread render stays above 32 ms for a second (`DetectExcessRenderBlocks`).
+  - **Nothing is dropped before the DSP**, since AEC3 pairs the two directions by order and count. A
+    sender behind skips the encode instead, never twice in a row. The RTP timestamp is the frame's
+    capture number, so a skip leaves a gap the far end reads as DTX.
+- **What fails, how:**
+  - **A call into the chain that fails or traps drops it for the rest of the call**, and the frame goes
+    as captured. The reference is a stranger's audio, so ending the call on its account would let anybody
+    end everybody's.
+  - **A call that never returns, the chain's construction included, ends the call**, through the session's
+    watchdog.
+  - **A DSP that keeps the sender four frames behind for 25 frames in a row is dropped.** Skipping cannot
+    drain a queue the DSP alone keeps full, and a far end sent half the frames hears nothing.
+- **It compiles at every call start, beside the codec, and is not awaited.** It takes about 200 ms, twice
+  the codec, and `send` takes it up when it is ready. It is never cached on disk, for the codec's reason.
+- **The settings:**
+  - three keys, `voice.echo_cancellation`, `voice.noise_suppression` and `voice.auto_gain`, all on by
+    default, read by the client;
+  - carried in the join's body and in the worker's `Join`.
+
+  With noise suppression off, RNNoise still runs for its voice probability, and its output is discarded.
+- **The audio level is computed after AGC2**, on the frame as sent. Its V flag is set when RNNoise's
+  probability reaches 0.5.
+- **No native twin** (unlike Opus). The spike measured native and that measurement is below. A committed
+  twin would bring cgo, a C++ toolchain and abseil into the worker's test builds, and it is the very thing
+  whose arrival reopens the confinement entry. A later milestone that wants one adds a tag and a
+  `native.go`.
+- **wazero v1.12.0 caches its version in an unlocked variable** (`GetWazeroVersion`), which the race
+  detector caught when the codec's and the DSP's runtimes were made on two goroutines.
+  `internal/wasmrt.Warm` makes one runtime first, in both packages. Reporting it upstream is the
+  author's call.
+
+### The measurement
+Same machine as above, pinned to one core.
+
+| Per 10 ms, µs, p50 | native, SIMD | native, no SIMD | WebAssembly | share of one core, WebAssembly |
+|---|---|---|---|---|
+| AEC3 + AGC2 (the APM) | 44 | 120 | 344–349 | 3.5% |
+| RNNoise, plain C | — | 254 | 555–558 | 5.6% |
+| RNNoise, `vec_wasm.h` | 87 | — | 150 | 1.5% |
+
+- **The chain as built: 5.05% of one core per caller, unpaced**, with p50 1,011 µs and p99 1,160 µs per
+  20 ms frame (`BenchmarkChain`). That is half the threshold. Without RNNoise's port it would have been
+  9.1%.
+- **Start: 176 ms** to compile the module and make one chain (`BenchmarkStart`). Making a chain alone
+  takes 1 to 3 ms, and up to 8 under `-race`.
+- **Memory: 3.5 MiB** after 10 s.
+- **Delay: 1,385 samples, 28.9 ms**, which `dsp.Delay` states and a test holds:
+  - RNNoise accounts for 20 ms: one chunk of overlap-add, and one because 0.2 applies each chunk's gains
+    to the chunk before it;
+  - AEC3 accounts for about 9 ms.
+
+  Mouth to ear in process goes from M29's 38–44 ms to 69–73 ms. The latency budget went from 90 to
+  120 ms, and 160 ms with loss, and its test runs without `-race`.
+- **A whole call, paced, costs 19.9% of one core per caller** (`TestWhatACallCosts`), against M29's 8.6%.
+  It is reported, not a trigger, as above.
+- **What it does,** on recorded speech (CC0 and public domain, stored as Opus) and a synthetic room:
+  - far end alone: AEC before RNNoise removes 42–45 dB, the other order 21–29 dB;
+  - two callers through M26's SFU: the first hears themselves about 60 dB below what the second played
+    with AEC alone, and 74–75 dB below, or nothing, with the whole chain;
+  - a starved sender: about 60 dB, where M29's drop-before-the-encoder queue left 13;
+  - rain under a reader: the floor drops 51.5 dB in a pause, and speech stays within 1.6 dB;
+  - AGC2 lifts a quiet speaker from 52.8 to 30.6 −dBov;
+  - V is set on 83% of speech packets and on none of rain's.
+- **The compiler agrees with the interpreter byte for byte**, on amd64 and on `test-arm64`
+  (`TestTheCompilerAgreesWithTheInterpreter`). The interpreter takes 21 ms for the APM's 10 ms and 14 ms
+  for RNNoise's. The test took 345 s under `-race`, which is why both differential tests run in a step
+  without it.
+- **The manual pass**, in two VMs, where a PipeWire loopback played b's speakers into its microphone
+  30 ms later at −10 dB, with a delay that wanders by milliseconds:
+  - with alice speaking and bob silent, alice heard herself 10 dB below what b played with the DSP off;
+  - 45 dB with AEC alone, and 92 dB with AEC and RNNoise;
+  - with everything on, 17 to 21 dB, until AGC2 started from no gain, and 59 to 81 dB after;
+  - in double-talk, bob's sentence reached alice at an envelope correlation of 0.88;
+  - RNNoise took 34 dB off rain in the pauses and moved the speech by 0.4 dB.
+
+  Real speakers, a real microphone and a real room have not been walked.
+- **Not measured:** the Mac, which ran M29's call 1.7 times dearer, and arm64's cost.
+
+### When to change
+On the least capable machine supported, if the chain passes the 10% threshold, measured as above:
+1. **First, the APM's own SIMD gap**, 2.7×: `simd128` kernels for AEC3's matched filter and adaptive FIR,
+   and for pffft.
+2. **Then a narrower chain**, by default or by setting.
+3. **Native last.** It brings back the release problem and reopens the confinement entry, as above.
+
+16 and 32 kHz are not a lever: AEC3 filters in its 16 kHz band whatever the rate, and they saved 1–6%.
+
+### Consequences
+- **The worker still has no cgo, the release does not change, and the confinement entry stays closed.**
+  The cgo permission in CLAUDE.md is unused.
+- **The notices gained RNNoise, the APM and its PATENTS file, PFFFT, Ooura's FFT, `spl_sqrt_floor`, the
+  APM's copy of RNNoise's weights, and abseil.** They also gained wasi-libc, which both modules link and
+  which was missing since M29. `scripts/wasi-libc-notice.sh` fetches its licences at the commit the
+  pinned wasi-sdk names.
+- **M34 inherits mute and deafen against the DSP:**
+  - deafen makes the mix play silence, so nothing stale is cancelled;
+  - mute must keep the chain running and stop only the sending, or AEC3 loses its convergence.
+- **M34 also owns the settings' verbs, and a DSP state the worker reports.** Today the status says what
+  the join asked, and a DSP dropped or never started is in the worker's log alone.
+- **M35's voice detection reads RNNoise's probability**, which runs whatever the settings, and adds the
+  hysteresis the V flag lacks.
+
+### Alternatives rejected
+- **A native APM, by cgo.** The APM costs 7.9 times its native self in WebAssembly, and buys the release
+  problem and the confinement question back.
+- **A reduced AEC built from AEC3's components.** It was the fallback, and is not needed: the whole APM
+  builds, abseil's synchronization included, against wasi-libc's single-threaded stubs.
+- **The APM's own noise suppressor instead of RNNoise.** The entry names RNNoise, and the APM's chain has
+  no place for it between AEC and AGC, which is why the order lives in Go.
+- **Rendering everything played before each frame, without a stamp.** It was built first, and no test
+  saw a difference until one held a sender behind for a second; AEC3 then resets.
+- **AGC2's own initial gain of 15 dB.** With nobody speaking it raised the echo canceller's residue by as
+  much: in a room whose delay wanders, the whole chain removed 8.8 dB of echo where AEC and RNNoise
+  removed 23.9 (`TestAGC2StartsFromNoGain`). From no gain it removes 23.8, and a quiet speaker is raised
+  as far.
+- **AGC2 only on what RNNoise calls a voice.** Tried, and it changed nothing: the leaks that matter are
+  the ones RNNoise calls a voice.
+- **meson in the build.** Its build files cannot be read as text the way libopus's lists can.
+

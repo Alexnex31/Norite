@@ -86,8 +86,9 @@ highest-value surfaces.
 `gofrs/flock`, `modernc.org/sqlite` (E2E keystore, pure Go/no cgo).
 
 **Voice-worker**: Go, `pion/webrtc` + `pion/interceptor`, libopus compiled to WebAssembly under `wazero`
-(ADR 0036, no cgo), pure-Go capture per OS, RNNoise/WebRTC APM (AEC3, M30; AEC3 replaces `libspeexdsp` per
-ADR 0023). The *only* binary in the stack where cgo is permitted, and since M29 it uses none.
+(ADR 0036, no cgo), pure-Go capture per OS, RNNoise and WebRTC's APM (AEC3 and AGC2, replacing `libspeexdsp`
+per ADR 0023) in WebAssembly too since M30. The *only* binary in the stack where cgo is permitted, and since
+M29 it uses none.
 
 **Web SPA** (later, tertiary client): React, TypeScript, Vite, TanStack Query, Zustand, Zod, Tailwind +
 shadcn/ui, `react-hook-form`, Vitest + Playwright.
@@ -221,7 +222,10 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just dev` — run the full local stack (docker-compose: postgres, valkey, backend w/ air; frontend w/ vite
   joins at Phase O)
 - `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
-  differs from CI is not a gate. **Needs a running container runtime**: the backend's integration tests
+  differs from CI is not a gate. Since M30, three of the voice-worker's tests run after the rest without it,
+  in CI too: the two differential tests, which the detector slows eighteenfold through wazero's
+  interpreter, and the latency budget, which times the program the detector slows. **Needs a running
+  container runtime**: the backend's integration tests
   start a real Postgres via `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race detector is
   reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
 - `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
@@ -390,7 +394,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M29 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M30 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -492,6 +496,12 @@ agent never creates a `v*` tag or bumps a version.**
   - wazero's arm64 compiler mistranslated the encoder. This is fixed upstream but not released. A `-Os`
     build of that one file works around it, a differential test holds the compiler to the interpreter,
     and CI's `test-arm64` runs both.
+- **M30 — Audio DSP**: done. RNNoise, AEC3 and AGC2 in one WebAssembly module that imports nothing (ADR 0036
+  as amended), the order in Go, the reference stamped per frame, the settings in `config.toml` and the join.
+  Its reviews found a sender too slow for the DSP mute at the far end, and AEC3 resetting under a sender
+  behind, which brought the stamp back. Its manual pass, in two VMs, found AGC2 raising the echo
+  canceller's residue from its default 15 dB, and help naming keys `norite config` refuses. A real room
+  with real devices has not been walked.
 
 ## What keeps coming back
 
@@ -521,12 +531,18 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   that overlap, a host that serves no archive (M17, M24, M27), a benchmark whose every call failed (M29).
 - **A test's silence is not a device's** (M29). Digital silence hid the comfort noise that real quiet
   makes DTX send, and every talk-spurt played 440 ms late. Feed a test the signal the device delivers.
+- **A test of what is sent is not a test of what is heard** (M30). A sender too slow for real time encoded
+  half its frames, and its test counted encodes, while the far end played silence for ten seconds. Assert
+  at the far end.
+- **A simplification no test can see is not proof it is safe** (M30). The reference's stamp was removed
+  because removing it failed no test, and no test held a sender behind for a second, which is when AEC3
+  resets without it. Ask what regime would need the thing before deleting it.
 - **Code compiled for the host is only as right as the compiler for each architecture** (M29). Hold it to
   a reference byte for byte, on every architecture a release ships.
 - **A stand-in must fail the way the real thing does**: a proxy that forwards the FIN, sequence numbers that
-  jump, a seed whose ids cluster or whose distributions share a modulus (M16, M19, M26). A schema-checked fake
-  cannot see wording or a screen, and a test that feeds a parser raw output has not tested what the runner
-  hands it (M19, M20a, M24).
+  jump, a seed whose ids cluster or whose distributions share a modulus (M16, M19, M26), a room whose
+  delay never moves (M30). A schema-checked fake cannot see wording or a screen, and a test that feeds a
+  parser raw output has not tested what the runner hands it (M19, M20a, M24).
 - **Test the configuration the defaults produce** and the one the documentation tells an operator to write, on
   a machine with more than one interface (M27, M28). Run `-race` and vet every new test file for every OS it
   claims to run on (M27, M28).
@@ -1831,10 +1847,11 @@ And on the client config and the daemon's own requests, from M21:
   status; since M24 also `unreachable`, when the request cannot be carried out yet: the release host could
   not be read, a check is already under way, or the instance has not been heard from. It takes no body and
   carries nothing of the user's in its path, because a daemon older than the prefix relays the path to its
-  instance (ledger). One exception since M22: the port number in `/@daemon/automation/enable/{port}`, sent
-  only after a request that says nothing has shown the daemon knows these requests. `relay.Target` refuses
-  the prefix, and a test holds `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and
-  `LocalRead`.
+  instance (ledger). Two exceptions, each sent only after a request that says nothing has shown the daemon
+  knows these requests: the port number in `/@daemon/automation/enable/{port}` (M22), and the voice join's
+  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly. `relay.Target` refuses the prefix, and a test
+  holds `openapi.yaml` to never using it. The CLI side is `daemonclient.Local`, `LocalWith` for a body,
+  and `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
   which nothing outside the daemon module can import. A write puts back the fields it did not understand.
   A step that must follow the state and not be interleaved with the next update goes in `Update`'s `then`.
@@ -2200,12 +2217,58 @@ And on the audio pipeline, from M29 (ADR 0036):
 - **The notices are each OS's.** `gen-third-party-notices.sh` reads the release targets from
   `.goreleaser.yaml`. It builds each with cgo off, takes the union, and adds the C components in
   `internal/notices/embedded/`. A C library compiled into a module goes there by hand (rule 22).
-- **Latency has a budget**: 38–44 ms mouth to ear in process. `TestMouthToEarStaysWithinItsBudget` fails
-  past 90 ms, and past 130 with loss and jitter. A change on the path, M30's DSP included, is read against it.
+- **Latency has a budget**: 38–44 ms mouth to ear in process at M29, 69–73 ms with M30's DSP, whose 28.9 ms
+  is `dsp.Delay`. `TestMouthToEarStaysWithinItsBudget` fails past 120 ms, and past 160 with loss and
+  jitter: M30 raised it from 90 by the DSP's delay, and runs it without `-race`. A change on the path is
+  read against it.
   - Its clicks are stamped at their own sample, inside their frame, never at the frame.
   - Its quiet is dithered.
 - **Measuring**: `BenchmarkFrame`, `BenchmarkStart` and `BenchmarkReset` in `internal/opus`, and
   `NORITE_MEASURE=1` for what a whole call costs. Pin the run to one core.
+
+And on the audio DSP, from M30 (ADR 0036 as amended):
+
+- **The DSP is `voiceworker/internal/dsp`'s `Module` and `Chain`**, one `dsp.wasm` holding RNNoise 0.2, the
+  APM 2.1 and abseil, built by `scripts/build-dsp-wasm.sh` from pinned tarballs and a committed source list.
+  - It imports nothing: `wasi_stubs.c` defines every libc wrapper, a clock that never moves included.
+    `importsNothing` holds it, with an 8 MiB cap.
+  - CI rebuilds it byte for byte (`just dsp-wasm-check`), holds RNNoise's `vec_wasm.h` to plain C byte for
+    byte (`just dsp-simd-check`), and the compiler to the interpreter on amd64 and arm64.
+  - A change to its sources, patches or flags is a change to what every call runs.
+- **The order is the worker's, in Go**: AEC, then RNNoise, then AGC, each a separate export. The APM's own
+  chain has no place for RNNoise. `TestEchoIsCanceledBeforeRNNoise` fails when two are swapped.
+- **The DSP runs in `send` alone**, and is fed what the speakers played through `refRing`.
+  - Each captured frame carries the ring's count, and `send` renders up to it and no further: AEC3 resets
+    when a sender behind renders ahead.
+  - **Nothing is dropped before the DSP**: AEC3 pairs the two directions by count, and a frame lost
+    shifts the rest. A sender behind skips the encode, never twice in a row.
+  - The RTP timestamp is the frame's capture number, so a skip is a gap the far end reads as DTX.
+- **What fails drops the chain for the rest of the call and never ends it**: a trap, an error, a DSP
+  too slow for real time (`slowDSP` frames behind). The reference is a stranger's audio. The frame
+  goes as captured.
+- **A call into the instance that never returns ends the call**, the chain's construction included,
+  through the watchdog's `dspCall`.
+- **It compiles at every call start, beside the codec, and nothing waits for it**: `send` takes it up
+  with `takeDSP` when it is ready. It is never cached on disk.
+- **Its delay is `dsp.Delay`, 28.9 ms**, which the latency budget counts. A change on the path is read
+  against `TestMouthToEarStaysWithinItsBudget`.
+- **The settings are `voice.*` in `contracts/client-config.toml`.**
+  - The client reads them and the join's body carries them, strictly decoded by `ipc.DecodeVoiceJoin`.
+  - `voiceipc.Join.Processing` takes them to the worker, and `session.New` reads them from the join.
+  - `VoiceStatus.processing` is what was asked, not what runs.
+  - All off still runs RNNoise, for the V flag.
+- **The level is computed after AGC2, and V follows RNNoise's probability at 0.5.**
+- **AGC2 starts from no gain**, not its default 15 dB, which raised the echo canceller's residue while
+  nobody spoke. A change to AGC2's settings is read against `TestAGC2StartsFromNoGain`, whose room's delay
+  wanders as a real loopback's does.
+- **No native twin.** Adding one is a tag and a `native.go`, and it reopens the ledger's confinement entry.
+- **wazero's runtimes are made after `wasmrt.Warm`**: v1.12.0 races on its own version cache.
+- **Testing**:
+  - `audiotest.Room` and `audiotest.Echoing` are a synthetic room and a device that hears its own
+    speakers, with a noise floor;
+  - `recordings` holds the CC0 and public-domain speech and rain, stored as Opus;
+  - `harness.joinWith` sets a call's DSP through its join, as the daemon does.
+- **Measuring**: `BenchmarkChain` and `BenchmarkStart` in `internal/dsp`, pinned to one core.
 
 ## Project-specific skills
 

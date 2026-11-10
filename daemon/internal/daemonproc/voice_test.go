@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +100,104 @@ func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
 	require.Contains(t, st.Reason, "room full")
 }
 
+// countingSignaler refuses every call and counts the routes asked of it: a join that got that far.
+type countingSignaler struct{ routes atomic.Int32 }
+
+func (c *countingSignaler) Route(context.Context, string) (voiceworker.Route, error) {
+	c.routes.Add(1)
+	return voiceworker.Route{}, errRefusing
+}
+
+func (*countingSignaler) Join(context.Context, string, string, string) (string, error) {
+	return "", errRefusing
+}
+
+// The join's body is the client's settings (M30): no body is every switch on, and anything else names all
+// three and nothing more, or the join is refused before it begins. A switch left out would read as off.
+func TestAJoinsSettingsAreDecodedStrictly(t *testing.T) {
+	for _, body := range []string{"", "null", `{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true}`} {
+		if body != "" && body != "null" {
+			matchesDefinition(t, "VoiceJoin", []byte(body))
+		}
+		srv := &countingSignaler{}
+		l := voiceFixture(srv, true)
+		resp := l.Do(context.Background(), ipc.Request{Method: http.MethodPost, Path: ipc.PathVoiceJoin("1"),
+			Body: json.RawMessage(body)})
+		require.NotNil(t, resp.Error, body)
+		require.Equal(t, ipc.RelayFailed, resp.Error.Code, "%s: the join went ahead, to the voice server", body)
+		require.Equal(t, int32(1), srv.routes.Load(), body)
+		// A call that failed takes its settings with it.
+		var st ipc.VoiceStatus
+		require.NoError(t, json.Unmarshal(l.Do(context.Background(),
+			ipc.Request{Method: http.MethodGet, Path: ipc.PathVoice}).Body, &st))
+		require.Equal(t, ipc.VoiceIdle, st.State)
+		require.Nil(t, st.Processing, body)
+	}
+	for _, body := range []string{
+		`{"echo_cancellation":true,"noise_suppression":false}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true,"mute":true}`,
+		`{"echo_cancellation":"on","noise_suppression":false,"auto_gain":true}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true} {}`,
+		`[]`, `true`,
+		// What encoding/json would have taken: a key in another case, a key twice, a stray close after.
+		`{"ECHO_CANCELLATION":false,"noise_suppression":false,"auto_gain":true}`,
+		`{"echo_cancellation":true,"echo_cancellation":false,"noise_suppression":false,"auto_gain":true}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true}]`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true}}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":null}`,
+	} {
+		srv := &countingSignaler{}
+		l := voiceFixture(srv, true)
+		resp := l.Do(context.Background(), ipc.Request{Method: http.MethodPost, Path: ipc.PathVoiceJoin("1"),
+			Body: json.RawMessage(body)})
+		require.NotNil(t, resp.Error, body)
+		require.Equal(t, ipc.RelayBadRequest, resp.Error.Code, body)
+		require.Zero(t, srv.routes.Load(), "%s: refused after the join began", body)
+		require.False(t, l.voice.Busy())
+	}
+}
+
+// The settings the body named are the call's, as its state reports them while the join is under way, and
+// the call's alone: they are gone once it has ended.
+func TestAJoinsSettingsAreTheCalls(t *testing.T) {
+	l := voiceFixture(holdingSignaler{}, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = l.Do(ctx, ipc.Request{Method: http.MethodPost, Path: ipc.PathVoiceJoin("1"),
+			Body: json.RawMessage(`{"echo_cancellation":false,"noise_suppression":true,"auto_gain":false}`)})
+	}()
+	var st ipc.VoiceStatus
+	require.Eventually(t, func() bool {
+		resp := l.Do(context.Background(), ipc.Request{Method: http.MethodGet, Path: ipc.PathVoice})
+		matchesDefinition(t, "VoiceStatus", resp.Body)
+		return json.Unmarshal(resp.Body, &st) == nil && st.State == ipc.VoiceJoining
+	}, 5*time.Second, 5*time.Millisecond)
+	require.Equal(t, &ipc.VoiceJoin{NoiseSuppression: true}, st.Processing)
+	l.voice.Leave()
+	cancel()
+	<-done
+	resp := l.Do(context.Background(), ipc.Request{Method: http.MethodGet, Path: ipc.PathVoice})
+	matchesDefinition(t, "VoiceStatus", resp.Body)
+	require.NoError(t, json.Unmarshal(resp.Body, &st))
+	require.Nil(t, st.Processing)
+}
+
+// What each body decodes to: no body is every switch on, and the rest is what it says.
+func TestAJoinsSettingsAreWhatTheBodySays(t *testing.T) {
+	for body, want := range map[string]ipc.VoiceJoin{
+		"":     {EchoCancellation: true, NoiseSuppression: true, AutoGain: true},
+		"null": {EchoCancellation: true, NoiseSuppression: true, AutoGain: true},
+		` {"echo_cancellation":false,"noise_suppression":true,"auto_gain":false} `: {NoiseSuppression: true},
+		`{"echo_cancellation":false,"noise_suppression":false,"auto_gain":false}`:  {},
+	} {
+		got, err := ipc.DecodeVoiceJoin(json.RawMessage(body))
+		require.NoError(t, err, body)
+		require.Equal(t, want, got, body)
+	}
+}
+
 // A sign-in not read yet answers "unavailable", never "log in", which would replace a good sign-in.
 func TestAJoinBeforeTheSignInIsReadIsUnavailable(t *testing.T) {
 	l := &localRequests{log: zerolog.Nop(), voice: voiceworker.NewVoice(voiceworker.VoiceOptions{
@@ -165,7 +264,7 @@ func TestASignInThatEndsEndsTheCallWithNoGateway(t *testing.T) {
 
 	calls := voiceworker.NewVoice(voiceworker.VoiceOptions{Signaler: holdingSignaler{}, Log: zerolog.Nop(),
 		Account: signedInAccount(src)})
-	go func() { _, _ = calls.Join(context.Background(), "1") }()
+	go func() { _, _ = calls.Join(context.Background(), "1", ipc.VoiceAllOn()) }()
 	require.Eventually(t, calls.Busy, 5*time.Second, 5*time.Millisecond)
 
 	require.NoError(t, store.Clear()) // `norite logout`

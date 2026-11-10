@@ -65,7 +65,11 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 	case req.Path == ipc.PathVoiceLeave:
 		out = l.voice.Leave()
 	case joining:
-		out, err = l.voice.Join(ctx, channel)
+		settings, bad := ipc.DecodeVoiceJoin(req.Body)
+		if bad != nil {
+			return ipc.Failure(ipc.RelayBadRequest, bad.Error())
+		}
+		out, err = l.voice.Join(ctx, channel, settings)
 	default:
 		return ipc.Failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
 	}

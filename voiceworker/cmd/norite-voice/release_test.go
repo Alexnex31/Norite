@@ -38,8 +38,12 @@ func TestTheReleasedWorkerHoldsNoTestDeviceAndNoNativeCodec(t *testing.T) {
 	if !has(mod+"opus") || !has(mod+"audio") || !has("github.com/tetratelabs/wazero") {
 		t.Fatalf("the worker does not import the codec and the devices, so this test sees nothing: %v", deps)
 	}
-	if has(mod + "audio/audiotest") {
-		t.Error("the released worker imports the test device")
+	// Under it too: audiotest/recordings carries the DSP tests' recordings (M30), and a match on the one
+	// path would not see it.
+	for _, d := range deps {
+		if d == mod+"audio/audiotest" || strings.HasPrefix(d, mod+"audio/audiotest/") {
+			t.Errorf("the released worker imports %s, which is for tests", d)
+		}
 	}
 	// A worker with no devices imports audio too, for the type, so the imports cannot tell it apart: which
 	// file the build takes can.

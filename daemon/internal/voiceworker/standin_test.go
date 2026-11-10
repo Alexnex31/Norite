@@ -191,6 +191,14 @@ func standin(mode string) int {
 		switch f.Op {
 		case voiceipc.OpJoin:
 			switch mode {
+			case "processing":
+				// Says what the join asked of its audio processing, into the daemon's log.
+				var j voiceipc.Join
+				if ipc.Decode(f, &j) != nil {
+					return 9
+				}
+				fmt.Printf("processing %t %t %t\n", j.Processing.EchoCancellation, j.Processing.NoiseSuppression,
+					j.Processing.AutoGain)
 			case "panic":
 				panic("a decoder fed something that is not Opus")
 			case "endearly":

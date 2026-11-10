@@ -59,13 +59,19 @@ dev:
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    # The voice-worker's tests of wazero's compiler against its interpreter, and its latency budget, run
+    # after the rest and without -race, as CI runs them: the detector makes the DSP's differential test
+    # eighteen times slower and can find nothing in one goroutine, beside the other packages they starve the
+    # timing-sensitive call tests, and a timing test under -race measures the race detector (M30).
+    differential='^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget)$'
     pids=()
     for m in {{go_modules}}; do
-        (cd "$m" && go test ./... -race 2>&1 | sed "s/^/[$m] /") &
+        (cd "$m" && go test ./... -race -skip "$differential" 2>&1 | sed "s/^/[$m] /") &
         pids+=($!)
     done
     fail=0
     for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    (cd voiceworker && go test ./... -run "$differential" 2>&1 | sed "s/^/[voiceworker] /") || fail=1
     exit $fail
 
 # Fast inner-loop variant of `test`. Not a substitute for it before pushing.
@@ -171,6 +177,33 @@ opus-wasm-check: opus-wasm
         exit 1
     fi
     echo "opus.wasm is the pinned build's"
+
+# Build the voice-worker's DSP module, voiceworker/internal/dsp/dsp.wasm, from RNNoise, WebRTC's audio
+# processing module, abseil and the pinned wasi-sdk, each checked by hash (M30, ADR 0036). Commit the
+# result, which is committed for the reason opus.wasm is.
+dsp-wasm:
+    {{justfile_directory()}}/scripts/build-dsp-wasm.sh
+
+# Fail if the committed module is not what the pinned build produces, as opus-wasm-check does.
+dsp-wasm-check: dsp-wasm
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git diff --quiet -- voiceworker/internal/dsp/dsp.wasm; then
+        echo "voiceworker/internal/dsp/dsp.wasm is not what the pinned build produces — run 'just dsp-wasm' and commit the result" >&2
+        exit 1
+    fi
+    echo "dsp.wasm is the pinned build's"
+
+# Build dsp.wasm's plain-C twin, and require the committed module, whose RNNoise runs SIMD kernels, to
+# compute exactly what it does. CI runs the same.
+dsp-simd-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    {{justfile_directory()}}/scripts/build-dsp-wasm.sh --scalar "$tmp/dsp-scalar.wasm"
+    cd {{justfile_directory()}}/voiceworker
+    NORITE_DSP_SCALAR_WASM="$tmp/dsp-scalar.wasm" go test ./internal/dsp/ -count=1 -run '^TestSIMDAgreesWithPlainC$'
 
 # pnpm audit and Trivy join once frontend/ and a Dockerfile exist.
 

@@ -8,7 +8,8 @@ isolation, and is the reasoning [ADR 0022](0022-access-token-signing-and-scope-m
 
 **Amended by [ADR 0036](0036-opus-in-webassembly.md)** (M29): the voice-worker is no longer "the cgo one".
 Opus runs in WebAssembly, so the bytes strangers send are decoded inside wazero rather than by native code.
-AEC3 still lands in the worker, where cgo remains permitted; whether it runs native is M30's decision.
+AEC3 still lands in the worker, and since M30 it runs in WebAssembly with the rest of the APM and RNNoise
+(ADR 0036 as amended): the permission for cgo stays, unused.
 
 **Amended at M26 (2026-11-02)** in two places, neither changing what authenticates a connection:
 - **The whole SDP offer travels**, not the fingerprint and ufrag alone, and the SFU answers with a whole

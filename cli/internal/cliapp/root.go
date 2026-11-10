@@ -144,7 +144,7 @@ func New(out, errOut io.Writer) *cli.Command {
 			automationcmd.Command(automationcmd.Connector(verbs.Daemon(Version))),
 			logscmd.Command(),
 			updatecmd.Command(updatecmd.Connector(verbs.Daemon(Version))),
-			voicecmd.Command(voicecmd.Connector(verbs.Daemon(Version))),
+			voicecmd.Command(voicecmd.Connector(verbs.Daemon(Version)), voicecmd.FileSettings),
 		}, verbs.Commands(verbs.Daemon(Version))...),
 	}
 	refuseUnknownSubcommands(root.Commands)

@@ -20,9 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio/audiotest"
+	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
 
@@ -56,6 +58,13 @@ func freePort(t *testing.T, network string) int {
 
 func startHarness(t *testing.T) *harness {
 	t.Helper()
+	// The DSP's module is compiled once for the package, and a call does not wait for it, so whichever test
+	// ran first compiled it while its callers spoke: 2.2 s under -race on two idle cores, and on a loaded CI
+	// runner long enough to put the senders behind, skipping frames, inside the window that test measures.
+	// It is compiled here, before any call, so no test pays it.
+	if _, err := sharedDSP(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(t.TempDir(), "voice-sfu")
 	build := exec.Command("go", "build", "-o", bin, "./internal/voice/voicetest/cmd/voice-sfu") //nolint:gosec // fixed
 	build.Dir = filepath.Join("..", "..", "..", "backend")
@@ -129,8 +138,32 @@ type keepOpen struct{ opus.Codec }
 
 func (keepOpen) Close(context.Context) error { return nil }
 
-// join connects a session to room as user, with dev for its microphone and speakers.
+// sharedMod is the DSP's module, compiled once for the package's calls as the codec is.
+var sharedMod = struct {
+	once sync.Once
+	mod  dsp.Module
+	err  error
+}{}
+
+func sharedDSP(context.Context) (dsp.Module, error) {
+	sharedMod.once.Do(func() { sharedMod.mod, sharedMod.err = dsp.New(context.Background()) })
+	return keepModule{sharedMod.mod}, sharedMod.err
+}
+
+type keepModule struct{ dsp.Module }
+
+func (keepModule) Close(context.Context) error { return nil }
+
+// join connects a session to room as user, with dev for its microphone and speakers, and its DSP off, which leaves its samples as M29's were: the tests below that feed a tone hold
+// the codec's path, and RNNoise takes a steady tone for noise. RNNoise still runs, for the V flag. The
+// tests in dsp_e2e_test.go and the latency budget turn the DSP on, through joinWith.
 func (h *harness) join(t *testing.T, room, user string, dev audio.Device, opts Options) *Session {
+	t.Helper()
+	return h.joinWith(t, room, user, dev, dsp.Settings{}, opts)
+}
+
+// joinWith is join with the DSP's components on as p says, carried in the join as the daemon carries them.
+func (h *harness) joinWith(t *testing.T, room, user string, dev audio.Device, p dsp.Settings, opts Options) *Session {
 	t.Helper()
 	var creds struct {
 		Username string   `json:"username"`
@@ -140,13 +173,16 @@ func (h *harness) join(t *testing.T, room, user string, dev audio.Device, opts O
 	if err := h.post("/credentials", map[string]string{"user": user}, &creds); err != nil {
 		t.Fatal(err)
 	}
-	j := voiceipc.Join{Loopback: true}
+	j := voiceipc.Join{Loopback: true, Processing: ipc.VoiceJoin(p)}
 	if len(creds.URLs) > 0 {
 		j.ICEServers = []voiceipc.ICEServer{{URLs: creds.URLs, Username: creds.Username, Credential: creds.Password}}
 	}
 	opts.Version, opts.Device = "dev", dev
 	if opts.Codec == nil {
 		opts.Codec = sharedCodec
+	}
+	if opts.DSP == nil {
+		opts.DSP = sharedDSP
 	}
 	if opts.Log == nil {
 		opts.Log = io.Discard
@@ -454,7 +490,13 @@ func onsets(heard []int16, at []time.Time) []time.Time {
 // the frame's 20 ms of filling, and it measured 38 to 44 ms at two frames deep. The pass found the gap as
 // unexplained latency between two VMs: about 112 ms each way, of which 42 ms is the two devices and the
 // rest is this. The budget leaves room for a loaded CI runner's timers.
-const latencyBudget = 90 * time.Millisecond
+//
+// From M30 the speaking caller's DSP is on, as every call's is, and adds 28.9 ms (dsp.Delay): measured at
+// 69 to 71 ms, and 83 to 104 with the loss. Under -race on a loaded machine it reached 87.5 ms against
+// what was then a 90 ms budget, so the budget rose by the DSP's delay, to keep the room M29 left for a
+// loaded runner, and the test runs without -race, which slows the program it times (the author's call at
+// M30). Run under -race, a timing test measures the race detector.
+const latencyBudget = 120 * time.Millisecond
 
 func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 	if testing.Short() {
@@ -478,7 +520,7 @@ func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 			}
 			a := &audiotest.Device{Source: c.source}
 			b := &audiotest.Device{}
-			h.join(t, "1", "1", a, Options{Lossy: lossy})
+			h.joinWith(t, "1", "1", a, dsp.AllOn(), Options{Lossy: lossy})
 			h.join(t, "1", "2", b, Options{})
 			time.Sleep(9 * time.Second)
 			heard, at := b.Heard()
