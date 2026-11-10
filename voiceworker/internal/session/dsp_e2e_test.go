@@ -47,11 +47,17 @@ func speaksAfter(after time.Duration, pcm []int16) func(int, []int16) {
 func echoRoom() audiotest.Room { return audiotest.Room{Delay: 0.030, Gain: 0.3, RT60: 0.15, Seed: 1} }
 
 // heardBack is how loud what the first caller heard is against what the second played them, in dB, over
-// the 6 s that end skip seconds before what each has heard so far: the echo returned.
+// the 6 s that end skip seconds before what each has heard so far: the echo returned. It is -Inf when the
+// first heard exact silence, which an echo canceled to nothing makes once RNNoise and DTX have their way,
+// and NaN when the second played nothing at all, which says nothing about echo.
 func heardBack(a *audiotest.Device, b *audiotest.Echoing, skip float64) float64 {
 	ha, _ := a.Heard()
 	hb, _ := b.Heard()
-	return 10 * math.Log10(power(ha, 6+skip, skip)/power(hb, 6+skip, skip))
+	played := power(hb, 6+skip, skip)
+	if played == 0 {
+		return math.NaN()
+	}
+	return 10 * math.Log10(power(ha, 6+skip, skip)/played)
 }
 
 // power is the mean power of x from `from` seconds before its end to `to` seconds before it.
@@ -97,8 +103,10 @@ func TestTheFarEndIsNotHeardBackThroughTheRoom(t *testing.T) {
 			speech := 10 * math.Log10(power(ha, 1.5, 0)/(32768*32768))
 			t.Logf("the first caller hears themselves %.1f dB below what the second played, and the second at "+
 				"%.1f dBFS", -back, speech)
-			if math.IsNaN(back) || math.IsInf(back, 0) {
-				t.Fatalf("the echo measured %v: a side heard nothing at all", back)
+			// Exact silence heard back is the echo canceled to nothing, and passes below; the first caller is
+			// held to hearing the second's speech, so it is not a call that carries nothing.
+			if math.IsNaN(back) || math.IsInf(back, 1) {
+				t.Fatalf("the echo measured %v: the second caller's speakers played nothing", back)
 			}
 			if speech < -45 {
 				t.Fatalf("the second caller is heard at %.1f dBFS: is their sender still sending?", speech)
@@ -162,6 +170,9 @@ func TestEchoStaysCanceledWhenTheSenderFallsBehind(t *testing.T) {
 	mu.Unlock()
 	if stalled < 10 {
 		t.Fatalf("the sender stalled %d times, so this tested little", stalled)
+	}
+	if math.IsNaN(back) {
+		t.Fatal("the second caller's speakers played nothing, so the echo measured nothing")
 	}
 	if speech < -45 {
 		t.Fatalf("the second caller is heard at %.1f dBFS: is their sender still sending?", speech)
