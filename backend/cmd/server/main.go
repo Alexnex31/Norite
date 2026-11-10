@@ -69,9 +69,9 @@ func main() {
 func run() error {
 	migrateOnly := flag.Bool("migrate-only", false,
 		"apply pending migrations and exit, without starting the HTTP server "+
-			"(used by `just db-migrate` and, for the flagship, by the Helm pre-upgrade Job)")
+			"(used by \"just db-migrate\" and, for the flagship, by the Helm pre-upgrade Job)")
 	configPath := flag.String("config", "",
-		"path to the instance config file written by `norite instance init`; overrides "+
+		"path to the instance config file written by \"norite instance init\"; overrides "+
 			config.ConfigFileEnvVar+" and the default location. Optional — NORITE_* environment "+
 			"variables alone are a fully supported configuration, and they override this file either way")
 	flag.Parse()
