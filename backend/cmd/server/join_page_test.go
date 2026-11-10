@@ -4,12 +4,14 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,4 +96,56 @@ func TestTheJoinPageIsAGetAlone(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+// TestTheJoinPageAnswersHeadAndATrailingSlash: a chat client links `…/join/#CODE` as readily, and a link
+// previewer asks with HEAD before it fetches. Both get the page, not the API's JSON 404 or 405.
+func TestTheJoinPageAnswersHeadAndATrailingSlash(t *testing.T) {
+	router := readyRouter(t, testConfig())
+	nonce := regexp.MustCompile(`nonce="[^"]*"`)
+	plain := nonce.ReplaceAllString(getJoin(t, router, "/join", "").Body.String(), "")
+
+	slash := getJoin(t, router, "/join/", "")
+	require.Equal(t, http.StatusOK, slash.Code)
+	assert.Equal(t, plain, nonce.ReplaceAllString(slash.Body.String(), ""))
+
+	for _, target := range []string{"/join", "/join/"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, target, nil))
+		assert.Equal(t, http.StatusOK, rec.Code, target)
+		assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"), target)
+	}
+}
+
+// TestTheJoinPagePinsTheInstancesRelease: the installer installs the newest release unless told, and before
+// 1.0 an instance refuses a client of another MINOR or pre-release, so the commands name the instance's own.
+// A build that is not a release pins nothing.
+func TestTheJoinPagePinsTheInstancesRelease(t *testing.T) {
+	assert.Equal(t, "v0.1.2", releaseTag("0.1.2"))
+	assert.Equal(t, "v0.1.0-alpha", releaseTag("0.1.0-alpha"))
+	assert.Empty(t, releaseTag("dev"))
+	assert.Empty(t, releaseTag(""))
+
+	versioned := func(version string) string {
+		t.Helper()
+		router, err := newRouter(routerOptions{Config: testConfig(), Logger: zerolog.New(io.Discard),
+			Health: readyHealth(), Version: version})
+		require.NoError(t, err)
+		return getJoin(t, router, "/join", "").Body.String()
+	}
+	pinned := versioned("0.1.2")
+	assert.Contains(t, pinned, "install.sh | sh -s -- --version v0.1.2</code>")
+	assert.Contains(t, pinned, "install.ps1))) -Version v0.1.2</code>")
+	assert.NotContains(t, pinned, "| iex")
+
+	unpinned := versioned("dev")
+	assert.Contains(t, unpinned, "install.sh | sh</code>")
+	assert.Contains(t, unpinned, "install.ps1 | iex</code>")
+	assert.NotContains(t, unpinned, "--version")
+}
+
+func readyHealth() *health {
+	h := newHealth(&stubPinger{})
+	h.MarkReady()
+	return h
 }

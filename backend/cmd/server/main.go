@@ -289,6 +289,7 @@ func run() error {
 		Tags:             tags.NewHandler(tagService),
 		RateLimitBackend: rateLimitBackend,
 		Gateway:          gw,
+		Version:          meta.Version,
 	})
 	if err != nil {
 		return err

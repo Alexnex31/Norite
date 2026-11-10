@@ -2299,9 +2299,19 @@ And on the first run, from the `easier-setup` branch:
 - **A link's instance is confirmed before anything is sent there**, since it decides where a password
   goes. Signing a machine in to another instance than the one stored is asked, default no.
 - **A guild invite never creates an account on an `invite` instance.** The two codes stay apart, and
-  `setup` asks for the instance's when the instance refuses without it.
+  `setup` asks for the instance's when the instance asks for one or refuses the one given
+  (`invite_required`, `invite_invalid`).
+- **A sign-in straight after registering waits for Enter.** One refused on an unconfirmed account mails a
+  new link and spends the one registration sent (M10), so trying at once kills the link the person is
+  about to open. After a refusal the account exists, so the way on is `norite login`, never `setup` again.
+- **A stored record is not a sign-in the instance accepts.** `setup` asks the daemon, and one that says
+  it is signed out is signed in again. Where the join goes is the socket's answer, never the service
+  manager's.
 - **`GET /join` reads nothing from the request.** It says how to install and run `norite setup`, names the
-  instance by `public_base_url` alone, and is mounted unconditionally. Every page shares `httpx.PageStyle`.
+  instance by `public_base_url` alone, and is mounted unconditionally, with HEAD and `/join/` beside it.
+  Its installer commands pin the instance's own release (`releaseTag(meta.Version)`): the newest release
+  is otherwise what they install, and before 1.0 an instance refuses another MINOR. Every page shares
+  `httpx.PageStyle`.
 - **Testing setup**: `setupInstance` in `setup_test.go` registers and signs in over loopback, and its
   `Connect` attaches to `daemontest`'s daemon with a READY naming whatever the store holds, as the real
   daemon reports a moment after a sign-in.

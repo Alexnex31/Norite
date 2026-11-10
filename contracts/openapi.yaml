@@ -694,11 +694,25 @@ paths:
       security: []
       responses:
         "200":
-          description: The page, the same for every request.
+          description: >
+            The page, the same for every request. When the instance runs a release, its installer commands
+            pin that release's tag, since before 1.0 a client of another MINOR or pre-release is refused. Also
+            served at `/join/`, a link a chat client makes as readily.
           content:
             text/html:
               schema:
                 type: string
+    head:
+      summary: The page an invite link opens (headers only)
+      description: >
+        Identical to `GET /join` with no body, for the link previewers that ask before they fetch. chi routes
+        methods separately, so it is registered explicitly, as `HEAD /healthz` is.
+      operationId: headJoinPage
+      tags: [guilds]
+      security: []
+      responses:
+        "200":
+          description: The page's headers.
   /reset:
     # Served at the instance root, not under /api/v1: this is a page a person opens from an email, not an
     # API a client codegens against, and putting it under the versioned prefix would imply it moves when

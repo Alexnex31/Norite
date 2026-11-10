@@ -29,6 +29,8 @@ type joinPageData struct {
 	// and a page naming it would name wherever a request was aimed (CLAUDE.md, M5). Empty when the operator
 	// set none, and the page then names no address.
 	Instance string
+	// Release is the release tag this instance runs, such as v0.1.2, or "" for a build that is not one.
+	Release string
 }
 
 // The installer commands are upstream's: the scripts verify each archive against the release this project's
@@ -47,9 +49,14 @@ var joinPageTemplate = template.Must(template.New("join").Parse(`<!doctype html>
 <p>Norite is a chat platform used from a terminal{{ if .Instance }}, and this invite is to the instance at
 <code class="code">{{ .Instance }}</code>{{ end }}. The link you opened is the whole invite: keep it.</p>
 <p><strong>1. Install Norite.</strong> On macOS or Linux:</p>
-<p><code class="code">curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh</code></p>
-<p>On Windows, in PowerShell:</p>
-<p><code class="code">irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex</code></p>
+{{ if .Release }}<p><code class="code">curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh -s -- --version {{ .Release }}</code></p>
+{{ else }}<p><code class="code">curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh</code></p>
+{{ end }}<p>On Windows, in PowerShell rather than cmd:</p>
+{{ if .Release }}<p><code class="code">&amp; ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Version {{ .Release }}</code></p>
+<p class="note">This installs {{ .Release }}, the version this instance runs: before 1.0, a client of another
+minor version, or another pre-release, cannot connect to it.</p>
+{{ else }}<p><code class="code">irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex</code></p>
+{{ end }}
 <p><strong>2. Run <code class="code">norite setup</code> followed by the link</strong>, as it is in your
 browser's address bar or in the message it came in, with everything after the <code>#</code>. It creates
 your account or signs you in, and joins the guild.</p>
@@ -59,16 +66,21 @@ instance was not sent it, and cannot tell who opened this page.</p>
 </html>
 `))
 
-// JoinPage serves GET /join.
+// JoinPage serves GET and HEAD /join.
 type JoinPage struct {
 	// Instance is the instance's public_base_url, or "".
 	Instance string
+	// Release is the release tag this instance runs, or "" for a build that is not a release. The installer
+	// commands pin it: they install the newest release otherwise, which before 1.0 an instance of another
+	// MINOR, or of another pre-release, refuses (gatewayproto.Check).
+	Release string
 }
 
 func (p JoinPage) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	if err := joinPageTemplate.Execute(w, joinPageData{Nonce: httpx.NonceFrom(r.Context()), Instance: p.Instance}); err != nil {
+	data := joinPageData{Nonce: httpx.NonceFrom(r.Context()), Instance: p.Instance, Release: p.Release}
+	if err := joinPageTemplate.Execute(w, data); err != nil {
 		// The status is written; a failed write is a client that went away.
 		logging.FromContext(r.Context()).Debug().Err(err).Msg("writing the invite page failed")
 	}
