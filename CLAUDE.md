@@ -2290,8 +2290,9 @@ And on the first run, from the `easier-setup` branch:
   `norite invite create` and `list` print it, from the instance the daemon named; one naming this machine
   alone is printed with a warning.
 - **A link is read in one place, `ops.ParseInvite`**, which refuses whatever a link does not need: a
-  query, a path not ending at `/join`, a dot segment, a username. Its instance goes through
-  `ParseInstanceURL`.
+  query, a path not ending at `/join`, a dot segment, a username, and before the `#` any character an
+  address is not written with (`linkChar`), since its instance is printed back unquoted in commands to
+  paste and `url.Parse` takes `$(…)` in a host. Its instance goes through `ParseInstanceURL`.
 - **A code is sent only to the instance its link names.** `ops.CodeFor` checks the link against the
   instance the daemon is signed in to, and refuses it, sending nothing, when they differ or the daemon
   names none yet. The verbs, the client's box and `setup` all go through it. Instances are compared by

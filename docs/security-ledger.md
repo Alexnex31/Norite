@@ -2062,3 +2062,50 @@ carries the condition that would reopen it.
 - **Reopens if**: xiph publishes a digest or a signature for the release, which the script then checks,
   or RNNoise moves to a version whose tarball is pinned the same way.
 
+
+## easier-setup — the first run and invite links
+
+### A link's instance can read as another instance
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `ops.ParseInvite` takes any host `ParseInstanceURL` takes, so a stranger's link can name
+  `chat.example.com.evil.example` or a name in another script that looks like a known one, and
+  `norite setup` would send a registration or a password there. What stands in the way is the question
+  `setup` asks before anything is sent, which names the link's instance, and the M7 rule that refuses
+  anything unprintable or invisible in it. That is the same defence a typed `--instance` has had since
+  M7, and refusing names in other scripts would refuse the instances whose names are written in them.
+- **Reopens if**: `setup` stops confirming a link's instance, or anything follows a link with nobody
+  asked, such as a URL handler registered for `/join` links.
+
+### An invite link given to `norite setup` is in the process list and the shell history
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: a guild invite code is made to be sent in a message. It is bounded by its own expiry and
+  uses, it joins a guild the inviter chose to open, and it needs an account to spend (M20a). A code
+  another user of the machine reads from the process list is one they could have been sent. The
+  instance's own invite code (`--invite-code`) is a flag on `norite register` since M10 and `setup`
+  asks for it when none is given.
+- **Reopens if**: a link starts carrying anything that grants more than a guild's membership, such as
+  the instance's own invite code or a sign-in.
+
+### The sign-in can change between a verb's attach and its request
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `ops.CodeFor` compares a link with the instance the daemon named in its READY, and a verb's
+  attachment asks for no events, so it is not closed when the daemon signs in elsewhere. A `norite login`
+  in another terminal landing between the two sends the code to the new instance. Only the account's own
+  programs reach the attach socket (OS permissions, rule 16), so whoever moved the sign-in is the person
+  sending the code.
+- **Reopens if**: invite redemption becomes reachable from the automation port or another tier below the
+  account's own programs, or the attach socket stops being OS-permission-protected.
+
+### The invite page tells strangers which commands to run
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `GET /join` names upstream's installers, fetched from GitHub over TLS, which check each archive
+  against the cosign identity pinned in them (M20a). It interpolates only `public_base_url` and a release
+  tag that `gatewayproto.ParseVersion` accepted, through `html/template`, and reads nothing from the
+  request. An operator can change what their own page says, which is true of any page an instance serves
+  and gives them nothing they did not already have: they choose where the account's password goes.
+- **Reopens if**: the page names a host other than upstream for an installer, serves an installer itself,
+  or renders anything taken from the request or from a member.

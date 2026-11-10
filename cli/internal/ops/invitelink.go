@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/daemon/credentials"
@@ -82,10 +84,14 @@ func ParseInvite(raw string) (Invite, error) {
 		s = "https://" + s
 	}
 	// A quote is refused so that a link can always be printed back inside single quotes, as a command to
-	// paste. A percent-encoded path is refused because the instance is rebuilt from the decoded one, where a
-	// %3F or %23 would turn into a query or a fragment that ParseInstanceURL drops without a word.
+	// paste. Before the code, only what an instance's address is written with is taken (linkChar), because
+	// that address is printed back unquoted, in `norite login --instance …` for one, and url.Parse lets a
+	// host or a path hold `$(…)`, backquotes, `;` and spaces: a stranger's link would otherwise put a
+	// command in a line the person is told to paste. It refuses a percent-encoded path too, which matters
+	// because the instance is rebuilt from the decoded one, where a %3F or %23 would turn into a query or a
+	// fragment that ParseInstanceURL drops without a word.
 	beforeCode, _, _ := strings.Cut(s, "#")
-	if strings.ContainsRune(s, '\'') || strings.Contains(beforeCode, "%") {
+	if strings.ContainsRune(s, '\'') || strings.ContainsFunc(beforeCode, func(r rune) bool { return !linkChar(r) }) {
 		return Invite{}, errNotAnInvite
 	}
 	u, err := url.Parse(s)
@@ -108,6 +114,19 @@ func ParseInvite(raw string) (Invite, error) {
 		return Invite{}, fmt.Errorf("that link does not name a usable instance: %w", err)
 	}
 	return Invite{Instance: instance, Code: u.Fragment}, nil
+}
+
+// linkChar reports whether r may appear in a link before its code: what a scheme, a host, a port, an IPv6
+// literal and a path are written with, '@' so that a username is refused with its own message below, and the
+// letters, digits and marks of a name in another script. None of them means anything to a shell.
+func linkChar(r rune) bool {
+	switch {
+	case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		return true
+	case r < utf8.RuneSelf:
+		return strings.ContainsRune("-._~:/[]@", r)
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
 }
 
 // typedCode reports whether s could be a code somebody typed or pasted: letters, digits, dashes, spaces and
