@@ -81,6 +81,13 @@ func ParseInvite(raw string) (Invite, error) {
 		// As ParseInstanceURL reads a bare host: https, so a slip cannot downgrade the connection.
 		s = "https://" + s
 	}
+	// A quote is refused so that a link can always be printed back inside single quotes, as a command to
+	// paste. A percent-encoded path is refused because the instance is rebuilt from the decoded one, where a
+	// %3F or %23 would turn into a query or a fragment that ParseInstanceURL drops without a word.
+	beforeCode, _, _ := strings.Cut(s, "#")
+	if strings.ContainsRune(s, '\'') || strings.Contains(beforeCode, "%") {
+		return Invite{}, errNotAnInvite
+	}
 	u, err := url.Parse(s)
 	if err != nil || u.RawQuery != "" || u.ForceQuery {
 		return Invite{}, errNotAnInvite
@@ -103,15 +110,15 @@ func ParseInvite(raw string) (Invite, error) {
 	return Invite{Instance: instance, Code: u.Fragment}, nil
 }
 
-// typedCode reports whether s could be a code somebody typed or pasted: letters, digits, dashes and spaces,
-// within maxTypedCode.
+// typedCode reports whether s could be a code somebody typed or pasted: letters, digits, dashes, spaces and
+// tabs, within maxTypedCode. The separators are the ones the instance strips (auth.ParseInviteCode).
 func typedCode(s string) bool {
 	if s == "" || len(s) > maxTypedCode {
 		return false
 	}
 	for _, r := range s {
 		switch {
-		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == ' ':
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == ' ', r == '\t':
 		default:
 			return false
 		}
@@ -150,11 +157,20 @@ func CodeFor(raw, signedIn string) (string, error) {
 // SignedInTo is the instance the daemon behind c named when it was attached to, or "" when it named no
 // account, or c is not an attachment that says.
 func SignedInTo(c daemonclient.Caller) string {
-	r, ok := c.(interface{ Ready() ipc.Ready })
-	if !ok || r.Ready().Account == nil {
+	ready, ok := ReadyOf(c)
+	if !ok || ready.Account == nil {
 		return ""
 	}
-	return r.Ready().Account.InstanceURL
+	return ready.Account.InstanceURL
+}
+
+// ReadyOf is the READY the daemon behind c answered its attach with, when c is an attachment that keeps it.
+func ReadyOf(c daemonclient.Caller) (ipc.Ready, bool) {
+	r, ok := c.(interface{ Ready() ipc.Ready })
+	if !ok {
+		return ipc.Ready{}, false
+	}
+	return r.Ready(), true
 }
 
 // LocalOnly reports whether instanceURL names this machine or its link alone: localhost, a loopback, a

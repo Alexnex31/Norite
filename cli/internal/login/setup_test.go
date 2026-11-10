@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
@@ -35,8 +37,10 @@ type setupInstance struct {
 	// registers and logins are what each endpoint received, in order.
 	registers []registerRequest
 	logins    []loginRequest
-	// inviteOnly answers invite_required to a registration without invite_code.
+	// inviteOnly answers invite_required to a registration without invite_code, and with validCode set,
+	// invite_invalid to one with any other.
 	inviteOnly bool
+	validCode  string
 	// refuseLogins is how many sign-ins are refused before one is accepted.
 	refuseLogins int
 	// requests counts every request, so a test can assert nothing reached the instance.
@@ -52,12 +56,17 @@ func newSetupInstance(t *testing.T) *setupInstance {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.mu.Lock()
 		f.registers = append(f.registers, req)
-		inviteOnly := f.inviteOnly
+		inviteOnly, valid := f.inviteOnly, f.validCode
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if inviteOnly && req.InviteCode == "" {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":{"code":"invite_required","message":"an invite code is required"}}`))
+			return
+		}
+		if inviteOnly && valid != "" && req.InviteCode != valid {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"invite_invalid","message":"that invite code is not valid"}}`))
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
@@ -107,6 +116,9 @@ type fakeService struct {
 	state            DaemonState
 	installs, starts int
 	installErr       error
+	// slowToSay leaves the state as it was after a successful install, as a service manager that has not
+	// reported the unit active yet does.
+	slowToSay bool
 }
 
 func (d *fakeService) State(context.Context) DaemonState { return d.state }
@@ -117,7 +129,9 @@ func (d *fakeService) Install(_ context.Context, out io.Writer) error {
 		return d.installErr
 	}
 	_, _ = io.WriteString(out, "Installed the daemon.\n")
-	d.state = DaemonRunning
+	if !d.slowToSay {
+		d.state = DaemonRunning
+	}
 	return nil
 }
 
@@ -174,7 +188,9 @@ func newSetupRun(t *testing.T, f *setupInstance, opts SetupOptions, lines, secre
 			return run.daemon.Attach(ready, false), func() {}, nil
 		},
 		browserReachable: func() bool { return true },
-		pollEvery:        time.Millisecond, waitFor: 200 * time.Millisecond,
+		// Never a real browser: a guard removed in a mutation once sent a provider sign-in to the desktop's.
+		openBrowser: func(context.Context, string) error { return errors.New("no browser in tests") },
+		pollEvery:   time.Millisecond, waitFor: 200 * time.Millisecond,
 	}
 	return run
 }
@@ -219,7 +235,7 @@ func TestANewcomerWithALinkEndsInTheGuild(t *testing.T) {
 	f := newSetupInstance(t)
 	link := f.server.URL + "/join#bcdf-ghjk-mnpq-rstv"
 	run := newSetupRun(t, f, SetupOptions{Invite: link},
-		[]string{"", "", "ada", "ada@example.com", "", ""}, []string{"a correct passphrase", "a correct passphrase"})
+		[]string{"", "", "ada", "ada@example.com", "", "", ""}, []string{"a correct passphrase", "a correct passphrase"})
 	run.daemon.On("previewInvite", daemontest.OK(preview("Tea Room"))).
 		On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
 
@@ -252,6 +268,7 @@ func TestANewcomerWithALinkEndsInTheGuild(t *testing.T) {
 		"The invite is for " + f.server.URL + ": your account and password go there. Is that the instance you meant? [Y/n] ",
 		"Do you already have an account on " + f.server.URL + "? [y/N] ",
 		"Username: ", "Email: ",
+		"Press Enter to sign in, once you have opened the link if it emailed you one: ",
 		"Install and start it? [Y/n] ",
 		"Join it? [Y/n] ",
 	}, run.lines.asked)
@@ -308,7 +325,7 @@ func TestAnInviteOnlyInstanceAsksForItsCodeAndSendsTheAnswersAgain(t *testing.T)
 	f := newSetupInstance(t)
 	f.inviteOnly = true
 	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, NoDaemon: true},
-		[]string{"", "ada", "ada@example.com", "QQQNBQQMGYTMQRMX"}, []string{"a correct passphrase", "a correct passphrase"})
+		[]string{"", "ada", "ada@example.com", "QQQNBQQMGYTMQRMX", ""}, []string{"a correct passphrase", "a correct passphrase"})
 
 	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
 	registers, logins, _ := f.seen()
@@ -328,7 +345,7 @@ func TestASignInRefusedAfterRegisteringIsTriedAgain(t *testing.T) {
 	f := newSetupInstance(t)
 	f.refuseLogins = 1
 	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, NoDaemon: true},
-		[]string{"", "ada", "ada@example.com", ""}, []string{"a correct passphrase", "a correct passphrase"})
+		[]string{"", "ada", "ada@example.com", "", ""}, []string{"a correct passphrase", "a correct passphrase"})
 	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
 	_, logins, _ := f.seen()
 	assert.Len(t, logins, 2)
@@ -337,11 +354,11 @@ func TestASignInRefusedAfterRegisteringIsTriedAgain(t *testing.T) {
 	g := newSetupInstance(t)
 	g.refuseLogins = 100
 	stuck := newSetupRun(t, g, SetupOptions{Instance: g.server.URL, NoDaemon: true},
-		[]string{"", "ada", "ada@example.com", "", ""}, []string{"a correct passphrase", "a correct passphrase"})
+		[]string{"", "ada", "ada@example.com", "", "", ""}, []string{"a correct passphrase", "a correct passphrase"})
 	err := stuck.setup.Run(context.Background())
-	require.EqualError(t, err, "the instance still refuses the sign-in. If it emailed you a link, open it, then "+
-		"run `norite setup` again; if that address already had an account, sign in with its own password: "+
-		"`norite login`")
+	require.EqualError(t, err, "the instance still refuses the sign-in. If it emailed you a link, open the newest "+
+		"one, then sign in with `norite login --instance "+g.server.URL+" --email ada@example.com`; if that "+
+		"address already had an account, the same command signs in with its own password")
 	_, logins, _ = g.seen()
 	assert.Len(t, logins, signInAttempts)
 }
@@ -386,7 +403,7 @@ func TestTheGuildIsJoinedOnlyOnceTheDaemonNamesTheLinksInstance(t *testing.T) {
 	require.NoError(t, run.setup.Run(context.Background()))
 	assert.Empty(t, run.daemon.Requests())
 	assert.Contains(t, run.out.String(), "the daemon did not take the sign-in up within 200ms; `norite daemon status` "+
-		"says where it stands. Join it once the daemon runs: `norite invite join "+f.server.URL+"/join#BCDFGHJKMNPQRSTV`.")
+		"says where it stands. Join it once the daemon runs: `norite invite join '"+f.server.URL+"/join#BCDFGHJKMNPQRSTV'`.")
 }
 
 // TestAProviderSignInIsNotAskedAboutAnAccount: a provider creates the account in the browser when there is
@@ -441,4 +458,173 @@ func TestWithNothingNamingTheInstanceItIsAsked(t *testing.T) {
 	empty := newSetupRun(t, f, SetupOptions{NoDaemon: true}, []string{""}, nil)
 	assert.EqualError(t, empty.setup.Run(context.Background()), "an instance address is required: the person "+
 		"who invited you, or the instance's administrator, has it")
+}
+
+// TestARefusedInstanceCodeIsAskedForAgain: the instance answers a wrong code invite_invalid, not
+// invite_required, and a guild invite's code typed there is the usual mistake. The code is asked for again,
+// the same answers sent with it.
+func TestARefusedInstanceCodeIsAskedForAgain(t *testing.T) {
+	f := newSetupInstance(t)
+	f.inviteOnly, f.validCode = true, "QQQNBQQMGYTMQRMX"
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, NoDaemon: true, InviteCode: "BCDFGHJKMNPQRSTV"},
+		[]string{"", "ada", "ada@example.com", "QQQNBQQMGYTMQRMX", ""}, []string{"a correct passphrase", "a correct passphrase"})
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	registers, logins, _ := f.seen()
+	require.Len(t, registers, 2)
+	assert.Equal(t, "BCDFGHJKMNPQRSTV", registers[0].InviteCode)
+	assert.Equal(t, "QQQNBQQMGYTMQRMX", registers[1].InviteCode)
+	assert.Len(t, logins, 1)
+	assert.Contains(t, run.out.String(), "the instance did not accept that instance invite code: it is mistyped, "+
+		"used up or expired, or it is a guild invite's.\n")
+
+	g := newSetupInstance(t)
+	g.inviteOnly, g.validCode = true, "QQQNBQQMGYTMQRMX"
+	wrong := newSetupRun(t, g, SetupOptions{Instance: g.server.URL, NoDaemon: true},
+		[]string{"", "ada", "ada@example.com", "AAAA", "BBBB", "CCCC"}, []string{"a correct passphrase", "a correct passphrase"})
+	assert.EqualError(t, wrong.setup.Run(context.Background()),
+		"the instance did not accept an instance invite code; nothing was created")
+	registers, _, _ = g.seen()
+	assert.Len(t, registers, 1+inviteCodeAttempts)
+}
+
+// TestTheFirstSignInWaitsForTheLinkToBeOpened: a sign-in refused on an unconfirmed account mails a new link
+// and spends the one registration sent, so nothing signs in until the person has had the chance to open it.
+func TestTheFirstSignInWaitsForTheLinkToBeOpened(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, NoDaemon: true}, nil,
+		[]string{"a correct passphrase", "a correct passphrase"})
+	answers := []string{"", "ada", "ada@example.com", ""}
+	loginsAtEnter := -1
+	run.setup.ReadLine = func(prompt string) (string, error) {
+		if strings.HasPrefix(prompt, "Press Enter to sign in") {
+			_, logins, _ := f.seen()
+			loginsAtEnter = len(logins)
+		}
+		a := answers[0]
+		answers = answers[1:]
+		return a, nil
+	}
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Zero(t, loginsAtEnter, "no sign-in before Enter")
+	_, logins, _ := f.seen()
+	assert.Len(t, logins, 1)
+}
+
+// TestAStoredSignInTheDaemonCallsSignedOutIsSignedInAgain: a record is not a sign-in the instance accepts.
+func TestAStoredSignInTheDaemonCallsSignedOutIsSignedInAgain(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, NoDaemon: true}, []string{"ada@example.com"},
+		[]string{"a correct passphrase"})
+	seed(t, run.store, f.server.URL, "ada")
+	run.setup.Connect = func(context.Context) (daemonclient.Caller, func(), error) {
+		return run.daemon.Attach(ipc.Ready{Standing: ipc.StandingSignedOut, Guilds: []ipc.GuildSummary{}}, false),
+			func() {}, nil
+	}
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Contains(t, run.out.String(), "the daemon says the instance no longer accepts it. Signing in again.")
+	_, logins, _ := f.seen()
+	assert.Len(t, logins, 1)
+	assert.NotContains(t, run.out.String(), "Signed in as @ada already.")
+}
+
+// TestTheGuildIsJoinedWhateverTheServiceManagerSays: a manager that cannot be asked, or that has not caught
+// up with an install, says nothing about the socket, which is what the join asks.
+func TestTheGuildIsJoinedWhateverTheServiceManagerSays(t *testing.T) {
+	for name, prepare := range map[string]func(*setupRun){
+		"unknown":           func(r *setupRun) { r.service.state = DaemonUnknown },
+		"installed, unsaid": func(r *setupRun) { r.service.slowToSay = true },
+	} {
+		f := newSetupInstance(t)
+		run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, []string{"", ""}, nil)
+		seed(t, run.store, f.server.URL, "ada")
+		prepare(run)
+		run.daemon.On("previewInvite", daemontest.OK(preview("Tea Room"))).
+			On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
+		require.NoError(t, run.setup.Run(context.Background()), "%s: %s", name, run.out.String())
+		assert.Len(t, requestsTo(run.daemon, "redeemInvite"), 1, name)
+	}
+}
+
+// TestADaemonThatCannotBeReachedSaysWhy: the attach's own error, such as a version to restart, is the
+// reason given, not that a sign-in was not taken up.
+func TestADaemonThatCannotBeReachedSaysWhy(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, nil, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonRunning
+	run.setup.Connect = func(context.Context) (daemonclient.Caller, func(), error) {
+		return nil, nil, clierr.Unavailable("the daemon is version 0.2.0 and this client 0.3.0; restart the daemon")
+	}
+	require.NoError(t, run.setup.Run(context.Background()))
+	assert.Contains(t, run.out.String(), "the daemon could not be reached within 200ms: the daemon is version 0.2.0 "+
+		"and this client 0.3.0; restart the daemon. Join it once the daemon runs")
+}
+
+// TestFlagsTheSignInCannotUseAreUsageErrors: as `norite login` refuses them, and --invite-code beside a
+// browser's sign-in, which would never send it.
+func TestFlagsTheSignInCannotUseAreUsageErrors(t *testing.T) {
+	for _, opts := range []SetupOptions{
+		{Provider: "github", Email: "ada@example.com"},
+		{DeviceCode: true, Email: "ada@example.com"},
+		{Provider: "google", InviteCode: "QQQNBQQMGYTMQRMX"},
+		{DeviceCode: true, InviteCode: "QQQNBQQMGYTMQRMX"},
+	} {
+		f := newSetupInstance(t)
+		opts.Instance = f.server.URL
+		run := newSetupRun(t, f, opts, nil, nil)
+		// Bounded, so that the refusal removed fails this test rather than hanging it in a sign-in.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := run.setup.Run(ctx)
+		cancel()
+		var usage *clierr.UsageError
+		require.ErrorAs(t, err, &usage, "%+v", opts)
+		assert.Empty(t, run.lines.asked, "%+v", opts)
+		_, _, requests := f.seen()
+		assert.Zero(t, requests, "%+v", opts)
+	}
+}
+
+// TestARefusedInviteKeepsItsExitCode: an expired invite is a refusal, exit 4, as `norite invite join` reports
+// it, and the codes the verbs give are kept through setup's own wrapping.
+func TestARefusedInviteKeepsItsExitCode(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, nil, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonRunning
+	run.daemon.On("previewInvite", func(daemontest.Request) (int, any) {
+		return 404, map[string]any{"error": map[string]any{"code": "not_found", "message": "not found",
+			"request_id": "req-1"}}
+	})
+	err := run.setup.Run(context.Background())
+	var refused *clierr.RefusedError
+	require.ErrorAs(t, err, &refused)
+	require.ErrorAs(t, setupExit(err), &refused)
+
+	for _, kept := range []error{clierr.Usage("u"), clierr.Unavailable("u"), fmt.Errorf("%w: x", ErrNoTerminal)} {
+		assert.Same(t, kept, setupExit(kept))
+	}
+	var coder cli.ExitCoder
+	require.ErrorAs(t, setupExit(errors.New("plain")), &coder)
+	assert.Equal(t, 1, coder.ExitCode())
+	assert.NoError(t, setupExit(nil))
+}
+
+// TestAnInviteToJoinLaterIsPrintedQuoted: a code may hold spaces, and a link a '#' some shells read.
+func TestAnInviteToJoinLaterIsPrintedQuoted(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL, Invite: "PGTQ RBXG TCDF FWBH"}, []string{"n"}, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonAbsent
+	require.NoError(t, run.setup.Run(context.Background()))
+	assert.Contains(t, run.out.String(), "Join it once the daemon runs: `norite invite join 'PGTQ RBXG TCDF FWBH'`.")
+}
+
+// TestAPreviewSaysWhatInviteShowSays: the expiry and the description, which a person deciding to join reads.
+func TestAPreviewSaysWhatInviteShowSays(t *testing.T) {
+	p := preview("Tea Room")
+	at := time.Date(2026, 10, 11, 12, 26, 0, 0, time.Local)
+	description := "a quiet \x1b[2Jroom"
+	p.ExpiresAt, p.Guild.Description = &at, &description
+	assert.Equal(t, "The invite leads to Tea Room, #general, invited by Alice (@alice), and expires 2026-10-11 12:26."+
+		"\n  a quiet \ufffd[2Jroom", describePreview(p))
 }

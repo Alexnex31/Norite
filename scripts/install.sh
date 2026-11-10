@@ -227,7 +227,7 @@ setup_account() {
     if ! have_tty; then
         say ""
         say "No terminal to ask on, so no account was set up. When you are ready:"
-        say "  norite setup${invite:+ $invite}"
+        say "  norite setup${invite:+ '$invite'}"
         return 0
     fi
     # norite setup asks the questions, and is what the person runs again later: the instance, the account,
@@ -239,7 +239,7 @@ setup_account() {
     [ "$daemon" = 1 ] || set -- "$@" --no-daemon
     [ -n "$invite" ] && set -- "$@" "$invite"
     "$norite" "$@" </dev/tty ||
-        warn "setup did not finish. Run it again with: norite setup${invite:+ $invite}"
+        warn "setup did not finish. Run it again with: norite setup${invite:+ '$invite'}"
 }
 
 # ---------- uninstalling ----------

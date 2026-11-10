@@ -29,6 +29,7 @@ func TestAnInviteIsALinkOrACode(t *testing.T) {
 		"PGTQRBXGTCDFFWBH":       {Code: "PGTQRBXGTCDFFWBH"},
 		"  pgtq-rbxg-tcdf-fwbh ": {Code: "pgtq-rbxg-tcdf-fwbh"},
 		"PGTQ RBXG TCDF FWBH":    {Code: "PGTQ RBXG TCDF FWBH"},
+		"PGTQ\tRBXG":             {Code: "PGTQ\tRBXG"},
 		// As an instance URL is read: a bare host is https.
 		"chat.example.com/join#PGTQRBXGTCDFFWBH":   {Instance: "https://chat.example.com", Code: "PGTQRBXGTCDFFWBH"},
 		"https://chat.example.com/join/#ABCD-EFGH": {Instance: "https://chat.example.com", Code: "ABCD-EFGH"},
@@ -47,15 +48,19 @@ func TestWhatIsNotAnInviteIsRefused(t *testing.T) {
 		"   ",
 		"https://chat.example.com/join",  // no code
 		"https://chat.example.com/join#", // no code
-		"https://chat.example.com/#PGTQRBXGTCDFFWBH",          // not /join
-		"https://chat.example.com/joint#PGTQRBXGTCDFFWBH",     // not /join
-		"https://chat.example.com/join?x=1#PGTQRBXGTCDFFWBH",  // a query
-		"https://chat.example.com/join?#PGTQRBXGTCDFFWBH",     // an empty one
-		"https://chat.example.com/a/../join#PGTQRBXGTCDFFWBH", // a dot segment
-		"https://chat.example.com/./join#PGTQRBXGTCDFFWBH",    // a dot segment
-		"https://chat.example.com/join#PGTQ/RBXG",             // not a code
-		"https://chat.example.com/join#PGTQ\u202eRBXG",        // not a code, and a bidi override
-		"https://evil.example#x/join#PGTQRBXGTCDFFWBH",        // the fragment is everything after the first #
+		"https://chat.example.com/#PGTQRBXGTCDFFWBH",           // not /join
+		"https://chat.example.com/joint#PGTQRBXGTCDFFWBH",      // not /join
+		"https://chat.example.com/join?x=1#PGTQRBXGTCDFFWBH",   // a query
+		"https://chat.example.com/join?#PGTQRBXGTCDFFWBH",      // an empty one
+		"https://chat.example.com/a/../join#PGTQRBXGTCDFFWBH",  // a dot segment
+		"https://chat.example.com/./join#PGTQRBXGTCDFFWBH",     // a dot segment
+		"https://chat.example.com/join#PGTQ/RBXG",              // not a code
+		"https://chat.example.com/join#PGTQ\u202eRBXG",         // not a code, and a bidi override
+		"https://evil.example#x/join#PGTQRBXGTCDFFWBH",         // the fragment is everything after the first #
+		"https://chat.example.com/a%3Fx/join#PGTQRBXGTCDFFWBH", // a query hidden in the path
+		"https://chat.example.com/a%23x/join#PGTQRBXGTCDFFWBH", // a fragment hidden in the path
+		"https://chat.example.com/a%2Fb/join#PGTQRBXGTCDFFWBH", // any encoding at all
+		"https://chat.example.com/it's/join#PGTQRBXGTCDFFWBH",  // a quote, which could not be printed back quoted
 		"PGTQ_RBXG",
 		"PGTQRBXGTCDFFWBHPGTQRBXGTCDFFWBHPGTQRBXGTCDFFWBHPGTQRBXGTCDFFWBHX", // past the bound
 	} {

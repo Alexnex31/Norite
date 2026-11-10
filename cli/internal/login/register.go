@@ -130,6 +130,11 @@ func (r *Registrar) collect() (registration, error) {
 // errInviteRequired is the instance's invite_required: registration on it takes an instance invite code.
 var errInviteRequired = errors.New("this instance takes new accounts by invite")
 
+// errInviteInvalid is the instance's invite_invalid: the instance invite code given is unknown, used up or
+// expired, which the instance answers alike.
+var errInviteInvalid = errors.New("the instance did not accept that instance invite code: it is mistyped, " +
+	"used up or expired, or it is a guild invite's")
+
 // submit sends reg, with inviteCode if any, and returns the instance's sentence, sanitized. It says either
 // to check the mail or that the account is ready (the instance has no mail relay to verify an address with).
 // It is a stranger's text, so it passes termsafe (rule 19), and it is printed as given rather than branched
@@ -146,8 +151,13 @@ func (r *Registrar) submit(ctx context.Context, reg registration, inviteCode str
 		}, &accepted)
 	if err != nil {
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.Code == "invite_required" {
-			return "", errInviteRequired
+		if errors.As(err, &apiErr) {
+			switch apiErr.Code {
+			case "invite_required":
+				return "", errInviteRequired
+			case "invite_invalid":
+				return "", errInviteInvalid
+			}
 		}
 		return "", err
 	}

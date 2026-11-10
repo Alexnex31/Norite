@@ -346,7 +346,7 @@ function Install-Norite {
         if (-not $canAsk) {
             Say ''
             Say 'No console to ask on, so no account was set up. When you are ready:'
-            Say ("  norite setup $Invite".TrimEnd())
+            if ($Invite) { Say "  norite setup '$Invite'" } else { Say '  norite setup' }
         }
         else {
             # norite setup asks the questions, and is what the person runs again later: the instance, the
@@ -358,7 +358,10 @@ function Install-Norite {
             if ($NoDaemon) { $setupArgs += '--no-daemon' }
             if ($Invite) { $setupArgs += $Invite }
             & $norite @setupArgs
-            if ($LASTEXITCODE -ne 0) { Note ("setup did not finish. Run it again with: norite setup $Invite".TrimEnd()) }
+            if ($LASTEXITCODE -ne 0) {
+                if ($Invite) { Note "setup did not finish. Run it again with: norite setup '$Invite'" }
+                else { Note 'setup did not finish. Run it again with: norite setup' }
+            }
         }
     }
 
