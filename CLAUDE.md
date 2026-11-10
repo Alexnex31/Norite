@@ -394,7 +394,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M29 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M30 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -496,6 +496,12 @@ agent never creates a `v*` tag or bumps a version.**
   - wazero's arm64 compiler mistranslated the encoder. This is fixed upstream but not released. A `-Os`
     build of that one file works around it, a differential test holds the compiler to the interpreter,
     and CI's `test-arm64` runs both.
+- **M30 — Audio DSP**: done. RNNoise, AEC3 and AGC2 in one WebAssembly module that imports nothing (ADR 0036
+  as amended), the order in Go, the reference stamped per frame, the settings in `config.toml` and the join.
+  Its reviews found a sender too slow for the DSP mute at the far end, and AEC3 resetting under a sender
+  behind, which brought the stamp back. Its manual pass, in two VMs, found AGC2 raising the echo
+  canceller's residue from its default 15 dB, and help naming keys `norite config` refuses. A real room
+  with real devices has not been walked.
 
 ## What keeps coming back
 
