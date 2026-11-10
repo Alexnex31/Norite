@@ -2112,6 +2112,12 @@ of this section.
     asked.
   - **The audio level is computed after AGC2, and V follows RNNoise's voice probability**, which runs
     whatever the settings.
+  - **AGC2 starts from no gain.** Its default 15 dB raised the echo canceller's residue while nobody
+    spoke, which the manual pass found in two VMs whose loopback delay wanders: with everything on, the
+    echo was 17 to 21 dB below what was played where AEC and RNNoise left it 92 dB below. From no gain it
+    is 59 to 81, and `TestAGC2StartsFromNoGain` holds it in a room whose delay jumps.
+  - **The manual pass ran in two VMs only.** A real room, with real speakers and a microphone, has not
+    been walked.
 - **M31 — Adaptive bitrate and congestion control**: `pion/interceptor`'s REMB/TWCC feedback wired into
   the encoder's runtime bitrate control (M29's shim; `hraban/opus` until M29), audio-only, no simulcast.
   Depends on M26, M29, and M30. Done when:

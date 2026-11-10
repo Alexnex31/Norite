@@ -534,9 +534,9 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 - **Code compiled for the host is only as right as the compiler for each architecture** (M29). Hold it to
   a reference byte for byte, on every architecture a release ships.
 - **A stand-in must fail the way the real thing does**: a proxy that forwards the FIN, sequence numbers that
-  jump, a seed whose ids cluster or whose distributions share a modulus (M16, M19, M26). A schema-checked fake
-  cannot see wording or a screen, and a test that feeds a parser raw output has not tested what the runner
-  hands it (M19, M20a, M24).
+  jump, a seed whose ids cluster or whose distributions share a modulus (M16, M19, M26), a room whose
+  delay never moves (M30). A schema-checked fake cannot see wording or a screen, and a test that feeds a
+  parser raw output has not tested what the runner hands it (M19, M20a, M24).
 - **Test the configuration the defaults produce** and the one the documentation tells an operator to write, on
   a machine with more than one interface (M27, M28). Run `-race` and vet every new test file for every OS it
   claims to run on (M27, M28).
@@ -2252,6 +2252,9 @@ And on the audio DSP, from M30 (ADR 0036 as amended):
   - `VoiceStatus.processing` is what was asked, not what runs.
   - All off still runs RNNoise, for the V flag.
 - **The level is computed after AGC2, and V follows RNNoise's probability at 0.5.**
+- **AGC2 starts from no gain**, not its default 15 dB, which raised the echo canceller's residue while
+  nobody spoke. A change to AGC2's settings is read against `TestAGC2StartsFromNoGain`, whose room's delay
+  wanders as a real loopback's does.
 - **No native twin.** Adding one is a tag and a `native.go`, and it reopens the ledger's confinement entry.
 - **wazero's runtimes are made after `wasmrt.Warm`**: v1.12.0 races on its own version cache.
 - **Testing**:

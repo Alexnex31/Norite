@@ -223,7 +223,8 @@ Switching brings back what this record avoids:
   fails when two of them are swapped. The APM's own chain has no place for RNNoise between its echo
   canceller and its gain, so the instance holds two `AudioProcessing` objects:
   - one for AEC3 and its high-pass filter;
-  - one for AGC2's adaptive digital gain, never the OS microphone's volume.
+  - one for AGC2's adaptive digital gain, never the OS microphone's volume, **starting from no gain**.
+    Its default 15 dB raised the echo canceller's residue while nobody spoke (the manual pass, below).
 
   AEC3's stream delay is never set, so it starts from its default and estimates.
 - **The DSP runs in `send`**, the one goroutine that enters the instance.
@@ -297,6 +298,15 @@ Same machine as above, pinned to one core.
   (`TestTheCompilerAgreesWithTheInterpreter`). The interpreter takes 21 ms for the APM's 10 ms and 14 ms
   for RNNoise's. The test took 345 s under `-race`, which is why both differential tests run in a step
   without it.
+- **The manual pass**, in two VMs, where a PipeWire loopback played b's speakers into its microphone
+  30 ms later at −10 dB, with a delay that wanders by milliseconds:
+  - with alice speaking and bob silent, alice heard herself 10 dB below what b played with the DSP off;
+  - 45 dB with AEC alone, and 92 dB with AEC and RNNoise;
+  - with everything on, 17 to 21 dB, until AGC2 started from no gain, and 59 to 81 dB after;
+  - in double-talk, bob's sentence reached alice at an envelope correlation of 0.88;
+  - RNNoise took 34 dB off rain in the pauses and moved the speech by 0.4 dB.
+
+  Real speakers, a real microphone and a real room have not been walked.
 - **Not measured:** the Mac, which ran M29's call 1.7 times dearer, and arm64's cost.
 
 ### When to change
@@ -332,5 +342,11 @@ On the least capable machine supported, if the chain passes the 10% threshold, m
   no place for it between AEC and AGC, which is why the order lives in Go.
 - **Rendering everything played before each frame, without a stamp.** It was built first, and no test
   saw a difference until one held a sender behind for a second; AEC3 then resets.
+- **AGC2's own initial gain of 15 dB.** With nobody speaking it raised the echo canceller's residue by as
+  much: in a room whose delay wanders, the whole chain removed 8.8 dB of echo where AEC and RNNoise
+  removed 23.9 (`TestAGC2StartsFromNoGain`). From no gain it removes 23.8, and a quiet speaker is raised
+  as far.
+- **AGC2 only on what RNNoise calls a voice.** Tried, and it changed nothing: the leaks that matter are
+  the ones RNNoise calls a voice.
 - **meson in the build.** Its build files cannot be read as text the way libopus's lists can.
 
