@@ -58,6 +58,13 @@ func freePort(t *testing.T, network string) int {
 
 func startHarness(t *testing.T) *harness {
 	t.Helper()
+	// The DSP's module is compiled once for the package, and a call does not wait for it, so whichever test
+	// ran first compiled it while its callers spoke: 2.2 s under -race on two idle cores, and on a loaded CI
+	// runner long enough to put the senders behind, skipping frames, inside the window that test measures.
+	// It is compiled here, before any call, so no test pays it.
+	if _, err := sharedDSP(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(t.TempDir(), "voice-sfu")
 	build := exec.Command("go", "build", "-o", bin, "./internal/voice/voicetest/cmd/voice-sfu") //nolint:gosec // fixed
 	build.Dir = filepath.Join("..", "..", "..", "backend")
