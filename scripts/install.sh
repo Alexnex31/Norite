@@ -6,11 +6,13 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh
 #   curl -fsSL …/scripts/install.sh | sh -s -- --instance https://chat.example.com
+#   curl -fsSL …/scripts/install.sh | sh -s -- --invite 'https://chat.example.com/join#PGTQRBXGTCDFFWBH'
 #   ./scripts/install.sh                      # in a checkout: builds from that source instead
 #
 # What it does, in order: gets the three programs (a release archive, checked, or a build of the checkout it
 # sits in), puts them in ~/.local/bin, registers the daemon with the service manager and starts it, then
-# offers to create an account or sign in. `--help` lists the switches for doing less.
+# runs `norite setup`, which creates an account or signs in and joins an invite's guild. `--help` lists the
+# switches for doing less.
 #
 # POSIX sh, not bash: it is piped into whatever `sh` a machine has, which is dash on Debian and bash 3.2 on
 # macOS. The whole of it is inside main(), called on the last line, so a download cut short runs nothing
@@ -40,10 +42,11 @@ Where the programs come from:
 
 Where they go, and what else happens:
   --bin-dir DIR         install into DIR (default: ~/.local/bin)
+  --invite LINK         an invite link: its instance, and the guild to join once signed in
   --instance URL        the instance to register on or sign in to (default: ask)
   --invite-code CODE    the instance invite code, for an instance that needs one to register
   --no-daemon           do not register or start the daemon
-  --no-account          do not offer to register or sign in
+  --no-account          do not run norite setup, which registers or signs in
   --require-signature   fail unless cosign is installed and the release's signature verifies
   --with-server         also install norite-server (install-server.sh uses this)
   --no-summary          do not print the closing notes (install-server.sh prints its own)
@@ -220,51 +223,23 @@ setup_daemon() {
 # from the terminal itself.
 have_tty() { (: </dev/tty) 2>/dev/null; }
 
-ask() { # ask PROMPT → $answer
-    printf '%s' "$1" >/dev/tty
-    IFS= read -r answer </dev/tty || answer=""
-}
-
 setup_account() {
     if ! have_tty; then
         say ""
         say "No terminal to ask on, so no account was set up. When you are ready:"
-        say "  norite register --instance ${instance:-INSTANCE-URL}    # or: norite login --instance …"
+        say "  norite setup${invite:+ $invite}"
         return 0
     fi
-    step "Your account"
-    if [ -z "$instance" ]; then
-        ask "Instance address, e.g. https://chat.example.com (Enter to skip): "
-        instance=$answer
-    fi
-    if [ -z "$instance" ]; then
-        say "Skipped. Later: norite register --instance URL, or norite login --instance URL"
-        return 0
-    fi
-    ask "Do you already have an account on $instance? [y/N] "
-    existing=$answer
-    # Asked here and handed to both commands, so it is typed once rather than once each.
-    ask "Email: "
-    email=$answer
-    [ -n "$email" ] || { say "No email given, so no account was set up."; return 0; }
-    case "$existing" in
-        y | Y | yes | Yes | YES) ;;
-        *)
-            if [ -z "$invite_code" ]; then
-                ask "Instance invite code, if this instance needs one to register (Enter for none): "
-                invite_code=$answer
-            fi
-            set -- register --instance "$instance" --email "$email"
-            [ -n "$invite_code" ] && set -- "$@" --invite-code "$invite_code"
-            if ! "$norite" "$@" </dev/tty; then
-                warn "registering did not finish. Try again with: norite register --instance $instance"
-                return 0
-            fi
-            say ""
-            ;;
-    esac
-    "$norite" login --instance "$instance" --email "$email" </dev/tty ||
-        warn "signing in did not finish. Try again with: norite login --instance $instance"
+    # norite setup asks the questions, and is what the person runs again later: the instance, the account,
+    # the daemon and the invite's guild. The daemon is up already unless --no-daemon said otherwise, and
+    # setup says so and skips it.
+    set -- setup
+    [ -n "$instance" ] && set -- "$@" --instance "$instance"
+    [ -n "$invite_code" ] && set -- "$@" --invite-code "$invite_code"
+    [ "$daemon" = 1 ] || set -- "$@" --no-daemon
+    [ -n "$invite" ] && set -- "$@" "$invite"
+    "$norite" "$@" </dev/tty ||
+        warn "setup did not finish. Run it again with: norite setup${invite:+ $invite}"
 }
 
 # ---------- uninstalling ----------
@@ -287,7 +262,7 @@ uninstall() {
 # ---------- main ----------
 
 main() {
-    tag="" mode="" bin_dir="$HOME/.local/bin" instance="" invite_code=""
+    tag="" mode="" bin_dir="$HOME/.local/bin" instance="" invite_code="" invite=""
     daemon=1 account=1 require_signature=0 with_server=0 do_uninstall=0 summary=1
 
     while [ $# -gt 0 ]; do
@@ -298,6 +273,7 @@ main() {
             --bin-dir)           [ $# -ge 2 ] || die "--bin-dir needs a directory"; bin_dir=$2; shift ;;
             --instance)          [ $# -ge 2 ] || die "--instance needs a URL"; instance=$2; shift ;;
             --invite-code)       [ $# -ge 2 ] || die "--invite-code needs a code"; invite_code=$2; shift ;;
+            --invite)            [ $# -ge 2 ] || die "--invite needs a link"; invite=$2; shift ;;
             --no-daemon)         daemon=0 ;;
             --no-account)        account=0 ;;
             --require-signature) require_signature=1 ;;

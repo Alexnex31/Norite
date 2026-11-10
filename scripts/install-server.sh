@@ -322,7 +322,8 @@ main() {
     say ""
     say "Check it from another machine:  curl ${url:-INSTANCE-URL}/api/v1/healthz"
     say "Let somebody register:          $norite instance invite create --config $config"
-    say "Sign in, from any machine:      norite login --instance ${url:-INSTANCE-URL}"
+    say "Sign in, from any machine:      norite setup --instance ${url:-INSTANCE-URL}"
+    say "Then invite people with a link: norite invite create CHANNEL-ID, which prints one"
     if [ "$behind_proxy" = 1 ]; then
         say ""
         say "The server listens on 127.0.0.1:$port only. Point your reverse proxy or tunnel at it;"

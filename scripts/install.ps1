@@ -7,12 +7,13 @@ daemon starts for a voice call, beside itself). It never asks for administrator 
 .DESCRIPTION
 In order: gets the three programs (a release archive, checked, or a build of the checkout it sits in), puts
 them in %LOCALAPPDATA%\Programs\Norite and on your PATH, registers the daemon to start at every logon and
-starts it, then offers to create an account or sign in.
+starts it, then runs norite setup, which creates an account or signs in and joins an invite's guild.
 
     irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex
 
     # with options, which `irm | iex` cannot carry:
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Instance https://chat.example.com
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Invite 'https://chat.example.com/join#PGTQRBXGTCDFFWBH'
 
     .\scripts\install.ps1            # in a checkout: builds from that source instead
 
@@ -27,6 +28,8 @@ Build the checkout this script is in. The default when it is in one; needs Go.
 Download a release even when run from a checkout.
 .PARAMETER BinDir
 Install into this folder. Default: %LOCALAPPDATA%\Programs\Norite.
+.PARAMETER Invite
+An invite link: its instance, and the guild to join once signed in.
 .PARAMETER Instance
 The instance to register on or sign in to. Default: ask.
 .PARAMETER InviteCode
@@ -40,7 +43,7 @@ Register the daemon to start at every logon. The default since M24; accepted so 
 .PARAMETER ShowConsole
 Run the daemon in a console window that shows its log as it is written, for testing. It has none otherwise.
 .PARAMETER NoAccount
-Do not offer to register or sign in.
+Do not run norite setup, which registers or signs in.
 .PARAMETER RequireSignature
 Fail unless cosign is installed and the release's signature verifies.
 .PARAMETER Uninstall
@@ -52,6 +55,7 @@ param(
     [switch]$FromSource,
     [switch]$Release,
     [string]$BinDir,
+    [string]$Invite,
     [string]$Instance,
     [string]$InviteCode,
     [switch]$NoDaemon,
@@ -65,7 +69,7 @@ param(
 
 function Install-Norite {
     param(
-        [string]$Version, [bool]$FromSource, [bool]$Release, [string]$BinDir, [string]$Instance,
+        [string]$Version, [bool]$FromSource, [bool]$Release, [string]$BinDir, [string]$Invite, [string]$Instance,
         [string]$InviteCode, [bool]$NoDaemon, [bool]$AutoStart, [bool]$NoAutoStart, [bool]$ShowConsole,
         [bool]$NoAccount, [bool]$RequireSignature,
         [bool]$Uninstall, [string]$ScriptPath
@@ -342,39 +346,19 @@ function Install-Norite {
         if (-not $canAsk) {
             Say ''
             Say 'No console to ask on, so no account was set up. When you are ready:'
-            Say '  norite register --instance INSTANCE-URL    # or: norite login --instance INSTANCE-URL'
+            Say ("  norite setup $Invite".TrimEnd())
         }
         else {
-            Step 'Your account'
-            if (-not $Instance) { $Instance = (Read-Host 'Instance address, e.g. https://chat.example.com (Enter to skip)').Trim() }
-            if (-not $Instance) {
-                Say 'Skipped. Later: norite register --instance URL, or norite login --instance URL'
-            }
-            else {
-                $existing = (Read-Host "Do you already have an account on $Instance? [y/N]").Trim()
-                # Asked here and handed to both commands, so it is typed once rather than once each.
-                $email = (Read-Host 'Email').Trim()
-                if (-not $email) {
-                    Say 'No email given, so no account was set up.'
-                }
-                else {
-                    $ok = $true
-                    if ($existing -notmatch '^(y|yes)$') {
-                        if (-not $InviteCode) { $InviteCode = (Read-Host 'Instance invite code, if this instance needs one to register (Enter for none)').Trim() }
-                        $registerArgs = @('register', '--instance', $Instance, '--email', $email)
-                        if ($InviteCode) { $registerArgs += @('--invite-code', $InviteCode) }
-                        & $norite @registerArgs
-                        if ($LASTEXITCODE -ne 0) {
-                            Note "registering did not finish. Try again with: norite register --instance $Instance"
-                            $ok = $false
-                        }
-                    }
-                    if ($ok) {
-                        & $norite login --instance $Instance --email $email
-                        if ($LASTEXITCODE -ne 0) { Note "signing in did not finish. Try again with: norite login --instance $Instance" }
-                    }
-                }
-            }
+            # norite setup asks the questions, and is what the person runs again later: the instance, the
+            # account, the daemon and the invite's guild. The daemon is up already unless -NoDaemon said
+            # otherwise, and setup says so and skips it.
+            $setupArgs = @('setup')
+            if ($Instance) { $setupArgs += @('--instance', $Instance) }
+            if ($InviteCode) { $setupArgs += @('--invite-code', $InviteCode) }
+            if ($NoDaemon) { $setupArgs += '--no-daemon' }
+            if ($Invite) { $setupArgs += $Invite }
+            & $norite @setupArgs
+            if ($LASTEXITCODE -ne 0) { Note ("setup did not finish. Run it again with: norite setup $Invite".TrimEnd()) }
         }
     }
 
@@ -396,7 +380,7 @@ function Install-Norite {
 }
 
 Install-Norite -Version $Version -FromSource $FromSource.IsPresent -Release $Release.IsPresent -BinDir $BinDir `
-    -Instance $Instance -InviteCode $InviteCode -NoDaemon $NoDaemon.IsPresent -AutoStart $AutoStart.IsPresent `
+    -Invite $Invite -Instance $Instance -InviteCode $InviteCode -NoDaemon $NoDaemon.IsPresent -AutoStart $AutoStart.IsPresent `
     -NoAutoStart $NoAutoStart.IsPresent -ShowConsole $ShowConsole.IsPresent `
     -NoAccount $NoAccount.IsPresent -RequireSignature $RequireSignature.IsPresent -Uninstall $Uninstall.IsPresent `
     -ScriptPath $PSCommandPath
