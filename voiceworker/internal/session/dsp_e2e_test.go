@@ -90,7 +90,7 @@ func TestTheFarEndIsNotHeardBackThroughTheRoom(t *testing.T) {
 			b := &audiotest.Echoing{Room: echoRoom()}
 			h.join(t, room, "1", a, Options{})
 			b.Source = speaksAfter(10*time.Second, recordings.Near())
-			h.join(t, room, "2", b, Options{Processing: c.s})
+			h.joinWith(t, room, "2", b, c.s, Options{})
 			time.Sleep(12 * time.Second)
 			back := heardBack(a, b, 2.5)
 			ha, _ := a.Heard()
@@ -149,7 +149,7 @@ func TestEchoStaysCanceledWhenTheSenderFallsBehind(t *testing.T) {
 	b := &audiotest.Echoing{Room: echoRoom()}
 	h.join(t, "1", "1", a, Options{})
 	b.Source = speaksAfter(10*time.Second, recordings.Near())
-	sb := h.join(t, "1", "2", b, Options{Processing: dsp.Settings{EchoCancellation: true}, stall: stall})
+	sb := h.joinWith(t, "1", "2", b, dsp.Settings{EchoCancellation: true}, Options{stall: stall})
 	time.Sleep(12 * time.Second)
 	back := heardBack(a, b, 2.5)
 	m := mediaOf(sb)
@@ -187,7 +187,7 @@ func TestTheAudioLevelFollowsTheProcessedSignal(t *testing.T) {
 	// listen is the mean level and the voiced share of what the listener received in seconds 6 to 10 of a
 	// speaker saying src.
 	listen := func(room string, src func(int, []int16), s dsp.Settings) reading {
-		h.join(t, room, "1", &audiotest.Device{Source: src}, Options{Processing: s})
+		h.joinWith(t, room, "1", &audiotest.Device{Source: src}, s, Options{})
 		sl := h.join(t, room, "2", &audiotest.Device{}, Options{})
 		slot := func() (n, voiced, loud int64) {
 			m := mediaOf(sl)

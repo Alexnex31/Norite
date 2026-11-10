@@ -332,7 +332,7 @@ func (m *media) process(pcm []int16) bool {
 	var voice float32
 	err := m.clocked(&m.processing, func() error {
 		played := m.ref.count()
-		if !m.s.opts.Processing.EchoCancellation {
+		if !m.s.processing.EchoCancellation {
 			m.rendered = played // nothing reads the reference
 		} else if behind := played - m.rendered; behind > refFrames {
 			m.overruns.Add(int64(behind - refFrames)) //nolint:gosec // at most the frames played
@@ -390,7 +390,7 @@ func (m *media) takeDSP() {
 		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", m.s.dspErr)
 		return
 	}
-	c, err := m.module.NewChain(context.Background(), m.s.opts.Processing)
+	c, err := m.module.NewChain(context.Background(), m.s.processing)
 	if err != nil {
 		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", err)
 		return

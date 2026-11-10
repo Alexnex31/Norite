@@ -146,11 +146,16 @@ type keepModule struct{ dsp.Module }
 
 func (keepModule) Close(context.Context) error { return nil }
 
-// join connects a session to room as user, with dev for its microphone and speakers. Unless opts says
-// otherwise its DSP is off, which leaves its samples as M29's were: the tests below that feed a tone hold
+// join connects a session to room as user, with dev for its microphone and speakers, and its DSP off, which leaves its samples as M29's were: the tests below that feed a tone hold
 // the codec's path, and RNNoise takes a steady tone for noise. RNNoise still runs, for the V flag. The
-// tests in dsp_e2e_test.go and the latency budget turn the DSP on.
+// tests in dsp_e2e_test.go and the latency budget turn the DSP on, through joinWith.
 func (h *harness) join(t *testing.T, room, user string, dev audio.Device, opts Options) *Session {
+	t.Helper()
+	return h.joinWith(t, room, user, dev, dsp.Settings{}, opts)
+}
+
+// joinWith is join with the DSP's components on as p says, carried in the join as the daemon carries them.
+func (h *harness) joinWith(t *testing.T, room, user string, dev audio.Device, p dsp.Settings, opts Options) *Session {
 	t.Helper()
 	var creds struct {
 		Username string   `json:"username"`
@@ -160,7 +165,7 @@ func (h *harness) join(t *testing.T, room, user string, dev audio.Device, opts O
 	if err := h.post("/credentials", map[string]string{"user": user}, &creds); err != nil {
 		t.Fatal(err)
 	}
-	j := voiceipc.Join{Loopback: true}
+	j := voiceipc.Join{Loopback: true, Processing: voiceipc.Processing(p)}
 	if len(creds.URLs) > 0 {
 		j.ICEServers = []voiceipc.ICEServer{{URLs: creds.URLs, Username: creds.Username, Credential: creds.Password}}
 	}
@@ -507,7 +512,7 @@ func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 			}
 			a := &audiotest.Device{Source: c.source}
 			b := &audiotest.Device{}
-			h.join(t, "1", "1", a, Options{Lossy: lossy, Processing: dsp.AllOn()})
+			h.joinWith(t, "1", "1", a, dsp.AllOn(), Options{Lossy: lossy})
 			h.join(t, "1", "2", b, Options{})
 			time.Sleep(9 * time.Second)
 			heard, at := b.Heard()

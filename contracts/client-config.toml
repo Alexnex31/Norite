@@ -94,6 +94,40 @@ portable = true
 consumer = "M21"
 live = true
 
+# A call's audio processing (M30), applied at the next join: echo cancellation, noise suppression and
+# automatic gain, each on or off. Turning noise suppression off still runs RNNoise for the voice
+# probability the audio level's V flag follows, and discards what it did to the sound.
+
+[[key]]
+name = "voice.echo_cancellation"
+section = "shared"
+type = "enum"
+values = ["on", "off"]
+default = "on"
+portable = true
+consumer = "M30"
+live = true
+
+[[key]]
+name = "voice.noise_suppression"
+section = "shared"
+type = "enum"
+values = ["on", "off"]
+default = "on"
+portable = true
+consumer = "M30"
+live = true
+
+[[key]]
+name = "voice.auto_gain"
+section = "shared"
+type = "enum"
+values = ["on", "off"]
+default = "on"
+portable = true
+consumer = "M30"
+live = true
+
 # --- Reserved: the format is settled here, and nothing reads these until the milestone named. ---
 
 [[key]]

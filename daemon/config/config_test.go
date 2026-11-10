@@ -159,6 +159,23 @@ func TestAnEnumOutsideItsValuesIsRefused(t *testing.T) {
 }
 
 // The opposite of the instance config's rule: an export from a newer client is read by an older one.
+// The call's audio processing is on unless the file says off, under [shared] or the client's own section,
+// and a value it got wrong leaves the switch on and says so (M30).
+func TestTheVoiceSwitchesAreOnUnlessTheFileSaysOff(t *testing.T) {
+	c := Defaults()
+	for _, k := range []string{KeyVoiceEchoCancellation, KeyVoiceNoiseSuppression, KeyVoiceAutoGain} {
+		assert.True(t, c.On(k), k)
+	}
+	c, err := Parse([]byte("[shared.voice]\nauto_gain = \"off\"\nnoise_suppression = \"maybe\"\n"+
+		"[tui.voice]\necho_cancellation = \"off\"\n"), TUI)
+	require.NoError(t, err)
+	assert.False(t, c.On(KeyVoiceAutoGain))
+	assert.False(t, c.On(KeyVoiceEchoCancellation), "[tui] overrides [shared] for the terminal client")
+	assert.True(t, c.On(KeyVoiceNoiseSuppression), "a value the file got wrong leaves the default")
+	require.Len(t, c.Warnings, 1)
+	assert.Equal(t, "shared.voice.noise_suppression", c.Warnings[0].Key)
+}
+
 func TestAnUnknownKeyIsAWarningNotAnError(t *testing.T) {
 	doc := "future = 1\n[shared]\nnewer_setting = true\n[tui]\ntheme = \"norite-dark\"\n" +
 		"[tui.colors]\nacent = 3\n[tui.keys]\n\"C-x b\" = \"buffers\"\n[plugins]\nx = 1\n"

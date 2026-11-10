@@ -4,6 +4,10 @@
 package ipc
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -42,6 +46,45 @@ func VoiceJoinChannel(path string) (string, bool) {
 	return ch, true
 }
 
+// VoiceJoin is the body of a PathVoiceJoin request (M30): which of the DSP's components process the
+// microphone, as the client's config.toml says. A join with no body has every component on.
+//
+// It travels only to a daemon that has answered PathVoice, for the reason the channel id does: a daemon
+// older than these requests would relay the body to its instance with the path (the ledger's entry on the
+// prefix, reopened at M30 for this body). The daemon module's voiceipc.Processing has the same fields.
+type VoiceJoin struct {
+	EchoCancellation bool `json:"echo_cancellation"`
+	NoiseSuppression bool `json:"noise_suppression"`
+	AutoGain         bool `json:"auto_gain"`
+}
+
+// DecodeVoiceJoin reads a PathVoiceJoin request's body. No body, or null, is every component on. Anything
+// else must name all three switches and nothing more: a switch left out would otherwise read as off, which
+// is not what a client that forgot it meant.
+func DecodeVoiceJoin(body json.RawMessage) (VoiceJoin, error) {
+	if len(bytes.TrimSpace(body)) == 0 || bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
+		return VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}, nil
+	}
+	var in struct {
+		EchoCancellation *bool `json:"echo_cancellation"`
+		NoiseSuppression *bool `json:"noise_suppression"`
+		AutoGain         *bool `json:"auto_gain"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		return VoiceJoin{}, fmt.Errorf("the join's settings do not decode: %w", err)
+	}
+	if dec.More() {
+		return VoiceJoin{}, errors.New("the join's settings are followed by something else")
+	}
+	if in.EchoCancellation == nil || in.NoiseSuppression == nil || in.AutoGain == nil {
+		return VoiceJoin{}, errors.New("the join's settings must name echo_cancellation, noise_suppression and auto_gain")
+	}
+	return VoiceJoin{EchoCancellation: *in.EchoCancellation, NoiseSuppression: *in.NoiseSuppression,
+		AutoGain: *in.AutoGain}, nil
+}
+
 // EventVoice tells a watching client that what PathVoice answers has changed: a join began, a call came up,
 // or one ended. It carries an empty object, and the client asks, as for EventUpdate.
 const EventVoice = LocalEventPrefix + "VOICE"
@@ -67,4 +110,7 @@ type VoiceStatus struct {
 	// cannot. Before M33 only a build for M26's harness can.
 	Available   bool   `json:"available"`
 	Unavailable string `json:"unavailable"`
+	// Processing is the call's audio processing as its join asked (M30), while there is a call; nil when
+	// there is none.
+	Processing *VoiceJoin `json:"processing"`
 }

@@ -13,6 +13,8 @@ package voicecmd
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 
 	"github.com/urfave/cli/v3"
 
@@ -20,14 +22,62 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/cli/internal/output"
+	"github.com/Alexnex31/Norite/daemon/config"
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // Connector attaches to the daemon. verbs.Daemon is the real one.
 type Connector func(ctx context.Context) (daemonclient.Caller, func(), error)
 
-// Command returns the `norite voice` group.
-func Command(connect Connector) *cli.Command {
+// Settings reads the call's audio processing as config.toml sets it (M30), with a line for each thing the
+// file got wrong about it. FileSettings is the real one.
+type Settings func() (ipc.VoiceJoin, []string, error)
+
+// voiceKeys are the switches a join reads.
+var voiceKeys = []string{config.KeyVoiceEchoCancellation, config.KeyVoiceNoiseSuppression, config.KeyVoiceAutoGain}
+
+// FileSettings reads the user's config.toml as the terminal client does, since the command tree is the one
+// M-x runs there (ADR 0026): [shared], then [tui], or config.tui.toml while the toggle has split them. A
+// file that is not there is every switch on.
+func FileSettings() (ipc.VoiceJoin, []string, error) {
+	path, _, err := config.PathFor(config.TUI)
+	if err != nil {
+		return ipc.VoiceJoin{}, nil, fmt.Errorf("finding the config file: %s", termsafe.Text(err.Error()))
+	}
+	cfg, err := config.Load(path, config.TUI)
+	if err != nil {
+		// Not the defaults: somebody who turned a switch off and broke the file meanwhile would be put in a
+		// call with it on. The path in the error is the filesystem's.
+		return ipc.VoiceJoin{}, nil, fmt.Errorf("the voice settings could not be read: %s", termsafe.Text(err.Error()))
+	}
+	return settingsOf(cfg, filepath.Base(path))
+}
+
+// settingsOf is a join's settings out of a config that loaded, and its warnings about them.
+func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error) {
+	var warnings []string
+	for _, w := range cfg.Warnings {
+		for _, k := range voiceKeys {
+			// A warning's key is the section's and the key's. The GUI's section applies to nothing here, so
+			// what it got wrong leaves nothing on.
+			if w.Key == string(config.Shared)+"."+k || w.Key == string(config.TUI)+"."+k {
+				warnings = append(warnings, fmt.Sprintf("%s: %s; it stays on", termsafe.Text(file), w.String()))
+			}
+		}
+	}
+	return ipc.VoiceJoin{
+		EchoCancellation: cfg.On(config.KeyVoiceEchoCancellation),
+		NoiseSuppression: cfg.On(config.KeyVoiceNoiseSuppression),
+		AutoGain:         cfg.On(config.KeyVoiceAutoGain),
+	}, warnings, nil
+}
+
+// Command returns the `norite voice` group. settings is FileSettings unless a test sets it.
+func Command(connect Connector, settings Settings) *cli.Command {
+	if settings == nil {
+		settings = FileSettings
+	}
 	return &cli.Command{
 		Name:  "voice",
 		Usage: "Join a voice channel, leave it, and see how the call stands",
@@ -44,7 +94,10 @@ func Command(connect Connector) *cli.Command {
 				Name:      "join",
 				Usage:     "Join a voice channel",
 				ArgsUsage: "CHANNEL_ID",
-				Action:    run(connect, true, join),
+				Description: "The call's audio processing is read from config.toml as the call is joined:\n" +
+					"voice.echo_cancellation, voice.noise_suppression and voice.auto_gain, each \"on\" or\n" +
+					"\"off\", all on by default. A change applies at the next join.",
+				Action: run(connect, true, joinWith(settings)),
 			},
 			{
 				Name:   "leave",
@@ -60,18 +113,30 @@ func status(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.Voi
 	return st, daemonclient.LocalRead(ctx, c, ipc.PathVoice, &st)
 }
 
-// join asks how voice stands before it sends the channel: the id is the user's, and a daemon from before
-// these requests would relay the path to its instance (the ledger's entry on the prefix). A daemon that
-// answers GET knows the join too. One that cannot join at all is refused here, and is never sent the id.
-func join(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
-	st, err := status(ctx, cmd, c)
-	if err != nil {
-		return st, err
+// joinWith asks how voice stands before it sends the channel and the settings: the id is the user's, the
+// settings too, and a daemon from before these requests would relay the path and the body to its instance
+// (the ledger's entry on the prefix). A daemon that answers GET knows the join too. One that cannot join at
+// all is refused here, and is never sent either.
+//
+// The settings are read before anything is asked, so a config that does not load sends nothing.
+func joinWith(settings Settings) func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
+	return func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
+		body, warnings, err := settings()
+		if err != nil {
+			return ipc.VoiceStatus{}, err
+		}
+		for _, w := range warnings {
+			_, _ = fmt.Fprintln(cmd.Root().ErrWriter, w)
+		}
+		st, err := status(ctx, cmd, c)
+		if err != nil {
+			return st, err
+		}
+		if !st.Available {
+			return st, &clierr.RefusedError{Message: output.Clean(st.Unavailable)}
+		}
+		return st, daemonclient.LocalWith(ctx, c, ipc.PathVoiceJoin(cmd.Args().First()), body, &st)
 	}
-	if !st.Available {
-		return st, &clierr.RefusedError{Message: output.Clean(st.Unavailable)}
-	}
-	return st, daemonclient.Local(ctx, c, ipc.PathVoiceJoin(cmd.Args().First()), &st)
 }
 
 func leave(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
@@ -127,7 +192,18 @@ func (v view) Text(t *output.Text) {
 			t.Line("The last call ended: %s.", output.Clean(v.Reason))
 		}
 	}
+	if p := v.Processing; p != nil && v.State != ipc.VoiceIdle {
+		t.Line("Echo cancellation %s, noise suppression %s, automatic gain %s.", onOff(p.EchoCancellation),
+			onOff(p.NoiseSuppression), onOff(p.AutoGain))
+	}
 	if !v.Available {
 		t.Line("This daemon cannot join voice calls: %s.", output.Clean(v.Unavailable))
 	}
+}
+
+func onOff(on bool) string {
+	if on {
+		return config.On
+	}
+	return config.Off
 }

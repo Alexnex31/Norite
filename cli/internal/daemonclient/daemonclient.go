@@ -158,18 +158,25 @@ func Refusal(status int, body json.RawMessage, unauthorized string) error {
 // Whatever comes of that — a status from an instance, or the relay declining because nobody is signed in —
 // means the same thing to the person who asked, and is said as that: restart the daemon.
 func Local(ctx context.Context, c Caller, path string, out any) error {
-	return local(ctx, c, http.MethodPost, path, out)
+	return local(ctx, c, http.MethodPost, path, nil, out)
+}
+
+// LocalWith is Local with a body. Only a request sent after one that carries nothing has shown the daemon
+// knows it may carry one: a daemon older than the request relays the body to its instance with the path
+// (the ledger's entry on the prefix).
+func LocalWith(ctx context.Context, c Caller, path string, body, out any) error {
+	return local(ctx, c, http.MethodPost, path, body, out)
 }
 
 // LocalRead is Local for a request that only asks, sent with GET.
 func LocalRead(ctx context.Context, c Caller, path string, out any) error {
-	return local(ctx, c, http.MethodGet, path, out)
+	return local(ctx, c, http.MethodGet, path, nil, out)
 }
 
-func local(ctx context.Context, c Caller, method, path string, out any) error {
+func local(ctx context.Context, c Caller, method, path string, body, out any) error {
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	res, err := c.Do(callCtx, method, path, nil)
+	res, err := c.Do(callCtx, method, path, body)
 	older := clierr.Unavailable("the running daemon is older than this command and does not know the request; " +
 		"restart it with `norite daemon restart`")
 	if err != nil {

@@ -55,10 +55,6 @@ type Options struct {
 	// Codec makes the call's codec, opus.New unless set. It starts compiling as the session is made, so
 	// that its ~100 ms run while ICE connects.
 	Codec func(context.Context) (opus.Codec, error)
-	// Processing says which of the DSP's three components process the microphone. Its zero value turns
-	// all three off, and RNNoise still runs then, for the voice probability the audio level's V flag
-	// follows (M30). The worker sets it from the join.
-	Processing dsp.Settings
 	// DSP makes the call's audio processing, dsp.New unless set. It compiles beside the codec, in about
 	// 180 ms, while ICE connects.
 	DSP func(context.Context) (dsp.Module, error)
@@ -77,6 +73,9 @@ type Options struct {
 type Session struct {
 	opts Options
 	pc   *webrtc.PeerConnection
+	// processing is which of the DSP's three components process the microphone, as the join said. All off
+	// still runs RNNoise, for the voice probability the audio level's V flag follows (M30).
+	processing dsp.Settings
 
 	ready    chan struct{}
 	ended    chan string
@@ -160,7 +159,8 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{opts: opts, pc: pc, ready: make(chan struct{}), ended: make(chan string, 1),
+	s := &Session{opts: opts, pc: pc, processing: dsp.Settings(join.Processing),
+		ready: make(chan struct{}), ended: make(chan string, 1),
 		codecDone: make(chan struct{}), dspDone: make(chan struct{})}
 	if opts.Device != nil {
 		mk := opts.Codec

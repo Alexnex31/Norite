@@ -1307,6 +1307,12 @@ carries the condition that would reopen it.
   `TestAJoinThisDaemonCannotMakeIsRefusedBeforeTheChannelIsSent`). A channel id would tell the instance
   little it does not know, since the channel is its own; the order is kept anyway, so the condition stays
   one rule rather than a judgement per request.
+- **Reopened at M30, and answered the same way**: the same join carries a body, the first request to the
+  daemon that does: three booleans saying which of the call's audio processing is on, read from the
+  client's `config.toml`. It goes in the same request as the channel, which is sent only to a daemon that
+  answered `GET /@daemon/voice` (`TestTheSettingsAreSentOnlyWithTheChannel`). What an older daemon would
+  have delivered is whether this account cancels echo, suppresses noise and adjusts its gain, which says
+  less than the channel beside it.
 
 ### Which file wins a shared key at unsplit is decided by modification times anything can set
 - **Raised**: M21, while building the toggle; narrowed by `/code-review`

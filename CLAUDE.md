@@ -1834,10 +1834,11 @@ And on the client config and the daemon's own requests, from M21:
   status; since M24 also `unreachable`, when the request cannot be carried out yet: the release host could
   not be read, a check is already under way, or the instance has not been heard from. It takes no body and
   carries nothing of the user's in its path, because a daemon older than the prefix relays the path to its
-  instance (ledger). One exception since M22: the port number in `/@daemon/automation/enable/{port}`, sent
-  only after a request that says nothing has shown the daemon knows these requests. `relay.Target` refuses
-  the prefix, and a test holds `openapi.yaml` to never using it. The CLI side is `daemonclient.Local` and
-  `LocalRead`.
+  instance (ledger). Two exceptions, each sent only after a request that says nothing has shown the daemon
+  knows these requests: the port number in `/@daemon/automation/enable/{port}` (M22), and the voice join's
+  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly. `relay.Target` refuses the prefix, and a test
+  holds `openapi.yaml` to never using it. The CLI side is `daemonclient.Local`, `LocalWith` for a body,
+  and `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
   which nothing outside the daemon module can import. A write puts back the fields it did not understand.
   A step that must follow the state and not be interleaved with the next update goes in `Update`'s `then`.

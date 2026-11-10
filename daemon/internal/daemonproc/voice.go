@@ -13,6 +13,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
 // signedInAccount is the sign-in a call is joined under: the session's account, and the session's own
@@ -65,7 +66,11 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 	case req.Path == ipc.PathVoiceLeave:
 		out = l.voice.Leave()
 	case joining:
-		out, err = l.voice.Join(ctx, channel)
+		settings, bad := ipc.DecodeVoiceJoin(req.Body)
+		if bad != nil {
+			return ipc.Failure(ipc.RelayBadRequest, bad.Error())
+		}
+		out, err = l.voice.Join(ctx, channel, voiceipc.Processing(settings))
 	default:
 		return ipc.Failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
 	}

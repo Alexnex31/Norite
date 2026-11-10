@@ -41,8 +41,8 @@ func TestWhatACallCosts(t *testing.T) {
 		a := &audiotest.Device{Source: audiotest.Tone(440, 8000)}
 		b := &audiotest.Device{Source: audiotest.Tone(660, 8000)}
 		// The DSP on, as every call has it from M30: what a call costs is the codec and the chain.
-		sa := h.join(t, r, "1", a, Options{Codec: mk, Processing: dsp.AllOn()})
-		sb := h.join(t, r, "2", b, Options{Codec: mk, Processing: dsp.AllOn()})
+		sa := h.joinWith(t, r, "1", a, dsp.AllOn(), Options{Codec: mk})
+		sb := h.joinWith(t, r, "2", b, dsp.AllOn(), Options{Codec: mk})
 		time.Sleep(2 * time.Second) // settled
 		before, wall := cpu(), time.Now()
 		time.Sleep(10 * time.Second)

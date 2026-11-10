@@ -601,7 +601,7 @@ func (counting) Close() error                     { return nil }
 func TestTheReferenceIsReadOnlyForEchoCancellation(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		renders := 0
-		m := &media{s: &Session{opts: Options{Log: io.Discard, Processing: dsp.Settings{EchoCancellation: on}}},
+		m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: on}},
 			chain: counting{renders: &renders}}
 		for range 10 {
 			m.ref.put(make([]int16, audio.FrameSamples))

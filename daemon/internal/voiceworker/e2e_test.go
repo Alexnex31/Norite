@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
 // The done-when, end to end: the daemon's calls start the real norite-voice, which connects to M26's SFU
@@ -156,9 +157,11 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	st, err := v.Join(ctx, "1001")
+	// The settings a client sent, as the call's state reports them (M30).
+	st, err := v.Join(ctx, "1001", voiceipc.Processing{EchoCancellation: true, AutoGain: true})
 	require.NoError(t, err)
-	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "1001", Available: true}, st)
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "1001", Available: true,
+		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}}, st)
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
 	if runtime.GOOS == "linux" {
@@ -182,7 +185,7 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	// A crash, seen through the closed pipe, ends the call with its reason; the next join works. Each step
 	// takes a room of its own: the SFU counts a killed worker's connection until ICE gives up on it, and
 	// holds two per user in a room (M36's entry).
-	_, err = v.Join(ctx, "1002")
+	_, err = v.Join(ctx, "1002", voiceipc.AllProcessing())
 	require.NoError(t, err)
 	v.mu.Lock()
 	pid := v.current.worker.PID()
@@ -195,9 +198,9 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.False(t, v.Busy())
 
 	// Joining another channel while in a call leaves the first.
-	_, err = v.Join(ctx, "1003")
+	_, err = v.Join(ctx, "1003", voiceipc.AllProcessing())
 	require.NoError(t, err)
-	st, err = v.Join(ctx, "1004")
+	st, err = v.Join(ctx, "1004", voiceipc.AllProcessing())
 	require.NoError(t, err)
 	require.Equal(t, "1004", st.Channel)
 	require.Equal(t, ipc.VoiceInCall, st.State)

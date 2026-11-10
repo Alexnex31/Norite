@@ -6,6 +6,7 @@ package voiceworker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
 // refusingServer gives a route and refuses the provision, as a voice server whose room is full does,
@@ -52,7 +54,7 @@ func TestAFailedJoinAnswersOnceItsWorkerIsGone(t *testing.T) {
 	srv := &refusingServer{}
 	v := standinVoice(t, "good", srv)
 	srv.v = v
-	st, err := v.Join(context.Background(), "1")
+	st, err := v.Join(context.Background(), "1", voiceipc.AllProcessing())
 	require.ErrorContains(t, err, "room full")
 	// The status the answer carries is the failure's, so the two agree, and a retry finds nothing to leave.
 	require.Equal(t, ipc.VoiceIdle, st.State)
@@ -90,7 +92,7 @@ func TestAJoinWhoseAskerLeftWhileWaitingIsNotDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	answered := make(chan error, 1)
 	go func() {
-		_, err := v.Join(ctx, "2")
+		_, err := v.Join(ctx, "2", voiceipc.AllProcessing())
 		answered <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -112,7 +114,7 @@ func TestAJoinWhoseAskerLeftWhileWaitingIsNotDone(t *testing.T) {
 func TestAJoinBeforeTheSignInIsReadIsPending(t *testing.T) {
 	v := NewVoice(VoiceOptions{Signaler: &blockingServer{}, Log: zerolog.Nop(),
 		Account: func() (SignIn, error) { return SignIn{}, ErrSignInPending }})
-	_, err := v.Join(context.Background(), "1")
+	_, err := v.Join(context.Background(), "1", voiceipc.AllProcessing())
 	var refused *Refusal
 	require.True(t, errors.As(err, &refused))
 	require.True(t, refused.Pending)
@@ -153,7 +155,7 @@ func TestAJoinWaitingWhileTheSignInEndsIsNotMade(t *testing.T) {
 	v.joinMu.Lock()
 	answered := make(chan error, 1)
 	go func() {
-		_, err := v.Join(context.Background(), "2")
+		_, err := v.Join(context.Background(), "2", voiceipc.AllProcessing())
 		answered <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -177,11 +179,32 @@ func TestTheEndOfTheSignInEndsTheCall(t *testing.T) {
 	v := NewVoice(VoiceOptions{Signaler: &blockingServer{}, Log: zerolog.Nop(),
 		Account: func() (SignIn, error) { return SignIn{Account: "42", Ended: ended}, nil }})
 	t.Cleanup(v.Close)
-	go func() { _, _ = v.Join(context.Background(), "1") }()
+	go func() { _, _ = v.Join(context.Background(), "1", voiceipc.AllProcessing()) }()
 	require.Eventually(t, v.Busy, 5*time.Second, 5*time.Millisecond)
 	close(ended)
 	require.Eventually(t, func() bool { return !v.Busy() }, 5*time.Second, 5*time.Millisecond)
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the sign-in ended", Available: true}, v.Status())
+}
+
+// The join's settings reach the worker in its JOIN, each switch where the request put it (M30).
+func TestTheJoinsSettingsReachTheWorker(t *testing.T) {
+	fast(t)
+	for _, p := range []voiceipc.Processing{
+		{EchoCancellation: true}, {NoiseSuppression: true}, {AutoGain: true}, voiceipc.AllProcessing(), {},
+	} {
+		log := &logBuffer{}
+		o := standinOptions(t, "processing", nil)
+		srv := &refusingServer{}
+		v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: srv, Env: o.Env,
+			Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.New(log)})
+		srv.v = v
+		_, err := v.Join(context.Background(), "1", p)
+		require.ErrorContains(t, err, "room full")
+		want := fmt.Sprintf("processing %t %t %t", p.EchoCancellation, p.NoiseSuppression, p.AutoGain)
+		require.Eventually(t, func() bool { return strings.Contains(log.String(), want) },
+			5*time.Second, 10*time.Millisecond, "%s", log.String())
+		v.Close()
+	}
 }
 
 // A leave while the worker is still starting is a leave: logged as the worker exiting, never as a crash.
@@ -194,7 +217,7 @@ func TestALeaveWhileTheWorkerStartsIsNoCrash(t *testing.T) {
 	t.Cleanup(v.Close)
 	answered := make(chan error, 1)
 	go func() {
-		_, err := v.Join(context.Background(), "1")
+		_, err := v.Join(context.Background(), "1", voiceipc.AllProcessing())
 		answered <- err
 	}()
 	require.Eventually(t, v.Busy, 5*time.Second, 5*time.Millisecond)
@@ -264,7 +287,7 @@ func TestAFailedJoinIsOverWhenItIsAnswered(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 		}})
-	st, err := v.Join(context.Background(), "1")
+	st, err := v.Join(context.Background(), "1", voiceipc.AllProcessing())
 	answered.Store(true)
 	require.Error(t, err)
 	require.NoError(t, within(5*time.Second, idle))
