@@ -32,18 +32,23 @@ import (
 // the jitter buffers and nothing here keeps time of its own.
 //
 // The DSP (M30) runs in send, the one goroutine that enters its instance, and is fed both directions there:
-// what the speakers played reaches it through a ring the mix writes, and send hands the echo canceller
-// everything played so far before each frame it processes. AEC3 queues what it is handed and takes one
-// played frame per recorded frame, in order, so what pairs the two directions is the order and the count,
-// not when the calls are made: a sender running behind renders several frames at once and loses nothing.
+// what the speakers played reaches it through a ring the mix writes, and each captured frame is stamped
+// with how much had been played when it was recorded. Before processing a frame, send hands the echo
+// canceller what was played up to its stamp. AEC3 queues what it is handed and takes one played frame per
+// recorded frame, in order, so what pairs the two directions is the order and the count, not when the
+// calls are made.
+//
+// The stamp is what keeps a sender running behind from handing over more: rendering everything played so
+// far put what it was behind by in AEC3's render buffer, and AEC3 resets its delay estimate when that
+// stays above 32 ms for a second (DetectExcessRenderBlocks), two frames (M30 /code-review). The stamp was
+// in the plan, was removed when no test could see it, and is back with the test that does
+// (TestASenderBehindRendersOnlyUpToTheFrame).
+//
 // What would lose the pairing is a recorded frame dropped on the way, which shifts every later one against
 // its reference until AEC3 reconverges: measured, starving the sender with M29's queue left 13 dB of echo
 // canceled where this design cancels 57 (TestEchoStaysCanceledWhenTheSenderFallsBehind). So no frame is
-// dropped before the DSP. A sender that falls behind runs the DSP on
-// every frame and leaves the encoder to skip, which is what keeps what is sent close to the microphone.
-//
-// The plan had each frame stamped with how much had been played when it was recorded, and rendered up to
-// the stamp. Removing the stamp changed nothing a test could see, for the reason above, so it went.
+// dropped before the DSP. A sender that falls behind runs the DSP on every frame and leaves the encoder to
+// skip, which is what keeps what is sent close to the microphone.
 
 const (
 	// stuckDecode is how long one decode may run before the call ends. libopus's work per packet is
@@ -51,12 +56,17 @@ const (
 	// (ADR 0036): ending the call ends the worker, which is what frees the core.
 	stuckDecode = time.Second
 	// captureQueue is how far behind the microphone the encoder may fall: a frame with this many others
-	// waiting behind it is processed and not encoded, which bounds what is sent to 80 ms behind. M29 dropped
-	// the oldest frame from the queue instead, which the DSP cannot afford (above). Never two frames in a
-	// row: a sender whose DSP alone takes longer than real time keeps the queue full, and would otherwise
-	// skip every frame and send nothing. Half its frames go instead, which is choppy rather than mute, as
-	// M29's overloaded sender was.
+	// waiting behind it is processed and not encoded, which bounds what is sent to 80 ms behind once the
+	// queue drains. M29 dropped the oldest frame from the queue instead, which the DSP cannot afford
+	// (above). Never two frames in a row: a sender too slow for real time keeps the queue full, and would
+	// otherwise skip every frame and send nothing.
 	captureQueue = 4
+	// slowDSP is how many frames in a row the sender may take with captureQueue others waiting before the
+	// DSP is judged too slow for this machine and dropped for the rest of the call. Skipping cannot drain a
+	// queue the DSP alone keeps full: it filled to captureBacklog, 320 ms behind the microphone, and the far
+	// end, sent half the frames, heard nothing (M30 /code-review). Half a second, which a sender that
+	// merely stalled has drained long before.
+	slowDSP = 25
 	// captureBacklog is how many captured frames wait for send before the oldest is dropped after all: as
 	// much as the reference ring holds, past which the reference is lost anyway.
 	captureBacklog = refFrames
@@ -75,11 +85,13 @@ type media struct {
 	s      *Session
 	codec  opus.Codec
 	enc    opus.Encoder
-	track  *webrtc.TrackLocalStaticRTP
+	track  interface{ WriteRTP(*rtp.Packet) error } // the session's track; a test's recorder
 	lossy  func() bool
-	frames chan []int16
-	stop   chan struct{}
-	sent   sync.WaitGroup
+	frames chan captureFrame
+	// captures counts the frames the microphone delivered, which numbers each; captured alone writes it.
+	captures uint64
+	stop     chan struct{}
+	sent     sync.WaitGroup
 
 	// The DSP, all of it send's but ref. send takes the module up once it has compiled (taken), and makes
 	// the chain then; until it has, and once the chain has failed or if it could not start, the call goes on
@@ -145,7 +157,7 @@ func (s *Session) startMedia(ctx context.Context) error {
 	// The DSP is not awaited: it compiles in about 200 ms, twice the codec, and send takes it up when it is
 	// ready, so it never holds back a call's first words.
 	m := &media{s: s, codec: codec, track: s.track, lossy: s.opts.Lossy,
-		frames: make(chan []int16, captureBacklog), stop: make(chan struct{}), base: time.Now()}
+		frames: make(chan captureFrame, captureBacklog), stop: make(chan struct{}), base: time.Now()}
 	if m.enc, err = codec.NewEncoder(ctx, opus.DefaultEncoderOptions()); err != nil {
 		m.closeDSP()
 		_ = codec.Close(ctx)
@@ -235,11 +247,20 @@ func (m *media) attach(tr remote) {
 	m.receive(tr.tr, audioLevelID(tr.rcv.GetParameters().HeaderExtensions), sl)
 }
 
+// captureFrame is a frame as the microphone delivered it, which one it was, and how many frames the
+// speakers had played when it was.
+type captureFrame struct {
+	pcm    []int16
+	n      uint64
+	played uint64
+}
+
 // captured hands a frame to send without ever waiting on it: the device's goroutine must not stall, so
 // past captureBacklog the oldest frame waiting is dropped, and the echo canceller reconverges across it.
 func (m *media) captured(pcm []int16) {
-	f := make([]int16, len(pcm))
-	copy(f, pcm)
+	f := captureFrame{pcm: make([]int16, len(pcm)), n: m.captures, played: m.ref.count()}
+	m.captures++
+	copy(f.pcm, pcm)
 	for {
 		select {
 		case <-m.stop:
@@ -259,26 +280,39 @@ func (m *media) captured(pcm []int16) {
 // send encodes each captured frame and writes it to the track. A frame DTX reduced to a packet of two
 // bytes or fewer is not sent, as WebRTC's own Opus sender does not: the timestamp moves on, the sequence
 // number does not, and the far end's jitter buffer reads the gap as silence rather than loss.
+//
+// The timestamp is the frame's place in what the microphone delivered, so a frame skipped or dropped
+// leaves the same gap. Counting only the frames sent made a sender slower than real time send a stream
+// whose timestamps ran at half the clock's speed: the far end's buffer, playing it at the clock's speed,
+// found every packet late and played silence (M30 /code-review).
 func (m *media) send() {
 	defer m.sent.Done()
 	var seq uint16
-	var ts uint32
-	talking, skipped := false, false
+	talking, skipped, behind := false, false, 0
 	out := make([]byte, opus.MaxPacket)
 	for {
-		var pcm []int16
+		var f captureFrame
 		select {
 		case <-m.stop:
 			return
-		case pcm = <-m.frames:
+		case f = <-m.frames:
 		}
+		pcm := f.pcm
 		if m.s.opts.stall != nil {
 			m.s.opts.stall()
 		}
-		voice := m.process(pcm)
+		voice := m.process(pcm, f.played)
+		if len(m.frames) < captureQueue {
+			behind = 0
+		} else if behind++; behind >= slowDSP && m.chain != nil {
+			m.s.logf("the audio processing is slower than real time on this machine, so the rest of the call " +
+				"goes unprocessed")
+			m.dropChain()
+			behind = 0
+		}
 		if len(m.frames) >= captureQueue && !skipped {
-			// Behind: this frame has been through the DSP, which keeps it in step, and is not sent. As for
-			// a frame M29 dropped, nothing of it reaches the track: no packet and no timestamp.
+			// Behind: this frame has been through the DSP, which keeps it in step, and is not sent: no
+			// packet, and a gap in the timestamps the far end hears as silence.
 			skipped = true
 			m.skipped.Add(1)
 			continue
@@ -290,8 +324,7 @@ func (m *media) send() {
 			m.s.end(voiceipc.CutReason("the microphone's audio could not be encoded: " + err.Error()))
 			return
 		}
-		frameTS := ts
-		ts += audio.FrameSamples
+		frameTS := uint32(f.n * audio.FrameSamples) //nolint:gosec // RTP's timestamp wraps, as it is meant to
 		if n <= 2 {
 			talking = false
 			continue
@@ -314,8 +347,8 @@ func (m *media) send() {
 	}
 }
 
-// process runs the DSP on a captured frame in place, after rendering what the speakers have played since
-// the last frame, and reports whether the frame holds a voice. With no chain, the frame goes as it was and
+// process runs the DSP on a captured frame in place, after rendering what the speakers had played by the
+// time it was recorded, its stamp, and reports whether the frame holds a voice. With no chain, the frame goes as it was and
 // is reported a voice, as M29 sent every frame.
 //
 // A failed call into the chain drops it for the rest of the call (M30's plan, D1). The reference is other
@@ -323,15 +356,15 @@ func (m *media) send() {
 // on it would let anybody end everybody's, where this lets them switch off one caller's processing.
 // Starting it again would hand them the same lever on every frame. A call that never returns is the
 // watchdog's.
-func (m *media) process(pcm []int16) bool {
-	m.takeDSP()
+func (m *media) process(pcm []int16, stamp uint64) bool {
+	m.takeDSP(stamp)
 	if m.chain == nil {
 		return true
 	}
 	copy(m.raw[:], pcm)
 	var voice float32
 	err := m.clocked(&m.processing, func() error {
-		played := m.ref.count()
+		played := stamp
 		if !m.s.processing.EchoCancellation {
 			m.rendered = played // nothing reads the reference
 		} else if behind := played - m.rendered; behind > refFrames {
@@ -362,8 +395,7 @@ func (m *media) process(pcm []int16) bool {
 	if err != nil {
 		m.s.logf("%s", voiceipc.CutReason("the audio processing failed, so the rest of the call goes unprocessed: "+
 			err.Error()))
-		_ = m.chain.Close()
-		m.chain = nil
+		m.dropChain()
 		// A failure on the frame's second half leaves its first processed: half delayed and gained, half
 		// not, which would click. The frame goes as it was captured.
 		copy(pcm, m.raw[:])
@@ -372,10 +404,16 @@ func (m *media) process(pcm []int16) bool {
 	return voice >= voiceProbability
 }
 
+// dropChain ends the chain for the rest of the call.
+func (m *media) dropChain() {
+	_ = m.chain.Close()
+	m.chain = nil
+}
+
 // takeDSP makes the chain once the module has compiled, without waiting for it. The reference starts at
-// what is playing then: AEC3 pairs the two directions by count, so starting further back would make it
-// estimate a delay that is not there, on top of the devices' own.
-func (m *media) takeDSP() {
+// the stamp of the frame it first processes: AEC3 pairs the two directions by count, so starting further
+// back would make it estimate a delay that is not there, on top of the devices' own.
+func (m *media) takeDSP(stamp uint64) {
 	if m.taken || m.s.dspDone == nil {
 		return
 	}
@@ -390,12 +428,18 @@ func (m *media) takeDSP() {
 		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", m.s.dspErr)
 		return
 	}
-	c, err := m.module.NewChain(context.Background(), m.s.processing)
+	// Making the chain runs the module's own C++ constructors and dsp_new in WebAssembly, so the watchdog
+	// bounds it as it bounds every call into the instance (M30 /code-review).
+	var c dsp.Chain
+	err := m.clocked(&m.processing, func() (e error) {
+		c, e = m.module.NewChain(context.Background(), m.s.processing)
+		return
+	})
 	if err != nil {
 		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", err)
 		return
 	}
-	m.chain, m.rendered = c, m.ref.count()
+	m.chain, m.rendered = c, stamp
 }
 
 // Level is RFC 6464's audio level of a frame: its power in -dBov, 0 the loudest and 127 silence.
@@ -457,7 +501,10 @@ func (m *media) fill(out []int16) {
 	for i, v := range m.mix {
 		out[i] = int16(max(math.MinInt16, min(math.MaxInt16, v)))
 	}
-	m.ref.put(out)
+	// Nothing reads the reference with echo cancellation off, so the speakers' callback is spared the copy.
+	if m.s.processing.EchoCancellation {
+		m.ref.put(out)
+	}
 }
 
 // refRing is the last refFrames frames the speakers played, for the echo canceller. The mix writes it under

@@ -76,7 +76,7 @@ type SignIn struct {
 // call is one call's worker and the goroutine that owns it.
 type call struct {
 	channel    string
-	processing voiceipc.Processing
+	processing ipc.VoiceJoin
 	cancel     context.CancelFunc
 	// worker is set under Voice.mu once started.
 	worker *Worker
@@ -132,7 +132,7 @@ func (r *Refusal) Error() string { return r.Msg }
 
 // Join joins channel, ending any call first, and returns once the call is up or has failed. The worker
 // processes the microphone as processing says.
-func (v *Voice) Join(ctx context.Context, channel string, processing voiceipc.Processing) (ipc.VoiceStatus, error) {
+func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJoin) (ipc.VoiceStatus, error) {
 	if v.opts.Signaler == nil {
 		return v.Status(), &Refusal{Msg: v.opts.Unavailable, Unavailable: true}
 	}
@@ -173,7 +173,7 @@ func (v *Voice) Join(ctx context.Context, channel string, processing voiceipc.Pr
 	default:
 	}
 	v.current = c
-	asked := ipc.VoiceJoin(processing)
+	asked := processing
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceJoining, channel, "", &asked
 	v.mu.Unlock()
 	v.publish()

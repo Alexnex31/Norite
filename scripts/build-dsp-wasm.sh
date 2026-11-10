@@ -145,7 +145,10 @@ objs=()
 compile() {
 	local o
 	o=$work/obj/$(tr / _ <<<"${1#"$work"/}").o
-	"$clang" "${common[@]}" "${@:2}" -c "$1" -o "$o" &
+	# A job's status is lost once wait -n has taken another's, and a bare wait returns 0 whatever its jobs
+	# did, so a failed compile leaves a mark for after the last wait (M30 /code-review). Without it the
+	# failure surfaced as the linker missing an object.
+	{ "$clang" "${common[@]}" "${@:2}" -c "$1" -o "$o" || : >"$work/failed"; } &
 	objs+=("$o")
 	while (( $(jobs -r | wc -l) >= $(nproc) )); do wait -n; done
 }
@@ -191,6 +194,7 @@ done
 compile "$csrc/shim.cc" "${cxx[@]}" "${webrtc[@]}" -I"$apm/webrtc/modules/audio_processing" -I"$rnnoise/include"
 compile "$csrc/wasi_stubs.c" -std=c11
 wait
+[[ ! -e $work/failed ]] || { echo "build-dsp-wasm: a compile failed; its error is above" >&2; exit 1; }
 
 # A reactor: no main, and _initialize runs the constructors. The stack is 1 MiB, as the spike gave AEC3;
 # memory starts where the link puts it, and the module declares 8 MiB at most, twice what a chain holds

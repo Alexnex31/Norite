@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio/audiotest"
@@ -165,7 +166,7 @@ func (h *harness) joinWith(t *testing.T, room, user string, dev audio.Device, p 
 	if err := h.post("/credentials", map[string]string{"user": user}, &creds); err != nil {
 		t.Fatal(err)
 	}
-	j := voiceipc.Join{Loopback: true, Processing: voiceipc.Processing(p)}
+	j := voiceipc.Join{Loopback: true, Processing: ipc.VoiceJoin(p)}
 	if len(creds.URLs) > 0 {
 		j.ICEServers = []voiceipc.ICEServer{{URLs: creds.URLs, Username: creds.Username, Credential: creds.Password}}
 	}

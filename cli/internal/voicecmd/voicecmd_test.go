@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -162,33 +163,60 @@ func TestTheSettingsAreSentOnlyWithTheChannel(t *testing.T) {
 // A config that does not load is not the defaults, and nothing is asked: somebody who turned a switch off
 // and then broke the file would otherwise be put in a call with it on.
 func TestAConfigThatDoesNotLoadJoinsNothing(t *testing.T) {
-	broken := func() (ipc.VoiceJoin, []string, error) {
-		return ipc.VoiceJoin{}, nil, errors.New("the voice settings could not be read: config.toml: line 3")
-	}
+	const why = "the voice settings could not be read: config.toml: line 3"
+	broken := func() (ipc.VoiceJoin, []string, error) { return ipc.VoiceJoin{}, nil, errors.New(why) }
 	d := &fakeDaemon{status: available()}
 	r := noriteWith(t, d, broken, false, "join", "1234")
 	require.Error(t, r.err)
-	assert.Contains(t, r.err.Error(), "line 3")
+	assert.Equal(t, why, r.err.Error())
 	assert.Empty(t, d.asked)
+
+	// And it is said as itself with no daemon running: reading the file is a local check, made before
+	// anything is attached to.
+	r = noriteWith(t, nil, broken, false, "join", "1234")
+	require.Error(t, r.err)
+	assert.Equal(t, why, r.err.Error())
 }
 
-// What the file got wrong about a switch is said, and the join goes ahead with that switch on.
-func TestASwitchTheFileGotWrongIsSaidAndStaysOn(t *testing.T) {
-	cfg, err := config.Parse([]byte("[shared.voice]\nauto_gain = \"of\"\necho_cancellation = \"off\"\n"+
-		"[tui.colors]\naccent = \"red\"\n[gui.voice]\nauto_gain = \"no\"\n"), config.TUI)
+// What the file got wrong under voice is said, a misspelled switch and a voice that is not a table
+// included, and the join goes ahead with every switch the file did not set right on. The GUI's section
+// applies to nothing here, and neither does a color.
+func TestWhatTheFileGotWrongAboutVoiceIsSaid(t *testing.T) {
+	cfg, err := config.Parse([]byte("[shared.voice]\nauto_gain = \"of\"\necho_cancelation = \"off\"\n"+
+		"[tui]\nvoice = false\n[tui.colors]\naccent = \"red\"\n[gui.voice]\nauto_gain = \"no\"\n"), config.TUI)
 	require.NoError(t, err)
 	body, warnings, err := settingsOf(cfg, "config.toml")
 	require.NoError(t, err)
-	assert.Equal(t, ipc.VoiceJoin{EchoCancellation: false, NoiseSuppression: true, AutoGain: true}, body)
-	require.Len(t, warnings, 1, "a color's problem is not the join's to report")
-	assert.True(t, strings.HasPrefix(warnings[0], "config.toml: shared.voice.auto_gain: "), warnings[0])
-	assert.True(t, strings.HasSuffix(warnings[0], "; it stays on"), warnings[0])
+	assert.Equal(t, ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}, body)
+	assert.Equal(t, []string{
+		`config.toml: shared.voice.auto_gain: must be one of "on" or "off"; it stays on`,
+		"config.toml: shared.voice.echo_cancelation: not a key this version of Norite knows; it changes nothing",
+		"config.toml: tui.voice: not a key this version of Norite knows; it changes nothing",
+	}, warnings)
 
 	d := &fakeDaemon{status: available()}
 	r := noriteWith(t, d, func() (ipc.VoiceJoin, []string, error) { return body, warnings, nil }, false,
 		"join", "1234")
 	require.NoError(t, r.err)
-	assert.Contains(t, r.out, warnings[0])
+	for _, w := range warnings {
+		assert.Contains(t, r.out, w+"\n")
+	}
+}
+
+// Problems past the bound the config keeps are counted, and one may be a switch's, so the join says so.
+func TestProblemsPastTheBoundAreSaidToMayConcernVoice(t *testing.T) {
+	var doc strings.Builder
+	doc.WriteString("[shared]\n")
+	for i := range config.MaxWarnings + 2 {
+		fmt.Fprintf(&doc, "nonsense%d = 1\n", i)
+	}
+	doc.WriteString("[shared.voice]\nauto_gain = \"of\"\n")
+	cfg, err := config.Parse([]byte(doc.String()), config.TUI)
+	require.NoError(t, err)
+	_, warnings, err := settingsOf(cfg, "config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"config.toml: 3 more problems, not listed, may concern the voice settings; " +
+		"`norite config get voice.auto_gain` and its siblings say what applies"}, warnings)
 }
 
 func TestAFailedJoinSaysWhy(t *testing.T) {

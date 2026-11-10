@@ -19,7 +19,6 @@ import (
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 	"github.com/Alexnex31/Norite/daemon/ipc"
-	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
 // refusingSignaler is a voice server that refuses every call, so a join fails at the first step without
@@ -140,6 +139,12 @@ func TestAJoinsSettingsAreDecodedStrictly(t *testing.T) {
 		`{"echo_cancellation":"on","noise_suppression":false,"auto_gain":true}`,
 		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true} {}`,
 		`[]`, `true`,
+		// What encoding/json would have taken: a key in another case, a key twice, a stray close after.
+		`{"ECHO_CANCELLATION":false,"noise_suppression":false,"auto_gain":true}`,
+		`{"echo_cancellation":true,"echo_cancellation":false,"noise_suppression":false,"auto_gain":true}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true}]`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true}}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":null}`,
 	} {
 		srv := &countingSignaler{}
 		l := voiceFixture(srv, true)
@@ -259,7 +264,7 @@ func TestASignInThatEndsEndsTheCallWithNoGateway(t *testing.T) {
 
 	calls := voiceworker.NewVoice(voiceworker.VoiceOptions{Signaler: holdingSignaler{}, Log: zerolog.Nop(),
 		Account: signedInAccount(src)})
-	go func() { _, _ = calls.Join(context.Background(), "1", voiceipc.AllProcessing()) }()
+	go func() { _, _ = calls.Join(context.Background(), "1", ipc.VoiceAllOn()) }()
 	require.Eventually(t, calls.Busy, 5*time.Second, 5*time.Millisecond)
 
 	require.NoError(t, store.Clear()) // `norite logout`

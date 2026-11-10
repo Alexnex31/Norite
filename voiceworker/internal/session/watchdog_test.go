@@ -4,6 +4,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pion/rtp"
 
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
 	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
@@ -74,12 +77,12 @@ func TestAnEncodeThatNeverReturnsEndsTheCall(t *testing.T) {
 	s := &Session{ended: make(chan string, 1)}
 	release := make(chan struct{})
 	defer close(release)
-	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, 1), base: time.Now(),
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 1), base: time.Now(),
 		enc: stuckEncoder{release: release}, codec: keepOpen{}}
 	m.sent.Add(2)
 	go m.watch()
 	go m.send()
-	m.frames <- make([]int16, audio.FrameSamples)
+	m.frames <- captureFrame{pcm: make([]int16, audio.FrameSamples)}
 	select {
 	case reason := <-s.ended:
 		if !strings.Contains(reason, "encoder stopped responding") {
@@ -386,12 +389,12 @@ func TestAProcessingThatNeverReturnsEndsTheCall(t *testing.T) {
 	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}
 	release := make(chan struct{})
 	defer close(release)
-	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, 1), base: time.Now(),
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 1), base: time.Now(),
 		chain: stuckChain{release: release}, enc: keeping{got: make(chan []int16, 8)}, codec: keepOpen{}}
 	m.sent.Add(2)
 	go m.watch()
 	go m.send()
-	m.frames <- make([]int16, audio.FrameSamples)
+	m.frames <- captureFrame{pcm: make([]int16, audio.FrameSamples)}
 	select {
 	case reason := <-s.ended:
 		if reason != "the audio processing stopped responding, so the call was ended" {
@@ -406,6 +409,44 @@ func TestAProcessingThatNeverReturnsEndsTheCall(t *testing.T) {
 	case <-closed:
 	case <-time.After(3 * stuckDecode):
 		t.Fatal("closing waited on the stuck processing")
+	}
+}
+
+// stuckModule never returns from making a chain until released, as a loop in a constructor would not.
+type stuckModule struct {
+	dsp.Module
+	release chan struct{}
+}
+
+func (m stuckModule) NewChain(context.Context, dsp.Settings) (dsp.Chain, error) {
+	<-m.release
+	return nil, errors.New("stuck")
+}
+
+func (stuckModule) Close(context.Context) error { return nil }
+
+// Making the chain runs WebAssembly too, the module's constructors and dsp_new, so one that never returns
+// ends the call like a stuck frame: it would otherwise hold the microphone silent for the rest of the call,
+// with nothing in the log to say why (M30 /code-review).
+func TestAChainThatIsNeverMadeEndsTheCall(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}, dspDone: make(chan struct{}),
+		dsp: stuckModule{release: release}}
+	close(s.dspDone)
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 1), base: time.Now(),
+		enc: keeping{got: make(chan []int16, 8)}, codec: keepOpen{}}
+	m.sent.Add(2)
+	go m.watch()
+	go m.send()
+	m.frames <- captureFrame{pcm: make([]int16, audio.FrameSamples)}
+	select {
+	case reason := <-s.ended:
+		if reason != "the audio processing stopped responding, so the call was ended" {
+			t.Errorf("the call ended with %q", reason)
+		}
+	case <-time.After(3 * stuckDecode):
+		t.Fatal("the call did not end")
 	}
 }
 
@@ -442,7 +483,7 @@ func TestAFailedDSPLeavesTheCallUnprocessed(t *testing.T) {
 	s := &Session{ended: make(chan string, 1), opts: Options{Log: lockedWriter{&logMu, &log}}}
 	closed := false
 	enc := keeping{got: make(chan []int16, 4)}
-	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, 4), base: time.Now(),
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 4), base: time.Now(),
 		chain: failingChain{closed: &closed}, enc: enc, codec: keepOpen{}}
 	m.sent.Add(1)
 	go m.send()
@@ -453,7 +494,7 @@ func TestAFailedDSPLeavesTheCallUnprocessed(t *testing.T) {
 	// The first frame is the one the chain fails on, having cleared it as a half-finished call could: it
 	// goes as it was captured. The others go with no chain at all.
 	for i := range 3 {
-		m.frames <- append([]int16(nil), frame...)
+		m.frames <- captureFrame{pcm: append([]int16(nil), frame...)}
 		select {
 		case got := <-enc.got:
 			if !slices.Equal(got, frame) {
@@ -501,31 +542,52 @@ func (slowChain) Capture([]int16) (float32, error) {
 	return 1, nil
 }
 
-// A sender whose DSP cannot keep up keeps its queue full, so every frame it takes has others waiting
-// behind it. It still sends: the encoder skips a frame, never two in a row, and the caller is choppy where
-// skipping every frame would make them mute with nothing to say why.
-func TestASenderTooSlowForTheDSPStillSends(t *testing.T) {
-	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}
+// A sender whose DSP cannot keep up keeps its queue full, and skipping the encoder cannot drain it: it
+// filled to captureBacklog, 320 ms behind the microphone, and the far end, sent half the frames, heard
+// nothing (M30 /code-review). The DSP goes once it has kept the sender behind for slowDSP frames, and the
+// queue drains: what is sent is back within captureQueue of the microphone, every frame of it after that.
+func TestADSPTooSlowForRealTimeIsDropped(t *testing.T) {
+	var mu sync.Mutex
+	var logged bytes.Buffer
+	s := &Session{ended: make(chan string, 1), opts: Options{Log: lockedWriter{&mu, &logged}}}
 	enc := keeping{got: make(chan []int16, 100)}
-	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, captureBacklog), base: time.Now(),
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		chain: slowChain{}, enc: enc, codec: keepOpen{}}
 	m.sent.Add(1)
 	go m.send()
 	tick := time.NewTicker(audio.FrameSamples * time.Second / audio.SampleRate)
+	deepest := 0
 	for range 75 { // a second and a half of microphone
 		<-tick.C
 		m.captured(make([]int16, audio.FrameSamples))
+		deepest = max(deepest, len(m.frames))
 	}
 	tick.Stop()
+	time.Sleep(50 * time.Millisecond) // the last frame's turn
+	left := len(m.frames)
 	close(m.stop)
 	m.sent.Wait()
 	encoded := len(enc.got)
-	t.Logf("%d frames encoded, %d skipped, %d dropped", encoded, m.skipped.Load(), m.dropped.Load())
+	t.Logf("%d frames encoded, %d skipped, %d dropped; %d deepest, %d left", encoded, m.skipped.Load(),
+		m.dropped.Load(), deepest, left)
 	if m.skipped.Load() == 0 {
 		t.Fatal("the sender never fell behind, so this tested nothing")
 	}
-	if encoded < 15 {
-		t.Errorf("an overloaded sender encoded %d frames in a second and a half", encoded)
+	mu.Lock()
+	said := logged.String()
+	mu.Unlock()
+	if !strings.Contains(said, "the audio processing is slower than real time on this machine, so the rest of "+
+		"the call goes unprocessed\n") {
+		t.Errorf("the log does not say the DSP was dropped:\n%s", said)
+	}
+	if m.dropped.Load() != 0 || deepest >= captureBacklog {
+		t.Errorf("the queue filled: %d deep, %d frames dropped", deepest, m.dropped.Load())
+	}
+	if left >= captureQueue {
+		t.Errorf("%d frames still waited at the end: the sender never caught up", left)
+	}
+	if encoded+int(m.skipped.Load()) != 75 {
+		t.Errorf("%d encoded and %d skipped of 75", encoded, m.skipped.Load())
 	}
 }
 
@@ -551,7 +613,7 @@ func (markingModule) Close(context.Context) error { return nil }
 func TestTheCallDoesNotWaitForTheDSP(t *testing.T) {
 	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}, dspDone: make(chan struct{})}
 	enc := keeping{got: make(chan []int16, 4)}
-	m := &media{s: s, stop: make(chan struct{}), frames: make(chan []int16, captureBacklog), base: time.Now(),
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		enc: enc, codec: keepOpen{}}
 	m.sent.Add(1)
 	go m.send()
@@ -566,7 +628,7 @@ func TestTheCallDoesNotWaitForTheDSP(t *testing.T) {
 		m.sent.Wait()
 	}()
 	next := func() []int16 {
-		m.frames <- make([]int16, audio.FrameSamples)
+		m.frames <- captureFrame{pcm: make([]int16, audio.FrameSamples)}
 		select {
 		case got := <-enc.got:
 			return got
@@ -596,16 +658,17 @@ func (c counting) Render([]int16) error           { *c.renders++; return nil }
 func (counting) Capture([]int16) (float32, error) { return 1, nil }
 func (counting) Close() error                     { return nil }
 
-// With echo cancellation off nothing reads the reference, so send does not walk the ring for it: held by
-// counting rather than timing (CLAUDE.md, M21). With it on, every frame played is handed over.
+// With echo cancellation off nothing reads the reference, so the speakers do not write it and send does
+// not walk it: held by counting rather than timing (CLAUDE.md, M21). With it on, every frame played is
+// handed over.
 func TestTheReferenceIsReadOnlyForEchoCancellation(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		renders := 0
 		m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: on}},
 			chain: counting{renders: &renders}}
 		for range 10 {
-			m.ref.put(make([]int16, audio.FrameSamples))
-			m.process(make([]int16, audio.FrameSamples))
+			m.fill(make([]int16, audio.FrameSamples))
+			m.process(make([]int16, audio.FrameSamples), m.ref.count())
 		}
 		want := 0
 		if on {
@@ -614,5 +677,146 @@ func TestTheReferenceIsReadOnlyForEchoCancellation(t *testing.T) {
 		if renders != want {
 			t.Errorf("echo cancellation %v: %d chunks of reference rendered, want %d", on, renders, want)
 		}
+		if written := m.ref.count(); !on && written != 0 {
+			t.Errorf("echo cancellation off: the speakers wrote %d frames of reference nobody reads", written)
+		}
+	}
+}
+
+// pairing is a chain that keeps, at every captured chunk, the most reference it had been handed beyond
+// the microphone: what AEC3's render buffer would hold in excess.
+type pairing struct {
+	dsp.Chain
+	mu                      *sync.Mutex
+	renders, captures, most *int
+}
+
+func (p pairing) Render([]int16) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	*p.renders++
+	return nil
+}
+
+func (p pairing) Capture([]int16) (float32, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	*p.captures++
+	*p.most = max(*p.most, *p.renders-*p.captures)
+	return 1, nil
+}
+
+func (pairing) Close() error { return nil }
+
+// A sender running behind hands the echo canceller what had been played when each frame was recorded, and
+// no more. Handing it everything played so far, as M30 first did, put what the sender was behind by in
+// AEC3's render buffer, which resets its delay estimate when that stays above two frames for a second
+// (M30 /code-review). The speakers and the microphone tick here in turn, and send is held three frames
+// behind them throughout.
+func TestASenderBehindRendersOnlyUpToTheFrame(t *testing.T) {
+	var mu sync.Mutex
+	renders, captures, most := 0, 0, 0
+	gate := make(chan struct{}, 100)
+	s := &Session{ended: make(chan string, 1), processing: dsp.Settings{EchoCancellation: true},
+		opts: Options{Log: io.Discard, stall: func() { <-gate }}}
+	enc := keeping{got: make(chan []int16, 100)}
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
+		chain: pairing{mu: &mu, renders: &renders, captures: &captures, most: &most}, taken: true, enc: enc,
+		codec: keepOpen{}}
+	m.sent.Add(1)
+	go m.send()
+	frame := make([]int16, audio.FrameSamples)
+	const behind, frames = 3, 60
+	for i := range frames {
+		m.fill(frame)
+		m.captured(frame)
+		if i >= behind {
+			gate <- struct{}{}
+			// send has taken frame i-3, and waits for it to be through before the next tick.
+			deadline := time.Now().Add(time.Second)
+			for len(enc.got) != i-behind+1 {
+				if time.Now().After(deadline) {
+					t.Fatalf("frame %d was not through within a second", i-behind)
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+	close(gate) // what is left goes through, and send waits on nothing while it stops
+	close(m.stop)
+	m.sent.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if captures < 2*(frames-behind-1) {
+		t.Fatalf("%d chunks captured, so this tested little", captures)
+	}
+	// One frame of two chunks: the speakers' tick before the microphone's.
+	if most > 2 {
+		t.Errorf("the echo canceller was handed %d chunks of reference beyond the microphone, want at most 2", most)
+	}
+}
+
+// threeBytes encodes every frame as a packet worth sending.
+type threeBytes struct{ opus.Encoder }
+
+func (threeBytes) Encode(_ []int16, out []byte) (int, error) { return copy(out, []byte{1, 2, 3}), nil }
+
+// recordingTrack keeps the timestamp of every packet written to it.
+type recordingTrack struct {
+	mu  sync.Mutex
+	ts  []uint32
+	seq []uint16
+}
+
+func (r *recordingTrack) WriteRTP(p *rtp.Packet) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ts, r.seq = append(r.ts, p.Timestamp), append(r.seq, p.SequenceNumber)
+	return nil
+}
+
+// A frame skipped for being behind leaves a gap in the timestamps, as a frame DTX did not send does, and
+// the sequence numbers run on: the far end hears a moment of silence. Timestamps that counted only the
+// frames sent ran slower than the clock under a sender behind, and the far end's buffer, finding each
+// packet late, deepened at every skip, or played nothing at all (M30 /code-review).
+func TestASkippedFrameLeavesAGapInTheTimestamps(t *testing.T) {
+	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}
+	track := &recordingTrack{}
+	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
+		enc: threeBytes{}, codec: keepOpen{}, track: track}
+	// Six frames waiting before send starts: the first has five behind it and is skipped, and the queue
+	// then drains without another skip.
+	for range 6 {
+		m.captured(make([]int16, audio.FrameSamples))
+	}
+	m.sent.Add(1)
+	go m.send()
+	deadline := time.Now().Add(time.Second)
+	for {
+		track.mu.Lock()
+		n := len(track.ts)
+		track.mu.Unlock()
+		if n == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d packets written in a second", n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(m.stop)
+	m.sent.Wait()
+	track.mu.Lock()
+	defer track.mu.Unlock()
+	if m.skipped.Load() != 1 {
+		t.Fatalf("%d frames skipped, want the first alone", m.skipped.Load())
+	}
+	want := []uint32{1 * audio.FrameSamples, 2 * audio.FrameSamples, 3 * audio.FrameSamples,
+		4 * audio.FrameSamples, 5 * audio.FrameSamples}
+	if !slices.Equal(track.ts, want) {
+		t.Errorf("timestamps %v, want %v", track.ts, want)
+	}
+	if !slices.Equal(track.seq, []uint16{0, 1, 2, 3, 4}) {
+		t.Errorf("sequence numbers %v, want them to run on", track.seq)
 	}
 }

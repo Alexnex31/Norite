@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/urfave/cli/v3"
 
@@ -54,17 +55,31 @@ func FileSettings() (ipc.VoiceJoin, []string, error) {
 	return settingsOf(cfg, filepath.Base(path))
 }
 
-// settingsOf is a join's settings out of a config that loaded, and its warnings about them.
+// settingsOf is a join's settings out of a config that loaded, and its warnings about them: anything the
+// file got wrong under voice in the sections this client reads, a misspelled switch included, which would
+// otherwise leave the switch meant on without a word. The GUI's section applies to nothing here.
 func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error) {
 	var warnings []string
 	for _, w := range cfg.Warnings {
-		for _, k := range voiceKeys {
-			// A warning's key is the section's and the key's. The GUI's section applies to nothing here, so
-			// what it got wrong leaves nothing on.
-			if w.Key == string(config.Shared)+"."+k || w.Key == string(config.TUI)+"."+k {
-				warnings = append(warnings, fmt.Sprintf("%s: %s; it stays on", termsafe.Text(file), w.String()))
+		for _, section := range []config.Section{config.Shared, config.TUI} {
+			voice := string(section) + ".voice"
+			if w.Key != voice && !strings.HasPrefix(w.Key, voice+".") {
+				continue
 			}
+			outcome := "it changes nothing"
+			for _, k := range voiceKeys {
+				if w.Key == string(section)+"."+k {
+					outcome = "it stays on"
+				}
+			}
+			warnings = append(warnings, fmt.Sprintf("%s: %s; %s", termsafe.Text(file), w.String(), outcome))
 		}
+	}
+	// The file's problems past the bound are counted and not kept, and one of them may be a switch's.
+	if cfg.MoreWarnings > 0 {
+		warnings = append(warnings, fmt.Sprintf("%s: %d more problems, not listed, may concern the voice settings; "+
+			"`norite config get voice.auto_gain` and its siblings say what applies", termsafe.Text(file),
+			cfg.MoreWarnings))
 	}
 	return ipc.VoiceJoin{
 		EchoCancellation: cfg.On(config.KeyVoiceEchoCancellation),
@@ -78,6 +93,7 @@ func Command(connect Connector, settings Settings) *cli.Command {
 	if settings == nil {
 		settings = FileSettings
 	}
+	readSettings, join := joinWith(settings)
 	return &cli.Command{
 		Name:  "voice",
 		Usage: "Join a voice channel, leave it, and see how the call stands",
@@ -88,7 +104,7 @@ func Command(connect Connector, settings Settings) *cli.Command {
 			{
 				Name:   "status",
 				Usage:  "Say whether you are in a call, and how the last one ended",
-				Action: run(connect, false, status),
+				Action: run(connect, false, nil, status),
 			},
 			{
 				Name:      "join",
@@ -97,12 +113,12 @@ func Command(connect Connector, settings Settings) *cli.Command {
 				Description: "The call's audio processing is read from config.toml as the call is joined:\n" +
 					"voice.echo_cancellation, voice.noise_suppression and voice.auto_gain, each \"on\" or\n" +
 					"\"off\", all on by default. A change applies at the next join.",
-				Action: run(connect, true, joinWith(settings)),
+				Action: run(connect, true, readSettings, join),
 			},
 			{
 				Name:   "leave",
 				Usage:  "Leave the call you are in",
-				Action: run(connect, false, leave),
+				Action: run(connect, false, nil, leave),
 			},
 		},
 	}
@@ -118,16 +134,22 @@ func status(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.Voi
 // (the ledger's entry on the prefix). A daemon that answers GET knows the join too. One that cannot join at
 // all is refused here, and is never sent either.
 //
-// The settings are read before anything is asked, so a config that does not load sends nothing.
-func joinWith(settings Settings) func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
-	return func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
-		body, warnings, err := settings()
+// The settings are read first, before the daemon is attached to: a config that does not load is a local
+// problem, said as one whether or not a daemon is running, and sends nothing.
+func joinWith(settings Settings) (prepare func(*cli.Command) error, ask asker) {
+	var body ipc.VoiceJoin
+	prepare = func(cmd *cli.Command) error {
+		read, warnings, err := settings()
 		if err != nil {
-			return ipc.VoiceStatus{}, err
+			return err
 		}
 		for _, w := range warnings {
 			_, _ = fmt.Fprintln(cmd.Root().ErrWriter, w)
 		}
+		body = read
+		return nil
+	}
+	return prepare, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
 		st, err := status(ctx, cmd, c)
 		if err != nil {
 			return st, err
@@ -144,10 +166,13 @@ func leave(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.Voic
 	return st, daemonclient.Local(ctx, c, ipc.PathVoiceLeave, &st)
 }
 
+// asker is one command's requests to the daemon, and what they answered.
+type asker func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error)
+
 // run wraps one command: its argument checked before anything is attached to, so a mistyped id is a usage
-// error on a machine with no daemon running too, then the request, then its answer printed.
-func run(connect Connector, takesChannel bool,
-	ask func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error)) cli.ActionFunc {
+// error on a machine with no daemon running too, then prepare, the command's own local checks when it has
+// some, then the request, then its answer printed.
+func run(connect Connector, takesChannel bool, prepare func(*cli.Command) error, ask asker) cli.ActionFunc {
 	return func(ctx context.Context, cmd *cli.Command) error {
 		switch {
 		case !takesChannel && cmd.Args().Len() != 0:
@@ -156,6 +181,11 @@ func run(connect Connector, takesChannel bool,
 			return clierr.Usage("norite voice %s takes one channel id", cmd.Name)
 		case takesChannel && !ops.IsID(cmd.Args().First()):
 			return clierr.Usage("%q is not a channel id", output.Clean(cmd.Args().First()))
+		}
+		if prepare != nil {
+			if err := prepare(cmd); err != nil {
+				return err
+			}
 		}
 		if connect == nil {
 			return errors.New("this build has no way to reach the daemon")
