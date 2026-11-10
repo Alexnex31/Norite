@@ -516,6 +516,20 @@ build-local:
     build daemon  norite-daemon ./cmd/daemond
     build voiceworker norite-voice ./cmd/norite-voice
 
+# Build this checkout's client and put it where an install goes, so that `norite setup` is all that is left.
+#
+# scripts/install.sh does it, in the mode it takes in a checkout, so programs are placed one way whichever
+# runs: norite, norite-daemon and norite-voice built as a release builds them (no cgo, no workspace) into
+# ~/.local/bin, the daemon registered with the service manager and restarted, and no install receipt. A
+# build of a checkout is not a release, so the daemon's updater never writes a release over it. The account
+# step is left out: that is `norite setup`. Run it again after pulling to replace the build; arguments go to
+# the script (`just install --bin-dir DIR`, `--no-daemon`), and `./scripts/install.sh --uninstall` undoes
+# it. On Windows, scripts/install.ps1 does the same from a checkout.
+install *args:
+    ./scripts/install.sh --from-source --no-account {{args}}
+    @echo
+    @echo "Next: norite setup, with the invite link if you were sent one."
+
 # Build every module with the workspace switched off.
 #
 # go.work resolves cross-module imports from the checkout, which since M7 hides a module whose own go.mod

@@ -247,6 +247,10 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
   Sigstore through TUF, and commit the diff after reading it. CI fails when the committed copy is behind.
 - `just build-local` — plain `go build` of all four binaries into `./bin/`, at paths that do not vary by
   platform the way `just build`'s goreleaser output does. `just notices` and CI's assertions both read them.
+- `just install` — build this checkout's client the way a release does and install it as `install.sh`
+  does from a checkout: `~/.local/bin`, the daemon registered and restarted, and no install receipt, so the
+  updater never writes a release over a development build. What is left is `norite setup`. Arguments go to
+  the script (`--bin-dir DIR`, `--no-daemon`).
 - `just notices` — regenerate each binary's `internal/notices/THIRD-PARTY-NOTICES.txt` from
   `go version -m` on the built binary, and commit the diff. **Not the same artifact as the inventory
   below**: this is the attribution obligation over what actually ships (backend: 53 modules since M27

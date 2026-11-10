@@ -103,6 +103,8 @@ What to know about them:
   after you log out ("lingering"); where that is refused, it says so and gives the one `sudo` command.
 - **From a checkout they build that checkout**, with Go installed: `./scripts/install.sh`, and
   `./scripts/install-server.sh` with the same options. That is the way to use them before a release exists.
+  `just install` builds and installs the client that way and stops short of the account, leaving
+  `norite setup` to run.
 - **A download is checked before it is installed.** Each archive must match the release's `checksums.txt`,
   and with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) installed, that file's
   signature is verified too. Without cosign the script says plainly that the signature was not checked;
