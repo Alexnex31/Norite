@@ -251,6 +251,10 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
   does from a checkout: `~/.local/bin`, the daemon registered and restarted, and no install receipt, so the
   updater never writes a release over a development build. What is left is `norite setup`. Arguments go to
   the script (`--bin-dir DIR`, `--no-daemon`).
+- `just install-server --url URL [--docker-postgres]` — the other side: `install-server.sh` building this
+  checkout's server, an instance in `~/norite-instance` as a user service, and its administrator. Run again,
+  it replaces the programs and keeps the configuration and the database. Builds report the version `dev`,
+  which skips the client–server version check, so everybody stays on one commit.
 - `just notices` — regenerate each binary's `internal/notices/THIRD-PARTY-NOTICES.txt` from
   `go version -m` on the built binary, and commit the diff. **Not the same artifact as the inventory
   below**: this is the attribution obligation over what actually ships (backend: 53 modules since M27

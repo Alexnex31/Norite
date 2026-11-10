@@ -560,6 +560,19 @@ install *args:
     @echo
     @echo "Next: norite setup, with the invite link if you were sent one."
 
+# Build this checkout's server and set an instance up on this machine with it, for the people `just install`
+# and `norite setup` connect. Linux with systemd, or macOS.
+#
+# scripts/install-server.sh does it, building the checkout as install.sh does: norite-server and norite into
+# ~/.local/bin, Postgres in Docker with --docker-postgres, instance.toml in ~/norite-instance, the server as
+# a user service, and the administrator. The first run needs --url, the address the others reach this
+# machine on; `just install-server --url http://192.168.1.20:8080 --docker-postgres` is the usual one. Run it
+# again after pulling: it replaces the programs, restarts the service, and keeps the configuration and the
+# database. To talk from this machine as well, `just install` and `norite setup` after it.
+[doc("Build this checkout's server and set an instance up on this machine with it (--url URL the first time).")]
+install-server *args:
+    ./scripts/install-server.sh --from-source {{args}}
+
 # Build every module with the workspace switched off.
 #
 # go.work resolves cross-module imports from the checkout, which since M7 hides a module whose own go.mod
