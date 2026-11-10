@@ -213,6 +213,15 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 		})
 	}
 
+	// The page an invite link opens in a browser (easier-setup), at the root beside /reset for the reason
+	// given there. Mounted whatever is wired, since it needs nothing but the configured address: a route
+	// mounted conditionally is one cmd/server/contract_test.go cannot see. It takes no input and spends
+	// nothing, so the base rate limit the whole chain carries is its bucket.
+	r.Group(func(r chi.Router) {
+		r.Use(httpx.HTMLPage)
+		r.Method(http.MethodGet, "/join", guilds.JoinPage{Instance: opts.Config.PublicBaseURL})
+	})
+
 	// The gateway (M18), at the root as docs/architecture.md §2 places it: a WebSocket's protocol version
 	// travels in its handshake (ADR 0033), not in its path.
 	//

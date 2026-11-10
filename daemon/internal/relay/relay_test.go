@@ -123,7 +123,7 @@ func TestEveryContractPathIsDecided(t *testing.T) {
 	decisions := map[string]string{
 		"/gateway": notAPI, "/verify": notAPI, "/oauth/continue": notAPI, "/reset": notAPI,
 		"/oauth/signup": notAPI, "/device": notAPI, "/device/signin": notAPI, "/device/2fa": notAPI,
-		"/device/approve": notAPI,
+		"/device/approve": notAPI, "/join": notAPI,
 
 		"/meta": relayed, "/healthz": relayed,
 

@@ -1275,6 +1275,11 @@ POST   /invites/revoke                     -- M20a; the invite's creator or Perm
                                            --   GET/POST/DELETE /invites/{code}, and a path is logged
                                            --   (ADR 0029, ADR 0028); a preview is a POST for the same
                                            --   reason, and writes nothing (rule 4 is about GET)
+GET    /join                               -- the page an invite link opens (root, HTML; easier-setup).
+                                           --   A link is the instance's address, /join and the code
+                                           --   after '#', which a browser never sends: the page cannot
+                                           --   see it, reads nothing from the request, and says how to
+                                           --   install Norite and run `norite setup` with the link
 
 -- Public matchmaking, friends, blocks, reports
 GET    /matchmaking/channels
