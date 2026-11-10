@@ -1,7 +1,7 @@
 # Trying the alpha on Windows
 
-This guide is for joining an instance that somebody else runs, from a Windows PC: create an account and
-talk. Running the instance itself is in [Trying the alpha](trying-the-alpha.md), which this guide leans on
+This guide is for joining an instance that somebody else runs, from a Windows PC: with the invite link
+you were sent, one installer line and one command take you to their guild. Running the instance itself is in [Trying the alpha](trying-the-alpha.md), which this guide leans on
 for the words it uses — *instance*, *instance URL*, *guild*, and the two kinds of invite.
 
 **Windows is the least-tried platform in this alpha.** Everything here builds for Windows, and the
@@ -16,10 +16,9 @@ worth reporting as a [GitHub issue](https://github.com/Alexnex31/Norite/issues).
 - [The quick way: the installer](#the-quick-way-the-installer)
 - [Getting the programs](#getting-the-programs)
 - [Step 1 — check you can reach the instance](#step-1--check-you-can-reach-the-instance)
-- [Step 2 — create an account](#step-2--create-an-account)
-- [Step 3 — start the daemon](#step-3--start-the-daemon)
-- [Step 4 — sign in](#step-4--sign-in)
-- [Step 5 — join a guild and talk](#step-5--join-a-guild-and-talk)
+- [Step 2 — set up, with the invite link](#step-2--set-up-with-the-invite-link)
+- [Step 3 — talk](#step-3--talk)
+- [Doing setup's steps by hand](#doing-setups-steps-by-hand)
 - [Where things are](#where-things-are)
 - [Stopping and removing it](#stopping-and-removing-it)
 - [When something goes wrong](#when-something-goes-wrong)
@@ -31,16 +30,22 @@ worth reporting as a [GitHub issue](https://github.com/Alexnex31/Norite/issues).
   Microsoft Store on Windows 10. The client draws a full-screen interface, and Windows Terminal is where
   that works properly; the old console window may, but has been tried less. Every command below is typed
   into a **PowerShell** tab in it.
-- **From whoever runs the instance**:
-  - **the instance URL**, such as `http://192.168.1.20:8080` or `https://chat.example.com`;
-  - **an instance invite code**, only if the instance's registration is `invite` — ask;
-  - **a guild invite code**, to join their guild once you have an account.
+- **From whoever invited you, an invite link**, such as
+  `https://chat.example.com/join#PGTQRBXGTCDFFWBH`: it names the instance and the guild. Without one, the
+  instance URL and a guild invite code do the same.
+- **An instance invite code** too, only if the instance's registration is `invite` — ask its administrator.
 
 ## The quick way: the installer
 
 [`scripts/install.ps1`](../scripts/install.ps1) does the rest of this guide in one go: it gets the two
-programs, puts them in `%LOCALAPPDATA%\Programs\Norite` and on your `PATH`, starts the daemon, and offers
-to create an account or sign in. In PowerShell:
+programs, puts them in `%LOCALAPPDATA%\Programs\Norite` and on your `PATH`, starts the daemon, and runs
+`norite setup`, which creates an account or signs in and, given the link, joins its guild. In PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Invite 'INVITE-LINK'
+```
+
+Without a link, the short form is enough:
 
 ```powershell
 irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex
@@ -64,7 +69,7 @@ What to know about it:
   signature is verified too. Without it the script says the signature was not checked.
 - **The daemon starts at every logon**, as a Task Scheduler task with no window. `-NoAutoStart` starts it
   for this session only, and `-ShowConsole` gives it a window that shows its log as it is written, for
-  testing (see step 3).
+  testing (see [B](#b--start-the-daemon)).
 - **Options need the longer form**, since `irm | iex` cannot carry any:
 
   ```powershell
@@ -179,14 +184,102 @@ Use the folder the programs are actually in, if it is not `$HOME\norite`.
 curl.exe INSTANCE-URL/api/v1/healthz
 ```
 
-It should print `{"status":"ok"}`. Type `curl.exe`, not `curl`: in Windows PowerShell 5, `curl` is another
+`INSTANCE-URL` is the invite link up to `/join`: for `https://chat.example.com/join#PGTQRBXGTCDFFWBH`, it
+is `https://chat.example.com`. It should print `{"status":"ok"}`. Type `curl.exe`, not `curl`: in Windows PowerShell 5, `curl` is another
 name for `Invoke-WebRequest`, which answers differently.
 
 If nothing answers, this PC cannot reach the server, and nothing after this will work until it can. The
 usual causes are on the server's side — its firewall, or the server not running — so tell whoever runs it.
 On a home network, also check the PC is on the same network, not a guest Wi-Fi kept apart from it.
 
-## Step 2 — create an account
+## Step 2 — set up, with the invite link
+
+```powershell
+.\norite.exe setup 'INVITE-LINK'
+```
+
+With no link, `.\norite.exe setup --instance INSTANCE-URL` does the same and joins nothing. The installer
+runs this for you. It asks, in order:
+
+1. **Whether the instance the link names is the one you meant.** Your account and password go there, so
+   look at the address before pressing Enter.
+2. **Whether you already have an account there.** If not, a username (2 to 32 characters: your public
+   handle, shown as `@name`), an email address (which you sign in with and nobody else sees), and a
+   password twice (at least 12 characters; nothing appears as you type it, deliberately). An instance whose
+   registration is `invite` also asks for its instance invite code. The account is then signed in with the
+   password you chose; with a mail relay, open the confirmation link the instance sends, then press Enter.
+3. **Whether to install the daemon**, the background program that keeps you connected. It becomes a Task
+   Scheduler task named "Norite Daemon", running as you at every logon with no window and no administrator
+   rights. Enter says yes. [B](#b--start-the-daemon) below is how to run it in a tab instead.
+4. **Whether to join the guild the link leads to**, once it has shown the guild, the channel and who
+   invited you.
+
+An instance at an `http://` address makes it warn that your password crosses the network unencrypted. On a
+home network or inside a VPN that is expected. Every step already done is said and skipped, so running it
+again is always safe. Your sign-in is stored in the **Credential Manager**.
+
+## Step 3 — talk
+
+```powershell
+.\norite.exe
+```
+
+The client opens full-screen, on the home screen, which lists your guilds and their channels; a guild
+`setup` joined is already there. With none yet, it looks like this:
+
+```
+Norite · signed in as @you
+
+YOUR GUILDS
+  NO GUILDS YET
+  Redeem an invite below, or start one with `norite guild create --name NAME`.
+
+REDEEM AN INVITE
+  › paste an invite code or link
+  RET looks the invite up; RET again joins
+
+RET open · C-n/C-p move · C-x C-c quit · norite about
+```
+
+1. **To join another guild, paste its invite link or code** into the box with Ctrl+V, or type it — either
+   case, with or without dashes — and press Enter. The client shows where it leads, and does nothing else
+   yet:
+
+   ```
+     ✓ Tea Room · #general · invited by alice (@alice) · expires 2026-10-11 12:26 · RET join
+   ```
+
+2. **Press Enter again** to join. The guild appears in the list with its channels.
+3. **Open a channel**: move to it with the arrow keys and press Enter. You see its last fifty messages,
+   newest at the bottom, and new ones arrive as they are sent.
+4. **Type a message and press Enter** to send it.
+
+The keys, where `C-x` means holding Ctrl and pressing X:
+
+| Key | What it does |
+| --- | --- |
+| Enter | On the home screen: look up the invite, then join; or open the selected channel. In a channel: send. |
+| ↑ ↓ | Move through the guilds and channels on the home screen. |
+| PgUp, PgDn | Scroll the channel. |
+| Escape | Clear the invite box; leave a channel for the home screen. |
+| Ctrl+V | Paste. |
+| Ctrl+X, then Ctrl+C | Quit. |
+| Ctrl+C alone | Only reminds you how to quit. It never quits by accident. |
+
+The line at the bottom says when something changes underneath. *trying again in 4s · the daemon is not
+running…* means the daemon stopped: `.\norite.exe daemon start` starts it again, and the client reconnects
+by itself, keeping anything you had typed. The main guide's [Step 9](trying-the-alpha.md#step-9--open-the-client)
+lists the others.
+
+Everything also works as commands, which is handy for checking from a script:
+`.\norite.exe guild list`, `.\norite.exe channel list GUILD_ID`, `.\norite.exe message list CHANNEL_ID`.
+
+## Doing setup's steps by hand
+
+`norite setup` runs three commands in turn, and each works alone too: to run the daemon in a tab rather
+than as a task, from a script, or to change one thing later.
+
+### A — create an account
 
 ```powershell
 .\norite.exe register --instance INSTANCE-URL
@@ -210,7 +303,7 @@ Sign in with:
 
 If the instance sends mail, it asks you to open a confirmation link first instead.
 
-## Step 3 — start the daemon
+### B — start the daemon
 
 The daemon is the background program that holds your sign-in and the live connection to the server; the
 client talks to it rather than to the server. **For trying it, run it in its own terminal tab**: open a
@@ -244,9 +337,9 @@ your next logon, and `daemon status` says so. If the task does not start, a tab 
 the output of `.\norite.exe daemon status` and `.\norite.exe logs tail` is worth an issue (see the last
 row of the table at the end for what that output names).
 
-## Step 4 — sign in
+### C — sign in
 
-Back in the first tab:
+In the first tab:
 
 ```powershell
 .\norite.exe login --instance INSTANCE-URL
@@ -262,59 +355,14 @@ This device is "YOUR-PC"; its credential is stored in the OS keyring.
 On Windows, "the OS keyring" is the **Credential Manager**. The daemon notices the sign-in by itself; you
 do not need to restart it.
 
-## Step 5 — join a guild and talk
+### D — join a guild
 
 ```powershell
-.\norite.exe
+.\norite.exe invite join 'INVITE-LINK'
 ```
 
-The client opens full-screen, on the home screen:
-
-```
-Norite · signed in as @you
-
-YOUR GUILDS
-  NO GUILDS YET
-  Redeem an invite below, or start one with `norite guild create --name NAME`.
-
-REDEEM AN INVITE
-  › paste an invite code
-  RET looks the code up; RET again joins
-
-RET open · C-n/C-p move · C-x C-c quit · norite about
-```
-
-1. **Paste the guild invite code** into the box with Ctrl+V, or type it — either case, with or without
-   dashes — and press Enter. The client shows where it leads, and does nothing else yet:
-
-   ```
-     ✓ Tea Room · #general · invited by alice (@alice) · expires 2026-10-11 12:26 · RET join
-   ```
-
-2. **Press Enter again** to join. The guild appears in the list with its channels.
-3. **Open a channel**: move to it with the arrow keys and press Enter. You see its last fifty messages,
-   newest at the bottom, and new ones arrive as they are sent.
-4. **Type a message and press Enter** to send it.
-
-The keys, where `C-x` means holding Ctrl and pressing X:
-
-| Key | What it does |
-| --- | --- |
-| Enter | On the home screen: look up the code, then join; or open the selected channel. In a channel: send. |
-| ↑ ↓ | Move through the guilds and channels on the home screen. |
-| PgUp, PgDn | Scroll the channel. |
-| Escape | Clear the invite box; leave a channel for the home screen. |
-| Ctrl+V | Paste. |
-| Ctrl+X, then Ctrl+C | Quit. |
-| Ctrl+C alone | Only reminds you how to quit. It never quits by accident. |
-
-The line at the bottom says when something changes underneath. *trying again in 4s · the daemon is not
-running…* means the daemon tab was closed or stopped: start it again, and the client reconnects by itself,
-keeping anything you had typed. The main guide's [Step 10](trying-the-alpha.md#step-10--open-the-client)
-lists the others.
-
-Everything also works as commands, which is handy for checking from a script:
-`.\norite.exe guild list`, `.\norite.exe channel list GUILD_ID`, `.\norite.exe message list CHANNEL_ID`.
+It takes the link or the code alone. A link for another instance than the one this PC is signed in to is
+refused, and nothing is sent to it.
 
 ## Where things are
 
@@ -344,11 +392,13 @@ Your account stays on the instance: deleting an account is not built yet (`M76a`
 | `go: go.mod requires go >= 1.26.0` | Install Go 1.26 or newer from [go.dev/dl](https://go.dev/dl/). |
 | `go: cannot find main module` | The build command ran in the wrong folder: `cli` for `norite.exe`, `daemon` for `norite-daemon.exe`. |
 | `curl.exe` gets no answer | This PC cannot reach the server. See [step 1](#step-1--check-you-can-reach-the-instance). |
-| `this instance takes new accounts by invite` | Ask for an instance invite code, and pass `--invite-code`. |
+| `this instance takes new accounts by invite` | Ask for an instance invite code; `setup` asks for it, and `register` takes `--invite-code`. |
+| `the instance did not take the sign-in` straight after `setup` created the account | Open the confirmation mail's link and press Enter. If the address already had an account, press Ctrl+C and run `.\norite.exe login` with its password. |
+| `that invite is for …, and this machine is signed in to …` | The link names another instance than the one this PC uses, and nothing was sent. Check the link. |
 | `password must be at least 12 characters` | A longer password; a few words strung together is easiest. |
-| `the daemon is not running` or `unavailable` | Start `.\norite-daemon.exe` in its own tab, and leave it open. |
-| `the daemon is not signed in; run norite login` | Step 4. |
+| `the daemon is not running` or `unavailable` | `.\norite.exe daemon start`, or start `.\norite-daemon.exe` in its own tab and leave it open. |
+| `the daemon is not signed in; run norite login` | `.\norite.exe setup` again, or [C](#c--sign-in). |
 | `that email and password did not match an account` | Check both. With a mail relay on the instance, the address may not be confirmed yet; the answer is the same on purpose. |
-| The client's box says `not found` for a code | Mistyped, expired, revoked or used up — these look identical on purpose. Ask for a new one, and check it is a *guild* invite, not an instance invite. |
+| `not found` for an invite, in the client's box or from `setup` | Mistyped, expired, revoked or used up — these look identical on purpose. Ask for a new one, and check it is a *guild* invite, not an instance invite. |
 | The screen looks garbled | Use Windows Terminal rather than the old console window, and make the window larger. |
 | Anything else | The command's output and what `.\norite.exe logs tail` prints, in a [GitHub issue](https://github.com/Alexnex31/Norite/issues). Neither contains your password or tokens. The log does name your instance's address, your username and your Windows account's folder: an issue is public, so remove what you would rather not post. |

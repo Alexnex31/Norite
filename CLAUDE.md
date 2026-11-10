@@ -1947,7 +1947,8 @@ And on the daemon's lifecycle and its log, from M23:
   its socket to go quiet when it named none, before it says so.
 - **What "yes" is lives in `prompt.Yes`**, for `prompt.Confirm` and for a question that is not one.
 - **Nothing installs or starts a daemon unasked.** `norite login` offers when somebody is there to
-  answer, and the default for installing is no. A failed offer never fails the login.
+  answer, and the default for installing is no. A failed offer never fails the login. `norite setup`
+  (easier-setup) asks too, with yes as the default, because running it is asking to be set up.
 - **A service of the account stops at its last logout on Linux.** `install` reports lingering and
   `--linger` asks for it, by numeric id. Never the default.
 - **`network-online.target` does not exist in a user manager.** Nothing in a user unit orders itself
@@ -2269,6 +2270,33 @@ And on the audio DSP, from M30 (ADR 0036 as amended):
   - `recordings` holds the CC0 and public-domain speech and rain, stored as Opus;
   - `harness.joinWith` sets a call's DSP through its join, as the daemon does.
 - **Measuring**: `BenchmarkChain` and `BenchmarkStart` in `internal/dsp`, pinned to one core.
+
+And on the first run, from the `easier-setup` branch:
+
+- **The first run is `norite setup`**, in `cli/internal/login` beside the commands it runs: register,
+  login, the daemon, then the invite's guild. It calls those flows rather than copies of them, and a step
+  already done is said and skipped. `install.sh` and `install.ps1` run it for their account step, and a
+  package's note names it. A new first-run question goes in it, never back into a script.
+- **An invite link is the instance's address, `/join`, and the guild invite code after `#`.** The code is
+  a fragment because a browser never sends one, so a link opened in a browser keeps it out of every log.
+  `norite invite create` and `list` print it, from the instance the daemon named; one naming this machine
+  alone is printed with a warning.
+- **A link is read in one place, `ops.ParseInvite`**, which refuses whatever a link does not need: a
+  query, a path not ending at `/join`, a dot segment, a username. Its instance goes through
+  `ParseInstanceURL`.
+- **A code is sent only to the instance its link names.** `ops.CodeFor` checks the link against the
+  instance the daemon is signed in to, and refuses it, sending nothing, when they differ or the daemon
+  names none yet. The verbs, the client's box and `setup` all go through it. Instances are compared by
+  `ipc.SameInstance`, the one comparison, which the automation port uses too.
+- **A link's instance is confirmed before anything is sent there**, since it decides where a password
+  goes. Signing a machine in to another instance than the one stored is asked, default no.
+- **A guild invite never creates an account on an `invite` instance.** The two codes stay apart, and
+  `setup` asks for the instance's when the instance refuses without it.
+- **`GET /join` reads nothing from the request.** It says how to install and run `norite setup`, names the
+  instance by `public_base_url` alone, and is mounted unconditionally. Every page shares `httpx.PageStyle`.
+- **Testing setup**: `setupInstance` in `setup_test.go` registers and signs in over loopback, and its
+  `Connect` attaches to `daemontest`'s daemon with a READY naming whatever the store holds, as the real
+  daemon reports a moment after a sign-in.
 
 ## Project-specific skills
 

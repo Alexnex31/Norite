@@ -22,8 +22,11 @@ software.
 
 - **Host your own instance** — one server program and a Postgres database, with open or invite-only
   registration. [`scripts/install-server.sh`](scripts/install-server.sh) sets one up on Linux.
-- **Create an account from the terminal** with `norite register`, and protect it with two-factor.
-- **Build a guild** — channels, roles, per-channel permissions — and invite people into it with a code.
+- **Set up a machine in one command.** `norite setup` creates your account or signs you in, installs the
+  daemon, and joins the guild an invite link leads to; the client installer runs it, and with the link,
+  `install.sh --invite 'LINK'` is all a newcomer types.
+- **Build a guild** — channels, roles, per-channel permissions — and invite people into it with a link
+  that names the instance, so it is the only thing you send. Accounts can carry two-factor.
 - **Talk in it.** Bare `norite` opens the terminal client: your guilds and their channels, a box to redeem
   an invite, and a channel that draws messages as they arrive and sends what you type.
 - **Script it.** More than forty `norite` verbs cover guilds, channels, roles, members, messages, reports
