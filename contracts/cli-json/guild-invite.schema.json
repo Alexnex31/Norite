@@ -39,7 +39,8 @@
         "max_uses",
         "uses",
         "expires_at",
-        "created_at"
+        "created_at",
+        "link"
       ],
       "description": "One live invite, its code in full.",
       "properties": {
@@ -102,6 +103,14 @@
         "created_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^https?://[^/?#]+(/[^?#]*)?/join#[BCDFGHJKMNPQRSTVWXYZ]{16}$",
+          "description": "The invite link (easier-setup): the instance this machine is signed in to, then /join# and the code, which `norite setup` and `norite invite join` take whole. The code is a fragment, so a browser opening the link never sends it. Null when the daemon named no instance."
         }
       }
     },

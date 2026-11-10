@@ -5,6 +5,7 @@ package verbs
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -67,7 +68,9 @@ func inviteCommand(connect Connector) *cli.Command {
 		spec{
 			name: "create", usage: "Create an invite into a channel", ids: []string{"channel"},
 			description: "Lives a week unless --expires-in says otherwise, and may be used any number of times " +
-				"unless --max-uses says otherwise. Needs the create-invite permission on the channel.",
+				"unless --max-uses says otherwise. Needs the create-invite permission on the channel.\n\n" +
+				"Prints the code and a link to send instead of it, which `norite setup` and `norite invite join` " +
+				"take whole: the link names this instance, so the person you send it to needs nothing else.",
 			flags: []cli.Flag{
 				&cli.IntFlag{Name: "max-uses",
 					Usage: "how many accounts may join with it, 1 to 1000; unlimited if absent"},
@@ -95,7 +98,7 @@ func inviteCommand(connect Connector) *cli.Command {
 				if err := e.do(ctx, http.MethodPost, "/channels/"+cmd.Args().Get(0)+"/invites", body, &inv); err != nil {
 					return nil, err
 				}
-				return inviteFrom(inv), nil
+				return inviteFrom(inv, ops.SignedInTo(e.call)), nil
 			},
 		},
 		spec{
@@ -108,7 +111,7 @@ func inviteCommand(connect Connector) *cli.Command {
 				}
 				out := inviteList{}
 				for _, inv := range list {
-					out = append(out, inviteFrom(inv))
+					out = append(out, inviteFrom(inv, ops.SignedInTo(e.call)))
 				}
 				return out, nil
 			},
@@ -117,7 +120,11 @@ func inviteCommand(connect Connector) *cli.Command {
 			name: "show", usage: "See where an invite leads before you use it", ids: []string{codeArg},
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
 				p, err := with(ctx, e, func(c daemonclient.Caller) (apicontract.GuildInvitePreview, error) {
-					return ops.PreviewInvite(ctx, c, cmd.Args().Get(0))
+					code, err := inviteCode(c, cmd.Args().Get(0))
+					if err != nil {
+						return apicontract.GuildInvitePreview{}, err
+					}
+					return ops.PreviewInvite(ctx, c, code)
 				})
 				if err != nil {
 					return nil, err
@@ -130,7 +137,11 @@ func inviteCommand(connect Connector) *cli.Command {
 			description: "Joining a guild you are already in changes nothing and spends no use of the invite.",
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
 				g, err := with(ctx, e, func(c daemonclient.Caller) (apicontract.Guild, error) {
-					return ops.JoinInvite(ctx, c, cmd.Args().Get(0))
+					code, err := inviteCode(c, cmd.Args().Get(0))
+					if err != nil {
+						return apicontract.Guild{}, err
+					}
+					return ops.JoinInvite(ctx, c, code)
 				})
 				if err != nil {
 					return nil, err
@@ -143,7 +154,14 @@ func inviteCommand(connect Connector) *cli.Command {
 			description: "Your own invites, or any invite with the manage-guild permission. Not asked about: " +
 				"revoking takes a way in away, and an invite is replaced by creating another.",
 			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
-				code := cmd.Args().Get(0)
+				c, err := e.attached(ctx)
+				if err != nil {
+					return nil, err
+				}
+				code, err := inviteCode(c, cmd.Args().Get(0))
+				if err != nil {
+					return nil, err
+				}
 				if err := e.do(ctx, http.MethodPost, "/invites/revoke",
 					apicontract.GuildInviteCodeRequest{Code: code}, nil); err != nil {
 					return nil, err
@@ -152,6 +170,20 @@ func inviteCommand(connect Connector) *cli.Command {
 			},
 		},
 	)
+}
+
+// inviteCode is the code to send for raw, a link or a code, once attached to c: a link for another instance
+// than the daemon's is a usage error, and one the daemon cannot be asked about yet is exit 3, as a daemon
+// still starting is. checkArgs has already refused what is neither.
+func inviteCode(c daemonclient.Caller, raw string) (string, error) {
+	code, err := ops.CodeFor(raw, ops.SignedInTo(c))
+	switch {
+	case errors.Is(err, ops.ErrInstanceUnknown):
+		return "", clierr.Unavailable("%s", err)
+	case err != nil:
+		return "", clierr.Usage("%s", err)
+	}
+	return code, nil
 }
 
 // ---------- views ----------
@@ -167,14 +199,22 @@ type inviteView struct {
 	Uses      int        `json:"uses"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
+	// Link is the invite link for the instance the daemon named, or nil when it named none.
+	Link *string `json:"link"`
 }
 
-func inviteFrom(inv apicontract.GuildInvite) inviteView {
-	return inviteView{
+// inviteFrom is the view of inv, with its link on instance when that is known.
+func inviteFrom(inv apicontract.GuildInvite, instance string) inviteView {
+	v := inviteView{
 		ID: inv.Id, Code: inv.Code, GuildID: inv.GuildId, ChannelID: inv.ChannelId, InviterID: inv.InviterId,
 		Inviter: userFrom(inv.Inviter), MaxUses: inv.MaxUses, Uses: inv.Uses, ExpiresAt: inv.ExpiresAt,
 		CreatedAt: inv.CreatedAt,
 	}
+	if instance != "" {
+		link := ops.InviteLink(instance, inv.Code)
+		v.Link = &link
+	}
+	return v
 }
 
 func (v inviteView) Text(t *output.Text) {
@@ -187,6 +227,16 @@ func (v inviteView) Text(t *output.Text) {
 		by = v.Inviter.named()
 	}
 	t.Line("%s  into channel %s  %s  %s  by %s", c(v.Code), c(v.ChannelID), uses, expires(v.ExpiresAt), by)
+	if v.Link == nil {
+		return
+	}
+	t.Line("  link  %s", c(*v.Link))
+	if ops.LocalOnly(*v.Link) {
+		// The link is built from the address this machine signs in with, and that one names this machine:
+		// sent to anybody else, it points at their own.
+		t.Line("  That address reaches this machine alone, so the link works only here. Send the code, with the")
+		t.Line("  address the others use to reach this instance.")
+	}
 }
 
 func expires(at *time.Time) string {

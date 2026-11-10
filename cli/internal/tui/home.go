@@ -162,8 +162,8 @@ type updateMsg struct {
 func newHome() homeModel {
 	code := textinput.New()
 	code.Prompt = "› "
-	code.Placeholder = "paste an invite code"
-	code.CharLimit = 64
+	code.Placeholder = "paste an invite code or link"
+	code.CharLimit = ops.MaxInvite
 	code.Focus()
 	return homeModel{code: code, look: defaultLook}
 }
@@ -448,14 +448,25 @@ func (m Model) homeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.setStatus("", false)
 		return m, nil
 	case "enter":
-		code := strings.TrimSpace(h.code.Value())
-		if code != "" {
+		typed := strings.TrimSpace(h.code.Value())
+		if typed != "" {
 			if m.sess == nil {
 				m.setStatus("not attached to the daemon yet", true)
 				return m, nil
 			}
+			// A link for another instance, or one the daemon has not named its instance for yet, is refused
+			// here and nothing is sent: a code is a way into a guild on the instance that issued it.
+			signedIn := ""
+			if m.account != nil {
+				signedIn = m.account.InstanceURL
+			}
+			code, err := ops.CodeFor(typed, signedIn)
+			if err != nil {
+				m.setStatus(termsafe.Text(err.Error()), true)
+				return m, nil
+			}
 			s := m.sess
-			if h.preview != nil && h.preview.code == code {
+			if h.preview != nil && h.preview.code == typed {
 				return m, func() tea.Msg {
 					g, err := call(s, func(ctx context.Context, s Session) (apicontract.Guild, error) {
 						return ops.JoinInvite(ctx, s, code)
@@ -468,7 +479,7 @@ func (m Model) homeKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				p, err := call(s, func(ctx context.Context, s Session) (apicontract.GuildInvitePreview, error) {
 					return ops.PreviewInvite(ctx, s, code)
 				})
-				return previewMsg{code: code, preview: p, err: err}
+				return previewMsg{code: typed, preview: p, err: err}
 			}
 		}
 		rows := h.rows()
@@ -518,7 +529,7 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 	if p := h.preview; p != nil {
 		box = append(box, clip("  "+h.look.accent.Render("✓ ")+h.look.previewLine(p.preview)+h.look.dim.Render(" · RET join"), width))
 	} else {
-		box = append(box, h.look.dim.Render("  RET looks the code up; RET again joins"))
+		box = append(box, h.look.dim.Render("  RET looks the invite up; RET again joins"))
 	}
 
 	list := []string{h.look.label.Render("YOUR GUILDS")}
@@ -527,7 +538,7 @@ func (h homeModel) view(account *ipc.Account, width, height int) string {
 	// the account is in, and calling that "no guilds yet" would be false (M20a's manual pass).
 	switch {
 	case !h.loaded && account == nil:
-		list = append(list, h.look.dim.Render("  Sign in with `norite login` to see your guilds."))
+		list = append(list, h.look.dim.Render("  Not signed in: `norite setup` signs you in, or creates your account."))
 	case !h.loaded:
 		list = append(list, h.look.dim.Render("  loading…"))
 	case len(h.guilds) == 0:
