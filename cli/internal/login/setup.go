@@ -20,6 +20,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
+	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
@@ -112,12 +113,20 @@ func (s *Setup) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Signed in to it already, the instance is the one stored, written as it was stored: a link may write it
+	// another way, with a final dot or its scheme's port, and the comparison that calls the two one instance
+	// is not a reason to send a password to the link's spelling unasked, which with a final dot may be
+	// resolved to another server. Re-parsed, as resolveInstanceURL does, since the record is a file.
+	signedIn := false
+	if storedAt, err := credentials.ParseInstanceURL(previous.InstanceURL); err == nil && ipc.SameInstance(storedAt, instance) {
+		signedIn, instance = true, storedAt
+	}
+
 	s.printf("Setting up Norite on this machine, for %s.\n", instance)
 	if apiclient.LooksLikeHTTP(instance) {
 		s.printf("Warning: %s is plain HTTP, so everything this sends — including your password —\n"+
 			"crosses the network unencrypted.\n", instance)
 	}
-	signedIn := previous.InstanceURL != "" && ipc.SameInstance(previous.InstanceURL, instance)
 	if invite.Instance != "" && !signedIn {
 		// A link is a stranger's text, and it decides where a password is about to go. Said before anything
 		// is asked or sent, so the address can be read and the run stopped.
@@ -135,7 +144,8 @@ func (s *Setup) Run(ctx context.Context) error {
 		daemon = s.daemonStep(ctx)
 	}
 	s.step("Your account")
-	if err := s.account(ctx, previous, instance, signedIn, daemon); err != nil {
+	confirmed, err := s.account(ctx, previous, instance, signedIn, stored, daemon)
+	if err != nil {
 		return err
 	}
 	if !stored {
@@ -149,7 +159,7 @@ func (s *Setup) Run(ctx context.Context) error {
 		if invite.Instance == "" {
 			invite.Instance = instance
 		}
-		if err := s.join(ctx, invite, daemon); err != nil {
+		if err := s.join(ctx, invite, daemon, confirmed); err != nil {
 			return err
 		}
 	}
@@ -206,7 +216,9 @@ func (s *Setup) instance(invite ops.Invite, flag string, previous credentials.Re
 	}
 	if url, err := resolveInstanceURL(flag, previous); err == nil {
 		return url, nil
-	} else if flag != "" || os.Getenv(instanceEnvVar) != "" {
+	} else if flag != "" || strings.TrimSpace(os.Getenv(instanceEnvVar)) != "" {
+		// Named and unusable: said, rather than asked over. A blank variable names nothing, as
+		// resolveInstanceURL reads it.
 		return "", err
 	}
 	answer, err := s.ReadLine("Instance address, such as https://chat.example.com: ")
@@ -220,22 +232,23 @@ func (s *Setup) instance(invite ops.Invite, flag string, previous credentials.Re
 	return credentials.ParseInstanceURL(answer)
 }
 
-// account signs this machine in to instance, registering first if the person has no account there. daemon
-// is where the daemon step left the daemon, when it came first.
-func (s *Setup) account(ctx context.Context, previous credentials.Record, instance string, signedIn bool,
-	daemon daemonUp) error {
-	if signedIn && previous.Username != "" {
+// account signs this machine in to instance, registering first if the person has no account there. stored
+// is a sign-in stored for instance, and daemon is where the daemon step left the daemon, which comes first
+// when there is one. confirmed is the daemon having just said the instance accepts the stored sign-in.
+func (s *Setup) account(ctx context.Context, previous credentials.Record, instance string, signedIn, stored bool,
+	daemon daemonUp) (confirmed bool, err error) {
+	if stored {
 		who := termsafe.Text(previous.Username)
 		switch standing, why := s.standing(ctx, instance, daemon); standing {
 		case signInAccepted:
 			s.printf("Signed in as @%s already.\n", who)
-			return nil
+			return true, nil
 		case signInUnknown:
 			// Nothing says it was refused, so it is not replaced: a sign-in done again for nothing would ask
 			// for a password, or a browser, for a sign-in that may be perfectly good.
 			s.printf("Signed in as @%s, as far as this machine knows: %s, so whether the instance still accepts "+
 				"it is not known. `norite daemon status` says, once the daemon runs.\n", who, why)
-			return nil
+			return false, nil
 		}
 		// The account exists: what is missing is a sign-in the instance accepts.
 		s.printf("This machine holds a sign-in as @%s, and the daemon says the instance no longer accepts it. "+
@@ -245,7 +258,7 @@ func (s *Setup) account(ctx context.Context, previous credentials.Record, instan
 			s.printf("If @%s signs in through Google or GitHub, press Ctrl-C and run `norite setup "+
 				"--provider google` or `--provider github` instead.\n", who)
 		}
-		return s.runner(instance, s.Options.Email, "").Run(ctx)
+		return false, s.runner(instance, s.Options.Email, "").Run(ctx)
 	}
 	if previous.InstanceURL != "" && !signedIn {
 		// One daemon holds one sign-in, so signing in here signs this machine out of the other instance.
@@ -255,16 +268,16 @@ func (s *Setup) account(ctx context.Context, previous credentials.Record, instan
 		}
 		if !s.yes(fmt.Sprintf("This machine is signed in to %s%s, and holds one sign-in at a time. Sign "+
 			"in to %s instead? [y/N] ", termsafe.Text(previous.InstanceURL), who, instance), false) {
-			return errors.New("stopped; this machine is still signed in to " + termsafe.Text(previous.InstanceURL))
+			return false, errors.New("stopped; this machine is still signed in to " + termsafe.Text(previous.InstanceURL))
 		}
 	}
 	// A provider's sign-in creates the account in the browser when there is none, and a device code is
 	// completed in one, so neither has a registration to do here.
 	if s.Options.Provider != "" || s.Options.DeviceCode ||
 		s.yes("Do you already have an account on "+instance+"? [y/N] ", false) {
-		return s.runner(instance, s.Options.Email, "").Run(ctx)
+		return false, s.runner(instance, s.Options.Email, "").Run(ctx)
 	}
-	return s.register(ctx, instance)
+	return false, s.register(ctx, instance)
 }
 
 // register creates the account, then signs in to it with the password just chosen.
@@ -311,8 +324,8 @@ func (s *Setup) register(ctx context.Context, instance string) error {
 	//
 	// Quoted, as a command to paste: an address in brackets is a pattern to zsh, and an address is read from
 	// a person or a link, so it may hold what a shell reads.
-	login := fmt.Sprintf("`norite login --instance %s --email %s`", shellQuote(instance),
-		shellQuote(termsafe.Text(reg.email)))
+	login := fmt.Sprintf("`norite login --instance %s --email %s`", output.ShellWord(instance),
+		output.ShellWord(termsafe.Text(reg.email)))
 	if _, err := s.ReadLine("Press Enter to sign in, once you have opened the link if it emailed you one: "); err != nil {
 		return err
 	}
@@ -362,16 +375,18 @@ func (s *Setup) standing(ctx context.Context, instance string, daemon daemonUp) 
 		return signInUnknown, termsafe.Text(err.Error())
 	}
 	defer detach()
-	ask, cancel := context.WithTimeout(ipc.ForInstance(ctx, instance), probeTimeout)
-	defer cancel()
-	res, err := c.Do(ask, http.MethodGet, "/users/@me", nil)
+	res, err := probe(ctx, c, instance)
 	var re *ipc.RelayError
 	switch {
 	case err == nil && res.Status == http.StatusUnauthorized:
 		// Refused after the relay's renewal: the session is ending it.
 		return signInRefused, ""
-	case err == nil:
+	case err == nil && res.Status >= 200 && res.Status < 300:
 		return signInAccepted, ""
+	case err == nil:
+		// A 503 while the instance migrates, a 429, a proxy's 502: answered above the check of the token,
+		// so they say nothing of the sign-in.
+		return signInUnknown, fmt.Sprintf("the instance answered HTTP %d", res.Status)
 	case errors.As(err, &re) && re.Code == ipc.RelayNotSignedIn:
 		return signInRefused, ""
 	}
@@ -381,6 +396,15 @@ func (s *Setup) standing(ctx context.Context, instance string, daemon daemonUp) 
 // probeTimeout bounds asking the instance who the daemon is signed in as: past the relay's own wait for a
 // daemon still starting, and the request.
 const probeTimeout = 45 * time.Second
+
+// probe asks the instance, through the daemon behind c and only if it is signed in to instance, who it is
+// signed in as: how setup learns whether the instance accepts a sign-in, and whether the daemon has taken
+// one up. Refused on this machine, sending nothing, when the daemon is signed out or signed in elsewhere.
+func probe(ctx context.Context, c daemonclient.Caller, instance string) (ipc.Result, error) {
+	ask, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	return daemonclient.DoFor(ask, c, instance, http.MethodGet, "/users/@me", nil)
+}
 
 // runner is a sign-in to instance as one of setup's steps.
 func (s *Setup) runner(instance, email, password string) *Runner {
@@ -461,13 +485,13 @@ func (s *Setup) daemon(ctx context.Context) daemonUp {
 }
 
 // join joins the guild the invite leads to through the daemon, which sends its code to the invite's
-// instance or nowhere (ops.Invite.Context): once it has taken up the sign-in to that instance, which it does
-// a moment after one is stored.
-func (s *Setup) join(ctx context.Context, invite ops.Invite, daemon daemonUp) error {
+// instance or nowhere (daemonclient.CallFor): once it has taken up the sign-in to that instance, which it does
+// a moment after one is stored. confirmed is the daemon having just answered as signed in there, so there is
+// nothing to wait for.
+func (s *Setup) join(ctx context.Context, invite ops.Invite, daemon daemonUp, confirmed bool) error {
 	// The person's own input, and checked by ParseInvite, but printed back to a terminal all the same, and
-	// quoted, since a code may hold spaces and a link a '#', which some shells read. ParseInvite refuses a
-	// quote, so the quoting holds.
-	link := "'" + termsafe.Text(strings.TrimSpace(s.Options.Invite)) + "'"
+	// quoted, since a code may hold spaces and a link a '#', which some shells read.
+	link := output.ShellWord(termsafe.Text(strings.TrimSpace(s.Options.Invite)))
 	later := "Join it once the daemon runs: `norite invite join " + link + "`."
 	if daemon == daemonDown || s.Connect == nil {
 		s.printf("%s\n", later)
@@ -477,7 +501,9 @@ func (s *Setup) join(ctx context.Context, invite ops.Invite, daemon daemonUp) er
 	c, detach, err := s.attach(ctx, daemon, deadline)
 	if err == nil {
 		defer detach()
-		err = s.awaitSignIn(ctx, c, invite.Instance, deadline)
+		if !confirmed {
+			err = s.awaitSignIn(ctx, c, invite.Instance, deadline)
+		}
 	}
 	if err != nil {
 		s.printf("%s. %s\n", termsafe.Text(err.Error()), later)
@@ -541,20 +567,31 @@ func (s *Setup) attach(ctx context.Context, daemon daemonUp, deadline time.Time)
 
 // awaitSignIn waits until the daemon behind c is signed in to instance, asked by a request that names it.
 // Until the daemon has read the sign-in setup stored, it answers that it is signed out, or signed in to the
-// instance it was before, and either answer is given on this machine, sending nothing; once it has, the
-// request reaches the instance. One attachment, asked again, rather than an attach each time: the
-// handshake is the daemon's, and a request it refuses costs it nothing.
+// instance it was before, and either answer is given on this machine, sending nothing; then, while it has
+// no session from the instance yet, that it cannot reach it. Once it has one, the request reaches the
+// instance. One attachment, asked again, rather than an attach each time: the handshake is the daemon's,
+// and a request it refuses costs it nothing.
+//
+// Anything else is returned, for the join to say and leave for later: the attachment ending, or a probe
+// that timed out.
 func (s *Setup) awaitSignIn(ctx context.Context, c daemonclient.Caller, instance string, deadline time.Time) error {
 	for {
-		ask, cancel := context.WithTimeout(ipc.ForInstance(ctx, instance), probeTimeout)
-		_, err := c.Do(ask, http.MethodGet, "/users/@me", nil)
-		cancel()
+		_, err := probe(ctx, c, instance)
 		var re *ipc.RelayError
-		if err == nil || !errors.As(err, &re) || (re.Code != ipc.RelayNotSignedIn && re.Code != ipc.RelayOtherInstance) {
-			// Answered, or failed in a way waiting does not change, which the preview then reports.
+		switch {
+		case err == nil:
+			// The instance answered: whatever it said, the preview reports.
 			return nil
+		case !errors.As(err, &re):
+			return fmt.Errorf("the daemon could not be asked: %s", termsafe.Text(err.Error()))
+		case re.Code != ipc.RelayNotSignedIn && re.Code != ipc.RelayOtherInstance && re.Code != ipc.RelayUnreachable:
+			return fmt.Errorf("the daemon could not ask the instance: %s", termsafe.Text(re.Message))
 		}
 		if time.Now().After(deadline) {
+			if re.Code == ipc.RelayUnreachable {
+				return fmt.Errorf("the daemon could not reach the instance within %s: %s", s.wait(),
+					termsafe.Text(re.Message))
+			}
 			return fmt.Errorf("the daemon did not take the sign-in up within %s; `norite daemon status` says "+
 				"where it stands", s.wait())
 		}
@@ -603,9 +640,6 @@ func (s *Setup) printf(format string, args ...any) { _, _ = fmt.Fprintf(s.Out, f
 func (s *Setup) yes(question string, byDefault bool) bool {
 	return yes(s.ReadLine, question, byDefault)
 }
-
-// shellQuote is s as one word to a POSIX shell, in single quotes: nothing inside them is read.
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // SetupCommand builds `norite setup`.
 func SetupCommand(daemon Daemon, connect Connect) *cli.Command {

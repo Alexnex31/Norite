@@ -230,7 +230,7 @@ func TestOnlyARelayedRequestNamesAnInstance(t *testing.T) {
 	assert.Equal(t, "https://chat.example", relayed[0].InstanceURL)
 }
 
-// The client sends the instance its context names (ipc.ForInstance) and hands back the one that answered.
+// The client sends the instance DoFor names and hands back the one that answered.
 func TestTheClientCarriesTheInstanceBothWays(t *testing.T) {
 	named := make(chan string, 2)
 	relay := relayFunc(func(_ context.Context, req ipc.Request) ipc.Response {
@@ -240,12 +240,12 @@ func TestTheClientCarriesTheInstanceBothWays(t *testing.T) {
 	})
 	c := newTestServer(t, relay).attach(t, false)
 
-	res, err := c.Do(ipc.ForInstance(context.Background(), "https://chat.example"), "GET", "/guilds/1", nil)
+	res, err := c.DoFor(context.Background(), "https://chat.example", "GET", "/guilds/1", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "https://chat.example", <-named)
 	assert.Equal(t, "https://chat.example", res.InstanceURL)
 
 	_, err = c.Do(context.Background(), "GET", "/guilds/1", nil)
 	require.NoError(t, err)
-	assert.Empty(t, <-named, "a request whose context names none names none")
+	assert.Empty(t, <-named, "Do names none")
 }

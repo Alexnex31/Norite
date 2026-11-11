@@ -185,17 +185,27 @@ func TestAnInviteCarriesItsLink(t *testing.T) {
 	assert.Equal(t, link, earlyBack["link"])
 
 	// No instance said, no link: null in JSON, nothing in text. Only a daemon older than the answer saying
-	// which instance answered gives that.
-	none := runVerb(t, f, "", "--json", "invite", "create", "20")
+	// which instance answered gives that, signed in all the same.
+	older := newFake(t).AsOlderDaemon().On("createChannelInvite", created(apiInvite("90", "BCDFGHJKMNPQRSTV")))
+	none := runVerbSignedIn(t, older, "https://chat.example.com", "--json", "invite", "create", "20")
 	require.NoError(t, none.err)
 	var bare map[string]any
 	require.NoError(t, json.Unmarshal([]byte(none.out), &bare))
 	v, present := bare["link"]
 	assert.True(t, present)
 	assert.Nil(t, v)
-	plain := runVerb(t, f, "", "invite", "create", "20")
+	plain := runVerbSignedIn(t, older, "https://chat.example.com", "invite", "create", "20")
 	require.NoError(t, plain.err)
 	assert.NotContains(t, plain.out, "link")
+
+	// A code the instance should not have sent makes no link either, rather than one that ParseInvite
+	// refuses and that reads as another code to whoever is handed it.
+	odd := newFake(t).On("createChannelInvite", created(apiInvite("90", "AB#CD x")))
+	strange := runVerbSignedIn(t, odd, "https://chat.example.com", "--json", "invite", "create", "20")
+	require.NoError(t, strange.err)
+	var oddBack map[string]any
+	require.NoError(t, json.Unmarshal([]byte(strange.out), &oddBack))
+	assert.Nil(t, oddBack["link"])
 }
 
 // TestALinkToThisMachineAloneSaysSo: an inviter signed in through localhost gets a link that points every

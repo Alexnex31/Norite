@@ -498,10 +498,17 @@ func TestARequestNamingAnInstanceGoesThereOrNowhere(t *testing.T) {
 	}
 	assert.Len(t, requests(), 3, "nothing reached the instance for a request naming another")
 
-	resp := r.Do(context.Background(), ipc.Request{ID: "1", Method: "GET", Path: "/guilds/1",
-		InstanceURL: "https://" + strings.Repeat("a", ipc.MaxInstanceURL)})
+	// The bound counts characters, as the contract's maxLength does: an address in another script, within
+	// it in characters and past it in bytes, is checked as any other, and one past it is refused unsent.
+	within := "https://" + strings.Repeat("é", ipc.MaxInstanceURL-len("https://"))
+	resp := r.Do(context.Background(), ipc.Request{ID: "1", Method: "GET", Path: "/guilds/1", InstanceURL: within})
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, ipc.RelayOtherInstance, resp.Error.Code)
+	resp = r.Do(context.Background(), ipc.Request{ID: "1", Method: "GET", Path: "/guilds/1", InstanceURL: within + "é"})
 	require.NotNil(t, resp.Error)
 	assert.Equal(t, ipc.RelayBadRequest, resp.Error.Code)
+	assert.Equal(t, "the instance named is longer than 2048 characters", resp.Error.Message)
+	assert.Len(t, requests(), 3)
 }
 
 // TestTheInstanceIsCheckedAgainstTheSignInTheRequestIsSentAs: a daemon still starting is waited for, as for

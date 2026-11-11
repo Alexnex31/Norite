@@ -149,10 +149,10 @@ func SendMessage(
 }
 
 // PreviewInvite says where an invite leads. The code goes in the body, never a path (ADR 0029), and only to
-// the instance its link names (Invite.Context).
+// the instance its link names (daemonclient.CallFor), or for a bare code whichever the daemon is signed in to.
 func PreviewInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.GuildInvitePreview, error) {
 	var out apicontract.GuildInvitePreview
-	err := daemonclient.Call(inv.Context(ctx), c, http.MethodPost, "/invites/preview",
+	err := daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/preview",
 		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out)
 	return out, err
 }
@@ -161,14 +161,14 @@ func PreviewInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apic
 // changes nothing and spends no use.
 func JoinInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.Guild, error) {
 	var out apicontract.Guild
-	err := daemonclient.Call(inv.Context(ctx), c, http.MethodPost, "/invites/redeem",
+	err := daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/redeem",
 		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out)
 	return out, err
 }
 
 // RevokeInvite deletes an invite so it stops working.
 func RevokeInvite(ctx context.Context, c daemonclient.Caller, inv Invite) error {
-	return daemonclient.Call(inv.Context(ctx), c, http.MethodPost, "/invites/revoke",
+	return daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/revoke",
 		apicontract.GuildInviteCodeRequest{Code: inv.Code}, nil)
 }
 

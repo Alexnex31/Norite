@@ -100,6 +100,8 @@ func TestBootstrapPresentsAnOperatorTokenTheInstanceCanVerify(t *testing.T) {
 	assert.Equal(t, "ada", f.body["username"])
 	assert.Equal(t, "a-test-password", f.body["password"])
 	assert.Contains(t, out.String(), "Created ada")
+	// A command to paste: the address quoted, as an IPv6 one in brackets is a pattern to zsh.
+	assert.Contains(t, out.String(), "\nSign in with:\n  norite login --instance '"+f.server.URL+"'\n")
 }
 
 // The signing key is the one secret this command handles, and it must never reach the terminal — not in

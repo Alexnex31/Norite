@@ -81,7 +81,7 @@ func TestRegisterSendsTheAccountAndSaysHowToSignIn(t *testing.T) {
 		DisplayName: "Bob B."}, f.got[0])
 	assert.Contains(t, out.String(), "Ready\uFFFD[2J; sign in now.", "the instance's words, made inert")
 	assert.NotContains(t, out.String(), "\x1b")
-	assert.Contains(t, out.String(), "norite login --instance "+f.server.URL+" --email bob@example.com")
+	assert.Contains(t, out.String(), "norite login --instance '"+f.server.URL+"' --email 'bob@example.com'")
 	assert.NotContains(t, out.String(), "correct horse battery", "the password is never printed")
 }
 

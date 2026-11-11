@@ -274,6 +274,8 @@ type Daemon struct {
 	clients []*Client
 	// signedIn, when set, is the instance the fake's relay is signed in to at each request, "" for none.
 	signedIn func() string
+	// unnamed, when set, leaves the answering instance out of every answer, as a daemon older than the field.
+	unnamed bool
 }
 
 // New builds a fake daemon for one test. Its clients are closed when the test ends.
@@ -304,12 +306,22 @@ func (d *Daemon) Requests() []Request {
 // moment later. Without it, a request through a client is answered as signed in to the instance its READY
 // named, and one made on the Daemon itself as signed in to none.
 //
-// The instance is what a request naming one (ipc.ForInstance) is checked against, as the relay checks it,
+// The instance is what a request naming one (DoFor) is checked against, as the relay checks it,
 // and what every answer says answered.
 func (d *Daemon) SignInFrom(signedIn func() string) *Daemon {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.signedIn = signedIn
+	return d
+}
+
+// AsOlderDaemon makes the fake answer as a daemon older than Response.instance_url (easier-setup), which says
+// nothing of the instance that answered: the one state in which a client has no instance to build a link
+// from, which the fake otherwise gives only by answering as signed in to none, as no real daemon does.
+func (d *Daemon) AsOlderDaemon() *Daemon {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.unnamed = true
 	return d
 }
 
@@ -421,6 +433,11 @@ func (c *Client) endLocked(err error) {
 
 // Do performs a relayed request through the fake daemon, once this client is still attached.
 func (c *Client) Do(ctx context.Context, method, path string, body any) (ipc.Result, error) {
+	return c.DoFor(ctx, "", method, path, body)
+}
+
+// DoFor is Do for a request meant for instanceURL alone, checked as the relay checks it (ipc.Client.DoFor).
+func (c *Client) DoFor(ctx context.Context, instanceURL, method, path string, body any) (ipc.Result, error) {
 	select {
 	case <-c.done:
 		return ipc.Result{}, c.Err()
@@ -430,7 +447,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (ipc.Res
 	if c.ready.Account != nil {
 		attached = c.ready.Account.InstanceURL
 	}
-	return c.d.do(ctx, c.d.instanceFor(attached), method, path, body)
+	return c.d.do(ctx, c.d.instanceFor(attached), instanceURL, method, path, body)
 }
 
 // Ready is what the daemon said when the client attached.
@@ -477,12 +494,18 @@ func (d *Daemon) OnLocal(path string, body any) *Daemon {
 
 // Do performs a relayed request on the fake itself, as signed in to SignInFrom's instance or to none.
 func (d *Daemon) Do(ctx context.Context, method, rawPath string, body any) (ipc.Result, error) {
-	return d.do(ctx, d.instanceFor(""), method, rawPath, body)
+	return d.DoFor(ctx, "", method, rawPath, body)
 }
 
-func (d *Daemon) do(ctx context.Context, instance, method, rawPath string, body any) (ipc.Result, error) {
+// DoFor is Do for a request meant for instanceURL alone, checked as the relay checks it.
+func (d *Daemon) DoFor(ctx context.Context, instanceURL, method, rawPath string, body any) (ipc.Result, error) {
+	return d.do(ctx, d.instanceFor(""), instanceURL, method, rawPath, body)
+}
+
+// do answers a request as signed in to instance, "" for none; named is the instance the request is meant
+// for, or "".
+func (d *Daemon) do(_ context.Context, instance, named, method, rawPath string, body any) (ipc.Result, error) {
 	t := d.t
-	named := ipc.InstanceFor(ctx)
 	if named != "" && strings.HasPrefix(rawPath, ipc.LocalPathPrefix) {
 		return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "a request to the daemon itself names no instance"}
 	}
@@ -575,6 +598,12 @@ func (d *Daemon) do(ctx context.Context, instance, method, rawPath string, body 
 	if op.id == "sendMessage" && status == 201 {
 		// What the instance does next: MESSAGE_CREATE to everybody watching, the sender included.
 		d.Dispatch("MESSAGE_CREATE", respBody)
+	}
+	d.mu.Lock()
+	unnamed := d.unnamed
+	d.mu.Unlock()
+	if unnamed {
+		instance = ""
 	}
 	return ipc.Result{Status: status, Body: respBody, InstanceURL: instance}, nil
 }

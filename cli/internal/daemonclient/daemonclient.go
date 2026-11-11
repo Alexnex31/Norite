@@ -11,7 +11,7 @@
 //   - it answered 4xx: clierr.RefusedError, exit 4 — except 401, which is the daemon's credential failing
 //     after the relay's retry, and 429, a throttle, which are both unavailable;
 //   - the daemon is not running, not signed in, or cannot reach the instance: clierr.UnavailableError, exit 3;
-//   - the request named another instance than the daemon's (ipc.ForInstance): clierr.UsageError, exit 2;
+//   - the request named another instance than the daemon's (CallFor): clierr.UsageError, exit 2;
 //   - anything else, a 5xx included: an ordinary error, exit 1.
 package daemonclient
 
@@ -33,6 +33,32 @@ import (
 // Caller performs a relayed request. *ipc.Client implements it; the verbs' tests substitute a fake daemon.
 type Caller interface {
 	Do(ctx context.Context, method, path string, body any) (ipc.Result, error)
+}
+
+// InstanceCaller is a Caller that can name the instance a request is meant for, as *ipc.Client.DoFor does:
+// the daemon then performs it only while signed in there.
+type InstanceCaller interface {
+	Caller
+	DoFor(ctx context.Context, instanceURL, method, path string, body any) (ipc.Result, error)
+}
+
+// ErrCannotNameInstance refuses a request meant for one instance on a connection with no way to say which.
+// Sent anyway, it would go to whichever instance the daemon is signed in to, which is what naming the
+// instance exists to prevent, so nothing is sent.
+var ErrCannotNameInstance = errors.New("this connection to the daemon cannot say which instance a request is " +
+	"for, so nothing was sent")
+
+// DoFor is c.DoFor when c can name an instance, c.Do when instanceURL is "", and ErrCannotNameInstance,
+// with nothing sent, otherwise.
+func DoFor(ctx context.Context, c Caller, instanceURL, method, path string, body any) (ipc.Result, error) {
+	if instanceURL == "" {
+		return c.Do(ctx, method, path, body)
+	}
+	ic, ok := c.(InstanceCaller)
+	if !ok {
+		return ipc.Result{}, ErrCannotNameInstance
+	}
+	return ic.DoFor(ctx, instanceURL, method, path, body)
 }
 
 // Connect attaches to this user's daemon, for one command's requests. version is this CLI's, for the
@@ -91,19 +117,29 @@ const attachTimeout = 10 * time.Second
 // not on a slow instance the relay is already timing out (M20 /code-review). A variable for the tests.
 var callTimeout = 2 * time.Minute
 
-// Call performs one request and decodes a 2xx answer's body into out, which may be nil to ignore it. A
-// context made by ipc.ForInstance sends the request to that instance or nowhere.
+// Call performs one request and decodes a 2xx answer's body into out, which may be nil to ignore it.
 func Call(ctx context.Context, c Caller, method, path string, body, out any) error {
-	_, err := CallFrom(ctx, c, method, path, body, out)
+	_, err := call(ctx, c, "", method, path, body, out)
+	return err
+}
+
+// CallFor is Call for a request meant for instanceURL alone, an invite link's code most often: the daemon
+// sends it there or nowhere (DoFor), and a connection that cannot say so sends nothing.
+func CallFor(ctx context.Context, c Caller, instanceURL, method, path string, body, out any) error {
+	_, err := call(ctx, c, instanceURL, method, path, body, out)
 	return err
 }
 
 // CallFrom is Call, and says which instance answered: the daemon's sign-in when it performed the request,
 // which READY may not have named yet, or "" from a daemon older than the answer saying so (easier-setup).
 func CallFrom(ctx context.Context, c Caller, method, path string, body, out any) (instanceURL string, err error) {
+	return call(ctx, c, "", method, path, body, out)
+}
+
+func call(ctx context.Context, c Caller, instance, method, path string, body, out any) (instanceURL string, err error) {
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	res, err := c.Do(callCtx, method, path, body)
+	res, err := DoFor(callCtx, c, instance, method, path, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			return "", clierr.Unavailable("the daemon did not answer within %s; the request may or may not have "+

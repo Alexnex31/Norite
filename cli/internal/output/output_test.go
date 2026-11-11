@@ -77,3 +77,11 @@ func TestRenderChoosesThePresentation(t *testing.T) {
 	assert.Equal(t, "name: a�[2Jb\n", text.String())
 	assert.JSONEq(t, `{"name":"a\u001b[2Jb"}`, js.String())
 }
+
+// TestAValueInACommandToPasteIsOneWord: an address and an email go into a command a person pastes, quoted
+// so that a shell reads neither, a quote inside included.
+func TestAValueInACommandToPasteIsOneWord(t *testing.T) {
+	assert.Equal(t, `'http://[fd00::1]:8080'`, ShellWord("http://[fd00::1]:8080"))
+	assert.Equal(t, `'it'\''s'`, ShellWord("it's"))
+	assert.Equal(t, `'$(id)'`, ShellWord("$(id)"))
+}

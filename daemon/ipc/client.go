@@ -84,25 +84,6 @@ type Result struct {
 	InstanceURL string
 }
 
-type instanceKey struct{}
-
-// ForInstance returns ctx carrying instanceURL as the instance a request made with it is meant for, which Do
-// sends as Request.InstanceURL: the daemon then sends the request there or nowhere. An empty instanceURL
-// names none.
-//
-// A value on the context rather than a parameter, because what carries it to Do is every caller of a
-// request — ops, daemonclient.Call, the fakes the tests attach to — and the instance belongs to the request
-// being made, not to any of them.
-func ForInstance(ctx context.Context, instanceURL string) context.Context {
-	return context.WithValue(ctx, instanceKey{}, instanceURL)
-}
-
-// InstanceFor is the instance ctx says a request is meant for, or "".
-func InstanceFor(ctx context.Context) string {
-	s, _ := ctx.Value(instanceKey{}).(string)
-	return s
-}
-
 // eventBuffer is how many dispatches the client holds for a consumer that has not taken them yet. Past it
 // the reader stops reading, the daemon's buffer for this client fills, and the daemon drops the client as
 // too slow: the consumer's pace is the connection's, which is the point of bounding it.
@@ -305,9 +286,19 @@ func (c *Client) Close() error {
 //
 // body is sent as JSON, nil for none. Whatever status the instance answered with is a Result rather than an
 // error: a 404 is an answer, and what it means is the caller's to decide. A *RelayError is the daemon
-// declining or failing to ask; a *CloseError or ErrClosed, the connection ending first. An instance ctx
-// carries (ForInstance) goes with the request.
+// declining or failing to ask; a *CloseError or ErrClosed, the connection ending first.
 func (c *Client) Do(ctx context.Context, method, path string, body any) (Result, error) {
+	return c.DoFor(ctx, "", method, path, body)
+}
+
+// DoFor is Do for a request meant for one instance alone (Request.InstanceURL): the daemon performs it only
+// while signed in to instanceURL, and otherwise answers RelayOtherInstance having sent nothing. An empty
+// instanceURL names none, and is Do.
+//
+// A parameter rather than a value on the context, so that a caller which cannot carry it says so by not
+// having this method (daemonclient.CallFor refuses then), where a context dropped on the way to Do would
+// lose the instance without a word (easier-setup's third /code-review).
+func (c *Client) DoFor(ctx context.Context, instanceURL, method, path string, body any) (Result, error) {
 	var raw json.RawMessage
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -335,7 +326,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (Result,
 	}
 
 	frame, err := Encode(OpRequest, Request{ID: id, Method: method, Path: path, Body: raw,
-		InstanceURL: InstanceFor(ctx)})
+		InstanceURL: instanceURL})
 	if err != nil {
 		forget()
 		return Result{}, err

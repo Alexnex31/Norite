@@ -15,6 +15,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/Alexnex31/Norite/cli/internal/apiclient"
+	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
@@ -89,7 +90,9 @@ func (r *Registrar) Run(ctx context.Context) error {
 		return err
 	}
 	r.printf("%s\n", message)
-	r.printf("\nSign in with:\n  norite login --instance %s --email %s\n", reg.instanceURL, termsafe.Text(reg.email))
+	// Quoted, as a command to paste (output.ShellWord).
+	r.printf("\nSign in with:\n  norite login --instance %s --email %s\n", output.ShellWord(reg.instanceURL),
+		output.ShellWord(termsafe.Text(reg.email)))
 	return nil
 }
 

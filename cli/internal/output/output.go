@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -144,6 +145,11 @@ func OrNone(s *string) string {
 	}
 	return Clean(*s)
 }
+
+// ShellWord is s as one word to a POSIX shell, in single quotes, inside which nothing is read: for a value in
+// a command somebody is told to paste. An IPv6 address in brackets is a pattern to zsh, and an address or
+// an email comes from a person or a link, so it may hold what a shell reads (easier-setup).
+func ShellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // Writer is where a command prints: its root's writer, or standard output when a tree was built with
 // none.

@@ -110,7 +110,7 @@
             "null"
           ],
           "pattern": "^https?://[^/?#]+(/[^?#]*)?/join#[BCDFGHJKMNPQRSTVWXYZ]{16}$",
-          "description": "The invite link (easier-setup): the instance that answered, as the daemon's sign-in names it, then /join# and the code, which `norite setup` and `norite invite join` take whole. The code is a fragment, so a browser opening the link never sends it. Null only from a daemon older than its answers saying which instance answered."
+          "description": "The invite link (easier-setup): the instance that answered, as the daemon's sign-in names it, then /join# and the code, which `norite setup` and `norite invite join` take whole. The code is a fragment, so a browser opening the link never sends it. Null from a daemon older than its answers saying which instance answered, and for a code that is not one of the instance's sixteen-letter codes, which no link carries."
         }
       }
     },

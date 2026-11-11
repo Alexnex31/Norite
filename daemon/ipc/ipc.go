@@ -315,8 +315,8 @@ const (
 	RelayOtherInstance = "other_instance"
 )
 
-// MaxInstanceURL bounds Request.InstanceURL, in bytes: an instance's address is far shorter, and the
-// refusal quotes it.
+// MaxInstanceURL bounds Request.InstanceURL, in characters as the contract counts them: an instance's
+// address is far shorter, and the refusal quotes it.
 const MaxInstanceURL = 2048
 
 // ValidMethod reports whether a request may use method: the five the REST API uses, spelled in capitals.

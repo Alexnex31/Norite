@@ -4,7 +4,6 @@
 package ops
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -15,7 +14,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/daemon/credentials"
-	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
 // The invite link (easier-setup): the instance's address, JoinPath, and a guild invite code after '#', as in
@@ -51,9 +49,18 @@ type Invite struct {
 	Code string
 }
 
-// InviteLink is the link for code on the instance at instanceURL.
-func InviteLink(instanceURL, code string) string {
-	return strings.TrimRight(instanceURL, "/") + JoinPath + "#" + code
+// inviteCodeAlphabet is what an instance's guild invite codes are made of, sixteen of them, as the contract
+// says of GuildInvite.code and the CLI's link pattern repeats.
+const inviteCodeAlphabet = "BCDFGHJKMNPQRSTVWXYZ"
+
+// InviteLink is the link for code on the instance at instanceURL, and false for a code no link carries: one
+// that is not sixteen characters of the alphabet the instance issues codes in. The code is the instance's
+// answer, and a link built from anything else breaks the CLI's contract and is one ParseInvite refuses.
+func InviteLink(instanceURL, code string) (string, bool) {
+	if len(code) != 16 || strings.ContainsFunc(code, func(r rune) bool { return !strings.ContainsRune(inviteCodeAlphabet, r) }) {
+		return "", false
+	}
+	return strings.TrimRight(instanceURL, "/") + JoinPath + "#" + code, true
 }
 
 // ParseInvite reads a link or a bare code.
@@ -136,21 +143,6 @@ func typedCode(s string) bool {
 		}
 	}
 	return true
-}
-
-// Context is ctx sending what is made with it to the instance the invite's link names, or nowhere: the
-// daemon checks that instance against the sign-in it would send the request as, at the moment it would send
-// it, and answers ipc.RelayOtherInstance, having sent nothing, when they differ. A bare code names no
-// instance and is sent to whichever the daemon is signed in to.
-//
-// The daemon checks rather than the client, against the READY it attached with, because that READY names no
-// instance while the daemon is starting, which refused a good link with advice that retrying would not
-// help, and because a sign-in can change after it (easier-setup's second /code-review).
-func (i Invite) Context(ctx context.Context) context.Context {
-	if i.Instance == "" {
-		return ctx
-	}
-	return ipc.ForInstance(ctx, i.Instance)
 }
 
 // LocalOnly reports whether instanceURL names this machine or its link alone: localhost, a loopback, a

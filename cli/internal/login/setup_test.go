@@ -324,6 +324,109 @@ func TestASecondRunWithALinkJoinsWithoutAskingAboutTheInstance(t *testing.T) {
 	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
 	assert.Equal(t, []string{"Join it? [Y/n] "}, run.lines.asked)
 	assert.Len(t, requestsTo(run.daemon, "redeemInvite"), 1)
+	// The daemon has just said the instance takes the sign-in, so the join does not ask it again.
+	assert.Len(t, requestsTo(run.daemon, "getCurrentUser"), 1)
+}
+
+// TestALinkWritingTheStoredInstanceAnotherWaySignsInWhereItIsStored: a link may write the instance this
+// machine is signed in to with a final dot, which a resolver may send to another server. The comparison
+// calls the two one instance, so nothing is asked, and what a sign-in then reaches is the instance as it was
+// stored, never the link's spelling of it.
+func TestALinkWritingTheStoredInstanceAnotherWaySignsInWhereItIsStored(t *testing.T) {
+	f := newSetupInstance(t)
+	stored := strings.Replace(f.server.URL, "127.0.0.1", "localhost", 1)
+	link := strings.Replace(f.server.URL, "127.0.0.1", "localhost.", 1) + "/join#BCDFGHJKMNPQRSTV"
+	run := newSetupRun(t, f, SetupOptions{Invite: link, NoDaemon: true}, []string{"ada@example.com"},
+		[]string{"a correct passphrase"})
+	seed(t, run.store, stored, "ada")
+	run.daemon.SignInFrom(func() string { return "" })
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Equal(t, []string{"Email: "}, run.lines.asked)
+	_, logins, _ := f.seen()
+	assert.Len(t, logins, 1)
+	rec, err := run.store.LoadRecord()
+	require.NoError(t, err)
+	assert.Equal(t, stored, rec.InstanceURL)
+	assert.Contains(t, run.out.String(), "Setting up Norite on this machine, for "+stored+".\n")
+}
+
+// TestAnAnswerAboveTheTokensCheckSaysNothingOfTheSignIn: only a 2xx says the instance took the sign-in and
+// only a 401 that it did not. A 503 while it migrates, a 429 or a proxy's 502 are answered before the token
+// is looked at; the 403 here stands for them, being what the contract declares for this route.
+func TestAnAnswerAboveTheTokensCheckSaysNothingOfTheSignIn(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL}, nil, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonRunning
+	run.daemon.On("getCurrentUser", func(daemontest.Request) (int, any) {
+		var refusal apicontract.Error
+		refusal.Error.Code, refusal.Error.Message = "forbidden", "missing scope"
+		return 403, refusal
+	})
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Contains(t, run.out.String(), "Signed in as @ada, as far as this machine knows: the instance answered "+
+		"HTTP 403, so whether the instance still accepts it is not known.")
+	assert.NotContains(t, run.out.String(), "Signed in as @ada already.")
+	_, logins, _ := f.seen()
+	assert.Empty(t, logins)
+}
+
+// unreachableFirst answers its first n requests as a daemon that has a sign-in and no session from the
+// instance yet, and passes the rest to InstanceCaller.
+type unreachableFirst struct {
+	daemonclient.InstanceCaller
+	n int
+}
+
+func (u *unreachableFirst) DoFor(ctx context.Context, instance, method, path string, body any) (ipc.Result, error) {
+	if u.n > 0 {
+		u.n--
+		return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayUnreachable, Message: "the daemon has no usable " +
+			"session from its instance yet"}
+	}
+	return u.InstanceCaller.DoFor(ctx, instance, method, path, body)
+}
+
+// TestADaemonWithoutASessionYetIsWaitedFor: just after a sign-in is stored, the daemon may still be getting
+// its session from a slow instance, and says it cannot reach it. That is waited out like a daemon that has
+// not read the sign-in; one that never gets there leaves the join for later, setup having done the rest.
+func TestADaemonWithoutASessionYetIsWaitedFor(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first int
+		want  string
+	}{
+		{"it comes", 3, "Joined Tea Room.\n"},
+		{"it never comes", 1 << 30, "the daemon could not reach the instance within 200ms: the daemon has no " +
+			"usable session from its instance yet. Join it once the daemon runs: `norite invite join '"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSetupInstance(t)
+			run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV", NoDaemon: true},
+				[]string{"", "y", "ada@example.com", "", ""}, []string{"a correct passphrase"})
+			run.daemon.On("previewInvite", daemontest.OK(preview("Tea Room"))).
+				On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
+			connect := run.setup.Connect
+			run.setup.Connect = func(ctx context.Context) (daemonclient.Caller, func(), error) {
+				c, detach, err := connect(ctx)
+				return &unreachableFirst{InstanceCaller: c.(daemonclient.InstanceCaller), n: tc.first}, detach, err
+			}
+			require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+			assert.Contains(t, run.out.String(), tc.want)
+		})
+	}
+}
+
+// TestABlankInstanceVariableIsAskedOver: NORITE_INSTANCE set to nothing but spaces names no instance, as
+// `norite login` reads it, so the address is asked rather than refused.
+func TestABlankInstanceVariableIsAskedOver(t *testing.T) {
+	t.Setenv(instanceEnvVar, "  ")
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{}, []string{""}, nil)
+	err := run.setup.Run(context.Background())
+	require.EqualError(t, err, "an instance address is required: the person who invited you, or the "+
+		"instance's administrator, has it")
+	assert.Equal(t, []string{"Instance address, such as https://chat.example.com: "}, run.lines.asked)
 }
 
 // TestAnInviteOnlyInstanceAsksForItsCodeAndSendsTheAnswersAgain: the instance's invite_required is answered
@@ -720,13 +823,6 @@ func TestAMistypedProviderIsRefusedFirst(t *testing.T) {
 	assert.Empty(t, run.lines.asked)
 	_, _, requests := f.seen()
 	assert.Zero(t, requests)
-}
-
-// TestACommandToPasteIsQuoted: an address and an email go into a command a person pastes, quoted so that a
-// shell reads neither, a quote inside included.
-func TestACommandToPasteIsQuoted(t *testing.T) {
-	assert.Equal(t, `'http://[fd00::1]:8080'`, shellQuote("http://[fd00::1]:8080"))
-	assert.Equal(t, `'it'\''s'`, shellQuote("it's"))
 }
 
 // TestABareCodeGoesOnlyToTheInstanceSetUpFor: a code given without its link names no instance, and is for

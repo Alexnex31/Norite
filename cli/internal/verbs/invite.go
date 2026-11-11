@@ -194,7 +194,8 @@ type inviteView struct {
 	Uses      int        `json:"uses"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
-	// Link is the invite link on the instance that answered, or nil from a daemon that does not say which.
+	// Link is the invite link on the instance that answered, or nil from a daemon that does not say which, or
+	// for a code no link carries.
 	Link *string `json:"link"`
 }
 
@@ -205,8 +206,7 @@ func inviteFrom(inv apicontract.GuildInvite, instance string) inviteView {
 		Inviter: userFrom(inv.Inviter), MaxUses: inv.MaxUses, Uses: inv.Uses, ExpiresAt: inv.ExpiresAt,
 		CreatedAt: inv.CreatedAt,
 	}
-	if instance != "" {
-		link := ops.InviteLink(instance, inv.Code)
+	if link, ok := ops.InviteLink(instance, inv.Code); ok && instance != "" {
 		v.Link = &link
 	}
 	return v

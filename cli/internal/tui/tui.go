@@ -39,7 +39,8 @@ import (
 // Session is one attachment to the daemon with its event stream: what *ipc.Client is, as far as this client
 // uses it, so the tests can attach to daemontest's fake instead.
 type Session interface {
-	daemonclient.Caller
+	// An instance can be named, so an invite link's code goes only to the instance its link names.
+	daemonclient.InstanceCaller
 	Ready() ipc.Ready
 	Events() <-chan ipc.Event
 	Done() <-chan struct{}

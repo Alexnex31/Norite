@@ -13,6 +13,7 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/daemontest"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/daemon/ipc"
@@ -20,13 +21,26 @@ import (
 
 func TestALinkReadsBackAsTheInstanceAndTheCode(t *testing.T) {
 	for _, instance := range []string{"https://chat.example.com", "http://192.168.1.20:8080", "https://example.com/norite"} {
-		link := ops.InviteLink(instance, "PGTQRBXGTCDFFWBH")
+		link, ok := ops.InviteLink(instance, "PGTQRBXGTCDFFWBH")
+		require.True(t, ok)
 		got, err := ops.ParseInvite(link)
 		require.NoError(t, err, link)
 		assert.Equal(t, ops.Invite{Instance: instance, Code: "PGTQRBXGTCDFFWBH"}, got, link)
 	}
-	assert.Equal(t, "https://chat.example.com/join#PGTQRBXGTCDFFWBH",
-		ops.InviteLink("https://chat.example.com/", "PGTQRBXGTCDFFWBH"))
+	link, ok := ops.InviteLink("https://chat.example.com/", "PGTQRBXGTCDFFWBH")
+	assert.True(t, ok)
+	assert.Equal(t, "https://chat.example.com/join#PGTQRBXGTCDFFWBH", link)
+}
+
+// TestACodeNoLinkCarriesMakesNoLink: the code is the instance's answer, and a link is built only from one of
+// the codes it issues, so a link never breaks the CLI's contract or reads back as something else.
+func TestACodeNoLinkCarriesMakesNoLink(t *testing.T) {
+	for _, code := range []string{"", "AB#CD x", "PGTQRBXGTCDFFWB", "PGTQRBXGTCDFFWBHX", "pgtqrbxgtcdffwbh",
+		"PGTQRBXGTCDFFWBA", "PGTQRBXGTCDFFW\u00c9"} {
+		link, ok := ops.InviteLink("https://chat.example.com", code)
+		assert.False(t, ok, code)
+		assert.Empty(t, link, code)
+	}
 }
 
 func TestAnInviteIsALinkOrACode(t *testing.T) {
@@ -151,6 +165,29 @@ func TestACodeIsSentOnlyToTheInstanceItsLinkNames(t *testing.T) {
 			"https://chat.example.com, so nothing was sent")
 	}
 	assert.Len(t, d.Requests(), 3, "nothing was sent for the link to another instance")
+}
+
+// onlyDo is a connection that can make a request and cannot say which instance it is for, as a wrapper
+// that passes Do on and nothing else would be.
+type onlyDo struct{ daemonclient.Caller }
+
+// TestALinksCodeIsNotSentWhereItsInstanceCannotBeNamed: a link's code goes to its instance or nowhere, so a
+// connection that cannot name the instance sends nothing, rather than the code to whichever instance the
+// daemon is signed in to. A bare code names none and goes as any request does.
+func TestALinksCodeIsNotSentWhereItsInstanceCannotBeNamed(t *testing.T) {
+	d := daemontest.New(t).On("previewInvite", daemontest.OK(invitePreview())).
+		SignInFrom(func() string { return "https://other.example" })
+	inv, err := ops.ParseInvite("https://chat.example.com/join#PGTQRBXGTCDFFWBH")
+	require.NoError(t, err)
+	_, err = ops.PreviewInvite(context.Background(), onlyDo{d}, inv)
+	require.ErrorIs(t, err, daemonclient.ErrCannotNameInstance)
+	assert.Empty(t, d.Requests())
+
+	bare, err := ops.ParseInvite("PGTQRBXGTCDFFWBH")
+	require.NoError(t, err)
+	_, err = ops.PreviewInvite(context.Background(), onlyDo{d}, bare)
+	require.NoError(t, err)
+	assert.Len(t, d.Requests(), 1)
 }
 
 // TestALinkWaitsForADaemonStillStarting: the daemon decides whether a link is for its instance, when it is
