@@ -165,11 +165,16 @@ func ParseInstanceURL(raw string) (string, error) {
 		// includes it.
 		return "", errors.New("an instance URL must not carry a username or password")
 	}
-	// The instance is rebuilt below from the decoded path, so a %3F or %23 in it would come back as a
-	// query or a fragment, and the instance stored would be another than the one typed: requests would go
-	// to the path before it, and SameInstance would call the two one instance (easier-setup's fifth
-	// /code-review). Refused, as anything that alters the value is here, rather than kept encoded: no
-	// instance's address needs an escape in its path.
+	// A query or a fragment was dropped without a word until easier-setup, which is the quiet alteration
+	// this function exists to refuse: an invite link pasted where an address belongs lost its code and
+	// became an instance at /join. And the instance is rebuilt below from the decoded path, so a %3F or
+	// %23 in it would come back as a query or a fragment, the instance stored another than the one typed:
+	// requests went to the path before it, and SameInstance called the two one instance. A record stored
+	// that way holds the raw '?' or '#', and is refused here when it is next read, which Validate asks.
+	// Refused rather than kept encoded: no instance's address needs an escape in its path.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(trimmed, "#") {
+		return "", errors.New("an instance URL must not carry a query or a fragment")
+	}
 	if strings.Contains(pathOf(trimmed), "%") {
 		return "", errors.New("an instance URL's path must not be percent-encoded")
 	}
@@ -178,18 +183,15 @@ func ParseInstanceURL(raw string) (string, error) {
 }
 
 // pathOf is the path of a URL as it was written, before anything decodes it: from the first '/' after the
-// authority up to a query or a fragment.
+// authority to the end. ParseInstanceURL asks it only once a query and a fragment are refused, so nothing
+// follows the path.
 func pathOf(raw string) string {
 	_, rest, _ := strings.Cut(raw, "://")
 	i := strings.IndexByte(rest, '/')
 	if i < 0 {
 		return ""
 	}
-	p := rest[i:]
-	if j := strings.IndexAny(p, "?#"); j >= 0 {
-		p = p[:j]
-	}
-	return p
+	return rest[i:]
 }
 
 // newDeviceID returns an identifier for this installation.

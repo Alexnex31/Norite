@@ -46,8 +46,9 @@ func TestACodeNoLinkCarriesMakesNoLink(t *testing.T) {
 }
 
 // TestAnInstanceNoLinkCarriesMakesNoLink: a link is returned only when it reads back as its instance and
-// its code. No instance is no link, and ParseInstanceURL keeps a path that a link cannot hold: it decodes
-// %3F and %23 into a query and a fragment, and takes a space or $(…), all of which ParseInvite refuses.
+// its code. No instance is no link, and an instance URL can hold what a link cannot: a space or $(…) in
+// its path, which ParseInstanceURL takes and ParseInvite refuses, or a '?' or '#' in a record written by
+// hand.
 func TestAnInstanceNoLinkCarriesMakesNoLink(t *testing.T) {
 	for _, instance := range []string{"", "https://host/a?b", "https://host/a#b", "https://host/a b",
 		"https://host/$(id)"} {
@@ -197,6 +198,22 @@ func TestAnInstanceNamedPastTheBoundIsRefusedUnsent(t *testing.T) {
 	require.EqualError(t, err, "the daemon would not relay the request: the instance named is longer than "+
 		"2048 characters")
 	assert.Empty(t, d.Requests())
+}
+
+// TestAnInviteIsWrittenBackAsItWasChecked: what a command to paste repeats is the invite as checked, the
+// code as the instance reads it, never the bytes typed, which may hold a tab termsafe would make unusable.
+func TestAnInviteIsWrittenBackAsItWasChecked(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://chat.example.com/join#bcdf\tghjk mnpq-rstv": "https://chat.example.com/join#BCDFGHJKMNPQRSTV",
+		"  pgtq-rbxg-tcdf-fwbh ":                             "PGTQRBXGTCDFFWBH",
+	} {
+		inv, err := ops.ParseInvite(raw)
+		require.NoError(t, err, raw)
+		assert.Equal(t, want, inv.Canonical(), raw)
+		back, err := ops.ParseInvite(inv.Canonical())
+		require.NoError(t, err, raw)
+		assert.Equal(t, inv.Instance, back.Instance, "what is written back reads back")
+	}
 }
 
 // onlyDo is a connection that can make a request and cannot say which instance it is for, as a wrapper

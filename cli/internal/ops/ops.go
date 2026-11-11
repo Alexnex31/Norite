@@ -195,7 +195,10 @@ func ListInvites(ctx context.Context, c daemonclient.Caller, guildID string) (in
 
 // PreviewInvite says where an invite leads. The code goes in the body, never a path (ADR 0029), and only to
 // the instance its link names (daemonclient.CallFor), or for a bare code whichever the daemon is signed in to.
-// An answer naming a code the instance would not issue is ErrNotAnIssuedCode.
+// An answer naming a code the instance would not issue is ErrNotAnIssuedCode, which stops setup's join and
+// the terminal client's too, though neither shows the code: a code the CLI's own contract refuses is an
+// answer this client cannot vouch for, and before 1.0 an instance and its clients share a MINOR, so a
+// change to the codes' shape arrives with a client that knows it.
 func PreviewInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.GuildInvitePreview, error) {
 	var out apicontract.GuildInvitePreview
 	if err := daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/preview",

@@ -255,8 +255,6 @@ func TestParseInstanceURL(t *testing.T) {
 			"http://localhost:8080":          "http://localhost:8080",
 			"https://example.com/norite":     "https://example.com/norite",
 			"https://example.com:8443/chat/": "https://example.com:8443/chat",
-			// Only the path is held to it: a query is dropped, as it always was, escapes and all.
-			"https://chat.example.com/a?q=%3F": "https://chat.example.com/a",
 		} {
 			got, err := ParseInstanceURL(input)
 			require.NoError(t, err, "input %q", input)
@@ -303,6 +301,14 @@ func TestParseInstanceURL(t *testing.T) {
 			"https://chat.example.com/a%23b",
 			"https://chat.example.com/a%2Fb",
 			"https://chat.example.com/a%20b",
+			// And a query or a fragment, which were dropped without a word: a link pasted for an address
+			// became an instance at /join, and a record holding the decoded form of a %3F above, written
+			// before these were refused, is refused when it is next read.
+			"https://chat.example.com/join#PGTQRBXGTCDFFWBH",
+			"https://chat.example.com/a?b",
+			"https://chat.example.com?",
+			"https://chat.example.com?next=/a%20b",
+			"https://chat.example.com#/%41",
 		} {
 			_, err := ParseInstanceURL(input)
 			assert.Error(t, err, "input %q must be refused", input)
@@ -826,4 +832,15 @@ func TestClearRemovesAnUnreadableRecordAndSaysWhatItCouldNotDo(t *testing.T) {
 	_, token, err := store.Load()
 	require.NoError(t, err)
 	assert.Equal(t, "nrt_fresh", token)
+}
+
+// TestARecordHoldingADecodedEscapeIsRefused: a record written before a %3F or %23 in an instance's path was
+// refused holds it decoded, as a raw '?' or '#', which read back silently as the path before it. It is
+// refused when it is read, so the daemon does not keep sending to an instance nobody typed.
+func TestARecordHoldingADecodedEscapeIsRefused(t *testing.T) {
+	for _, stored := range []string{"https://chat.example.com/a?b", "https://chat.example.com/a#b"} {
+		err := Record{InstanceURL: stored, DeviceID: "device"}.Validate()
+		assert.EqualError(t, err, "an instance URL must not carry a query or a fragment", stored)
+	}
+	assert.NoError(t, Record{InstanceURL: "https://chat.example.com/a", DeviceID: "device"}.Validate())
 }

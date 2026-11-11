@@ -174,7 +174,14 @@ func TestACodeTheInstanceWouldNotIssueIsRefused(t *testing.T) {
 	matchesCLISchema(t, list.out, "guild-invite.schema.json", "inviteList")
 	assert.Contains(t, list.out, `"BCDFGHJKMNPQRSTV"`)
 	assert.NotContains(t, list.out, "$(curl")
-	assert.Equal(t, "1 invites left out: their codes are not ones the instance issues\n", list.errOut)
+	assert.Equal(t, "1 invite left out: its code is not one the instance issues.\n", list.errOut)
+
+	// As text it is said beside the rows, and a listing left with none does not say there are none.
+	text := runVerbOn(t, answering{200, "[" + invite + "," + invite + "]"}, "invite", "list", "10")
+	require.NoError(t, text.err)
+	assert.Equal(t, "No live invite to show.\n2 invites left out: their codes are not ones the instance issues.\n",
+		text.out)
+	assert.Empty(t, text.errOut)
 }
 
 // TestAHugeDayCountIsRefusedNotWrapped: the day count is bounded before it is multiplied, so a number that

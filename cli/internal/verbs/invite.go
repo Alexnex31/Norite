@@ -5,6 +5,7 @@ package verbs
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -115,13 +116,14 @@ func inviteCommand(connect Connector) *cli.Command {
 				if err != nil {
 					return nil, err
 				}
-				if skipped > 0 {
-					// On stderr, so --json stays the contract's array and a script still sees it said.
-					e.warnf("%d invites left out: their codes are not ones the instance issues\n", skipped)
-				}
-				out := inviteList{}
+				out := inviteListing{rows: inviteList{}, skipped: skipped}
 				for _, inv := range list {
-					out = append(out, inviteFrom(inv, instance))
+					out.rows = append(out.rows, inviteFrom(inv, instance))
+				}
+				if skipped > 0 && e.json {
+					// On stderr, so --json stays the contract's array and a script still sees it said. Text
+					// says it beside the rows.
+					e.warnf("%s\n", out.leftOut())
 				}
 				return out, nil
 			},
@@ -253,6 +255,38 @@ func expires(at *time.Time) string {
 
 type inviteList []inviteView
 
+// inviteListing is `invite list`'s result: the rows, which are its JSON, and how many the instance listed
+// that were left out (ops.ListInvites), which text says beside them.
+type inviteListing struct {
+	rows    inviteList
+	skipped int
+}
+
+func (l inviteListing) MarshalJSON() ([]byte, error) { return json.Marshal(l.rows) }
+
+func (l inviteListing) Text(t *output.Text) {
+	switch {
+	case len(l.rows) == 0 && l.skipped == 0:
+		t.Line("No live invites.")
+	case len(l.rows) == 0:
+		t.Line("No live invite to show.")
+	}
+	for _, v := range l.rows {
+		v.Text(t)
+	}
+	if l.skipped > 0 {
+		t.Line("%s", l.leftOut())
+	}
+}
+
+// leftOut says how many invites were left out, and why.
+func (l inviteListing) leftOut() string {
+	if l.skipped == 1 {
+		return "1 invite left out: its code is not one the instance issues."
+	}
+	return strconv.Itoa(l.skipped) + " invites left out: their codes are not ones the instance issues."
+}
+
 func (l inviteList) Text(t *output.Text) {
 	if len(l) == 0 {
 		t.Line("No live invites.")
@@ -314,7 +348,7 @@ func (v previewView) Text(t *output.Text) {
 	// Rebuilt from what was checked, rather than repeated as typed: what a person types may hold a tab,
 	// which termsafe would turn into something no command takes. Quoted all the same.
 	if v.join != "" {
-		t.Line("Join with `norite invite join %s`.", output.ShellWord(v.join))
+		t.Line("Join with `norite invite join %s`.", output.ShellWord(c(v.join)))
 	}
 }
 

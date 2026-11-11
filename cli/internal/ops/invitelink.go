@@ -163,6 +163,23 @@ func typedCode(s string) bool {
 	return true
 }
 
+// Canonical is the invite as `norite invite join` takes it back, written from what was checked rather than
+// as it was typed: the code as the instance reads it, its case, dashes, spaces and tabs normalised away
+// (auth.ParseInviteCode), after the instance and JoinPath when one is named. A tab pasted in a code would
+// otherwise reach a terminal as termsafe's U+FFFD, which no command takes back.
+func (i Invite) Canonical() string {
+	code := strings.Map(func(r rune) rune {
+		if r == '-' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return unicode.ToUpper(r)
+	}, i.Code)
+	if i.Instance == "" {
+		return code
+	}
+	return strings.TrimRight(i.Instance, "/") + JoinPath + "#" + code
+}
+
 // LocalOnly reports whether instanceURL names this machine or its link alone: localhost, a loopback, a
 // link-local or an unspecified address. A link built from one works on this machine and nowhere else, which
 // is what the inviter is told.

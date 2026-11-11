@@ -830,7 +830,10 @@ func TestAnInviteToJoinLaterIsPrintedQuoted(t *testing.T) {
 	seed(t, run.store, f.server.URL, "ada")
 	run.service.state = DaemonAbsent
 	require.NoError(t, run.setup.Run(context.Background()))
-	assert.Contains(t, run.out.String(), "Join it once the daemon runs: `norite invite join 'PGTQ RBXG TCDF FWBH'`.")
+	// Written back as checked, as a link to the instance set up for: a bare code would go to whichever
+	// instance the daemon is on by then.
+	assert.Contains(t, run.out.String(), "\nJoin it once the daemon runs: `norite invite join '"+f.server.URL+
+		"/join#PGTQRBXGTCDFFWBH'`.\n")
 }
 
 // TestAPreviewSaysWhatInviteShowSays: the expiry and the description, which a person deciding to join reads.
@@ -945,5 +948,73 @@ func TestABareCodeGoesOnlyToTheInstanceSetUpFor(t *testing.T) {
 	require.NoError(t, run.setup.Run(context.Background()))
 	assert.Empty(t, run.daemon.Requests())
 	assert.Contains(t, run.out.String(), "\nstopped waiting: the daemon is still signed in to another instance; "+
-		"`norite daemon status` says which. Join it later: `norite invite join 'BCDFGHJKMNPQRSTV'`.\n")
+		"`norite daemon status` says which. Join it later: `norite invite join '"+f.server.URL+
+		"/join#BCDFGHJKMNPQRSTV'`.\n")
+}
+
+// TestASignedOutAnswerIsAskedAgainBeforeItIsARefusal: signed out is also a daemon that has not read a
+// sign-in stored a moment ago, so a stored sign-in the daemon calls signed out and then takes up is not
+// replaced, and nothing asks for a password.
+func TestASignedOutAnswerIsAskedAgainBeforeItIsARefusal(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Instance: f.server.URL}, nil, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonRunning
+	asked := 0
+	run.daemon.SignInFrom(func() string {
+		asked++
+		if asked < 3 {
+			return ""
+		}
+		return f.server.URL
+	})
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Contains(t, run.out.String(), "\nSigned in as @ada already.\n")
+	assert.Empty(t, run.secrets.asked)
+	_, logins, _ := f.seen()
+	assert.Empty(t, logins)
+}
+
+// TestARecordNamingNoAccountConfirmsNothing: a sign-in whose `GET /users/@me` failed stores no account id,
+// and then any account the daemon holds would pass for it, so nothing is claimed and nothing is joined.
+func TestARecordNamingNoAccountConfirmsNothing(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, nil, nil)
+	id, err := run.store.DeviceID()
+	require.NoError(t, err)
+	require.NoError(t, run.store.Save(credentials.Record{InstanceURL: f.server.URL, Username: "ada",
+		DeviceID: id, DeviceName: "ada-laptop"}, "nrt_kept"))
+	run.service.state = DaemonRunning
+	run.daemon.On("previewInvite", daemontest.OK(preview("Tea Room")))
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Contains(t, run.out.String(), "\nSigned in as @ada, as far as this machine knows: this machine's "+
+		"record does not say which account it is, so whether the instance still accepts it is not known. "+
+		"`norite login` signs in again and says.\n")
+	assert.Contains(t, run.out.String(), "\nthis machine's sign-in does not say which account it is; "+
+		"`norite login` signs in again and says. Join it later: `norite invite join '"+f.server.URL+
+		"/join#BCDFGHJKMNPQRSTV'`.\n")
+	assert.Empty(t, requestsTo(run.daemon, "previewInvite"))
+}
+
+// dropping is an attachment that ends under the first request made on it.
+type dropping struct{ daemonclient.InstanceCaller }
+
+func (dropping) DoFor(context.Context, string, string, string, any) (ipc.Result, error) {
+	return ipc.Result{}, ipc.ErrClosed
+}
+
+// TestAnAttachmentEndingUnderTheWaitSaysTheDaemon: the daemon going away while the join waits is the daemon
+// to start again, said as a daemon that never answered is, not as an instance to wait for.
+func TestAnAttachmentEndingUnderTheWaitSaysTheDaemon(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV", NoDaemon: true},
+		[]string{"", "y", "ada@example.com", ""}, []string{"a correct passphrase"})
+	connect := run.setup.Connect
+	run.setup.Connect = func(ctx context.Context) (daemonclient.Caller, func(), error) {
+		c, detach, err := connect(ctx)
+		return dropping{c.(daemonclient.InstanceCaller)}, detach, err
+	}
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Contains(t, run.out.String(), "\nthe daemon could not be asked: "+ipc.ErrClosed.Error()+
+		". Join it once the daemon runs: `norite invite join '")
 }
