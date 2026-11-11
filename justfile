@@ -1,8 +1,10 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # Every recipe carries a [doc] line, which is what `just --list` shows. Without one it shows the comment line
-# right above the recipe, which in this file is the last line of a paragraph, mid-sentence. [doc] needs just
-# 1.27 or newer.
+# right above the recipe, which in this file is the last line of a paragraph, mid-sentence. This file needs
+# just 1.37 or newer: [doc] exists from 1.27 and wins over that comment from 1.37, and the
+# [positional-arguments] attribute `install` and `install-server` carry exists from 1.29. Before 1.29 the
+# file does not parse at all.
 
 go_modules := "backend cli gui daemon voiceworker"
 

@@ -34,7 +34,9 @@ type joinPageData struct {
 }
 
 // The installer commands are upstream's: the scripts verify each archive against the release this project's
-// workflow signed, so they are the same commands whichever instance serves this page.
+// workflow signed, so they are the same commands whichever instance serves this page. For a release, the
+// scripts are the ones at its tag: they restate that release's archive names and signing identity, which a
+// later release may change (CLAUDE.md, M20a), so the newest script on main may not install an older one.
 var joinPageTemplate = template.Must(template.New("join").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -49,10 +51,10 @@ var joinPageTemplate = template.Must(template.New("join").Parse(`<!doctype html>
 <p>Norite is a chat platform used from a terminal{{ if .Instance }}, and this invite is to the instance at
 <code class="code">{{ .Instance }}</code>{{ end }}. The link you opened is the whole invite: keep it.</p>
 <p><strong>1. Install Norite.</strong> On macOS or Linux:</p>
-{{ if .Release }}<p><code class="code">curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh -s -- --version {{ .Release }}</code></p>
+{{ if .Release }}<p><code class="code">curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/{{ .Release }}/scripts/install.sh | sh -s -- --version {{ .Release }}</code></p>
 {{ else }}<p><code class="code">curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh</code></p>
 {{ end }}<p>On Windows, in PowerShell rather than cmd:</p>
-{{ if .Release }}<p><code class="code">&amp; ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Version {{ .Release }}</code></p>
+{{ if .Release }}<p><code class="code">&amp; ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/{{ .Release }}/scripts/install.ps1))) -Version {{ .Release }}</code></p>
 <p class="note">This installs {{ .Release }}, the version this instance runs: before 1.0, a client of another
 minor version, or another pre-release, cannot connect to it.</p>
 {{ else }}<p><code class="code">irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex</code></p>
@@ -71,8 +73,8 @@ type JoinPage struct {
 	// Instance is the instance's public_base_url, or "".
 	Instance string
 	// Release is the release tag this instance runs, or "" for a build that is not a release. The installer
-	// commands pin it: they install the newest release otherwise, which before 1.0 an instance of another
-	// MINOR, or of another pre-release, refuses (gatewayproto.Check).
+	// commands pin it, and are fetched at it: they install the newest release otherwise, which before 1.0 an
+	// instance of another MINOR, or of another pre-release, refuses (gatewayproto.Check).
 	Release string
 }
 

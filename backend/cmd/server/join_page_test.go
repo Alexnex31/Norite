@@ -118,8 +118,8 @@ func TestTheJoinPageAnswersHeadAndATrailingSlash(t *testing.T) {
 }
 
 // TestTheJoinPagePinsTheInstancesRelease: the installer installs the newest release unless told, and before
-// 1.0 an instance refuses a client of another MINOR or pre-release, so the commands name the instance's own.
-// A build that is not a release pins nothing.
+// 1.0 an instance refuses a client of another MINOR or pre-release, so the commands name the instance's own,
+// and fetch the scripts at its tag. A build that is not a release pins nothing.
 func TestTheJoinPagePinsTheInstancesRelease(t *testing.T) {
 	assert.Equal(t, "v0.1.2", releaseTag("0.1.2"))
 	assert.Equal(t, "v0.1.2", releaseTag("v0.1.2"), "one v, whichever way the version is reported")
@@ -138,9 +138,13 @@ func TestTheJoinPagePinsTheInstancesRelease(t *testing.T) {
 		require.NoError(t, err)
 		return getJoin(t, router, "/join", "").Body.String()
 	}
+	// The scripts too are the release's, from its tag: a later one on main may expect archives it lacks.
 	pinned := versioned("0.1.2")
-	assert.Contains(t, pinned, "install.sh | sh -s -- --version v0.1.2</code>")
-	assert.Contains(t, pinned, "install.ps1))) -Version v0.1.2</code>")
+	assert.Contains(t, pinned, "<code class=\"code\">curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/"+
+		"v0.1.2/scripts/install.sh | sh -s -- --version v0.1.2</code>")
+	assert.Contains(t, pinned, "<code class=\"code\">&amp; ([scriptblock]::Create((irm https://raw.githubusercontent.com/"+
+		"Alexnex31/Norite/v0.1.2/scripts/install.ps1))) -Version v0.1.2</code>")
+	assert.NotContains(t, pinned, "/main/")
 	assert.NotContains(t, pinned, "| iex")
 
 	unpinned := versioned("dev")
