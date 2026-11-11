@@ -51,6 +51,12 @@ Without a link, the short form is enough:
 irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex
 ```
 
+> **Until `v0.2.0` is released, the account step stops.** The installer installs the newest release,
+> and `v0.1.2` has no `norite setup` and does not read invite links, so the step ends with an error from
+> `norite`, such as `unknown command "setup"`. The programs and the daemon are installed all the same.
+> Build from a checkout instead (below), or do [setup's steps by hand](#doing-setups-steps-by-hand),
+> joining with `norite invite join CODE`, where the code is the part of the link after `#`.
+
 From a checkout, with Go installed, it builds that checkout instead — the way to use it before a release
 exists. Windows does not run a downloaded script file by default, so allow it for this one window first:
 
@@ -298,7 +304,7 @@ home network or inside a VPN that is expected; on an `https://` instance there i
 Your account is ready. You can sign in now.
 
 Sign in with:
-  norite login --instance http://192.168.1.20:8080 --email you@example.com
+  norite login --instance 'http://192.168.1.20:8080' --email 'you@example.com'
 ```
 
 If the instance sends mail, it asks you to open a confirmation link first instead.

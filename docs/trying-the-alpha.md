@@ -93,6 +93,14 @@ irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 
 
 [Trying the alpha on Windows](trying-the-alpha-on-windows.md) is the rest of it there.
 
+> **Until `v0.2.0` is released, the account step stops.** The installers install the newest release,
+> and `v0.1.2` has no `norite setup` and does not read invite links, so the step ends with an error from
+> `norite`, such as `unknown command "setup"`. The programs and the daemon are installed all the same.
+> Build from a checkout instead (`./scripts/install.sh`, below, or `just install`), or do
+> [setup's steps by hand](#appendix--what-norite-setup-does-by-hand), joining with
+> `norite invite join CODE`, where the code is the part of the link after `#`. An instance's `/join` page
+> built from a checkout names the same installers, and the same applies to the people it is shown to.
+
 **On the server machine**, Linux with systemd, this sets up the instance. It replaces
 [Part 1](#part-1--the-server), apart from making the address reach the machine, which is the section
 [Decide how people will reach the server](#decide-how-people-will-reach-the-server) and is still yours:
@@ -322,7 +330,7 @@ in `instance.toml`, so nobody who merely reaches the server first can claim it.
 Created alice, the administrator of http://192.168.1.20:8080.
 
 Sign in with:
-  norite login --instance http://192.168.1.20:8080
+  norite login --instance 'http://192.168.1.20:8080'
 ```
 
 The administrator is an ordinary account in every other way. To talk from it, do part 2 on whichever

@@ -2309,12 +2309,14 @@ And on the first run, from the `easier-setup` branch:
 - **Both new frame fields are MINOR changes (M20), and the answer's is on every relayed answer**, so a
   client a PATCH behind fails every request against a daemon carrying it. The release carrying them is
   `v0.2.0`, and until it no PATCH is cut from `main`: one comes from a branch off the last tag (ADR 0033
-  §3).
+  §3). **Until `v0.2.0` exists, the installers' account step fails**: they install the newest release,
+  which has no `norite setup`. Accepted by the author rather than worked around, and both alpha guides say
+  so and give the way round, a checkout's build or setup's steps by hand.
 - **A link's instance is confirmed before anything is sent there**, since it decides where a password
   goes. Signing a machine in to another instance than the one stored is asked, default no. A link that
-  writes the stored instance another way (a final dot, `:443`) is that instance, and `setup` then uses
-  the stored spelling: the comparison that skips the question is no reason to send a password to an
-  address it did not ask about.
+  writes the stored instance, or `--instance`, another way (a final dot, `:443`) is that instance, and
+  `setup` then uses the stored or typed spelling: the comparison that skips the question, or accepts the
+  pair, is no reason to send a password to an address nobody typed.
 - **A guild invite never creates an account on an `invite` instance.** The two codes stay apart, and
   `setup` asks for the instance's when the instance asks for one or refuses the one given
   (`invite_required`, `invite_invalid`).
@@ -2322,27 +2324,36 @@ And on the first run, from the `easier-setup` branch:
   new link and spends the one registration sent (M10), so trying at once kills the link the person is
   about to open. After a refusal the account exists, so the way on is `norite login`, never `setup` again.
 - **A stored record is not a sign-in the instance accepts.** `setup` asks the daemon, by a relayed
-  `GET /users/@me` naming the instance: a 2xx is accepted, a 401 or a daemon signed out refused, and
-  anything else, a 503, a 429, a proxy's 502, says nothing, being answered above the token's check. With no
-  daemon to ask it claims nothing either way. Where the join goes is the socket's answer, never the service
-  manager's. The join waits on one attachment, asking again while the daemon answers signed out, signed in
-  elsewhere, or without a session from the instance yet; anything else, or the wait running out, leaves the
-  join for later with the command to run. With `--no-daemon` the socket is asked once.
-- **A command to paste quotes what came from a person or a link** with `output.ShellWord`: `norite setup`,
-  `norite register` and `norite instance bootstrap` all print one.
+  `GET /users/@me` naming the instance: a 2xx carrying an account is accepted (`signedInAs`), a 401 or a
+  daemon signed out refused, and anything else, a 503, a 429, a proxy's 502 or a portal's 200 the relay
+  dropped as not JSON, says nothing, being answered before the token is looked at. With no daemon to ask
+  it claims nothing either way. Where the join goes is the socket's answer, never the service manager's.
+  The join waits on one attachment, asking again while the daemon answers signed out, signed in elsewhere
+  or without a session from the instance yet, and while the instance answers anything but an account or a
+  401; anything else, or the wait running out, leaves the join for later with the command to run. With
+  `--no-daemon` the socket is asked once.
+- **A command to paste quotes what came from a person or a link** with `output.ShellWord`, POSIX quoting
+  and on Windows PowerShell's: `norite setup`, `norite register`, `norite instance bootstrap` and
+  `norite invite show`, which repeats what was typed rather than the instance's code, so a link keeps its
+  instance.
 - **`GET /join` reads nothing from the request.** It says how to install and run `norite setup`, names the
   instance by `public_base_url` alone, and is mounted unconditionally, with HEAD and `/join/` beside it.
   Its installer commands pin the instance's own release (`releaseTag(meta.Version)`), and fetch the
   scripts at its tag: the newest release is otherwise what they install, before 1.0 an instance refuses
   another MINOR, and a later script on `main` may expect archives the release lacks. Every page shares
   `httpx.PageStyle`.
-- **A link is built only from a code a link carries** (`ops.InviteLink`): sixteen letters of the alphabet
-  the instance issues codes in. Anything else the instance answers gets `link: null`.
+- **A code the instance would not issue is refused** (`ops.IssuedCode`): sixteen letters of its alphabet,
+  which `openapi.yaml`'s `GuildInvite.code` pattern states and a test on each side holds the CLI's copy and
+  the backend's codes to, the two modules being unable to import each other. **A link is returned only when
+  `ParseInvite` reads it back** as its instance and its code (`ops.InviteLink`), so an instance stored with
+  a path no link holds, a decoded `%3F` for one, gets `link: null`.
 - **Testing setup**: `setupInstance` in `setup_test.go` registers and signs in over loopback, and its
   `Connect` attaches to `daemontest`'s daemon, which `SignInFrom` makes answer each request as signed in to
   whatever the store holds then, as the real daemon is a moment after a sign-in, checking a named instance
-  as the relay does. `AsOlderDaemon` answers without naming the instance, the one state with no link to
-  build. The package's `TestMain` clears `NORITE_INSTANCE` and `NORITE_PASSWORD`.
+  as the relay does, bound included. `AsOlderDaemon` answers without naming the instance, one of the two
+  ways to `link: null`, the other an instance whose address no link holds. An answer the contract forbids,
+  which the fake refuses to script, is played by a `Caller` of the test's own (`answering` in
+  `invite_test.go`). The package's `TestMain` clears `NORITE_INSTANCE` and `NORITE_PASSWORD`.
 
 ## Project-specific skills
 
