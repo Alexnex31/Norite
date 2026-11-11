@@ -5,6 +5,7 @@ package verbs
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -98,7 +99,7 @@ func inviteCommand(connect Connector) *cli.Command {
 				if err != nil {
 					return nil, err
 				}
-				return inviteFrom(inv, instance), nil
+				return inviteFrom(inv, instance)
 			},
 		},
 		spec{
@@ -112,7 +113,11 @@ func inviteCommand(connect Connector) *cli.Command {
 				}
 				out := inviteList{}
 				for _, inv := range list {
-					out = append(out, inviteFrom(inv, instance))
+					v, err := inviteFrom(inv, instance)
+					if err != nil {
+						return nil, err
+					}
+					out = append(out, v)
 				}
 				return out, nil
 			},
@@ -130,7 +135,10 @@ func inviteCommand(connect Connector) *cli.Command {
 				if err != nil {
 					return nil, err
 				}
-				return previewFrom(p), nil
+				if !ops.IssuedCode(p.Code) {
+					return nil, errNotAnIssuedCode
+				}
+				return previewFrom(p, cmd.Args().Get(0)), nil
 			},
 		},
 		spec{
@@ -195,21 +203,28 @@ type inviteView struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
 	// Link is the invite link on the instance that answered, or nil from a daemon that does not say which, or
-	// for a code no link carries.
+	// for an instance whose address a link cannot carry (ops.InviteLink).
 	Link *string `json:"link"`
 }
 
+// errNotAnIssuedCode refuses an instance's answer whose code is not one it issues: the contract this output
+// is held to cannot carry it, and a link built from it would be one ParseInvite refuses.
+var errNotAnIssuedCode = errors.New("the instance answered with an invite code that is not one it issues")
+
 // inviteFrom is the view of inv, with its link on instance when that is known.
-func inviteFrom(inv apicontract.GuildInvite, instance string) inviteView {
+func inviteFrom(inv apicontract.GuildInvite, instance string) (inviteView, error) {
+	if !ops.IssuedCode(inv.Code) {
+		return inviteView{}, errNotAnIssuedCode
+	}
 	v := inviteView{
 		ID: inv.Id, Code: inv.Code, GuildID: inv.GuildId, ChannelID: inv.ChannelId, InviterID: inv.InviterId,
 		Inviter: userFrom(inv.Inviter), MaxUses: inv.MaxUses, Uses: inv.Uses, ExpiresAt: inv.ExpiresAt,
 		CreatedAt: inv.CreatedAt,
 	}
-	if link, ok := ops.InviteLink(instance, inv.Code); ok && instance != "" {
+	if link, ok := ops.InviteLink(instance, inv.Code); ok {
 		v.Link = &link
 	}
-	return v
+	return v, nil
 }
 
 func (v inviteView) Text(t *output.Text) {
@@ -266,10 +281,13 @@ type previewView struct {
 		Name *string `json:"name"`
 	} `json:"channel"`
 	Inviter *userView `json:"inviter"`
+	// typed is the invite as the command was given it, a link or a code, for the command that joins it.
+	typed string
 }
 
-func previewFrom(p apicontract.GuildInvitePreview) previewView {
-	v := previewView{Code: p.Code, ExpiresAt: p.ExpiresAt, Inviter: userFrom(p.Inviter)}
+// previewFrom is the preview of the invite typed, as the command was given it.
+func previewFrom(p apicontract.GuildInvitePreview, typed string) previewView {
+	v := previewView{Code: p.Code, ExpiresAt: p.ExpiresAt, Inviter: userFrom(p.Inviter), typed: typed}
 	v.Guild.ID, v.Guild.Name, v.Guild.Description, v.Guild.IconHash =
 		p.Guild.Id, p.Guild.Name, p.Guild.Description, p.Guild.IconHash
 	v.Channel.ID, v.Channel.Name = p.Channel.Id, p.Channel.Name
@@ -291,7 +309,9 @@ func (v previewView) Text(t *output.Text) {
 		t.Line("  invited by a deleted account")
 	}
 	t.Line("  %s", expires(v.ExpiresAt))
-	t.Line("Join with `norite invite join %s`.", c(v.Code))
+	// What was typed, never the instance's code: a link keeps the instance it names, which a bare code would
+	// drop, and the instance's answer is a stranger's text in a command to paste. Quoted all the same.
+	t.Line("Join with `norite invite join %s`.", output.ShellWord(c(strings.TrimSpace(v.typed))))
 }
 
 // revokedInvite is what `invite revoke` prints: the instance answers with no object, and the code is not an

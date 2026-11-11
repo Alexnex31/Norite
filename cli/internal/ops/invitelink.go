@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/daemon/credentials"
+	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
 // The invite link (easier-setup): the instance's address, JoinPath, and a guild invite code after '#', as in
@@ -49,18 +50,36 @@ type Invite struct {
 	Code string
 }
 
-// inviteCodeAlphabet is what an instance's guild invite codes are made of, sixteen of them, as the contract
-// says of GuildInvite.code and the CLI's link pattern repeats.
-const inviteCodeAlphabet = "BCDFGHJKMNPQRSTVWXYZ"
+// inviteCodeAlphabet and inviteCodeLength are what an instance's guild invite codes are: sixteen characters
+// of this alphabet. openapi.yaml's GuildInvite.code pattern says so, the backend's codes are held to it, and
+// TestTheCodeShapeIsTheContracts holds these to it.
+const (
+	inviteCodeAlphabet = "BCDFGHJKMNPQRSTVWXYZ"
+	inviteCodeLength   = 16
+)
 
-// InviteLink is the link for code on the instance at instanceURL, and false for a code no link carries: one
-// that is not sixteen characters of the alphabet the instance issues codes in. The code is the instance's
-// answer, and a link built from anything else breaks the CLI's contract and is one ParseInvite refuses.
+// IssuedCode reports whether code is shaped as the codes an instance issues, as it writes them back. An
+// answer holding anything else is not one the CLI's contract can carry.
+func IssuedCode(code string) bool {
+	return len(code) == inviteCodeLength &&
+		!strings.ContainsFunc(code, func(r rune) bool { return !strings.ContainsRune(inviteCodeAlphabet, r) })
+}
+
+// InviteLink is the link for code on the instance at instanceURL, and false when there is no such link: no
+// instance, a code the instance would not issue (IssuedCode), or an instance whose address a link cannot
+// carry, such as one stored with a %3F in its path, which reads back as a query. A link is returned only
+// when ParseInvite reads it back as this instance and this code, so what is printed is what `norite setup`
+// takes.
 func InviteLink(instanceURL, code string) (string, bool) {
-	if len(code) != 16 || strings.ContainsFunc(code, func(r rune) bool { return !strings.ContainsRune(inviteCodeAlphabet, r) }) {
+	if instanceURL == "" || !IssuedCode(code) {
 		return "", false
 	}
-	return strings.TrimRight(instanceURL, "/") + JoinPath + "#" + code, true
+	link := strings.TrimRight(instanceURL, "/") + JoinPath + "#" + code
+	back, err := ParseInvite(link)
+	if err != nil || back.Code != code || !ipc.SameInstance(back.Instance, instanceURL) {
+		return "", false
+	}
+	return link, true
 }
 
 // ParseInvite reads a link or a bare code.

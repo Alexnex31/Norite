@@ -40,6 +40,20 @@ func TestACodeNoLinkCarriesMakesNoLink(t *testing.T) {
 		link, ok := ops.InviteLink("https://chat.example.com", code)
 		assert.False(t, ok, code)
 		assert.Empty(t, link, code)
+		assert.False(t, ops.IssuedCode(code), code)
+	}
+	assert.True(t, ops.IssuedCode("PGTQRBXGTCDFFWBH"))
+}
+
+// TestAnInstanceNoLinkCarriesMakesNoLink: a link is returned only when it reads back as its instance and
+// its code. No instance is no link, and ParseInstanceURL keeps a path that a link cannot hold: it decodes
+// %3F and %23 into a query and a fragment, and takes a space or $(…), all of which ParseInvite refuses.
+func TestAnInstanceNoLinkCarriesMakesNoLink(t *testing.T) {
+	for _, instance := range []string{"", "https://host/a?b", "https://host/a#b", "https://host/a b",
+		"https://host/$(id)"} {
+		link, ok := ops.InviteLink(instance, "PGTQRBXGTCDFFWBH")
+		assert.False(t, ok, instance)
+		assert.Empty(t, link, instance)
 	}
 }
 
@@ -165,6 +179,18 @@ func TestACodeIsSentOnlyToTheInstanceItsLinkNames(t *testing.T) {
 			"https://chat.example.com, so nothing was sent")
 	}
 	assert.Len(t, d.Requests(), 3, "nothing was sent for the link to another instance")
+}
+
+// TestAnInstanceNamedPastTheBoundIsRefusedUnsent: the fake bounds a named instance as the relay does, in
+// characters, so a client naming one longer is seen to be refused here as it would be by the daemon.
+func TestAnInstanceNamedPastTheBoundIsRefusedUnsent(t *testing.T) {
+	d := daemontest.New(t).On("previewInvite", daemontest.OK(invitePreview())).
+		SignInFrom(func() string { return "https://chat.example.com" })
+	long := ops.Invite{Instance: "https://" + strings.Repeat("\u00e9", ipc.MaxInstanceURL), Code: "PGTQRBXGTCDFFWBH"}
+	_, err := ops.PreviewInvite(context.Background(), d, long)
+	require.EqualError(t, err, "the daemon would not relay the request: the instance named is longer than "+
+		"2048 characters")
+	assert.Empty(t, d.Requests())
 }
 
 // onlyDo is a connection that can make a request and cannot say which instance it is for, as a wrapper

@@ -36,6 +36,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/require"
@@ -506,6 +507,11 @@ func (d *Daemon) DoFor(ctx context.Context, instanceURL, method, rawPath string,
 // for, or "".
 func (d *Daemon) do(_ context.Context, instance, named, method, rawPath string, body any) (ipc.Result, error) {
 	t := d.t
+	if utf8.RuneCountInString(named) > ipc.MaxInstanceURL {
+		// As the relay bounds it, in characters, before anything else.
+		return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayBadRequest,
+			Message: fmt.Sprintf("the instance named is longer than %d characters", ipc.MaxInstanceURL)}
+	}
 	if named != "" && strings.HasPrefix(rawPath, ipc.LocalPathPrefix) {
 		return ipc.Result{}, &ipc.RelayError{Code: ipc.RelayBadRequest, Message: "a request to the daemon itself names no instance"}
 	}

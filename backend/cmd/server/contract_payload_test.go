@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -646,5 +647,24 @@ func TestTheTagResponsesMatchTheContract(t *testing.T) {
 			assert.Equal(t, declared, required,
 				"%s: every field is always present, so the contract should require all of them", tc.schema)
 		})
+	}
+}
+
+// TestAnInviteCodeIsWhatTheContractSays: the CLI builds an invite link from a guild invite's code and refuses
+// one outside GuildInvite.code's pattern, so every code this server mints must match it. The CLI holds its
+// own copy of the shape to the same pattern (ops' TestTheCodeShapeIsTheContracts); the two modules cannot
+// import each other, and the contract is where they meet.
+func TestAnInviteCodeIsWhatTheContractSays(t *testing.T) {
+	schemas := contractSchemas(t)
+	for _, schema := range []string{"GuildInvite", "GuildInvitePreview"} {
+		code, _ := schemas[schema]["properties"].(map[string]any)["code"].(map[string]any)
+		pattern, _ := code["pattern"].(string)
+		require.NotEmpty(t, pattern, "%s.code declares no pattern", schema)
+		shape := regexp.MustCompile(pattern)
+		for range 200 {
+			minted, err := auth.NewInviteCode()
+			require.NoError(t, err)
+			require.Regexp(t, shape, minted, schema)
+		}
 	}
 }

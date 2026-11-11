@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -146,10 +147,36 @@ func OrNone(s *string) string {
 	return Clean(*s)
 }
 
-// ShellWord is s as one word to a POSIX shell, in single quotes, inside which nothing is read: for a value in
-// a command somebody is told to paste. An IPv6 address in brackets is a pattern to zsh, and an address or
-// an email comes from a person or a link, so it may hold what a shell reads (easier-setup).
-func ShellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+// ShellWord is s as one word to the shell a command printed here is pasted into, in single quotes, inside
+// which nothing is read: for a value in a command somebody is told to paste. An IPv6 address in brackets is
+// a pattern to zsh, and an address or an email comes from a person or a link, so it may hold what a shell
+// reads (easier-setup).
+//
+// On Windows that shell is PowerShell, which the guides and the invite page name, and which writes a quote
+// inside single quotes as two; a POSIX shell closes the quotes, escapes one and opens them again.
+// PowerShell also reads the typographic single quotes as quotes, so each is doubled the same way. Written
+// from PowerShell's quoting rules, and not yet pasted into one: nobody has run this on Windows.
+func ShellWord(s string) string { return shellWord(runtime.GOOS, s) }
+
+// powerShellQuotes are the characters PowerShell ends a single-quoted string on: the ASCII quote and the
+// four typographic ones (U+2018 to U+201B).
+const powerShellQuotes = "'\u2018\u2019\u201a\u201b"
+
+func shellWord(goos, s string) string {
+	if goos == "windows" {
+		var b strings.Builder
+		b.WriteByte('\'')
+		for _, r := range s {
+			if strings.ContainsRune(powerShellQuotes, r) {
+				b.WriteRune(r)
+			}
+			b.WriteRune(r)
+		}
+		b.WriteByte('\'')
+		return b.String()
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // Writer is where a command prints: its root's writer, or standard output when a tree was built with
 // none.

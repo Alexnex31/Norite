@@ -6449,7 +6449,10 @@ components:
           $ref: "#/components/schemas/Snowflake"
         code:
           type: string
-          description: Sixteen characters of the same alphabet instance invites use.
+          pattern: "^[BCDFGHJKMNPQRSTVWXYZ]{16}$"
+          description: >
+            Sixteen characters of the same alphabet instance invites use. The CLI builds an invite link
+            from it and refuses one that is not this shape.
         guild_id:
           $ref: "#/components/schemas/Snowflake"
         channel_id:
@@ -6485,6 +6488,8 @@ components:
       properties:
         code:
           type: string
+          pattern: "^[BCDFGHJKMNPQRSTVWXYZ]{16}$"
+          description: The invite's code, as `GuildInvite.code` is written.
         expires_at:
           type: [string, "null"]
           format: date-time

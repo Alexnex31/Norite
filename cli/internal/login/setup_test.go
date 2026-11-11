@@ -365,10 +365,82 @@ func TestAnAnswerAboveTheTokensCheckSaysNothingOfTheSignIn(t *testing.T) {
 	})
 	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
 	assert.Contains(t, run.out.String(), "Signed in as @ada, as far as this machine knows: the instance answered "+
-		"HTTP 403, so whether the instance still accepts it is not known.")
+		"HTTP 403, so whether the instance still accepts it is not known. Running `norite setup` again asks "+
+		"again.\n", "the daemon answered, so it is not the daemon status to look at")
 	assert.NotContains(t, run.out.String(), "Signed in as @ada already.")
 	_, logins, _ := f.seen()
 	assert.Empty(t, logins)
+
+	// A 200 that is not the instance's answer, a captive portal's page the relay dropped as not JSON, says
+	// no more than the 403 does.
+	portal := newSetupRun(t, f, SetupOptions{Instance: f.server.URL}, nil, nil)
+	seed(t, portal.store, f.server.URL, "ada")
+	portal.service.state = DaemonRunning
+	portal.daemon.On("getCurrentUser", daemontest.OK(nil))
+	require.NoError(t, portal.setup.Run(context.Background()), portal.out.String())
+	assert.Contains(t, portal.out.String(), "Signed in as @ada, as far as this machine knows: the instance "+
+		"answered HTTP 200 with no account in it, so whether the instance still accepts it is not known.")
+}
+
+// TestTheJoinWaitsOutAnAnswerThatSaysNothingOfTheSignIn: right after a sign-in, the instance may answer
+// the daemon with a 503 while it migrates, or a 429; the join waits that out as it waits for the daemon, and
+// a 401, which waiting does not change, leaves the join for later with the command to run.
+func TestTheJoinWaitsOutAnAnswerThatSaysNothingOfTheSignIn(t *testing.T) {
+	me := apicontract.User{Id: "123", Username: "ada", DisplayName: "ada", Email: "ada@example.com",
+		CreatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+	var refusal apicontract.Error
+	refusal.Error.Code, refusal.Error.Message = "unauthorized", "no"
+	for _, tc := range []struct {
+		name   string
+		status int
+		times  int
+		want   string
+	}{
+		{"passing", 403, 3, "Joined Tea Room.\n"},
+		{"for good", 403, 1 << 30, "\nafter 200ms, the instance answered HTTP 403. Join it once the daemon runs"},
+		{"refused", 401, 1, "\nthe instance refused the sign-in setup stored; `norite login` signs in again. Join " +
+			"it once the daemon runs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSetupInstance(t)
+			run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV", NoDaemon: true},
+				[]string{"", "y", "ada@example.com", "", ""}, []string{"a correct passphrase"})
+			left := tc.times
+			run.daemon.On("getCurrentUser", func(daemontest.Request) (int, any) {
+				if left > 0 {
+					left--
+					if tc.status == 401 {
+						return 401, refusal
+					}
+					var e apicontract.Error
+					e.Error.Code, e.Error.Message = "forbidden", "not now"
+					return tc.status, e
+				}
+				return 200, me
+			}).On("previewInvite", daemontest.OK(preview("Tea Room"))).
+				On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
+			require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+			assert.Contains(t, run.out.String(), tc.want)
+		})
+	}
+}
+
+// TestTheInstanceTypedIsTheSpellingUsed: --instance and a link that name one instance in two spellings are
+// one instance, and the one typed is where the account goes: a link's final dot may be resolved elsewhere.
+func TestTheInstanceTypedIsTheSpellingUsed(t *testing.T) {
+	f := newSetupInstance(t)
+	typed := strings.Replace(f.server.URL, "127.0.0.1", "localhost", 1)
+	link := strings.Replace(f.server.URL, "127.0.0.1", "localhost.", 1) + "/join#BCDFGHJKMNPQRSTV"
+	run := newSetupRun(t, f, SetupOptions{Instance: typed, Invite: link, NoDaemon: true},
+		[]string{"", "y", "ada@example.com", "", ""}, []string{"a correct passphrase"})
+	run.daemon.On("previewInvite", daemontest.OK(preview("Tea Room"))).
+		On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Equal(t, "The invite is for "+typed+": your account and password go there. Is that the instance "+
+		"you meant? [Y/n] ", run.lines.asked[0])
+	rec, err := run.store.LoadRecord()
+	require.NoError(t, err)
+	assert.Equal(t, typed, rec.InstanceURL)
 }
 
 // unreachableFirst answers its first n requests as a daemon that has a sign-in and no session from the
@@ -397,8 +469,8 @@ func TestADaemonWithoutASessionYetIsWaitedFor(t *testing.T) {
 		want  string
 	}{
 		{"it comes", 3, "Joined Tea Room.\n"},
-		{"it never comes", 1 << 30, "the daemon could not reach the instance within 200ms: the daemon has no " +
-			"usable session from its instance yet. Join it once the daemon runs: `norite invite join '"},
+		{"it never comes", 1 << 30, "\nafter 200ms, the daemon has no usable session from its instance yet. " +
+			"Join it once the daemon runs: `norite invite join '"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSetupInstance(t)
