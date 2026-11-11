@@ -76,6 +76,11 @@ the point at which a release first has somebody to reach.
   the same treatment here: they ship in whatever version is current when they are done, and do not gate a
   phase boundary.
 - **PATCH releases** (`v0.x.1`, `v0.x.2`, …) may be cut at any time between phase boundaries, for fixes.
+  **Not from a commit that changed what a MINOR must**: a field added to a strictly decoded frame (M20) is
+  one, and a PATCH-different client and daemon talk, so a PATCH carrying it is refused by the side without
+  it on every request. Once `main` holds such a change, a PATCH is cut from a branch off the last release
+  tag, until the next MINOR. `main` holds one from the `easier-setup` merge until `v0.2.0`:
+  `instance_url` on the attach socket's request and answer.
 - **Intermediate pre-releases are optional**, at the author's discretion: an alpha, beta or rc of the next
   version may be cut at any milestone (`v0.2.0-alpha.1` mid-Phase E, `v0.2.0-beta.1` shortly before its
   end). This is an option and not a schedule. No document assigns an alpha or beta label to a future

@@ -2103,10 +2103,51 @@ carries the condition that would reopen it.
 ### The invite page tells strangers which commands to run
 - **Raised**: easier-setup, `/security-sweep`
 - **Verdict**: not a vulnerability
-- **Why**: `GET /join` names upstream's installers, fetched from GitHub over TLS, which check each archive
+- **Why**: `GET /join` names upstream's installers, fetched from GitHub over TLS at the instance's release
+  tag, or `main` for a build that is not a release, which check each archive
   against the cosign identity pinned in them (M20a). It interpolates only `public_base_url` and a release
   tag that `gatewayproto.ParseVersion` accepted, through `html/template`, and reads nothing from the
   request. An operator can change what their own page says, which is true of any page an instance serves
   and gives them nothing they did not already have: they choose where the account's password goes.
 - **Reopens if**: the page names a host other than upstream for an installer, serves an installer itself,
   or renders anything taken from the request or from a member.
+
+### A final dot makes two instances one to the relay's check
+- **Raised**: easier-setup, third `/security-sweep` and `/code-review`
+- **Verdict**: accepted risk
+- **Why**: `ipc.SameInstance` takes `host.` and `host` for one instance, and under a resolver's search
+  domain the two can be different servers: `norite` reaching `norite.corp`, `norite.` a top-level name.
+  The relay only ever sends to the credential's own instance (`relay.go`'s `send`), never to the spelling
+  a request names, so the most the equivalence can do is send a code made on the dotted server to the
+  other one, and arranging that takes controlling a top-level name with the same label as the host. The
+  one place the comparison chose where a password went, `norite setup` signing in to a link's spelling
+  of the stored instance without asking, now uses the stored spelling.
+- **Reopens if**: anything dials the address a request or a link names after `SameInstance` called it the
+  stored one, or the relay starts sending to `Request.instance_url`.
+
+### `invite create` builds its link from what the relay says answered
+- **Raised**: easier-setup, third `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `Response.instance_url` is the daemon's credential's instance (`relay.go`, `cred.InstanceURL`),
+  which came from `ParseInstanceURL` when the sign-in was stored, never anything the instance answered.
+  The attach socket is the account's own tier (rule 16), and the code beside it must be one a link carries
+  (`ops.InviteLink`).
+- **Reopens if**: the field is ever filled from an instance's answer, or reaches the automation port.
+
+### A daemon that ignored `instance_url` would send the code anywhere
+- **Raised**: easier-setup, third `/security-sweep`
+- **Verdict**: unreachable
+- **Why**: every frame on the socket is decoded with `DisallowUnknownFields` (`ipc/frame.go`), so a daemon
+  without the field refuses the request as malformed and sends nothing, and the handshake refuses a client
+  of another MINOR before any request. A connection with no `DoFor` sends nothing either
+  (`daemonclient.ErrCannotNameInstance`).
+- **Reopens if**: the socket's decoding becomes lenient, or a wrapper implements `DoFor` and drops its
+  instance.
+
+### `other_instance` says which instance the machine is signed in to
+- **Raised**: easier-setup, third `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: only the attach socket answers it, which is the account's own programs (rule 16) and could ask
+  `GET /@daemon/…` or read READY for the same. The automation port closes a connection that sends the
+  field, so a script holding the port's secret never sees the refusal.
+- **Reopens if**: the relay's refusals become reachable from the automation port.
