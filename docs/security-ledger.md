@@ -2151,3 +2151,12 @@ carries the condition that would reopen it.
   `GET /@daemon/…` or read READY for the same. The automation port closes a connection that sends the
   field, so a script holding the port's secret never sees the refusal.
 - **Reopens if**: the relay's refusals become reachable from the automation port.
+
+### The guides' way round until v0.2.0 sends a bare code
+- **Raised**: easier-setup, fourth `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: until `v0.2.0` the alpha guides have a person join with `norite invite join CODE`, and a bare
+  code goes to whichever instance the daemon is signed in to, without `instance_url`. The same steps have
+  just signed that daemon in to the link's instance by hand, and `v0.1.2` reads no links, so a bare code
+  is the only way it joins.
+- **Reopens if**: the note outlives `v0.2.0`, or a guide offers a bare code where a link would do.
