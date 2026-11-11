@@ -67,19 +67,18 @@ func IssuedCode(code string) bool {
 
 // InviteLink is the link for code on the instance at instanceURL, and false when there is no such link: no
 // instance, a code the instance would not issue (IssuedCode), or an instance whose address a link cannot
-// carry, such as one stored with a %3F in its path, which reads back as a query. A link is returned only
-// when ParseInvite reads it back as this instance and this code, so what is printed is what `norite setup`
-// takes.
+// carry, such as one with `$(` in its path, which linkChar refuses. A link is returned only when ParseInvite
+// reads it back as this instance and this code, and it is written as ParseInvite wrote the instance back, so
+// a record spelling its scheme in capitals still gives a link the CLI's contract carries.
 func InviteLink(instanceURL, code string) (string, bool) {
 	if instanceURL == "" || !IssuedCode(code) {
 		return "", false
 	}
-	link := strings.TrimRight(instanceURL, "/") + JoinPath + "#" + code
-	back, err := ParseInvite(link)
+	back, err := ParseInvite(strings.TrimRight(instanceURL, "/") + JoinPath + "#" + code)
 	if err != nil || back.Code != code || !ipc.SameInstance(back.Instance, instanceURL) {
 		return "", false
 	}
-	return link, true
+	return back.Instance + JoinPath + "#" + code, true
 }
 
 // ParseInvite reads a link or a bare code.

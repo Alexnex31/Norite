@@ -16,6 +16,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -148,13 +149,63 @@ func SendMessage(
 	return out, err
 }
 
+// ErrNotAnIssuedCode refuses an instance's answer carrying an invite code it would not issue (IssuedCode):
+// the CLI's contract cannot carry it, a link built from it is one ParseInvite refuses, and printed in a
+// command to paste it would be a stranger's text there.
+var ErrNotAnIssuedCode = errors.New("the instance answered with an invite code that is not one it issues")
+
+// CreateInvite makes an invite into channelID and says which instance answered, which its link is built on.
+func CreateInvite(ctx context.Context, c daemonclient.Caller, channelID string,
+	req apicontract.CreateGuildInviteRequest) (inv apicontract.GuildInvite, instance string, err error) {
+	if err := checkIDs(channelID); err != nil {
+		return apicontract.GuildInvite{}, "", err
+	}
+	instance, err = daemonclient.CallFrom(ctx, c, http.MethodPost, "/channels/"+channelID+"/invites", req, &inv)
+	if err != nil {
+		return apicontract.GuildInvite{}, "", err
+	}
+	if !IssuedCode(inv.Code) {
+		return apicontract.GuildInvite{}, "", ErrNotAnIssuedCode
+	}
+	return inv, instance, nil
+}
+
+// ListInvites returns guildID's live invites and which instance answered. An invite whose code the instance
+// would not issue is left out and counted in skipped, rather than failing the listing: a moderator reading
+// it is often about to revoke something, and one bad row must not hide the rest.
+func ListInvites(ctx context.Context, c daemonclient.Caller, guildID string) (invites []apicontract.GuildInvite,
+	instance string, skipped int, err error) {
+	if err := checkIDs(guildID); err != nil {
+		return nil, "", 0, err
+	}
+	var all []apicontract.GuildInvite
+	if instance, err = daemonclient.CallFrom(ctx, c, http.MethodGet, "/guilds/"+guildID+"/invites", nil, &all); err != nil {
+		return nil, "", 0, err
+	}
+	invites = make([]apicontract.GuildInvite, 0, len(all))
+	for _, inv := range all {
+		if !IssuedCode(inv.Code) {
+			skipped++
+			continue
+		}
+		invites = append(invites, inv)
+	}
+	return invites, instance, skipped, nil
+}
+
 // PreviewInvite says where an invite leads. The code goes in the body, never a path (ADR 0029), and only to
 // the instance its link names (daemonclient.CallFor), or for a bare code whichever the daemon is signed in to.
+// An answer naming a code the instance would not issue is ErrNotAnIssuedCode.
 func PreviewInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.GuildInvitePreview, error) {
 	var out apicontract.GuildInvitePreview
-	err := daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/preview",
-		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out)
-	return out, err
+	if err := daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/preview",
+		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out); err != nil {
+		return apicontract.GuildInvitePreview{}, err
+	}
+	if !IssuedCode(out.Code) {
+		return apicontract.GuildInvitePreview{}, ErrNotAnIssuedCode
+	}
+	return out, nil
 }
 
 // JoinInvite joins the guild an invite leads to and returns it. Joining one the account is already in

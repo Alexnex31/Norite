@@ -61,15 +61,6 @@ func (e *env) do(ctx context.Context, method, path string, body, out any) error 
 	return daemonclient.Call(ctx, c, method, path, body, out)
 }
 
-// doFrom is do, and says which instance answered (daemonclient.CallFrom).
-func (e *env) doFrom(ctx context.Context, method, path string, body, out any) (string, error) {
-	c, err := e.attached(ctx)
-	if err != nil {
-		return "", err
-	}
-	return daemonclient.CallFrom(ctx, c, method, path, body, out)
-}
-
 // with runs one of ops' functions on the verb's connection, attaching first. The verbs that the terminal
 // client shares go through ops (M20a), so the request and its bounds exist once.
 func with[T any](ctx context.Context, e *env, op func(daemonclient.Caller) (T, error)) (T, error) {

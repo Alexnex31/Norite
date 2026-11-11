@@ -255,6 +255,8 @@ func TestParseInstanceURL(t *testing.T) {
 			"http://localhost:8080":          "http://localhost:8080",
 			"https://example.com/norite":     "https://example.com/norite",
 			"https://example.com:8443/chat/": "https://example.com:8443/chat",
+			// Only the path is held to it: a query is dropped, as it always was, escapes and all.
+			"https://chat.example.com/a?q=%3F": "https://chat.example.com/a",
 		} {
 			got, err := ParseInstanceURL(input)
 			require.NoError(t, err, "input %q", input)
@@ -294,6 +296,13 @@ func TestParseInstanceURL(t *testing.T) {
 			"https://chat\u00a0example.com",
 			"https://chat.example.com/\u202enimda",
 			"https://chat\u200b.example.com",
+
+			// Decoded, these would be stored as a query, a fragment and a slash: an instance other than
+			// the one typed, which every later reader of the record would parse differently.
+			"https://chat.example.com/a%3Fb",
+			"https://chat.example.com/a%23b",
+			"https://chat.example.com/a%2Fb",
+			"https://chat.example.com/a%20b",
 		} {
 			_, err := ParseInstanceURL(input)
 			assert.Error(t, err, "input %q must be refused", input)

@@ -165,8 +165,31 @@ func ParseInstanceURL(raw string) (string, error) {
 		// includes it.
 		return "", errors.New("an instance URL must not carry a username or password")
 	}
+	// The instance is rebuilt below from the decoded path, so a %3F or %23 in it would come back as a
+	// query or a fragment, and the instance stored would be another than the one typed: requests would go
+	// to the path before it, and SameInstance would call the two one instance (easier-setup's fifth
+	// /code-review). Refused, as anything that alters the value is here, rather than kept encoded: no
+	// instance's address needs an escape in its path.
+	if strings.Contains(pathOf(trimmed), "%") {
+		return "", errors.New("an instance URL's path must not be percent-encoded")
+	}
 
 	return strings.TrimSuffix(u.Scheme+"://"+u.Host+u.Path, "/"), nil
+}
+
+// pathOf is the path of a URL as it was written, before anything decodes it: from the first '/' after the
+// authority up to a query or a fragment.
+func pathOf(raw string) string {
+	_, rest, _ := strings.Cut(raw, "://")
+	i := strings.IndexByte(rest, '/')
+	if i < 0 {
+		return ""
+	}
+	p := rest[i:]
+	if j := strings.IndexAny(p, "?#"); j >= 0 {
+		p = p[:j]
+	}
+	return p
 }
 
 // newDeviceID returns an identifier for this installation.

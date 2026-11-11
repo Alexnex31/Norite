@@ -145,7 +145,7 @@ func (s *Setup) Run(ctx context.Context) error {
 		daemon = s.daemonStep(ctx)
 	}
 	s.step("Your account")
-	confirmed, err := s.account(ctx, previous, instance, signedIn, daemon)
+	confirmed, err := s.account(ctx, previous, instance, signedIn, stored, daemon)
 	if err != nil {
 		return err
 	}
@@ -220,9 +220,9 @@ func (s *Setup) instance(invite ops.Invite, flag string, previous credentials.Re
 	if invite.Instance != "" {
 		return invite.Instance, nil
 	}
-	if url, err := resolveInstanceURL(flag, previous); err == nil {
+	if url, err := resolveInstanceURL("", previous); err == nil {
 		return url, nil
-	} else if flag != "" || strings.TrimSpace(os.Getenv(instanceEnvVar)) != "" {
+	} else if strings.TrimSpace(os.Getenv(instanceEnvVar)) != "" {
 		// Named and unusable: said, rather than asked over. A blank variable names nothing, as
 		// resolveInstanceURL reads it.
 		return "", err
@@ -238,14 +238,15 @@ func (s *Setup) instance(invite ops.Invite, flag string, previous credentials.Re
 	return credentials.ParseInstanceURL(answer)
 }
 
-// account signs this machine in to instance, registering first if the person has no account there. daemon
-// is where the daemon step left the daemon, which comes first when a sign-in is stored for instance.
-// confirmed is the daemon having just said the instance accepts that sign-in.
-func (s *Setup) account(ctx context.Context, previous credentials.Record, instance string, signedIn bool,
+// account signs this machine in to instance, registering first if the person has no account there.
+// signedIn is the stored record being for instance, and stored is that record naming an account too, which
+// Run decided and brought the daemon up first for: one decision, made there. daemon is where the daemon step
+// left the daemon. confirmed is the daemon having just said the instance accepts the stored sign-in.
+func (s *Setup) account(ctx context.Context, previous credentials.Record, instance string, signedIn, stored bool,
 	daemon daemonUp) (confirmed bool, err error) {
-	if signedIn && previous.Username != "" {
+	if stored {
 		who := termsafe.Text(previous.Username)
-		switch standing, why, next := s.standing(ctx, instance, daemon); standing {
+		switch standing, why, next := s.standing(ctx, instance, previous.UserID, daemon); standing {
 		case signInAccepted:
 			s.printf("Signed in as @%s already.\n", who)
 			return true, nil
@@ -369,10 +370,11 @@ const (
 	signInRefused
 )
 
-// standing asks the daemon whether the sign-in it holds for instance is one the instance accepts, by asking
-// the instance who it is signed in as. A daemon still starting is waited for by the relay, as for any
-// request. When the standing is unknown, why says why, and next where to find out.
-func (s *Setup) standing(ctx context.Context, instance string, daemon daemonUp) (standing signInStanding, why, next string) {
+// standing asks the daemon whether the sign-in it holds for instance, as the account userID, is one the
+// instance accepts, by asking the instance who it is signed in as. A daemon still starting is waited for by
+// the relay, as for any request. When the standing is unknown, why says why, and next where to find out.
+func (s *Setup) standing(ctx context.Context, instance, userID string, daemon daemonUp) (standing signInStanding,
+	why, next string) {
 	const daemonNext = "`norite daemon status` says, once the daemon runs."
 	if daemon == daemonDown || s.Connect == nil {
 		return signInUnknown, "the daemon is not running", daemonNext
@@ -390,8 +392,13 @@ func (s *Setup) standing(ctx context.Context, instance string, daemon daemonUp) 
 	case err == nil && res.Status == http.StatusUnauthorized:
 		// Refused after the relay's renewal: the session is ending it.
 		return signInRefused, "", ""
-	case err == nil && signedInAs(res):
+	case err == nil && signedInAs(res, userID):
 		return signInAccepted, "", ""
+	case err == nil && accountIn(res) != "":
+		// Signed in to this instance as somebody else than the record names: a daemon that has not read the
+		// store since another `norite login`.
+		return signInUnknown, "the daemon is signed in to it as another account than this machine's record names",
+			"`norite daemon status` says which."
 	case err == nil:
 		// A 503 while the instance migrates, a 429, a proxy's 502, or a 200 that is not the instance's
 		// answer, such as a captive portal's page: answered before the token is looked at, so they say
@@ -403,17 +410,28 @@ func (s *Setup) standing(ctx context.Context, instance string, daemon daemonUp) 
 	return signInUnknown, "the daemon could not ask the instance (" + termsafe.Text(err.Error()) + ")", instanceNext
 }
 
-// signedInAs reports whether res is the instance saying who the daemon is signed in as: a 2xx carrying an
-// account. The relay drops a body that is not JSON, so a proxy's or a portal's 200 is a 2xx with no
-// account in it, and says nothing of the sign-in.
-func signedInAs(res ipc.Result) bool {
+// signedInAs reports whether res is the instance saying the daemon is signed in as userID: a 2xx carrying
+// that account, or any account when userID is "", a record older than the id it names. The relay drops a
+// body that is not JSON, so a proxy's or a portal's 200 is a 2xx with no account in it, and says nothing of
+// the sign-in; and an account other than the record's is a daemon that has not caught up with the store.
+func signedInAs(res ipc.Result, userID string) bool {
+	id := accountIn(res)
+	return id != "" && (userID == "" || id == userID)
+}
+
+// accountIn is the id of the account res says the daemon is signed in as, or "" for an answer carrying
+// none.
+func accountIn(res ipc.Result) string {
 	if res.Status < 200 || res.Status >= 300 || res.Body == nil {
-		return false
+		return ""
 	}
 	var me struct {
 		ID string `json:"id"`
 	}
-	return json.Unmarshal(res.Body, &me) == nil && me.ID != ""
+	if json.Unmarshal(res.Body, &me) != nil {
+		return ""
+	}
+	return me.ID
 }
 
 // answeredWith says what the instance answered when it was not who the daemon is signed in as.
@@ -523,22 +541,28 @@ func (s *Setup) join(ctx context.Context, invite ops.Invite, daemon daemonUp, co
 	// The person's own input, and checked by ParseInvite, but printed back to a terminal all the same, and
 	// quoted, since a code may hold spaces and a link a '#', which some shells read.
 	link := output.ShellWord(termsafe.Text(strings.TrimSpace(s.Options.Invite)))
-	later := "Join it once the daemon runs: `norite invite join " + link + "`."
+	// Said once the daemon runs when it is the daemon that is missing, and later when it answered and the
+	// wait for a sign-in the instance takes ran out.
+	once := "Join it once the daemon runs: `norite invite join " + link + "`."
+	later := "Join it later: `norite invite join " + link + "`."
 	if daemon == daemonDown || s.Connect == nil {
-		s.printf("%s\n", later)
+		s.printf("%s\n", once)
 		return nil
 	}
 	deadline := time.Now().Add(s.wait())
 	c, detach, err := s.attach(ctx, daemon, deadline)
-	if err == nil {
-		defer detach()
-		if !confirmed {
-			err = s.awaitSignIn(ctx, c, invite.Instance, deadline)
-		}
-	}
 	if err != nil {
-		s.printf("%s. %s\n", termsafe.Text(err.Error()), later)
+		s.printf("%s. %s\n", termsafe.Text(err.Error()), once)
 		return nil
+	}
+	defer detach()
+	if !confirmed {
+		// The account the record names now, which the sign-in this run stored, if it stored one, wrote.
+		rec, _ := s.previous()
+		if err := s.awaitSignIn(ctx, c, invite.Instance, rec.UserID, deadline); err != nil {
+			s.printf("%s. %s\n", termsafe.Text(err.Error()), later)
+			return nil
+		}
 	}
 
 	p, err := ops.PreviewInvite(ctx, c, invite)
@@ -596,38 +620,50 @@ func (s *Setup) attach(ctx context.Context, daemon daemonUp, deadline time.Time)
 	}
 }
 
-// awaitSignIn waits until the daemon behind c is signed in to instance, asked by a request that names it.
+// awaitSignIn waits until the daemon behind c is signed in to instance as userID (signedInAs), asked by a
+// request that names it.
 // Until the daemon has read the sign-in setup stored, it answers that it is signed out, or signed in to the
 // instance it was before, and either answer is given on this machine, sending nothing; then, while it has
 // no session from the instance yet, that it cannot reach it. Once it has one, the request reaches the
 // instance. One attachment, asked again, rather than an attach each time: the handshake is the daemon's,
 // and a request it refuses costs it nothing.
 //
-// An answer from the instance that is not who the daemon is signed in as, a 503 while it migrates or a 429,
-// is waited out too, while a 401 is not. Anything else is returned, for the join to say and leave for
-// later: the attachment ending, or a probe that timed out.
-func (s *Setup) awaitSignIn(ctx context.Context, c daemonclient.Caller, instance string, deadline time.Time) error {
+// An answer from the instance that is not the account, a 503 while it migrates, a 429 or another account,
+// is waited out too. A sign-in the instance refuses is not told apart from one not read yet: the relay
+// renews on a 401, and answers a renewal refused as signed out, so the message names both. A 401 itself
+// comes back only when a renewed sign-in is refused again, and ends the wait.
+//
+// Anything else is returned, for the join to say and leave for later: the attachment ending, or a probe
+// that timed out. What is said names no length of time, since each probe may outlast the deadline.
+func (s *Setup) awaitSignIn(ctx context.Context, c daemonclient.Caller, instance, userID string,
+	deadline time.Time) error {
 	for {
 		res, err := probe(ctx, c, instance)
 		var re *ipc.RelayError
 		// What the wait ends on, past the deadline: the last thing heard.
 		var last error
 		switch {
-		case err == nil && signedInAs(res):
+		case err == nil && signedInAs(res, userID):
 			return nil
 		case err == nil && res.Status == http.StatusUnauthorized:
-			return errors.New("the instance refused the sign-in setup stored; `norite login` signs in again")
+			return errors.New("the instance refused the daemon's sign-in; `norite login` signs in again")
+		case err == nil && accountIn(res) != "":
+			last = errors.New("stopped waiting: the daemon is still signed in to the instance as another " +
+				"account; `norite daemon status` says which")
 		case err == nil:
 			// A 503 while the instance migrates, a 429, a portal's 200: passing, maybe, so waited out.
-			last = fmt.Errorf("after %s, %s", s.wait(), answeredWith(res))
+			last = errors.New("stopped waiting: " + answeredWith(res))
 		case !errors.As(err, &re):
 			return fmt.Errorf("the daemon could not be asked: %s", termsafe.Text(err.Error()))
 		case re.Code == ipc.RelayUnreachable:
 			// Said as the relay says it, which already names the instance: "could not reach the instance: …".
-			last = fmt.Errorf("after %s, %s", s.wait(), termsafe.Text(re.Message))
-		case re.Code == ipc.RelayNotSignedIn || re.Code == ipc.RelayOtherInstance:
-			last = fmt.Errorf("the daemon did not take the sign-in up within %s; `norite daemon status` says "+
-				"where it stands", s.wait())
+			last = errors.New("stopped waiting: " + termsafe.Text(re.Message))
+		case re.Code == ipc.RelayNotSignedIn:
+			last = errors.New("stopped waiting: the daemon is not signed in, having not read the sign-in stored " +
+				"on this machine yet or had it refused by the instance; `norite daemon status` says which")
+		case re.Code == ipc.RelayOtherInstance:
+			last = errors.New("stopped waiting: the daemon is still signed in to another instance; " +
+				"`norite daemon status` says which")
 		default:
 			return fmt.Errorf("the daemon could not ask the instance: %s", termsafe.Text(re.Message))
 		}

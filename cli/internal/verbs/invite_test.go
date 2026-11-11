@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"strings"
 	"testing"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/apicontract"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
+	"github.com/Alexnex31/Norite/cli/internal/ops"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
@@ -110,15 +110,20 @@ func TestAPreviewIsInertInTextAndExactInJSON(t *testing.T) {
 	assert.Equal(t, hostile, back["guild"].(map[string]any)["name"], "lossless")
 }
 
-// TestAPreviewSaysToJoinWhatWasTyped: the command it ends with joins what the person was given, a link
-// keeping its instance, and never repeats the instance's code, which is a stranger's text in a command to
-// paste.
-func TestAPreviewSaysToJoinWhatWasTyped(t *testing.T) {
+// TestAPreviewSaysToJoinWhatItWasGiven: the command it ends with joins the invite the person was given, a
+// link keeping its instance, which a bare code would drop. It is rebuilt from the link's instance and the
+// code the instance issues, never repeated as typed: a code typed with a tab would come back through
+// termsafe as something no command takes.
+func TestAPreviewSaysToJoinWhatItWasGiven(t *testing.T) {
 	f := newFake(t).On("previewInvite", ok(apiPreview("BCDFGHJKMNPQRSTV", "Guild")))
-	const link = "https://chat.example.com/join#bcdf-ghjk-mnpq-rstv"
-	r := runVerbSignedIn(t, f, "https://chat.example.com", "invite", "show", link)
-	require.NoError(t, r.err)
-	assert.Contains(t, r.out, "\nJoin with `norite invite join '"+link+"'`.\n")
+	for typed, want := range map[string]string{
+		"https://chat.example.com/join#bcdf-ghjk-mnpq-rstv": "https://chat.example.com/join#BCDFGHJKMNPQRSTV",
+		"bcdf\tghjk mnpq-rstv":                              "BCDFGHJKMNPQRSTV",
+	} {
+		r := runVerbSignedIn(t, f, "https://chat.example.com", "invite", "show", typed)
+		require.NoError(t, r.err, typed)
+		assert.Contains(t, r.out, "\nJoin with `norite invite join '"+want+"'`.\n", typed)
+	}
 }
 
 // answering is a connection on which the instance answers every request with status and body, as a
@@ -134,17 +139,8 @@ func (a answering) Do(context.Context, string, string, any) (ipc.Result, error) 
 
 func runVerbOn(t *testing.T, c daemonclient.Caller, argv ...string) ran {
 	t.Helper()
-	var out bytes.Buffer
-	root := &cli.Command{
-		Name: "norite", Writer: &out, ErrWriter: io.Discard, Reader: strings.NewReader(""),
-		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
-		ExitErrHandler: func(context.Context, *cli.Command, error) {},
-		Commands: Commands(func(context.Context) (daemonclient.Caller, func(), error) {
-			return c, func() {}, nil
-		}),
-	}
-	err := root.Run(context.Background(), append([]string{"norite"}, argv...))
-	return ran{out: out.String(), err: err}
+	return runWith(t, func(context.Context) (daemonclient.Caller, func(), error) { return c, func() {}, nil },
+		"", argv...)
 }
 
 // TestACodeTheInstanceWouldNotIssueIsRefused: an instance's answer holding a code outside the shape it
@@ -162,14 +158,23 @@ func TestACodeTheInstanceWouldNotIssueIsRefused(t *testing.T) {
 	}{
 		{answering{201, invite}, []string{"invite", "create", "20"}},
 		{answering{201, invite}, []string{"--json", "invite", "create", "20"}},
-		{answering{200, "[" + invite + "]"}, []string{"invite", "list", "10"}},
 		{answering{200, preview}, []string{"invite", "show", "BCDFGHJKMNPQRSTV"}},
 		{answering{200, preview}, []string{"--json", "invite", "show", "BCDFGHJKMNPQRSTV"}},
 	} {
 		r := runVerbOn(t, tc.answer, tc.argv...)
-		require.ErrorIs(t, r.err, errNotAnIssuedCode, "%v", tc.argv)
+		require.ErrorIs(t, r.err, ops.ErrNotAnIssuedCode, "%v", tc.argv)
 		assert.Empty(t, r.out, "%v", tc.argv)
 	}
+
+	// A listing leaves the row out and says so on stderr, rather than hiding every good invite behind one
+	// bad one from a moderator who may be about to revoke something.
+	good := strings.Replace(invite, hostile, `"BCDFGHJKMNPQRSTV"`, 1)
+	list := runVerbOn(t, answering{200, "[" + invite + "," + good + "]"}, "--json", "invite", "list", "10")
+	require.NoError(t, list.err)
+	matchesCLISchema(t, list.out, "guild-invite.schema.json", "inviteList")
+	assert.Contains(t, list.out, `"BCDFGHJKMNPQRSTV"`)
+	assert.NotContains(t, list.out, "$(curl")
+	assert.Equal(t, "1 invites left out: their codes are not ones the instance issues\n", list.errOut)
 }
 
 // TestAHugeDayCountIsRefusedNotWrapped: the day count is bounded before it is multiplied, so a number that
@@ -195,18 +200,9 @@ func runVerbSignedIn(t *testing.T, f *fakeDaemon, instance string, argv ...strin
 		ready = ipc.Ready{Standing: ipc.StandingSignedIn, Guilds: []ipc.GuildSummary{},
 			Account: &ipc.Account{InstanceURL: instance, UserID: "1", Username: "alice"}}
 	}
-	connect := func(context.Context) (daemonclient.Caller, func(), error) {
+	return runWith(t, func(context.Context) (daemonclient.Caller, func(), error) {
 		return f.Attach(ready, false), func() {}, nil
-	}
-	var out, errOut bytes.Buffer
-	root := &cli.Command{
-		Name: "norite", Writer: &out, ErrWriter: &errOut,
-		Flags:          []cli.Flag{&cli.BoolFlag{Name: "json"}},
-		ExitErrHandler: func(context.Context, *cli.Command, error) {},
-		Commands:       Commands(connect),
-	}
-	err := root.Run(context.Background(), append([]string{"norite"}, argv...))
-	return ran{out: out.String(), err: err}
+	}, "", argv...)
 }
 
 // TestAnInviteCarriesItsLink: the link is the instance that answered, /join, and the code after '#', in

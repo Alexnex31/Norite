@@ -378,51 +378,86 @@ func TestAnAnswerAboveTheTokensCheckSaysNothingOfTheSignIn(t *testing.T) {
 	portal.service.state = DaemonRunning
 	portal.daemon.On("getCurrentUser", daemontest.OK(nil))
 	require.NoError(t, portal.setup.Run(context.Background()), portal.out.String())
-	assert.Contains(t, portal.out.String(), "Signed in as @ada, as far as this machine knows: the instance "+
-		"answered HTTP 200 with no account in it, so whether the instance still accepts it is not known.")
+	assert.Contains(t, portal.out.String(), "\nSigned in as @ada, as far as this machine knows: the instance "+
+		"answered HTTP 200 with no account in it, so whether the instance still accepts it is not known. "+
+		"Running `norite setup` again asks again.\n")
+
+	// Signed in to the instance as somebody else than the record names: a daemon that has not read the
+	// store since another sign-in, which is not this machine's sign-in being accepted.
+	other := newSetupRun(t, f, SetupOptions{Instance: f.server.URL}, nil, nil)
+	seed(t, other.store, f.server.URL, "ada")
+	other.service.state = DaemonRunning
+	other.daemon.On("getCurrentUser", daemontest.OK(apicontract.User{Id: "999", Username: "bob",
+		DisplayName: "bob", Email: "bob@example.com", CreatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}))
+	require.NoError(t, other.setup.Run(context.Background()), other.out.String())
+	assert.Contains(t, other.out.String(), "\nSigned in as @ada, as far as this machine knows: the daemon is "+
+		"signed in to it as another account than this machine's record names, so whether the instance still "+
+		"accepts it is not known. `norite daemon status` says which.\n")
 }
 
 // TestTheJoinWaitsOutAnAnswerThatSaysNothingOfTheSignIn: right after a sign-in, the instance may answer
-// the daemon with a 503 while it migrates, or a 429; the join waits that out as it waits for the daemon, and
-// a 401, which waiting does not change, leaves the join for later with the command to run.
+// the daemon with a 503 while it migrates, or a 429, and the daemon may still be signed in as the account
+// it held before; the join waits those out as it waits for the daemon. A 401 reaches it only when a renewed
+// sign-in is refused again, and ends the wait. Either way the join is left for later with the command.
 func TestTheJoinWaitsOutAnAnswerThatSaysNothingOfTheSignIn(t *testing.T) {
-	me := apicontract.User{Id: "123", Username: "ada", DisplayName: "ada", Email: "ada@example.com",
-		CreatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
-	var refusal apicontract.Error
-	refusal.Error.Code, refusal.Error.Message = "unauthorized", "no"
+	user := func(id string) apicontract.User {
+		return apicontract.User{Id: id, Username: "ada", DisplayName: "ada", Email: "ada@example.com",
+			CreatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+	}
+	refusal := func(code string) apicontract.Error {
+		var e apicontract.Error
+		e.Error.Code, e.Error.Message = apicontract.ErrorErrorCode(code), "no"
+		return e
+	}
+	const later = " Join it later: `norite invite join '"
 	for _, tc := range []struct {
 		name   string
-		status int
-		times  int
+		answer func(n int) (int, any)
 		want   string
 	}{
-		{"passing", 403, 3, "Joined Tea Room.\n"},
-		{"for good", 403, 1 << 30, "\nafter 200ms, the instance answered HTTP 403. Join it once the daemon runs"},
-		{"refused", 401, 1, "\nthe instance refused the sign-in setup stored; `norite login` signs in again. Join " +
-			"it once the daemon runs"},
+		{"passing", func(n int) (int, any) {
+			if n < 3 {
+				return 403, refusal("forbidden")
+			}
+			return 200, user("123")
+		}, "Joined Tea Room.\n"},
+		{"for good", func(int) (int, any) { return 403, refusal("forbidden") },
+			"\nstopped waiting: the instance answered HTTP 403." + later},
+		{"as another account", func(int) (int, any) { return 200, user("999") },
+			"\nstopped waiting: the daemon is still signed in to the instance as another account; " +
+				"`norite daemon status` says which." + later},
+		{"refused after a renewal", func(int) (int, any) { return 401, refusal("unauthorized") },
+			"\nthe instance refused the daemon's sign-in; `norite login` signs in again." + later},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSetupInstance(t)
 			run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV", NoDaemon: true},
 				[]string{"", "y", "ada@example.com", "", ""}, []string{"a correct passphrase"})
-			left := tc.times
+			asked := 0
 			run.daemon.On("getCurrentUser", func(daemontest.Request) (int, any) {
-				if left > 0 {
-					left--
-					if tc.status == 401 {
-						return 401, refusal
-					}
-					var e apicontract.Error
-					e.Error.Code, e.Error.Message = "forbidden", "not now"
-					return tc.status, e
-				}
-				return 200, me
+				asked++
+				return tc.answer(asked - 1)
 			}).On("previewInvite", daemontest.OK(preview("Tea Room"))).
 				On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
 			require.NoError(t, run.setup.Run(context.Background()), run.out.String())
 			assert.Contains(t, run.out.String(), tc.want)
 		})
 	}
+}
+
+// TestASignInTheInstanceRefusesIsWaitedForAndSaidAsEither: the relay renews on a 401 and answers a renewal
+// refused as signed out, which is also what a daemon that has not read the store yet answers. The two
+// cannot be told apart from here, so the wait ends saying both, never blaming the daemon alone.
+func TestASignInTheInstanceRefusesIsWaitedForAndSaidAsEither(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV", NoDaemon: true},
+		[]string{"", "y", "ada@example.com", ""}, []string{"a correct passphrase"})
+	run.daemon.SignInFrom(func() string { return "" })
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Contains(t, run.out.String(), "\nstopped waiting: the daemon is not signed in, having not read the "+
+		"sign-in stored on this machine yet or had it refused by the instance; `norite daemon status` says "+
+		"which. Join it later: `norite invite join '"+f.server.URL+"/join#BCDFGHJKMNPQRSTV'`.\n")
+	assert.Empty(t, requestsTo(run.daemon, "previewInvite"))
 }
 
 // TestTheInstanceTypedIsTheSpellingUsed: --instance and a link that name one instance in two spellings are
@@ -469,8 +504,8 @@ func TestADaemonWithoutASessionYetIsWaitedFor(t *testing.T) {
 		want  string
 	}{
 		{"it comes", 3, "Joined Tea Room.\n"},
-		{"it never comes", 1 << 30, "\nafter 200ms, the daemon has no usable session from its instance yet. " +
-			"Join it once the daemon runs: `norite invite join '"},
+		{"it never comes", 1 << 30, "\nstopped waiting: the daemon has no usable session from its instance yet. " +
+			"Join it later: `norite invite join '"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSetupInstance(t)
@@ -581,8 +616,9 @@ func TestTheGuildIsJoinedOnlyOnceTheDaemonNamesTheLinksInstance(t *testing.T) {
 	run.daemon.SignInFrom(func() string { return "https://other.example" })
 	require.NoError(t, run.setup.Run(context.Background()))
 	assert.Empty(t, run.daemon.Requests(), "nothing reached the instance the daemon is signed in to")
-	assert.Contains(t, run.out.String(), "the daemon did not take the sign-in up within 200ms; `norite daemon status` "+
-		"says where it stands. Join it once the daemon runs: `norite invite join '"+f.server.URL+"/join#BCDFGHJKMNPQRSTV'`.")
+	assert.Contains(t, run.out.String(), "\nstopped waiting: the daemon is still signed in to another instance; "+
+		"`norite daemon status` says which. Join it later: `norite invite join '"+f.server.URL+
+		"/join#BCDFGHJKMNPQRSTV'`.\n")
 }
 
 // TestAProviderSignInIsNotAskedAboutAnAccount: a provider creates the account in the browser when there is
@@ -908,5 +944,6 @@ func TestABareCodeGoesOnlyToTheInstanceSetUpFor(t *testing.T) {
 		On("previewInvite", daemontest.OK(preview("Tea Room")))
 	require.NoError(t, run.setup.Run(context.Background()))
 	assert.Empty(t, run.daemon.Requests())
-	assert.Contains(t, run.out.String(), "the daemon did not take the sign-in up within 200ms")
+	assert.Contains(t, run.out.String(), "\nstopped waiting: the daemon is still signed in to another instance; "+
+		"`norite daemon status` says which. Join it later: `norite invite join 'BCDFGHJKMNPQRSTV'`.\n")
 }

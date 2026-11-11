@@ -46,6 +46,7 @@ package ipc
 import (
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
 )
@@ -318,6 +319,17 @@ const (
 // MaxInstanceURL bounds Request.InstanceURL, in characters as the contract counts them: an instance's
 // address is far shorter, and the refusal quotes it.
 const MaxInstanceURL = 2048
+
+// CheckInstanceURL refuses a Request.InstanceURL past MaxInstanceURL, counted in characters as the
+// contract's maxLength counts them: an address may be written in any script, and a bound in bytes would
+// refuse one the contract admits (CLAUDE.md, M15). The relay asks it, and so does daemontest's fake, so the
+// two refuse alike.
+func CheckInstanceURL(instanceURL string) error {
+	if utf8.RuneCountInString(instanceURL) > MaxInstanceURL {
+		return fmt.Errorf("the instance named is longer than %d characters", MaxInstanceURL)
+	}
+	return nil
+}
 
 // ValidMethod reports whether a request may use method: the five the REST API uses, spelled in capitals.
 // One list for the attach socket, the automation port and the command that speaks to it.

@@ -19,6 +19,7 @@ package verbs
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 
@@ -125,6 +126,10 @@ func (e *env) attached(ctx context.Context) (daemonclient.Caller, error) {
 	e.call, e.detach = c, detach
 	return c, nil
 }
+
+// warnf says something beside a verb's result, on stderr, where --json output is not. A write that fails is
+// a terminal gone away, which nothing here can tell anybody about.
+func (e *env) warnf(format string, args ...any) { _, _ = fmt.Fprintf(e.errOut, format, args...) }
 
 // ---------- arguments ----------
 

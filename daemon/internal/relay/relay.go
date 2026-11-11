@@ -61,7 +61,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 
@@ -132,11 +131,8 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	if req.Body != nil && !json.Valid(req.Body) {
 		return ipc.Failure(ipc.RelayBadRequest, "the request body is not JSON")
 	}
-	// Counted in characters, as the contract's maxLength counts them: an address may be written in any
-	// script, and a bound in bytes would refuse one the contract admits (CLAUDE.md, M15).
-	if utf8.RuneCountInString(req.InstanceURL) > ipc.MaxInstanceURL {
-		return ipc.Failure(ipc.RelayBadRequest, fmt.Sprintf("the instance named is longer than %d characters",
-			ipc.MaxInstanceURL))
+	if err := ipc.CheckInstanceURL(req.InstanceURL); err != nil {
+		return ipc.Failure(ipc.RelayBadRequest, err.Error())
 	}
 
 	if standing, _ := r.creds.Status(); standing == session.SignedOut {

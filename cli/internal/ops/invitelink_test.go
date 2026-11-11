@@ -55,6 +55,12 @@ func TestAnInstanceNoLinkCarriesMakesNoLink(t *testing.T) {
 		assert.False(t, ok, instance)
 		assert.Empty(t, link, instance)
 	}
+
+	// A record is a file a person can edit, and one spelling its scheme in capitals is the instance it
+	// names. Its link is written as ParseInvite reads the instance back, which the CLI's contract carries.
+	link, ok := ops.InviteLink("HTTPS://chat.example.com", "PGTQRBXGTCDFFWBH")
+	assert.True(t, ok)
+	assert.Equal(t, "https://chat.example.com/join#PGTQRBXGTCDFFWBH", link)
 }
 
 func TestAnInviteIsALinkOrACode(t *testing.T) {
