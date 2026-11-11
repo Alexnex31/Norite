@@ -2281,10 +2281,10 @@ And on the audio DSP, from M30 (ADR 0036 as amended):
 
 And on the first run, from the `easier-setup` branch:
 
-- **The first run is `norite setup`**, in `cli/internal/login` beside the commands it runs: register,
-  login, the daemon, then the invite's guild, with the daemon first when a sign-in is already stored, since
-  it is what can say whether the instance still takes it. It calls those flows rather than copies of them,
-  and a step already done is said and skipped. `install.sh` and `install.ps1` run it for their account step, and a
+- **The first run is `norite setup`**, in `cli/internal/login` beside the commands it runs: register, login,
+  the daemon, then the invite's guild, with the daemon first when a sign-in is already stored, since it is
+  what can say whether the instance still takes it. It calls those flows rather than copies of them, and a
+  step already done is said and skipped. `install.sh` and `install.ps1` run it for their account step, and a
   package's note names it. A new first-run question goes in it, never back into a script.
 - **An invite link is the instance's address, `/join`, and the guild invite code after `#`.** The code is
   a fragment because a browser never sends one, so a link opened in a browser keeps it out of every log.
@@ -2324,16 +2324,20 @@ And on the first run, from the `easier-setup` branch:
   new link and spends the one registration sent (M10), so trying at once kills the link the person is
   about to open. After a refusal the account exists, so the way on is `norite login`, never `setup` again.
 - **A stored record is not a sign-in the instance accepts.** `setup` asks the daemon, by a relayed
-  `GET /users/@me` naming the instance: a 2xx carrying the record's own account is accepted
-  (`signedInAs`), a 401 or a daemon signed out refused, and anything else, a 503, a 429, a proxy's 502, a
-  portal's 200 the relay dropped as not JSON, or another account, says nothing. With no daemon to ask it
+  `GET /users/@me` naming the instance: a 2xx carrying the record's own account id is accepted, a 401 or a
+  daemon signed out for a moment (`settle`) refused, and anything else, a 503, a 429, a proxy's 502, a
+  portal's 200 the relay dropped as not JSON, another account, or a record naming no account id, which a
+  sign-in whose own `/users/@me` failed writes, says nothing, and joins nothing. With no daemon to ask it
   claims nothing either way. Where the join goes is the socket's answer, never the service manager's. The
   join waits on one attachment, asking again while the daemon answers signed out, signed in elsewhere or
   without a session from the instance yet, and while the instance answers anything but the account or a
   401; anything else, or the wait running out, leaves the join for later with the command to run. With
   `--no-daemon` the socket is asked once. **A sign-in the instance refuses reaches the client as signed
-  out**, not as a 401: the relay renews on a 401 and answers a renewal refused that way, so the wait's
-  message names both causes, and names no length of time, since a probe may outlast the deadline.
+  out**, not as a 401: the relay renews on a 401 and answers a renewal refused that way, which is also a
+  daemon that has not read a sign-in stored a moment ago. So `standing` asks again for a moment before it
+  signs in again, and the wait's message names both causes, and no length of time, since a probe may
+  outlast the deadline. A command to join later is the invite as checked (`ops.Invite.Canonical`), a bare
+  code as a link to the instance set up for, never the bytes typed.
 - **A command to paste quotes what came from a person or a link** with `output.ShellWord`, POSIX quoting
   and on Windows PowerShell's (written from its rules, never pasted into one): `norite setup`,
   `norite register`, `norite instance bootstrap` and `norite invite show`, which rebuilds the link it was
@@ -2347,20 +2351,22 @@ And on the first run, from the `easier-setup` branch:
   `httpx.PageStyle`.
 - **A code the instance would not issue is refused, in `ops`** (`IssuedCode`, `ErrNotAnIssuedCode`):
   `CreateInvite` and `PreviewInvite` refuse the answer, and `ListInvites` leaves the row out and counts it,
-  which `invite list` says on stderr, so one bad row hides no good one. Sixteen letters of its alphabet,
-  which `openapi.yaml`'s `GuildInvite.code` pattern states and a test on each side holds the CLI's copy and
-  the backend's codes to, the two modules being unable to import each other. **A link is returned only when
-  `ParseInvite` reads it back** as its instance and its code (`ops.InviteLink`), written as it read the
-  instance back, so an instance whose path no link holds gets `link: null`.
-- **`ParseInstanceURL` refuses a percent-encoded path.** It rebuilds the instance from the decoded path, so
-  a `%3F` came back a query: requests went to the path before it, and `SameInstance` called the two one
-  instance. A record written before is refused when it is next read, which is the M7 rule for a value that
-  also bounds something.
+  which `invite list` says beside the rows, or on stderr with `--json`, so one bad row hides no good one.
+  Sixteen letters of its alphabet, which `openapi.yaml`'s `GuildInvite.code` pattern states and a test on each
+  side holds the CLI's copy and the backend's codes to, the two modules being unable to import each other. **A
+  link is returned only when `ParseInvite` reads it back** as its instance and its code (`ops.InviteLink`),
+  written as it read the instance back, so an instance whose path no link holds gets `link: null`.
+- **`ParseInstanceURL` refuses a percent-encoded path, a query and a fragment.** It rebuilt the instance
+  from the decoded path, so a `%3F` came back a query: requests went to the path before it, and
+  `SameInstance` called the two one instance. A query or a fragment was dropped without a word, so a link
+  pasted for an address became an instance at `/join`. A record written before holds the decoded `?` or
+  `#`, and `Validate` refuses it when it is next read: the M7 rule for a value that also bounds something.
 - **Testing setup**: `setupInstance` in `setup_test.go` registers and signs in over loopback, and its
   `Connect` attaches to `daemontest`'s daemon, which `SignInFrom` makes answer each request as signed in to
   whatever the store holds then, as the real daemon is a moment after a sign-in, checking a named instance
-  as the relay does, bound included (`ipc.CheckInstanceURL`, which both ask). `AsOlderDaemon` answers without naming the instance, one of the two
-  ways to `link: null`, the other an instance whose address no link holds. An answer the contract forbids,
+  as the relay does, bound included (`ipc.CheckInstanceURL`, which both ask). `AsOlderDaemon` answers
+  without naming the instance, one of the two ways to `link: null`, the other an instance whose address no
+  link holds. An answer the contract forbids,
   which the fake refuses to script, is played by a `Caller` of the test's own (`answering` in
   `invite_test.go`). The package's `TestMain` clears `NORITE_INSTANCE` and `NORITE_PASSWORD`.
 

@@ -404,7 +404,7 @@ Your account stays on the instance: deleting an account is not built yet (`M76a`
 | `this instance takes new accounts by invite` | Ask for an instance invite code; `setup` asks for it, and `register` takes `--invite-code`. |
 | `the instance did not take the sign-in` straight after `setup` created the account | Open the confirmation mail's link and press Enter. If the address already had an account, press Ctrl+C and run `.\norite.exe login` with its password. |
 | `that is for …, and this machine is signed in to …, so nothing was sent` | The link names another instance than the one this PC uses, and nothing was sent. Check the link. |
-| `stopped waiting: …`, then `Join it later` | The daemon or the instance had not caught up with the sign-in when `setup` stopped waiting; the line says which. Run `.\norite.exe daemon status`, then the `invite join` command it ends with. |
+| `stopped waiting: …`, then `Join it later` | `setup` stopped waiting before the daemon was signed in as this PC's account; the line says why. Run `.\norite.exe daemon status`, then `.\norite.exe login` if it is signed out, then the `invite join` command the line ends with. |
 | `password must be at least 12 characters` | A longer password; a few words strung together is easiest. |
 | `the daemon is not running` or `unavailable` | `.\norite.exe daemon start`, or start `.\norite-daemon.exe` in its own tab and leave it open. |
 | `the daemon is not signed in; run norite login` | `.\norite.exe setup` again, or [C](#c--sign-in). |
