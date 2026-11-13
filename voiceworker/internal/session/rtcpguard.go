@@ -15,8 +15,11 @@ import (
 // that parse allocate a delta for each before it finds the bytes are not there (M31's /code-review). The
 // SFU is a stranger's server, from M33 an instance's.
 //
-// A packet is dropped, and the next one read, when the second's budget is spent or when a feedback in it
-// claims more deltas than it carries bytes for, which Pion would refuse anyway, after the allocation.
+// A packet is dropped, and the next one read, when the second's budget is spent, when a feedback in it
+// claims more deltas than it carries bytes for, which Pion would refuse anyway, after the allocation, or
+// when it does not parse. The parse is kept in the attributes, where Pion's interceptors and readRTCP
+// take it rather than parse again, so a packet the SFU sent can never fail a read above the guard: a read
+// that fails is the stream's (M31's third /code-review).
 type rtcpGuard struct{ interceptor.NoOp }
 
 func (rtcpGuard) NewInterceptor(string) (interceptor.Interceptor, error) { return &rtcpGuard{}, nil }
@@ -30,7 +33,13 @@ func (*rtcpGuard) BindRTCPReader(r interceptor.RTCPReader) interceptor.RTCPReade
 			if err != nil {
 				return n, attr, err
 			}
-			if budget.allow(time.Now()) && plausible(b[:n]) {
+			if !budget.allow(time.Now()) || !plausible(b[:n]) {
+				continue
+			}
+			if attr == nil {
+				attr = interceptor.Attributes{}
+			}
+			if _, err := attr.GetRTCPPackets(b[:n]); err == nil {
 				return n, attr, nil
 			}
 		}

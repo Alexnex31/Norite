@@ -123,33 +123,77 @@ type readerFunc func(b []byte) (int, interceptor.Attributes, error)
 
 func (f readerFunc) Read(b []byte) (int, interceptor.Attributes, error) { return f(b) }
 
-// A packet Pion could not parse costs that packet: the reader goes on, and the next feedback reaches the
-// controller. M28's drain returned on any error, which would have left the bitrate where it was for the
-// rest of the call.
+// tooShort is a sender report whose header is whole and whose body is not there: the guard's bounds pass
+// it, and Pion's parser refuses it.
+func tooShort() []byte { return []byte{0x80, 200, 0, 1, 0, 0, 0, 1} }
+
+// A packet Pion could not parse costs that packet: the guard drops it, the reader goes on, and the next
+// feedback reaches the controller. M28's drain returned on any error, which would have left the bitrate
+// where it was for the rest of the call.
 func TestAMalformedPacketDoesNotStopTheFeedback(t *testing.T) {
+	if !plausible(tooShort()) {
+		t.Fatal("the malformed packet does not reach the parse")
+	}
+	if _, err := rtcp.Unmarshal(tooShort()); err == nil {
+		t.Fatal("pion parsed the malformed packet")
+	}
 	s := &Session{cc: testController(), opts: Options{Log: io.Discard}}
 	now := time.Now()
 	for seq := range uint16(20) {
 		s.cc.Sent(seq, now)
 	}
-	// Past spinAfter failures in a row, each further one pauses; none gives up.
 	var reads []func([]byte) (int, error)
-	for range 3 * spinAfter {
-		reads = append(reads, func([]byte) (int, error) { return 0, errors.New("rtcp: packet too short") })
+	for range 30 {
+		reads = append(reads, packet(tooShort()))
 	}
-	script := &scripted{reads: append(reads, packet(feedbackFor(t, 20)))}
+	// Through the call's whole chain: Pion's report interceptor, above the guard, fails the read on a
+	// packet it cannot parse.
+	reg, err := interceptors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := reg.Build("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = chain.Close() }()
+	r := chain.BindRTCPReader(&scripted{reads: append(reads, packet(feedbackFor(t, 20)))})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.readRTCP(readerFunc(func(b []byte) (int, interceptor.Attributes, error) { return script.Read(b, nil) }))
+		s.readRTCP(readerFunc(func(b []byte) (int, interceptor.Attributes, error) { return r.Read(b, nil) }))
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("readRTCP did not return at the end of the stream")
 	}
-	if l := s.cc.Loss(); l < 0.19 || l > 0.21 {
-		t.Errorf("after %d malformed packets the controller measured %.0f%% loss, want the feedback's 20%%",
-			3*spinAfter, 100*l)
+	if l, measured := s.cc.Loss(); !measured || l < 0.19 || l > 0.21 {
+		t.Errorf("after 30 malformed packets the controller measured %.0f%% loss (measured: %v), want the "+
+			"feedback's 20%%", 100*l, measured)
+	}
+}
+
+// A read that fails is the stream's, since the guard drops every packet that does not parse: reading
+// stops. A stream whose transport closed before it opened fails every read without blocking, and reading
+// on past it woke a thousand times a second for the rest of the call (M31's third /code-review).
+func TestAStreamThatFailsEndsTheRead(t *testing.T) {
+	s := &Session{cc: testController(), opts: Options{Log: io.Discard}}
+	reads := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.readRTCP(readerFunc(func([]byte) (int, interceptor.Attributes, error) {
+			reads++
+			return 0, nil, errors.New("failed type assertion")
+		}))
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("readRTCP read on past a stream that fails every read")
+	}
+	if reads != 1 {
+		t.Errorf("readRTCP read %d times from a stream that failed the first", reads)
 	}
 }

@@ -17,7 +17,6 @@ package session
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -410,38 +409,23 @@ type rtcpReader interface {
 	Read(b []byte) (int, interceptor.Attributes, error)
 }
 
-// spinAfter is how many reads in a row may fail, with the stream not closed, before readRTCP pauses
-// spinPause after each further failure: a stream that failed every read without blocking would otherwise
-// spin. It never gives up, since the failures may be the SFU's packets, and good ones may follow (M31's
-// second /code-review).
-const (
-	spinAfter = 100
-	spinPause = time.Millisecond
-)
-
 // readRTCP reads what the SFU sends about the call's track, and hands its transport-wide feedback to the
 // controller. It must keep reading whatever arrives, or the packets pile up in Pion's buffers. rtcpGuard,
-// at the bottom of the interceptor chain, has already bounded what reaches this far.
+// at the bottom of the interceptor chain, has already bounded what reaches this far, and dropped what does
+// not parse.
 //
-// A read that fails with the stream open is one packet Pion could not parse, which the SFU sent: it costs
-// that packet and nothing more. Returning on it, as M28's drain did, would have left the controller with
-// no feedback for the rest of the call, on one malformed packet (M31's /code-review).
+// So a read that fails is the stream's, not a packet's, and reading stops. M28's drain stopped on any
+// error too, and one malformed packet then ended the feedback for the call (M31's /code-review), which
+// the guard now drops. Reading on past every error instead woke a thousand times a second on a stream
+// that could never be read, such as one whose transport closed before it opened (the third).
 func (s *Session) readRTCP(r rtcpReader) {
 	buf := make([]byte, 1500)
-	failed := 0
 	for {
 		n, attr, err := r.Read(buf)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+		if err != nil {
 			return
 		}
-		if err != nil {
-			if failed++; failed > spinAfter {
-				time.Sleep(spinPause)
-			}
-			continue
-		}
-		failed = 0
-		// What Pion's report interceptor parsed, kept in the attributes, is not parsed again.
+		// What the guard parsed, kept in the attributes, is not parsed again.
 		pkts, err := attr.GetRTCPPackets(buf[:n])
 		if err != nil {
 			continue

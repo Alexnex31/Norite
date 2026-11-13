@@ -6,6 +6,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"sync"
@@ -377,13 +378,14 @@ func (m *media) adapt() error {
 	if m.s.opts.fixedBitrate {
 		return nil
 	}
-	if b := m.s.cc.Bitrate(); b != m.bitrate {
+	b, l := m.s.cc.Target()
+	if b != m.bitrate {
 		if err := m.clocked(&m.encoding, func() error { return m.enc.SetBitrate(b) }); err != nil {
 			return err
 		}
 		m.bitrate = b
 	}
-	if l := m.s.cc.LossPercent(); l != m.lossPercent {
+	if l != m.lossPercent {
 		if err := m.clocked(&m.encoding, func() error { return m.enc.SetLoss(l) }); err != nil {
 			return err
 		}
@@ -730,9 +732,12 @@ func (m *media) close() {
 		m.sent.Wait()
 		// What the network made of the call's bitrate (M31), read once send has stopped, which writes it.
 		if m.rateN > 0 {
-			m.s.logf("the bitrate was %d to %d kbps, %d on average, over %d packets; the loss was last measured "+
-				"at %.1f%%, and the FEC sized for %d%%", m.rateMin/1000, m.rateMax/1000, m.rateSum/int64(m.rateN)/1000,
-				m.rateN, 100*m.s.cc.Loss(), m.lossPercent)
+			loss := "the loss was never measured"
+			if l, measured := m.s.cc.Loss(); measured {
+				loss = fmt.Sprintf("the loss was last measured at %.1f%%", 100*l)
+			}
+			m.s.logf("the bitrate was %d to %d kbps, %d on average, over %d packets; %s, and the FEC sized for %d%%",
+				m.rateMin/1000, m.rateMax/1000, m.rateSum/int64(m.rateN)/1000, m.rateN, loss, m.lossPercent)
 		}
 		m.mu.Lock()
 		m.closed = true

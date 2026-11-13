@@ -441,8 +441,8 @@ func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
 	}
 	// A packet the test drops was numbered and noted as sent first, so the SFU's feedback reports it lost
 	// (M31). LossPercent cannot show it: its floor is the 5% the test drops.
-	if l := sa.cc.Loss(); l < 0.02 || l > 0.10 {
-		t.Errorf("the lossy caller's controller measured %.1f%% loss, at 5%%", 100*l)
+	if l, measured := sa.cc.Loss(); !measured || l < 0.02 || l > 0.10 {
+		t.Errorf("the lossy caller's controller measured %.1f%% loss (measured: %v), at 5%%", 100*l, measured)
 	}
 }
 
