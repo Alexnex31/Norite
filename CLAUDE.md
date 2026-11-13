@@ -2345,9 +2345,10 @@ And on the first run, from the `easier-setup` branch:
   and on Windows PowerShell's: `norite setup`, `norite register`, `norite instance bootstrap` and
   `norite invite show`, which rebuilds the link it was given from the link's instance and the code the
   instance issues, so a link keeps its instance, and nothing typed is repeated through termsafe. The
-  installers quote the link they were given the same way. Pasted into Windows PowerShell 5.1 at the manual
-  pass, every word read back as quoted; 5.1 passes a program a `"` inside a word, or a `\` ending one that
-  holds a space, wrongly, which only an email's quoted local part can hold.
+  installers quote the link they were given the same way, and refuse one holding what termsafe removes,
+  since quoting keeps a link from the shell and not from the terminal. Pasted into Windows PowerShell 5.1
+  at the manual pass, every word read back as quoted; 5.1 passes a program a `"` inside a word, or a `\`
+  ending one that holds a space, wrongly, which only an email's quoted local part can hold.
 - **`GET /join` reads nothing from the request.** It says how to install and run `norite setup`, names the
   instance by `public_base_url` alone, and is mounted unconditionally, with HEAD and `/join/` beside it.
   Its installer commands pin the instance's own release (`releaseTag(meta.Version)`), and fetch the

@@ -226,6 +226,18 @@ have_tty() { (: </dev/tty) 2>/dev/null; }
 # shell_word prints $1 as one word to a POSIX shell, in single quotes: for a value in a command to paste.
 shell_word() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+# acts_on_terminal succeeds when $1 holds a character that acts on a terminal or reorders it, the set
+# termsafe removes: a C0 or C1 control, DEL, a bidi embedding, override or isolate, a line or paragraph
+# separator. Read as bytes, by od, so no locale decides what a character is.
+acts_on_terminal() {
+    bytes=" $(printf '%s' "$1" | od -An -v -tx1 | tr '\n\t' '  ' | tr -s ' ') "
+    case "$bytes" in
+        *" "[01][0-9a-f]" "* | *" 7f "* | *" c2 "[89][0-9a-f]" "* | *" e2 80 a"[89a-e]" "* | *" e2 81 a"[6-9]" "*)
+            return 0 ;;
+    esac
+    return 1
+}
+
 setup_account() {
     again="norite setup"
     [ -n "$invite" ] && again="$again $(shell_word "$invite")"
@@ -293,6 +305,12 @@ main() {
         esac
         shift
     done
+    # The link is printed back in the command to run again, and it came from somebody else: one holding an
+    # escape sequence would be written to this terminal, which `norite setup` never does with it. Refused,
+    # not cleaned, since a link that holds one is not a link setup takes.
+    if acts_on_terminal "$invite"; then
+        die "--invite: that is not an invite link; it holds characters that act on a terminal"
+    fi
 
     case "$(uname -s)" in
         Linux)  os=linux ;;

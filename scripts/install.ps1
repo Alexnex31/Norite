@@ -85,6 +85,13 @@ function Install-Norite {
     # Windows, and M24's pass in a VM did. -AutoStart is kept so instructions that say it still work.
     if ($AutoStart -and $NoAutoStart) { throw '-AutoStart and -NoAutoStart say opposite things; pass one' }
     $AutoStart = -not $NoAutoStart
+    # The link is printed back in the command to run again, and it came from somebody else: one holding an
+    # escape sequence would be written to this console, which `norite setup` never does with it. Refused,
+    # not cleaned, since a link that holds one is not a link setup takes. The set is termsafe's: controls,
+    # bidi embeddings, overrides and isolates, and the line and paragraph separators.
+    if ($Invite -match '[\p{Cc}\u202A-\u202E\u2028\u2029\u2066-\u2069]') {
+        throw '-Invite: that is not an invite link; it holds characters that act on a terminal'
+    }
 
     function Step($text) { Write-Host ''; Write-Host "==> $text" }
     function Say($text) { Write-Host $text }
