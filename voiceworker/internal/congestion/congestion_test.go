@@ -255,9 +255,17 @@ func TestLossInSilenceIsNotJudged(t *testing.T) {
 	l := newLink(t, 64000)
 	l.run(5*time.Second, true)
 	l.loss = 0.03
-	l.run(60*time.Second, false)
+	// Nor is the FEC sized from it: speech resuming on a link losing 3% is not told to expect 25%.
+	worst := 0
+	for range 600 {
+		l.run(100*time.Millisecond, false)
+		worst = max(worst, l.c.LossPercent())
+	}
 	if m := l.take(); m.minRate < 64000 {
 		t.Errorf("a minute of silence at 3%% loss took the bitrate down to %d", m.minRate)
+	}
+	if worst > 10 {
+		t.Errorf("in a minute of silence at 3%% loss the FEC was sized for as much as %d%%", worst)
 	}
 }
 
@@ -277,6 +285,101 @@ func TestAnOutageIsOneDecrease(t *testing.T) {
 	l.run(5*time.Second, true)
 	if r := l.c.Bitrate(); r != 64000 {
 		t.Errorf("eight seconds after the outage the bitrate is %d", r)
+	}
+	// With random loss beside the outage, each loss in the second after it is judged on what came since
+	// the outage's decrease, not on the window's memory of the outage.
+	for _, background := range []float64{0.03, 0.05} {
+		l := newLink(t, 64000)
+		l.loss = background
+		l.run(5*time.Second, true)
+		l.take()
+		l.loss = 1
+		l.run(time.Second, true)
+		l.loss = background
+		l.run(3*time.Second, true)
+		if m := l.take(); m.minRate < 64000/2 {
+			t.Errorf("a second's outage on a link losing %.0f%% took the bitrate down to %d", 100*background,
+				m.minRate)
+		}
+	}
+}
+
+// A packet reported lost and then received, which pion's recorder does for one reordered across a
+// feedback, was late: it is taken back out of the loss.
+func TestAReorderedPacketIsNotLost(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	c := New(64000, start)
+	rec := twcc.NewRecorder(1)
+	feed := func(at time.Time) {
+		for _, p := range rec.BuildFeedbackPacket() {
+			b, err := p.Marshal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := rtcp.Unmarshal(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range got {
+				if fb, ok := q.(*rtcp.TransportLayerCC); ok {
+					c.Feedback(fb, at)
+				}
+			}
+		}
+	}
+	for seq := range uint16(10) {
+		c.Sent(seq, start.Add(time.Duration(seq)*20*time.Millisecond))
+	}
+	for _, seq := range []uint16{0, 1, 3, 4} {
+		rec.Record(7, seq, start.Add(time.Duration(seq)*20*time.Millisecond+5*time.Millisecond).UnixMicro())
+	}
+	feed(start.Add(100 * time.Millisecond))
+	if c.lost < 0.9 {
+		t.Fatalf("packet 2, not yet arrived, counted %v lost", c.lost)
+	}
+	for _, seq := range []uint16{2, 5, 6, 7, 8, 9} {
+		rec.Record(7, seq, start.Add(time.Duration(seq)*20*time.Millisecond+30*time.Millisecond).UnixMicro())
+	}
+	feed(start.Add(200 * time.Millisecond))
+	if c.lost > 0.01 {
+		t.Errorf("packet 2, received late, is still counted %v lost", c.lost)
+	}
+}
+
+// A feedback whose received packets carry no delta (symbol 3) says nothing of the queue: twenty of them,
+// nothing lost, leave the bitrate where it was.
+func TestAFeedbackWithNoDeltasSaysNothingOfTheQueue(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	c := New(64000, start)
+	now := start
+	for k := range 20 {
+		base := uint16(k * 5) //nolint:gosec // a test's count
+		for i := range uint16(5) {
+			c.Sent(base+i, now)
+		}
+		now = now.Add(100 * time.Millisecond)
+		c.Feedback(&rtcp.TransportLayerCC{BaseSequenceNumber: base, PacketStatusCount: 5,
+			PacketChunks: []rtcp.PacketStatusChunk{&rtcp.RunLengthChunk{
+				PacketStatusSymbol: rtcp.TypeTCCPacketReceivedWithoutDelta, RunLength: 5}}}, now)
+	}
+	if r := c.Bitrate(); r != 64000 {
+		t.Errorf("twenty feedbacks with no delta and nothing lost took the bitrate to %d", r)
+	}
+}
+
+// Speech resuming after a silence, on a link losing 40%: the window is too small to judge the loss on,
+// and too small to climb on either. The bitrate holds until there is enough to judge.
+func TestLossTooSoonToJudgeDoesNotRaiseTheBitrate(t *testing.T) {
+	l := newLink(t, 64000)
+	l.c.rate = 40000
+	l.run(5*time.Second, false)
+	l.take()
+	l.loss = 0.4
+	l.run(300*time.Millisecond, true)
+	for _, b := range l.bitrates {
+		if b > 40000 {
+			t.Fatalf("speech on a link losing 40%% raised the bitrate to %d", b)
+		}
 	}
 }
 

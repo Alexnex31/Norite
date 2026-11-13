@@ -83,12 +83,13 @@ jobs:
           cache-dependency-path: "**/go.sum"
       # The backend's integration tests start a real Postgres via testcontainers. ubuntu-latest runners
       # ship a working Docker daemon, so no extra service container or setup step is needed.
-      # Three of the voice-worker's tests are a step of their own after this one, without -race (M30). Its two
+      # Four of the voice-worker's tests are a step of their own after this one, without -race (M30, M31). Its two
       # differential tests run each module through wazero's interpreter: under -race the DSP's took 345 s
       # against 19 s without, since the detector instruments every step the interpreter takes, and it runs
       # on one goroutine, where there is no race to find. Run beside the other packages, they also starved
       # M29's timing-sensitive call tests of CPU, which is what made one of those flake. And the latency
       # budget times the program, which -race slows: under it, on a loaded machine, it measured 87.5 ms.
+      # M31's shaped-link test times a queue and a delay in two real calls at once, for the same reason.
       - name: go test
         working-directory: ${{ matrix.module }}
         run: go test ./... -race -count=1 -skip '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget|TestTheBitrateFollowsAConstrainedLink)$'

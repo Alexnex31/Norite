@@ -38,9 +38,9 @@ func (*rtcpGuard) BindRTCPReader(r interceptor.RTCPReader) interceptor.RTCPReade
 }
 
 // maxRTCP is how many RTCP packets a stream lets through each second; the rest are read and dropped. The
-// SFU sends a transport-wide feedback every 100 ms and a sender report every second or so. The worst a
-// packet can then carry is 58 feedbacks claiming 8,191 packets each, of which the controller reads 256:
-// 52 µs to parse and read, so 2.6 ms a second at the bound (M31's /security-sweep).
+// SFU sends a transport-wide feedback every 100 ms and a sender report every second or so. pion/srtp
+// splits a compound packet and writes each of its packets to its stream alone, so a read is one packet,
+// and the worst one lets through is a single feedback, of which the controller reads 256 statuses.
 const maxRTCP = 50
 
 // rtcpBudget counts the RTCP packets read in the current second, on the monotonic clock.

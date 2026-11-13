@@ -14,13 +14,15 @@ import (
 	"github.com/pion/rtcp"
 )
 
-// feedbackFor is a transport-wide feedback for packets 0 to n-1, all received 20 ms apart, as the SFU's
-// interceptor builds it.
+// feedbackFor is a transport-wide feedback for packets 0 to n-1, received 20 ms apart but for every fifth,
+// as the SFU's interceptor builds it.
 func feedbackFor(t *testing.T, n int) []byte {
 	t.Helper()
 	rec := twcc.NewRecorder(1)
 	for i := range n {
-		rec.Record(7, uint16(i), int64(1_000_000+i*20_000)) //nolint:gosec // a test's count
+		if i%5 != 2 {
+			rec.Record(7, uint16(i), int64(1_000_000+i*20_000)) //nolint:gosec // a test's count
+		}
 	}
 	b, err := rtcp.Marshal(rec.BuildFeedbackPacket())
 	if err != nil {
@@ -127,13 +129,15 @@ func (f readerFunc) Read(b []byte) (int, interceptor.Attributes, error) { return
 func TestAMalformedPacketDoesNotStopTheFeedback(t *testing.T) {
 	s := &Session{cc: testController(), opts: Options{Log: io.Discard}}
 	now := time.Now()
-	for seq := range uint16(5) {
+	for seq := range uint16(20) {
 		s.cc.Sent(seq, now)
 	}
-	script := &scripted{reads: []func([]byte) (int, error){
-		func([]byte) (int, error) { return 0, errors.New("rtcp: packet too short") },
-		packet(feedbackFor(t, 5)),
-	}}
+	// Past spinAfter failures in a row, each further one pauses; none gives up.
+	var reads []func([]byte) (int, error)
+	for range 3 * spinAfter {
+		reads = append(reads, func([]byte) (int, error) { return 0, errors.New("rtcp: packet too short") })
+	}
+	script := &scripted{reads: append(reads, packet(feedbackFor(t, 20)))}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -144,7 +148,8 @@ func TestAMalformedPacketDoesNotStopTheFeedback(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("readRTCP did not return at the end of the stream")
 	}
-	if p := s.cc.Reported(); p != 5 {
-		t.Errorf("the controller counted %d packets after the malformed one, want 5", p)
+	if l := s.cc.Loss(); l < 0.19 || l > 0.21 {
+		t.Errorf("after %d malformed packets the controller measured %.0f%% loss, want the feedback's 20%%",
+			3*spinAfter, 100*l)
 	}
 }

@@ -2080,16 +2080,25 @@ carries the condition that would reopen it.
 - **Reopens if**: the controller's output reaches anything but this caller's encoder, or its ceiling comes
   from somewhere a server sets without a bound (M33 carries the channel's, clamped).
 
-### One RTCP packet can carry 58 feedbacks
-- **Raised**: M31, `/security-sweep`
+### What the voice server's RTCP can make the worker spend
+- **Raised**: M31, `/security-sweep`; corrected by M31's second `/code-review`
 - **Verdict**: accepted risk
-- **Why**: `session.maxRTCP` bounds the compound packets parsed each second, not the feedbacks inside one;
-  `session.rtcpGuard` drops, before Pion parses it, any feedback claiming more deltas than its bytes hold.
-  1,392 bytes hold 58, each claiming 8,191 packets, of which the controller reads `MaxStatuses` (256).
-  Measured: 52 µs to parse and read such a packet, so 2.6 ms of a second at the bound, 0.26% of a core.
-  The decryption Pion does first is the per-packet work M29's entry above already accepts.
-- **Reopens if**: the per-feedback read stops being bounded by `MaxStatuses`, or the bound on packets is
-  raised past a few hundred a second.
+- **Why**:
+  - **What bounds it:** `session.rtcpGuard` is the innermost reader. It lets through `maxRTCP` packets a
+    second per stream, and drops before Pion parses it any feedback claiming more deltas than its bytes
+    hold. The controller then reads `MaxStatuses` (256) statuses of one feedback.
+  - **One packet per read:** pion/srtp splits a compound packet and writes each packet to its stream
+    alone, so a read is one RTCP packet.
+  - **The figure first recorded here was wrong.** The sweep first recorded 58 feedbacks in one read,
+    measured at 52 µs, through a path that cannot reach the reader. The real worst case is one feedback a
+    read, which costs less.
+  - **What is left:** the decryption Pion does first, which is the per-packet work M29's entry above
+    already accepts.
+- **Reopens if**:
+  - the per-feedback read stops being bounded by `MaxStatuses`;
+  - a reader gets compound packets whole;
+  - the guard leaves the bottom of the chain;
+  - the bound on packets is raised past a few hundred a second.
 
 ### An answer can give the audio level and the transport-wide number one id
 - **Raised**: M31, `/security-sweep`

@@ -730,8 +730,9 @@ func (m *media) close() {
 		m.sent.Wait()
 		// What the network made of the call's bitrate (M31), read once send has stopped, which writes it.
 		if m.rateN > 0 {
-			m.s.logf("the bitrate was %d to %d kbps, %d on average, over %d packets; the FEC was last sized for "+
-				"%d%% loss", m.rateMin/1000, m.rateMax/1000, m.rateSum/int64(m.rateN)/1000, m.rateN, m.lossPercent)
+			m.s.logf("the bitrate was %d to %d kbps, %d on average, over %d packets; the loss was last measured "+
+				"at %.1f%%, and the FEC sized for %d%%", m.rateMin/1000, m.rateMax/1000, m.rateSum/int64(m.rateN)/1000,
+				m.rateN, 100*m.s.cc.Loss(), m.lossPercent)
 		}
 		m.mu.Lock()
 		m.closed = true

@@ -440,9 +440,9 @@ func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
 		t.Error("no lost frame was recovered from FEC")
 	}
 	// A packet the test drops was numbered and noted as sent first, so the SFU's feedback reports it lost
-	// and the encoder's FEC is sized for it (M31).
-	if p := sa.cc.LossPercent(); p < 2 || p > 10 {
-		t.Errorf("the lossy caller's FEC is sized for %d%% loss, at 5%%", p)
+	// (M31). LossPercent cannot show it: its floor is the 5% the test drops.
+	if l := sa.cc.Loss(); l < 0.02 || l > 0.10 {
+		t.Errorf("the lossy caller's controller measured %.1f%% loss, at 5%%", 100*l)
 	}
 }
 

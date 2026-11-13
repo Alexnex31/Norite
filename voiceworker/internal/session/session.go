@@ -410,9 +410,14 @@ type rtcpReader interface {
 	Read(b []byte) (int, interceptor.Attributes, error)
 }
 
-// maxReadErrors is how many reads in a row may fail, with the stream not closed, before readRTCP gives up:
-// a stream that fails every read without blocking would otherwise spin.
-const maxReadErrors = 1000
+// spinAfter is how many reads in a row may fail, with the stream not closed, before readRTCP pauses
+// spinPause after each further failure: a stream that failed every read without blocking would otherwise
+// spin. It never gives up, since the failures may be the SFU's packets, and good ones may follow (M31's
+// second /code-review).
+const (
+	spinAfter = 100
+	spinPause = time.Millisecond
+)
 
 // readRTCP reads what the SFU sends about the call's track, and hands its transport-wide feedback to the
 // controller. It must keep reading whatever arrives, or the packets pile up in Pion's buffers. rtcpGuard,
@@ -430,9 +435,8 @@ func (s *Session) readRTCP(r rtcpReader) {
 			return
 		}
 		if err != nil {
-			if failed++; failed >= maxReadErrors {
-				s.logf("the voice server's reports could not be read, so the bitrate stays where it is: %v", err)
-				return
+			if failed++; failed > spinAfter {
+				time.Sleep(spinPause)
 			}
 			continue
 		}

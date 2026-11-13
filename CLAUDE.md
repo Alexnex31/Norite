@@ -222,9 +222,11 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just dev` — run the full local stack (docker-compose: postgres, valkey, backend w/ air; frontend w/ vite
   joins at Phase O)
 - `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
-  differs from CI is not a gate. Since M30, three of the voice-worker's tests run after the rest without it,
-  in CI too: the two differential tests, which the detector slows eighteenfold through wazero's
-  interpreter, and the latency budget, which times the program the detector slows. **Needs a running
+  differs from CI is not a gate. Since M30, the voice-worker's timing and differential tests run after the rest
+  without it, in CI too, four of them since M31:
+  - the two differential tests, which the detector slows eighteenfold through wazero's interpreter;
+  - the latency budget, which times the program the detector slows;
+  - M31's shaped-link test, which times a queue and a delay in two real calls. **Needs a running
   container runtime**: the backend's integration tests
   start a real Postgres via `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race detector is
   reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
@@ -2294,12 +2296,13 @@ And on adaptive bitrate, from M31:
     there before a test's `Lossy` drops the packet, so the feedback sees the loss.
   - No congestion interceptor is registered.
 - **Loss is counted in packets, not feedbacks.**
-  - It is judged only once the one-second window holds ten packets, which DTX never fills.
-  - It brings the bitrate down once per feedback that reports some, never again on the window's memory
-    of an outage.
+  - It is judged only once the one-second window holds ten packets, which DTX never fills. That holds for
+    the FEC too: it keeps the last loss judged on a full window.
+  - The bitrate is cut on the loss since the last cut loss made, never again on what it acted on.
+  - A packet counted lost and then reported received was reordered, and is taken back out.
   - The FEC is sized for at least `MinLossPercent`, which equals the encoder's starting 5%: libopus
     turns FEC off at 0%.
-  - Symbol 3 (received, no delta) takes no delta.
+  - Symbol 3 (received, no delta) takes no delta, and says nothing of the queue.
 - **The bitrate climbs only while packets flow.** Through DTX the feedback carries a comfort-noise update
   every 400 ms, which says nothing about what speech needs. The spike watched GCC climb into a link it did
   not fit.
