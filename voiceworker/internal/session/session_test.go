@@ -121,3 +121,22 @@ func TestReachable(t *testing.T) {
 	}
 	require.True(t, reachable(net.ParseIP("127.0.0.1"), true))
 }
+
+// The SFU's RTCP is a stranger's: past maxRTCP packets in a second the rest are not parsed, and the next
+// second has its own.
+func TestTheSFUsRTCPIsBounded(t *testing.T) {
+	var b rtcpBudget
+	now := time.Unix(1_800_000_000, 0)
+	allowed := 0
+	for i := range 10 * maxRTCP {
+		if b.allow(now.Add(time.Duration(i) * time.Millisecond / 10)) {
+			allowed++
+		}
+	}
+	if allowed != maxRTCP {
+		t.Errorf("%d of %d packets in a tenth of a second were parsed, want %d", allowed, 10*maxRTCP, maxRTCP)
+	}
+	if !b.allow(now.Add(time.Second)) {
+		t.Error("a packet a second later was not parsed")
+	}
+}

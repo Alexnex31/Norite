@@ -165,6 +165,15 @@ func (h *harness) join(t *testing.T, room, user string, dev audio.Device, opts O
 // joinWith is join with the DSP's components on as p says, carried in the join as the daemon carries them.
 func (h *harness) joinWith(t *testing.T, room, user string, dev audio.Device, p dsp.Settings, opts Options) *Session {
 	t.Helper()
+	return h.joinVia(t, room, user, dev, p, opts, nil)
+}
+
+// joinVia is joinWith with the SFU's answer passed through rewrite before it is applied: a test's way of
+// putting something between the session and the SFU, which is ICE-lite and answers whatever address its
+// checks come from.
+func (h *harness) joinVia(t *testing.T, room, user string, dev audio.Device, p dsp.Settings, opts Options,
+	rewrite func(string) string) *Session {
+	t.Helper()
 	var creds struct {
 		Username string   `json:"username"`
 		Password string   `json:"password"`
@@ -203,6 +212,9 @@ func (h *harness) joinWith(t *testing.T, room, user string, dev audio.Device, p 
 	}
 	if err := h.post("/provision", map[string]string{"room": room, "user": user, "offer": offer}, &ans); err != nil {
 		t.Fatal(err)
+	}
+	if rewrite != nil {
+		ans.Answer = rewrite(ans.Answer)
 	}
 	if err := s.Accept(ans.Answer); err != nil {
 		t.Fatal(err)
@@ -414,7 +426,7 @@ func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
 	}
 	a := &audiotest.Device{Source: audiotest.Tone(440, 8000)}
 	b := &audiotest.Device{}
-	h.join(t, "1", "1", a, Options{RelayOnly: true, Lossy: lossy})
+	sa := h.join(t, "1", "1", a, Options{RelayOnly: true, Lossy: lossy})
 	sb := h.join(t, "1", "2", b, Options{RelayOnly: true})
 	checkHeard(t, "the far end", steady(t, b, 2*time.Second), 440, 0.8)
 	sb.mediaMu.Lock()
@@ -426,6 +438,11 @@ func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
 	}
 	if recovered == 0 {
 		t.Error("no lost frame was recovered from FEC")
+	}
+	// A packet the test drops was numbered and noted as sent first, so the SFU's feedback reports it lost
+	// and the encoder's FEC is sized for it (M31).
+	if p := sa.cc.LossPercent(); p < 2 || p > 10 {
+		t.Errorf("the lossy caller's FEC is sized for %d%% loss, at 5%%", p)
 	}
 }
 
