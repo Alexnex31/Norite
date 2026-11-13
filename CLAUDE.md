@@ -2284,8 +2284,11 @@ And on the first run, from the `easier-setup` branch:
 - **The first run is `norite setup`**, in `cli/internal/login` beside the commands it runs: register, login,
   the daemon, then the invite's guild, with the daemon first when a sign-in is already stored, since it is
   what can say whether the instance still takes it. It calls those flows rather than copies of them, and a
-  step already done is said and skipped. `install.sh` and `install.ps1` run it for their account step, and a
-  package's note names it. A new first-run question goes in it, never back into a script.
+  step already done is said and skipped, a guild by the list of the account's guilds (`ops.InGuild`), since
+  redeeming again answers as a first join does. `install.sh` and `install.ps1` run it for their account step
+  when there is a terminal to ask on, which `install.ps1` asks of the console and never of
+  `[Environment]::UserInteractive`, false over SSH; and a package's note names it. A new first-run question
+  goes in it, never back into a script.
 - **An invite link is the instance's address, `/join`, and the guild invite code after `#`.** The code is
   a fragment because a browser never sends one, so a link opened in a browser keeps it out of every log.
   `norite invite create` and `list` print it, on the instance that answered (`Response.instance_url`,
@@ -2339,10 +2342,12 @@ And on the first run, from the `easier-setup` branch:
   outlast the deadline. A command to join later is the invite as checked (`ops.Invite.Canonical`), a bare
   code as a link to the instance set up for, never the bytes typed.
 - **A command to paste quotes what came from a person or a link** with `output.ShellWord`, POSIX quoting
-  and on Windows PowerShell's (written from its rules, never pasted into one): `norite setup`,
-  `norite register`, `norite instance bootstrap` and `norite invite show`, which rebuilds the link it was
-  given from the link's instance and the code the instance issues, so a link keeps its instance, and
-  nothing typed is repeated through termsafe.
+  and on Windows PowerShell's: `norite setup`, `norite register`, `norite instance bootstrap` and
+  `norite invite show`, which rebuilds the link it was given from the link's instance and the code the
+  instance issues, so a link keeps its instance, and nothing typed is repeated through termsafe. The
+  installers quote the link they were given the same way. Pasted into Windows PowerShell 5.1 at the manual
+  pass, every word read back as quoted; 5.1 passes a program a `"` inside a word, or a `\` ending one that
+  holds a space, wrongly, which only an email's quoted local part can hold.
 - **`GET /join` reads nothing from the request.** It says how to install and run `norite setup`, names the
   instance by `public_base_url` alone, and is mounted unconditionally, with HEAD and `/join/` beside it.
   Its installer commands pin the instance's own release (`releaseTag(meta.Version)`), and fetch the

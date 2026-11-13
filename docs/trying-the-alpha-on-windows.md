@@ -6,7 +6,8 @@ for the words it uses — *instance*, *instance URL*, *guild*, and the two kinds
 
 **Windows is the least-tried platform in this alpha.** Everything here builds for Windows, and the
 Windows-specific parts — how the client reaches the daemon, and where the sign-in is stored — are covered by
-tests that run on Linux. They had not yet run on a real Windows machine when this guide was written. If a
+tests that run on Linux. Since this guide was first written they have run in a Windows 11 virtual machine:
+the updater, voice calls, and this guide's installer, `norite setup` and an invite link, over SSH. If a
 step fails, the output and the daemon's log (see [Where things are](#where-things-are)) are exactly what is
 worth reporting as a [GitHub issue](https://github.com/Alexnex31/Norite/issues).
 
