@@ -5,6 +5,7 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
 	"github.com/Alexnex31/Norite/voiceworker/internal/congestion"
@@ -33,6 +34,11 @@ func TestTheFrameIsOneSizeEverywhere(t *testing.T) {
 	if jitter.MaxPacket != opus.MaxPacket {
 		t.Errorf("the jitter buffer keeps packets of %d bytes and the codec takes %d", jitter.MaxPacket, opus.MaxPacket)
 	}
+	// The controller credits its climb per packet, a frame each (M31).
+	if congestion.Frame != time.Duration(opus.FrameSamples)*time.Second/time.Duration(opus.SampleRate) {
+		t.Errorf("the controller credits %v a packet, and a frame is %d samples at %d Hz", congestion.Frame,
+			opus.FrameSamples, opus.SampleRate)
+	}
 }
 
 // The encoder starts with its FEC sized for the loss M29 chose, and the controller never sizes it for less:
@@ -46,5 +52,9 @@ func TestTheEncoderStartsWhereTheControllerDoes(t *testing.T) {
 	}
 	if o.LossPercent < 1 {
 		t.Errorf("the encoder starts at %d%% loss, which turns libopus's FEC off", o.LossPercent)
+	}
+	if b, l := newController(time.Now()).Target(); b != o.Bitrate || l != o.LossPercent {
+		t.Errorf("the call's controller starts at %d bps and %d%%, the encoder at %d bps and %d%%", b, l,
+			o.Bitrate, o.LossPercent)
 	}
 }

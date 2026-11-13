@@ -6,6 +6,7 @@ package session
 import (
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,7 +179,8 @@ func TestAMalformedPacketDoesNotStopTheFeedback(t *testing.T) {
 // stops. A stream whose transport closed before it opened fails every read without blocking, and reading
 // on past it woke a thousand times a second for the rest of the call (M31's third /code-review).
 func TestAStreamThatFailsEndsTheRead(t *testing.T) {
-	s := &Session{cc: testController(), opts: Options{Log: io.Discard}}
+	var log strings.Builder
+	s := &Session{cc: testController(), opts: Options{Log: &log}}
 	reads := 0
 	done := make(chan struct{})
 	go func() {
@@ -195,5 +197,9 @@ func TestAStreamThatFailsEndsTheRead(t *testing.T) {
 	}
 	if reads != 1 {
 		t.Errorf("readRTCP read %d times from a stream that failed the first", reads)
+	}
+	// And says so: the close's line would otherwise read as a controller that ran throughout.
+	if !strings.Contains(log.String(), "RTCP could not be read (failed type assertion)") {
+		t.Errorf("the log does not say the feedback ended: %q", log.String())
 	}
 }

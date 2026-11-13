@@ -898,7 +898,7 @@ func TestNoChainForGoodStopsTheReference(t *testing.T) {
 
 // testController is the controller New gives a session, for the sessions these tests build by hand.
 func testController() *congestion.Controller {
-	return congestion.New(opus.DefaultEncoderOptions().Bitrate, time.Now())
+	return newController(time.Now())
 }
 
 // tunable is a fake encoder's answer to the controller's adjustments, which the fakes take no notice of.

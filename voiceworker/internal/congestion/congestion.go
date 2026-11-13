@@ -47,11 +47,14 @@ const (
 	backoff = 0.85
 	settle  = 300 * time.Millisecond
 	// climb is how much the bitrate may rise in a second of speech, so 16 kbps reaches 64 in about ten. A
-	// second of speech is fifty packets received, each frame's worth credited once: a climb measured in time
+	// second of speech is fifty packets received, each Frame's worth credited once: a climb measured in time
 	// since the last feedback credited the silence before a sentence to it (M31's third /code-review: twenty
-	// 100 ms bursts of speech climbed as four seconds would).
+	// 100 ms bursts of speech climbed as four seconds would). One feedback is credited with settle at most:
+	// one reporting 256 packets doubled the bitrate (the fourth).
 	climb = 1.15
-	frame = 20 * time.Millisecond
+	// Frame is the encoder's frame, which the climb credits per packet. TestTheFrameIsOneSizeEverywhere
+	// holds it to the codec's.
+	Frame = 20 * time.Millisecond
 	// flowing is how many of its packets a feedback must acknowledge for an increase. In DTX the encoder
 	// sends a comfort-noise update every 400 ms or so, and what such a link carries says nothing about what
 	// speech would: the spike measured GCC raising its target from 41 to 70 kbps over four seconds of
@@ -61,24 +64,42 @@ const (
 	// congested and policed are the losses past which the bitrate comes down: with a queue standing, the
 	// loss is the queue overflowing; past policed with none, a policer dropping what exceeds its rate.
 	// Below them loss is the link's own, which a lower bitrate does nothing for and the FEC is sized for.
+	// congested is also the most loss the current talk-spurt may show for the bitrate to climb.
 	congested = 0.10
 	policed   = 0.25
-	// lossWindow is how many packets the loss is counted over: the newest of known outcome, three seconds
-	// of speech, however long the silences between them. They are counted off the departures the
+	// overflowed is how far past the link's own loss the loss may rise after a climb before it is the
+	// bitrate's doing (baselined).
+	overflowed = 0.02
+	// baselined is how many packets after a decrease measure the link's own loss, at a bitrate known to
+	// fit: loss confidently past it by overflowed, among the packets sent after them, is the bitrate's
+	// doing, and is answered by backoff. A link that drops what queues past 35 ms holds less than two
+	// packets at 64 kbit/s, so no queue shows, and its 17% read as random: the controller climbed back
+	// into it after each cut and stayed (M31's fourth /code-review).
+	baselined = 50
+	// lossWindow is how many packets the FEC's loss is counted over: the newest of known outcome, three
+	// seconds of speech, however long the silences between them. They are counted off the departures the
 	// controller keeps, so a packet reported lost and then received is taken back exactly, and nothing
-	// fades. Counted over a time, a conversation's short sentences never held enough to judge.
+	// fades. Counted over a time, a window after a silence held a few comfort-noise updates, and one of
+	// them lost sized the FEC for 12%.
 	lossWindow = 150
-	// judged is how many packets of known outcome the window must hold before the loss in it moves the
-	// bitrate down or sizes the FEC. In DTX a feedback covers one comfort-noise packet or none, and one of
-	// them lost is not half the link lost: judged on fewer, 3% random loss through a minute of silence took
-	// the bitrate to the floor (M31's /code-review).
+	// judged is how many packets of known outcome a count must hold before it says anything: the FEC's
+	// window, and the packets since the last decrease that loss brings the bitrate down on. One
+	// comfort-noise update lost is not half the link lost: judged on fewer, 3% random loss through a
+	// minute of silence took the bitrate to the floor (M31's /code-review).
 	judged = 10
-	// decided is how many packets of the window, sent since the last decrease, must be known before the
-	// loss among them moves the bitrate, down or up: two seconds of speech. Ten cannot tell 15% random loss from a
-	// policer's 25%, nor 40% from 10%: judged on ten, 15% random loss cut the bitrate in half the seeds
-	// of a test, each cut leaving ten packets to judge the next on, and speech resuming on a link losing
-	// 40% climbed in eight seeds of twenty (M31's third /code-review).
-	decided = 100
+	// confidence is how sure the controller must be that the loss since the last decrease is past its line
+	// before it acts on it: the lower bound of a Wilson interval, at about one chance
+	// in a thousand of acting on random loss under the line. A fixed sample cannot do both jobs: ten
+	// packets read 15% random loss as a policer's 25% in half a test's seeds, and a hundred took seven
+	// seconds to settle on a link dropping what queued past 35 ms (M31's third and fourth /code-review).
+	confidence = 3.0
+	// spurt is how many packets of the current talk-spurt must be known before the bitrate climbs, and
+	// the most of them it climbs on: the loss among them, at most congested. Only the spurt's own: a
+	// window reaching across a silence let clean speech from before it hide loss that started after it,
+	// and the bitrate climbed on a link losing 40% (M31's fourth /code-review).
+	spurt = 25
+	// pause is a gap between two departures that ends a talk-spurt: DTX sends nothing for 400 ms.
+	pause = 3 * Frame
 	// MinLossPercent and MaxLossPercent bound the loss the FEC is sized for. libopus turns in-band FEC off
 	// altogether at 0% (decide_fec), so the floor is what M29 sized it for before the controller, and keeps
 	// the first loss of a burst recoverable. Past the ceiling, Opus spends so much of the bitrate on
@@ -96,7 +117,7 @@ const (
 	// covering five packets; a feedback is a stranger's (from M33 an instance's), and its count is 16 bits.
 	MaxStatuses = 256
 	// remembered is how long a departure stays: the ring's span at 50 packets a second.
-	remembered = ring * frame
+	remembered = ring * Frame
 )
 
 // Controller is one call's. Sent is called by the sender, Feedback by the RTCP reader, and the rest by
@@ -105,8 +126,8 @@ type Controller struct {
 	mu      sync.Mutex
 	ceiling float64
 	rate    float64
-	// fec is the loss last judged on a full window, which the FEC is sized for: in DTX the window holds a
-	// packet or two, and one of them lost would size it for 25%. measured is whether any window was full.
+	// fec is the loss last judged on a window of at least judged packets, which the FEC is sized for, and
+	// measured whether there has been one.
 	fec      float64
 	measured bool
 
@@ -120,6 +141,13 @@ type Controller struct {
 	// again (M31's second /code-review), and the queue's overflow, which its backoffs answered, cut once
 	// more once the queue fell (the third).
 	cut time.Duration
+	// baseline is the loss of the first baselined packets after the last decrease, the newest of which
+	// left at baselineAt; haveBaseline is whether they are known yet. climbed is whether the bitrate has
+	// risen since the last decrease: loss can be the bitrate's doing only then, and an outage at the
+	// ceiling was otherwise cut twice, once as risen loss and once as a policer's.
+	baseline              float64
+	baselineAt            time.Duration
+	haveBaseline, climbed bool
 
 	// The smallest one-way delay in each half of baseWindow, the current half started at half.
 	minNow, minPrev time.Duration
@@ -242,36 +270,62 @@ type feedback struct {
 	queue           time.Duration // the least a timed packet waited; meaningless at timed 0
 }
 
-// tally is the window's packets of known outcome: in all, and sent after the last decrease.
-type tally struct{ lost, known, lostSince, knownSince int }
+// count is packets of known outcome, and how many of them were lost.
+type count struct{ lost, known int }
 
-// window counts the newest lossWindow packets of known outcome, back from the newest sent, as far as the
-// ring reaches: in DTX, minutes. A window cut at an age instead held a few comfort-noise updates after a
-// silence, and one of them lost sized the FEC for 12%.
-func (c *Controller) window() tally {
+func (n *count) add(d *departure) {
+	n.known++
+	if d.lost {
+		n.lost++
+	}
+}
+
+func (n count) ratio() float64 { return float64(n.lost) / float64(n.known) }
+
+// tally is what the newest lossWindow packets of known outcome say about the loss: all of them, which
+// the FEC is sized from; those sent since the last decrease; those sent after the baseline; and the
+// current talk-spurt's newest.
+type tally struct{ window, since, risen, spurt count }
+
+// counts walks the departures back from the newest sent, as far as the ring reaches, which in DTX is
+// minutes: about 155 of them in speech, ten times a second.
+func (c *Controller) counts() tally {
 	var t tally
-	for k := 0; k < ring && t.known < lossWindow; k++ {
+	inSpurt := true
+	next := c.sent[c.last%ring].at
+	for k := 0; k < ring && t.window.known < lossWindow; k++ {
 		seq := c.last - uint16(k) //nolint:gosec // k is under ring
 		d := &c.sent[seq%ring]
 		if !d.used || d.seq != seq {
 			break
 		}
+		inSpurt = inSpurt && next-d.at <= pause
+		next = d.at
 		if !d.reported {
 			continue
 		}
-		t.known++
-		since := d.at > c.cut
-		if since {
-			t.knownSince++
+		t.window.add(d)
+		if d.at > c.cut {
+			t.since.add(d)
 		}
-		if d.lost {
-			t.lost++
-			if since {
-				t.lostSince++
-			}
+		if c.haveBaseline && d.at > c.baselineAt {
+			t.risen.add(d)
+		}
+		if inSpurt && t.spurt.known < spurt {
+			t.spurt.add(d)
 		}
 	}
 	return t
+}
+
+// past is whether the loss in n is past line, by the lower bound of its Wilson interval at confidence.
+func (n count) past(line float64) bool {
+	if n.known < judged {
+		return false
+	}
+	k, p, z := float64(n.known), n.ratio(), confidence
+	lower := (p + z*z/(2*k) - z*math.Sqrt(p*(1-p)/k+z*z/(4*k*k))) / (1 + z*z/k)
+	return lower > line
 }
 
 // delay is a one-way delay's excess over the smallest seen lately: the queue it waited in. The two clocks
@@ -288,14 +342,12 @@ func (c *Controller) delay(owd time.Duration, now time.Time) time.Duration {
 }
 
 func (c *Controller) adjust(f feedback, now time.Time) {
-	w := c.window()
-	if w.known >= judged {
-		c.fec, c.measured = float64(w.lost)/float64(w.known), true
+	t := c.counts()
+	if t.window.known >= judged {
+		c.fec, c.measured = t.window.ratio(), true
 	}
-	judging := w.knownSince >= decided
-	loss := 0.0
-	if judging {
-		loss = float64(w.lostSince) / float64(w.knownSince)
+	if !c.haveBaseline && t.since.known >= baselined {
+		c.baseline, c.baselineAt, c.haveBaseline = t.since.ratio(), c.sent[c.last%ring].at, true
 	}
 	canDecrease := now.Sub(c.lastDecrease) >= settle
 	// The queue is read off packets that carried a delta; a feedback with none says nothing about it.
@@ -305,12 +357,31 @@ func (c *Controller) adjust(f feedback, now time.Time) {
 	switch {
 	case queued && canDecrease:
 		c.decrease(backoff, now)
-	case canDecrease && judging && (loss > policed || (loss > congested && standing)):
-		c.decrease(1-loss/2, now)
-	case f.received >= flowing && drained && judging && loss <= congested:
-		speech := time.Duration(f.received) * frame
-		c.rate = min(c.ceiling, c.rate*math.Pow(climb, speech.Seconds()))
+	case canDecrease && standing && t.since.past(congested):
+		c.decrease(1-t.since.ratio()/2, now)
+	case canDecrease && f.received >= flowing && c.climbed && c.haveBaseline && t.risen.past(c.baseline+overflowed):
+		c.decrease(backoff, now)
+	case canDecrease && t.since.past(policed):
+		// A policer passes what fits its rate and drops the rest, so what it passed is where to go: halving
+		// the loss instead left a link dropping what queued past 35 ms at 17% loss, which reads as random.
+		// An outage passes nothing, and is not a rate: no decrease takes more than half.
+		c.decrease(max(0.5, 1-t.since.ratio()), now)
+	case f.received >= flowing && drained && t.spurt.known >= spurt && t.spurt.ratio() <= c.climbable():
+		speech := min(time.Duration(f.received)*Frame, settle)
+		rate := min(c.ceiling, c.rate*math.Pow(climb, speech.Seconds()))
+		c.climbed = c.climbed || rate > c.rate
+		c.rate = rate
 	}
+}
+
+// climbable is the most loss the current talk-spurt may show for the bitrate to climb: congested, and
+// once the link's own loss is known, no more than overflowed past it, so the climb stops where its own
+// loss starts.
+func (c *Controller) climbable() float64 {
+	if c.haveBaseline {
+		return min(congested, c.baseline+overflowed)
+	}
+	return congested
 }
 
 // decrease brings the bitrate down by a factor, and starts the loss judged next after the newest packet
@@ -319,6 +390,7 @@ func (c *Controller) decrease(by float64, now time.Time) {
 	c.rate = max(Floor, c.rate*by)
 	c.lastDecrease = now
 	c.cut = c.sent[c.last%ring].at
+	c.haveBaseline, c.climbed = false, false
 }
 
 // Target is what the encoder should be set to, under one lock: the bitrate in bits per second, and the
@@ -330,21 +402,9 @@ func (c *Controller) Target() (bitrate, lossPercent int) {
 	return int(c.rate), max(MinLossPercent, min(MaxLossPercent, int(math.Round(c.fec*100))))
 }
 
-// Bitrate is Target's bitrate.
-func (c *Controller) Bitrate() int {
-	b, _ := c.Target()
-	return b
-}
-
-// LossPercent is Target's loss.
-func (c *Controller) LossPercent() int {
-	_, l := c.Target()
-	return l
-}
-
-// Loss is the share of packets lost, as last judged on a full window, for the close's log line, and
-// whether any window was full: a call whose feedback never came, or that never spoke for long, measured
-// nothing.
+// Loss is the share of packets lost, as last judged on a window of at least judged packets, for the
+// close's log line, and whether there has been one: a call whose feedback never came, or that sent fewer
+// packets than that, measured nothing.
 func (c *Controller) Loss() (loss float64, measured bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -60,7 +60,7 @@ func newLink(t *testing.T, ceiling int) *link {
 func (l *link) run(d time.Duration, talking bool) {
 	for end := l.now.Add(d); l.now.Before(end); l.now = l.now.Add(20 * time.Millisecond) {
 		l.frame++
-		bitrate := l.c.Bitrate()
+		bitrate := l.c.bitrate()
 		l.bitrates = append(l.bitrates, bitrate)
 		size := bitrate / 8 / 50
 		if !talking {
@@ -141,7 +141,7 @@ type measured struct {
 
 func (l *link) take() measured {
 	m := measured{worstQueue: l.worstQueue, sent: l.sent, dropped: l.dropped, minRate: 1 << 30,
-		lastRate: l.c.Bitrate()}
+		lastRate: l.c.bitrate()}
 	sum := 0
 	for _, b := range l.bitrates {
 		m.minRate = min(m.minRate, b)
@@ -212,9 +212,9 @@ func TestSilenceDoesNotRaiseTheBitrate(t *testing.T) {
 	l := newLink(t, 64000)
 	l.rate = 64000
 	l.run(25*time.Second, true)
-	before := l.c.Bitrate()
+	before := l.c.bitrate()
 	l.run(10*time.Second, false)
-	if after := l.c.Bitrate(); after > before {
+	if after := l.c.bitrate(); after > before {
 		t.Errorf("ten seconds of silence raised the bitrate from %d to %d", before, after)
 	}
 	l.take()
@@ -240,12 +240,12 @@ func TestRandomLossSizesTheFECAndKeepsTheBitrate(t *testing.T) {
 				m.average)
 		}
 		// The window is 150 packets, whose loss is within 7% of the link's in nineteen draws of twenty.
-		if p := l.c.LossPercent(); p < 8 || p > 22 {
+		if p := l.c.lossPercent(); p < 8 || p > 22 {
 			t.Errorf("seed %d: at 15%% loss the FEC is sized for %d%%", seed, p)
 		}
 		l.loss = 0
 		l.run(10*time.Second, true)
-		if p := l.c.LossPercent(); p != MinLossPercent {
+		if p := l.c.lossPercent(); p != MinLossPercent {
 			t.Errorf("seed %d: ten seconds after the loss stopped the FEC is sized for %d%%, want the floor %d%%",
 				seed, p, MinLossPercent)
 		}
@@ -256,7 +256,7 @@ func TestRandomLossSizesTheFECAndKeepsTheBitrate(t *testing.T) {
 // the call's first frame, on a link that has lost nothing, the first loss of a burst stays recoverable.
 func TestTheFECIsNeverSizedForNoLoss(t *testing.T) {
 	l := newLink(t, 64000)
-	if p := l.c.LossPercent(); p != MinLossPercent {
+	if p := l.c.lossPercent(); p != MinLossPercent {
 		t.Errorf("a call starts with its FEC sized for %d%%", p)
 	}
 	// Nor is a call that has had no feedback said to have measured none.
@@ -264,7 +264,7 @@ func TestTheFECIsNeverSizedForNoLoss(t *testing.T) {
 		t.Error("a controller that has read no feedback says it measured the loss")
 	}
 	l.run(5*time.Second, true)
-	if p := l.c.LossPercent(); p != MinLossPercent {
+	if p := l.c.lossPercent(); p != MinLossPercent {
 		t.Errorf("on a clean link the FEC is sized for %d%%", p)
 	}
 }
@@ -272,20 +272,29 @@ func TestTheFECIsNeverSizedForNoLoss(t *testing.T) {
 // In DTX a feedback covers a comfort-noise packet or none, and one of them lost is not the link lost: a
 // minute of silence at 3% random loss leaves the bitrate where the speech left it.
 func TestLossInSilenceIsNotJudged(t *testing.T) {
-	l := newLink(t, 64000)
-	l.run(5*time.Second, true)
-	l.loss = 0.03
-	// Nor is the FEC sized from it: speech resuming on a link losing 3% is not told to expect 25%.
-	worst := 0
-	for range 600 {
-		l.run(100*time.Millisecond, false)
-		worst = max(worst, l.c.LossPercent())
-	}
-	if m := l.take(); m.minRate < 64000 {
-		t.Errorf("a minute of silence at 3%% loss took the bitrate down to %d", m.minRate)
-	}
-	if worst > 10 {
-		t.Errorf("in a minute of silence at 3%% loss the FEC was sized for as much as %d%%", worst)
+	for seed := range uint64(40) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 1)) //nolint:gosec // a test's link
+		// Under the ceiling and climbing, so loss after it could be read as the climb's.
+		l.c.rate = 40000
+		l.run(5*time.Second, true)
+		start := l.c.bitrate()
+		l.take()
+		l.loss = 0.03
+		// Nor is the FEC sized from it: speech resuming on a link losing 3% is not told to expect 25%.
+		worst := 0
+		for range 600 {
+			l.run(100*time.Millisecond, false)
+			worst = max(worst, l.c.lossPercent())
+		}
+		if m := l.take(); m.minRate < start {
+			t.Errorf("seed %d: a minute of silence at 3%% loss took the bitrate from %d down to %d", seed, start,
+				m.minRate)
+		}
+		if worst > 10 {
+			t.Errorf("seed %d: in a minute of silence at 3%% loss the FEC was sized for as much as %d%%", seed,
+				worst)
+		}
 	}
 }
 
@@ -303,13 +312,30 @@ func TestAnOutageIsOneDecrease(t *testing.T) {
 		t.Errorf("a second's outage took the bitrate down to %d", m.minRate)
 	}
 	l.run(5*time.Second, true)
-	if r := l.c.Bitrate(); r != 64000 {
+	if r := l.c.bitrate(); r != 64000 {
 		t.Errorf("eight seconds after the outage the bitrate is %d", r)
+	}
+	// Right after a decrease, the packets since it are the outage's alone, every one lost: still one
+	// decrease, of half at most, not one to the floor.
+	l = newLink(t, 64000)
+	l.run(5*time.Second, true)
+	l.c.mu.Lock()
+	l.c.decrease(1, l.now)
+	l.c.mu.Unlock()
+	// The losses are reported once a packet arrives again, after the outage.
+	l.loss = 1
+	l.run(time.Second, true)
+	l.loss = 0
+	l.run(time.Second, true)
+	if m := l.take(); m.minRate < 64000/2 {
+		t.Errorf("an outage straight after a decrease took the bitrate down to %d", m.minRate)
 	}
 	// With random loss beside the outage, each loss in the second after it is judged on what came since
 	// the outage's decrease, not on the window's memory of the outage.
-	for _, background := range []float64{0.03, 0.05} {
+	for i := range 80 {
+		background := []float64{0.03, 0.05}[i%2]
 		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(uint64(i/2), 1)) //nolint:gosec // a test's link
 		l.loss = background
 		l.run(5*time.Second, true)
 		l.take()
@@ -318,8 +344,8 @@ func TestAnOutageIsOneDecrease(t *testing.T) {
 		l.loss = background
 		l.run(3*time.Second, true)
 		if m := l.take(); m.minRate < 64000/2 {
-			t.Errorf("a second's outage on a link losing %.0f%% took the bitrate down to %d", 100*background,
-				m.minRate)
+			t.Errorf("draw %d: a second's outage on a link losing %.0f%% took the bitrate down to %d", i,
+				100*background, m.minRate)
 		}
 	}
 }
@@ -354,14 +380,14 @@ func TestAReorderedPacketIsNotLost(t *testing.T) {
 		rec.Record(7, seq, start.Add(time.Duration(seq)*20*time.Millisecond+5*time.Millisecond).UnixMicro())
 	}
 	feed(start.Add(100 * time.Millisecond))
-	if lost := c.window().lost; lost != 1 {
+	if lost := c.counts().window.lost; lost != 1 {
 		t.Fatalf("packet 2, not yet arrived, counted %d lost", lost)
 	}
 	for _, seq := range []uint16{2, 5, 6, 7, 8, 9} {
 		rec.Record(7, seq, start.Add(time.Duration(seq)*20*time.Millisecond+30*time.Millisecond).UnixMicro())
 	}
 	feed(start.Add(200 * time.Millisecond))
-	if w := c.window(); w.lost != 0 || w.known != 10 {
+	if w := c.counts().window; w.lost != 0 || w.known != 10 {
 		t.Errorf("packet 2, received late, leaves %d of %d counted lost", w.lost, w.known)
 	}
 }
@@ -382,7 +408,7 @@ func TestAFeedbackWithNoDeltasSaysNothingOfTheQueue(t *testing.T) {
 			PacketChunks: []rtcp.PacketStatusChunk{&rtcp.RunLengthChunk{
 				PacketStatusSymbol: rtcp.TypeTCCPacketReceivedWithoutDelta, RunLength: 5}}}, now)
 	}
-	if r := c.Bitrate(); r != 64000 {
+	if r := c.bitrate(); r != 64000 {
 		t.Errorf("twenty feedbacks with no delta and nothing lost took the bitrate to %d", r)
 	}
 }
@@ -414,7 +440,7 @@ func TestAPauseIsNotCreditedToTheClimb(t *testing.T) {
 	l := newLink(t, 64000)
 	l.c.rate = 20000
 	l.run(3*time.Second, true)
-	before := l.c.Bitrate()
+	before := l.c.bitrate()
 	if before <= 20000 || before >= 64000 {
 		t.Fatalf("three seconds of speech on a clean link left the bitrate at %d, want it climbing", before)
 	}
@@ -422,7 +448,7 @@ func TestAPauseIsNotCreditedToTheClimb(t *testing.T) {
 	l.now = l.now.Add(300 * time.Millisecond)
 	l.run(100*time.Millisecond, true)
 	// One feedback, reporting at most seven packets: 140 ms of speech.
-	if after, most := l.c.Bitrate(), float64(before)*math.Pow(climb, 0.14); float64(after) > most+1 {
+	if after, most := l.c.bitrate(), float64(before)*math.Pow(climb, 0.14); float64(after) > most+1 {
 		t.Errorf("a feedback after a 300 ms pause raised the bitrate from %d to %d, past %.0f", before, after, most)
 	}
 }
@@ -460,12 +486,13 @@ func TestAQueuesOverflowIsNotCutAgain(t *testing.T) {
 			}
 		}
 	}
-	// A clean second, which sets the base, then two seconds queued 100 ms and losing one in five.
+	// A clean second, which sets the base, then two seconds queued 100 ms and losing one in three: enough
+	// that the loss since the start is past congested by the confidence bound.
 	arrive(0, 50, 0, 0)
 	feed(sent(50))
-	arrive(50, 150, 100*time.Millisecond, 5)
+	arrive(50, 150, 100*time.Millisecond, 3)
 	feed(sent(150))
-	cut := c.Bitrate()
+	cut := c.bitrate()
 	if cut == 64000 {
 		t.Fatal("a queue of 100 ms left the bitrate at the ceiling")
 	}
@@ -473,7 +500,7 @@ func TestAQueuesOverflowIsNotCutAgain(t *testing.T) {
 	// come again.
 	arrive(150, 160, 40*time.Millisecond, 0)
 	feed(sent(150).Add(2 * settle))
-	if b := c.Bitrate(); b != cut {
+	if b := c.bitrate(); b != cut {
 		t.Errorf("the overflow the queue's decrease answered cut the bitrate again, from %d to %d", cut, b)
 	}
 }
@@ -507,7 +534,7 @@ func TestATakebackRemovesThatPacketAlone(t *testing.T) {
 		}
 	}
 	c.Feedback(status(0, syms...), start.Add(2500*time.Millisecond))
-	if b := c.Bitrate(); b == 64000 {
+	if b := c.bitrate(); b == 64000 {
 		t.Fatalf("half the packets lost left the bitrate at %d", b)
 	}
 	// The last of them received late, and of the next ten, sent after the decrease, one lost.
@@ -520,9 +547,9 @@ func TestATakebackRemovesThatPacketAlone(t *testing.T) {
 		}
 	}
 	c.Feedback(status(119, next...), start.Add(2600*time.Millisecond))
-	if w := c.window(); w.lostSince != 1 || w.knownSince != 10 || w.lost != 60 {
+	if w := c.counts(); w.since.lost != 1 || w.since.known != 10 || w.window.lost != 60 {
 		t.Errorf("after a takeback and a new loss, %d of %d are lost since the decrease and %d in all, want 1 "+
-			"of 10 and 60", w.lostSince, w.knownSince, w.lost)
+			"of 10 and 60", w.since.lost, w.since.known, w.window.lost)
 	}
 }
 
@@ -535,7 +562,7 @@ func TestHeavyLossBringsTheBitrateDown(t *testing.T) {
 	if m := l.take(); m.lastRate > 32000 {
 		t.Errorf("at 45%% loss the bitrate is %d", m.lastRate)
 	}
-	if p := l.c.LossPercent(); p != MaxLossPercent {
+	if p := l.c.lossPercent(); p != MaxLossPercent {
 		t.Errorf("at 45%% loss the FEC is sized for %d%%, want %d", p, MaxLossPercent)
 	}
 }
@@ -548,7 +575,7 @@ func TestTheFloorHolds(t *testing.T) {
 	if m := l.take(); m.minRate != Floor {
 		t.Errorf("on a 20 kbps link the bitrate went to %d, want the floor %d", m.minRate, Floor)
 	}
-	if b := New(8000, l.now).Bitrate(); b != Floor {
+	if b := New(8000, l.now).bitrate(); b != Floor {
 		t.Errorf("a ceiling under the floor starts at %d", b)
 	}
 }
@@ -559,7 +586,7 @@ func TestFeedbackIsBounded(t *testing.T) {
 	l := newLink(t, 64000)
 	l.rate = 64000
 	l.run(25*time.Second, true)
-	before, loss := l.c.Bitrate(), l.c.LossPercent()
+	before, loss := l.c.bitrate(), l.c.lossPercent()
 	forged := &rtcp.TransportLayerCC{BaseSequenceNumber: l.seq + 2000, PacketStatusCount: 7,
 		PacketChunks: []rtcp.PacketStatusChunk{&rtcp.RunLengthChunk{
 			PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 7}}}
@@ -567,21 +594,21 @@ func TestFeedbackIsBounded(t *testing.T) {
 		l.now = l.now.Add(100 * time.Millisecond)
 		l.c.Feedback(forged, l.now)
 	}
-	if after := l.c.Bitrate(); after != before {
+	if after := l.c.bitrate(); after != before {
 		t.Errorf("feedback on packets never sent moved the bitrate from %d to %d", before, after)
 	}
-	if after := l.c.LossPercent(); after != loss {
+	if after := l.c.lossPercent(); after != loss {
 		t.Errorf("feedback on packets never sent moved the loss from %d%% to %d%%", loss, after)
 	}
 	// Sequence numbers sharing the ring's places with packets just sent, which no feedback has counted yet.
 	for range 3 {
 		l.send(100)
 	}
-	lost := l.c.window().lost
+	lost := l.c.counts().window.lost
 	l.c.Feedback(&rtcp.TransportLayerCC{BaseSequenceNumber: l.seq - 2 + ring, PacketStatusCount: 3,
 		PacketChunks: []rtcp.PacketStatusChunk{&rtcp.RunLengthChunk{
 			PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 3}}}, l.now)
-	if got := l.c.window().lost; got != lost {
+	if got := l.c.counts().window.lost; got != lost {
 		t.Errorf("feedback naming another packet's place in the ring counted %d lost", got-lost)
 	}
 	huge := &rtcp.TransportLayerCC{BaseSequenceNumber: l.seq, PacketStatusCount: 65535}
@@ -615,7 +642,7 @@ func TestEachDeltaIsTheRightPacketsAndAShortFeedbackStops(t *testing.T) {
 	c.Feedback(&rtcp.TransportLayerCC{BaseSequenceNumber: 0, PacketStatusCount: 4, ReferenceTime: 100,
 		PacketChunks: []rtcp.PacketStatusChunk{two(3, 1, 1, 1)},
 		RecvDeltas:   []*rtcp.RecvDelta{{Delta: 20000}, {Delta: 20000}, {Delta: 20000}}}, at)
-	if w := c.window(); w.lost != 0 || w.known != 4 {
+	if w := c.counts().window; w.lost != 0 || w.known != 4 {
 		t.Errorf("four received packets counted as %d lost of %d", w.lost, w.known)
 	}
 	if want := 100*64*time.Millisecond + 20*time.Millisecond - 20*time.Millisecond; c.minNow != want {
@@ -627,7 +654,7 @@ func TestEachDeltaIsTheRightPacketsAndAShortFeedbackStops(t *testing.T) {
 		PacketChunks: []rtcp.PacketStatusChunk{two(1, 1), &rtcp.RunLengthChunk{
 			PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 2}},
 		RecvDeltas: []*rtcp.RecvDelta{{Delta: 100000}}}, at)
-	if lost := c.window().lost; lost != 0 {
+	if lost := c.counts().window.lost; lost != 0 {
 		t.Errorf("a feedback whose deltas ran out counted %d packets lost after it", lost)
 	}
 	// The same in run-length chunks: three received with one delta, then two lost.
@@ -639,7 +666,7 @@ func TestEachDeltaIsTheRightPacketsAndAShortFeedbackStops(t *testing.T) {
 			&rtcp.RunLengthChunk{PacketStatusSymbol: rtcp.TypeTCCPacketReceivedSmallDelta, RunLength: 3},
 			&rtcp.RunLengthChunk{PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 2}},
 		RecvDeltas: []*rtcp.RecvDelta{{Delta: 100000}}}, at)
-	if lost := c.window().lost; lost != 0 {
+	if lost := c.counts().window.lost; lost != 0 {
 		t.Errorf("a feedback whose deltas ran out in a run counted %d packets lost after it", lost)
 	}
 }
@@ -653,11 +680,85 @@ func TestAPacketIsCountedOnce(t *testing.T) {
 		PacketChunks: []rtcp.PacketStatusChunk{&rtcp.RunLengthChunk{
 			PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 1}}}
 	l.send(100)
-	before := l.c.window().lost
+	before := l.c.counts().window.lost
 	for range 5 {
 		l.c.Feedback(fb, l.now)
 	}
-	if got := l.c.window().lost - before; got != 1 {
+	if got := l.c.counts().window.lost - before; got != 1 {
 		t.Errorf("one packet reported lost five times counted %d times", got)
+	}
+}
+
+// bitrate and lossPercent are Target's halves, for a test.
+func (c *Controller) bitrate() int {
+	b, _ := c.Target()
+	return b
+}
+
+func (c *Controller) lossPercent() int {
+	_, l := c.Target()
+	return l
+}
+
+// Speech after a silence, on a link that turned lossy during it: the speech before the silence says
+// nothing of the link now, so the bitrate does not climb on it (M31's fourth /code-review: a window
+// reaching across the silence climbed in every seed).
+func TestCleanSpeechBeforeASilenceHidesNoLoss(t *testing.T) {
+	for seed := range uint64(40) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 2)) //nolint:gosec // a test's link
+		l.c.rate = 30000
+		l.run(4*time.Second, true)
+		start := l.c.bitrate()
+		l.run(5*time.Second, false)
+		l.take()
+		l.loss = 0.4
+		l.run(time.Second, true)
+		for _, b := range l.bitrates {
+			if b > start {
+				t.Fatalf("seed %d: speech on a link losing 40%% after a silence raised the bitrate from %d to %d",
+					seed, start, b)
+			}
+		}
+	}
+}
+
+// A link that drops what queues past 35 ms, as a shallow buffer does. At 64 kbit/s that is less than two
+// packets, so no queue shows and only loss does: the bitrate comes down within a second or two and stays
+// near what fits, rather than in steps of two seconds each (M31's fourth /code-review: a fixed sample of
+// a hundred packets took seven), or climbing back into the loss after each cut.
+func TestAShallowBufferIsSettledQuickly(t *testing.T) {
+	l := newLink(t, 64000)
+	l.rate, l.maxQueue = 64000, 35*time.Millisecond
+	l.run(2*time.Second, true)
+	first := l.take()
+	l.run(8*time.Second, true)
+	after := l.take()
+	t.Logf("first 2 s: %d of %d dropped; next 8 s: %d of %d, bitrate %d to %d", first.dropped, first.sent,
+		after.dropped, after.sent, after.minRate, after.lastRate)
+	// It settles at about what fits, and drops a packet a second or two as its climb meets the link.
+	if after.dropped*20 > after.sent {
+		t.Errorf("after two seconds on a 35 ms buffer, %d of %d packets were still dropped", after.dropped,
+			after.sent)
+	}
+}
+
+// One feedback reporting a batch of packets raises the bitrate by what settle's worth of speech allows,
+// however many it reports: one reporting 256 doubled it (M31's fourth /code-review).
+func TestOneFeedbackClimbsBySettleAtMost(t *testing.T) {
+	l := newLink(t, 64000)
+	l.c.rate = 20000
+	l.run(3*time.Second, true)
+	before := l.c.bitrate()
+	// The SFU's feedback held back while 256 packets cross a clean link, then sent at once.
+	for range MaxStatuses {
+		l.send(before/8/50 + overhead)
+		l.now = l.now.Add(Frame)
+		l.deliver()
+	}
+	l.feedback()
+	if after, most := l.c.bitrate(), float64(before)*math.Pow(climb, settle.Seconds()); float64(after) > most+1 {
+		t.Errorf("one feedback of %d packets raised the bitrate from %d to %d, past %.0f", MaxStatuses, before,
+			after, most)
 	}
 }

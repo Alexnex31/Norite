@@ -17,6 +17,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -176,7 +177,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	s := &Session{opts: opts, pc: pc, processing: dsp.Settings(join.Processing),
 		ready: make(chan struct{}), ended: make(chan string, 1),
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
-		cc: congestion.New(opus.DefaultEncoderOptions().Bitrate, time.Now())}
+		cc: newController(time.Now())}
 	if opts.Device != nil {
 		mk := opts.Codec
 		if mk == nil {
@@ -404,6 +405,12 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 	return sdp, nil
 }
 
+// newController is the call's: its ceiling is the encoder's starting bitrate, so the first frame's adapt
+// moves nothing until the feedback says to.
+func newController(now time.Time) *congestion.Controller {
+	return congestion.New(opus.DefaultEncoderOptions().Bitrate, now)
+}
+
 // rtcpReader is what readRTCP reads, a sender's RTCP: an RTPSender, or a test's.
 type rtcpReader interface {
 	Read(b []byte) (int, interceptor.Attributes, error)
@@ -423,6 +430,11 @@ func (s *Session) readRTCP(r rtcpReader) {
 	for {
 		n, attr, err := r.Read(buf)
 		if err != nil {
+			// A stream closed with the call ends quietly; any other end is the controller's last
+			// feedback, which the log says, or the close's line reads as a controller that ran throughout.
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+				s.logf("the voice server's RTCP could not be read (%v); the bitrate stays where it is", err)
+			}
 			return
 		}
 		// What the guard parsed, kept in the attributes, is not parsed again.

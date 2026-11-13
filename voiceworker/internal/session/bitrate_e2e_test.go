@@ -26,8 +26,8 @@ import (
 // The link counts what IPv4 and UDP add, as a real one does: 64 kbps carries 39.2 kbps of Opus in 20 ms
 // frames, the rest being the 62 bytes of headers, tag and IP each packet carries.
 //
-// Measured at M31 on loopback, with the controller: Opus at 36 to 37 kbps in the limit's last twelve
-// seconds, 38 to 40 ms of queue and nothing dropped; without it, 279 ms of queue and 13% dropped. The spike
+// Measured at M31 on loopback, with the controller: Opus at 35 to 37 kbps in the limit's last twelve
+// seconds, 31 to 41 ms of queue and nothing dropped; without it, 279 ms of queue and 13% dropped. The spike
 // before it measured pion's GCC at 190 ms.
 func TestTheBitrateFollowsAConstrainedLink(t *testing.T) {
 	if testing.Short() {
@@ -137,7 +137,8 @@ func runShaped(t *testing.T, fixed bool) linkRun {
 			sh.limit(0)
 		}
 		d := sh.take(time.Second)
-		rate := float64(s.cc.Bitrate())
+		b, _ := s.cc.Target()
+		rate := float64(b)
 		if fixed {
 			rate = 64000
 		}
