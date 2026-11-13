@@ -94,6 +94,64 @@ func TestADTXGapIsConcealedNotRecovered(t *testing.T) {
 	}
 }
 
+// Packets that waited in a queue on the way arrive bunched once it drains, and the buffer holds more than
+// its target. The next DTX gap is cut short, to the target, so the delay the queue added does not stay for
+// the rest of the call; a gap in a buffer at its target is left whole (TestADTXGapIsConcealedNotRecovered).
+func TestABacklogDrainsInTheNextDTXGap(t *testing.T) {
+	b := New()
+	for i := range 10 { // ten frames of speech, all at once
+		push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
+	}
+	push(b, 7, 20, uint32(1000+15*FrameSamples)) // five frames of DTX, then speech
+	push(b, 7, 21, uint32(1000+16*FrameSamples))
+	check(t, play(b, 12), "p10 p11 p12 p13 p14 p15 p16 p17 p18 p19 p20 p21")
+	if s := b.Stats(); s.Skipped != 5 || s.Concealed != 0 {
+		t.Errorf("stats %+v, want 5 frames skipped and none concealed", s)
+	}
+}
+
+// The gap is cut to the target and no further, and never past the packet that ends it.
+func TestADrainedBufferKeepsItsTarget(t *testing.T) {
+	b := New()
+	b.target = 2
+	for i := range 10 {
+		push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
+	}
+	for i := range 3 {
+		push(b, 7, uint16(20+i), uint32(1000+(20+i)*FrameSamples))
+	}
+	// The gap is frames 10 to 19 and the newest is frame 22: the timeline goes to frame 20, p20, and keeps
+	// two frames behind it.
+	check(t, play(b, 13), "p10 p11 p12 p13 p14 p15 p16 p17 p18 p19 p20 p21 p22")
+	if s := b.Stats(); s.Skipped != 10 {
+		t.Errorf("stats %+v, want the whole gap skipped", s)
+	}
+	b = New()
+	b.target = 2
+	for i := range 10 {
+		push(b, 7, uint16(10+i), uint32(1000+i*FrameSamples))
+	}
+	push(b, 7, 20, uint32(1000+20*FrameSamples))
+	push(b, 7, 21, uint32(1000+30*FrameSamples))
+	// The newest is frame 30, so holding the target would mean frame 28, past p20: the timeline stops at it.
+	check(t, play(b, 11), "p10 p11 p12 p13 p14 p15 p16 p17 p18 p19 p20")
+}
+
+// A link that delivers slower than the sender sends, as a saturated uplink does: 36 packets a second of a
+// sender's 50. A buffer deepened to ten frames still starts once ten consecutive frames are held, though
+// they arrived over 280 ms, longer than the ten frames' window.
+func TestASlowLinkStillStarts(t *testing.T) {
+	b := New()
+	b.target = MaxDelay
+	for i := range MaxDelay {
+		b.Push(7, uint16(10+i), uint32(1000+i*FrameSamples), []byte("p"),
+			t0.Add(time.Duration(i)*27750*time.Microsecond))
+	}
+	if s := b.Next(); s.Kind != Play {
+		t.Errorf("ten frames held, delivered at 36 a second, played %v", s.Kind)
+	}
+}
+
 func TestASenderThatStopsIsConcealedThenSilent(t *testing.T) {
 	b := New()
 	b.target = 2 // a buffer deepened by lateness, which waits for two
