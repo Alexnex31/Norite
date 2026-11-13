@@ -17,6 +17,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -144,8 +145,8 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 			return nil, err
 		}
 	}
-	reg := &interceptor.Registry{}
-	if err := webrtc.ConfigureRTCPReports(reg); err != nil {
+	reg, err := interceptors()
+	if err != nil {
 		return nil, err
 	}
 
@@ -208,6 +209,17 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		}
 	})
 	return s, nil
+}
+
+// interceptors is the call's interceptor chain: rtcpGuard, then Pion's RTCP reports. The guard is first,
+// so the innermost reader, and reads what the SFU sends before anything above it parses it.
+func interceptors() (*interceptor.Registry, error) {
+	reg := &interceptor.Registry{}
+	reg.Add(rtcpGuard{})
+	if err := webrtc.ConfigureRTCPReports(reg); err != nil {
+		return nil, err
+	}
+	return reg, nil
 }
 
 // trackArrived is a slot's first packet. Before the audio has started it waits, a slot's worth at most.
@@ -393,54 +405,48 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 	return sdp, nil
 }
 
-// maxRTCP is how many RTCP packets from the SFU are read for their content each second; the rest are
-// read and dropped. The SFU sends a transport-wide feedback every 100 ms and a sender report every second
-// or so. The SFU is a stranger's server (from M33 an instance's), so what it can make the worker spend is
-// bounded here, before anything is parsed. The worst a packet can carry is 58 feedbacks claiming 8,191
-// packets each, which the controller reads 256 of: 52 µs to parse and read, so 2.6 ms a second at the bound
-// (M31's /security-sweep).
-const maxRTCP = 50
-
-// rtcpBudget counts the RTCP packets read in the current second, on the monotonic clock.
-type rtcpBudget struct {
-	window time.Time
-	read   int
+// rtcpReader is what readRTCP reads, a sender's RTCP: an RTPSender, or a test's.
+type rtcpReader interface {
+	Read(b []byte) (int, interceptor.Attributes, error)
 }
 
-// allow is whether a packet arriving at now may be parsed.
-func (b *rtcpBudget) allow(now time.Time) bool {
-	if now.Sub(b.window) >= time.Second {
-		b.window, b.read = now, 0
-	}
-	b.read++
-	return b.read <= maxRTCP
-}
+// maxReadErrors is how many reads in a row may fail, with the stream not closed, before readRTCP gives up:
+// a stream that fails every read without blocking would otherwise spin.
+const maxReadErrors = 1000
 
 // readRTCP reads what the SFU sends about the call's track, and hands its transport-wide feedback to the
-// controller. It must keep reading whatever arrives, or the packets pile up in Pion's buffers.
-func (s *Session) readRTCP(sender *webrtc.RTPSender) {
+// controller. It must keep reading whatever arrives, or the packets pile up in Pion's buffers. rtcpGuard,
+// at the bottom of the interceptor chain, has already bounded what reaches this far.
+//
+// A read that fails with the stream open is one packet Pion could not parse, which the SFU sent: it costs
+// that packet and nothing more. Returning on it, as M28's drain did, would have left the controller with
+// no feedback for the rest of the call, on one malformed packet (M31's /code-review).
+func (s *Session) readRTCP(r rtcpReader) {
 	buf := make([]byte, 1500)
-	var budget rtcpBudget
+	failed := 0
 	for {
-		n, _, err := sender.Read(buf)
-		if err != nil {
+		n, attr, err := r.Read(buf)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
 			return
 		}
-		if now := time.Now(); budget.allow(now) {
-			s.feedback(buf[:n], now)
+		if err != nil {
+			if failed++; failed >= maxReadErrors {
+				s.logf("the voice server's reports could not be read, so the bitrate stays where it is: %v", err)
+				return
+			}
+			continue
 		}
-	}
-}
-
-// feedback hands the transport-wide feedback in one RTCP compound packet to the controller.
-func (s *Session) feedback(b []byte, now time.Time) {
-	pkts, err := rtcp.Unmarshal(b)
-	if err != nil {
-		return
-	}
-	for _, p := range pkts {
-		if fb, ok := p.(*rtcp.TransportLayerCC); ok {
-			s.cc.Feedback(fb, now)
+		failed = 0
+		// What Pion's report interceptor parsed, kept in the attributes, is not parsed again.
+		pkts, err := attr.GetRTCPPackets(buf[:n])
+		if err != nil {
+			continue
+		}
+		now := time.Now()
+		for _, p := range pkts {
+			if fb, ok := p.(*rtcp.TransportLayerCC); ok {
+				s.cc.Feedback(fb, now)
+			}
 		}
 	}
 }

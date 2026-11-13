@@ -230,8 +230,53 @@ func TestRandomLossSizesTheFECAndKeepsTheBitrate(t *testing.T) {
 	}
 	l.loss = 0
 	l.run(10*time.Second, true)
-	if p := l.c.LossPercent(); p != 0 {
-		t.Errorf("ten seconds after the loss stopped the FEC is sized for %d%%", p)
+	if p := l.c.LossPercent(); p != MinLossPercent {
+		t.Errorf("ten seconds after the loss stopped the FEC is sized for %d%%, want the floor %d%%", p,
+			MinLossPercent)
+	}
+}
+
+// libopus turns in-band FEC off at 0% loss, so the FEC is never sized for less than MinLossPercent: from
+// the call's first frame, on a link that has lost nothing, the first loss of a burst stays recoverable.
+func TestTheFECIsNeverSizedForNoLoss(t *testing.T) {
+	l := newLink(t, 64000)
+	if p := l.c.LossPercent(); p != MinLossPercent {
+		t.Errorf("a call starts with its FEC sized for %d%%", p)
+	}
+	l.run(5*time.Second, true)
+	if p := l.c.LossPercent(); p != MinLossPercent {
+		t.Errorf("on a clean link the FEC is sized for %d%%", p)
+	}
+}
+
+// In DTX a feedback covers a comfort-noise packet or none, and one of them lost is not the link lost: a
+// minute of silence at 3% random loss leaves the bitrate where the speech left it.
+func TestLossInSilenceIsNotJudged(t *testing.T) {
+	l := newLink(t, 64000)
+	l.run(5*time.Second, true)
+	l.loss = 0.03
+	l.run(60*time.Second, false)
+	if m := l.take(); m.minRate < 64000 {
+		t.Errorf("a minute of silence at 3%% loss took the bitrate down to %d", m.minRate)
+	}
+}
+
+// An outage is one loss event: the bitrate comes down once for it, not once every settle for as long as
+// the window remembers it.
+func TestAnOutageIsOneDecrease(t *testing.T) {
+	l := newLink(t, 64000)
+	l.run(5*time.Second, true)
+	l.loss = 1
+	l.run(time.Second, true)
+	l.loss = 0
+	l.run(3*time.Second, true)
+	m := l.take()
+	if m.minRate < 64000/2 {
+		t.Errorf("a second's outage took the bitrate down to %d", m.minRate)
+	}
+	l.run(5*time.Second, true)
+	if r := l.c.Bitrate(); r != 64000 {
+		t.Errorf("eight seconds after the outage the bitrate is %d", r)
 	}
 }
 
@@ -282,6 +327,17 @@ func TestFeedbackIsBounded(t *testing.T) {
 	if after := l.c.LossPercent(); after != loss {
 		t.Errorf("feedback on packets never sent moved the loss from %d%% to %d%%", loss, after)
 	}
+	// Sequence numbers sharing the ring's places with packets just sent, which no feedback has counted yet.
+	for range 3 {
+		l.send(100)
+	}
+	lost := l.c.lost
+	l.c.Feedback(&rtcp.TransportLayerCC{BaseSequenceNumber: l.seq - 2 + ring, PacketStatusCount: 3,
+		PacketChunks: []rtcp.PacketStatusChunk{&rtcp.RunLengthChunk{
+			PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 3}}}, l.now)
+	if l.c.lost != lost {
+		t.Errorf("feedback naming another packet's place in the ring counted %v lost", l.c.lost-lost)
+	}
 	huge := &rtcp.TransportLayerCC{BaseSequenceNumber: l.seq, PacketStatusCount: 65535}
 	for range 8 {
 		huge.PacketChunks = append(huge.PacketChunks, &rtcp.RunLengthChunk{
@@ -291,5 +347,71 @@ func TestFeedbackIsBounded(t *testing.T) {
 	l.c.Feedback(huge, l.now)
 	if l.c.visited > MaxStatuses {
 		t.Errorf("one feedback had %d packets read, past %d", l.c.visited, MaxStatuses)
+	}
+}
+
+// A packet received without a delta (symbol 3) takes none of the deltas, which belong to the packets after
+// it; and a feedback whose deltas run out stops there, rather than counting what follows against packets
+// it cannot place.
+func TestEachDeltaIsTheRightPacketsAndAShortFeedbackStops(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	c := New(64000, start)
+	for seq := range uint16(8) {
+		c.Sent(seq, start.Add(time.Duration(seq)*20*time.Millisecond))
+	}
+	at := start.Add(time.Second)
+	two := func(syms ...uint16) *rtcp.StatusVectorChunk {
+		return &rtcp.StatusVectorChunk{SymbolSize: rtcp.TypeTCCSymbolSizeTwoBit, SymbolList: syms}
+	}
+	// Four packets, 20 ms apart as sent, each arriving 20 ms after the last: no queue. The first arrived
+	// without a delta, so the three deltas are the next three packets'. Read off by one, the third would
+	// arrive at the second's time and the base would be set 20 ms early, making the rest look queued.
+	c.Feedback(&rtcp.TransportLayerCC{BaseSequenceNumber: 0, PacketStatusCount: 4, ReferenceTime: 100,
+		PacketChunks: []rtcp.PacketStatusChunk{two(3, 1, 1, 1)},
+		RecvDeltas:   []*rtcp.RecvDelta{{Delta: 20000}, {Delta: 20000}, {Delta: 20000}}}, at)
+	if c.lost != 0 || c.counted != 4 {
+		t.Errorf("four received packets counted as %v lost of %v", c.lost, c.counted)
+	}
+	if want := 100*64*time.Millisecond + 20*time.Millisecond - 20*time.Millisecond; c.minNow != want {
+		t.Errorf("the base delay is %v, want %v: a delta was given to the wrong packet", c.minNow, want)
+	}
+	// Two received packets with one delta between them, then, in the next chunk, two lost: the walk stops
+	// at the second, the whole walk and not only its chunk, so the two after it are not counted lost.
+	c.Feedback(&rtcp.TransportLayerCC{BaseSequenceNumber: 4, PacketStatusCount: 4, ReferenceTime: 100,
+		PacketChunks: []rtcp.PacketStatusChunk{two(1, 1), &rtcp.RunLengthChunk{
+			PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 2}},
+		RecvDeltas: []*rtcp.RecvDelta{{Delta: 100000}}}, at)
+	if c.lost != 0 {
+		t.Errorf("a feedback whose deltas ran out counted %v packets lost after it", c.lost)
+	}
+	// The same in run-length chunks: three received with one delta, then two lost.
+	for seq := uint16(8); seq < 13; seq++ {
+		c.Sent(seq, start.Add(time.Duration(seq)*20*time.Millisecond))
+	}
+	c.Feedback(&rtcp.TransportLayerCC{BaseSequenceNumber: 8, PacketStatusCount: 5, ReferenceTime: 100,
+		PacketChunks: []rtcp.PacketStatusChunk{
+			&rtcp.RunLengthChunk{PacketStatusSymbol: rtcp.TypeTCCPacketReceivedSmallDelta, RunLength: 3},
+			&rtcp.RunLengthChunk{PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 2}},
+		RecvDeltas: []*rtcp.RecvDelta{{Delta: 100000}}}, at)
+	if c.lost != 0 {
+		t.Errorf("a feedback whose deltas ran out in a run counted %v packets lost after it", c.lost)
+	}
+}
+
+// A packet reported twice, by a feedback arriving twice or by pion's recorder after a reordering, is
+// counted once.
+func TestAPacketIsCountedOnce(t *testing.T) {
+	l := newLink(t, 64000)
+	l.run(time.Second, true)
+	fb := &rtcp.TransportLayerCC{BaseSequenceNumber: l.seq + 1, PacketStatusCount: 1,
+		PacketChunks: []rtcp.PacketStatusChunk{&rtcp.RunLengthChunk{
+			PacketStatusSymbol: rtcp.TypeTCCPacketNotReceived, RunLength: 1}}}
+	l.send(100)
+	before := l.c.lost
+	for range 5 {
+		l.c.Feedback(fb, l.now)
+	}
+	if got := l.c.lost - before; got != 1 {
+		t.Errorf("one packet reported lost five times counted %v times", got)
 	}
 }

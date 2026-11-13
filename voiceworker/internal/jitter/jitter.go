@@ -342,23 +342,30 @@ func (b *Buffer) Next() Step {
 // cut is a stretch the sender sent nothing for, which the decoder would have filled with comfort noise, so
 // nothing anybody said is lost; a backlog in the middle of a sentence waits for its pause.
 func (b *Buffer) drain() {
-	e := b.earliest(b.next, true)
+	// One pass: the packet that ends the gap, the earliest at or after the timeline, and the newest held.
+	var e, newest *entry
+	for i := range b.ring {
+		r := &b.ring[i]
+		if !r.used {
+			continue
+		}
+		if int32(r.ts-b.next) >= 0 && (e == nil || int32(r.ts-e.ts) < 0) { //nolint:gosec // signed difference
+			e = r
+		}
+		if newest == nil || int32(r.ts-newest.ts) > 0 { //nolint:gosec // signed difference
+			newest = r
+		}
+	}
 	if e == nil || e.ts == b.next || e.seq != b.lastSeq+1 {
 		return // playing, losing, or nothing buffered: not a DTX gap
 	}
-	newest := e.ts
-	for i := range b.ring {
-		if r := &b.ring[i]; r.used && int32(r.ts-newest) > 0 { //nolint:gosec // signed difference
-			newest = r.ts
-		}
-	}
-	ahead := int(int32(newest-b.next)) / FrameSamples //nolint:gosec // signed difference
+	ahead := int(int32(newest.ts-b.next)) / FrameSamples //nolint:gosec // signed difference
 	if ahead <= b.target+catchUp {
 		return
 	}
 	// Forward to where the target is still held, and never past the packet that ends the gap.
-	to := newest - uint32(b.target*FrameSamples) //nolint:gosec // target is at most MaxDelay
-	if int32(to-e.ts) > 0 {                      //nolint:gosec // signed difference
+	to := newest.ts - uint32(b.target*FrameSamples) //nolint:gosec // target is at most MaxDelay
+	if int32(to-e.ts) > 0 {                         //nolint:gosec // signed difference
 		to = e.ts
 	}
 	if d := int32(to - b.next); d > 0 { //nolint:gosec // signed difference

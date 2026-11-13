@@ -2083,7 +2083,8 @@ carries the condition that would reopen it.
 ### One RTCP packet can carry 58 feedbacks
 - **Raised**: M31, `/security-sweep`
 - **Verdict**: accepted risk
-- **Why**: `session.maxRTCP` bounds the compound packets parsed each second, not the feedbacks inside one.
+- **Why**: `session.maxRTCP` bounds the compound packets parsed each second, not the feedbacks inside one;
+  `session.rtcpGuard` drops, before Pion parses it, any feedback claiming more deltas than its bytes hold.
   1,392 bytes hold 58, each claiming 8,191 packets, of which the controller reads `MaxStatuses` (256).
   Measured: 52 µs to parse and read such a packet, so 2.6 ms of a second at the bound, 0.26% of a core.
   The decryption Pion does first is the per-packet work M29's entry above already accepts.

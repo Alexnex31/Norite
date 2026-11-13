@@ -2189,7 +2189,11 @@ of this section.
   - **20 ms frames cannot go below about 41 kbps on the wire.** Each packet carries 62 bytes that are not
     Opus (architecture.md §17). Longer frames are the lever for slower links, and they are not built.
   - **The SFU's RTCP is a stranger's.**
-    - The worker parses 50 packets a second of it at most, and 256 statuses of one feedback.
+    - **What is let through:** a guard under Pion's interceptors lets through 50 packets a second, and
+      only feedback whose deltas fit its bytes. Pion would otherwise allocate a delta per claimed packet
+      before refusing it.
+    - **What the controller reads:** 256 statuses of one feedback.
+    - **When a packet is malformed,** the reader goes on.
     - The feedback costs 20 µs per packet, about nine a second. The whole call's CPU did not move.
   - **The downlink adapts to nothing**, by this entry's own scope. A receiver still gets every slot at its
     sender's bitrate. M34's client-driven subscription is its home (architecture.md §17).
@@ -2256,7 +2260,7 @@ of this section.
   instance's, so the worker clamps it: under Opus's 510 kbps, which `SetBitrate` refuses past and a refusal
   ends the call, and under what the SFU's per-track bound (256 kbps, `limits.go`) carries with its headers,
   past which the SFU drops the caller's track (M31's `/security-sweep`). The worker's RTCP read is
-  already bounded (`session.maxRTCP`, `congestion.MaxStatuses`), against the instance's SFU as much as
+  already bounded (`session.rtcpGuard`, `congestion.MaxStatuses`), against the instance's SFU as much as
   the harness's.
 
   The `supports_video: bool` capability field is added to the voice-join payload now

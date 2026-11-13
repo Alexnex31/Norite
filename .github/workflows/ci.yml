@@ -91,11 +91,11 @@ jobs:
       # budget times the program, which -race slows: under it, on a loaded machine, it measured 87.5 ms.
       - name: go test
         working-directory: ${{ matrix.module }}
-        run: go test ./... -race -count=1 -skip '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget)$'
+        run: go test ./... -race -count=1 -skip '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget|TestTheBitrateFollowsAConstrainedLink)$'
       - name: the interpreter and latency tests, without -race
         if: matrix.module == 'voiceworker'
         working-directory: voiceworker
-        run: go test ./... -count=1 -run '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget)$'
+        run: go test ./... -count=1 -run '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget|TestTheBitrateFollowsAConstrainedLink)$'
 
       # go.work resolves cross-module imports from the checkout, so a module whose own go.mod and go.sum
       # are missing an entry still builds here. That was harmless while the four modules were independent
@@ -150,11 +150,11 @@ jobs:
           cache-dependency-path: "**/go.sum"
       - name: go test
         working-directory: voiceworker
-        run: go test ./... -race -count=1 -skip '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget)$'
+        run: go test ./... -race -count=1 -skip '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget|TestTheBitrateFollowsAConstrainedLink)$'
       # The test this job exists for, and the latency budget, apart for the reasons the test job gives.
       - name: the interpreter and latency tests, without -race
         working-directory: voiceworker
-        run: go test ./... -count=1 -run '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget)$'
+        run: go test ./... -count=1 -run '^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget|TestTheBitrateFollowsAConstrainedLink)$'
 
   codegen:
     name: codegen is up to date

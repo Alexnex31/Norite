@@ -96,7 +96,7 @@ func (e *nativeEncoder) SetBitrate(bitrate int) error {
 }
 
 func (e *nativeEncoder) SetLoss(percent int) error {
-	if err := (EncoderOptions{Bitrate: 6000, LossPercent: percent}).check(); err != nil {
+	if err := checkLoss(percent); err != nil {
 		return err
 	}
 	if r := C.shim_set_loss(e.e, C.int(percent)); r != 0 {

@@ -54,8 +54,14 @@ func (o EncoderOptions) check() error {
 		return fmt.Errorf("opus: bitrate %d outside 6000 to 510000", o.Bitrate)
 	case o.Complexity < 0 || o.Complexity > 10:
 		return fmt.Errorf("opus: complexity %d outside 0 to 10", o.Complexity)
-	case o.LossPercent < 0 || o.LossPercent > 100:
-		return fmt.Errorf("opus: loss %d%% outside 0 to 100", o.LossPercent)
+	}
+	return checkLoss(o.LossPercent)
+}
+
+// checkLoss is the rule for a loss the FEC is sized for, at creation and by SetLoss.
+func checkLoss(percent int) error {
+	if percent < 0 || percent > 100 {
+		return fmt.Errorf("opus: loss %d%% outside 0 to 100", percent)
 	}
 	return nil
 }

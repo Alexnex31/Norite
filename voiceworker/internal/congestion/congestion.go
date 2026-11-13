@@ -59,10 +59,19 @@ const (
 	// Below them loss is the link's own, which a lower bitrate does nothing for and the FEC is sized for.
 	congested = 0.10
 	policed   = 0.25
-	// lossWindow is the time constant of the loss the controller judges by.
+	// lossWindow is the time constant of the loss the controller judges by, counted in packets: each
+	// feedback adds its packets, and what came before fades by e^(-elapsed/lossWindow).
 	lossWindow = time.Second
-	// MaxLossPercent is the most loss the FEC is sized for. Past it, Opus spends so much of the bitrate on
+	// judged is how many packets the window must hold before the loss in it moves the bitrate. In DTX a
+	// feedback covers one comfort-noise packet or none, and one of them lost is not half the link lost:
+	// judged on fewer, 3% random loss through a minute of silence took the bitrate to the floor (M31's
+	// /code-review).
+	judged = 10
+	// MinLossPercent and MaxLossPercent bound the loss the FEC is sized for. libopus turns in-band FEC off
+	// altogether at 0% (decide_fec), so the floor is what M29 sized it for before the controller, and keeps
+	// the first loss of a burst recoverable. Past the ceiling, Opus spends so much of the bitrate on
 	// redundancy that what is protected is worth little.
+	MinLossPercent = 5
 	MaxLossPercent = 25
 
 	// baseWindow is how long the smallest delay is remembered. Kept in two halves, so forgetting the old
@@ -84,7 +93,8 @@ type Controller struct {
 	mu      sync.Mutex
 	ceiling float64
 	rate    float64
-	loss    float64 // smoothed, 0 to 1
+	// The packets lost and counted, each fading with lossWindow.
+	lost, counted float64
 
 	sent [ring]departure
 	base time.Time // what departures are measured from
@@ -96,8 +106,6 @@ type Controller struct {
 
 	lastFeedback, lastDecrease, lastLoss time.Time
 
-	queue time.Duration // what the last feedback measured, for the log
-
 	visited int // packets read out of feedback, for a test of the bound
 }
 
@@ -105,6 +113,9 @@ type departure struct {
 	seq  uint16
 	at   time.Duration // since base
 	used bool
+	// reported is set once a feedback has counted it, lost or received. pion's recorder reports packets
+	// again after a reordering, and a feedback can arrive twice; neither is counted twice.
+	reported bool
 }
 
 // New starts at ceiling, which is what a call is configured for: a call starts as it would without the
@@ -130,6 +141,7 @@ func (c *Controller) Feedback(fb *rtcp.TransportLayerCC, now time.Time) {
 	deltas := fb.RecvDeltas
 	n := min(int(fb.PacketStatusCount), MaxStatuses)
 	i := 0
+	// visit reads the next packet's status, and reports whether the walk goes on.
 	visit := func(symbol uint16) bool {
 		if i >= n {
 			return false
@@ -137,35 +149,40 @@ func (c *Controller) Feedback(fb *rtcp.TransportLayerCC, now time.Time) {
 		seq := fb.BaseSequenceNumber + uint16(i) //nolint:gosec // i is under MaxStatuses
 		i++
 		c.visited++
-		d := c.sent[seq%ring]
-		mine := d.used && d.seq == seq && now.Sub(c.base)-d.at < remembered
-		if symbol == rtcp.TypeTCCPacketNotReceived {
-			if mine {
-				lost++
-				total++
+		// A received packet has a delta, in order, whether or not it is one this controller sent, except
+		// one received without a delta (symbol 3), which pion's parser gives none. A feedback whose deltas
+		// run out is malformed, and nothing after that point in it can be placed.
+		timed := symbol == rtcp.TypeTCCPacketReceivedSmallDelta || symbol == rtcp.TypeTCCPacketReceivedLargeDelta
+		if timed {
+			if len(deltas) == 0 {
+				return false
 			}
+			arrival += time.Duration(deltas[0].Delta) * time.Microsecond
+			deltas = deltas[1:]
+		}
+		d := &c.sent[seq%ring]
+		if !d.used || d.seq != seq || d.reported || now.Sub(c.base)-d.at >= remembered {
 			return true
 		}
-		// Each received packet has a delta, in order, whether or not it is one this controller sent.
-		if len(deltas) == 0 {
-			return false
-		}
-		arrival += time.Duration(deltas[0].Delta) * time.Microsecond
-		deltas = deltas[1:]
-		if !mine {
-			return true
-		}
+		d.reported = true
 		total++
+		if symbol == rtcp.TypeTCCPacketNotReceived {
+			lost++
+			return true
+		}
 		received++
-		queue = min(queue, c.delay(arrival-d.at, now))
+		if timed {
+			queue = min(queue, c.delay(arrival-d.at, now))
+		}
 		return true
 	}
+walk:
 	for _, chunk := range fb.PacketChunks {
 		switch ch := chunk.(type) {
 		case *rtcp.RunLengthChunk:
 			for range ch.RunLength {
 				if !visit(ch.PacketStatusSymbol) {
-					break
+					break walk
 				}
 			}
 		case *rtcp.StatusVectorChunk:
@@ -173,12 +190,9 @@ func (c *Controller) Feedback(fb *rtcp.TransportLayerCC, now time.Time) {
 			// two-bit symbols' own values.
 			for _, s := range ch.SymbolList {
 				if !visit(s) {
-					break
+					break walk
 				}
 			}
-		}
-		if i >= n {
-			break
 		}
 	}
 	if total == 0 {
@@ -206,31 +220,53 @@ func (c *Controller) adjust(lost, total, received int, queue time.Duration, now 
 		dt = 0
 	}
 	c.lastFeedback = now
-	sample := float64(lost) / float64(total)
-	if c.lastLoss.IsZero() {
-		c.loss = sample
-	} else {
-		c.loss = sample + math.Exp(-float64(now.Sub(c.lastLoss))/float64(lossWindow))*(c.loss-sample)
+	fade := 0.0
+	if !c.lastLoss.IsZero() {
+		fade = math.Exp(-float64(now.Sub(c.lastLoss)) / float64(lossWindow))
 	}
-	c.lastLoss = now
-	if received > 0 {
-		c.queue = queue
-	}
+	c.lost, c.counted, c.lastLoss = c.lost*fade+float64(lost), c.counted*fade+float64(total), now
+	loss := c.lossRatio()
 	canDecrease := now.Sub(c.lastDecrease) >= settle
 	standing := received > 0 && queue > low
+	// Loss brings the bitrate down once for each feedback that reports some: the window remembers an
+	// outage for a second after it ends, and acting on that memory every settle compounded one outage
+	// into several decreases (M31's /code-review measured a second's outage halving the bitrate).
+	fresh := lost > 0 && c.counted >= judged
 	switch {
 	case received > 0 && queue > high && canDecrease:
 		c.decrease(backoff, now)
-	case canDecrease && (c.loss > policed || (c.loss > congested && standing)):
-		c.decrease(1-c.loss/2, now)
-	case received >= flowing && queue < low && c.loss <= congested:
+	case canDecrease && fresh && (loss > policed || (loss > congested && standing)):
+		c.decrease(1-loss/2, now)
+	case received >= flowing && queue < low && (c.counted < judged || loss <= congested):
 		c.rate = min(c.ceiling, c.rate*math.Pow(climb, dt.Seconds()))
 	}
+}
+
+// lossRatio is the share of the packets in the window that were lost.
+func (c *Controller) lossRatio() float64 {
+	if c.counted == 0 {
+		return 0
+	}
+	return c.lost / c.counted
 }
 
 func (c *Controller) decrease(by float64, now time.Time) {
 	c.rate = max(Floor, c.rate*by)
 	c.lastDecrease = now
+}
+
+// Reported is how many of its packets the feedback has counted, lost or received, for a test that feedback
+// reaches the controller.
+func (c *Controller) Reported() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, d := range c.sent {
+		if d.reported {
+			n++
+		}
+	}
+	return n
 }
 
 // Bitrate is what the encoder should be set to, in bits per second.
@@ -240,17 +276,10 @@ func (c *Controller) Bitrate() int {
 	return int(c.rate)
 }
 
-// LossPercent is the loss the encoder's FEC should be sized for: what the feedback measured, up to
-// MaxLossPercent.
+// LossPercent is the loss the encoder's FEC should be sized for: what the feedback measured, between
+// MinLossPercent and MaxLossPercent.
 func (c *Controller) LossPercent() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return min(MaxLossPercent, int(math.Round(c.loss*100)))
-}
-
-// Queue is the queue the last feedback measured.
-func (c *Controller) Queue() time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.queue
+	return max(MinLossPercent, min(MaxLossPercent, int(math.Round(c.lossRatio()*100))))
 }

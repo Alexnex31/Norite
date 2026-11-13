@@ -244,7 +244,7 @@ func (e *wasmEncoder) SetBitrate(bitrate int) error {
 }
 
 func (e *wasmEncoder) SetLoss(percent int) error {
-	if err := (EncoderOptions{Bitrate: 6000, LossPercent: percent}).check(); err != nil {
+	if err := checkLoss(percent); err != nil {
 		return err
 	}
 	r, err := e.in.call(context.Background(), e.in.setLoss, uint64(e.in.state), uint64(percent))

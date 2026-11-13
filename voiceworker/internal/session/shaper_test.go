@@ -90,7 +90,9 @@ func through(t *testing.T, sh **shaper) func(string) string {
 // isAudio is an RTP packet of the call's Opus payload type, whose header SRTP leaves in the clear.
 func isAudio(b []byte) bool { return len(b) > 12 && b[0]>>6 == 2 && b[1]&0x7f == 111 }
 
+// uplink is the only sender on out, so it closes it when the listener closes, and deliver returns.
 func (s *shaper) uplink() {
+	defer close(s.out)
 	buf := make([]byte, 2048)
 	for {
 		n, from, err := s.ln.ReadFromUDP(buf)

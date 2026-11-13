@@ -2293,17 +2293,29 @@ And on adaptive bitrate, from M31:
   - The transport-cc extension is written in `send`, beside the audio level, and each departure is noted
     there before a test's `Lossy` drops the packet, so the feedback sees the loss.
   - No congestion interceptor is registered.
+- **Loss is counted in packets, not feedbacks.**
+  - It is judged only once the one-second window holds ten packets, which DTX never fills.
+  - It brings the bitrate down once per feedback that reports some, never again on the window's memory
+    of an outage.
+  - The FEC is sized for at least `MinLossPercent`, which equals the encoder's starting 5%: libopus
+    turns FEC off at 0%.
+  - Symbol 3 (received, no delta) takes no delta.
 - **The bitrate climbs only while packets flow.** Through DTX the feedback carries a comfort-noise update
   every 400 ms, which says nothing about what speech needs. The spike watched GCC climb into a link it did
   not fit.
 - **The controller is applied in `send`, read from the controller by polling.** `adapt` sets the bitrate
   and the loss on a change, under `clocked`, as an encode is. Nothing pushes a target from another
   goroutine: GCC's callback ran each change on a goroutine of its own, out of order.
-- **The SFU's RTCP is bounded before it is parsed:**
-  - `session.maxRTCP` packets a second;
-  - `congestion.MaxStatuses` packets of one feedback.
-
-  A departure the controller did not record is ignored, so forged feedback moves nothing.
+- **The SFU's RTCP is bounded before Pion parses it,** by `session.rtcpGuard`. The guard is first in the
+  interceptor chain, so it is the innermost reader. Pion's report interceptors parse every packet in full
+  inside the read, and a feedback claiming 8,191 received packets in two bytes allocates a delta for each.
+  - **What the guard lets through:**
+    - `maxRTCP` packets a second per stream;
+    - only feedback that carries the bytes its deltas need.
+  - **What the controller reads:** `congestion.MaxStatuses` packets of one feedback, and each departure it
+    recorded only once. A departure it did not record is ignored, so forged feedback moves nothing.
+  - **A packet Pion cannot parse costs that packet.** `readRTCP` keeps reading.
+  - `TestTheGuardIsUnderPionsInterceptors` holds the guard's place in the chain.
 - **20 ms frames need about 41 kbps of link at the 16 kbps floor** (architecture.md §17). Nothing here
   serves a slower link.
 - **The jitter buffer drains a backlog in DTX gaps, and judges freshness by timestamp as well as arrival**

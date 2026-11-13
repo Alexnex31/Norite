@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/congestion"
 	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/jitter"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
@@ -31,5 +32,19 @@ func TestTheFrameIsOneSizeEverywhere(t *testing.T) {
 	}
 	if jitter.MaxPacket != opus.MaxPacket {
 		t.Errorf("the jitter buffer keeps packets of %d bytes and the codec takes %d", jitter.MaxPacket, opus.MaxPacket)
+	}
+}
+
+// The encoder starts with its FEC sized for the loss M29 chose, and the controller never sizes it for less:
+// the two must be one number, or the call's first frame moves it (M31's /code-review found it moved to 0%,
+// where libopus turns FEC off). The ceiling is the encoder's starting bitrate for the same reason.
+func TestTheEncoderStartsWhereTheControllerDoes(t *testing.T) {
+	o := opus.DefaultEncoderOptions()
+	if o.LossPercent != congestion.MinLossPercent {
+		t.Errorf("the encoder starts at %d%% loss and the controller's floor is %d%%", o.LossPercent,
+			congestion.MinLossPercent)
+	}
+	if o.LossPercent < 1 {
+		t.Errorf("the encoder starts at %d%% loss, which turns libopus's FEC off", o.LossPercent)
 	}
 }
