@@ -2200,7 +2200,7 @@ And on the audio pipeline, from M29 (ADR 0036):
   - `silk/NSQ_del_dec.c` is built at `-Os` until a wazero release carries its #2508.
   - Anything else compiled to WASM gets the same test.
 - **The frame is 20 ms of 48 kHz mono s16 everywhere.** `TestTheFrameIsOneSizeEverywhere` pins the
-  constants three packages repeat.
+  constants four packages repeat, the controller's since M31.
 - **The device clock drives both directions**: `Device.Capture(ctx, frame)` and `Device.Play(ctx, fill)`.
   - Each OS has a pure-Go backend: PulseAudio on Linux, WASAPI over COM through `syscall`, and
     AudioQueue through `purego`.
@@ -2295,7 +2295,9 @@ And on adaptive bitrate, from M31:
 - **The controller is `voiceworker/internal/congestion`'s, not pion's GCC.**
   - It reads the queue on the uplink from the SFU's transport-wide feedback: each packet's arrival minus
     its departure, against a ten-second minimum.
-  - Loss is its second signal: with a queue standing, or past 25% without one.
+  - Loss is its second signal, in three forms: beside a standing queue, which is the queue overflowing;
+    risen since the last decrease, after a climb, which is the bitrate's doing; and past 25%, which is a
+    policer. The first two are answered by the queue's backoff, the third by going to what it passed.
   - Loss below that sizes the FEC (`Encoder.SetLoss`), never the bitrate.
   - pion v0.1.51's GCC clamps its loss half to 100 kbps and lets a full queue stand. A pion upgrade is not
     a reason to switch back unless it has been measured against the shaper.
@@ -2306,11 +2308,15 @@ And on adaptive bitrate, from M31:
 - **Loss is counted in packets, off the departures the controller keeps**, never in feedbacks and never
   as a faded sum: the window is the newest 150 packets of known outcome, however long the silences between
   them, since a window of seconds never held enough of a conversation's short sentences to judge.
-  - The FEC is sized from the window once it holds ten packets of known outcome, which DTX never fills,
-    and keeps the last loss judged that way.
-  - The bitrate moves on loss, down or up, only on a hundred packets sent since its last decrease, of
-    either kind. Ten could not tell 15% random loss from a policer's 25%, nor 40% from 10%, and a
-    test's fixed seed hid it: run a test of a random link over many seeds before trusting it.
+  - The FEC is sized from the window once it holds ten packets of known outcome, and keeps the last loss
+    judged that way. A call that never got that far has measured nothing, and its close line says so.
+  - **A decrease on loss is decided on a confidence bound** (`count.past`, a Wilson interval) over the
+    packets sent since the last decrease, of either kind, never on a fixed sample. Ten packets could not
+    tell 15% random loss from a policer's 25%; a hundred took seven seconds on a shallow buffer. A test's
+    fixed seed hid the first: run a test of a random link over many seeds before trusting it.
+  - **The climb is judged on the current talk-spurt alone**, its newest 25 packets, and stops where loss
+    rises past the link's own, measured on the first 50 packets after each decrease. A window across a
+    silence let clean speech before it hide loss after it.
   - A packet counted lost and then reported received was reordered, and is unmarked.
   - The FEC is sized for at least `MinLossPercent`, which equals the encoder's starting 5%: libopus
     turns FEC off at 0%.
@@ -2318,7 +2324,9 @@ And on adaptive bitrate, from M31:
 - **The bitrate climbs only while packets flow, by the packets received.** Through DTX the feedback carries
   a comfort-noise update every 400 ms, which says nothing about what speech needs. The spike watched GCC
   climb into a link it did not fit. A climb measured in time since the last feedback credited each
-  sentence with the pause before it; fifty packets received are a second of speech.
+  sentence with the pause before it; fifty packets received are a second of speech, and one feedback is
+  credited with `settle` at most, or a batch of 256 doubles the bitrate. `congestion.Frame` is held to the
+  codec's by `TestTheFrameIsOneSizeEverywhere`.
 - **The controller is applied in `send`, read from the controller by polling.** `adapt` sets the bitrate
   and the loss on a change, under `clocked`, as an encode is. Nothing pushes a target from another
   goroutine: GCC's callback ran each change on a goroutine of its own, out of order.
@@ -2331,7 +2339,8 @@ And on adaptive bitrate, from M31:
   - **What the controller reads:** `congestion.MaxStatuses` packets of one feedback, and each departure it
     recorded only once. A departure it did not record is ignored, so forged feedback moves nothing.
   - **A packet Pion cannot parse is dropped by the guard**, whose parse Pion's interceptors and
-    `readRTCP` then take from the attributes. So a read that fails is the stream's, and `readRTCP` stops.
+    `readRTCP` then take from the attributes. So a read that fails is the stream's, and `readRTCP` stops,
+    saying so in the log unless the call closed it.
   - `TestTheGuardIsUnderPionsInterceptors` holds the guard's place in the chain.
 - **20 ms frames need about 41 kbps of link at the 16 kbps floor** (architecture.md §17). Nothing here
   serves a slower link.

@@ -2144,8 +2144,11 @@ of this section.
       its departure, against the smallest such delay in the last ten seconds.
     - **How it moves:**
       - past 60 ms of queue, it backs off 15%;
-      - under 20 ms, it climbs 15% a second, and only while packets flow;
-      - loss brings it down when a queue is standing, or past 25% with none;
+      - under 20 ms, it climbs 15% a second of speech, credited per packet, while the talk-spurt loses
+        no more than the link's own;
+      - loss brings it down when a queue is standing, when it has risen past the link's own after a
+        climb, or past 25% with none, each judged on a confidence bound over the packets since the last
+        decrease;
       - loss below that sizes the FEC instead, through the shim's new `shim_set_loss`.
     - **Bounds:** the floor is 16 kbps, and the ceiling is the call's 64.
     - **Where the numbering lives:** the sender writes the transport-cc extension itself and notes each
