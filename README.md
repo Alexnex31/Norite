@@ -16,7 +16,7 @@ software.
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
 [![Release](https://img.shields.io/badge/release-v0.1.2-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.2)
-[![Milestone](https://img.shields.io/badge/milestone-M30%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M31%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -44,7 +44,7 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 > [!NOTE]
 > **It is still early, and text only.** Voice calls, DMs, presence and the GUI are not built yet: the server
 > half of a call exists since `M26`, its relay since `M27`, the call's audio on your machine since `M29`, and
-> its noise suppression and echo cancellation since `M30`, but no client can join one until `M33`. The client shows one channel at a time, in plain text, and no third party has reviewed the code. The full scope is
+> its noise suppression and echo cancellation since `M30`, and a bitrate that follows your connection since `M31`, but no client can join one until `M33`. The client shows one channel at a time, in plain text, and no third party has reviewed the code. The full scope is
 > multi-year work — [Status](#status) says exactly what exists.
 
 ---
@@ -73,13 +73,14 @@ message's edit history, a guild's opt-in message recording, message tagging, the
 daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
 the settings file the clients share, a local port for scripts and bots, the daemon as a service you can
 stop, inspect and read the log of, and a client that keeps itself up to date, are done — `M0` through
-`M24`, which completes Phase D. Phase E, voice, has begun, and its first six milestones are done too:
+`M24`, which completes Phase D. Phase E, voice, has begun, and its first seven milestones are done too:
 `M25`, a finding rather than code, which settles on each OS who opens the microphone and how push-to-talk is
 held; `M26`, the server that carries a call's audio between its participants; `M27`, the relay that
 lets a participant whose network refuses UDP reach it; `M28`, the separate program on your machine that
 holds a call, which the daemon starts and stops; `M29`, the call's audio in that program, from your
-microphone to the others' speakers on Linux, Windows and macOS; and `M30`, which cancels the echo of your
-speakers, suppresses the noise around you and evens out your level. The instance can start the server and the relay, off by
+microphone to the others' speakers on Linux, Windows and macOS; `M30`, which cancels the echo of your
+speakers, suppresses the noise around you and evens out your level; and `M31`, which lowers the bitrate
+your voice is sent at when your connection cannot carry it, and raises it again when it can. The instance can start the server and the relay, off by
 default, and none of it is used until `M33` lets a client join a call.**
 
 <details>
@@ -123,6 +124,7 @@ default, and none of it is used until `M33` lets a client join a call.**
 | `M28` | The program that holds a call — `norite-voice`, which the daemon starts when you join a voice channel and stops when you leave, so a problem with audio can only end the call and never your messages; it connects to the call's server itself, is given nothing of your sign-in and none of the daemon's environment, and goes away with the daemon however that ends; `norite voice join`, `leave` and `status`; it ships beside the daemon and updates with it. Joining a real call arrives with `M33`, and its audio with `M29` |
 | `M29` | A call's audio — the voice program captures your microphone and plays the others on Linux, Windows and macOS, with nothing to install and no C compiled into it: the Opus codec runs in WebAssembly, so a malformed packet from another participant is held inside the one decoder it reaches, by wazero's sandbox; a short buffer per speaker smooths a bumpy network, recovers a lost packet from the next one when it can, and adds about a frame of delay when the network is clean; about 40 ms from one microphone to the other speakers, before the devices' own buffers. Joining a real call still arrives with `M33`, and noise suppression and echo cancellation with `M30` |
 | `M30` | A call's sound cleaned up before it leaves your machine — what your speakers play is canceled out of your microphone, so the others do not hear themselves back; the noise around you is suppressed while your voice is kept; and a quiet voice is raised. All three run in WebAssembly beside the codec, for about 5% of a core, and each can be turned off in `config.toml`. Joining a real call still arrives with `M33` |
+| `M31` | A call that keeps up with your connection — the voice program reads, from what the call's server reports back, how long your audio waited on the way out, and lowers the bitrate it sends at when a queue builds or packets are lost, down to 16 kbps, then raises it again once the connection carries it; on a connection limited to 64 kbit/s, your audio waited 28 ms on average rather than 380, and none of it was dropped. Light loss is met with more recovery data instead of a lower bitrate. Joining a real call still arrives with `M33` |
 
 </details>
 

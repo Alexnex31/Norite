@@ -2165,8 +2165,8 @@ of this section.
       the SFU's answer is rewritten to name. M27's `public_addresses` refuses loopback, rightly. The
       speaker reads M30's recording aloud.
     - **With the controller:**
-      - the encoder comes down to 36–37 kbps;
-      - the queue stays at 38–41 ms, with nothing dropped;
+      - the encoder comes down to 35–37 kbps;
+      - the queue stays at 31–41 ms, with nothing dropped;
       - the bitrate is back at 64 once the link lifts.
     - **Without it:** 279 ms of queue and 13% dropped. That run is the proof that the test can see the
       property.
@@ -2197,6 +2197,24 @@ of this section.
     - The feedback costs 20 µs per packet, about nine a second. The whole call's CPU did not move.
   - **The downlink adapts to nothing**, by this entry's own scope. A receiver still gets every slot at its
     sender's bitrate. M34's client-driven subscription is its home (architecture.md §17).
+  - **The manual pass ran in two unprivileged VMs**, the caller's uplink shaped in its own kernel by a
+    `tbf` at 64 kbit/s with a drop-tail queue of about 500 ms.
+    - **For the whole call:**
+
+      | | With the controller | `main`'s worker |
+      |---|---|---|
+      | Opus bitrate | 16–64 kbps, 27 on average | 64 kbps |
+      | Queue | 28 ms on average, 280 at worst | 380 ms on average, 498 at worst |
+      | Dropped | 0 | 651 packets |
+      | Heard at the far end | | about 600 ms later than with it |
+
+    - **Shaped for 20 s and lifted:** the queue reached 486 ms and drained within 3 s, then held at
+      0–80 ms. The rate was back after about 12 s of speech.
+    - **`netem` loss with no queue** left the bitrate at 64 at 5%, and at 55–64 at 15%, where the FEC was
+      sized for the 12% measured.
+    - **Not walked:** a real network such as Wi-Fi under load, macOS and Windows.
+    - **It found the echo canceller keeping a silent caller sending** while another speaks, which is M30's
+      and carried to M35.
 - **M32 — Mic permission, real implementation**: built per M25's finding
   ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §1). There is no handoff: the worker opens the
   device itself and no client ever does. The worker reports the outcome of opening it, and the daemon
@@ -2321,6 +2339,19 @@ of this section.
 
   **What the terminal's own push-to-talk becomes** is settled here with M44. KEYMAP's `C-space (hold)`
   needs a key release, which a terminal sends only with the kitty keyboard protocol's event types.
+
+  **From M31's manual pass: AEC3 keeps a silent caller sending while somebody else speaks.**
+  - **What was seen:** a caller whose microphone gave digital silence sent 87% of its frames in a 42 s
+    call, at about −80 dBFS, which Opus does not take for silence.
+  - **What causes it:** with echo cancellation alone on, it sent 526 packets in 13 s. With it off, or with
+    only noise suppression or gain, it sent 41, DTX's ordinary updates.
+  - **What it costs:** every silent participant sends about 64 kbps while anybody speaks.
+  - **Why no test sees it:** the tests' far end is a tone, under which a silent caller sends 23–37 packets
+    in 6 s with any setting. Speech shows it.
+  - **The likely cause is AEC3's comfort noise.** That was not read.
+  - **This milestone's voice detection is the natural gate:** send on RNNoise's probability, or turn
+    AEC3's comfort noise off. Done when a silent caller in a call with somebody speaking sends no more
+    than DTX's updates, with a far end that is speech and not a tone.
 - **M36 — Voice auto-rejoin**: the "last active voice channel" breadcrumb (the one exception to in-memory
   daemon state), the daemon respawns the worker and rejoins on crash/restart. The respawn is
   `daemon/internal/voiceworker`'s join (M28), and a worker that crashed is already reported as the call's

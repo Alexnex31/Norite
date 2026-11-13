@@ -226,10 +226,11 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
   without it, in CI too, four of them since M31:
   - the two differential tests, which the detector slows eighteenfold through wazero's interpreter;
   - the latency budget, which times the program the detector slows;
-  - M31's shaped-link test, which times a queue and a delay in two real calls. **Needs a running
-  container runtime**: the backend's integration tests
-  start a real Postgres via `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race detector is
-  reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
+  - M31's shaped-link test, which times a queue and a delay in two real calls.
+
+  **Needs a running container runtime**: the backend's integration tests start a real Postgres via
+  `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race
+  detector is reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
 - `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
   substitute for `just test` before pushing.
 - `just lint` — `go vet` + `golangci-lint` per module (frontend ESLint/`tsc --noEmit` at Phase O)
@@ -404,7 +405,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M30 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M31 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -512,6 +513,13 @@ agent never creates a `v*` tag or bumps a version.**
   behind, which brought the stamp back. Its manual pass, in two VMs, found AGC2 raising the echo
   canceller's residue from its default 15 dB, and help naming keys `norite config` refuses. A real room
   with real devices has not been walked.
+- **M31 — Adaptive bitrate and congestion control**: done. A controller of the worker's own in
+  `internal/congestion`, reading the queue on the uplink from the SFU's TWCC feedback, after a spike found
+  pion's GCC unusable for audio; `Encoder.SetLoss` sizing the FEC; `rtcpGuard` bounding the SFU's RTCP
+  before Pion parses it. Its done-when found two bugs in M29's jitter buffer, both fixed. Its manual pass,
+  in two VMs on a kernel-shaped 64 kbit/s link, held the queue at 28 ms against 380 without the controller,
+  and found AEC3 keeping a silent caller sending while another speaks, carried to M35. A real network has
+  not been walked.
 
 ## What keeps coming back
 
@@ -2295,17 +2303,22 @@ And on adaptive bitrate, from M31:
   - The transport-cc extension is written in `send`, beside the audio level, and each departure is noted
     there before a test's `Lossy` drops the packet, so the feedback sees the loss.
   - No congestion interceptor is registered.
-- **Loss is counted in packets, not feedbacks.**
-  - It is judged only once the one-second window holds ten packets, which DTX never fills. That holds for
-    the FEC too: it keeps the last loss judged on a full window.
-  - The bitrate is cut on the loss since the last cut loss made, never again on what it acted on.
-  - A packet counted lost and then reported received was reordered, and is taken back out.
+- **Loss is counted in packets, off the departures the controller keeps**, never in feedbacks and never
+  as a faded sum: the window is the newest 150 packets of known outcome, however long the silences between
+  them, since a window of seconds never held enough of a conversation's short sentences to judge.
+  - The FEC is sized from the window once it holds ten packets of known outcome, which DTX never fills,
+    and keeps the last loss judged that way.
+  - The bitrate moves on loss, down or up, only on a hundred packets sent since its last decrease, of
+    either kind. Ten could not tell 15% random loss from a policer's 25%, nor 40% from 10%, and a
+    test's fixed seed hid it: run a test of a random link over many seeds before trusting it.
+  - A packet counted lost and then reported received was reordered, and is unmarked.
   - The FEC is sized for at least `MinLossPercent`, which equals the encoder's starting 5%: libopus
     turns FEC off at 0%.
   - Symbol 3 (received, no delta) takes no delta, and says nothing of the queue.
-- **The bitrate climbs only while packets flow.** Through DTX the feedback carries a comfort-noise update
-  every 400 ms, which says nothing about what speech needs. The spike watched GCC climb into a link it did
-  not fit.
+- **The bitrate climbs only while packets flow, by the packets received.** Through DTX the feedback carries
+  a comfort-noise update every 400 ms, which says nothing about what speech needs. The spike watched GCC
+  climb into a link it did not fit. A climb measured in time since the last feedback credited each
+  sentence with the pause before it; fifty packets received are a second of speech.
 - **The controller is applied in `send`, read from the controller by polling.** `adapt` sets the bitrate
   and the loss on a change, under `clocked`, as an encode is. Nothing pushes a target from another
   goroutine: GCC's callback ran each change on a goroutine of its own, out of order.
@@ -2317,7 +2330,8 @@ And on adaptive bitrate, from M31:
     - only feedback that carries the bytes its deltas need.
   - **What the controller reads:** `congestion.MaxStatuses` packets of one feedback, and each departure it
     recorded only once. A departure it did not record is ignored, so forged feedback moves nothing.
-  - **A packet Pion cannot parse costs that packet.** `readRTCP` keeps reading.
+  - **A packet Pion cannot parse is dropped by the guard**, whose parse Pion's interceptors and
+    `readRTCP` then take from the attributes. So a read that fails is the stream's, and `readRTCP` stops.
   - `TestTheGuardIsUnderPionsInterceptors` holds the guard's place in the chain.
 - **20 ms frames need about 41 kbps of link at the 16 kbps floor** (architecture.md §17). Nothing here
   serves a slower link.
