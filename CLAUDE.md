@@ -2211,8 +2211,9 @@ And on the audio pipeline, from M29 (ADR 0036):
   - It is a fixed ring of 64. Every sequence and timestamp comparison is a signed difference, so it holds
     across the wrap.
   - A payload is copied out under the lock.
-  - It starts from packets that arrived within the target delay of the newest, which skips a stale DTX
-    update.
+  - It starts from packets that arrived, or are timestamped, within the target delay of the newest, which
+    skips a stale DTX update. The timestamp is M31's, for a link slower than the sender.
+  - A backlog drains in DTX gaps (M31).
   - Its delay:
     - it starts at `MinDelay`, one frame;
     - it deepens to `fecDelay` on its first concealed loss, which FEC needs;
@@ -2278,6 +2279,43 @@ And on the audio DSP, from M30 (ADR 0036 as amended):
   - `recordings` holds the CC0 and public-domain speech and rain, stored as Opus;
   - `harness.joinWith` sets a call's DSP through its join, as the daemon does.
 - **Measuring**: `BenchmarkChain` and `BenchmarkStart` in `internal/dsp`, pinned to one core.
+
+And on adaptive bitrate, from M31:
+
+- **The controller is `voiceworker/internal/congestion`'s, not pion's GCC.**
+  - It reads the queue on the uplink from the SFU's transport-wide feedback: each packet's arrival minus
+    its departure, against a ten-second minimum.
+  - Loss is its second signal: with a queue standing, or past 25% without one.
+  - Loss below that sizes the FEC (`Encoder.SetLoss`), never the bitrate.
+  - pion v0.1.51's GCC clamps its loss half to 100 kbps and lets a full queue stand. A pion upgrade is not
+    a reason to switch back unless it has been measured against the shaper.
+- **The sender numbers its own packets.**
+  - The transport-cc extension is written in `send`, beside the audio level, and each departure is noted
+    there before a test's `Lossy` drops the packet, so the feedback sees the loss.
+  - No congestion interceptor is registered.
+- **The bitrate climbs only while packets flow.** Through DTX the feedback carries a comfort-noise update
+  every 400 ms, which says nothing about what speech needs. The spike watched GCC climb into a link it did
+  not fit.
+- **The controller is applied in `send`, read from the controller by polling.** `adapt` sets the bitrate
+  and the loss on a change, under `clocked`, as an encode is. Nothing pushes a target from another
+  goroutine: GCC's callback ran each change on a goroutine of its own, out of order.
+- **The SFU's RTCP is bounded before it is parsed:**
+  - `session.maxRTCP` packets a second;
+  - `congestion.MaxStatuses` packets of one feedback.
+
+  A departure the controller did not record is ignored, so forged feedback moves nothing.
+- **20 ms frames need about 41 kbps of link at the 16 kbps floor** (architecture.md §17). Nothing here
+  serves a slower link.
+- **The jitter buffer drains a backlog in DTX gaps, and judges freshness by timestamp as well as arrival**
+  (M31's two fixes to M29's buffer). What M31 leaves at the far end is the buffer's depth after a burst of
+  late packets: it sheds a frame every ten seconds.
+- **Testing:**
+  - `congestion_test.go`'s `link` is a token bucket with a drop-tail queue, on the test's clock, whose
+    feedback pion's own `twcc.Recorder` builds as the SFU does.
+  - End to end, `shaper_test.go` is a UDP hop between one caller and the SFU, reached by rewriting the
+    answer's candidate port (`through`).
+  - `TestTheBitrateFollowsAConstrainedLink` runs it with the controller and without (`fixedBitrate`), and
+    asserts at the far end.
 
 And on the first run, from the `easier-setup` branch:
 

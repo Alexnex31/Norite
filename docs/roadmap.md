@@ -2123,8 +2123,9 @@ of this section.
     is 59 to 81, and `TestAGC2StartsFromNoGain` holds it in a room whose delay jumps.
   - **The manual pass ran in two VMs only.** A real room, with real speakers and a microphone, has not
     been walked.
-- **M31 — Adaptive bitrate and congestion control**: `pion/interceptor`'s REMB/TWCC feedback wired into
-  the encoder's runtime bitrate control (M29's shim; `hraban/opus` until M29), audio-only, no simulcast.
+- **M31 — Adaptive bitrate and congestion control**: the SFU's transport-wide (TWCC) feedback wired into
+  the encoder's runtime bitrate control through M29's shim, audio-only, no simulcast. It named REMB beside
+  TWCC until M31, which found nothing that produces one.
   Depends on M26, M29, and M30. Done when:
   a simulated packet-loss/bandwidth-constrained test shows the encoder's bitrate measurably drop and recover
   in response, rather than staying fixed regardless of network conditions. M26 terminates RTCP per hop, so
@@ -2136,6 +2137,62 @@ of this section.
     the jitter buffer paid 20 ms for the 10 saved. Frame size is weighed here, with the bitrate.
   - **Complexity is the cheaper CPU lever.** Complexity 6 brought a call from 8.6% to 7.3% of a core,
     while 8 changed nothing (ADR 0036).
+
+  **As built:**
+  - **The controller is the worker's own** (`voiceworker/internal/congestion`), not pion's GCC.
+    - **How it reads the queue:** it reads the queue each packet waited in, as the packet's arrival minus
+      its departure, against the smallest such delay in the last ten seconds.
+    - **How it moves:**
+      - past 60 ms of queue, it backs off 15%;
+      - under 20 ms, it climbs 15% a second, and only while packets flow;
+      - loss brings it down when a queue is standing, or past 25% with none;
+      - loss below that sizes the FEC instead, through the shim's new `shim_set_loss`.
+    - **Bounds:** the floor is 16 kbps, and the ceiling is the call's 64.
+    - **Where the numbering lives:** the sender writes the transport-cc extension itself and notes each
+      departure. No interceptor is added.
+  - **The spike measured GCC against a UDP shaper and found it unusable for audio** in pion/interceptor
+    v0.1.51.
+    - **Its loss half is inert.** It clamps its own rate to a hardcoded 100 kbps floor, so no loss moved an
+      audio target.
+    - **Its delay half lets a queue stand.** It reads a trend, and a full drop-tail queue has none: under
+      a 64 kbps bucket it left 190 ms of queue, against 214 with no loop.
+    - **Its callback is unordered.** It fires on a new goroutine for each change.
+    - **And the fear that started the spike was wrong the other way round.** GCC's target did not collapse
+      in DTX; it *rose* in silence, from 41 to 70 kbps, into a link carrying 40. So the controller climbs
+      only while packets flow.
+  - **The done-when is `TestTheBitrateFollowsAConstrainedLink`.**
+    - **The setup:** an uplink is shaped to 64 kbps for 20 s and then lifted, through a UDP shaper that
+      the SFU's answer is rewritten to name. M27's `public_addresses` refuses loopback, rightly. The
+      speaker reads M30's recording aloud.
+    - **With the controller:**
+      - the encoder comes down to 36–37 kbps;
+      - the queue stays at 38–41 ms, with nothing dropped;
+      - the bitrate is back at 64 once the link lifts.
+    - **Without it:** 279 ms of queue and 13% dropped. That run is the proof that the test can see the
+      property.
+    - **At the far end:**
+
+      | | Delay added | Frames concealed |
+      |---|---|---|
+      | With the controller | 180–200 ms | 36–38 |
+      | Without | 280 ms | 280–370 |
+
+  - **It found two bugs in M29's jitter buffer, both fixed here.**
+    - **A backlog stayed for the rest of the call.** The packets a draining queue delivered bunched stayed
+      in the buffer, since DTX's comfort-noise updates keep it from running dry: the far end heard the
+      reading 420 ms late. A DTX gap is now cut to the buffer's target.
+    - **A buffer at ten frames never started again on a slow link.** On a link carrying 36 packets a
+      second, it waited for ten arrivals inside eleven frames. Freshness is now judged by timestamp too.
+  - **What the controller leaves is the far end's jitter buffer.** The late packets of the queue's first
+    seconds deepen it a frame each, and it sheds one frame every ten seconds (`shrinkAfter`). That is most
+    of the 180–200 ms.
+  - **20 ms frames cannot go below about 41 kbps on the wire.** Each packet carries 62 bytes that are not
+    Opus (architecture.md §17). Longer frames are the lever for slower links, and they are not built.
+  - **The SFU's RTCP is a stranger's.**
+    - The worker parses 50 packets a second of it at most, and 256 statuses of one feedback.
+    - The feedback costs 20 µs per packet, about nine a second. The whole call's CPU did not move.
+  - **The downlink adapts to nothing**, by this entry's own scope. A receiver still gets every slot at its
+    sender's bitrate. M34's client-driven subscription is its home (architecture.md §17).
 - **M32 — Mic permission, real implementation**: built per M25's finding
   ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md) §1). There is no handoff: the worker opens the
   device itself and no client ever does. The worker reports the outcome of opening it, and the daemon
@@ -2194,6 +2251,11 @@ of this section.
     (`backend/internal/voice/streams.go`), from the other side. The worker's buffer factory counts them
     against its slots. The worker's memory is the machine's, though not the daemon's.
 
+  **From M31:** the channel's bitrate (`channels.bitrate`, since M12) rides in the join to the worker and
+  becomes the controller's ceiling, where M31 can only use the default 64 kbps. The worker's RTCP read is
+  already bounded (`session.maxRTCP`, `congestion.MaxStatuses`), against the instance's SFU as much as
+  the harness's.
+
   The `supports_video: bool` capability field is added to the voice-join payload now
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
@@ -2211,6 +2273,11 @@ of this section.
   speaker, local mute and report, and widening the call state to carry them. Done
   when: `norite voice join/leave/mute/deafen` fully control a session; a test client attached to the daemon
   receives active-speaker updates and can local-mute and report a participant independently of each other.
+
+  **From M31:** a receiver's downlink adapts to nothing. The sender's controller follows its own uplink,
+  per hop, and the SFU forwards every slot at its sender's bitrate. Subscription is where a receiver on a
+  weak link asks for fewer slots (ADR 0023), so it is built here or given an entry of its own
+  (architecture.md §17).
 
   **From M30:**
   - **Mute keeps the DSP running and stops only the sending**, or AEC3 loses its convergence and the first
