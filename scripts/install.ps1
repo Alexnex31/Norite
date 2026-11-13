@@ -78,6 +78,7 @@ function Install-Norite {
     # Local to this function, so running through `iex` leaves the caller's session as it was.
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'   # the progress bar makes Invoke-WebRequest many times slower
+    $setupDone = $false
 
     $repo = 'Alexnex31/Norite'
     # The logon task is the default: M23 registered it only when asked until somebody had watched it work on
@@ -342,11 +343,18 @@ function Install-Norite {
     }
 
     if (-not $NoAccount) {
-        $canAsk = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+        # The command to run again, the link quoted as PowerShell reads it: a quote inside single quotes, the
+        # typographic ones too, is written twice.
+        $again = 'norite setup'
+        if ($Invite) { $again += " '" + [regex]::Replace($Invite, '[''\u2018-\u201B]', '$0$0') + "'" }
+        # A console is what setup asks on. Not [Environment]::UserInteractive, which is false in an SSH
+        # session, whose terminal setup asks on as well as any (easier-setup's manual pass); where nobody is
+        # there, setup refuses and says what would answer it.
+        $canAsk = -not [Console]::IsInputRedirected
         if (-not $canAsk) {
             Say ''
             Say 'No console to ask on, so no account was set up. When you are ready:'
-            if ($Invite) { Say "  norite setup '$Invite'" } else { Say '  norite setup' }
+            Say "  $again"
         }
         else {
             # norite setup asks the questions, and is what the person runs again later: the instance, the
@@ -358,10 +366,8 @@ function Install-Norite {
             if ($NoDaemon) { $setupArgs += '--no-daemon' }
             if ($Invite) { $setupArgs += $Invite }
             & $norite @setupArgs
-            if ($LASTEXITCODE -ne 0) {
-                if ($Invite) { Note "setup did not finish. Run it again with: norite setup '$Invite'" }
-                else { Note 'setup did not finish. Run it again with: norite setup' }
-            }
+            if ($LASTEXITCODE -ne 0) { Note "setup did not finish. Run it again with: $again" }
+            else { $setupDone = $true }
         }
     }
 
@@ -379,7 +385,8 @@ function Install-Norite {
         Say "'norite update mode off' stops the check. 'norite update status' says where it stands."
         Say ''
     }
-    Say "Run 'norite' to open the client, and 'norite --help' for everything else."
+    # setup says it as it finishes, so it is said here only when setup did not run or did not finish.
+    if (-not $setupDone) { Say "Run 'norite' to open the client, and 'norite --help' for everything else." }
 }
 
 Install-Norite -Version $Version -FromSource $FromSource.IsPresent -Release $Release.IsPresent -BinDir $BinDir `

@@ -79,6 +79,9 @@ type Setup struct {
 	openBrowser      func(ctx context.Context, target string) error
 	// pollEvery and waitFor bound the wait for the daemon to take the sign-in up. Zero means the defaults.
 	pollEvery, waitFor time.Duration
+	// unanswered is the account step having said why no daemon answered, which the join then does not say
+	// again (easier-setup's manual pass: the same four lines twice).
+	unanswered bool
 }
 
 // signInAttempts is how many times a sign-in straight after registering is tried: once, then again after
@@ -391,6 +394,7 @@ func (s *Setup) standing(ctx context.Context, instance, userID string, daemon da
 	}
 	c, detach, err := s.attach(ctx, daemon, time.Now().Add(s.wait()))
 	if err != nil {
+		s.unanswered = true
 		return signInUnknown, termsafe.Text(err.Error()), daemonNext
 	}
 	defer detach()
@@ -571,7 +575,11 @@ func (s *Setup) join(ctx context.Context, invite ops.Invite, daemon daemonUp, co
 	}
 	deadline := time.Now().Add(s.wait())
 	c, detach, err := s.attach(ctx, daemon, deadline)
-	if err != nil {
+	switch {
+	case err != nil && s.unanswered:
+		s.printf("%s\n", once)
+		return nil
+	case err != nil:
 		s.printf("%s. %s\n", termsafe.Text(err.Error()), once)
 		return nil
 	}
@@ -601,6 +609,12 @@ func (s *Setup) join(ctx context.Context, invite ops.Invite, daemon daemonUp, co
 	p, err := ops.PreviewInvite(ctx, c, invite)
 	if err != nil {
 		return fmt.Errorf("looking the invite up: %w", err)
+	}
+	// A guild joined already is said and skipped, as every other step done already is: redeeming again
+	// spends nothing, and answers as a first join does. A list that cannot be read asks the question.
+	if in, err := ops.InGuild(ctx, c, invite.Instance, p.Guild.Id); err == nil && in {
+		s.printf("Already in %s.\n", termsafe.Text(p.Guild.Name))
+		return nil
 	}
 	s.printf("%s\n", describePreview(p))
 	if !s.yes("Join it? [Y/n] ", true) {

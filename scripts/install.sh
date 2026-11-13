@@ -223,11 +223,16 @@ setup_daemon() {
 # from the terminal itself.
 have_tty() { (: </dev/tty) 2>/dev/null; }
 
+# shell_word prints $1 as one word to a POSIX shell, in single quotes: for a value in a command to paste.
+shell_word() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
 setup_account() {
+    again="norite setup"
+    [ -n "$invite" ] && again="$again $(shell_word "$invite")"
     if ! have_tty; then
         say ""
         say "No terminal to ask on, so no account was set up. When you are ready:"
-        say "  norite setup${invite:+ '$invite'}"
+        say "  $again"
         return 0
     fi
     # norite setup asks the questions, and is what the person runs again later: the instance, the account,
@@ -238,8 +243,11 @@ setup_account() {
     [ -n "$invite_code" ] && set -- "$@" --invite-code "$invite_code"
     [ "$daemon" = 1 ] || set -- "$@" --no-daemon
     [ -n "$invite" ] && set -- "$@" "$invite"
-    "$norite" "$@" </dev/tty ||
-        warn "setup did not finish. Run it again with: norite setup${invite:+ '$invite'}"
+    if "$norite" "$@" </dev/tty; then
+        setup_done=1
+    else
+        warn "setup did not finish. Run it again with: $again"
+    fi
 }
 
 # ---------- uninstalling ----------
@@ -263,7 +271,7 @@ uninstall() {
 
 main() {
     tag="" mode="" bin_dir="$HOME/.local/bin" instance="" invite_code="" invite=""
-    daemon=1 account=1 require_signature=0 with_server=0 do_uninstall=0 summary=1
+    daemon=1 account=1 require_signature=0 with_server=0 do_uninstall=0 summary=1 setup_done=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -376,7 +384,8 @@ main() {
         say ""
     fi
     if on_path; then
-        say "Run 'norite' to open the client, and 'norite --help' for everything else."
+        # setup says it as it finishes, so it is said here only when setup did not run or did not finish.
+        [ "$setup_done" = 1 ] || say "Run 'norite' to open the client, and 'norite --help' for everything else."
     else
         say "$bin_dir is not on your PATH yet. Add this line to your shell's startup file"
         say "(~/.zshrc on macOS, ~/.bashrc on most Linux), then open a new terminal:"

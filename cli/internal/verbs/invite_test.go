@@ -19,6 +19,7 @@ import (
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
 	"github.com/Alexnex31/Norite/cli/internal/daemonclient"
 	"github.com/Alexnex31/Norite/cli/internal/ops"
+	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
@@ -352,5 +353,23 @@ func TestWhatIsNeitherALinkNorACodeIsRefusedBeforeAttaching(t *testing.T) {
 		var usage *clierr.UsageError
 		require.ErrorAs(t, err, &usage, bad)
 		assert.False(t, attached, bad)
+	}
+}
+
+// TestAnInvitesUsesAreCountedInEnglish: "1 use" and "of 1 use", never "1 uses".
+func TestAnInvitesUsesAreCountedInEnglish(t *testing.T) {
+	for _, tc := range []struct {
+		uses int
+		max  *int
+		want string
+	}{
+		{0, nil, "  0 uses  "}, {1, nil, "  1 use  "}, {2, nil, "  2 uses  "},
+		{0, ptr(1), "  0 of 1 use  "}, {1, ptr(5), "  1 of 5 uses  "},
+	} {
+		inv := apiInvite("90", "BCDFGHJKMNPQRSTV")
+		inv.Uses, inv.MaxUses = tc.uses, tc.max
+		var b bytes.Buffer
+		require.NoError(t, output.Render(&b, false, inviteFrom(inv, "")))
+		assert.Contains(t, b.String(), tc.want)
 	}
 }

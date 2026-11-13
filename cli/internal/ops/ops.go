@@ -82,6 +82,21 @@ func ListGuilds(ctx context.Context, c daemonclient.Caller) ([]apicontract.Guild
 	return out, nil
 }
 
+// InGuild says whether the account is in guildID on instance, from the list of the guilds it is in there.
+// Never from whether it can read the guild: an Instance Admin reads every guild on its instance.
+func InGuild(ctx context.Context, c daemonclient.Caller, instance, guildID string) (bool, error) {
+	var out []apicontract.Guild
+	if err := daemonclient.CallFor(ctx, c, instance, http.MethodGet, "/users/@me/guilds", nil, &out); err != nil {
+		return false, err
+	}
+	for _, g := range out {
+		if g.Id == guildID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ListChannels returns the channels of a guild the account can see, every type of them.
 func ListChannels(ctx context.Context, c daemonclient.Caller, guildID string) ([]apicontract.Channel, error) {
 	if err := checkIDs(guildID); err != nil {

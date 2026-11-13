@@ -154,8 +154,13 @@ func OrNone(s *string) string {
 //
 // On Windows that shell is PowerShell, which the guides and the invite page name, and which writes a quote
 // inside single quotes as two; a POSIX shell closes the quotes, escapes one and opens them again.
-// PowerShell also reads the typographic single quotes as quotes, so each is doubled the same way. Written
-// from PowerShell's quoting rules, and not yet pasted into one: nobody has run this on Windows.
+// PowerShell also reads the typographic single quotes as quotes, so each is doubled the same way.
+//
+// Run in Windows PowerShell 5.1 at easier-setup's manual pass, with each quote, `$(…)`, a backtick, spaces
+// and a link among 24 words: every one read back as the string it quoted. Passed to a program, two did
+// not, which is 5.1's own way of building a command line: a '"' inside a word, and a '\' ending one that
+// holds a space. No link, instance or username holds either; an email address holds a '"' only in a
+// quoted local part.
 func ShellWord(s string) string { return shellWord(runtime.GOOS, s) }
 
 // powerShellQuotes are the characters PowerShell ends a single-quoted string on: the ASCII quote and the

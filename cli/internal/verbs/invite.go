@@ -224,10 +224,18 @@ func inviteFrom(inv apicontract.GuildInvite, instance string) inviteView {
 	return v
 }
 
+// countOf is n and the noun, which is plural but for one (easier-setup's manual pass read "1 uses").
+func countOf(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
+}
+
 func (v inviteView) Text(t *output.Text) {
-	uses := strconv.Itoa(v.Uses) + " uses"
+	uses := countOf(v.Uses, "use")
 	if v.MaxUses != nil {
-		uses = strconv.Itoa(v.Uses) + " of " + strconv.Itoa(*v.MaxUses) + " uses"
+		uses = strconv.Itoa(v.Uses) + " of " + countOf(*v.MaxUses, "use")
 	}
 	by := "a deleted account " + c(v.InviterID)
 	if v.Inviter != nil {

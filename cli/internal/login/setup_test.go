@@ -181,7 +181,8 @@ func newSetupRun(t *testing.T, f *setupInstance, opts SetupOptions, lines, secre
 		}
 		return ""
 	}).On("getCurrentUser", daemontest.OK(apicontract.User{Id: "123", Username: "ada", DisplayName: "ada",
-		Email: "ada@example.com", CreatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}))
+		Email: "ada@example.com", CreatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)})).
+		On("listCurrentUserGuilds", daemontest.OK([]apicontract.Guild{}))
 	run.setup = &Setup{
 		Options: opts, Store: store, Out: run.out, ReadLine: run.lines.read, ReadSecret: run.secrets.read,
 		Interactive: true, Hostname: func() (string, error) { return "ada-laptop", nil },
@@ -760,7 +761,8 @@ func TestTheGuildIsJoinedWhateverTheServiceManagerSays(t *testing.T) {
 }
 
 // TestADaemonThatCannotBeReachedSaysWhy: the attach's own error, such as a version to restart, is the
-// reason given, not that a sign-in was not taken up.
+// reason given, not that a sign-in was not taken up, and given once: the join that follows does not say it
+// again (easier-setup's manual pass).
 func TestADaemonThatCannotBeReachedSaysWhy(t *testing.T) {
 	f := newSetupInstance(t)
 	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, nil, nil)
@@ -770,8 +772,13 @@ func TestADaemonThatCannotBeReachedSaysWhy(t *testing.T) {
 		return nil, nil, clierr.Unavailable("the daemon is version 0.2.0 and this client 0.3.0; restart the daemon")
 	}
 	require.NoError(t, run.setup.Run(context.Background()))
-	assert.Contains(t, run.out.String(), "the daemon could not be reached within 200ms: the daemon is version 0.2.0 "+
-		"and this client 0.3.0; restart the daemon. Join it once the daemon runs")
+	out := run.out.String()
+	why := "the daemon could not be reached within 200ms: the daemon is version 0.2.0 and this client 0.3.0; " +
+		"restart the daemon"
+	assert.Contains(t, out, "Signed in as @ada, as far as this machine knows: "+why+", so whether")
+	assert.Equal(t, 1, strings.Count(out, why), out)
+	assert.Contains(t, out, "\nJoin it once the daemon runs: `norite invite join '"+f.server.URL+
+		"/join#BCDFGHJKMNPQRSTV'`.\n")
 }
 
 // TestFlagsTheSignInCannotUseAreUsageErrors: as `norite login` refuses them, and --invite-code beside a
@@ -891,8 +898,52 @@ func TestADaemonLeftAloneIsAskedOnceAndNotWaitedFor(t *testing.T) {
 	require.NoError(t, run.setup.Run(context.Background()))
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Equal(t, 2, attaches, "once for the stored sign-in, once for the guild")
-	assert.Contains(t, run.out.String(), "no daemon answered (the daemon is not running). Join it once the daemon "+
-		"runs: `norite invite join '"+f.server.URL+"/join#BCDFGHJKMNPQRSTV'`.")
+	out := run.out.String()
+	assert.Equal(t, 1, strings.Count(out, "no daemon answered (the daemon is not running)"), out)
+	assert.Contains(t, out, "\nJoin it once the daemon runs: `norite invite join '"+f.server.URL+
+		"/join#BCDFGHJKMNPQRSTV'`.\n")
+}
+
+// TestAGuildJoinedAlreadyIsSaidAndSkipped: a second run with the same link asks nothing and redeems
+// nothing, where it asked "Join it?" and said "Joined" (easier-setup's manual pass). The list asked is the
+// link's instance's.
+func TestAGuildJoinedAlreadyIsSaidAndSkipped(t *testing.T) {
+	f := newSetupInstance(t)
+	run := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, nil, nil)
+	seed(t, run.store, f.server.URL, "ada")
+	run.service.state = DaemonRunning
+	other := guildNamed("Elsewhere")
+	other.Id = "11"
+	run.daemon.On("previewInvite", daemontest.OK(preview("Tea Room"))).
+		On("listCurrentUserGuilds", daemontest.OK([]apicontract.Guild{other, guildNamed("Tea Room")}))
+
+	asked := map[string]string{}
+	connect := run.setup.Connect
+	run.setup.Connect = func(ctx context.Context) (daemonclient.Caller, func(), error) {
+		c, detach, err := connect(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return naming{c.(daemonclient.InstanceCaller), asked}, detach, nil
+	}
+
+	require.NoError(t, run.setup.Run(context.Background()), run.out.String())
+	assert.Empty(t, run.lines.asked)
+	assert.Empty(t, requestsTo(run.daemon, "redeemInvite"))
+	assert.Equal(t, f.server.URL, asked["/users/@me/guilds"], "the list is the link's instance's")
+	assert.Contains(t, run.out.String(), "\nThe guild\nAlready in Tea Room.\n\nDone\n")
+	assert.NotContains(t, run.out.String(), "Joined")
+
+	// In another guild only, the question is put.
+	again := newSetupRun(t, f, SetupOptions{Invite: f.server.URL + "/join#BCDFGHJKMNPQRSTV"}, []string{""}, nil)
+	seed(t, again.store, f.server.URL, "ada")
+	again.service.state = DaemonRunning
+	again.daemon.On("previewInvite", daemontest.OK(preview("Tea Room"))).
+		On("listCurrentUserGuilds", daemontest.OK([]apicontract.Guild{other})).
+		On("redeemInvite", daemontest.OK(guildNamed("Tea Room")))
+	require.NoError(t, again.setup.Run(context.Background()), again.out.String())
+	assert.Equal(t, []string{"Join it? [Y/n] "}, again.lines.asked)
+	assert.Len(t, requestsTo(again.daemon, "redeemInvite"), 1)
 }
 
 // TestTheJoinWaitsOnOneAttachment: a daemon that has not yet read the sign-in setup stored answers that it
@@ -997,6 +1048,22 @@ func TestARecordNamingNoAccountConfirmsNothing(t *testing.T) {
 }
 
 // dropping is an attachment that ends under the first request made on it.
+// naming records, by path, the instance each request named: "" for one that named none.
+type naming struct {
+	daemonclient.InstanceCaller
+	asked map[string]string
+}
+
+func (n naming) Do(ctx context.Context, method, path string, body any) (ipc.Result, error) {
+	n.asked[path] = ""
+	return n.InstanceCaller.Do(ctx, method, path, body)
+}
+
+func (n naming) DoFor(ctx context.Context, instanceURL, method, path string, body any) (ipc.Result, error) {
+	n.asked[path] = instanceURL
+	return n.InstanceCaller.DoFor(ctx, instanceURL, method, path, body)
+}
+
 type dropping struct{ daemonclient.InstanceCaller }
 
 func (dropping) DoFor(context.Context, string, string, string, any) (ipc.Result, error) {
