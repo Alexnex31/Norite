@@ -395,8 +395,10 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 
 // maxRTCP is how many RTCP packets from the SFU are read for their content each second; the rest are
 // read and dropped. The SFU sends a transport-wide feedback every 100 ms and a sender report every second
-// or so. Reading a feedback costs the controller ~20 µs, and the SFU is a stranger's server (from M33 an
-// instance's), so what it can make the worker spend is bounded here, before anything is parsed.
+// or so. The SFU is a stranger's server (from M33 an instance's), so what it can make the worker spend is
+// bounded here, before anything is parsed. The worst a packet can carry is 58 feedbacks claiming 8,191
+// packets each, which the controller reads 256 of: 52 µs to parse and read, so 2.6 ms a second at the bound
+// (M31's /security-sweep).
 const maxRTCP = 50
 
 // rtcpBudget counts the RTCP packets read in the current second, on the monotonic clock.

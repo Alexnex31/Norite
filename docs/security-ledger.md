@@ -1993,8 +1993,9 @@ carries the condition that would reopen it.
 - **Verdict**: unreachable
 - **Why**: `Lossy` drops outgoing packets and `RelayOnly` forces TURN. Both exist for the end-to-end tests.
   `cmd/norite-voice` sets neither, and nothing in a JOIN or the pipe protocol maps onto them, so no daemon,
-  client or instance can set them.
-- **Reopens if**: a JOIN field, a flag or an environment variable reaches either.
+  client or instance can set them. M31's `fixedBitrate`, which keeps the encoder at its starting bitrate,
+  is unexported, so nothing outside the package can.
+- **Reopens if**: a JOIN field, a flag or an environment variable reaches any of them.
 
 ### An instance a sender took over still makes that sender's audio
 - **Raised**: M29, `/security-sweep`
@@ -2062,6 +2063,58 @@ carries the condition that would reopen it.
 - **Reopens if**: xiph publishes a digest or a signature for the release, which the script then checks,
   or RNNoise moves to a version whose tarball is pinned the same way.
 
+
+## M31 — Adaptive bitrate and congestion control
+
+### The voice server can hold a caller's bitrate at the floor
+- **Raised**: M31, `/security-sweep` (and M31's plan)
+- **Verdict**: accepted risk
+- **Why**: the controller believes the SFU's feedback. A server that reports every packet lost, or reports
+  arrivals that make the queue look long, keeps the caller at 16 kbps for as long as it likes. One that
+  reports none lost and no queue holds the bitrate at the ceiling, the call's own 64 kbps, which is where it
+  starts anyway.
+
+  The server already decides whether the call happens and forwards every packet of it. Degrading it to the
+  floor is less than dropping it, which it can always do. Feedback naming packets the worker never sent
+  moves nothing (`TestFeedbackIsBounded`).
+- **Reopens if**: the controller's output reaches anything but this caller's encoder, or its ceiling comes
+  from somewhere a server sets without a bound (M33 carries the channel's, clamped).
+
+### One RTCP packet can carry 58 feedbacks
+- **Raised**: M31, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `session.maxRTCP` bounds the compound packets parsed each second, not the feedbacks inside one.
+  1,392 bytes hold 58, each claiming 8,191 packets, of which the controller reads `MaxStatuses` (256).
+  Measured: 52 µs to parse and read such a packet, so 2.6 ms of a second at the bound, 0.26% of a core.
+  The decryption Pion does first is the per-packet work M29's entry above already accepts.
+- **Reopens if**: the per-feedback read stops being bounded by `MaxStatuses`, or the bound on packets is
+  raised past a few hundred a second.
+
+### An answer can give the audio level and the transport-wide number one id
+- **Raised**: M31, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: the sender reads each extension's id from the SFU's answer, and writes the transport-wide
+  number after the level. One id for both makes the second overwrite the first in every packet the caller
+  sends. What breaks is the server's own reading of its own call: the level it forwards, or the feedback it
+  sends. The worker writes two bytes it chose, whatever the id.
+- **Reopens if**: the worker reads anything back from its own packets, or an extension's value comes from
+  the server.
+
+### A sender can make the far end skip or delay its own audio
+- **Raised**: M31, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: M31's two changes to the jitter buffer read a sender's sequence numbers and timestamps.
+  - The drain cuts a DTX gap short when the buffer holds more than its target.
+  - Freshness is judged by timestamp as well as arrival.
+
+  A sender lying in either can make its own slot skip, start late or stay silent, which it could do by
+  sending nothing. Each slot's buffer is one sender's (a change of sender clears it), so no sender reaches
+  another's audio.
+
+  The drain scans the ring of 64 once per frame, as `Next` already does. A timestamp past `maxAhead`
+  resyncs the buffer on arrival, so the drain never looks further ahead than that.
+- **Reopens if**: a buffer is shared between senders, or the drain cuts anything but a stretch the sender
+  sent no packet for.
 
 ## easier-setup — the first run and invite links
 

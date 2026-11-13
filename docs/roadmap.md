@@ -2252,7 +2252,10 @@ of this section.
     against its slots. The worker's memory is the machine's, though not the daemon's.
 
   **From M31:** the channel's bitrate (`channels.bitrate`, since M12) rides in the join to the worker and
-  becomes the controller's ceiling, where M31 can only use the default 64 kbps. The worker's RTCP read is
+  becomes the controller's ceiling, where M31 can only use the default 64 kbps. The value is the
+  instance's, so the worker clamps it: under Opus's 510 kbps, which `SetBitrate` refuses past and a refusal
+  ends the call, and under what the SFU's per-track bound (256 kbps, `limits.go`) carries with its headers,
+  past which the SFU drops the caller's track (M31's `/security-sweep`). The worker's RTCP read is
   already bounded (`session.maxRTCP`, `congestion.MaxStatuses`), against the instance's SFU as much as
   the harness's.
 
