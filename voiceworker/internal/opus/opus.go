@@ -67,6 +67,8 @@ type Encoder interface {
 	Encode(pcm []int16, out []byte) (int, error)
 	// SetBitrate changes the bitrate from the next frame on (M31).
 	SetBitrate(bitrate int) error
+	// SetLoss changes the loss, in percent, the encoder sizes its in-band FEC for (M31).
+	SetLoss(percent int) error
 	Close() error
 }
 

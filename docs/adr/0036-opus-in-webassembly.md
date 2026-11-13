@@ -140,7 +140,9 @@ Switching brings back what this record avoids:
   - The APM is C++ with abseil and will be harder. M30 spikes it before choosing.
   - A native APM reads only the local microphone and the decoded far end, not the network's bytes. It
     would still bring back the release problem, and the ledger entry names it.
-- **M31 drives the encoder's bitrate through the shim**, not through `hraban/opus`.
+- **M31 drives the encoder's bitrate through the shim**, not through `hraban/opus`. It drives the loss the
+  in-band FEC is sized for too, through a second export, `shim_set_loss`. The differential test changes
+  both during a stream.
 - **The cgo permission in CLAUDE.md stays** for M30. It is unused while the worker has none.
 - **The codec is only as correct as wazero's compiler for each architecture**, and M29's macOS pass found
   one wrong.

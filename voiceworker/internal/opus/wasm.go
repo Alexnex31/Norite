@@ -75,13 +75,13 @@ func (c *wasmCodec) Close(ctx context.Context) error { return c.rt.Close(ctx) }
 // instance is one module instance, holding one encoder or one decoder, and the two buffers every call
 // passes through: samples, and a packet.
 type instance struct {
-	mod                                    api.Module
-	mem                                    api.Memory
-	newEncoder, setBitrate, encode, newDec api.Function
-	decode                                 api.Function
-	pcm, pkt                               uint32
-	state                                  uint32
-	stack                                  [8]uint64
+	mod                                     api.Module
+	mem                                     api.Memory
+	newEncoder, setBitrate, setLoss, encode api.Function
+	newDec, decode                          api.Function
+	pcm, pkt                                uint32
+	state                                   uint32
+	stack                                   [8]uint64
 }
 
 func (c *wasmCodec) instantiate(ctx context.Context) (*instance, error) {
@@ -93,7 +93,8 @@ func (c *wasmCodec) instantiate(ctx context.Context) (*instance, error) {
 	}
 	in := &instance{mod: mod, mem: mod.Memory()}
 	fns := map[string]*api.Function{"shim_encoder": &in.newEncoder, "shim_set_bitrate": &in.setBitrate,
-		"shim_encode": &in.encode, "shim_decoder": &in.newDec, "shim_decode": &in.decode}
+		"shim_set_loss": &in.setLoss, "shim_encode": &in.encode, "shim_decoder": &in.newDec,
+		"shim_decode": &in.decode}
 	for name, f := range fns {
 		if *f = mod.ExportedFunction(name); *f == nil {
 			_ = mod.Close(ctx)
@@ -238,6 +239,20 @@ func (e *wasmEncoder) SetBitrate(bitrate int) error {
 	}
 	if r != 0 {
 		return codeError("setting the bitrate", r)
+	}
+	return nil
+}
+
+func (e *wasmEncoder) SetLoss(percent int) error {
+	if err := (EncoderOptions{Bitrate: 6000, LossPercent: percent}).check(); err != nil {
+		return err
+	}
+	r, err := e.in.call(context.Background(), e.in.setLoss, uint64(e.in.state), uint64(percent))
+	if err != nil {
+		return fmt.Errorf("opus: setting the loss: %w", err)
+	}
+	if r != 0 {
+		return codeError("setting the loss", r)
 	}
 	return nil
 }
