@@ -4,7 +4,8 @@ This guide takes you from nothing to two or more people talking in Norite, each 
 machine runs the **server**, which everybody connects to; every person, the server's owner included if
 they want to talk, runs the **client** on their own machine.
 
-Set aside about half an hour for the server and five minutes for each person after that. You will type
+Set aside about half an hour for the server and a few minutes for each person after that: once there is
+a guild, everybody else needs one link and one command. You will type
 commands in a terminal throughout; nothing here needs a graphical interface.
 
 **What you get is small on purpose.** Text conversations in guild channels, drawn live in a terminal
@@ -22,10 +23,11 @@ things in ways that need you to start over.
 - [Getting the programs](#getting-the-programs)
 - [Decide how people will reach the server](#decide-how-people-will-reach-the-server)
 - [Part 1 — the server](#part-1--the-server)
-- [Part 2 — each person's machine](#part-2--each-persons-machine)
-- [Part 3 — a guild and an invite](#part-3--a-guild-and-an-invite)
+- [Part 2 — your account, a guild and an invite link](#part-2--your-account-a-guild-and-an-invite-link)
+- [Part 3 — everybody else: one link](#part-3--everybody-else-one-link)
 - [Part 4 — talking](#part-4--talking)
 - [Everyday things](#everyday-things)
+- [Appendix — what `norite setup` does, by hand](#appendix--what-norite-setup-does-by-hand)
 - [When something goes wrong](#when-something-goes-wrong)
 - [What does not work yet](#what-does-not-work-yet)
 
@@ -59,7 +61,11 @@ And the words:
   | Needed when | the instance's registration is `invite` | always, to join a guild somebody else owns |
   | Made by | the administrator, on the server machine | the guild's owner, from any machine |
   | Made with | `norite instance invite create` | `norite invite create CHANNEL_ID` |
-  | Used with | `norite register --invite-code CODE` | the box on the client's home screen |
+  | Comes as | a code | a code, and a **link** naming the instance: `https://chat.example.com/join#CODE` |
+  | Used with | the question `norite setup` asks, or `--invite-code CODE` | `norite setup LINK`, `norite invite join`, or the client's home screen |
+
+  A guild invite never lets somebody create an account on an `invite` instance: that choice is the
+  administrator's, so such an instance needs both.
 
 ## The quick way: the installers
 
@@ -67,13 +73,33 @@ Three scripts in [`scripts/`](../scripts) do most of this guide for you. The res
 do, step by step, and is where to look when one of them stops.
 
 **On each person's machine**, macOS or Linux, this installs the client and the daemon, starts the daemon,
-and offers to create an account or sign in. It replaces [Part 2](#part-2--each-persons-machine):
+and runs `norite setup`, which creates an account or signs in. With an invite link it joins that guild too,
+which is the whole of [Part 3](#part-3--everybody-else-one-link):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh
+# or, with an invite link:
+curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh -s -- --invite 'INVITE-LINK'
 ```
 
-On Windows, it is `install.ps1`; see [Trying the alpha on Windows](trying-the-alpha-on-windows.md).
+**On Windows** it is `install.ps1`, which is PowerShell: type these into a PowerShell window, not cmd, and
+never pipe either script into `sh`, which Windows does not have.
+
+```powershell
+irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1 | iex
+# or, with an invite link:
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Invite 'INVITE-LINK'
+```
+
+[Trying the alpha on Windows](trying-the-alpha-on-windows.md) is the rest of it there.
+
+> **Until `v0.2.0` is released, the account step stops.** The installers install the newest release,
+> and `v0.1.2` has no `norite setup` and does not read invite links, so the step ends with an error from
+> `norite`, such as `unknown command "setup"`. The programs and the daemon are installed all the same.
+> Build from a checkout instead (`./scripts/install.sh`, below, or `just install`), or do
+> [setup's steps by hand](#appendix--what-norite-setup-does-by-hand), joining with
+> `norite invite join CODE`, where the code is the part of the link after `#`. An instance's `/join` page
+> built from a checkout names the same installers, and the same applies to the people it is shown to.
 
 **On the server machine**, Linux with systemd, this sets up the instance. It replaces
 [Part 1](#part-1--the-server), apart from making the address reach the machine, which is the section
@@ -95,6 +121,10 @@ What to know about them:
   after you log out ("lingering"); where that is refused, it says so and gives the one `sudo` command.
 - **From a checkout they build that checkout**, with Go installed: `./scripts/install.sh`, and
   `./scripts/install-server.sh` with the same options. That is the way to use them before a release exists.
+  `just install` builds and installs the client that way and stops short of the account, leaving
+  `norite setup` to run; `just install-server --url URL --docker-postgres` is the server's. A build from a
+  checkout reports the version `dev` and is not checked against the other side's, so keep every machine on
+  the same commit.
 - **A download is checked before it is installed.** Each archive must match the release's `checksums.txt`,
   and with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) installed, that file's
   signature is verified too. Without cosign the script says plainly that the signature was not checked;
@@ -300,114 +330,45 @@ in `instance.toml`, so nobody who merely reaches the server first can claim it.
 Created alice, the administrator of http://192.168.1.20:8080.
 
 Sign in with:
-  norite login --instance http://192.168.1.20:8080
+  norite login --instance 'http://192.168.1.20:8080'
 ```
 
 The administrator is an ordinary account in every other way. To talk from it, do part 2 on whichever
-machine its owner uses, skipping step 5 — the account already exists.
+machine its owner uses: `norite setup` signs it in, answering yes to "Do you already have an account".
 
-## Part 2 — each person's machine
+## Part 2 — your account, a guild and an invite link
 
-Every person does this on their own machine, with only the client archive: no server, no Postgres. On
-Windows, [Trying the alpha on Windows](trying-the-alpha-on-windows.md) covers this part and joining a guild.
+Whoever starts the guild does this, on their own machine. That is often the administrator, whose account
+already exists (step 4), but it can be anybody with an account.
 
-### Step 5 — create an account
+### Step 5 — set up your machine
 
-```sh
-norite register --instance INSTANCE-URL
-```
-
-If the instance's registration is `invite`, add `--invite-code CODE`, with a code the administrator makes
-on the server machine:
+The client installer runs `norite setup` for you (see [the quick way](#the-quick-way-the-installers)). With
+the programs installed some other way, run it yourself:
 
 ```sh
-norite instance invite create --config ./instance.toml
+norite setup --instance INSTANCE-URL
 ```
 
-That prints a code such as `QQQNBQQMGYTMQRMX` that never expires and can be used any number of times,
-unless you add `--max-uses 1` or `--expires-in 48h` (hours and minutes, such as `48h` or `30m`; this command
-does not take days). Codes can be typed in either case, with or without dashes.
+It asks, in order:
 
-`register` asks for:
+1. **Whether you already have an account there.** The administrator does. Anybody else answers no, and is
+   asked for a username (2 to 32 characters: your public `@handle`, which cannot be changed yet), an email
+   address (used to sign in, and seen by nobody else), and a password twice (at least 12 characters, typed
+   without echo). If the instance's registration is `invite`, it also asks for an **instance invite code**,
+   which the administrator makes on the server machine with `norite instance invite create --config
+   ./instance.toml`.
+2. **Your password, to sign in** — but only for an account that already existed: one you have just created
+   is signed in with the password you chose. With a mail relay, the instance first sends a link to confirm
+   the address; open it, then press Enter where `setup` waits.
+3. **Whether to install the daemon**, the background program that keeps you connected. It starts each time
+   you log in to this computer, as you, with no administrator rights. Enter says yes.
 
-- **a username** — 2 to 32 characters. It is your public handle, shown as `@name` next to your messages,
-  and cannot be changed yet;
-- **an email address** — used for sign-in. Nobody else sees it;
-- **a password, twice** — at least 12 characters. Typed without echo, and never accepted as a flag,
-  because a flag shows up in the process list for every user on the machine.
+Every step that is already done is said and skipped, so running `norite setup` again is always safe.
+`--email` saves typing the address, and `--provider google` or `--provider github` signs in through a
+provider instead of a password.
 
-`--display-name` sets the name people see beside your handle; it defaults to the username. Without a mail
-relay the instance answers "Your account is ready. You can sign in now."; with one, it sends a link that
-has to be opened first.
-
-### Step 6 — set up the daemon
-
-```sh
-norite daemon install
-norite daemon start
-```
-
-`install` registers `norite-daemon` with your operating system's service manager — a systemd *user*
-service on Linux, a launchd agent on macOS, a logon task on Windows — so it starts by itself whenever you
-log in. It never needs administrator rights and never runs as a system service: it runs as you, because it
-holds your sign-in. On macOS it is already running after `install`, and it says so.
-
-`norite daemon status` tells you where it stands, and whether it is signed in: it exits 0 when a daemon is
-running, 1 when installed but stopped and 2 when not installed. `norite logs tail` prints the newest lines
-of its log, and `norite logs tail --follow` keeps printing. The log itself is `daemon.log` in
-`~/.local/state/norite/` on Linux and `%LOCALAPPDATA%\Norite\` on Windows, and
-`~/Library/Logs/norite-daemon.log` on macOS.
-
-**Updates.** If you installed with the installer, Norite keeps itself up to date on Linux and on
-Windows; on macOS it tells you about a release and leaves installing it to the installer. Once a day the daemon asks GitHub for this project's list of releases, sending nothing but its own
-version. A newer release is downloaded, its signature is verified on your machine as the one this
-project's release workflow made, and it is installed; the daemon restarts as it. A release that fails the
-check is refused and the version you have keeps running. One that does not stay up after it is installed
-is undone by itself.
-
-- `norite update status` says which version runs and what is known about a newer one.
-- `norite update mode notify` makes it tell you and wait for `norite update apply`.
-- `norite update mode off` stops the daily check.
-- `norite update channel prerelease` also offers alphas, betas and release candidates.
-
-It only ever moves to a version your instance talks to, so it does not jump ahead of the server you are
-signed in to. On macOS, and for any install the installer did not make, it tells you a release is out and
-does not install it: run the installer again.
-
-**On a Linux machine you only reach over SSH**, a service of your account stops when you disconnect.
-`norite daemon install --linger` keeps it running, and starts it at boot. `install` tells you which case
-you are in.
-
-If you skip this step, `norite login` offers to do it when it finishes.
-
-One daemon serves one OS account. Two people sharing a computer use two OS accounts.
-
-### Step 7 — sign in
-
-```sh
-norite login --instance INSTANCE-URL
-```
-
-It asks for your email and password, and stores the sign-in for the daemon:
-
-```
-Signed in as bob on http://192.168.1.20:8080.
-This device is "bobs-laptop"; its credential is stored in the OS keyring.
-```
-
-The credential goes in the operating system's keyring when there is one. On a machine without one — a
-headless Linux box, or over SSH — it goes in a file only your user can read, and the message says so. The
-daemon notices the sign-in by itself within a moment; you do not need to restart it.
-
-`--email` saves typing the address. For scripts, the password can come from the `NORITE_PASSWORD`
-environment variable instead of the prompt.
-
-## Part 3 — a guild and an invite
-
-Whoever creates the guild does this, from their own machine once signed in. Every command here goes
-through the daemon, so it works the same on any machine.
-
-### Step 8 — create a guild and a channel
+### Step 6 — create a guild and a channel
 
 ```sh
 norite guild create --name "Tea Room"
@@ -435,7 +396,7 @@ norite channel create 365082143254118400 --name general
 The first number is the channel's id. `norite guild list` and `norite channel list GUILD_ID` show these
 again whenever you need them, and every command takes `--json` if you would rather script it.
 
-### Step 9 — invite somebody
+### Step 7 — invite people
 
 ```sh
 norite invite create 365082149730123776
@@ -443,24 +404,73 @@ norite invite create 365082149730123776
 
 ```
 PGTQRBXGTCDFFWBH  into channel 365082149730123776  0 uses  expires 2026-10-11 12:26  by alice (@alice) 365082065139400704
+  link  http://192.168.1.20:8080/join#PGTQRBXGTCDFFWBH
 ```
 
-The first word is the code. Send it to the person however you like; it is not a password, but anybody who
-has it can join, so do not post it publicly. By default it lasts a week and can be used any number of
-times:
+**Send the link.** It names the instance and the guild, so it is everything somebody needs; Part 3 is what
+they do with it. It is not a password, but anybody who has it can join, so do not post it publicly. By
+default it lasts a week and can be used any number of times:
 
 - `--expires-in 1d` or `12h` (up to `30d`), or `--expires-in never`, changes how long it lasts;
 - `--max-uses 1` makes it single-use;
-- `norite invite list GUILD_ID` shows the guild's live invites, and `norite invite revoke CODE` ends one.
+- `norite invite list GUILD_ID` shows the guild's live invites with their links, and `norite invite revoke
+  CODE` ends one.
+
+Two things about the link:
+
+- **It is built from the address you signed in with.** If that was `localhost` or `127.0.0.1`, on the
+  server machine itself, the link points everybody else at their own computer, and `invite create` says
+  so. Sign in with the instance URL instead, or send the code with that URL.
+- **It does not create accounts on an `invite` instance.** Whoever has no account there still needs an
+  instance invite code from the administrator, and `setup` asks for it.
 
 Only the guild's owner can create invites to begin with. Letting others do it is a permission the owner
 grants through a role; see `norite role --help`.
 
+## Part 3 — everybody else: one link
+
+Every other person does this on their own machine, with the link from step 7 and nothing else: no
+server, no Postgres.
+
+### Step 8 — install and set up, with the link
+
+On macOS or Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.sh | sh -s -- --invite 'INVITE-LINK'
+```
+
+On Windows, in PowerShell rather than cmd ([Trying the alpha on Windows](trying-the-alpha-on-windows.md)
+has the rest):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Alexnex31/Norite/main/scripts/install.ps1))) -Invite 'INVITE-LINK'
+```
+
+With Norite installed already, by a package manager or otherwise:
+
+```sh
+norite setup 'INVITE-LINK'
+```
+
+Keep the quotes: they stop the shell reading anything in the link. `setup` then:
+
+1. **Shows the instance the link names and asks whether it is the one you meant.** Your account and
+   password go there, so look at the address before pressing Enter.
+2. Creates your account or signs you in, and installs the daemon, as in [step 5](#step-5--set-up-your-machine).
+3. **Shows where the invite leads** — the guild, the channel, who invited you — and joins it when you say
+   yes.
+
+Opened in a browser instead, the link shows a page with these same instructions. The part after `#` is
+the invite, and a browser never sends it, so the page cannot see it and the server is not told who opened
+it.
+
 ## Part 4 — talking
 
-### Step 10 — open the client
+### Step 9 — open the client
 
-Run `norite` with no arguments. It opens full-screen in the terminal, on the home screen:
+Run `norite` with no arguments. It opens full-screen in the terminal, on the home screen, which lists your
+guilds and their channels; a guild `setup` joined is already there. With none yet, it looks like this:
 
 ```
 Norite · signed in as @bob
@@ -470,13 +480,13 @@ YOUR GUILDS
   Redeem an invite below, or start one with `norite guild create --name NAME`.
 
 REDEEM AN INVITE
-  › paste an invite code
-  RET looks the code up; RET again joins
+  › paste an invite code or link
+  RET looks the invite up; RET again joins
 
 RET open · C-n/C-p move · C-x C-c quit · norite about
 ```
 
-**To join with a guild invite**, paste or type the code into the box — it always takes typing — and press
+**To join another guild**, paste its invite link or code into the box — it always takes typing — and press
 Enter. The client looks it up and shows where it leads before doing anything:
 
 ```
@@ -597,8 +607,114 @@ There is no downgrade.
 ### Removing it
 
 On a person's machine: `norite logout`, `norite daemon uninstall`, then delete the binaries and the state
-directory from step 6. On the server: stop it, drop the database (`sudo -u postgres dropdb norite`), and
+directory from [appendix B](#b--set-up-the-daemon), or run the installer again with `--uninstall`. On the server: stop it, drop the database (`sudo -u postgres dropdb norite`), and
 delete the instance directory.
+
+## Appendix — what `norite setup` does, by hand
+
+`norite setup` runs three commands in turn, and each also works alone: from a script, on a machine where
+you would rather do one thing at a time, or to change one thing later. These are they, followed by joining
+a guild.
+
+### A — create an account
+
+```sh
+norite register --instance INSTANCE-URL
+```
+
+If the instance's registration is `invite`, add `--invite-code CODE`, with a code the administrator makes
+on the server machine:
+
+```sh
+norite instance invite create --config ./instance.toml
+```
+
+That prints a code such as `QQQNBQQMGYTMQRMX` that never expires and can be used any number of times,
+unless you add `--max-uses 1` or `--expires-in 48h` (hours and minutes, such as `48h` or `30m`; this command
+does not take days). Codes can be typed in either case, with or without dashes.
+
+`register` asks for:
+
+- **a username** — 2 to 32 characters. It is your public handle, shown as `@name` next to your messages,
+  and cannot be changed yet;
+- **an email address** — used for sign-in. Nobody else sees it;
+- **a password, twice** — at least 12 characters. Typed without echo, and never accepted as a flag,
+  because a flag shows up in the process list for every user on the machine.
+
+`--display-name` sets the name people see beside your handle; it defaults to the username. Without a mail
+relay the instance answers "Your account is ready. You can sign in now."; with one, it sends a link that
+has to be opened first.
+
+### B — set up the daemon
+
+```sh
+norite daemon install
+norite daemon start
+```
+
+`install` registers `norite-daemon` with your operating system's service manager — a systemd *user*
+service on Linux, a launchd agent on macOS, a logon task on Windows — so it starts by itself whenever you
+log in. It never needs administrator rights and never runs as a system service: it runs as you, because it
+holds your sign-in. On macOS it is already running after `install`, and it says so.
+
+`norite daemon status` tells you where it stands, and whether it is signed in: it exits 0 when a daemon is
+running, 1 when installed but stopped and 2 when not installed. `norite logs tail` prints the newest lines
+of its log, and `norite logs tail --follow` keeps printing. The log itself is `daemon.log` in
+`~/.local/state/norite/` on Linux and `%LOCALAPPDATA%\Norite\` on Windows, and
+`~/Library/Logs/norite-daemon.log` on macOS.
+
+**Updates.** If you installed with the installer, Norite keeps itself up to date on Linux and on
+Windows; on macOS it tells you about a release and leaves installing it to the installer. Once a day the daemon asks GitHub for this project's list of releases, sending nothing but its own
+version. A newer release is downloaded, its signature is verified on your machine as the one this
+project's release workflow made, and it is installed; the daemon restarts as it. A release that fails the
+check is refused and the version you have keeps running. One that does not stay up after it is installed
+is undone by itself.
+
+- `norite update status` says which version runs and what is known about a newer one.
+- `norite update mode notify` makes it tell you and wait for `norite update apply`.
+- `norite update mode off` stops the daily check.
+- `norite update channel prerelease` also offers alphas, betas and release candidates.
+
+It only ever moves to a version your instance talks to, so it does not jump ahead of the server you are
+signed in to. On macOS, and for any install the installer did not make, it tells you a release is out and
+does not install it: run the installer again.
+
+**On a Linux machine you only reach over SSH**, a service of your account stops when you disconnect.
+`norite daemon install --linger` keeps it running, and starts it at boot. `install` tells you which case
+you are in.
+
+If you skip this step, `norite login` offers to do it when it finishes.
+
+One daemon serves one OS account. Two people sharing a computer use two OS accounts.
+
+### C — sign in
+
+```sh
+norite login --instance INSTANCE-URL
+```
+
+It asks for your email and password, and stores the sign-in for the daemon:
+
+```
+Signed in as bob on http://192.168.1.20:8080.
+This device is "bobs-laptop"; its credential is stored in the OS keyring.
+```
+
+The credential goes in the operating system's keyring when there is one. On a machine without one — a
+headless Linux box, or over SSH — it goes in a file only your user can read, and the message says so. The
+daemon notices the sign-in by itself within a moment; you do not need to restart it.
+
+`--email` saves typing the address. For scripts, the password can come from the `NORITE_PASSWORD`
+environment variable instead of the prompt.
+
+### D — join a guild
+
+```sh
+norite invite join 'INVITE-LINK'
+```
+
+It takes the link or the code alone, and `norite invite show` says where either leads first. A link for
+another instance than the one this machine is signed in to is refused, and nothing is sent to it.
 
 ## When something goes wrong
 
@@ -610,9 +726,14 @@ delete the instance directory.
 | `the daemon is not running` or `unavailable` | No daemon is answering on this machine. | `norite daemon status`, then `norite daemon start`. `norite logs tail` shows its log. |
 | `the daemon is not signed in; run norite login` | The daemon is running with no sign-in. | `norite login --instance INSTANCE-URL`. |
 | `that email and password did not match an account` | Wrong email or password — or, with a mail relay, an address not confirmed yet. The answer is deliberately the same for all of them. | Check both; look for the confirmation mail. |
-| `this instance takes new accounts by invite` | Registration is `invite`. | Ask the administrator for an instance invite and pass `--invite-code`. |
+| `this instance takes new accounts by invite` | Registration is `invite`. | Ask the administrator for an instance invite; `norite setup` asks for it, and `norite register` takes `--invite-code`. |
+| `the instance did not take the sign-in` straight after `setup` created the account | With a mail relay, the address is not confirmed yet. Or the address already had an account, and this is not its password. | Open the confirmation mail's link and press Enter; or press Ctrl-C and `norite login` with the old password. |
+| `that is for …, and this machine is signed in to …, so nothing was sent` | The link names another instance than the one this machine uses. Nothing was sent. | Check the link. One machine is signed in to one instance at a time; `norite setup LINK` moves it, after asking. |
+| `stopped waiting: …`, then `Join it later` | `setup` stopped waiting to join the guild before the daemon was signed in to the instance as this machine's account. The rest of the line says why: the daemon had not caught up, the instance was busy, or it refused the sign-in. | `norite daemon status`. If it is signed out, `norite login`; then the `norite invite join` command the line ends with. |
+| `an instance URL's path must not be percent-encoded`, or `must not carry a query or a fragment` | The address has a `%` escape in its path, or a `?` or `#`, which would be stored as another address than the one typed. Pasting an invite link where an address is asked for does this. | Type the address alone, without escapes. A link goes to `norite setup` whole. |
+| `invite create` says the link works only on this machine | You signed in through `localhost` or `127.0.0.1`. | Sign in with the instance URL everybody else uses, or send the code with that URL. |
 | `password must be at least 12 characters` | Exactly that. | A longer password; a few words strung together is easiest. |
-| The home screen says `not found` for a code | The code is mistyped, expired, revoked or used up. These look identical on purpose, so codes cannot be guessed. | Ask for a new one — and check it is a *guild* invite, not an instance invite. |
+| `not found` for an invite, on the home screen or from `setup` | The code is mistyped, expired, revoked or used up. These look identical on purpose, so codes cannot be guessed. | Ask for a new one — and check it is a *guild* invite, not an instance invite. |
 | Signing in works, but messages only appear after reopening the channel | Behind a proxy, the live WebSocket connection is not getting through. | Make the proxy forward WebSocket upgrades for `/gateway` (Caddy does without configuration). |
 | `the attach socket path … is N bytes` | You pointed `XDG_STATE_HOME` at a deep directory, and Unix sockets have a path limit. | Use a shorter directory, or unset it. |
 | A warning that the instance is plain HTTP | Your password is about to cross the network unencrypted. | Expected in shape A; in shape B, check you typed `https://`. |

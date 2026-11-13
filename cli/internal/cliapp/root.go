@@ -133,6 +133,8 @@ func New(out, errOut io.Writer) *cli.Command {
 		},
 
 		Commands: append([]*cli.Command{
+			login.SetupCommand(loginDaemon{setup: daemonctl.Setup{Version: Version}},
+				login.Connect(verbs.Daemon(Version))),
 			login.RegisterCommand(),
 			login.Command(loginDaemon{setup: daemonctl.Setup{Version: Version}}),
 			login.LogoutCommand(),

@@ -56,9 +56,12 @@ func (h *hostile) Do(_ context.Context, _, path string, _ any) (ipc.Result, erro
 
 func (h *hostile) Ready() ipc.Ready         { return signedIn("alice") }
 func (h *hostile) Events() <-chan ipc.Event { return nil }
-func (h *hostile) Done() <-chan struct{}    { return nil }
-func (h *hostile) Err() error               { return nil }
-func (h *hostile) Close() error             { return nil }
+func (h *hostile) DoFor(ctx context.Context, _, method, path string, body any) (ipc.Result, error) {
+	return h.Do(ctx, method, path, body)
+}
+func (h *hostile) Done() <-chan struct{} { return nil }
+func (h *hostile) Err() error            { return nil }
+func (h *hostile) Close() error          { return nil }
 
 // TestHomeAsksForNoMoreGuildsThanAnAccountCanBeIn: a listing naming more guilds than any server lets an
 // account join is read up to that bound, and no further guild's channels are asked for.

@@ -19,10 +19,9 @@ package verbs
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
-	"strings"
-	"unicode"
 
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
@@ -128,29 +127,30 @@ func (e *env) attached(ctx context.Context) (daemonclient.Caller, error) {
 	return c, nil
 }
 
+// warnf says something beside a verb's result, on stderr, where --json output is not. A write that fails is
+// a terminal gone away, which nothing here can tell anybody about.
+func (e *env) warnf(format string, args ...any) { _, _ = fmt.Fprintf(e.errOut, format, args...) }
+
 // ---------- arguments ----------
 
 // argsKey is where a command records the ids it takes, for checkArgs to read.
 const argsKey = "ids"
 
 // codeArg is the one positional argument that is not an id: an invite code (M20a), as M10's
-// `instance invite revoke <code>` takes one. Its name is one no id could plausibly be given, since an id
-// declared with it would lose the digits check (M20a's second /code-review).
+// `instance invite revoke <code>` takes one, or since easier-setup the link a code comes in. Its name is one
+// no id could plausibly be given, since an id declared with it would lose the digits check (M20a's second
+// /code-review).
 const codeArg = "invite code"
 
-// maxCodeArg bounds a code as typed. A code is sixteen letters; dashes and spaces a chat client added are
-// the instance's to strip, so the bound is loose, and the instance's own parser decides what is a code.
-const maxCodeArg = 64
-
 // ids declares a command's positional arguments by name, all of them ids except codeArg:
-// `ids("guild", "role")` takes `<guild-id> <role-id>`, and `ids("code")` takes `<code>`.
+// `ids("guild", "role")` takes `<guild-id> <role-id>`, and `ids(codeArg)` takes `<code-or-link>`.
 func ids(names ...string) (usage string, meta map[string]any) {
 	for i, n := range names {
 		if i > 0 {
 			usage += " "
 		}
 		if n == codeArg {
-			usage += "<code>"
+			usage += "<code-or-link>"
 			continue
 		}
 		usage += "<" + n + "-id>"
@@ -174,11 +174,12 @@ func checkArgs(cmd *cli.Command) error {
 	}
 	for i, a := range args {
 		if names[i] == codeArg {
-			// Not shaped here beyond what keeps it a code a person could have pasted: the instance answers
-			// any code it did not issue with one 404, and a second judgement here would be one that drifts.
-			// It goes into a request body, never a path (ADR 0029).
-			if a == "" || len(a) > maxCodeArg || strings.ContainsFunc(a, unicode.IsControl) {
-				return clierr.Usage("%q is not an invite code", output.Clean(a))
+			// Read as ops reads a link or a code, and not shaped further: the instance answers any code it did
+			// not issue with one 404, and a second judgement here would be one that drifts. The code goes into
+			// a request body, never a path (ADR 0029). Whether a link's instance is the one signed in to is
+			// the daemon's to say, when it sends the request (daemonclient.CallFor).
+			if _, err := ops.ParseInvite(a); err != nil {
+				return clierr.Usage("%q: %s", output.Clean(a), err)
 			}
 			continue
 		}

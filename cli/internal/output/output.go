@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -143,6 +145,42 @@ func OrNone(s *string) string {
 		return "-"
 	}
 	return Clean(*s)
+}
+
+// ShellWord is s as one word to the shell a command printed here is pasted into, in single quotes, inside
+// which nothing is read: for a value in a command somebody is told to paste. An IPv6 address in brackets is
+// a pattern to zsh, and an address or an email comes from a person or a link, so it may hold what a shell
+// reads (easier-setup).
+//
+// On Windows that shell is PowerShell, which the guides and the invite page name, and which writes a quote
+// inside single quotes as two; a POSIX shell closes the quotes, escapes one and opens them again.
+// PowerShell also reads the typographic single quotes as quotes, so each is doubled the same way.
+//
+// Run in Windows PowerShell 5.1 at easier-setup's manual pass, with each quote, `$(…)`, a backtick, spaces
+// and a link among 24 words: every one read back as the string it quoted. Passed to a program, two did
+// not, which is 5.1's own way of building a command line: a '"' inside a word, and a '\' ending one that
+// holds a space. No link, instance or username holds either; an email address holds a '"' only in a
+// quoted local part.
+func ShellWord(s string) string { return shellWord(runtime.GOOS, s) }
+
+// powerShellQuotes are the characters PowerShell ends a single-quoted string on: the ASCII quote and the
+// four typographic ones (U+2018 to U+201B).
+const powerShellQuotes = "'\u2018\u2019\u201a\u201b"
+
+func shellWord(goos, s string) string {
+	if goos == "windows" {
+		var b strings.Builder
+		b.WriteByte('\'')
+		for _, r := range s {
+			if strings.ContainsRune(powerShellQuotes, r) {
+				b.WriteRune(r)
+			}
+			b.WriteRune(r)
+		}
+		b.WriteByte('\'')
+		return b.String()
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Writer is where a command prints: its root's writer, or standard output when a tree was built with

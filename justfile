@@ -1,5 +1,11 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+# Every recipe carries a [doc] line, which is what `just --list` shows. Without one it shows the comment line
+# right above the recipe, which in this file is the last line of a paragraph, mid-sentence. This file needs
+# just 1.37 or newer: [doc] exists from 1.27 and wins over that comment from 1.37, and the
+# [positional-arguments] attribute `install` and `install-server` carry exists from 1.29. Before 1.29 the
+# file does not parse at all.
+
 go_modules := "backend cli gui daemon voiceworker"
 
 # Pinned so every machine and CI generate byte-identical code. Bump deliberately, then re-run
@@ -35,10 +41,12 @@ goreleaser_version := "v2.18.2"
 database_url := env_var_or_default("NORITE_DATABASE_URL", "postgres://norite:norite@localhost:5432/norite?sslmode=disable")
 
 # List available recipes.
+[doc("List available recipes.")]
 default:
     @just --list
 
 # Run the full local stack (Postgres, Redis, backend). Frontend joins once it exists (Phase O).
+[doc("Run the full local stack (Postgres, Redis, backend). Frontend joins once it exists (Phase O).")]
 dev:
     docker compose -f docker/docker-compose.yml up --build
 
@@ -56,6 +64,7 @@ dev:
 # It costs about 1.6x, not the 10x the race detector is reputed to: 63s to 103s on the backend, because
 # most of that suite's time is Postgres round trips rather than Go CPU. `just test-short` is still the fast
 # inner loop; this is the thing to run before pushing.
+[doc("Test every Go module with the race detector (needs a container runtime).")]
 test:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -77,6 +86,7 @@ test:
 # Fast inner-loop variant of `test`. Not a substitute for it before pushing.
 
 # Test every Go module, skipping anything that needs a container runtime.
+[doc("Test every Go module, skipping anything that needs a container runtime.")]
 test-short:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -94,6 +104,7 @@ test-short:
 # (Phase O).
 
 # Vet + lint every Go module, in parallel.
+[doc("Vet + lint every Go module, in parallel.")]
 lint:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -115,6 +126,7 @@ lint:
 # and the flagship's Helm pre-upgrade Job take. There is no second implementation to drift.
 
 # Apply pending golang-migrate migrations.
+[doc("Apply pending golang-migrate migrations.")]
 db-migrate:
     cd backend && NORITE_DATABASE_URL="{{database_url}}" go run ./cmd/server -migrate-only
 
@@ -122,12 +134,14 @@ db-migrate:
 # so run this and commit the diff whenever either input changes.
 
 # Regenerate the sqlc query layer in backend/internal/db.
+[doc("Regenerate the sqlc query layer in backend/internal/db.")]
 sqlc-generate:
     cd backend && go run github.com/sqlc-dev/sqlc/cmd/sqlc@{{sqlc_version}} generate
 
 # Run in CI so a schema or query change can't merge without its regenerated code.
 
 # Fail if the committed sqlc output is stale.
+[doc("Fail if the committed sqlc output is stale.")]
 sqlc-check: sqlc-generate
     #!/usr/bin/env bash
     set -euo pipefail
@@ -143,6 +157,7 @@ sqlc-check: sqlc-generate
 # Types only — see backend/oapi-codegen.yaml for why this project does not generate a server. Run this and
 # commit the diff whenever the contract changes, which rule 6 requires to be the same commit as the
 # endpoint it describes.
+[doc("Regenerate backend/apicontract from contracts/openapi.yaml.")]
 contract-generate:
     cd backend && go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@{{oapi_codegen_version}} \
         -config oapi-codegen.yaml ../contracts/openapi.yaml
@@ -151,6 +166,7 @@ contract-generate:
 #
 # The sqlc-check arrangement exactly: generated code is committed so a plain `go build` needs no extra
 # tooling, and that only stays true if a contract change cannot merge without its regenerated code.
+[doc("Fail if the committed contract types are stale.")]
 contract-check: contract-generate
     #!/usr/bin/env bash
     set -euo pipefail
@@ -164,11 +180,13 @@ contract-check: contract-generate
 # Build the voice-worker's Opus module, voiceworker/internal/opus/opus.wasm, from libopus and the pinned
 # wasi-sdk, both checked by hash (ADR 0036). Commit the result. The module is committed so that a plain
 # `go build` needs no C toolchain, and opus-wasm-check is what keeps it the build of what it claims to be.
+[doc("Build the voice-worker's opus.wasm from its pinned sources (ADR 0036). Commit the result.")]
 opus-wasm:
     {{justfile_directory()}}/scripts/build-opus-wasm.sh
 
 # Fail if the committed module is not what the pinned build produces. Run it after opus-wasm has written
 # over the file, so it is the bytes that are compared, not the dates.
+[doc("Fail if the committed opus.wasm is not what the pinned build produces.")]
 opus-wasm-check: opus-wasm
     #!/usr/bin/env bash
     set -euo pipefail
@@ -181,10 +199,12 @@ opus-wasm-check: opus-wasm
 # Build the voice-worker's DSP module, voiceworker/internal/dsp/dsp.wasm, from RNNoise, WebRTC's audio
 # processing module, abseil and the pinned wasi-sdk, each checked by hash (M30, ADR 0036). Commit the
 # result, which is committed for the reason opus.wasm is.
+[doc("Build the voice-worker's dsp.wasm from its pinned sources (M30, ADR 0036). Commit the result.")]
 dsp-wasm:
     {{justfile_directory()}}/scripts/build-dsp-wasm.sh
 
 # Fail if the committed module is not what the pinned build produces, as opus-wasm-check does.
+[doc("Fail if the committed dsp.wasm is not what the pinned build produces.")]
 dsp-wasm-check: dsp-wasm
     #!/usr/bin/env bash
     set -euo pipefail
@@ -196,6 +216,7 @@ dsp-wasm-check: dsp-wasm
 
 # Build dsp.wasm's plain-C twin, and require the committed module, whose RNNoise runs SIMD kernels, to
 # compute exactly what it does. CI runs the same.
+[doc("Require dsp.wasm's SIMD RNNoise to compute exactly what its plain-C twin does.")]
 dsp-simd-check:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -208,6 +229,7 @@ dsp-simd-check:
 # pnpm audit and Trivy join once frontend/ and a Dockerfile exist.
 
 # Run govulncheck and the dependency-license check across every Go module.
+[doc("Run govulncheck and the dependency-license check across every Go module.")]
 security-scan: license-check
     #!/usr/bin/env bash
     set -euo pipefail
@@ -233,6 +255,7 @@ security-scan: license-check
 # already are. Nothing has to be installed, and the version cannot be shadowed: this machine had v1.6.0 in
 # ~/go/bin and a distro-packaged v2.0.1 in /usr/bin, ~/go/bin was on no shell's PATH, and so the recipe
 # silently ran a different version than CI did.
+[doc("Fail if any dependency carries a license outside the allow-list in ADR 0032.")]
 license-check:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -305,6 +328,7 @@ license-check:
 # differently. Without it the committed file and the one CI regenerates hold the same lines in a different
 # order, and the staleness check fails on every push from a machine whose locale differs from the runner's.
 # Running the recipe twice on one machine cannot catch this.
+[doc("Regenerate the committed dependency-license inventory. Commit the diff.")]
 license-inventory:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -337,10 +361,12 @@ license-inventory:
 # Sigstore, through TUF. Commit the diff, and read it: this file is what decides whose signature the
 # updater believes. It is embedded so that verifying a release asks nobody anything, and an embedded root
 # ages, so `trusted-root-check` and CI fail when Sigstore's has moved on.
+[doc("Regenerate the updater's trusted root from Sigstore, through TUF. Read the diff, then commit it.")]
 trusted-root:
     cd daemon && GOWORK=off go run ./internal/updater/rootfetch internal/updater/trusted_root.json
 
 # Fail if the committed trusted root is not Sigstore's current one.
+[doc("Fail if the committed trusted root is not Sigstore's current one.")]
 trusted-root-check:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -355,6 +381,7 @@ trusted-root-check:
     echo "the embedded trusted root is Sigstore's current one"
 
 # Build every released binary via goreleaser, snapshot mode: no archives, no signing, no publishing.
+[doc("Build every released binary via goreleaser, snapshot mode: no archives, no signing, no publishing.")]
 build:
     GOWORK=off go run github.com/goreleaser/goreleaser/v2@{{goreleaser_version}} build --snapshot --clean
 
@@ -362,6 +389,7 @@ build:
 # configuration checked, then every archive for every OS and arch and checksums.txt, into dist/. The tag is
 # signing's first real run (M20a). Then `norite about` from this machine's archive must report a revision
 # that was stamped and that this repository holds, which is the AGPL section 5(d) notice telling the truth.
+[doc("The release short of signing and publishing: every archive into dist/, checked.")]
 release-dry-run:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -427,6 +455,7 @@ release-dry-run:
 # yet is checked too. Without it the recipe passes on exactly the case it is for — somebody has just
 # written a new .go file, runs this, sees green, commits, and CI fails on the file they were told was
 # fine. Untracked-and-ignored paths (bin/, dist/) stay excluded, which is what --exclude-standard buys.
+[doc("Fail if any hand-written Go file is missing its two-line SPDX header (rule 24, ADR 0032).")]
 spdx-check:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -479,6 +508,7 @@ spdx-check:
 # The files live under each module's internal/notices/ because `//go:embed` cannot reach outside the package
 # directory, and cli and daemon both embed theirs. The generator builds what it reads itself, for every
 # release target (.goreleaser.yaml), and reads nothing built here, so this needs no build first.
+[doc("Regenerate every binary's THIRD-PARTY-NOTICES.txt. Commit the diff.")]
 notices:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -501,6 +531,7 @@ notices:
 # will ship under.
 #
 # GOWORK=off for build-standalone's reason: it is what a release build and a single-module consumer both do.
+[doc("Build every binary to ./bin/ with plain `go build`, at paths that do not vary by platform.")]
 build-local:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -516,12 +547,48 @@ build-local:
     build daemon  norite-daemon ./cmd/daemond
     build voiceworker norite-voice ./cmd/norite-voice
 
+# Build this checkout's client and put it where an install goes, so that `norite setup` is all that is left.
+#
+# scripts/install.sh does it, in the mode it takes in a checkout, so programs are placed one way whichever
+# runs: norite, norite-daemon and norite-voice built as a release builds them (no cgo, no workspace) into
+# ~/.local/bin, the daemon registered with the service manager and restarted, and no install receipt. A
+# build of a checkout is not a release, so the daemon's updater never writes a release over it. The account
+# step is left out: that is `norite setup`. Run it again after pulling to replace the build; arguments go to
+# the script (`just install --bin-dir DIR`, `--no-daemon`), and `./scripts/install.sh --uninstall` undoes
+# it. On Windows, scripts/install.ps1 does the same from a checkout.
+#
+# The arguments reach the script as they were given, through "$@": `{{args}}` would join them with spaces
+# and let the shell split them again, so `--bin-dir "My Tools"` became two.
+[doc("Build this checkout's client and install it, so that `norite setup` is all that is left.")]
+[positional-arguments]
+install *args:
+    ./scripts/install.sh --from-source --no-account "$@"
+    @echo
+    @echo "Next: norite setup, with the invite link if you were sent one."
+
+# Build this checkout's server and set an instance up on this machine with it, for the people `just install`
+# and `norite setup` connect. Linux with systemd, or macOS.
+#
+# scripts/install-server.sh does it, building the checkout as install.sh does: norite-server and norite into
+# ~/.local/bin, Postgres in Docker with --docker-postgres, instance.toml in ~/norite-instance, the server as
+# a user service, and the administrator. The first run needs --url, the address the others reach this
+# machine on; `just install-server --url http://192.168.1.20:8080 --docker-postgres` is the usual one. Run it
+# again after pulling: it replaces the programs, restarts the service, and keeps the configuration and the
+# database. To talk from this machine as well, `just install` and `norite setup` after it.
+#
+# The arguments reach the script as they were given, as `just install`'s do.
+[doc("Build this checkout's server and set an instance up on this machine with it (--url URL the first time).")]
+[positional-arguments]
+install-server *args:
+    ./scripts/install-server.sh --from-source "$@"
+
 # Build every module with the workspace switched off.
 #
 # go.work resolves cross-module imports from the checkout, which since M7 hides a module whose own go.mod
 # and go.sum are missing an entry — cli requires daemon now, so a dependency added to daemon is invisible
 # from cli until something builds without the workspace. A release build does. So does anyone consuming one
 # module on its own.
+[doc("Build every module with the workspace switched off.")]
 build-standalone:
     #!/usr/bin/env bash
     set -euo pipefail

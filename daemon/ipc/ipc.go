@@ -46,6 +46,7 @@ package ipc
 import (
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
 )
@@ -261,6 +262,15 @@ type Request struct {
 	Path string `json:"path"`
 	// Body is the JSON to send, or null for none.
 	Body json.RawMessage `json:"body"`
+	// InstanceURL, when set, is the instance the request is meant for (easier-setup): the daemon sends it
+	// only to that one, compared by SameInstance with the sign-in it would send it as, and otherwise answers
+	// RelayOtherInstance having sent nothing. It is how a code from an invite link reaches only the instance
+	// the link names. Checked where the request is performed, it holds across a daemon still starting and a
+	// sign-in that changed after the client attached, which a check against READY could not.
+	//
+	// Left out when empty, so a request that names no instance is the frame it always was. A request to the
+	// daemon itself names none, and the port for scripts takes none.
+	InstanceURL string `json:"instance_url,omitempty"`
 }
 
 // Response is op 101's payload. Exactly one of Status and Error is set: Status when the instance answered,
@@ -274,6 +284,10 @@ type Response struct {
 	Body json.RawMessage `json:"body"`
 	// Error says why the daemon could not perform the request, or is nil.
 	Error *RelayError `json:"error"`
+	// InstanceURL is the instance that answered, with Status, on a relayed request (easier-setup): what a
+	// client builds an invite link from, since READY names none while the daemon is starting. Left out on
+	// an Error, on a request to the daemon itself, and on the port for scripts.
+	InstanceURL string `json:"instance_url,omitempty"`
 }
 
 // RelayError codes.
@@ -297,7 +311,25 @@ const (
 	RelayConflict = "conflict"
 	// RelayFailed: a request to the daemon itself that it tried and could not complete.
 	RelayFailed = "failed"
+	// RelayOtherInstance: the request named an instance (Request.InstanceURL) other than the one the daemon
+	// is signed in to, and nothing was sent.
+	RelayOtherInstance = "other_instance"
 )
+
+// MaxInstanceURL bounds Request.InstanceURL, in characters as the contract counts them: an instance's
+// address is far shorter, and the refusal quotes it.
+const MaxInstanceURL = 2048
+
+// CheckInstanceURL refuses a Request.InstanceURL past MaxInstanceURL, counted in characters as the
+// contract's maxLength counts them: an address may be written in any script, and a bound in bytes would
+// refuse one the contract admits (CLAUDE.md, M15). The relay asks it, and so does daemontest's fake, so the
+// two refuse alike.
+func CheckInstanceURL(instanceURL string) error {
+	if utf8.RuneCountInString(instanceURL) > MaxInstanceURL {
+		return fmt.Errorf("the instance named is longer than %d characters", MaxInstanceURL)
+	}
+	return nil
+}
 
 // ValidMethod reports whether a request may use method: the five the REST API uses, spelled in capitals.
 // One list for the attach socket, the automation port and the command that speaks to it.

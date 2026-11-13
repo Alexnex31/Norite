@@ -6,6 +6,7 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -76,4 +77,20 @@ func TestRenderChoosesThePresentation(t *testing.T) {
 
 	assert.Equal(t, "name: a�[2Jb\n", text.String())
 	assert.JSONEq(t, `{"name":"a\u001b[2Jb"}`, js.String())
+}
+
+// TestAValueInACommandToPasteIsOneWord: an address and an email go into a command a person pastes, quoted
+// so that a shell reads neither, a quote inside included.
+func TestAValueInACommandToPasteIsOneWord(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		assert.Equal(t, `'http://[fd00::1]:8080'`, shellWord(goos, "http://[fd00::1]:8080"))
+		assert.Equal(t, `'it'\''s'`, shellWord(goos, "it's"))
+		assert.Equal(t, `'$(id)'`, shellWord(goos, "$(id)"))
+	}
+	// PowerShell, where a single-quoted string takes no escape but a doubled quote, and reads no $( ).
+	assert.Equal(t, `'http://[fd00::1]:8080'`, shellWord("windows", "http://[fd00::1]:8080"))
+	assert.Equal(t, `'it''s'`, shellWord("windows", "it's"))
+	assert.Equal(t, "'it\u2019\u2019s'", shellWord("windows", "it\u2019s"), "a typographic quote ends one too")
+	assert.Equal(t, `'$(id)'`, shellWord("windows", "$(id)"))
+	assert.Equal(t, shellWord(runtime.GOOS, "it's"), ShellWord("it's"))
 }

@@ -79,6 +79,9 @@ type Result struct {
 	Status int
 	// Body is the instance's JSON body, or nil when it sent none.
 	Body json.RawMessage
+	// InstanceURL is the instance that answered, as the daemon's sign-in names it, or "" from a daemon older
+	// than the field.
+	InstanceURL string
 }
 
 // eventBuffer is how many dispatches the client holds for a consumer that has not taken them yet. Past it
@@ -285,6 +288,17 @@ func (c *Client) Close() error {
 // error: a 404 is an answer, and what it means is the caller's to decide. A *RelayError is the daemon
 // declining or failing to ask; a *CloseError or ErrClosed, the connection ending first.
 func (c *Client) Do(ctx context.Context, method, path string, body any) (Result, error) {
+	return c.DoFor(ctx, "", method, path, body)
+}
+
+// DoFor is Do for a request meant for one instance alone (Request.InstanceURL): the daemon performs it only
+// while signed in to instanceURL, and otherwise answers RelayOtherInstance having sent nothing. An empty
+// instanceURL names none, and is Do.
+//
+// A parameter rather than a value on the context, so that a caller which cannot carry it says so by not
+// having this method (daemonclient.CallFor refuses then), where a context dropped on the way to Do would
+// lose the instance without a word (easier-setup's third /code-review).
+func (c *Client) DoFor(ctx context.Context, instanceURL, method, path string, body any) (Result, error) {
 	var raw json.RawMessage
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -311,7 +325,8 @@ func (c *Client) Do(ctx context.Context, method, path string, body any) (Result,
 		c.mu.Unlock()
 	}
 
-	frame, err := Encode(OpRequest, Request{ID: id, Method: method, Path: path, Body: raw})
+	frame, err := Encode(OpRequest, Request{ID: id, Method: method, Path: path, Body: raw,
+		InstanceURL: instanceURL})
 	if err != nil {
 		forget()
 		return Result{}, err
@@ -354,7 +369,7 @@ func resultOf(id string, resp Response) (Result, error) {
 	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
 		body = nil
 	}
-	return Result{Status: *resp.Status, Body: body}, nil
+	return Result{Status: *resp.Status, Body: body, InstanceURL: resp.InstanceURL}, nil
 }
 
 // write sends one frame, bounded by ctx's deadline. A local socket blocks a write only when the daemon has

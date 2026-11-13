@@ -15,6 +15,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/operatortoken"
 	"github.com/Alexnex31/Norite/cli/internal/apiclient"
 	"github.com/Alexnex31/Norite/cli/internal/clierr"
+	"github.com/Alexnex31/Norite/cli/internal/output"
 	"github.com/Alexnex31/Norite/daemon/credentials"
 )
 
@@ -153,7 +154,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Sanitized on the way out of the response, so the value is safe wherever it goes afterwards — the
 	// boundary rule M7 established (CLAUDE.md rule 19). This one is a name the instance echoed back.
 	r.printf("Created %s, the administrator of %s.\n", apiclient.ForDisplay(account.Username), baseURL)
-	r.printf("\nSign in with:\n  norite login --instance %s\n", baseURL)
+	r.printf("\nSign in with:\n  norite login --instance %s\n", output.ShellWord(baseURL))
 	return nil
 }
 

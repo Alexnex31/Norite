@@ -670,6 +670,49 @@ paths:
               schema:
                 type: string
 
+  /join:
+    # Served at the instance root, not under /api/v1, for the reason /reset is: it is a page a person opens,
+    # not an API a client codegens against. Documented because it is a route the backend serves, and
+    # cmd/server/contract_test.go holds the router and this file to the same set.
+    servers:
+      - url: /
+    get:
+      summary: The page an invite link opens
+      description: >
+        An invite link (easier-setup) is the instance's address, `/join`, and a guild invite code after
+        `#`, such as `https://chat.example.com/join#PGTQRBXGTCDFFWBH`. `norite setup` and `norite invite
+        join` take it whole; opened in a browser instead, it lands here, and this page says how to install
+        Norite and run `norite setup` with the link.
+
+
+        The code is a fragment, which a browser never sends, so this request does not carry it and the page
+        cannot show it: it reaches no request log. The page takes no parameter, reads nothing from the
+        request, and names the instance by its configured `public_base_url`, or not at all. HTML, no
+        script, no form, no authentication.
+      operationId: getJoinPage
+      tags: [guilds]
+      security: []
+      responses:
+        "200":
+          description: >
+            The page, the same for every request. When the instance runs a release, its installer commands
+            pin that release's tag, since before 1.0 a client of another MINOR or pre-release is refused. Also
+            served at `/join/`, a link a chat client makes as readily.
+          content:
+            text/html:
+              schema:
+                type: string
+    head:
+      summary: The page an invite link opens (headers only)
+      description: >
+        Identical to `GET /join` with no body, for the link previewers that ask before they fetch. chi routes
+        methods separately, so it is registered explicitly, as `HEAD /healthz` is.
+      operationId: headJoinPage
+      tags: [guilds]
+      security: []
+      responses:
+        "200":
+          description: The page's headers.
   /reset:
     # Served at the instance root, not under /api/v1: this is a page a person opens from an email, not an
     # API a client codegens against, and putting it under the versioned prefix would imply it moves when
@@ -6406,7 +6449,10 @@ components:
           $ref: "#/components/schemas/Snowflake"
         code:
           type: string
-          description: Sixteen characters of the same alphabet instance invites use.
+          pattern: "^[BCDFGHJKMNPQRSTVWXYZ]{16}$"
+          description: >
+            Sixteen characters of the same alphabet instance invites use. The CLI builds an invite link
+            from it and refuses one that is not this shape.
         guild_id:
           $ref: "#/components/schemas/Snowflake"
         channel_id:
@@ -6442,6 +6488,8 @@ components:
       properties:
         code:
           type: string
+          pattern: "^[BCDFGHJKMNPQRSTVWXYZ]{16}$"
+          description: The invite's code, as `GuildInvite.code` is written.
         expires_at:
           type: [string, "null"]
           format: date-time

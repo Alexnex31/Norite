@@ -342,6 +342,12 @@
             },
             "body": {
               "description": "The JSON to send, or null for none."
+            },
+            "instance_url": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "description": "From easier-setup, and left out when not needed: the instance the request is meant for. The daemon sends the request only while signed in to that instance, compared by scheme, host and port as a connection uses them, and path prefix, and otherwise answers other_instance having sent nothing. It is checked against the sign-in the request would be sent as, after the wait for a daemon still starting. A request under /@daemon/ names none."
             }
           }
         },
@@ -400,7 +406,8 @@
                 },
                 "error": {
                   "$ref": "#/$defs/RelayError"
-                }
+                },
+                "instance_url": false
               }
             }
           ],
@@ -420,6 +427,10 @@
             },
             "error": {
               "description": "Why the daemon could not ask the instance, or null."
+            },
+            "instance_url": {
+              "type": "string",
+              "description": "From easier-setup: the instance that answered, beside a status on a relayed request, as the daemon's sign-in names it. Left out beside an error and on the daemon's own requests."
             }
           }
         },
@@ -448,7 +459,8 @@
             "too_many_requests",
             "too_large",
             "conflict",
-            "failed"
+            "failed",
+            "other_instance"
           ]
         },
         "message": {

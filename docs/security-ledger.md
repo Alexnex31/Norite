@@ -2062,3 +2062,101 @@ carries the condition that would reopen it.
 - **Reopens if**: xiph publishes a digest or a signature for the release, which the script then checks,
   or RNNoise moves to a version whose tarball is pinned the same way.
 
+
+## easier-setup — the first run and invite links
+
+### A link's instance can read as another instance
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: `ops.ParseInvite` takes any host `ParseInstanceURL` takes, so a stranger's link can name
+  `chat.example.com.evil.example` or a name in another script that looks like a known one, and
+  `norite setup` would send a registration or a password there. What stands in the way is the question
+  `setup` asks before anything is sent, which names the link's instance, and the M7 rule that refuses
+  anything unprintable or invisible in it. That is the same defence a typed `--instance` has had since
+  M7, and refusing names in other scripts would refuse the instances whose names are written in them.
+- **Reopens if**: `setup` stops confirming a link's instance, or anything follows a link with nobody
+  asked, such as a URL handler registered for `/join` links.
+
+### An invite link given to `norite setup` is in the process list and the shell history
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: a guild invite code is made to be sent in a message. It is bounded by its own expiry and
+  uses, it joins a guild the inviter chose to open, and it needs an account to spend (M20a). A code
+  another user of the machine reads from the process list is one they could have been sent. The
+  instance's own invite code (`--invite-code`) is a flag on `norite register` since M10 and `setup`
+  asks for it when none is given.
+- **Reopens if**: a link starts carrying anything that grants more than a guild's membership, such as
+  the instance's own invite code or a sign-in.
+
+### The sign-in can change between a verb's attach and its request
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: superseded
+- **Why**: the client compared a link with the instance the daemon named in its READY, so a `norite login`
+  in another terminal landing between the attach and the request sent the code to the new instance. The
+  second `/code-review` moved the check into the relay (`ipc.Request.instance_url`), which compares the
+  link's instance with the credential it is about to send the request with, so a sign-in that changed
+  after the attach is the one checked.
+- **Reopens if**: anything sends an invite's code without naming its instance in the request, or the
+  relay sends a request with another credential than the one it checked, as a retry after a 401 would if
+  it stopped requiring the same instance and generation.
+
+### The invite page tells strangers which commands to run
+- **Raised**: easier-setup, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `GET /join` names upstream's installers, fetched from GitHub over TLS at the instance's release
+  tag, or `main` for a build that is not a release, which check each archive
+  against the cosign identity pinned in them (M20a). It interpolates only `public_base_url` and a release
+  tag that `gatewayproto.ParseVersion` accepted, through `html/template`, and reads nothing from the
+  request. An operator can change what their own page says, which is true of any page an instance serves
+  and gives them nothing they did not already have: they choose where the account's password goes.
+- **Reopens if**: the page names a host other than upstream for an installer, serves an installer itself,
+  or renders anything taken from the request or from a member.
+
+### A final dot makes two instances one to the relay's check
+- **Raised**: easier-setup, third `/security-sweep` and `/code-review`
+- **Verdict**: accepted risk
+- **Why**: `ipc.SameInstance` takes `host.` and `host` for one instance, and under a resolver's search
+  domain the two can be different servers: `norite` reaching `norite.corp`, `norite.` a top-level name.
+  The relay only ever sends to the credential's own instance (`relay.go`'s `send`), never to the spelling
+  a request names, so the most the equivalence can do is send a code made on the dotted server to the
+  other one, and arranging that takes controlling a top-level name with the same label as the host. The
+  one place the comparison chose where a password went, `norite setup` signing in to a link's spelling
+  of the stored instance without asking, now uses the stored spelling.
+- **Reopens if**: anything dials the address a request or a link names after `SameInstance` called it the
+  stored one, or the relay starts sending to `Request.instance_url`.
+
+### `invite create` builds its link from what the relay says answered
+- **Raised**: easier-setup, third `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `Response.instance_url` is the daemon's credential's instance (`relay.go`, `cred.InstanceURL`),
+  which came from `ParseInstanceURL` when the sign-in was stored, never anything the instance answered.
+  The attach socket is the account's own tier (rule 16), and the code beside it must be one a link carries
+  (`ops.InviteLink`).
+- **Reopens if**: the field is ever filled from an instance's answer, or reaches the automation port.
+
+### A daemon that ignored `instance_url` would send the code anywhere
+- **Raised**: easier-setup, third `/security-sweep`
+- **Verdict**: unreachable
+- **Why**: every frame on the socket is decoded with `DisallowUnknownFields` (`ipc/frame.go`), so a daemon
+  without the field refuses the request as malformed and sends nothing, and the handshake refuses a client
+  of another MINOR before any request. A connection with no `DoFor` sends nothing either
+  (`daemonclient.ErrCannotNameInstance`).
+- **Reopens if**: the socket's decoding becomes lenient, or a wrapper implements `DoFor` and drops its
+  instance.
+
+### `other_instance` says which instance the machine is signed in to
+- **Raised**: easier-setup, third `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: only the attach socket answers it, which is the account's own programs (rule 16) and could ask
+  `GET /@daemon/…` or read READY for the same. The automation port closes a connection that sends the
+  field, so a script holding the port's secret never sees the refusal.
+- **Reopens if**: the relay's refusals become reachable from the automation port.
+
+### The guides' way round until v0.2.0 sends a bare code
+- **Raised**: easier-setup, fourth `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: until `v0.2.0` the alpha guides have a person join with `norite invite join CODE`, and a bare
+  code goes to whichever instance the daemon is signed in to, without `instance_url`. The same steps have
+  just signed that daemon in to the link's instance by hand, and `v0.1.2` reads no links, so a bare code
+  is the only way it joins.
+- **Reopens if**: the note outlives `v0.2.0`, or a guide offers a bare code where a link would do.

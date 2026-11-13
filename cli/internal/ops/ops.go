@@ -16,6 +16,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -79,6 +80,21 @@ func ListGuilds(ctx context.Context, c daemonclient.Caller) ([]apicontract.Guild
 		return nil, err
 	}
 	return out, nil
+}
+
+// InGuild says whether the account is in guildID on instance, from the list of the guilds it is in there.
+// Never from whether it can read the guild: an Instance Admin reads every guild on its instance.
+func InGuild(ctx context.Context, c daemonclient.Caller, instance, guildID string) (bool, error) {
+	var out []apicontract.Guild
+	if err := daemonclient.CallFor(ctx, c, instance, http.MethodGet, "/users/@me/guilds", nil, &out); err != nil {
+		return false, err
+	}
+	for _, g := range out {
+		if g.Id == guildID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ListChannels returns the channels of a guild the account can see, every type of them.
@@ -148,21 +164,81 @@ func SendMessage(
 	return out, err
 }
 
-// PreviewInvite says where a code leads. The code goes in the body, never a path (ADR 0029).
-func PreviewInvite(ctx context.Context, c daemonclient.Caller, code string) (apicontract.GuildInvitePreview, error) {
+// ErrNotAnIssuedCode refuses an instance's answer carrying an invite code it would not issue (IssuedCode):
+// the CLI's contract cannot carry it, a link built from it is one ParseInvite refuses, and printed in a
+// command to paste it would be a stranger's text there.
+var ErrNotAnIssuedCode = errors.New("the instance answered with an invite code that is not one it issues")
+
+// CreateInvite makes an invite into channelID and says which instance answered, which its link is built on.
+func CreateInvite(ctx context.Context, c daemonclient.Caller, channelID string,
+	req apicontract.CreateGuildInviteRequest) (inv apicontract.GuildInvite, instance string, err error) {
+	if err := checkIDs(channelID); err != nil {
+		return apicontract.GuildInvite{}, "", err
+	}
+	instance, err = daemonclient.CallFrom(ctx, c, http.MethodPost, "/channels/"+channelID+"/invites", req, &inv)
+	if err != nil {
+		return apicontract.GuildInvite{}, "", err
+	}
+	if !IssuedCode(inv.Code) {
+		return apicontract.GuildInvite{}, "", ErrNotAnIssuedCode
+	}
+	return inv, instance, nil
+}
+
+// ListInvites returns guildID's live invites and which instance answered. An invite whose code the instance
+// would not issue is left out and counted in skipped, rather than failing the listing: a moderator reading
+// it is often about to revoke something, and one bad row must not hide the rest.
+func ListInvites(ctx context.Context, c daemonclient.Caller, guildID string) (invites []apicontract.GuildInvite,
+	instance string, skipped int, err error) {
+	if err := checkIDs(guildID); err != nil {
+		return nil, "", 0, err
+	}
+	var all []apicontract.GuildInvite
+	if instance, err = daemonclient.CallFrom(ctx, c, http.MethodGet, "/guilds/"+guildID+"/invites", nil, &all); err != nil {
+		return nil, "", 0, err
+	}
+	invites = make([]apicontract.GuildInvite, 0, len(all))
+	for _, inv := range all {
+		if !IssuedCode(inv.Code) {
+			skipped++
+			continue
+		}
+		invites = append(invites, inv)
+	}
+	return invites, instance, skipped, nil
+}
+
+// PreviewInvite says where an invite leads. The code goes in the body, never a path (ADR 0029), and only to
+// the instance its link names (daemonclient.CallFor), or for a bare code whichever the daemon is signed in to.
+// An answer naming a code the instance would not issue is ErrNotAnIssuedCode, which stops setup's join and
+// the terminal client's too, though neither shows the code: a code the CLI's own contract refuses is an
+// answer this client cannot vouch for, and before 1.0 an instance and its clients share a MINOR, so a
+// change to the codes' shape arrives with a client that knows it.
+func PreviewInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.GuildInvitePreview, error) {
 	var out apicontract.GuildInvitePreview
-	err := daemonclient.Call(ctx, c, http.MethodPost, "/invites/preview",
-		apicontract.GuildInviteCodeRequest{Code: code}, &out)
+	if err := daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/preview",
+		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out); err != nil {
+		return apicontract.GuildInvitePreview{}, err
+	}
+	if !IssuedCode(out.Code) {
+		return apicontract.GuildInvitePreview{}, ErrNotAnIssuedCode
+	}
+	return out, nil
+}
+
+// JoinInvite joins the guild an invite leads to and returns it. Joining one the account is already in
+// changes nothing and spends no use.
+func JoinInvite(ctx context.Context, c daemonclient.Caller, inv Invite) (apicontract.Guild, error) {
+	var out apicontract.Guild
+	err := daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/redeem",
+		apicontract.GuildInviteCodeRequest{Code: inv.Code}, &out)
 	return out, err
 }
 
-// JoinInvite joins the guild a code leads to and returns it. Joining one the account is already in changes
-// nothing and spends no use.
-func JoinInvite(ctx context.Context, c daemonclient.Caller, code string) (apicontract.Guild, error) {
-	var out apicontract.Guild
-	err := daemonclient.Call(ctx, c, http.MethodPost, "/invites/redeem",
-		apicontract.GuildInviteCodeRequest{Code: code}, &out)
-	return out, err
+// RevokeInvite deletes an invite so it stops working.
+func RevokeInvite(ctx context.Context, c daemonclient.Caller, inv Invite) error {
+	return daemonclient.CallFor(ctx, c, inv.Instance, http.MethodPost, "/invites/revoke",
+		apicontract.GuildInviteCodeRequest{Code: inv.Code}, nil)
 }
 
 // InstanceMeta is the instance's AGPL section 13 offer: its license, and where its running version's source

@@ -42,14 +42,22 @@ func matchesCLISchema(t *testing.T, out, file, def string) {
 // ---------- running a verb ----------
 
 type ran struct {
-	out string
-	err error
+	out    string
+	errOut string
+	err    error
 }
 
 // runVerb runs argv through the real verb tree, attached to f, with stdin answering any question.
 func runVerb(t *testing.T, f *fakeDaemon, stdin string, argv ...string) ran {
 	t.Helper()
-	connect := func(context.Context) (daemonclient.Caller, func(), error) { return f, func() {}, nil }
+	return runWith(t, func(context.Context) (daemonclient.Caller, func(), error) { return f, func() {}, nil },
+		stdin, argv...)
+}
+
+// runWith runs argv through the real verb tree, attached through connect: the one root every test runs a
+// verb under, so a root flag added for one runs for all.
+func runWith(t *testing.T, connect Connector, stdin string, argv ...string) ran {
+	t.Helper()
 	var out, errOut bytes.Buffer
 	root := &cli.Command{
 		Name: "norite", Writer: &out, ErrWriter: &errOut, Reader: strings.NewReader(stdin),
@@ -58,5 +66,5 @@ func runVerb(t *testing.T, f *fakeDaemon, stdin string, argv ...string) ran {
 		Commands:       Commands(connect),
 	}
 	err := root.Run(context.Background(), append([]string{"norite"}, argv...))
-	return ran{out: out.String(), err: err}
+	return ran{out: out.String(), errOut: errOut.String(), err: err}
 }

@@ -279,6 +279,48 @@ func TestASecondAccountJoinsFromHome(t *testing.T) {
 	assert.JSONEq(t, `{"code":"bcdf-ghjk-mnpq-rstv"}`, string(redeemed[0].Body))
 }
 
+// TestALinkJoinsOnlyOnItsOwnInstance: the box takes the link an invite came in, and sends its code to the
+// instance it names; a link for another instance is refused on the status line with nothing sent, since a
+// code is a way into a guild there.
+func TestALinkJoinsOnlyOnItsOwnInstance(t *testing.T) {
+	d := daemontest.New(t)
+	preview := apicontract.GuildInvitePreview{Code: "BCDFGHJKMNPQRSTV",
+		Inviter: &apicontract.PublicUser{Id: "1", Username: "alice", DisplayName: "Alice"}}
+	preview.Guild.Id, preview.Guild.Name = "10", "Guild"
+	preview.Channel.Id, preview.Channel.Name = "20", ptr("general")
+	d.On("listCurrentUserGuilds", daemontest.OK([]apicontract.Guild{})).
+		On("previewInvite", daemontest.OK(preview)).
+		On("redeemInvite", daemontest.OK(guild("10", "Guild")))
+
+	c := drive(t, Options{Dial: func(context.Context) (Session, error) {
+		return d.Attach(signedIn("bob"), true), nil
+	}}, 100, 24)
+	c.shows("NO GUILDS YET")
+	c.typeText("https://other.example/join#BCDFGHJKMNPQRSTV")
+	c.press("enter")
+	c.shows("that is for https://other.example, and this machine is signed in to https://chat.example")
+	for _, r := range d.Requests() {
+		assert.NotContains(t, []string{"previewInvite", "redeemInvite"}, r.Op, "nothing is sent for another instance")
+	}
+
+	c.press("esc")
+	c.typeText("https://chat.example/join#bcdf-ghjk-mnpq-rstv")
+	c.press("enter")
+	c.shows("invited by Alice (@alice)")
+	c.press("enter")
+	c.shows("joined Guild")
+	var sent []string
+	for _, r := range d.Requests() {
+		if r.Op == "previewInvite" || r.Op == "redeemInvite" {
+			sent = append(sent, string(r.Body))
+		}
+	}
+	require.Len(t, sent, 2)
+	for _, body := range sent {
+		assert.JSONEq(t, `{"code":"bcdf-ghjk-mnpq-rstv"}`, body)
+	}
+}
+
 // TestAStrangersTextIsDrawnInert: a message carrying ESC[2J and an OSC title sequence, by an author whose
 // name carries a bidi override, draws as text. Asserted on the frame as drawn, before anything strips it:
 // the frame's own styling is SGR, and neither of these is.
@@ -578,7 +620,7 @@ func TestASignOutForgetsWhatWasDrawn(t *testing.T) {
 	f.d.Drop(&ipc.CloseError{Code: ipc.CloseResync, Reason: "the daemon's sign-in ended"})
 	c.shows("signed out; run `norite login`")
 	assert.NotContains(t, c.screen(), "only bob may read this")
-	c.shows("Sign in with `norite login` to see your guilds")
+	c.shows("Not signed in: `norite setup` signs you in, or creates your account.")
 }
 
 // TestAnotherAccountDoesNotInheritTheScreen: a resync landing on a different account drops the open pane,

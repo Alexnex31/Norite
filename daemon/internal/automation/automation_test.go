@@ -578,6 +578,13 @@ func TestWhatClosesAnIdentifiedConnection(t *testing.T) {
 	extra.send(ipc.OpRequest, map[string]any{"id": "1", "method": "GET", "path": "/users/@me", "body": nil, "token": "nat_other"})
 	assert.Equal(t, ipc.CloseDecodeError, extra.closed().Code)
 
+	// The attach socket's instance_url is a field of ipc.Request and not of this port's frame (easier-setup).
+	named := f.raw()
+	named.identify(f)
+	named.send(ipc.OpRequest, map[string]any{"id": "1", "method": "GET", "path": "/users/@me", "body": nil,
+		"instance_url": "https://chat.example"})
+	assert.Equal(t, ipc.CloseDecodeError, named.closed().Code)
+
 	big := f.raw()
 	big.identify(f)
 	_, err := big.conn.Write([]byte{0x7f, 0xff, 0xff, 0xff})
@@ -737,22 +744,6 @@ func TestATokenIsNotSentToAnInstanceThePortWasNotEnabledFor(t *testing.T) {
 		assert.Contains(t, resp.Error.Message, "norite automation enable")
 	}
 	assert.Len(t, f.seen(), 1)
-}
-
-func TestWhichURLsNameOneInstance(t *testing.T) {
-	assert.True(t, SameInstance("https://chat.example", "https://chat.example/"))
-	assert.True(t, SameInstance("https://Chat.Example/norite", "https://chat.example/norite/"))
-	for _, pair := range [][2]string{
-		{"https://chat.example", "http://chat.example"},
-		{"https://chat.example", "https://chat.example:8443"},
-		{"https://chat.example", "https://chat.example.evil.test"},
-		{"https://chat.example/a", "https://chat.example/b"},
-		{"https://chat.example", ""},
-		{"", ""},
-		{"chat.example", "chat.example"},
-	} {
-		assert.False(t, SameInstance(pair[0], pair[1]), "%q and %q", pair[0], pair[1])
-	}
 }
 
 // TestARequestWhoseIDCouldNotBeEchoedIsNotPerformed: the id goes back in the answer, so one the contract

@@ -439,7 +439,7 @@ var oauthSignupTemplate = template.Must(template.New("oauth-signup").Parse(`<!do
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Choose your username</title>
-<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+<style nonce="{{ .Nonce }}">` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Choose your username</h1>
@@ -464,7 +464,7 @@ var oauthDoneTemplate = template.Must(template.New("oauth-done").Parse(`<!doctyp
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Signed in</title>
-<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+<style nonce="{{ .Nonce }}">` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>You're signed in</h1>
@@ -481,7 +481,7 @@ var oauthErrorTemplate = template.Must(template.New("oauth-error").Parse(`<!doct
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign-in did not complete</title>
-<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+<style nonce="{{ .Nonce }}">` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Sign-in did not complete</h1>
@@ -496,7 +496,7 @@ var oauthCheckEmailTemplate = template.Must(template.New("oauth-check-email").Pa
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Check your email</title>
-<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+<style nonce="{{ .Nonce }}">` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Check your email</h1>
@@ -513,7 +513,7 @@ var oauthMailedDoneTemplate = template.Must(template.New("oauth-mailed-done").Pa
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Your account is ready</title>
-<style nonce="{{ .Nonce }}">` + pageStyle + `</style>
+<style nonce="{{ .Nonce }}">` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Your account is ready</h1>

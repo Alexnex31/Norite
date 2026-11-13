@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 
+	"github.com/Alexnex31/Norite/backend/gatewayproto"
 	"github.com/Alexnex31/Norite/backend/internal/auth"
 	"github.com/Alexnex31/Norite/backend/internal/config"
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
@@ -50,6 +51,10 @@ type routerOptions struct {
 
 	// Gateway serves /gateway. Nil answers 404, which is what the service-less test routers get.
 	Gateway http.Handler
+
+	// Version is the release this binary was built as, meta.Version in main, for the invite page's
+	// installer commands to pin. Empty, as in the test routers, is a build that is not a release.
+	Version string
 }
 
 // authRateLimit is the stricter bucket the unauthenticated auth routes sit behind.
@@ -212,6 +217,22 @@ func newRouter(opts routerOptions) (http.Handler, error) {
 			opts.Auth.VerifyPageRoutes(r)
 		})
 	}
+
+	// The page an invite link opens in a browser (easier-setup), at the root beside /reset for the reason
+	// given there. Mounted whatever is wired, since it needs nothing but the configured address: a route
+	// mounted conditionally is one cmd/server/contract_test.go cannot see. It takes no input and spends
+	// nothing, so the base rate limit the whole chain carries is its bucket.
+	//
+	// HEAD too, for the link previewers that ask before they fetch, and /join/ too, since a chat client
+	// turns `…/join/#CODE` into a link as readily as `…/join#CODE`, and both are links ParseInvite takes.
+	join := guilds.JoinPage{Instance: opts.Config.PublicBaseURL, Release: releaseTag(opts.Version)}
+	r.Group(func(r chi.Router) {
+		r.Use(httpx.HTMLPage)
+		for _, path := range []string{"/join", "/join/"} {
+			r.Method(http.MethodGet, path, join)
+			r.Method(http.MethodHead, path, join)
+		}
+	})
 
 	// The gateway (M18), at the root as docs/architecture.md §2 places it: a WebSocket's protocol version
 	// travels in its handshake (ADR 0033), not in its path.
@@ -458,4 +479,16 @@ func allowedMethods(mux *chi.Mux, path string) string {
 		}
 	}
 	return strings.Join(allowed, ", ")
+}
+
+// releaseTag is the tag a release of version was published under, or "" when version is not a release's:
+// "dev" from a checkout, and a snapshot or a build carrying metadata, which no tag names and an installer
+// pinned to would fail to find (easier-setup's second /code-review). The tag is built from the parsed
+// version, so one reported with its "v" already is not given a second.
+func releaseTag(version string) string {
+	v, err := gatewayproto.ParseVersion(version)
+	if err != nil || strings.Contains(version, "+") || strings.Contains(strings.ToUpper(v.Pre), "SNAPSHOT") {
+		return ""
+	}
+	return "v" + v.String()
 }

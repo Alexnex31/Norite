@@ -53,6 +53,11 @@ condition holds, and not before: an adopter or sponsor in that project, and for 
 versions, a handshake that tolerates an older MINOR, which ADR 0033 gives MAJOR ≥ 1. ADR 0035 states each
 condition.
 
+**The first run** (the `easier-setup` branch, after M30, not a milestone). `norite setup` takes a machine from
+a fresh install to a guild, and the installers run it; an invite link (`https://…/join#CODE`) names its
+instance, so it is all a newcomer is sent, and `GET /join` answers it in a browser. The command tree's half
+of first run is therefore built; screen `5a` (M55) draws it in the client, and `5b`'s box (M57) takes a link.
+
 Read as a long-term, dependency-ordered critical path, not a near-term v1 promise — the accumulated scope
 (custom SFU, custom crypto, native GUI, plugin sandbox, a Kubernetes deployment) is realistically multi-year
 work. Every milestone is scoped to one coherent deliverable, states what it depends on when that is not simply
@@ -2465,7 +2470,8 @@ of this section.
   the retry banner, queued messages marked `◷` in an in-memory outbox flushed in order on reconnect — and the
   Deep Work view with its rule strip, countdown and held-message review. `5b` (empty / first join) rides with
   DMs at M57, its redeem box over the invite routes M20a built, and `5e` (whisper composer) with whispers at
-  M61.
+  M61. `5a` draws `norite setup` (the `easier-setup` branch), which already runs the first run's steps in the
+  command tree: the screen is its progress, not a second flow.
 
   **`5a` is also where a device-code flow that stalls has to say so.** ADR 0029 left one case pending: a
   device flow whose browser half signs in with a provider that will not vouch for the address gets an
@@ -2519,8 +2525,8 @@ of this section.
   milestone's until 2026-10-02, when M20a took them: no route added a guild member, so the first client could
   not be shared. Carries its screens: `1b` (DM — the peer column, verified-device header, `◈` composer) and
   `1c` (group DM, which shows instance-side encryption and **no** `◈`, since E2E is `DM`-only per rule 13),
-  plus `5b` (empty / first join, whose invite-redeem box drives M20a's routes) and the DM entries the M50
-  switcher gains. The rejoin question M13 left here went with the invites, and M20a answered it.
+  plus `5b` (empty / first join, whose invite-redeem box drives M20a's routes and since `easier-setup` takes
+  an invite link) and the DM entries the M50 switcher gains. The rejoin question M13 left here went with the invites, and M20a answered it.
 
   Done when: a user can DM another user.
 - **M58 — Attachments storage**: the pluggable storage interface (local disk default), server-side

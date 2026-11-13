@@ -863,7 +863,7 @@ type GuildInvite struct {
 	// Examples: 7238829238972837423
 	ChannelId Snowflake `json:"channel_id"`
 
-	// Code Sixteen characters of the same alphabet instance invites use.
+	// Code Sixteen characters of the same alphabet instance invites use. The CLI builds an invite link from it and refuses one that is not this shape.
 	Code      string    `json:"code"`
 	CreatedAt time.Time `json:"created_at"`
 
@@ -912,6 +912,8 @@ type GuildInvitePreview struct {
 		Id   Snowflake `json:"id"`
 		Name *string   `json:"name"`
 	} `json:"channel"`
+
+	// Code The invite's code, as `GuildInvite.code` is written.
 	Code      string     `json:"code"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	Guild     struct {

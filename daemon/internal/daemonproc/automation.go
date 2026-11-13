@@ -220,7 +220,7 @@ func (a *automationControl) statusLocked(st statefile.State) ipc.AutomationStatu
 	switch now, err := a.InstanceURL(); {
 	case err != nil:
 		out.Problem = err.Error()
-	case !automation.SameInstance(now, st.AutomationInstance):
+	case !ipc.SameInstance(now, st.AutomationInstance):
 		out.Problem = "the daemon is signed in to " + termsafe.Text(now) + " now, and the port serves only the " +
 			"instance it was turned on for; run `norite automation enable` to use it with this one"
 	}

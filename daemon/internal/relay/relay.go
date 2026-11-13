@@ -42,6 +42,12 @@
 // session and taking the renewed token. The relay does the same, once: session.Source is the only owner of
 // the refresh token, so two clients refreshing at the same moment is one refresh, never two presentations
 // of one rotating token, which reuse detection reads as theft.
+//
+// # A request may name its instance
+//
+// A client sending what belongs to one instance alone, an invite link's code (easier-setup), names that
+// instance in the request, and the relay sends it only while signed in there. The answer to every request
+// it performs names the instance that answered.
 package relay
 
 import (
@@ -125,6 +131,9 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	if req.Body != nil && !json.Valid(req.Body) {
 		return ipc.Failure(ipc.RelayBadRequest, "the request body is not JSON")
 	}
+	if err := ipc.CheckInstanceURL(req.InstanceURL); err != nil {
+		return ipc.Failure(ipc.RelayBadRequest, err.Error())
+	}
 
 	if standing, _ := r.creds.Status(); standing == session.SignedOut {
 		return ipc.Failure(ipc.RelayNotSignedIn, "the daemon is not signed in; run `norite login`")
@@ -132,6 +141,13 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 	cred, failed := r.current(ctx)
 	if failed != nil {
 		return *failed
+	}
+	// Against the credential the request is about to be sent with, once the daemon has one: a daemon still
+	// starting is waited for above, as for any request, and a sign-in that changed since the client attached
+	// is the one asked. The retry below goes only to this same instance.
+	if req.InstanceURL != "" && !ipc.SameInstance(req.InstanceURL, cred.InstanceURL) {
+		return ipc.Failure(ipc.RelayOtherInstance, fmt.Sprintf("that is for %s, and this machine is signed in "+
+			"to %s, so nothing was sent", termsafe.Text(req.InstanceURL), termsafe.Text(cred.InstanceURL)))
 	}
 
 	status, body, err := r.send(ctx, req, target, cred)
@@ -163,7 +179,7 @@ func (r *Relay) Do(ctx context.Context, req ipc.Request) ipc.Response {
 
 	r.log.Debug().Str("method", req.Method).Str("path", termsafe.Text(target.Path)).Int("status", status).
 		Msg("relayed a request")
-	return ipc.Response{Status: &status, Body: body}
+	return ipc.Response{Status: &status, Body: body, InstanceURL: cred.InstanceURL}
 }
 
 // current waits a bounded while for a usable credential.

@@ -41,7 +41,7 @@ var verifyPageTemplate = template.Must(template.New("verify").Parse(`<!doctype h
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Confirm your Norite address</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Confirm your address</h1>
@@ -64,7 +64,7 @@ var verifyDoneTemplate = template.Must(template.New("verify-done").Parse(`<!doct
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Address confirmed</title>
 <style nonce="{{ .Nonce }}">
-` + pageStyle + `</style>
+` + httpx.PageStyle + `</style>
 </head>
 <body>
 <h1>Your address is confirmed</h1>

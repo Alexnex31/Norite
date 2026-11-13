@@ -39,7 +39,8 @@
         "max_uses",
         "uses",
         "expires_at",
-        "created_at"
+        "created_at",
+        "link"
       ],
       "description": "One live invite, its code in full.",
       "properties": {
@@ -102,6 +103,14 @@
         "created_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^https?://[^/?#]+(/[^?#]*)?/join#[BCDFGHJKMNPQRSTVWXYZ]{16}$",
+          "description": "The invite link (easier-setup): the instance that answered, as the daemon's sign-in names it, then /join# and the code, which `norite setup` and `norite invite join` take whole. The code is a fragment, so a browser opening the link never sends it. Null from a daemon older than its answers saying which instance answered, and for an instance whose address no link can carry, such as one stored with a %3F in its path. A code the instance would not issue is refused rather than printed."
         }
       }
     },

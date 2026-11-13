@@ -55,6 +55,32 @@ func HTMLPage(next http.Handler) http.Handler {
 	})
 }
 
+// PageStyle is the stylesheet every server-rendered page shares: the reset, verification and device pages
+// in internal/auth, and since easier-setup the invite page in internal/guilds. Here rather than in either
+// package, so the second shares it rather than copying it.
+//
+// One definition rather than one per page: they are seen by someone who is locked out, half-signed-up or
+// not yet a user, and two copies drifting would mean the pages slowly stop looking like the same product.
+// It is inlined under a per-request nonce rather than served as a file, because a stylesheet at its own URL
+// would need a route, a cache policy, and a CSP source — three things to get right for one screenful of CSS.
+const PageStyle = `
+  body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem;
+         line-height: 1.5; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; }
+  label { display: block; margin-top: 1.5rem; font-weight: 600; }
+  input { width: 100%; padding: 0.6rem; margin-top: 0.4rem; font-size: 1rem;
+          border: 1px solid #bbb; border-radius: 4px; box-sizing: border-box; }
+  button { margin-top: 1.5rem; padding: 0.6rem 1.2rem; font-size: 1rem; border: 0; border-radius: 4px;
+           background: #2b5eaa; color: #fff; cursor: pointer; }
+  code.code { display: inline-block; padding: 0.4rem 0.6rem; background: #eee; border-radius: 4px;
+              font-size: 1.1rem; word-break: break-all; }
+  .note { color: #555; font-size: 0.9rem; }
+  .error { color: #a12; font-weight: 600; }
+  button.deny { background: #a12; }
+  a.provider { display: inline-block; margin: 0.3rem 0.4rem 0 0; padding: 0.6rem 1.2rem;
+               border: 1px solid #2b5eaa; border-radius: 4px; color: #2b5eaa; text-decoration: none; }
+`
+
 // NonceFrom returns the CSP nonce for this request, or "" outside an HTMLPage-wrapped route.
 func NonceFrom(ctx context.Context) string {
 	nonce, _ := ctx.Value(nonceContextKey{}).(string)

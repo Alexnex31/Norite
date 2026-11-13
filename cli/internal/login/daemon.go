@@ -92,10 +92,15 @@ func (r *Runner) daemonAfterSignIn(ctx context.Context) {
 // yes asks a question whose answer does not decide whether the login succeeded. An empty answer is
 // byDefault, and a read that fails is no.
 func (r *Runner) yes(question string, byDefault bool) bool {
-	if r.ReadLine == nil {
+	return yes(r.ReadLine, question, byDefault)
+}
+
+// yes asks question through readLine; an empty answer is byDefault, and no reader or a read that fails is no.
+func yes(readLine func(string) (string, error), question string, byDefault bool) bool {
+	if readLine == nil {
 		return false
 	}
-	line, err := r.ReadLine(question)
+	line, err := readLine(question)
 	if err != nil {
 		return false
 	}
