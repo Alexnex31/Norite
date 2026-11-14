@@ -222,12 +222,15 @@ frontend/      React SPA — the later, tertiary web client (Phase O)
 - `just dev` — run the full local stack (docker-compose: postgres, valkey, backend w/ air; frontend w/ vite
   joins at Phase O)
 - `just test` — every Go module's tests, **with `-race`**, because that is what CI runs and a gate that
-  differs from CI is not a gate. Since M30, three of the voice-worker's tests run after the rest without it,
-  in CI too: the two differential tests, which the detector slows eighteenfold through wazero's
-  interpreter, and the latency budget, which times the program the detector slows. **Needs a running
-  container runtime**: the backend's integration tests
-  start a real Postgres via `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race detector is
-  reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
+  differs from CI is not a gate. Since M30, the voice-worker's timing and differential tests run after the rest
+  without it, in CI too, four of them since M31:
+  - the two differential tests, which the detector slows eighteenfold through wazero's interpreter;
+  - the latency budget, which times the program the detector slows;
+  - M31's shaped-link test, which times a queue and a delay in two real calls.
+
+  **Needs a running container runtime**: the backend's integration tests start a real Postgres via
+  `testcontainers-go`, and since M18 a Valkey for the Redis paths. Costs about 1.6x, not the 10x the race
+  detector is reputed to, since most of that time is Postgres round trips. Frontend tests join at Phase O.
 - `just test-short` — unit tests only, skipping everything container-backed. Fast inner loop, not a
   substitute for `just test` before pushing.
 - `just lint` — `go vet` + `golangci-lint` per module (frontend ESLint/`tsc --noEmit` at Phase O)
@@ -402,7 +405,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M30 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M31 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -510,6 +513,13 @@ agent never creates a `v*` tag or bumps a version.**
   behind, which brought the stamp back. Its manual pass, in two VMs, found AGC2 raising the echo
   canceller's residue from its default 15 dB, and help naming keys `norite config` refuses. A real room
   with real devices has not been walked.
+- **M31 — Adaptive bitrate and congestion control**: done. A controller of the worker's own in
+  `internal/congestion`, reading the queue on the uplink from the SFU's TWCC feedback, after a spike found
+  pion's GCC unusable for audio; `Encoder.SetLoss` sizing the FEC; `rtcpGuard` bounding the SFU's RTCP
+  before Pion parses it. Its done-when found two bugs in M29's jitter buffer, both fixed. Its manual pass,
+  in two VMs on a kernel-shaped 64 kbit/s link, held the queue at 28 ms against 380 without the controller,
+  and found AEC3 keeping a silent caller sending while another speaks, carried to M35. A real network has
+  not been walked.
 
 ## What keeps coming back
 
@@ -2190,7 +2200,7 @@ And on the audio pipeline, from M29 (ADR 0036):
   - `silk/NSQ_del_dec.c` is built at `-Os` until a wazero release carries its #2508.
   - Anything else compiled to WASM gets the same test.
 - **The frame is 20 ms of 48 kHz mono s16 everywhere.** `TestTheFrameIsOneSizeEverywhere` pins the
-  constants three packages repeat.
+  constants the devices, the codec, the jitter buffer, the DSP and, since M31, the controller repeat.
 - **The device clock drives both directions**: `Device.Capture(ctx, frame)` and `Device.Play(ctx, fill)`.
   - Each OS has a pure-Go backend: PulseAudio on Linux, WASAPI over COM through `syscall`, and
     AudioQueue through `purego`.
@@ -2211,8 +2221,9 @@ And on the audio pipeline, from M29 (ADR 0036):
   - It is a fixed ring of 64. Every sequence and timestamp comparison is a signed difference, so it holds
     across the wrap.
   - A payload is copied out under the lock.
-  - It starts from packets that arrived within the target delay of the newest, which skips a stale DTX
-    update.
+  - It starts from packets that arrived, or are timestamped, within the target delay of the newest, which
+    skips a stale DTX update. The timestamp is M31's, for a link slower than the sender.
+  - A backlog drains in DTX gaps (M31).
   - Its delay:
     - it starts at `MinDelay`, one frame;
     - it deepens to `fecDelay` on its first concealed loss, which FEC needs;
@@ -2278,6 +2289,72 @@ And on the audio DSP, from M30 (ADR 0036 as amended):
   - `recordings` holds the CC0 and public-domain speech and rain, stored as Opus;
   - `harness.joinWith` sets a call's DSP through its join, as the daemon does.
 - **Measuring**: `BenchmarkChain` and `BenchmarkStart` in `internal/dsp`, pinned to one core.
+
+And on adaptive bitrate, from M31:
+
+- **The controller is `voiceworker/internal/congestion`'s, not pion's GCC.**
+  - It reads the queue on the uplink from the SFU's transport-wide feedback: each packet's arrival minus
+    its departure, against a ten-second minimum.
+  - Loss is its second signal: past 10% with a queue standing, the queue overflowing, or past 25%
+    without one, a policer. Either cuts the bitrate by half the loss measured.
+  - A buffer under about two packets shows no queue, so its overflow below 25% reads as the link's own
+    (architecture.md §17). M31's fourth and fifth reviews tried a baseline, a risen rule and a
+    confidence bound for it, and each round found how they interacted badly: the fix is a signal that
+    sees it, the delivered rate, which the roadmap carries.
+  - Loss below that sizes the FEC (`Encoder.SetLoss`), never the bitrate.
+  - pion v0.1.51's GCC clamps its loss half to 100 kbps and lets a full queue stand. A pion upgrade is not
+    a reason to switch back unless it has been measured against the shaper.
+- **The sender numbers its own packets.**
+  - The transport-cc extension is written in `send`, beside the audio level, and each departure is noted
+    there before a test's `Lossy` drops the packet, so the feedback sees the loss.
+  - No congestion interceptor is registered.
+- **Loss is counted in packets, off the departures the controller keeps**, never in feedbacks and never
+  as a faded sum: the window is the newest 150 packets of known outcome, however long the silences between
+  them, since a window of seconds never held enough of a conversation's short sentences to judge.
+  - The FEC is sized from the window once it holds ten packets of known outcome, and keeps the last loss
+    judged that way. A call that never got that far has measured nothing, and its close line says so.
+  - **A decrease on loss is judged on 50 packets sent since the last decrease**, of either kind. Ten
+    could not tell 15% random loss from a policer's 25%, and each cut left ten to judge the next on. A
+    test's fixed seed hid it: run a test of a random link over many seeds before trusting it.
+  - **The climb is judged on the current talk-spurt alone**, its newest 25 packets, at most 10% lost. A
+    window across a silence let clean speech before it hide loss after it.
+  - A packet counted lost and then reported received was reordered, and is unmarked.
+  - The FEC is sized for at least `MinLossPercent`, which equals the encoder's starting 5%: libopus
+    turns FEC off at 0%.
+  - Symbol 3 (received, no delta) takes no delta, and says nothing of the queue.
+- **The bitrate climbs only while packets flow, by the packets received.** Through DTX the feedback carries
+  a comfort-noise update every 400 ms, which says nothing about what speech needs. The spike watched GCC
+  climb into a link it did not fit. A climb measured in time since the last feedback credited each
+  sentence with the pause before it; fifty packets received are a second of speech, and one feedback is
+  credited with `settle` at most, or a batch of 256 doubles the bitrate. `congestion.Frame` is held to the
+  codec's by `TestTheFrameIsOneSizeEverywhere`.
+- **The controller is applied in `send`, read from the controller by polling.** `adapt` sets the bitrate
+  and the loss on a change, under `clocked`, as an encode is. Nothing pushes a target from another
+  goroutine: GCC's callback ran each change on a goroutine of its own, out of order.
+- **The SFU's RTCP is bounded before Pion parses it,** by `session.rtcpGuard`. The guard is first in the
+  interceptor chain, so it is the innermost reader. Pion's report interceptors parse every packet in full
+  inside the read, and a feedback claiming 8,191 received packets in two bytes allocates a delta for each.
+  - **What the guard lets through:**
+    - `maxRTCP` packets a second per stream;
+    - only feedback that carries the bytes its deltas need.
+  - **What the controller reads:** `congestion.MaxStatuses` packets of one feedback, and each departure it
+    recorded only once. A departure it did not record is ignored, so forged feedback moves nothing.
+  - **A packet Pion cannot parse is dropped by the guard**, whose parse Pion's interceptors and
+    `readRTCP` then take from the attributes. So a read that fails is the stream's, and `readRTCP` stops,
+    saying so in the log unless the call closed it.
+  - `TestTheGuardIsUnderPionsInterceptors` holds the guard's place in the chain.
+- **20 ms frames need about 41 kbps of link at the 16 kbps floor** (architecture.md §17). Nothing here
+  serves a slower link.
+- **The jitter buffer drains a backlog in DTX gaps, and judges freshness by timestamp as well as arrival**
+  (M31's two fixes to M29's buffer). What M31 leaves at the far end is the buffer's depth after a burst of
+  late packets: it sheds a frame every ten seconds.
+- **Testing:**
+  - `congestion_test.go`'s `link` is a token bucket with a drop-tail queue, on the test's clock, whose
+    feedback pion's own `twcc.Recorder` builds as the SFU does.
+  - End to end, `shaper_test.go` is a UDP hop between one caller and the SFU, reached by rewriting the
+    answer's candidate port (`through`).
+  - `TestTheBitrateFollowsAConstrainedLink` runs it with the controller and without (`fixedBitrate`), and
+    asserts at the far end.
 
 And on the first run, from the `easier-setup` branch:
 

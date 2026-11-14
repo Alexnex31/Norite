@@ -71,8 +71,9 @@ test:
     # The voice-worker's tests of wazero's compiler against its interpreter, and its latency budget, run
     # after the rest and without -race, as CI runs them: the detector makes the DSP's differential test
     # eighteen times slower and can find nothing in one goroutine, beside the other packages they starve the
-    # timing-sensitive call tests, and a timing test under -race measures the race detector (M30).
-    differential='^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget)$'
+    # timing-sensitive call tests, and a timing test under -race measures the race detector (M30). M31's
+    # shaped-link test times a queue and a delay in two real calls at once, and joins them.
+    differential='^(TestTheCompilerAgreesWithTheInterpreter|TestMouthToEarStaysWithinItsBudget|TestTheBitrateFollowsAConstrainedLink)$'
     pids=()
     for m in {{go_modules}}; do
         (cd "$m" && go test ./... -race -skip "$differential" 2>&1 | sed "s/^/[$m] /") &

@@ -16,6 +16,7 @@ package opus
 OpusEncoder *shim_encoder(int, int, int, int, int);
 void shim_encoder_free(OpusEncoder *);
 int shim_set_bitrate(OpusEncoder *, int);
+int shim_set_loss(OpusEncoder *, int);
 int shim_encode(OpusEncoder *, const opus_int16 *, int, unsigned char *, int);
 OpusDecoder *shim_decoder(void);
 void shim_decoder_free(OpusDecoder *);
@@ -90,6 +91,16 @@ func (e *nativeEncoder) SetBitrate(bitrate int) error {
 	}
 	if r := C.shim_set_bitrate(e.e, C.int(bitrate)); r != 0 {
 		return codeError("setting the bitrate", int32(r))
+	}
+	return nil
+}
+
+func (e *nativeEncoder) SetLoss(percent int) error {
+	if err := checkLoss(percent); err != nil {
+		return err
+	}
+	if r := C.shim_set_loss(e.e, C.int(percent)); r != 0 {
+		return codeError("setting the loss", int32(r))
 	}
 	return nil
 }

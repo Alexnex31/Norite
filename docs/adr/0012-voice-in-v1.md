@@ -33,8 +33,9 @@ in a strict, non-negotiable order: **Mic Capture → AEC → RNNoise → AGC →
 would non-linearly distort the signal and break AEC's echo-correlation assumption). The worker holds its own
 direct WebRTC connection to the SFU — actual RTP audio never flows through the daemon, only control
 signaling does, which is what makes the fault isolation real: a media-pipeline bug can only crash the
-worker, never messaging/presence/plugins. `pion/interceptor`'s REMB/TWCC feedback drives adaptive bitrate
-into Opus's runtime control, audio-only, no simulcast.
+worker, never messaging/presence/plugins. The SFU's transport-wide (TWCC) feedback drives adaptive bitrate
+into Opus's runtime control, audio-only, no simulcast (M31, which found no REMB producer and measured pion's
+GCC unfit for audio, so the controller is the worker's own).
 
 An embedded Go TURN server (`pion/turn`, also answering plain STUN) ships in the backend, so self-hosters
 don't need to separately run `coturn`. Voice is a deployment-time opt-out (TURN/SFU need a reachable public
@@ -64,8 +65,10 @@ surfaces mitigate this with a real-time active-speaker indicator plus separate l
 - The daemon respawns the worker and rejoins on crash/restart via a persisted "last active voice channel"
   breadcrumb — the one exception to otherwise-ephemeral daemon state. The client auto-update mechanism must
   defer applying an update while a voice session is active, so it doesn't force a mid-call daemon restart.
-- Prometheus voice/SFU metrics (packet loss, bitrate, jitter) feed the adaptive-bitrate loop directly, not
-  just a dashboard — voice-call-quality problems are notoriously hard to debug from logs alone.
+- Prometheus voice/SFU metrics (packet loss, bitrate, jitter) are a real v1 requirement, since
+  voice-call-quality problems are notoriously hard to debug from logs alone. They observe the
+  adaptive-bitrate loop and do not feed it: the loop runs in each client's worker, from its own hop's
+  feedback, and the metrics are the server's (corrected at M31).
 
 ## Alternatives considered
 - **LiveKit** (external SFU process): rejected — stepping outside the all-Go ecosystem for a component this

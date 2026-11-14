@@ -6,6 +6,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"sync"
@@ -109,6 +110,11 @@ type media struct {
 	// skipped counts the frames send processed and did not encode for being behind, dropped those the
 	// queue lost before send took them.
 	skipped, dropped atomic.Int64
+	// The bitrate and the loss the encoder is set to, send's alone, and what the bitrate was over the
+	// frames sent, for the close's log line.
+	bitrate, lossPercent    int
+	rateMin, rateMax, rateN int
+	rateSum                 int64
 
 	// mu is held by every decode and by the mix, so that closing the codec never pulls an instance out
 	// from under a call in progress.
@@ -160,7 +166,9 @@ func (s *Session) startMedia(ctx context.Context) error {
 	// ready, so it never holds back a call's first words.
 	m := &media{s: s, codec: codec, track: s.track, lossy: s.opts.Lossy,
 		frames: make(chan captureFrame, captureBacklog), stop: make(chan struct{}), base: time.Now()}
-	if m.enc, err = codec.NewEncoder(ctx, opus.DefaultEncoderOptions()); err != nil {
+	eo := opus.DefaultEncoderOptions()
+	m.bitrate, m.lossPercent = eo.Bitrate, eo.LossPercent
+	if m.enc, err = codec.NewEncoder(ctx, eo); err != nil {
 		m.closeDSP()
 		_ = codec.Close(ctx)
 		return err
@@ -289,7 +297,7 @@ func (m *media) captured(pcm []int16) {
 // found every packet late and played silence (M30 /code-review).
 func (m *media) send() {
 	defer m.sent.Done()
-	var seq uint16
+	var seq, twseq uint16
 	talking, skipped, behind := false, false, 0
 	out := make([]byte, opus.MaxPacket)
 	for {
@@ -323,6 +331,10 @@ func (m *media) send() {
 			continue
 		}
 		skipped = false
+		if err := m.adapt(); err != nil {
+			m.s.end(voiceipc.CutReason("the encoder could not be adjusted to the network: " + err.Error()))
+			return
+		}
 		var n int
 		err := m.clocked(&m.encoding, func() (e error) { n, e = m.enc.Encode(pcm, out); return })
 		if err != nil {
@@ -344,12 +356,52 @@ func (m *media) send() {
 				_ = p.SetExtension(id, b)
 			}
 		}
+		// Numbered and noted as sent before a test's loss drops it, so that the feedback sees the gap, as it
+		// would a packet the network lost.
+		if id := m.s.twccID(); id != 0 {
+			_ = p.SetExtension(id, []byte{byte(twseq >> 8), byte(twseq)})
+			m.s.cc.Sent(twseq, time.Now())
+			twseq++
+		}
+		m.noteRate()
 		if m.lossy != nil && m.lossy() {
 			continue
 		}
 		// An error is a track not yet bound or already closed; the call's own state says which.
 		_ = m.track.WriteRTP(&p)
 	}
+}
+
+// adapt sets the encoder to the bitrate and the loss the controller asks for, when either has changed.
+// Each is a call into the codec's instance, so the watchdog bounds it as it bounds an encode.
+func (m *media) adapt() error {
+	if m.s.opts.fixedBitrate {
+		return nil
+	}
+	b, l := m.s.cc.Target()
+	if b != m.bitrate {
+		if err := m.clocked(&m.encoding, func() error { return m.enc.SetBitrate(b) }); err != nil {
+			return err
+		}
+		m.bitrate = b
+	}
+	if l != m.lossPercent {
+		if err := m.clocked(&m.encoding, func() error { return m.enc.SetLoss(l) }); err != nil {
+			return err
+		}
+		m.lossPercent = l
+	}
+	return nil
+}
+
+// noteRate counts the bitrate of a frame sent, for the close's log line.
+func (m *media) noteRate() {
+	if m.rateN == 0 || m.bitrate < m.rateMin {
+		m.rateMin = m.bitrate
+	}
+	m.rateMax = max(m.rateMax, m.bitrate)
+	m.rateSum += int64(m.bitrate)
+	m.rateN++
 }
 
 // process runs the DSP on a captured frame in place, after rendering what the speakers had played by the
@@ -655,8 +707,8 @@ func (m *media) close() {
 	for i, sl := range m.slots {
 		if st := sl.buf.Stats(); st.Senders > 0 {
 			m.s.logf("slot %d: %d senders, delay %d frames, %d late, %d concealed, %d recovered, %d oversize, "+
-				"%d resyncs", i, st.Senders, sl.buf.Target(), st.Late, st.Concealed, st.Recovered, st.Oversize,
-				st.Resyncs)
+				"%d resyncs, %d frames of DTX skipped", i, st.Senders, sl.buf.Target(), st.Late, st.Concealed,
+				st.Recovered, st.Oversize, st.Resyncs, st.Skipped)
 		}
 	}
 	if n := m.overruns.Load(); n > 0 {
@@ -678,6 +730,15 @@ func (m *media) close() {
 			}
 		}
 		m.sent.Wait()
+		// What the network made of the call's bitrate (M31), read once send has stopped, which writes it.
+		if m.rateN > 0 {
+			loss := "the loss was never measured"
+			if l, measured := m.s.cc.Loss(); measured {
+				loss = fmt.Sprintf("the loss was last measured at %.1f%%", 100*l)
+			}
+			m.s.logf("the bitrate was %d to %d kbps, %d on average, over %d packets; %s, and the FEC sized for %d%%",
+				m.rateMin/1000, m.rateMax/1000, m.rateSum/int64(m.rateN)/1000, m.rateN, loss, m.lossPercent)
+		}
 		m.mu.Lock()
 		m.closed = true
 		m.mu.Unlock()

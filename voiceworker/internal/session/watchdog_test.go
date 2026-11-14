@@ -17,6 +17,7 @@ import (
 	"github.com/pion/rtp"
 
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/congestion"
 	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/jitter"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
@@ -36,7 +37,7 @@ func (d stuck) Conceal(context.Context, []int16) (int, error)        { return 0,
 // A decode that never returns ends the call, with the reason, rather than leaving a core spinning and the
 // speakers silent until somebody leaves.
 func TestADecodeThatNeverReturnsEndsTheCall(t *testing.T) {
-	s := &Session{ended: make(chan string, 1)}
+	s := &Session{cc: testController(), ended: make(chan string, 1)}
 	release := make(chan struct{})
 	defer close(release)
 	buf := jitter.New()
@@ -62,7 +63,7 @@ func TestADecodeThatNeverReturnsEndsTheCall(t *testing.T) {
 
 // stuckEncoder is an encoder whose Encode never returns until released.
 type stuckEncoder struct {
-	opus.Encoder
+	tunable
 	release chan struct{}
 }
 
@@ -74,7 +75,7 @@ func (e stuckEncoder) Encode([]int16, []byte) (int, error) {
 // An encode is a call into the same uninterruptible module, and one that never returns ends the call too,
 // rather than leaving the caller muted with no reason given.
 func TestAnEncodeThatNeverReturnsEndsTheCall(t *testing.T) {
-	s := &Session{ended: make(chan string, 1)}
+	s := &Session{cc: testController(), ended: make(chan string, 1)}
 	release := make(chan struct{})
 	defer close(release)
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 1), base: time.Now(),
@@ -114,7 +115,7 @@ func TestADecoderThatWritesNothingCostsAFrame(t *testing.T) {
 	for i := range jitter.MinDelay {
 		buf.Push(7, uint16(i), uint32(i*jitter.FrameSamples), []byte{0xf8}, time.Now())
 	}
-	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+	m := &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		slots: []*slot{{buf: buf, dec: silent{}, pcm: make([]int16, 0, opus.MaxDecodeSamples+audio.FrameSamples),
 			tmp: make([]int16, opus.MaxDecodeSamples)}}}
 	done := make(chan struct{})
@@ -175,7 +176,7 @@ func (d *devices) Capture(context.Context, func([]int16)) (io.Closer, error) { r
 // does not wait for it, and the device, once open, sees the leave and closes itself. Staged, not raced:
 // Play is held until close has returned.
 func TestAMicrophoneIsNeverLeftOpenAfterTheCall(t *testing.T) {
-	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+	m := &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}}
 	m.close()
 	d := &devices{}
@@ -184,7 +185,7 @@ func TestAMicrophoneIsNeverLeftOpenAfterTheCall(t *testing.T) {
 		t.Errorf("%d devices opened after the call closed", d.opened)
 	}
 
-	m = &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+	m = &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}}
 	d = &devices{hold: make(chan struct{}), entered: make(chan struct{})}
 	done := make(chan struct{})
@@ -220,7 +221,7 @@ func (b blocking) Close() error { <-b.release; return nil }
 // Leaving a call whose decoder is stuck still returns, in time for the connection's goodbye.
 func TestClosingIsBoundedWhateverIsStuck(t *testing.T) {
 	release := make(chan struct{})
-	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+	m := &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}, playback: blocking{release}, capture: blocking{release}}
 	m.sent.Add(1) // a sender stuck in an encode
 	m.mu.Lock()   // and a mix stuck in a decode
@@ -251,7 +252,7 @@ func TestANewSenderHearsNothingOfThePrevious(t *testing.T) {
 	buf := jitter.New()
 	sl := &slot{buf: buf, dec: long{}, pcm: make([]int16, 0, opus.MaxDecodeSamples+audio.FrameSamples),
 		tmp: make([]int16, opus.MaxDecodeSamples)}
-	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+	m := &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		slots: []*slot{sl}}
 	now := time.Now()
 	for i := range jitter.MinDelay {
@@ -279,7 +280,7 @@ func TestANewSenderHearsNothingOfThePreviousShortTail(t *testing.T) {
 	buf := jitter.New()
 	sl := &slot{buf: buf, dec: thirty{}, pcm: make([]int16, 0, opus.MaxDecodeSamples+audio.FrameSamples),
 		tmp: make([]int16, opus.MaxDecodeSamples)}
-	m := &media{s: &Session{ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
+	m := &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		slots: []*slot{sl}}
 	now := time.Now()
 	for i := range jitter.MinDelay {
@@ -351,7 +352,7 @@ func (d *lateDevice) Capture(context.Context, func([]int16)) (io.Closer, error) 
 // A device that finishes opening after the leave closes itself without holding the lock close takes first:
 // its Close may wait on a stuck callback, and close must not wait with it.
 func TestALateDeviceClosesItselfOutsideTheLock(t *testing.T) {
-	m := &media{s: &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}, stop: make(chan struct{}),
+	m := &media{s: &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: io.Discard}}, stop: make(chan struct{}),
 		base: time.Now(), codec: keepOpen{}}
 	d := &lateDevice{entered: make(chan struct{}), hold: make(chan struct{}),
 		dev: slowClose{started: make(chan struct{}), release: make(chan struct{})}}
@@ -386,7 +387,7 @@ func (c stuckChain) Capture([]int16) (float32, error) {
 // never returns ends the call as a stuck codec does: nothing else frees the core (ADR 0036).
 func TestAProcessingThatNeverReturnsEndsTheCall(t *testing.T) {
 	// A log, because the release at the test's end lets the stuck call fail, and the sender logs it.
-	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}
+	s := &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: io.Discard}}
 	release := make(chan struct{})
 	defer close(release)
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 1), base: time.Now(),
@@ -431,7 +432,7 @@ func (stuckModule) Close(context.Context) error { return nil }
 func TestAChainThatIsNeverMadeEndsTheCall(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
-	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}, dspDone: make(chan struct{}),
+	s := &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: io.Discard}, dspDone: make(chan struct{}),
 		dsp: stuckModule{release: release}}
 	close(s.dspDone)
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 1), base: time.Now(),
@@ -465,7 +466,7 @@ func (c failingChain) Close() error { *c.closed = true; return nil }
 
 // keeping is an encoder that keeps what it is given, and sends nothing.
 type keeping struct {
-	opus.Encoder
+	tunable
 	got chan []int16
 }
 
@@ -480,7 +481,7 @@ func (e keeping) Encode(pcm []int16, _ []byte) (int, error) {
 func TestAFailedDSPLeavesTheCallUnprocessed(t *testing.T) {
 	var log strings.Builder
 	var logMu sync.Mutex
-	s := &Session{ended: make(chan string, 1), opts: Options{Log: lockedWriter{&logMu, &log}}}
+	s := &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: lockedWriter{&logMu, &log}}}
 	closed := false
 	enc := keeping{got: make(chan []int16, 4)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, 4), base: time.Now(),
@@ -549,7 +550,7 @@ func (slowChain) Capture([]int16) (float32, error) {
 func TestADSPTooSlowForRealTimeIsDropped(t *testing.T) {
 	var mu sync.Mutex
 	var logged bytes.Buffer
-	s := &Session{ended: make(chan string, 1), opts: Options{Log: lockedWriter{&mu, &logged}}}
+	s := &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: lockedWriter{&mu, &logged}}}
 	enc := keeping{got: make(chan []int16, 100)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		chain: slowChain{}, enc: enc, codec: keepOpen{}}
@@ -611,7 +612,7 @@ func (markingModule) Close(context.Context) error { return nil }
 // The DSP compiles in about 200 ms, twice the codec, and a call does not wait for it: frames go out
 // unprocessed until it is ready, and processed from then on.
 func TestTheCallDoesNotWaitForTheDSP(t *testing.T) {
-	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}, dspDone: make(chan struct{})}
+	s := &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: io.Discard}, dspDone: make(chan struct{})}
 	enc := keeping{got: make(chan []int16, 4)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		enc: enc, codec: keepOpen{}}
@@ -717,7 +718,7 @@ func TestASenderBehindRendersOnlyUpToTheFrame(t *testing.T) {
 	var mu sync.Mutex
 	renders, captures, most := 0, 0, 0
 	gate := make(chan struct{}, 100)
-	s := &Session{ended: make(chan string, 1), processing: dsp.Settings{EchoCancellation: true},
+	s := &Session{cc: testController(), ended: make(chan string, 1), processing: dsp.Settings{EchoCancellation: true},
 		opts: Options{Log: io.Discard, stall: func() { <-gate }}}
 	enc := keeping{got: make(chan []int16, 100)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
@@ -757,7 +758,7 @@ func TestASenderBehindRendersOnlyUpToTheFrame(t *testing.T) {
 }
 
 // threeBytes encodes every frame as a packet worth sending.
-type threeBytes struct{ opus.Encoder }
+type threeBytes struct{ tunable }
 
 func (threeBytes) Encode(_ []int16, out []byte) (int, error) { return copy(out, []byte{1, 2, 3}), nil }
 
@@ -780,7 +781,7 @@ func (r *recordingTrack) WriteRTP(p *rtp.Packet) error {
 // frames sent ran slower than the clock under a sender behind, and the far end's buffer, finding each
 // packet late, deepened at every skip, or played nothing at all (M30 /code-review).
 func TestASkippedFrameLeavesAGapInTheTimestamps(t *testing.T) {
-	s := &Session{ended: make(chan string, 1), opts: Options{Log: io.Discard}}
+	s := &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: io.Discard}}
 	track := &recordingTrack{}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		enc: threeBytes{}, codec: keepOpen{}, track: track}
@@ -827,7 +828,7 @@ func TestASkippedFrameLeavesAGapInTheTimestamps(t *testing.T) {
 func TestADSPTakenUpBehindIsNotBlamedForTheBacklog(t *testing.T) {
 	var mu sync.Mutex
 	var logged bytes.Buffer
-	s := &Session{ended: make(chan string, 1), dspDone: make(chan struct{}),
+	s := &Session{cc: testController(), ended: make(chan string, 1), dspDone: make(chan struct{}),
 		opts: Options{Log: lockedWriter{&mu, &logged}}}
 	n := 0
 	// send is slow for its first 40 frames, with no DSP yet, and then the module is ready and send keeps up.
@@ -894,3 +895,14 @@ func TestNoChainForGoodStopsTheReference(t *testing.T) {
 		t.Errorf("with no module: %d frames of reference written, want none", m.ref.count())
 	}
 }
+
+// testController is the controller New gives a session, for the sessions these tests build by hand.
+func testController() *congestion.Controller {
+	return newController(time.Now())
+}
+
+// tunable is a fake encoder's answer to the controller's adjustments, which the fakes take no notice of.
+type tunable struct{ opus.Encoder }
+
+func (tunable) SetBitrate(int) error { return nil }
+func (tunable) SetLoss(int) error    { return nil }

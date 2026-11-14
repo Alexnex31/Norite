@@ -17,6 +17,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -30,11 +31,14 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/logging"
+	"github.com/pion/rtcp"
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
+	"github.com/Alexnex31/Norite/voiceworker/internal/congestion"
 	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
@@ -67,6 +71,9 @@ type Options struct {
 	// stall, when set, is called by the sender before each captured frame: a test's busy machine, which
 	// leaves the encoder behind the microphone.
 	stall func()
+	// fixedBitrate leaves the encoder at its starting bitrate and loss whatever the feedback says: a test's
+	// call without M31's controller, to measure what the controller buys.
+	fixedBitrate bool
 }
 
 // Session is one call's connection.
@@ -85,6 +92,9 @@ type Session struct {
 	track  *webrtc.TrackLocalStaticRTP
 	sender *webrtc.RTPSender
 	level  atomic.Uint32 // the audio level's extension id, once negotiated; zero before
+	twcc   atomic.Uint32 // the transport-wide sequence number's, likewise
+	// cc sets the encoder's bitrate and loss from the SFU's transport-wide feedback (M31).
+	cc *congestion.Controller
 
 	codecDone chan struct{}
 	codec     opus.Codec
@@ -125,13 +135,18 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
-	if err := engine.RegisterHeaderExtension(
-		webrtc.RTPHeaderExtensionCapability{URI: voiceproto.AudioLevelURI}, webrtc.RTPCodecTypeAudio,
-	); err != nil {
-		return nil, err
+	// The transport-wide sequence number, which the SFU's feedback reports each packet's arrival by (M31).
+	// The sender writes it itself, as it writes the audio level, and notes when each packet left: there is
+	// one stream, so the number is the stream's own count.
+	for _, uri := range []string{voiceproto.AudioLevelURI, sdp.TransportCCURI} {
+		if err := engine.RegisterHeaderExtension(
+			webrtc.RTPHeaderExtensionCapability{URI: uri}, webrtc.RTPCodecTypeAudio,
+		); err != nil {
+			return nil, err
+		}
 	}
-	reg := &interceptor.Registry{}
-	if err := webrtc.ConfigureRTCPReports(reg); err != nil {
+	reg, err := interceptors()
+	if err != nil {
 		return nil, err
 	}
 
@@ -161,7 +176,8 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	}
 	s := &Session{opts: opts, pc: pc, processing: dsp.Settings(join.Processing),
 		ready: make(chan struct{}), ended: make(chan string, 1),
-		codecDone: make(chan struct{}), dspDone: make(chan struct{})}
+		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
+		cc: newController(time.Now())}
 	if opts.Device != nil {
 		mk := opts.Codec
 		if mk == nil {
@@ -193,6 +209,17 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		}
 	})
 	return s, nil
+}
+
+// interceptors is the call's interceptor chain: rtcpGuard, then Pion's RTCP reports. The guard is first,
+// so the innermost reader, and reads what the SFU sends before anything above it parses it.
+func interceptors() (*interceptor.Registry, error) {
+	reg := &interceptor.Registry{}
+	reg.Add(rtcpGuard{})
+	if err := webrtc.ConfigureRTCPReports(reg); err != nil {
+		return nil, err
+	}
+	return reg, nil
 }
 
 // trackArrived is a slot's first packet. Before the audio has started it waits, a slot's worth at most.
@@ -270,13 +297,20 @@ func (s *Session) resolveLevel() {
 	if s.sender == nil {
 		return
 	}
-	s.level.Store(uint32(audioLevelID(s.sender.GetParameters().HeaderExtensions)))
+	exts := s.sender.GetParameters().HeaderExtensions
+	s.level.Store(uint32(audioLevelID(exts)))
+	s.twcc.Store(uint32(extensionID(exts, sdp.TransportCCURI)))
 }
 
 // audioLevelID is the id RFC 6464's audio level was negotiated under, zero if it was not.
 func audioLevelID(exts []webrtc.RTPHeaderExtensionParameter) uint8 {
+	return extensionID(exts, voiceproto.AudioLevelURI)
+}
+
+// extensionID is the id the extension named uri was negotiated under, zero if it was not.
+func extensionID(exts []webrtc.RTPHeaderExtensionParameter, uri string) uint8 {
 	for _, e := range exts {
-		if e.URI == voiceproto.AudioLevelURI && e.ID > 0 && e.ID < 256 {
+		if e.URI == uri && e.ID > 0 && e.ID < 256 {
 			return uint8(e.ID) //nolint:gosec // checked above
 		}
 	}
@@ -286,6 +320,12 @@ func audioLevelID(exts []webrtc.RTPHeaderExtensionParameter) uint8 {
 // levelID is the audio level's extension id as negotiated, zero if the answer left it out.
 func (s *Session) levelID() uint8 {
 	return uint8(s.level.Load()) //nolint:gosec // an extension id, at most 255
+}
+
+// twccID is the transport-wide sequence number's extension id as negotiated, zero if the answer left it
+// out, which leaves the controller with no feedback and the bitrate where it started.
+func (s *Session) twccID() uint8 {
+	return uint8(s.twcc.Load()) //nolint:gosec // an extension id, at most 255
 }
 
 func (s *Session) logf(format string, args ...any) {
@@ -321,7 +361,7 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 		return "", err
 	}
 	s.track, s.sender = track, tr.Sender()
-	go drainRTCP(tr.Sender())
+	go s.readRTCP(tr.Sender())
 	for range Slots {
 		if _, err := s.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionRecvonly,
@@ -365,11 +405,52 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 	return sdp, nil
 }
 
-func drainRTCP(sender *webrtc.RTPSender) {
+// newController is the call's: its ceiling is the encoder's starting bitrate, so the first frame's adapt
+// moves nothing until the feedback says to.
+func newController(now time.Time) *congestion.Controller {
+	return congestion.New(opus.DefaultEncoderOptions().Bitrate, now)
+}
+
+// rtcpReader is what readRTCP reads, a sender's RTCP: an RTPSender, or a test's.
+type rtcpReader interface {
+	Read(b []byte) (int, interceptor.Attributes, error)
+}
+
+// readRTCP reads what the SFU sends about the call's track, and hands its transport-wide feedback to the
+// controller. It must keep reading whatever arrives, or the packets pile up in Pion's buffers. rtcpGuard,
+// at the bottom of the interceptor chain, has already bounded what reaches this far, and dropped what does
+// not parse.
+//
+// So a read that fails is the stream's, not a packet's, and reading stops. M28's drain stopped on any
+// error too, and one malformed packet then ended the feedback for the call (M31's /code-review), which
+// the guard now drops. Reading on past every error instead woke a thousand times a second on a stream
+// that could never be read, such as one whose transport closed before it opened (the third).
+func (s *Session) readRTCP(r rtcpReader) {
 	buf := make([]byte, 1500)
 	for {
-		if _, _, err := sender.Read(buf); err != nil {
+		n, attr, err := r.Read(buf)
+		if err != nil {
+			// A stream closed, or one the call's close ended before it opened, which srtp reports as a
+			// failed type assertion, ends quietly. Any other end is the controller's last feedback, which
+			// the log says, or the close's line reads as a controller that ran throughout.
+			s.mediaMu.Lock()
+			closing := s.closing
+			s.mediaMu.Unlock()
+			if !closing && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+				s.logf("the voice server's RTCP could not be read (%v); the bitrate stays where it is", err)
+			}
 			return
+		}
+		// What the guard parsed, kept in the attributes, is not parsed again.
+		pkts, err := attr.GetRTCPPackets(buf[:n])
+		if err != nil {
+			continue
+		}
+		now := time.Now()
+		for _, p := range pkts {
+			if fb, ok := p.(*rtcp.TransportLayerCC); ok {
+				s.cc.Feedback(fb, now)
+			}
 		}
 	}
 }

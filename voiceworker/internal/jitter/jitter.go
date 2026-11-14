@@ -41,6 +41,8 @@ const (
 	// it, which must have arrived by the time the lost one is due. A buffer at MinDelay deepens to it at the
 	// first loss it conceals, and comes back after shrinkAfter without another.
 	fecDelay = 2
+	// catchUp is how many frames past its target the buffer may hold before a DTX gap is cut short.
+	catchUp = 2
 )
 
 // Kind is what to play for the next stretch of audio.
@@ -80,6 +82,8 @@ type entry struct {
 // Stats counts what the buffer refused or covered for, for the call's log.
 type Stats struct {
 	Late, Oversize, Resyncs, Concealed, Recovered int
+	// Skipped counts the frames of DTX gaps cut short to drain a backlog.
+	Skipped int
 	// Senders is how many senders the slot has carried.
 	Senders int
 }
@@ -211,26 +215,39 @@ func (b *Buffer) earliest(from uint32, at bool) *entry {
 	return best
 }
 
-// fresh is where playing starts: the earliest of the packets that arrived within the target delay of the
-// newest arrival, when there are enough of them, and nil otherwise. Counting every packet held would start
-// on a stale one: in DTX a sender's comfort-noise update arrives alone every 400 ms or so, and starting from
-// it when speech resumes plays everything after it that much late, for as long as the speech lasts (M29's
-// manual pass measured 440 ms of it). Staleness is judged by arrival, not by timestamp, so a burst the
-// network delivered at once is all fresh and none of it is skipped. Older packets are dropped once playing
-// starts.
+// fresh is where playing starts: the earliest of the packets that are fresh, when there are enough of them,
+// and nil otherwise. A packet is fresh when it arrived within the target delay of the newest arrival, or
+// when its timestamp is within the target delay of the newest timestamp. Counting every packet held would
+// start on a stale one: in DTX a sender's comfort-noise update arrives alone every 400 ms or so, and starting
+// from it when speech resumes plays everything after it that much late, for as long as the speech lasts
+// (M29's manual pass measured 440 ms of it). Such a packet is stale both ways. Arrival alone keeps a burst
+// the network delivered at once whole; the timestamp alone keeps a link that delivers slower than the sender
+// sends, where arrival alone never finds target packets inside the window: at a target of ten frames and the
+// 36 packets a second a saturated 64 kbps uplink carries, the slot fell silent and stayed so (M31). Older
+// packets are dropped once playing starts.
 func (b *Buffer) fresh() *entry {
 	var newest time.Time
+	var newestTS uint32
+	have := false
 	for i := range b.ring {
-		if e := &b.ring[i]; e.used && e.at.After(newest) {
+		e := &b.ring[i]
+		if !e.used {
+			continue
+		}
+		if e.at.After(newest) {
 			newest = e.at
+		}
+		if !have || int32(e.ts-newestTS) > 0 { //nolint:gosec // signed difference
+			newestTS, have = e.ts, true
 		}
 	}
 	window := time.Duration(b.target+1) * frameDuration
+	span := int32((b.target + 1) * FrameSamples) //nolint:gosec // target is at most MaxDelay
 	var first *entry
 	n := 0
 	for i := range b.ring {
 		e := &b.ring[i]
-		if !e.used || newest.Sub(e.at) > window {
+		if !e.used || (newest.Sub(e.at) > window && int32(newestTS-e.ts) > span) { //nolint:gosec // signed difference
 			continue
 		}
 		n++
@@ -277,6 +294,7 @@ func (b *Buffer) Next() Step {
 			e.used = false
 		}
 	}
+	b.drain()
 	if e := b.earliest(b.next, true); e != nil && e.ts == b.next {
 		if e.seq != b.lastSeq+1 && b.target < fecDelay {
 			// A packet before this one was lost and concealed, where its FEC in this packet would have
@@ -314,6 +332,46 @@ func (b *Buffer) Next() Step {
 	}
 	b.stats.Concealed++
 	return Step{Kind: Conceal, Reset: reset}
+}
+
+// drain cuts a DTX gap short when the buffer holds more than its target. Packets that waited in a queue on
+// the way arrive bunched once it drains, and the buffer then holds them all: the delay the queue added moves
+// into the buffer, and stays for the rest of the call, since nothing else here plays faster than the
+// speakers ask and DTX's comfort-noise updates keep it from ever running dry. M31's done-when found it: with
+// the sender's controller draining a shaped uplink, the far end still heard the reading 420 ms late. What is
+// cut is a stretch the sender sent nothing for, which the decoder would have filled with comfort noise, so
+// nothing anybody said is lost; a backlog in the middle of a sentence waits for its pause.
+func (b *Buffer) drain() {
+	// One pass: the packet that ends the gap, the earliest at or after the timeline, and the newest held.
+	var e, newest *entry
+	for i := range b.ring {
+		r := &b.ring[i]
+		if !r.used {
+			continue
+		}
+		if int32(r.ts-b.next) >= 0 && (e == nil || int32(r.ts-e.ts) < 0) { //nolint:gosec // signed difference
+			e = r
+		}
+		if newest == nil || int32(r.ts-newest.ts) > 0 { //nolint:gosec // signed difference
+			newest = r
+		}
+	}
+	if e == nil || e.ts == b.next || e.seq != b.lastSeq+1 {
+		return // playing, losing, or nothing buffered: not a DTX gap
+	}
+	ahead := int(int32(newest.ts-b.next)) / FrameSamples //nolint:gosec // signed difference
+	if ahead <= b.target+catchUp {
+		return
+	}
+	// Forward to where the target is still held, and never past the packet that ends the gap.
+	to := newest.ts - uint32(b.target*FrameSamples) //nolint:gosec // target is at most MaxDelay
+	if int32(to-e.ts) > 0 {                         //nolint:gosec // signed difference
+		to = e.ts
+	}
+	if d := int32(to - b.next); d > 0 { //nolint:gosec // signed difference
+		b.stats.Skipped += int(d) / FrameSamples
+		b.next = to
+	}
 }
 
 func (b *Buffer) copyOut(e *entry) []byte {

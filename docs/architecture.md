@@ -2373,9 +2373,15 @@ mouth-to-ear latency is dominated by the network leg, so a user far from the SFU
 conversation that no codec or DSP work compensates for. `MediaCoordinator.AllocateSession` chooses which SFU
 serves a session, so **proximity routing is a seam already in place**; v1 runs a single region deliberately.
 
-**Adaptive bitrate**: `pion/interceptor`'s REMB/TWCC feedback drives the encoder's runtime bitrate control,
-audio-only, no simulcast — the Prometheus voice/SFU metrics (§15) feed this loop directly, not just a
-dashboard.
+**Adaptive bitrate** (M31): the SFU's transport-wide (TWCC) feedback drives the encoder's runtime bitrate and
+the loss its FEC is sized for, audio-only, no simulcast. The feedback is per hop, since the SFU terminates RTCP,
+so a sender adapts to its own uplink. The loop runs in the worker, in `voiceworker/internal/congestion`.
+- **What it does:** it holds the queue on the uplink short, read from the feedback as each packet's arrival
+  minus its departure. Loss is its second signal.
+- **Why not pion's GCC:** M31 measured it and found it unusable for audio. Its loss half is clamped to a
+  100 kbps floor, and its delay half lets a full queue stand.
+- **The server's metrics observe it.** The Prometheus voice/SFU metrics (§15, M93) are the server's and
+  cannot feed a client's encoder.
 
 **TURN**: an embedded Go TURN server (`pion/turn`, also answering plain STUN), bundled into the backend —
 self-hosters don't run a separate `coturn`. It exists for a network that refuses UDP to the SFU's port: a
@@ -2906,10 +2912,11 @@ E2E key-boundary violations.
    rate-limiter store — both activated only by the flagship (§12); self-hosted single-process instances never
    touch either. Don't build the Redis paths' operational surface before there's real load to justify it.
 
-8. **Voice/SFU performance**: the adaptive-bitrate control loop (REMB/TWCC → Opus runtime bitrate) closes a
-   real optimization gap in the custom SFU — framed as load-bearing v1 functionality, not a nice-to-have,
-   fed directly by the Prometheus voice metrics (packet loss, bitrate, jitter), which are themselves a real
-   v1 operability requirement given how hard voice-call-quality problems are to debug from logs alone.
+8. **Voice/SFU performance**: the adaptive-bitrate control loop (TWCC → Opus runtime bitrate, M31) closes a
+   real optimization gap in the custom SFU — framed as load-bearing v1 functionality, not a nice-to-have.
+   It runs in each voice-worker, from its own hop's feedback. The Prometheus voice metrics (packet loss,
+   bitrate, jitter) observe it from the server's side and do not feed it; they are a real v1 operability
+   requirement given how hard voice-call-quality problems are to debug from logs alone.
 
 9. **WASM plugin overhead**: `wazero`'s instruction-metering has a real baseline host-CPU cost; benchmarked
    against real plugin workloads, with memory quotas + wall-clock timeout as the fallback primary mechanism
@@ -3145,6 +3152,27 @@ during implementation, and must be documented plainly wherever the relevant subs
   WebRTC transport encryption (DTLS-SRTP), which protects against network eavesdroppers but not against the
   server/SFU operator. True end-to-end voice (frame-level encryption the SFU forwards without decrypting) is
   out of scope entirely.
+- **A voice uplink slower than about 41 kbps cannot carry 20 ms frames.**
+  - **The arithmetic:** each packet carries 62 bytes that are not Opus (the RTP header with two extensions,
+    the SRTP tag, IPv4 and UDP). At 50 packets a second that is 24.8 kbps. The controller's 16 kbps floor
+    therefore needs 41 kbps of link (M31).
+  - **What would go lower:** 40 or 60 ms frames would cut the overhead to a half or a third, at 20 or 40 ms
+    of added delay.
+  - **Why they are not built:** 20 ms is pinned through the worker, from its tests to the DSP's stamping
+    and the RTP timestamps. Longer frames are the lever if slower links are to be served.
+- **An uplink buffer under about two packets deep shows no queue.**
+  - **Why:** the controller reads the queue as delay past the smallest seen, and the smallest already
+    holds one packet's time at the bottleneck. At 64 kbit/s a packet takes about 20 ms, so a buffer that
+    drops past 35 ms never reads past the 20 ms the controller climbs under.
+  - **The effect:** its overflow is answered only past 25% loss, as a policer's. Below that it reads as
+    random loss, and the FEC is sized for it: a call on such a link stays losing about 17% (M31).
+  - **The answer:** the delivered rate, arrivals spaced wider than departures, which sees a full link at
+    any depth. M34's entry carries it.
+- **A receiver's downlink adapts to nothing.**
+  - **Why:** the controller is per hop. A sender follows its own uplink, and the SFU forwards every slot at
+    its sender's bitrate, with no simulcast and no transcoding.
+  - **The effect:** a receiver on a weak link gets up to 16 slots of up to 64 kbps, whatever it can carry.
+  - **The answer:** subscription, which is client-driven and capped (ADR 0023). M34's entry carries it.
 - **A browser alone cannot complete an OAuth sign-in, by design.** The flow is bound to the *client* that
   started it rather than to the browser that walks through it: `/authorize` requires a `flow_challenge` and
   `/auth/oauth/exchange` requires the matching `flow_verifier` (§2). Someone who opens an authorize URL by

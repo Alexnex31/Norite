@@ -41,6 +41,12 @@ EXPORT(shim_set_bitrate) int shim_set_bitrate(OpusEncoder *e, int bitrate) {
 	return opus_encoder_ctl(e, OPUS_SET_BITRATE(bitrate));
 }
 
+/* The loss the encoder sizes its in-band FEC for, which the worker follows from what its feedback measures
+ * (M31). */
+EXPORT(shim_set_loss) int shim_set_loss(OpusEncoder *e, int percent) {
+	return opus_encoder_ctl(e, OPUS_SET_PACKET_LOSS_PERC(percent));
+}
+
 EXPORT(shim_encode) int shim_encode(OpusEncoder *e, const opus_int16 *pcm, int frame, unsigned char *out,
 	int max) {
 	return opus_encode(e, pcm, frame, out, max);

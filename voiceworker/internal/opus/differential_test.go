@@ -59,6 +59,19 @@ func TestTheCompilerAgreesWithTheInterpreter(t *testing.T) {
 		"loud": tone(440, 32000, 0, second),
 	}
 	for name, signal := range signals {
+		// From M31 the worker changes an encoder's bitrate and loss during a call, so the two are held to
+		// each other across those changes too.
+		t.Run(name+"/adapting", func(t *testing.T) {
+			o := DefaultEncoderOptions()
+			want := encodeAdapting(t, interpreted, o, signal)
+			got := encodeAdapting(t, compiled, o, signal)
+			for i := range want {
+				if !bytes.Equal(want[i], got[i]) {
+					t.Fatalf("frame %d encodes to %d bytes compiled and %d interpreted, and they differ",
+						i, len(got[i]), len(want[i]))
+				}
+			}
+		})
 		for _, o := range []EncoderOptions{
 			{Bitrate: 64000, Complexity: 10, FEC: true, DTX: true, LossPercent: 5},
 			{Bitrate: 16000, Complexity: 5, FEC: true, DTX: false, LossPercent: 20},
@@ -101,6 +114,30 @@ func TestTheCompilerAgreesWithTheInterpreter(t *testing.T) {
 
 func encodeWith(t *testing.T, c Codec, o EncoderOptions, signal []int16) [][]byte {
 	t.Helper()
+	return encodeSteps(t, c, o, signal, nil)
+}
+
+// encodeAdapting encodes signal with its bitrate and loss changed every ten frames, as M31's controller
+// changes them during a call.
+func encodeAdapting(t *testing.T, c Codec, o EncoderOptions, signal []int16) [][]byte {
+	t.Helper()
+	bitrates, losses := []int{16000, 40000, 24000, 64000, 6000}, []int{0, 10, 25, 5, 100}
+	return encodeSteps(t, c, o, signal, func(frame int, enc Encoder) {
+		if frame%10 != 0 {
+			return
+		}
+		k := frame / 10 % len(bitrates)
+		if err := enc.SetBitrate(bitrates[k]); err != nil {
+			t.Fatal(err)
+		}
+		if err := enc.SetLoss(losses[k]); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func encodeSteps(t *testing.T, c Codec, o EncoderOptions, signal []int16, step func(int, Encoder)) [][]byte {
+	t.Helper()
 	enc, err := c.NewEncoder(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +146,9 @@ func encodeWith(t *testing.T, c Codec, o EncoderOptions, signal []int16) [][]byt
 	buf := make([]byte, MaxPacket)
 	var out [][]byte
 	for f := 0; f+FrameSamples <= len(signal); f += FrameSamples {
+		if step != nil {
+			step(f/FrameSamples, enc)
+		}
 		n, err := enc.Encode(signal[f:f+FrameSamples], buf)
 		if err != nil {
 			t.Fatalf("frame %d: %v", f/FrameSamples, err)

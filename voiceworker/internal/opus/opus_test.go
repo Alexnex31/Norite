@@ -4,12 +4,15 @@
 package opus
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
+
+	"github.com/Alexnex31/Norite/voiceworker/internal/audio/audiotest"
 )
 
 // native is set by native_test.go under the norite_opusnative tag, so that every test here runs against both
@@ -293,6 +296,58 @@ func TestEncoderOptionsAreChecked(t *testing.T) {
 			}
 			if err := e.SetBitrate(1); err == nil {
 				t.Error("a bitrate of 1 was accepted")
+			}
+			for _, p := range []int{0, 25, 100} {
+				if err := e.SetLoss(p); err != nil {
+					t.Errorf("a loss of %d%%: %v", p, err)
+				}
+			}
+			for _, p := range []int{-1, 101} {
+				if err := e.SetLoss(p); err == nil {
+					t.Errorf("a loss of %d%% was accepted", p)
+				}
+			}
+		})
+	}
+}
+
+// M31's controller changes the bitrate and the loss during a call, and each must change what the encoder
+// makes: a quarter of the bitrate is well under half the bytes, and a loss of 25% sizes the in-band FEC
+// differently from none, so the stream is not the same.
+func TestTheBitrateAndTheLossTakeEffect(t *testing.T) {
+	ctx := context.Background()
+	speech := audiotest.SpeechLike(2, 7, 140)
+	for name, c := range codecs(t) {
+		t.Run(name, func(t *testing.T) {
+			encode := func(set func(Encoder) error) (int, []byte) {
+				t.Helper()
+				e, err := c.NewEncoder(ctx, EncoderOptions{Bitrate: 64000, Complexity: 10, FEC: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = e.Close() }()
+				if err := set(e); err != nil {
+					t.Fatal(err)
+				}
+				buf := make([]byte, MaxPacket)
+				var all []byte
+				for f := 0; f+FrameSamples <= len(speech); f += FrameSamples {
+					n, err := e.Encode(speech[f:f+FrameSamples], buf)
+					if err != nil {
+						t.Fatal(err)
+					}
+					all = append(all, buf[:n]...)
+				}
+				return len(all), all
+			}
+			full, plain := encode(func(Encoder) error { return nil })
+			low, _ := encode(func(e Encoder) error { return e.SetBitrate(16000) })
+			if low*2 > full {
+				t.Errorf("at 16 kbps the speech took %d bytes, against %d at 64 kbps", low, full)
+			}
+			_, lossy := encode(func(e Encoder) error { return e.SetLoss(25) })
+			if bytes.Equal(plain, lossy) {
+				t.Error("a loss of 25% encodes the same stream as none")
 			}
 		})
 	}
