@@ -73,8 +73,12 @@ func TestTheBitrateFollowsAConstrainedLink(t *testing.T) {
 	if with.heard < 0.9 {
 		t.Errorf("the far end's loudness followed the reading at %.3f on the shaped link", with.heard)
 	}
+	// The delay is where the loudness follows best, so it is only found where it follows at all: on
+	// test-arm64 the far end without the controller followed the reading at 0.137, and the best of a
+	// match that poor put it 220 ms late, which said nothing. Not following is then the worse outcome.
 	addedWith, addedWithout := with.shapedLag-with.cleanLag, without.shapedLag-without.cleanLag
-	if addedWith+60*time.Millisecond > addedWithout || with.concealed*3 > without.concealed {
+	lagFound := without.heard >= 0.5
+	if (lagFound && addedWith+60*time.Millisecond > addedWithout) || with.concealed*3 > without.concealed {
 		t.Errorf("the far end heard the reading %v later and concealed %d frames with the controller, against "+
 			"%v and %d without", addedWith, with.concealed, addedWithout, without.concealed)
 	}
