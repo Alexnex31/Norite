@@ -231,6 +231,24 @@ func TestProblemsPastTheBoundAreSaidToMayConcernVoice(t *testing.T) {
 		"`norite config get` says what applies"}, warnings)
 }
 
+// A join whose call ended as it started, neither device usable, says what the devices were doing, from the
+// status the daemon keeps; and says nothing of devices an earlier call left there (M32).
+func TestAJoinEndedByItsDevicesSaysWhatTheyWereDoing(t *testing.T) {
+	const why = "neither the microphone nor the speakers can be used"
+	none := &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession}
+	d := &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceIdle, Available: true, Reason: why, Microphone: none,
+		Speakers: none}, refuse: &ipc.RelayError{Code: ipc.RelayFailed, Message: why}}
+	r := norite(t, d, false, "join", "1234")
+	require.Error(t, r.err)
+	assert.Contains(t, r.out, "Nothing can use the microphone or speakers until somebody logs in at this machine.\n")
+
+	d = &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceIdle, Available: true, Reason: why, Microphone: none,
+		Speakers: none}, refuse: &ipc.RelayError{Code: ipc.RelayFailed, Message: "the voice server refused: 409 room full"}}
+	r = norite(t, d, false, "join", "1234")
+	require.Error(t, r.err)
+	assert.NotContains(t, r.out, "logs in")
+}
+
 func TestAFailedJoinSaysWhy(t *testing.T) {
 	d := &fakeDaemon{status: available(),
 		refuse: &ipc.RelayError{Code: ipc.RelayFailed, Message: "the voice server refused: 409 room full"}}
@@ -265,6 +283,16 @@ func TestTheTextSaysHowTheCallStands(t *testing.T) {
 		{ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the voice server closed the call\x1b[2J", Available: true},
 			[]string{"The last call ended: the voice server closed the call"}, []string{"\x1b"}},
 		{ipc.VoiceStatus{State: ipc.VoiceIdle, Unavailable: "not yet"}, []string{"cannot join voice calls: not yet."}, nil},
+		// The devices (M32): during a call, the worker's reason cleaned; after a call their failing ended.
+		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
+			Microphone: &ipc.VoiceDevice{State: ipc.VoiceDeviceFailed, Reason: "it stopped\x1b[2J delivering audio"},
+			Speakers:   &ipc.VoiceDevice{State: ipc.VoiceDeviceOpen}},
+			[]string{"The microphone failed: it stopped", "delivering audio.\nThe speakers are on.\n"}, []string{"\x1b"}},
+		{ipc.VoiceStatus{State: ipc.VoiceIdle, Available: true, Reason: "neither the microphone nor the speakers can be used",
+			Microphone: &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession},
+			Speakers:   &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession}},
+			[]string{"The last call ended: neither the microphone nor the speakers can be used.\nNothing can use the " +
+				"microphone or speakers until somebody logs in at this machine.\n"}, nil},
 	}
 	for _, tc := range cases {
 		r := norite(t, &fakeDaemon{status: tc.st}, false, "status")
@@ -276,4 +304,17 @@ func TestTheTextSaysHowTheCallStands(t *testing.T) {
 			assert.False(t, strings.Contains(r.out, n), "%q in %q", n, r.out)
 		}
 	}
+}
+
+// The devices are in --json as the contract has them (rule 15).
+func TestTheDevicesAreInTheJSON(t *testing.T) {
+	d := &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
+		Microphone: &ipc.VoiceDevice{State: ipc.VoiceDeviceAsking},
+		Speakers:   &ipc.VoiceDevice{State: ipc.VoiceDeviceFailed, Reason: "it opened and delivers no audio"}}}
+	r := norite(t, d, true, "status")
+	require.NoError(t, r.err)
+	daemontest.MatchesCLISchema(t, r.out, "voice.schema.json", "status")
+	var got ipc.VoiceStatus
+	require.NoError(t, json.Unmarshal([]byte(r.out), &got))
+	assert.Equal(t, d.status, got)
 }

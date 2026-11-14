@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/urfave/cli/v3"
@@ -164,7 +165,25 @@ func joinWith(settings Settings) (prepare func(*cli.Command) error, ask asker) {
 		if !st.Available {
 			return st, &clierr.RefusedError{Message: output.Clean(st.Unavailable)}
 		}
-		return st, daemonclient.LocalWith(ctx, c, ipc.PathVoiceJoin(cmd.Args().First()), body, &st)
+		err = daemonclient.LocalWith(ctx, c, ipc.PathVoiceJoin(cmd.Args().First()), body, &st)
+		if err != nil {
+			explainDevices(ctx, cmd, c, err)
+		}
+		return st, err
+	}
+}
+
+// explainDevices says on stderr what the devices were doing when a join failed because of them: a call
+// that ends as it starts, neither device usable, is a failed join, and the status keeps its devices (M32).
+// Only when the status's reason is the join's, so the devices are this call's and not an earlier one's.
+func explainDevices(ctx context.Context, cmd *cli.Command, c daemonclient.Caller, joinErr error) {
+	st, err := status(ctx, cmd, c)
+	if err != nil || st.State != ipc.VoiceIdle || st.Reason == "" ||
+		!strings.Contains(joinErr.Error(), st.Reason) {
+		return
+	}
+	for _, line := range ops.VoiceDevices(st.Microphone, st.Speakers, runtime.GOOS) {
+		_, _ = fmt.Fprintln(cmd.Root().ErrWriter, output.Clean(line)+".")
 	}
 }
 
@@ -206,13 +225,15 @@ func run(connect Connector, takesChannel bool, prepare func(*cli.Command) error,
 		if err != nil {
 			return err
 		}
-		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), view{st})
+		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), view{st, runtime.GOOS})
 	}
 }
 
 // view is a VoiceStatus as these commands print it (contracts/cli-json/voice.schema.json).
 type view struct {
 	ipc.VoiceStatus
+	// goos is the OS whose settings a refusal names: this machine's, the daemon's and the worker's too.
+	goos string
 }
 
 // Text draws it for a person.
@@ -234,6 +255,11 @@ func (v view) Text(t *output.Text) {
 		// dropped, so this says what was asked rather than what runs.
 		t.Line("Joined with echo cancellation %s, noise suppression %s, automatic gain %s.",
 			onOff(p.EchoCancellation), onOff(p.NoiseSuppression), onOff(p.AutoGain))
+	}
+	// What the devices are doing (M32): during a call, and after one their failing ended. The words are the
+	// client's, and the worker's reason in them is cleaned.
+	for _, line := range ops.VoiceDevices(v.Microphone, v.Speakers, v.goos) {
+		t.Line("%s.", output.Clean(line))
 	}
 	if !v.Available {
 		t.Line("This daemon cannot join voice calls: %s.", output.Clean(v.Unavailable))
