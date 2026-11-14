@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/daemon/ipc"
@@ -117,12 +116,15 @@ func (s *statuses) add(st ipc.VoiceStatus) {
 	s.seen = append(s.seen, st)
 }
 
+// states is the states seen, each run of one state once: the devices' changes publish within a state.
 func (s *statuses) states() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []string
 	for _, st := range s.seen {
-		out = append(out, st.State)
+		if len(out) == 0 || out[len(out)-1] != st.State {
+			out = append(out, st.State)
+		}
 	}
 	return out
 }
@@ -152,8 +154,10 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	// The settings a client sent, as the call's state reports them (M30).
 	st, err := v.Join(ctx, "1001", ipc.VoiceJoin{EchoCancellation: true, AutoGain: true})
 	require.NoError(t, err)
+	// A worker built without audio says so of both devices (M32), so the join waits on no microphone.
+	none := &ipc.VoiceDevice{State: ipc.VoiceDeviceNoDevice, Reason: "this worker was built without audio"}
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "1001", Available: true,
-		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}}, st)
+		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}, Microphone: none, Speakers: none}, st)
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
 
@@ -208,12 +212,18 @@ func TestACallWithNoAudioServerEndsSayingSo(t *testing.T) {
 	t.Cleanup(v.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	_, _ = v.Join(ctx, "1001", ipc.VoiceAllOn())
-	ended := assert.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 10*time.Second,
-		20*time.Millisecond)
-	if !ended {
-		t.Fatalf("a call with neither device stayed up:\n%s", logged.String())
+	// The join waits for the microphone, and answers with the call's end (M32).
+	st, err := v.Join(ctx, "1001", ipc.VoiceAllOn())
+	if err == nil {
+		t.Fatalf("a call with neither device was joined: %+v\n%s", st, logged.String())
 	}
-	require.Equal(t, "neither the microphone nor the speakers can be used", v.Status().Reason)
+	require.Equal(t, "neither the microphone nor the speakers can be used", err.Error())
+	require.Equal(t, ipc.VoiceIdle, st.State)
+	require.Equal(t, "neither the microphone nor the speakers can be used", st.Reason)
+	for _, d := range []*ipc.VoiceDevice{st.Microphone, st.Speakers} {
+		require.NotNil(t, d, "the devices that ended the call were not kept")
+		require.Equal(t, ipc.VoiceDeviceFailed, d.State)
+		require.Contains(t, d.Reason, "no PulseAudio or PipeWire server answered")
+	}
 	require.Contains(t, logged.String(), "could not be opened")
 }

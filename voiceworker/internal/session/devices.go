@@ -177,11 +177,17 @@ func (s *Session) authorize(ctx context.Context, a audio.Authorizer) {
 	})
 }
 
-// Devices delivers the devices' state each time it changes, the latest only. Nothing is sent for a session
-// with no device.
+// Devices delivers the devices' state each time it changes, the latest only. A session with no device,
+// a worker built without audio, says so once, so that a join waiting on its microphone is not kept
+// waiting for a device that will never be.
 func (s *Session) Devices() <-chan voiceipc.Devices {
 	if s.devs == nil {
-		return nil
+		s.noDevicesOnce.Do(func() {
+			none := voiceipc.Device{State: voiceipc.DeviceNoDevice, Reason: "this worker was built without audio"}
+			s.noDevices = make(chan voiceipc.Devices, 1)
+			s.noDevices <- voiceipc.Devices{Microphone: none, Speakers: none}
+		})
+		return s.noDevices
 	}
 	return s.devs.changes
 }

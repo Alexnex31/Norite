@@ -109,6 +109,9 @@ type Session struct {
 	authDone chan struct{}
 	authErr  error
 	stopAuth context.CancelFunc
+	// noDevices is what a session with no device says of its devices, once.
+	noDevices     chan voiceipc.Devices
+	noDevicesOnce sync.Once
 
 	mediaMu       sync.Mutex
 	media         *media

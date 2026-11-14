@@ -14,7 +14,9 @@
         "reason",
         "available",
         "unavailable",
-        "processing"
+        "processing",
+        "microphone",
+        "speakers"
       ],
       "properties": {
         "state": {
@@ -70,6 +72,55 @@
               }
             }
           ]
+        },
+        "microphone": {
+          "description": "What the call's microphone is doing (M32), as the voice worker last said; null before it has said. Kept after a call that ended by itself, so its end can be explained; null after `leave` and at the next join. `join` prints once the call is up and this is past `opening`, or after 3 s.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/device"
+            }
+          ]
+        },
+        "speakers": {
+          "description": "What the call's speakers are doing (M32), as for `microphone`.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/device"
+            }
+          ]
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "opening",
+            "open",
+            "asking",
+            "refused",
+            "no_device",
+            "no_session",
+            "failed"
+          ],
+          "description": "opening: being opened, or opened and not yet delivering. open: delivering audio. asking: macOS is asking whether norite-daemon may use the microphone. refused: the OS or the person refused it; the text output names the setting that changes it. no_device: there is none to use. no_session: nobody is logged in at the machine, so nothing may use a device (Linux). failed: anything else, `reason` saying what."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The voice worker's words on what went wrong, or empty."
         }
       }
     }

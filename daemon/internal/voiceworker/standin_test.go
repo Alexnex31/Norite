@@ -217,7 +217,30 @@ func standin(mode string) int {
 			if mode == "neverready" {
 				continue
 			}
+			if mode == "devasking" { // macOS's question, asked as the call starts, before it is up
+				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceAsking},
+					Speakers: voiceipc.Device{State: voiceipc.DeviceOpening}})
+			}
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateReady})
+			dev := func(mic, spk, why string) voiceipc.Devices {
+				return voiceipc.Devices{Microphone: voiceipc.Device{State: mic, Reason: why},
+					Speakers: voiceipc.Device{State: spk}}
+			}
+			switch mode {
+			case "devopen": // the microphone's first frame a moment after ready, then unplugged mid-call
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpening, voiceipc.DeviceOpening, ""))
+				time.Sleep(300 * time.Millisecond)
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
+				time.Sleep(300 * time.Millisecond)
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceFailed, voiceipc.DeviceOpen,
+					"it stopped delivering audio \x1b[31m"))
+			case "devneither":
+				none := voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "nobody is logged in"}
+				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: none, Speakers: none})
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+					Reason: "neither the microphone nor the speakers can be used"})
+				return 0
+			}
 			if mode == "dropcall" {
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
 					Reason: "the voice server closed the call \x1b[31m"})
