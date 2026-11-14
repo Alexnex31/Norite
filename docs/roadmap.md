@@ -2144,11 +2144,10 @@ of this section.
       its departure, against the smallest such delay in the last ten seconds.
     - **How it moves:**
       - past 60 ms of queue, it backs off 15%;
-      - under 20 ms, it climbs 15% a second of speech, credited per packet, while the talk-spurt loses
-        no more than the link's own;
-      - loss brings it down when a queue is standing, when it has risen past the link's own after a
-        climb, or past 25% with none, each judged on a confidence bound over the packets since the last
-        decrease;
+      - under 20 ms, it climbs 15% a second of speech, credited per packet, while the current
+        talk-spurt loses at most 10%;
+      - loss brings it down when a queue is standing, or past 25% with none, judged on the 50 packets
+        sent since the last decrease;
       - loss below that sizes the FEC instead, through the shim's new `shim_set_loss`.
     - **Bounds:** the floor is 16 kbps, and the ceiling is the call's 64.
     - **Where the numbering lives:** the sender writes the transport-cc extension itself and notes each
@@ -2169,7 +2168,7 @@ of this section.
       speaker reads M30's recording aloud.
     - **With the controller:**
       - the encoder comes down to 35–37 kbps;
-      - the queue stays at 31–41 ms, with nothing dropped;
+      - the queue stays at 31–45 ms, with nothing dropped;
       - the bitrate is back at 64 once the link lifts.
     - **Without it:** 279 ms of queue and 13% dropped. That run is the proof that the test can see the
       property.
@@ -2198,6 +2197,13 @@ of this section.
     - **What the controller reads:** 256 statuses of one feedback.
     - **When a packet is malformed,** the reader goes on.
     - The feedback costs 20 µs per packet, about nine a second. The whole call's CPU did not move.
+  - **A buffer under about two packets shows no queue** (architecture.md §17): one dropping what queues
+    past 35 ms at 64 kbit/s is cut on its heavy loss at the ceiling, then left losing about 17%, which
+    reads as random. M31's fourth and fifth `/code-review` rounds tried rules on the loss alone for it,
+    and each round found them interacting badly. **What would see it is the delivered rate**: arrivals
+    spaced wider than departures mean the link is full at any buffer depth, and the feedback's deltas
+    already carry it. That is a design of its own, with its tests and a review, and it is carried to
+    M34 beside the downlink, or to an entry of its own.
   - **The downlink adapts to nothing**, by this entry's own scope. A receiver still gets every slot at its
     sender's bitrate. M34's client-driven subscription is its home (architecture.md §17).
   - **The manual pass ran in two unprivileged VMs**, the caller's uplink shaped in its own kernel by a
@@ -2301,6 +2307,12 @@ of this section.
   speaker, local mute and report, and widening the call state to carry them. Done
   when: `norite voice join/leave/mute/deafen` fully control a session; a test client attached to the daemon
   receives active-speaker updates and can local-mute and report a participant independently of each other.
+
+  **From M31: an uplink buffer too shallow to show a queue.** The controller reads the queue as delay
+  past the smallest seen, which holds one packet's time at the bottleneck, so a buffer under about two
+  packets never shows one and its overflow below 25% reads as random loss. The delivered rate, arrival
+  spacing against departure spacing, sees it at any depth (M31's entry, architecture.md §17). It is built
+  here with the downlink's subscription, or given an entry of its own.
 
   **From M31:** a receiver's downlink adapts to nothing. The sender's controller follows its own uplink,
   per hop, and the SFU forwards every slot at its sender's bitrate. Subscription is where a receiver on a

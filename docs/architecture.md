@@ -3160,6 +3160,14 @@ during implementation, and must be documented plainly wherever the relevant subs
     of added delay.
   - **Why they are not built:** 20 ms is pinned through the worker, from its tests to the DSP's stamping
     and the RTP timestamps. Longer frames are the lever if slower links are to be served.
+- **An uplink buffer under about two packets deep shows no queue.**
+  - **Why:** the controller reads the queue as delay past the smallest seen, and the smallest already
+    holds one packet's time at the bottleneck. At 64 kbit/s a packet takes about 20 ms, so a buffer that
+    drops past 35 ms never reads past the 20 ms the controller climbs under.
+  - **The effect:** its overflow is answered only past 25% loss, as a policer's. Below that it reads as
+    random loss, and the FEC is sized for it: a call on such a link stays losing about 17% (M31).
+  - **The answer:** the delivered rate, arrivals spaced wider than departures, which sees a full link at
+    any depth. M34's entry carries it.
 - **A receiver's downlink adapts to nothing.**
   - **Why:** the controller is per hop. A sender follows its own uplink, and the SFU forwards every slot at
     its sender's bitrate, with no simulcast and no transcoding.

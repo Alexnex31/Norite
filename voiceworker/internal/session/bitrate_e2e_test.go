@@ -27,7 +27,7 @@ import (
 // frames, the rest being the 62 bytes of headers, tag and IP each packet carries.
 //
 // Measured at M31 on loopback, with the controller: Opus at 35 to 37 kbps in the limit's last twelve
-// seconds, 31 to 41 ms of queue and nothing dropped; without it, 279 ms of queue and 13% dropped. The spike
+// seconds, 31 to 45 ms of queue and nothing dropped; without it, 279 ms of queue and 13% dropped. The spike
 // before it measured pion's GCC at 190 ms.
 func TestTheBitrateFollowsAConstrainedLink(t *testing.T) {
 	if testing.Short() {

@@ -2200,7 +2200,7 @@ And on the audio pipeline, from M29 (ADR 0036):
   - `silk/NSQ_del_dec.c` is built at `-Os` until a wazero release carries its #2508.
   - Anything else compiled to WASM gets the same test.
 - **The frame is 20 ms of 48 kHz mono s16 everywhere.** `TestTheFrameIsOneSizeEverywhere` pins the
-  constants four packages repeat, the controller's since M31.
+  constants the devices, the codec, the jitter buffer, the DSP and, since M31, the controller repeat.
 - **The device clock drives both directions**: `Device.Capture(ctx, frame)` and `Device.Play(ctx, fill)`.
   - Each OS has a pure-Go backend: PulseAudio on Linux, WASAPI over COM through `syscall`, and
     AudioQueue through `purego`.
@@ -2295,9 +2295,12 @@ And on adaptive bitrate, from M31:
 - **The controller is `voiceworker/internal/congestion`'s, not pion's GCC.**
   - It reads the queue on the uplink from the SFU's transport-wide feedback: each packet's arrival minus
     its departure, against a ten-second minimum.
-  - Loss is its second signal, in three forms: beside a standing queue, which is the queue overflowing;
-    risen since the last decrease, after a climb, which is the bitrate's doing; and past 25%, which is a
-    policer. The first two are answered by the queue's backoff, the third by going to what it passed.
+  - Loss is its second signal: past 10% with a queue standing, the queue overflowing, or past 25%
+    without one, a policer. Either cuts the bitrate by half the loss measured.
+  - A buffer under about two packets shows no queue, so its overflow below 25% reads as the link's own
+    (architecture.md §17). M31's fourth and fifth reviews tried a baseline, a risen rule and a
+    confidence bound for it, and each round found how they interacted badly: the fix is a signal that
+    sees it, the delivered rate, which the roadmap carries.
   - Loss below that sizes the FEC (`Encoder.SetLoss`), never the bitrate.
   - pion v0.1.51's GCC clamps its loss half to 100 kbps and lets a full queue stand. A pion upgrade is not
     a reason to switch back unless it has been measured against the shaper.
@@ -2310,13 +2313,11 @@ And on adaptive bitrate, from M31:
   them, since a window of seconds never held enough of a conversation's short sentences to judge.
   - The FEC is sized from the window once it holds ten packets of known outcome, and keeps the last loss
     judged that way. A call that never got that far has measured nothing, and its close line says so.
-  - **A decrease on loss is decided on a confidence bound** (`count.past`, a Wilson interval) over the
-    packets sent since the last decrease, of either kind, never on a fixed sample. Ten packets could not
-    tell 15% random loss from a policer's 25%; a hundred took seven seconds on a shallow buffer. A test's
-    fixed seed hid the first: run a test of a random link over many seeds before trusting it.
-  - **The climb is judged on the current talk-spurt alone**, its newest 25 packets, and stops where loss
-    rises past the link's own, measured on the first 50 packets after each decrease. A window across a
-    silence let clean speech before it hide loss after it.
+  - **A decrease on loss is judged on 50 packets sent since the last decrease**, of either kind. Ten
+    could not tell 15% random loss from a policer's 25%, and each cut left ten to judge the next on. A
+    test's fixed seed hid it: run a test of a random link over many seeds before trusting it.
+  - **The climb is judged on the current talk-spurt alone**, its newest 25 packets, at most 10% lost. A
+    window across a silence let clean speech before it hide loss after it.
   - A packet counted lost and then reported received was reordered, and is unmarked.
   - The FEC is sized for at least `MinLossPercent`, which equals the encoder's starting 5%: libopus
     turns FEC off at 0%.
