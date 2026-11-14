@@ -430,9 +430,13 @@ func (s *Session) readRTCP(r rtcpReader) {
 	for {
 		n, attr, err := r.Read(buf)
 		if err != nil {
-			// A stream closed with the call ends quietly; any other end is the controller's last
-			// feedback, which the log says, or the close's line reads as a controller that ran throughout.
-			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+			// A stream closed, or one the call's close ended before it opened, which srtp reports as a
+			// failed type assertion, ends quietly. Any other end is the controller's last feedback, which
+			// the log says, or the close's line reads as a controller that ran throughout.
+			s.mediaMu.Lock()
+			closing := s.closing
+			s.mediaMu.Unlock()
+			if !closing && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
 				s.logf("the voice server's RTCP could not be read (%v); the bitrate stays where it is", err)
 			}
 			return

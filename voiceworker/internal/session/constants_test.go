@@ -14,8 +14,9 @@ import (
 	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
 
-// The frame, the rate and the packet bound are written in three packages that do not import each other, so
-// each stays usable alone; this package uses all three, and is where they are held equal (CLAUDE.md, M15).
+// The frame, the rate and the packet bound are written in packages that do not import each other, so each
+// stays usable alone: the devices, the codec, the jitter buffer, the DSP and, since M31, the controller.
+// This package uses them all, and is where they are held equal (CLAUDE.md, M15).
 // A frame of one size in the jitter buffer and another in the codec would stop FEC recovery matching, with
 // every other test still passing.
 func TestTheFrameIsOneSizeEverywhere(t *testing.T) {

@@ -6,6 +6,7 @@ package session
 import (
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -199,7 +200,31 @@ func TestAStreamThatFailsEndsTheRead(t *testing.T) {
 		t.Errorf("readRTCP read %d times from a stream that failed the first", reads)
 	}
 	// And says so: the close's line would otherwise read as a controller that ran throughout.
-	if !strings.Contains(log.String(), "RTCP could not be read (failed type assertion)") {
-		t.Errorf("the log does not say the feedback ended: %q", log.String())
+	const want = "norite-voice: the voice server's RTCP could not be read (failed type assertion); the bitrate " +
+		"stays where it is\n"
+	if log.String() != want {
+		t.Errorf("the log says %q, want %q", log.String(), want)
+	}
+}
+
+// A stream the call's close ends says nothing, whatever srtp makes of it: the log would otherwise report a
+// failure of the feedback at every call's end.
+func TestAStreamTheCallClosesEndsQuietly(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		err     error
+		closing bool
+	}{
+		{"at the end of the stream", io.EOF, false},
+		{"on a closed pipe", io.ErrClosedPipe, false},
+		{"on a closed connection", net.ErrClosed, false},
+		{"on a stream the close ended before it opened", errors.New("failed type assertion"), true},
+	} {
+		var log strings.Builder
+		s := &Session{cc: testController(), opts: Options{Log: &log}, closing: c.closing}
+		s.readRTCP(readerFunc(func([]byte) (int, interceptor.Attributes, error) { return 0, nil, c.err }))
+		if log.Len() != 0 {
+			t.Errorf("%s, readRTCP logged %q", c.name, log.String())
+		}
 	}
 }

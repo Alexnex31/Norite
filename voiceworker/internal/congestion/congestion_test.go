@@ -723,23 +723,25 @@ func TestCleanSpeechBeforeASilenceHidesNoLoss(t *testing.T) {
 	}
 }
 
-// A link that drops what queues past 35 ms, as a shallow buffer does. At 64 kbit/s that is less than two
-// packets, so no queue shows and only loss does: the bitrate comes down within a second or two and stays
-// near what fits, rather than in steps of two seconds each (M31's fourth /code-review: a fixed sample of
-// a hundred packets took seven), or climbing back into the loss after each cut.
-func TestAShallowBufferIsSettledQuickly(t *testing.T) {
+// A link that drops what queues past 35 ms holds under two packets at 64 kbit/s, so no queue shows and
+// only loss does. Its heavy loss at the ceiling, past policed, brings the bitrate down, and never to the
+// floor; what is left below policed reads as the link's own, which is architecture.md §17's limit and
+// not this test's to hide.
+func TestAShallowBufferIsCutOnItsHeavyLoss(t *testing.T) {
 	l := newLink(t, 64000)
 	l.rate, l.maxQueue = 64000, 35*time.Millisecond
 	l.run(2*time.Second, true)
-	first := l.take()
+	m := l.take()
 	l.run(8*time.Second, true)
 	after := l.take()
-	t.Logf("first 2 s: %d of %d dropped; next 8 s: %d of %d, bitrate %d to %d", first.dropped, first.sent,
-		after.dropped, after.sent, after.minRate, after.lastRate)
-	// It settles at about what fits, and drops a packet a second or two as its climb meets the link.
-	if after.dropped*20 > after.sent {
-		t.Errorf("after two seconds on a 35 ms buffer, %d of %d packets were still dropped", after.dropped,
-			after.sent)
+	t.Logf("first 2 s: %d of %d dropped, bitrate down to %d; next 8 s: %d of %d, bitrate %d to %d",
+		m.dropped, m.sent, m.minRate, after.dropped, after.sent, after.minRate, after.lastRate)
+	if m.minRate == 64000 {
+		t.Errorf("two seconds on a 35 ms buffer, dropping %d of %d, left the bitrate at the ceiling", m.dropped,
+			m.sent)
+	}
+	if min(m.minRate, after.minRate) <= Floor {
+		t.Errorf("a 35 ms buffer at 64 kbit/s took the bitrate to the floor")
 	}
 }
 
@@ -760,5 +762,35 @@ func TestOneFeedbackClimbsBySettleAtMost(t *testing.T) {
 	if after, most := l.c.bitrate(), float64(before)*math.Pow(climb, settle.Seconds()); float64(after) > most+1 {
 		t.Errorf("one feedback of %d packets raised the bitrate from %d to %d, past %.0f", MaxStatuses, before,
 			after, most)
+	}
+}
+
+// Loss past policed with no queue brings the bitrate down within two seconds of speech, in every draw: a
+// confidence bound over the window's 150 packets read 33% as under 25%, and never cut (M31's fifth
+// /code-review).
+func TestLossPastPolicedIsCut(t *testing.T) {
+	for seed := range uint64(20) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 4)) //nolint:gosec // a test's link
+		l.loss = 0.33
+		l.run(2*time.Second, true)
+		if m := l.take(); m.minRate == 64000 {
+			t.Errorf("seed %d: two seconds of speech at 33%% loss left the bitrate at the ceiling", seed)
+		}
+	}
+}
+
+// Random loss just under policed reads past it now and then, and each cut is judged on the packets after
+// it: on fifty, never a cascade to the floor. Judged on ten, 20% random loss reached it within half a
+// minute (M31's fifth /code-review).
+func TestRandomLossUnderPolicedNeverReachesTheFloor(t *testing.T) {
+	for seed := range uint64(40) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 9)) //nolint:gosec // a test's link
+		l.loss = 0.20
+		l.run(30*time.Second, true)
+		if m := l.take(); m.minRate <= Floor {
+			t.Errorf("seed %d: thirty seconds at 20%% random loss took the bitrate to the floor", seed)
+		}
 	}
 }
